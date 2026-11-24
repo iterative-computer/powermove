@@ -3379,3 +3379,49 @@ fn streaming_conversation_never_paints_empty() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// PM-698: a selection change re-renders the Effects browser and the
+/// viewer's chrome to the same trees; those commits are acknowledged, not
+/// published, so the views draw nothing again. Properties, which shows the
+/// selected layer, still publishes.
+#[::core::prelude::v1::test]
+fn a_selection_change_publishes_only_the_panels_it_changes() {
+    for (panel, publishes) in [("fxbrowser", false), ("viewer", false), ("inspector", true)] {
+        let rig = rig(panel, 3);
+        let _ = publication(&rig);
+        // From one selected layer to another (the first selection changes
+        // the viewer's chrome for real).
+        for (layer, measured) in [("l0", false), ("l1", true), ("l2", true)] {
+            rig.kernel
+                .call(
+                    PROJECT,
+                    pm_kernel::Request::new(
+                        pm_kernel::Caller::native(),
+                        pm_kernel::SelectionCall::Layers {
+                            ids: vec![layer.into()],
+                            add: false,
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            for (_, ticket) in rig.runtime.publish() {
+                let ticket = ticket.unwrap();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while ticket.try_take().is_none() {
+                    assert!(Instant::now() < deadline, "{panel} did not settle");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let published = rig
+                .runtime
+                .take_publications()
+                .iter()
+                .any(|p| p.panel == panel);
+            if measured {
+                assert_eq!(published, publishes, "{panel} on selecting {layer}");
+            }
+        }
+    }
+}

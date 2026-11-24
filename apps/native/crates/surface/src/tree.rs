@@ -154,6 +154,9 @@ pub struct Surface {
     /// children or place. An event planned earlier may still land on an
     /// element whose subtree has not changed since.
     changed: BTreeMap<Id, u64>,
+    /// Whether the last commit changed any node: a commit can set what is
+    /// already there (a re-render that came out the same).
+    last_changed: bool,
     pub limits: Limits,
     pub allow_webview: bool,
     styles: crate::style::StyleSheet,
@@ -165,6 +168,7 @@ impl Default for Surface {
             nodes: BTreeMap::from([(0, Node::new(0, "root".into()))]),
             high_id: 0,
             changed: BTreeMap::new(),
+            last_changed: false,
             limits: Limits::default(),
             allow_webview: false,
             styles: crate::style::StyleSheet::default(),
@@ -174,6 +178,10 @@ impl Default for Surface {
 impl Surface {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Whether the last commit applied changed any node.
+    pub fn last_commit_changed(&self) -> bool {
+        self.last_changed
     }
     pub fn nodes(&self) -> &BTreeMap<Id, Node> {
         &self.nodes
@@ -206,14 +214,25 @@ impl Surface {
             .revision
             .checked_add(1)
             .ok_or_else(|| reject(None, "revision exhausted"))?;
+        let mut changed = false;
         for (index, op) in commit.ops.into_iter().enumerate() {
             let touched = next.touched(&op);
+            let before: Vec<Option<Node>> = touched
+                .iter()
+                .map(|id| next.nodes.get(id).cloned())
+                .collect();
             next.apply_op(op, &mut diagnostics)
                 .map_err(|reason| reject(Some(index), &reason))?;
-            for id in touched {
-                next.changed.insert(id, revision);
+            // Only what the op really changed: an event planned on the last
+            // revision still lands on a node a commit set to what it was.
+            for (id, was) in touched.into_iter().zip(before) {
+                if next.nodes.get(&id) != was.as_ref() {
+                    next.changed.insert(id, revision);
+                    changed = true;
+                }
             }
         }
+        next.last_changed = changed;
         next.validate().map_err(|reason| reject(None, &reason))?;
         let nodes = &next.nodes;
         next.changed.retain(|id, _| nodes.contains_key(id));
