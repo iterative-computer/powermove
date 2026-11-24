@@ -1,7 +1,7 @@
 //! The Select tool's marquee (viewer.ts `startSelectionMarquee`): a drag from
 //! empty canvas selects the active layers it fully encloses; Shift toggles
 //! them in the selection instead.
-use super::{GizmoSurface, transform};
+use super::{GizmoSurface, project_box};
 use gpui::{prelude::*, *};
 use pm_kernel::{Caller, QueryMirror, Request, SelectionCall};
 
@@ -31,28 +31,15 @@ fn enclosed(p: &pm_kernel::Published, b: crate::shape_tool::ShapeBox, time: f64)
         } else {
             crate::text_host::query(p, |q| q.bounds(None, &layer.id, time))
         };
-        let (Ok(Some(bounds)), Ok(world)) =
-            (bounds, mirror.queries().world_matrix(None, &layer.id, time))
-        else {
+        let Ok(Some(bounds)) = bounds else {
             continue;
         };
-        // Group bounds are already in the composition.
-        let world = if layer.kind == "group" {
-            [1., 0., 0., 1., 0., 0.]
-        } else {
-            world
+        let Some((corners, _)) = project_box(mirror.queries(), &layer.id, time, bounds) else {
+            continue;
         };
-        let inside = [
-            [bounds.x0, bounds.y0],
-            [bounds.x1, bounds.y0],
-            [bounds.x1, bounds.y1],
-            [bounds.x0, bounds.y1],
-        ]
-        .iter()
-        .all(|&c| {
-            let p = transform(&world, c);
-            p[0] >= b.x0 && p[0] <= b.x1 && p[1] >= b.y0 && p[1] <= b.y1
-        });
+        let inside = corners
+            .iter()
+            .all(|&p| p[0] >= b.x0 && p[0] <= b.x1 && p[1] >= b.y0 && p[1] <= b.y1);
         if inside {
             out.push(layer.id);
         }

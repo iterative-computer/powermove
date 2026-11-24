@@ -4166,5 +4166,116 @@ fn gradient_handle_unheard_release_closes_the_kernel_gesture(cx: &mut TestAppCon
     s.undo(cx);
     assert_eq!(s.surface.read_with(&s.vcx,|g,_|g.effect_points()),before);
 }
+
+#[gpui::test]
+fn selection_box_projects_through_plane_matrix_for_3d_layers_and_3d_groups(
+    cx: &mut TestAppContext,
+) {
+    let project = r#"{
+        "id":"c","name":"Main","w":1000,"h":600,"fps":30,"dur":4,
+        "layers":[
+            {
+                "id":"l3d","type":"shape","name":"Tilted","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":650,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":400,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":15,"kf":[]},
+                    "rotation.y":{"v":35,"kf":[]},
+                    "anchor.x":{"v":0,"kf":[]},
+                    "anchor.y":{"v":0,"kf":[]},
+                    "anchor.z":{"v":0,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{"kind":"rect","w":200,"h":120,"stroke":0},
+                "fx":[]
+            },
+            {
+                "id":"g3d","type":"group","name":"Card3D","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":400,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":250,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":0,"kf":[]},
+                    "rotation.y":{"v":-30,"kf":[]},
+                    "anchor.x":{"v":0,"kf":[]},
+                    "anchor.y":{"v":0,"kf":[]},
+                    "anchor.z":{"v":0,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{},
+                "fx":[]
+            },
+            {
+                "id":"child","type":"shape","name":"Child","group":"g3d",
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":0,"kf":[]},
+                    "position.y":{"v":0,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "anchor.x":{"v":0,"kf":[]},
+                    "anchor.y":{"v":0,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{"kind":"rect","w":160,"h":100,"stroke":0},
+                "fx":[]
+            }
+        ]
+    }"#;
+    let mut s = unposed(cx, project);
+    for id in ["l3d", "g3d", "child"] {
+        select_ids(&mut s, cx, &[id]);
+        let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+        assert_eq!(poses.len(), 1, "selected {id}");
+        let pose = &poses[0];
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let mut mirror = pm_kernel::QueryMirror::new(&p);
+        let plane = mirror
+            .queries()
+            .plane_matrix(None, id, 0.5, false)
+            .unwrap();
+        let b = crate::text_host::query(&p, |q| q.bounds(None, id, 0.5))
+            .unwrap()
+            .unwrap();
+        let expected = [
+            pm_eval::space3d::project_point(&plane, b.x0, b.y0),
+            pm_eval::space3d::project_point(&plane, b.x1, b.y0),
+            pm_eval::space3d::project_point(&plane, b.x1, b.y1),
+            pm_eval::space3d::project_point(&plane, b.x0, b.y1),
+        ];
+        for (got, want) in pose.corners.iter().zip(expected) {
+            assert!(
+                (got[0] - want.0).abs() < 1e-4 && (got[1] - want.1).abs() < 1e-4,
+                "{id} corner mismatch: got {got:?}, want {want:?}"
+            );
+        }
+        // Perspective foreshortening makes the tilted box non-rectangular (trapezoid),
+        // proving it is not a flat 2D world_matrix projection.
+        let left_h = (pose.corners[3][1] - pose.corners[0][1]).hypot(
+            pose.corners[3][0] - pose.corners[0][0],
+        );
+        let right_h = (pose.corners[2][1] - pose.corners[1][1]).hypot(
+            pose.corners[2][0] - pose.corners[1][0],
+        );
+        assert!(
+            (left_h - right_h).abs() > 1.0,
+            "{id} should show perspective foreshortening: left={left_h}, right={right_h}"
+        );
+    }
+}
 #[path = "drag_latency_viewer_tests.rs"]
 mod drag_latency_metrics;
