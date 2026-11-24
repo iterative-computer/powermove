@@ -259,6 +259,10 @@ impl SurfaceView {
     fn fill(&mut self, id: Id, text: &str, value: Value, cx: &mut Context<Self>) {
         if let Some(field) = self.fields.get(&id).cloned() {
             field.update(cx, |f, cx| f.set_value(text, cx));
+        } else {
+            // No AppKit field (offscreen): the drawn stand-in shows the
+            // typed text, as the field does while a person edits.
+            self.offscreen_text.insert(id, text.to_owned());
         }
         let listeners = self
             .publication
@@ -289,6 +293,30 @@ impl SurfaceView {
             self.run(ticket, cx);
         }
         self.change(id, value, cx);
+    }
+    /// Types `text` into the composer as a person's typing arrives (the
+    /// first-run film's requests; it never sends). False without one.
+    pub fn type_composer(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.composer_field() else {
+            return false;
+        };
+        self.fill(id, text, json!(text), cx);
+        true
+    }
+    /// The composer's field: the text area that sends on Return.
+    fn composer_field(&self) -> Option<Id> {
+        self.publication
+            .surface
+            .nodes()
+            .iter()
+            .find(|(_, node)| {
+                node.r#type == "textarea"
+                    && node
+                        .props
+                        .get("metadata")
+                        .is_some_and(|m| m.get("submitOnReturn") == Some(&Value::Bool(true)))
+            })
+            .map(|(id, _)| *id)
     }
     pub fn agent_has(&self, id: Id) -> bool {
         self.prepared
