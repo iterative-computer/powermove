@@ -244,6 +244,13 @@ pub const DIRECT_LINGER: std::time::Duration = std::time::Duration::from_millis(
 /// [`DIRECT_LINGER`], no frame is waiting to be drawn and no drawable is on
 /// its way from the layer (the layer must not be asked for one while a link
 /// owns it).
+/// P-120 (PM-696): whether the link pace takes its drawables from a source
+/// off the main thread (`PM_GPUI_LINK_SOURCE=0`: from the layer on main).
+pub fn link_sourced() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PM_GPUI_LINK_SOURCE").is_none_or(|v| v != "0"))
+}
+
 pub fn leaves_direct(since_moved: std::time::Duration, frame_waiting: bool, idle: bool) -> bool {
     since_moved >= DIRECT_LINGER && !frame_waiting && idle
 }

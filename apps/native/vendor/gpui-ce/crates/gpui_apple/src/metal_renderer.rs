@@ -330,6 +330,15 @@ pub struct DrawableSource {
 }
 impl DrawableSource {
     pub fn new(layer: metal::MetalLayer) -> Self {
+        Self::with_arrival(layer, None)
+    }
+    /// A source that calls `arrived` (on its own thread) each time a
+    /// drawable it was asked for has come, or the layer gave none within
+    /// its timeout: the window draws then a frame that waited for one.
+    pub fn with_arrival(
+        layer: metal::MetalLayer,
+        on_arrival: Option<Box<dyn Fn() + Send + 'static>>,
+    ) -> Self {
         let (requests, asked) = std::sync::mpsc::channel::<()>();
         let (arrived, arrivals) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
@@ -347,6 +356,9 @@ impl DrawableSource {
                     });
                     if arrived.send(drawable).is_err() {
                         break;
+                    }
+                    if let Some(on_arrival) = &on_arrival {
+                        on_arrival();
                     }
                 }
             });
@@ -388,6 +400,14 @@ impl DrawableSource {
             self.request();
         }
         drawable
+    }
+    /// A drawable of this size has arrived and is held.
+    pub fn holds(&mut self, size: (u64, u64)) -> bool {
+        self.collect();
+        self.held.as_ref().is_some_and(|drawable| {
+            let texture = drawable.texture();
+            (texture.width(), texture.height()) == size
+        })
     }
     /// Nothing is on its way from the layer.
     pub fn idle(&mut self) -> bool {

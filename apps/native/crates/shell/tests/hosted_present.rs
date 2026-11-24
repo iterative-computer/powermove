@@ -14,6 +14,7 @@ fn main() {
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     macos::policy();
     macos::drawables();
+    macos::drawable_arrivals();
     macos::paints(mtm);
     macos::rows();
     macos::host_rows();
@@ -807,6 +808,48 @@ mod macos {
 
     /// Drawables come from the layer on another thread; the main thread
     /// takes one that has arrived and has the right size, or none, at once.
+    /// P-120 (PM-696): the link pace's source signals each arrival (or a
+    /// layer that gave none), so a frame that waited for a drawable draws
+    /// when it comes rather than at the next tick; asking and holding never
+    /// wait on the caller's thread.
+    pub fn drawable_arrivals() {
+        use std::sync::mpsc;
+        let size = |w: f64, h: f64| core_graphics::geometry::CGSize::new(w, h);
+        let layer = new_window_layer(false);
+        layer.set_device(&metal::Device::system_default().expect("a Metal device"));
+        layer.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        layer.set_drawable_size(size(64., 48.));
+        layer.set_maximum_drawable_count(3);
+        let (signal, arrivals) = mpsc::channel();
+        let mut source =
+            DrawableSource::with_arrival(layer.clone(), Some(Box::new(move || {
+                let _ = signal.send(());
+            })));
+        let at = Instant::now();
+        assert!(!source.holds((64, 48)));
+        source.request();
+        source.request();
+        assert!(at.elapsed() < Duration::from_millis(100), "asking waits on nothing");
+        arrivals
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the arrival is signalled");
+        assert!(
+            arrivals.recv_timeout(Duration::from_millis(200)).is_err(),
+            "one arrival for one request, however often asked"
+        );
+        assert!(source.holds((64, 48)));
+        assert!(!source.holds((128, 96)), "held for its own size only");
+        let first = source.take((64, 48)).expect("the arrived drawable");
+        // Three in the pool: one on glass, one drawn, one on its way.
+        source.request();
+        arrivals.recv_timeout(Duration::from_secs(5)).expect("a second");
+        let second = source.take((64, 48)).expect("a second drawable");
+        source.request();
+        arrivals.recv_timeout(Duration::from_secs(5)).expect("a third");
+        assert!(source.holds((64, 48)), "a third while two are out");
+        drop((first, second));
+    }
+
     pub fn drawables() {
         let size = |w: f64, h: f64| core_graphics::geometry::CGSize::new(w, h);
         let layer = new_window_layer(false);

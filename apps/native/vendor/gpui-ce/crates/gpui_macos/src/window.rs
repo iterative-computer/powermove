@@ -903,6 +903,13 @@ struct MacWindowState {
     /// that present with the slot transaction.
     #[cfg(not(feature = "wgpu"))]
     direct_source: Option<renderer::DrawableSource>,
+    /// P-120 (PM-696): the link pace's drawables, taken off the main thread
+    /// (`link_source`); a frame with none in hand waits for one and draws
+    /// when it arrives (`link_waiting`), never asking the layer on main.
+    #[cfg(not(feature = "wgpu"))]
+    link_source: Option<renderer::DrawableSource>,
+    #[cfg(not(feature = "wgpu"))]
+    link_waiting: bool,
     /// The window is in the direct pace (see `composition::Pace`) since a
     /// frame moved a hosted view; when the last one did.
     #[cfg(not(feature = "wgpu"))]
@@ -1199,6 +1206,10 @@ impl MacWindowState {
     #[cfg(not(feature = "wgpu"))]
     fn enter_direct(&mut self) {
         self.renderer.set_display_link_drawable(None);
+        if let Some(source) = self.link_source.as_mut() {
+            source.release();
+        }
+        self.link_waiting = false;
         self.release_display_link_for_sync_present();
         self.renderer.set_presents_with_transaction(true);
         if self.direct_source.is_none()
@@ -1211,6 +1222,44 @@ impl MacWindowState {
         }
         self.direct_moved = Some(std::time::Instant::now());
         self.start_display_link();
+    }
+
+    /// P-120 (PM-696): the link pace's drawable source, made on first use,
+    /// while no CAMetalDisplayLink owns the layer (a link lends its own) and
+    /// outside the direct pace (it has its own). Three drawables, so one can
+    /// be on its way while one is on glass and one is being drawn; asked for
+    /// at each tick's start and after each present, so the wait overlaps the
+    /// frame's work. `PM_GPUI_LINK_SOURCE=0` asks the layer on main, as before.
+    #[cfg(not(feature = "wgpu"))]
+    fn link_source(
+        &mut self,
+        state: &Arc<Mutex<MacWindowState>>,
+    ) -> Option<&mut renderer::DrawableSource> {
+        if !crate::composition::link_sourced()
+            || self.renderer.display_link_bound()
+            || self.direct_moved.is_some()
+        {
+            return None;
+        }
+        if self.link_source.is_none() {
+            let layer = self.renderer.layer()?.to_owned();
+            if std::env::var_os("PM_GPUI_DRAWABLES").is_none() {
+                layer.set_maximum_drawable_count(3);
+            }
+            let weak = Arc::downgrade(state);
+            let arrived = move || {
+                let weak = weak.clone();
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    if let Some(state) = weak.upgrade() {
+                        drawable_arrived(&state);
+                    }
+                });
+            };
+            let mut source = renderer::DrawableSource::with_arrival(layer, Some(Box::new(arrived)));
+            source.request();
+            self.link_source = Some(source);
+        }
+        self.link_source.as_mut()
     }
 
     /// Back to the link pace once nothing has moved for a while. The layer
@@ -1523,6 +1572,10 @@ impl MacWindow {
                 painted: false,
                 #[cfg(not(feature = "wgpu"))]
                 direct_source: None,
+                #[cfg(not(feature = "wgpu"))]
+                link_source: None,
+                #[cfg(not(feature = "wgpu"))]
+                link_waiting: false,
                 #[cfg(not(feature = "wgpu"))]
                 direct_moved: None,
                 request_frame_callback: None,
@@ -2569,6 +2622,11 @@ impl PlatformWindow for MacWindow {
                 && let Some(drawable) = this.direct_source.as_mut().and_then(|s| s.take(size))
             {
                 this.renderer.set_display_link_drawable(Some(drawable));
+            } else if let Some(source) = this.link_source.as_mut()
+                && source.holds(size)
+            {
+                let drawable = source.take(size);
+                this.renderer.set_display_link_drawable(drawable);
             }
         } else {
             let pace = if this.direct_moved.is_some() {
@@ -2584,6 +2642,24 @@ impl PlatformWindow for MacWindow {
                     (renderer::LinkDrawable::Wait, false, in_hand)
                 }
                 Pace::Link => {
+                    // P-120: a drawable from the source, or the frame waits
+                    // for one (`drawable_arrived` draws it); main never asks.
+                    if !this.gate.may_draw() {
+                        // A moving frame is rendering: held below.
+                    } else if let Some(source) = this.link_source(&self.0) {
+                        match source.take(size) {
+                            Some(drawable) => {
+                                this.link_waiting = false;
+                                this.renderer.set_display_link_drawable(Some(drawable));
+                            }
+                            None => {
+                                this.link_waiting = true;
+                                this.present_pending = true;
+                                drop(this);
+                                return trace("wait", false, 0.);
+                            }
+                        }
+                    }
                     let link = this.renderer.drawable_ready();
                     // Only a link's drawable is late for a transaction.
                     let pending = link == renderer::LinkDrawable::Ready
@@ -2644,6 +2720,9 @@ impl PlatformWindow for MacWindow {
             });
             this.in_flight = Some(in_flight);
             this.last_draw = Some(std::time::Instant::now());
+            if let Some(source) = this.link_source.as_mut() {
+                source.request();
+            }
             drop(this);
             return trace("gpu", true, 0.);
         }
@@ -2685,6 +2764,10 @@ impl PlatformWindow for MacWindow {
             }
         } else {
             this.renderer.submit(prepared, sync);
+        }
+        if let Some(source) = this.link_source.as_mut() {
+            // The next frame's drawable, on its way while this one shows.
+            source.request();
         }
         if late {
             this.enter_direct();
@@ -3967,6 +4050,10 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     {
         source.resized();
     }
+    #[cfg(not(feature = "wgpu"))]
+    if let Some(source) = lock.link_source.as_mut() {
+        source.resized();
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -4162,6 +4249,10 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     {
         source.resized();
     }
+    #[cfg(not(feature = "wgpu"))]
+    if let Some(source) = lock.link_source.as_mut() {
+        source.resized();
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -4259,6 +4350,11 @@ extern "C" fn step(view: *mut c_void) {
         if !lock.gate.may_draw() {
             return;
         }
+        // P-120: the frame's drawable is asked for before GPUI draws it.
+        #[cfg(not(feature = "wgpu"))]
+        if let Some(source) = lock.link_source.as_mut() {
+            source.request();
+        }
         // Dirty views and animations mark demand through frame_waker while
         // GPUI serves this frame. Keep a running animation's link uninterrupted.
         if let Some(mut callback) = lock.request_frame_callback.take() {
@@ -4328,6 +4424,21 @@ fn complete_in_flight(state: &Arc<Mutex<MacWindowState>>, serial: u64) {
     unsafe {
         let _: () = msg_send![class!(CATransaction), flush];
     }
+}
+
+/// P-120 (PM-696): a drawable the link pace asked for has arrived (or the
+/// layer gave none in its timeout): a frame that waited for it draws now,
+/// not at the next tick.
+#[cfg(not(feature = "wgpu"))]
+fn drawable_arrived(state: &Arc<Mutex<MacWindowState>>) {
+    let view = {
+        let this = state.lock();
+        if !this.link_waiting || !this.gate.may_draw() {
+            return;
+        }
+        this.native_view.as_ptr()
+    };
+    step(view as *mut c_void);
 }
 
 /// AppKit's own synchronous paint must show now: a frame still rendering is
