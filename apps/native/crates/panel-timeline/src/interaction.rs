@@ -2018,26 +2018,37 @@ impl Drag {
                         })
                         .ok_or(ModelError::MissingHost("evaluated property baseline"))?;
                     let value = baseline + sample.value_delta;
-                    if matches!(c.as_str(), "scale.x" | "scale.y")
+                    if matches!(c.as_str(), "scale.x" | "scale.y" | "scale.z")
                         && targets
                             .iter()
                             .filter(|(layer, path)| {
-                                layer == l && matches!(path.as_str(), "scale.x" | "scale.y")
+                                layer == l
+                                    && matches!(path.as_str(), "scale.x" | "scale.y" | "scale.z")
                             })
                             .count()
                             == 1
                     {
-                        let paired = if c == "scale.x" { "scale.y" } else { "scale.x" };
-                        let other = self
-                            .property_values
-                            .get(&(l.clone(), paired.into()))
-                            .copied()
-                            .or_else(|| self.start.channel(l, paired)?.value.as_f64())
-                            .ok_or(ModelError::InvalidNumber)?;
+                        let three_d = self.start.layer(l).is_some_and(|layer| layer.three_d);
+                        let mut peers = Vec::new();
+                        for paired in ["scale.x", "scale.y", "scale.z"] {
+                            if paired == c
+                                || (paired == "scale.z" && !three_d)
+                                || self.start.channel(l, paired).is_none()
+                            {
+                                continue;
+                            }
+                            let other = self
+                                .property_values
+                                .get(&(l.clone(), paired.into()))
+                                .copied()
+                                .or_else(|| self.start.channel(l, paired)?.value.as_f64())
+                                .ok_or(ModelError::InvalidNumber)?;
+                            peers.push((paired, other));
+                        }
                         let mut model = TimelineModel::default();
                         model.index = self.start.clone();
                         for call in model
-                            .scale_value(l, c, value, *time, baseline, other)?
+                            .scale_values(l, c, value, *time, baseline, &peers)?
                             .calls
                         {
                             if let Call::Transact {

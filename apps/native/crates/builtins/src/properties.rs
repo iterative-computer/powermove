@@ -28,6 +28,11 @@ pub struct Properties {
     pub(crate) commands: Vec<(String, Vec<Value>)>,
     /// Each listed row's label, for what a row action shows about it.
     labels: BTreeMap<String, String>,
+    /// Multi-axis property rows (`position`, `scale`, `anchor`, `orientation`,
+    /// `rotation3d`, `target`) mapped to their exact active channel paths on
+    /// the current layer so row-level keyframing, reset, expressions and graph
+    /// actions always target every visible axis (including 3D Z / X / Y).
+    row_channels: BTreeMap<String, Vec<String>>,
     /// Imported files by asset ID, for a model's material slots (read once
     /// per asset into `slots`).
     pub originals: BTreeMap<String, std::path::PathBuf>,
@@ -160,6 +165,7 @@ impl Properties {
         if self.document != Some(model.document_id()) || self.selection != model.selected_layers() {
             self.adapter.retire();
             self.handles.clear();
+            self.row_channels.clear();
             self.selection = model.selected_layers().to_vec();
             self.document = Some(model.document_id());
             self.sequence = self
@@ -570,7 +576,9 @@ impl Properties {
                 ]);
                 for (id, label, paths, unit, step) in groups {
                     let mut axes = vec![];
-                    let mut animation = "static";
+                    let mut all_keyed = true;
+                    let mut any_animated = false;
+                    let mut active_paths = vec![];
                     let (mut bound, mut expression) = (vec![], None);
                     for (index, path) in paths.iter().enumerate() {
                         let binding = Binding::Property(PropertyId::new(&layer, *path));
@@ -583,11 +591,13 @@ impl Properties {
                             .value
                             .as_f64()
                             .ok_or_else(|| format!("Non-numeric {path}"))?;
-                        if state.key_at_playhead {
-                            animation = "key-at-playhead";
-                        } else if state.animated && animation == "static" {
-                            animation = "animated";
+                        if !state.key_at_playhead {
+                            all_keyed = false;
                         }
+                        if state.key_at_playhead || state.animated {
+                            any_animated = true;
+                        }
+                        active_paths.push((*path).to_owned());
                         bound.push(binding.clone());
                         expression = expression.or_else(|| state.expression.clone());
                         let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
@@ -603,6 +613,18 @@ impl Properties {
                         axes.push(axis);
                     }
                     if !axes.is_empty() {
+                        let animation = if all_keyed {
+                            "key-at-playhead"
+                        } else if any_animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
+                        if active_paths.len() > 1 {
+                            self.row_channels.insert(id.into(), active_paths);
+                        } else {
+                            self.row_channels.remove(id);
+                        }
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
                         if id == "position" {
                             row["separateDimensions"] = json!(
@@ -914,7 +936,9 @@ impl Properties {
         }
         for (id, label, paths, unit, step) in groups {
             let mut axes = vec![];
-            let mut animation = "static";
+            let mut all_keyed = true;
+            let mut any_animated = false;
+            let mut active_paths = vec![];
             for (path, axis) in paths {
                 let binding = Binding::Property(PropertyId::new(layer, path));
                 let state = match model.binding_state(&binding, time) {
@@ -932,9 +956,13 @@ impl Properties {
                 } else {
                     "static"
                 };
-                if a != "static" && animation != "key-at-playhead" {
-                    animation = a;
+                if !state.key_at_playhead {
+                    all_keyed = false;
                 }
+                if state.key_at_playhead || state.animated {
+                    any_animated = true;
+                }
+                active_paths.push(path.to_owned());
                 // Three narrow wells hold four characters: one place below
                 // ten (-1.7), none above (-12). Typing still sets exact values.
                 let shown = if value.abs() >= 10. {
@@ -944,6 +972,13 @@ impl Properties {
                 };
                 axes.push(json!({"binding":self.lease(model,path,binding)?,"value":shown,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
             }
+            let animation = if !axes.is_empty() && all_keyed {
+                "key-at-playhead"
+            } else if any_animated {
+                "animated"
+            } else {
+                "static"
+            };
             // A light's rotation does nothing it can show: only kept in view
             // while a value or keyframe is there to clear.
             if role == Role::Light
@@ -954,6 +989,11 @@ impl Properties {
                 continue;
             }
             if !axes.is_empty() {
+                if active_paths.len() > 1 {
+                    self.row_channels.insert(id.into(), active_paths);
+                } else {
+                    self.row_channels.remove(id);
+                }
                 // Three axes fill the value column; no room for a link button.
                 rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
             }
@@ -3145,12 +3185,18 @@ impl Properties {
             )));
         }
         let row = intent["row"].as_str().unwrap_or("");
-        let path = match row {
-            "position" => "position.x",
-            "scale" => "scale.x",
-            "anchor" => "anchor.x",
-            _ => row,
-        };
+        let group_channels = self.row_channels.get(row).cloned();
+        let path = group_channels
+            .as_ref()
+            .and_then(|channels| channels.first().map(String::as_str))
+            .unwrap_or(match row {
+                "position" => "position.x",
+                "scale" => "scale.x",
+                "anchor" => "anchor.x",
+                "orientation" => "orientation.x",
+                "rotation3d" => "rotation.x",
+                _ => row,
+            });
         if intent["type"] == "collapse" {
             self.collapsed.insert(
                 intent["section"].as_str().ok_or("section")?.into(),
@@ -3223,17 +3269,16 @@ impl Properties {
             return self.write(model, caller, handle, value, time).map(Some);
         }
         let group;
-        let handle = if matches!(row, "position" | "scale" | "anchor") {
+        let has_group = group_channels.as_ref().is_some_and(|c| c.len() > 1);
+        let handle = if let Some(channels) = group_channels.as_ref().filter(|c| c.len() > 1) {
             let layer = model.primary().ok_or("No selected layer")?.to_owned();
             group = self
                 .adapter
                 .register(
                     model,
-                    ["x", "y"]
+                    channels
                         .iter()
-                        .map(|axis| {
-                            Binding::Property(PropertyId::new(&layer, format!("{row}.{axis}")))
-                        })
+                        .map(|channel| Binding::Property(PropertyId::new(&layer, channel)))
                         .collect(),
                 )
                 .map_err(|e| e.to_string())?;
@@ -3249,7 +3294,7 @@ impl Properties {
                 .adapter
                 .read(model, handle, time)
                 .map(|states| states.into_iter().find_map(|s| s.expression));
-            if matches!(row, "position" | "scale" | "anchor") {
+            if has_group {
                 self.adapter.dispose(handle);
             }
             let targets = targets.map_err(|e| e.to_string())?;
@@ -3311,7 +3356,7 @@ impl Properties {
             self.commands
                 .push(("timeline.focusGraph".into(), vec![json!(layer), json!(path)]));
         }
-        if matches!(row, "position" | "scale" | "anchor") {
+        if has_group {
             self.adapter.dispose(handle);
         }
         match result.map_err(|e| e.to_string())? {

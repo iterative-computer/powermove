@@ -244,14 +244,18 @@ impl TimelineClient {
             let mut mirror = pm_kernel::QueryMirror::new(&published);
             let mut evaluated = targets.clone();
             for (layer, channel) in targets {
-                let paired = match channel.as_str() {
-                    "scale.x" => Some("scale.y"),
-                    "scale.y" => Some("scale.x"),
-                    _ => None,
-                };
-                if let Some(paired) = paired {
-                    if !evaluated.contains(&(layer.clone(), paired.into())) {
-                        evaluated.push((layer.clone(), paired.into()));
+                if matches!(channel.as_str(), "scale.x" | "scale.y" | "scale.z") {
+                    let three_d = self.model.index.layer(layer).is_some_and(|l| l.three_d);
+                    for paired in ["scale.x", "scale.y", "scale.z"] {
+                        if paired == channel
+                            || (paired == "scale.z" && !three_d)
+                            || self.model.index.channel(layer, paired).is_none()
+                        {
+                            continue;
+                        }
+                        if !evaluated.contains(&(layer.clone(), paired.into())) {
+                            evaluated.push((layer.clone(), paired.into()));
+                        }
                     }
                 }
             }

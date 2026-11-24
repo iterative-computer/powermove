@@ -603,7 +603,10 @@ impl TimelineIndex {
             },
             solo: boolean(layer.get("solo")),
             shy: boolean(layer.get("shy")),
-            three_d: boolean(layer.get("threeD")),
+            three_d: boolean(layer.get("threeD"))
+                || string(layer.get("type")).as_deref() == Some("camera")
+                || string(content.and_then(|d| d.get("definition")))
+                    .is_some_and(|def| def.starts_with("scene3d.")),
             audio_muted: boolean(layer.get("d").and_then(|n| n.get("audioMuted"))),
             collapsed: string(layer.get("type")).as_deref() == Some("group")
                 || !matches!(
