@@ -2746,8 +2746,7 @@ impl GizmoSurface {
         let seq = self.studio.hovered_part_seq;
         let Some((layer, key)) = target else {
             if self.studio.hovered_part.take().is_some() {
-                self.draw(cx);
-                cx.notify();
+                self.redraw(cx);
             }
             return;
         };
@@ -2835,8 +2834,7 @@ impl GizmoSurface {
             self.cursor = CursorStyle::Crosshair;
             true
         };
-        self.draw(cx);
-        cx.notify();
+        self.redraw(cx);
         active
     }
     /// The cursor promises what a press does over the 3D view.
