@@ -911,6 +911,18 @@ impl VisualTestContext {
         self.simulate_window_resize(self.window, size)
     }
 
+    /// Delivers a frame request to the window, as the platform's frame source
+    /// would (its next-frame callbacks run, then a dirty window draws).
+    pub fn simulate_frame(&mut self) {
+        let window = self.test_window(self.window);
+        // Presenting: an inactive test window's frames are not throttled.
+        window.simulate_frame_request(crate::RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        });
+        self.run_until_parked();
+    }
+
     /// debug_bounds returns the bounds of the element with the given selector.
     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())

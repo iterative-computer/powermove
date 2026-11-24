@@ -3379,3 +3379,65 @@ fn streaming_conversation_never_paints_empty() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// PM-696: a panel whose height changes (rows measured as a scroll brings
+/// them near, content published) draws itself and the shell again, not every
+/// other panel: a window refresh drew them all, cached or not, on every wheel
+/// step that measured a row.
+struct Pair {
+    a: Entity<SurfaceView>,
+    b: Entity<SurfaceView>,
+}
+impl Render for Pair {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let column = |v: &Entity<SurfaceView>| {
+            div()
+                .w(px(100.))
+                .h(px(400.))
+                .child(v.clone().cached(StyleRefinement::default().w(px(100.)).h(px(400.))))
+        };
+        div().flex().child(column(&self.a)).child(column(&self.b))
+    }
+}
+#[gpui::test]
+fn a_panel_whose_height_changes_draws_no_other_panel_again(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    // A column with a block of `height`, as a side panel's content.
+    let page = |height: f64, generation: u64| {
+        let mut ops = node_ops(1, 0, "div", json!({"style":{"display":"flex","flexDirection":"column","flexGrow":1}}), &[]);
+        ops.extend(node_ops(2, 1, "div", json!({}), &[]));
+        ops.extend(node_ops(3, 2, "div", json!({"style":{"height":height,"flexShrink":0}}), &[]));
+        let mut p = synthetic(&rig, ops);
+        p.generation = generation;
+        p
+    };
+    cx.executor().allow_parking();
+    let runtime = rig.runtime.clone();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let mut panel = |p| {
+            cx.new(|cx| {
+                let mut v = SurfaceView::new(runtime.clone(), p, tokens(), Default::default(), window, cx);
+                v.grows = true;
+                v
+            })
+        };
+        let (a, b) = (panel(page(100., 1)), panel(page(100., 1)));
+        Pair { a, b }
+    });
+    let mut vcx = vcx.clone();
+    for _ in 0..4 {
+        vcx.run_until_parked();
+        vcx.simulate_frame();
+    }
+    let (a, b) = root.read_with(&vcx, |p, _| (p.a.clone(), p.b.clone()));
+    let before = b.read_with(&vcx, |v, _| v.renders);
+    a.update(&mut vcx, |v, cx| v.publish(page(300., 2), cx));
+    // Frames as the display link asks for them (next-frame callbacks run).
+    for _ in 0..4 {
+        vcx.run_until_parked();
+        vcx.simulate_frame();
+    }
+    assert!(a.read_with(&vcx, |v, _| v.natural_body_height()) >= 300., "the panel measured its new height");
+    assert_eq!(b.read_with(&vcx, |v, _| v.renders), before, "the other panel kept its drawing");
+}

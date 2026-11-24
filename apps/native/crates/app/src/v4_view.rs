@@ -369,6 +369,10 @@ pub(crate) fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key
     ((next * scale).round() / scale).clamp(facts.min, facts.max)
 }
 
+/// How long a panel's demand must stay put before the shell reads it again:
+/// a scroll layer's settle (rows measured as a scroll brings them near).
+const DEMAND_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -487,6 +491,8 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     focus_events: std::collections::BTreeSet<Id>,
     origin: Rc<Cell<Point<Pixels>>>,
+    /// Counts demand changes, so only the last one's settle draws again.
+    demand_changes: u64,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     truncated: Rc<RefCell<HashMap<Id, bool>>>,
     /// The height a sheet's body wants, measured as it is laid out.
@@ -694,6 +700,7 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             focus_events: Default::default(),
             origin: Rc::new(Cell::new(Point::default())),
+            demand_changes: 0,
             anchors: Default::default(),
             truncated: Default::default(),
             sheet_fit: Default::default(),
@@ -6467,6 +6474,7 @@ impl Render for SurfaceView {
                 })
                 .collect();
             let origin = self.origin.clone();
+            let entity = cx.entity().downgrade();
             let (panel, fit) = (self.publication.panel.clone(), self.fit.get());
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
@@ -6505,10 +6513,23 @@ impl Render for SurfaceView {
                             "panel": panel.as_str(), "painted": painted, "stretch": stretch,
                             "natural": height, "demand": demand, "fit": fit}));
                     }
-                    if changed || column_changed {
-                        // Prepaint is still drawing. Refresh the whole window
-                        // on the next frame so the shell can use the new demand.
-                        window.on_next_frame(|window, _| window.refresh());
+                    // Prepaint is still drawing: the panel draws again on
+                    // the next frame (and with it the shell, which reads the
+                    // new height). Only this panel: refreshing the window drew
+                    // every panel again, cached or not, on every wheel step
+                    // that measured a row (PM-696). A change of the demand
+                    // alone (rows measured as a scroll brings them near)
+                    // waits until the steps stop.
+                    if changed {
+                        let entity = entity.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = entity.update(cx, |_, cx| cx.notify());
+                        });
+                    } else if column_changed {
+                        let entity = entity.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = entity.update(cx, |v, cx| v.settle_demand(cx));
+                        });
                     }
                 })
         } else {
@@ -7228,6 +7249,22 @@ impl SurfaceView {
             })
     }
     /// Natural content demand includes inner lists before they are clipped.
+    /// The panel's demand changed while measuring rows: it draws again (and
+    /// the shell reads the demand) once the changes have stopped for a
+    /// scroll layer's settle.
+    fn settle_demand(&mut self, cx: &mut Context<Self>) {
+        self.demand_changes += 1;
+        let at = self.demand_changes;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DEMAND_SETTLE).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.demand_changes == at {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
     pub(crate) fn natural_body_height(&self) -> f32 {
         self.natural.get().max(self.column_natural.get())
     }
