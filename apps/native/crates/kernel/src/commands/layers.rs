@@ -1542,8 +1542,13 @@ fn duplicate(
     };
     let comp = cx.find(first)?.comp_id;
     let layers = cx.layers(comp.as_deref());
-    let mut selected = Vec::new();
-    for id in layer_ids {
+    let mut explicit = std::collections::HashMap::with_capacity(layer_ids.len());
+    let mut requested = HashSet::with_capacity(layer_ids.len());
+    let mut used: HashSet<String> = layers
+        .iter()
+        .filter_map(|l| values::text(l, "id").map(str::to_owned))
+        .collect();
+    for (id, nid) in layer_ids.iter().zip(new_ids) {
         let l = layers
             .iter()
             .find(|l| values::text(l, "id") == Some(id.as_str()))
@@ -1554,27 +1559,38 @@ fn duplicate(
                 name: values::layer_name(l, id),
             });
         }
-        selected.push(l.clone());
+        explicit.insert(id.as_str(), nid.as_str());
+        requested.insert(id.as_str());
+        used.insert(nid.clone());
     }
-    // `selectedStackLayers`: stack order.
-    selected.sort_by_key(|l| {
-        layers
+    // Expanding groups brings every descendant along in stack order, so
+    // duplicating a group copies its entire subtree with remapped links.
+    let expanded = expand_groups(&layers, &requested);
+    let mut selected = Vec::with_capacity(expanded.len());
+    let mut ids = Vec::with_capacity(expanded.len());
+    for id in &expanded {
+        let Some(l) = layers
             .iter()
-            .position(|x| values::text(x, "id") == values::text(l, "id"))
-    });
+            .find(|l| values::text(l, "id") == Some(id.as_str()))
+        else {
+            continue;
+        };
+        let next_id = if let Some(&nid) = explicit.get(id.as_str()) {
+            nid.to_owned()
+        } else {
+            loop {
+                let candidate = new_id("L");
+                if used.insert(candidate.clone()) {
+                    break candidate;
+                }
+            }
+        };
+        selected.push(l.clone());
+        ids.push(next_id);
+    }
     let index = layers
         .iter()
-        .position(|l| values::text(l, "id").is_some_and(|i| layer_ids.iter().any(|x| x == i)));
-    let ids: Vec<String> = selected
-        .iter()
-        .map(|l| {
-            let i = layer_ids
-                .iter()
-                .position(|x| Some(x.as_str()) == values::text(l, "id"))
-                .expect("selected");
-            new_ids[i].clone()
-        })
-        .collect();
+        .position(|l| values::text(l, "id").is_some_and(|i| expanded.iter().any(|x| x == i)));
     paste(cx, comp.as_deref(), &selected, &ids, index, None)
 }
 
