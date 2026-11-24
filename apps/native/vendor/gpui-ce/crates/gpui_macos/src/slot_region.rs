@@ -90,39 +90,71 @@ pub(crate) fn misplaced(gpui: &NSView, wrapper: &NSView, parent: Option<&NSView>
     let Some(current) = (unsafe { wrapper.superview() }) else {
         return false;
     };
+    // Held where it is for an edit in progress (`reparent`): not a move.
+    if holds_first_responder(wrapper) {
+        return false;
+    }
     match parent {
         Some(parent) => !std::ptr::eq(&*current, parent),
         None => unsafe { gpui.superview() }.is_some_and(|home| !std::ptr::eq(&*current, &*home)),
     }
 }
 
-/// Puts a slot's wrapper in `parent` (a region's content view), or back in
-/// GPUI's view's parent when `parent` is `None` and it sits in a region's.
-/// Returns whether it moved.
-pub(crate) fn reparent(gpui: &NSView, wrapper: &NSView, parent: Option<&NSView>) -> bool {
+/// Puts a slot's wrapper in `parent` (a region's content view), or in GPUI's
+/// view's parent when `parent` is `None` and it sits elsewhere, and says
+/// where its `frame` (in that destination's coordinates) goes. A view moves
+/// between parents of a window by being added to the new one: AppKit keeps an
+/// edit in progress then (`removeFromSuperview` would end it). A wrapper that
+/// holds the window's first responder (a field being edited) stays in its
+/// parent until the edit ends, at the same place on screen: its frame comes
+/// back converted into that parent. Returns whether it changed parent.
+pub(crate) fn reparent(
+    gpui: &NSView,
+    wrapper: &NSView,
+    parent: Option<&NSView>,
+    frame: NSRect,
+) -> (bool, NSRect) {
     let current = unsafe { wrapper.superview() };
-    match parent {
-        Some(parent) => {
-            if current.as_deref().is_some_and(|c| std::ptr::eq(c, parent)) {
-                return false;
-            }
-            wrapper.removeFromSuperview();
-            parent.addSubview(wrapper);
-            true
+    let home = unsafe { gpui.superview() };
+    let Some(target) = parent.or(home.as_deref()) else {
+        return (false, frame);
+    };
+    match current {
+        Some(current) if std::ptr::eq(&*current, target) => (false, frame),
+        Some(current) if holds_first_responder(wrapper) => {
+            (false, target.convertRect_toView(frame, Some(&current)))
         }
-        None => {
-            let home = unsafe { gpui.superview() };
-            let Some(current) = current else { return false };
-            if home.as_deref().is_some_and(|h| std::ptr::eq(h, &*current)) {
-                return false;
-            }
-            wrapper.removeFromSuperview();
-            if let Some(home) = home {
-                home.addSubview_positioned_relativeTo(wrapper, NSWindowOrderingMode::Above, Some(gpui));
-            }
-            true
+        // A wrapper not in the window yet joins it where its paint shows it
+        // (outside a region, `attach` decides when).
+        None if parent.is_none() => (false, frame),
+        _ => {
+            adopt(target, wrapper, parent.is_none().then_some(gpui));
+            (true, frame)
         }
     }
+}
+
+/// Adds `view` to `parent`, above GPUI's view when `above` is it.
+fn adopt(parent: &NSView, view: &NSView, above: Option<&NSView>) {
+    match above {
+        Some(gpui) => parent.addSubview_positioned_relativeTo(
+            view,
+            NSWindowOrderingMode::Above,
+            Some(gpui),
+        ),
+        None => parent.addSubview(view),
+    }
+}
+
+/// Whether the window's first responder is `view` or inside it (a field's
+/// editor is a subview of its field).
+pub(crate) fn holds_first_responder(view: &NSView) -> bool {
+    let Some(responder) = view.window().and_then(|w| w.firstResponder()) else {
+        return false;
+    };
+    responder
+        .downcast::<NSView>()
+        .is_ok_and(|responder| responder.isDescendantOf(view))
 }
 
 /// A content view's size: its slots stay inside it for hit testing at any
@@ -237,16 +269,8 @@ fn place(host: &mut Host, gpui: &NSView, id: usize) -> Option<Retained<NSView>> 
     if superview.as_deref().is_none_or(|s| !std::ptr::eq(s, &*wanted))
         || container.parent != target.parent
     {
-        container.clip.removeFromSuperview();
-        if target.parent.is_some() {
-            wanted.addSubview(&container.clip);
-        } else {
-            wanted.addSubview_positioned_relativeTo(
-                &container.clip,
-                NSWindowOrderingMode::Above,
-                Some(gpui),
-            );
-        }
+        // Added, not removed first: an edit inside keeps going (see `reparent`).
+        adopt(&wanted, &container.clip, target.parent.is_none().then_some(gpui));
         container.parent = target.parent;
         container.applied = None;
         host.moved = true;
@@ -294,7 +318,10 @@ pub(crate) fn finish(view: usize) -> bool {
         let targets = &host.targets;
         let mut moved = std::mem::take(&mut host.moved);
         host.containers.retain(|id, container| {
-            if used.contains(id) {
+            // A field being edited inside stays shown until the edit ends
+            // (hiding its ancestor would end it): it is held there by
+            // `reparent` while its row moves elsewhere.
+            if used.contains(id) || holds_first_responder(&container.clip) {
                 return true;
             }
             if !container.clip.isHidden() {

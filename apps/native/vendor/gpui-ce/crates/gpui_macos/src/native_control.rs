@@ -284,7 +284,9 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         // of its clip) follows its row unseen, with no synchronous present.
         let unseen = hidden && state.wrapper.isHidden();
         // Into its region's container, or back out of one.
-        if crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref()) {
+        let (adopted, frame) =
+            crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame);
+        if adopted {
             moved = true;
             // In a region its container's clip fades, not its own mask.
             if parent.is_some() {
@@ -319,7 +321,11 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             moved = true;
             crate::composition_accessibility::changed(key);
         }
-        if settled.is_some() && !hidden {
+        // Settled only where it belongs: one held in its old parent for an
+        // edit is placed again by the frames after the edit ends.
+        let home = !crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+            && !crate::slot_region::holds_first_responder(&state.wrapper);
+        if settled.is_some() && !hidden && home {
             state.settled.set(settled);
         }
     }

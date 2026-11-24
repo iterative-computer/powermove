@@ -23,6 +23,7 @@ fn main() {
     macos::unprepared_frames(mtm);
     macos::present_modes();
     macos::leaving_a_region(mtm);
+    macos::editing_across_regions(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -45,6 +46,129 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: a field being edited keeps its edit (field editor,
+    /// selection, first responder) while its row moves into a scrolling
+    /// region, while that region's container changes parent, and while the
+    /// row moves out again; it shows where its row is throughout, and joins
+    /// its new parent once the edit ends.
+    pub fn editing_across_regions(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        use objc2_app_kit::{NSTextField, NSTextView};
+        use objc2_foundation::{NSRange, NSString};
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0., 0., 120., 22.));
+        field.setStringValue(&NSString::from_str("hello world"));
+        let field_view: Retained<NSView> = field.clone().into_super().into_super();
+        let slot = NativeControlSlot::new(&gpui, field_view);
+        let shown = |slot: &NativeControlSlot| {
+            let w = slot.wrapper();
+            let r = w.convertRect_toView(w.bounds(), Some(&gpui));
+            (r.origin.x, gpui.bounds().size.height - r.origin.y - r.size.height)
+        };
+        let region = |id, parent, frame: (f32, f32, f32, f32), origin_y: f32| SlotRegionGeometry {
+            id,
+            parent,
+            frame: Bounds::new(point(px(frame.0), px(frame.1)), size(px(frame.2), px(frame.3))),
+            origin: point(px(0.), px(origin_y)),
+            fade: [px(0.), px(0.)],
+        };
+        let open = rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6);
+        let editing = || {
+            let editor = field.currentEditor();
+            let responder = window.firstResponder();
+            let selection = editor
+                .as_ref()
+                .and_then(|e| e.clone().downcast::<NSTextView>().ok())
+                .map(|t| t.selectedRange());
+            let first = match (&editor, responder) {
+                (Some(e), Some(r)) => std::ptr::eq(
+                    Retained::as_ptr(e) as *const AnyObject,
+                    Retained::as_ptr(&r) as *const AnyObject,
+                ),
+                _ => false,
+            };
+            (editor.is_some() && first, selection)
+        };
+        let frame = |slot: &NativeControlSlot| {
+            probe::painted(&gpui);
+            probe::place(&gpui);
+            let _ = slot;
+        };
+        // Outside any region, then edited with "llo" selected.
+        slot.stage(rect(10., 20., 120., 22.), rect(0., 0., 400., 600.));
+        frame(&slot);
+        assert!(window.makeFirstResponder(Some(&field)), "the field takes the keyboard");
+        let editor = field.currentEditor().expect("a field editor");
+        editor.downcast::<NSTextView>().expect("a text view").setSelectedRange(NSRange::new(2, 3));
+        let before = editing();
+        assert!(before.0, "editing");
+        // Region 1 at (0, 50), region 2 inside it at (0, 100), scrolled 30.
+        let both = |nested: bool| {
+            regions::set(
+                &gpui,
+                &[
+                    region(1, None, (0., 50., 200., 400.), 0.),
+                    if nested {
+                        region(2, Some(1), (0., 100., 200., 200.), -30.)
+                    } else {
+                        region(2, None, (0., 150., 200., 200.), -30.)
+                    },
+                ],
+            )
+        };
+        // Its row moves into region 2 (content y 60 shows at 50 + 100 - 30 + 60).
+        both(true);
+        slot.stage_in_region(2, rect(10., 60., 120., 22.), open);
+        frame(&slot);
+        assert_eq!(editing(), before, "moving into a region keeps the edit");
+        assert_eq!(shown(&slot), (10., 180.), "it shows on its row meanwhile");
+        // The edit ends: it joins region 2's container.
+        assert!(window.makeFirstResponder(None));
+        slot.keep();
+        frame(&slot);
+        let inner = regions::clip(&gpui, 2).expect("region 2's container");
+        assert!(slot.wrapper().isDescendantOf(&inner), "in its region once the edit ended");
+        assert_eq!(shown(&slot), (10., 180.));
+        // Edited again inside the region; the region's container changes parent.
+        assert!(window.makeFirstResponder(Some(&field)));
+        let editor = field.currentEditor().expect("a field editor");
+        editor.downcast::<NSTextView>().expect("a text view").setSelectedRange(NSRange::new(2, 3));
+        let before = editing();
+        both(false);
+        slot.keep();
+        frame(&slot);
+        assert_eq!(editing(), before, "a container changing parent keeps the edit");
+        assert_eq!(shown(&slot), (10., 180.), "region 2 now stands at 150 in the window");
+        // Its row moves out of the regions while it is edited.
+        slot.stage(rect(10., 300., 120., 22.), rect(0., 0., 400., 600.));
+        frame(&slot);
+        assert_eq!(editing(), before, "moving out of a region keeps the edit");
+        assert_eq!(shown(&slot), (10., 300.));
+        assert!(window.makeFirstResponder(None));
+        slot.keep();
+        frame(&slot);
+        let parent = unsafe { slot.wrapper().superview() }.expect("in the window");
+        assert!(std::ptr::eq(&*parent, &*content), "outside the regions once the edit ended");
+        assert_eq!(shown(&slot), (10., 300.));
+        drop(slot);
+        window.close();
+    }
 
     /// PM-696 review: a control that leaves a scrolling region (its row moved
     /// out of the scroll content) is placed in GPUI's view's parent in the

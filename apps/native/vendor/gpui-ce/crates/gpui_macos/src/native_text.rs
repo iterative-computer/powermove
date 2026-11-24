@@ -1374,8 +1374,16 @@ fn place(key: usize, apply: bool) -> bool {
         // present: a panel of number fields made every frame of its scroll
         // one.
         let unseen = hidden && state.wrapper.isHidden();
+        // Top-down content coordinates in a region.
+        let mut frame = match region {
+            Some(_) => visible,
+            None => crate::composition::hosted_rect(&state.gpui, visible),
+        };
         if apply {
-            if crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref()) {
+            let (adopted, placed) =
+                crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame);
+            frame = placed;
+            if adopted {
                 moved = true;
                 // In a region its container's clip fades, not its own mask.
                 if parent.is_some() {
@@ -1386,11 +1394,6 @@ fn place(key: usize, apply: bool) -> bool {
             moved |= crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
                 || (parent.is_some() && unsafe { state.wrapper.superview() }.is_none());
         }
-        // Top-down content coordinates in a region.
-        let frame = match region {
-            Some(_) => visible,
-            None => crate::composition::hosted_rect(&state.gpui, visible),
-        };
         if state.wrapper.frame() != frame {
             moved |= !unseen;
             if apply {
