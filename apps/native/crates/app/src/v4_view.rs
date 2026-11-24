@@ -4253,6 +4253,15 @@ impl SurfaceView {
         }
         self.element_close(id, element, children, window, cx)
     }
+    /// How far the panel's own scrollers have moved, all summed (tests: a
+    /// scroll case proves it moved something).
+    #[cfg(test)]
+    pub(crate) fn scroll_offsets(&self) -> f32 {
+        self.scrolls
+            .values()
+            .map(|h| f32::from(h.offset().x).abs() + f32::from(h.offset().y).abs())
+            .sum()
+    }
     /// Draw the published search field and kit switch when no AppKit slot exists.
     fn offscreen_control(
         &self,

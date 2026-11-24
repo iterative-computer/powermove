@@ -178,6 +178,8 @@ struct Workspace {
 fn workspace_project(n: usize) -> String {
     let mut project: Value = serde_json::from_str(&project_json(n)).unwrap();
     project["layers"][0]["p"]["position.x"]["kf"] = json!([{"t":0,"v":100},{"t":10,"v":500}]);
+    // Two minutes, so the timeline has time to scroll sideways through.
+    project["dur"] = json!(120);
     // Offline stills: the Project panel lists them (rows to hover and scroll).
     project["assets"] = (0..40)
         .map(|i| {
@@ -235,7 +237,15 @@ fn layout_record() -> Value {
     left["panels"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"id": "color", "size": 280}));
+        .push(json!({"id": "color", "size": 160}));
+    // Effects in a slot its list overflows, as on a laptop screen: its
+    // scroll cases must move something.
+    let right = docks.iter_mut().find(|d| d["id"] == "right").unwrap();
+    for panel in right["panels"].as_array_mut().unwrap() {
+        if panel["id"] == "fxbrowser" {
+            panel["size"] = json!(200);
+        }
+    }
     record["id"] = json!("ui-latency");
     record["builtin"] = json!(false);
     record["scope"] = json!("project");
@@ -432,15 +442,6 @@ impl Workspace {
     }
     fn rect(&self, id: &str) -> Option<pm_shell::layout::Rect> {
         self.editor.read_with(&self.vcx, |e, _| e.panel_rect(id))
-    }
-    /// The middle of a panel's body.
-    fn body_center(&self, id: &str) -> Option<Point<Pixels>> {
-        let r = self.rect(id)?;
-        let header = self.dock.tokens.metrics.header;
-        Some(point(
-            px(r.x + r.w / 2.),
-            px(r.y + header + (r.h - header) / 2.),
-        ))
     }
     fn click(&mut self, probe: &mut Probe, at: Point<Pixels>) {
         click_center(&mut self.vcx, probe, at);
@@ -716,6 +717,69 @@ fn momentum_events(at: Point<Pixels>, horizontal: bool, sign: f32) -> Vec<Scroll
     out
 }
 
+/// A point of the panel's body where a wheel step moves it (outside any
+/// measured step: one step and one back). Its middle can hold a control that
+/// takes the wheel for itself (a colour wheel), or nothing that scrolls.
+fn scroll_target(ws: &mut Workspace, panel: &str, horizontal: bool) -> Option<Point<Pixels>> {
+    let r = ws.rect(panel)?;
+    let header = ws.dock.tokens.metrics.header;
+    for (fx, fy) in [
+        (0.5, 0.5),
+        (0.5, 0.3),
+        (0.5, 0.75),
+        (0.15, 0.5),
+        (0.85, 0.6),
+    ] {
+        let at = point(px(r.x + r.w * fx), px(r.y + header + (r.h - header) * fy));
+        let before = scroll_position(ws, panel, horizontal);
+        let mut moved = false;
+        for v in [-40., 40.] {
+            let d = if horizontal {
+                point(px(v), px(0.))
+            } else {
+                point(px(0.), px(v))
+            };
+            ws.vcx
+                .simulate_event(wheel(at, d, TouchPhase::Moved, false));
+            ws.vcx.run_until_parked();
+            moved |= (scroll_position(ws, panel, horizontal) - before).abs() > 1e-3;
+        }
+        if moved {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Where a scroll case's target stands: the timeline's scroll (rows or
+/// time), or a side panel's body and its own scrollers.
+fn scroll_position(ws: &Workspace, panel: &str, horizontal: bool) -> f64 {
+    if panel == "timeline" {
+        return ws.timeline.read_with(&ws.vcx, |t, _| {
+            if horizontal {
+                t.scroll_time()
+            } else {
+                t.scroll_y()
+            }
+        });
+    }
+    let body = ws
+        .dock
+        .scrolls
+        .borrow()
+        .get(panel)
+        .map_or(0., |h| f64::from(f32::from(h.offset().y)).abs());
+    let inner = ws.dock.views.borrow().get(panel).map_or(0., |v| {
+        f64::from(v.read_with(&ws.vcx, |v, _| v.scroll_offsets()))
+    });
+    // A panel that grows with its content scrolls its dock's column.
+    let column = ws.editor.read_with(&ws.vcx, |e, _| {
+        let (dock, _, _) = e.layout.find(panel)?;
+        Some(f64::from(e.dock_scroll_offset(&e.layout.docks[dock].id)))
+    });
+    body + inner + column.unwrap_or(0.)
+}
+
 fn scroll_case(
     ws: &mut Workspace,
     playback: &mut Option<Playback>,
@@ -726,8 +790,8 @@ fn scroll_case(
     momentum: bool,
 ) -> Case {
     let mut case = Case::new(id, "workspace", name);
-    let Some(at) = ws.body_center(panel) else {
-        return case.skip(format!("{panel} is not on screen"));
+    let Some(at) = scroll_target(ws, panel, horizontal) else {
+        return case.skip(format!("no point of {panel} scrolls"));
     };
     let events: Vec<ScrollWheelEvent> = if momentum {
         let mut e = momentum_events(at, horizontal, 1.);
@@ -746,6 +810,9 @@ fn scroll_case(
             })
             .collect()
     };
+    // The target must move: a swallowed gesture or a body with nothing to
+    // scroll would measure less work and pass (PM-698 review).
+    let (mut least, mut most) = (f64::MAX, f64::MIN);
     for event in events {
         let sample = step(
             ws,
@@ -754,6 +821,12 @@ fn scroll_case(
             false,
         );
         case.samples.push(sample);
+        let at = scroll_position(ws, panel, horizontal);
+        (least, most) = (least.min(at), most.max(at));
+    }
+    case.note("moved", json!(most - least));
+    if most - least < 1e-3 {
+        return case.skip(format!("the gesture did not move {panel}"));
     }
     case
 }
@@ -775,10 +848,22 @@ fn hover_case(
             }
         }
     } else if let Some(view) = ws.dock.views.borrow().get(panel).cloned() {
+        // A fresh paint of every view, outside any measured step: a cached
+        // panel replays its paint and leaves no bounds to aim at.
+        ws.vcx.update(|window, _| window.refresh());
+        ws.vcx.run_until_parked();
         let ids = nodes(&view, &ws.vcx, |n| {
             matches!(
                 role(n),
-                "button" | "tab" | "option" | "menuitem" | "row" | "listitem" | "treeitem"
+                "button"
+                    | "tab"
+                    | "option"
+                    | "menuitem"
+                    | "row"
+                    | "listitem"
+                    | "treeitem"
+                    | "cell"
+                    | "gridcell"
             )
         });
         let body = ws.rect(panel);

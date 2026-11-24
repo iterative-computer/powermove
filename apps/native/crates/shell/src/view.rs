@@ -2038,6 +2038,11 @@ impl Editor {
     /// Where tab `id` (or a lone title) is drawn in its header, as last
     /// rendered. For headless recordings and tests.
     #[doc(hidden)]
+    /// How far dock `id` (a column of panels) is scrolled (benches).
+    #[doc(hidden)]
+    pub fn dock_scroll_offset(&self, id: &str) -> f32 {
+        self.dock_scroll.get(id).copied().unwrap_or(0.)
+    }
     /// The dividers as last laid out (benches drive their drags).
     #[doc(hidden)]
     pub fn dividers(&self) -> &[layout::Divider] {
