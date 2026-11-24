@@ -2950,6 +2950,40 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// Pictures a prepainted subtree without inserting its pixels into this frame.
+    /// Used by snapshot transitions. The closure must paint only that subtree;
+    /// native child windows and deferred overlays are not part of the picture.
+    /// Captures only on preparation, never in an animation frame loop.
+    #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
+    pub fn paint_snapshot(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cx: &mut App,
+        paint: impl FnOnce(&mut Self, &mut App),
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.invalidator.debug_assert_paint();
+        anyhow::ensure!(
+            bounds.origin.x >= Pixels::ZERO && bounds.origin.y >= Pixels::ZERO
+                && bounds.size.width > Pixels::ZERO && bounds.size.height > Pixels::ZERO,
+            "snapshot must have positive dimensions and lie inside the window"
+        );
+        let saved = std::mem::take(&mut self.next_frame.scene);
+        paint(self, cx);
+        let mut captured = std::mem::replace(&mut self.next_frame.scene, saved);
+        captured.finish();
+        let image = self.platform_window.render_to_image(&captured)?;
+        let scale = self.scale_factor();
+        let x = (f32::from(bounds.origin.x) * scale).round().max(0.) as u32;
+        let y = (f32::from(bounds.origin.y) * scale).round().max(0.) as u32;
+        let w = (f32::from(bounds.size.width) * scale).round().max(1.) as u32;
+        let h = (f32::from(bounds.size.height) * scale).round().max(1.) as u32;
+        anyhow::ensure!(
+            x + w <= image.width() && y + h <= image.height(),
+            "snapshot outside window"
+        );
+        Ok(image::imageops::crop_imm(&image, x, y, w, h).to_image())
+    }
+
     /// Returns the current frame's quad and glyph sprite counts.
     #[cfg(any(test, feature = "headless-support"))]
     pub fn rendered_primitive_counts(&self) -> (usize, usize, usize, usize) {

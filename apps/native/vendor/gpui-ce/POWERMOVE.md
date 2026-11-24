@@ -277,3 +277,16 @@ has been made. No measurements from a locked or occluded session certify pacing.
   follows. GPUI keeps presenting the last scene for a second after fast
   input; such a `draw` staged nothing, and placing slots from it hid every
   hosted control and field until the next paint.
+
+### Snapshot view transitions
+
+`Window::paint_snapshot` (under the existing `frame-capture` feature) isolates a
+prepainted subtree into a temporary scene and returns its offscreen pixels,
+restoring the pending scene before rasterization. This lets a transition freeze
+its own children without capturing the display or including its live overlay.
+The native Metal window exposes its retained `metal::Device` through the existing
+`gpu_context` hook, so custom surface producers use the renderer's device rather
+than guessing the system default. The Metal layer explicitly declares sRGB:
+packed `NativeTexture` surfaces contain display-encoded sRGB, and ColorSync must
+convert those colors for a Display P3 display. No new scene primitive or shader
+pipeline is added to GPUI for the wave itself.

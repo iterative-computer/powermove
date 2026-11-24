@@ -5638,6 +5638,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pm-design",
+ "pm-wave",
  "raw-window-handle",
  "resvg",
  "serde",
@@ -5796,6 +5797,14 @@ dependencies = [
  "pm-time",
  "ryu-js",
  "serde_json",
+]
+
+[[package]]
+name = "pm-wave"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "metal",
 ]
 
 [[package]]
