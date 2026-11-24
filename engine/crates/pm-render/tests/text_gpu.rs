@@ -25,6 +25,7 @@ fn main() {
             None,
         ))
     };
+    packed_glow_specialization_preserves_gpu_bits();
     density_replay_keeps_compat_passthrough_layers(fonts());
     a_base_text_window_reads_the_same_texels_as_the_whole_canvas(fonts());
     let blur = json!({
@@ -317,6 +318,201 @@ fn a_base_text_window_reads_the_same_texels_as_the_whole_canvas(
                 .zip(&whole.pixels.pixels[start..start + stride])
                 .all(|(a, b)| a.to_bits() == b.to_bits()),
             "window row {row}"
+        );
+    }
+}
+
+/// Both pipelines draw the same branch of a synthetic packed blur on Metal.
+/// Compare raw targets before presentation can round away a low-bit change.
+#[cfg(target_os = "macos")]
+fn packed_glow_specialization_preserves_gpu_bits() {
+    use pm_gpu::target::Target;
+    use pm_render::effects::program::{Call, GpuProgram};
+    use wgpu::util::DeviceExt;
+
+    const SIZE: u32 = 32;
+    const BLUR: &str = r#"#version 300 es
+precision highp float;
+precision highp int;
+ in vec2 v_st;
+ out vec4 o;
+ uniform sampler2D u_tex;
+ uniform int u_pass;
+ uniform float u_highQuality;
+ uniform float u_dispersion;
+ void main() {
+   if (u_pass != 6) { o = vec4(0.0); return; }
+   int xs = u_highQuality > 0.5 ? 4 : 3;
+   int ys = u_highQuality > 0.5 ? 12 : 6;
+   vec3 sum = vec3(0.0);
+   float total = 0.0;
+   for (int y = -12; y <= 12; y++) {
+     if (abs(y) > ys) continue;
+     for (int x = -4; x <= 4; x++) {
+       if (abs(x) > xs) continue;
+       vec2 offset = vec2(float(x) / float(xs), float(y) / float(ys));
+       float weight = exp(-3.5 * dot(offset, offset));
+       vec2 tap = v_st + offset * vec2(0.27, 0.39);
+       vec3 rgb = texture(u_tex, tap).rgb;
+       if (u_dispersion > 0.0) {
+         rgb.r = texture(u_tex, tap + offset * u_dispersion).r;
+         rgb.b = texture(u_tex, tap - offset * u_dispersion).b;
+       }
+       sum += rgb * weight;
+       total += weight;
+     }
+   }
+   o = vec4(sum / total, 1.0);
+ }"#;
+
+    let gpu = pm_gpu::Gpu::new("packed glow bit parity").expect("Metal device");
+    let device = &gpu.device;
+    let queue = &gpu.queue;
+    let mut program = GpuProgram::new(
+        device,
+        pm_glsl::translate(BLUR, 0).expect("translate the synthetic blur"),
+        "packed glow proof",
+    )
+    .expect("compile the synthetic blur");
+    let input = Target::new(
+        device,
+        "packed glow seed",
+        SIZE,
+        SIZE,
+        wgpu::TextureFormat::Rgba32Float,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let mut seed = 0x5e12_74b9_u32;
+    let samples: Vec<u8> = (0..SIZE * SIZE * 4)
+        .flat_map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            ((seed >> 8) as f32 / (1 << 21) as f32).to_le_bytes()
+        })
+        .collect();
+    queue.write_texture(
+        input.texture.as_image_copy(),
+        &samples,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 16),
+            rows_per_image: Some(SIZE),
+        },
+        input.texture.size(),
+    );
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let uniform = |block, calls: &[(String, Call)]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &GpuProgram::block_bytes(block, calls),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    };
+    let fblock = program.fragment_block.as_ref().unwrap();
+    let fbuf = uniform(
+        fblock,
+        &[
+            ("u_pass".into(), Call::I(6)),
+            ("u_highQuality".into(), Call::F(vec![0.])),
+            ("u_dispersion".into(), Call::F(vec![0.])),
+        ],
+    );
+    let (_, binding) = &program.samplers[0];
+    let fragment = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &program.fragment_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: fblock.binding,
+                resource: fbuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: wgpu::BindingResource::TextureView(&input.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: *binding + pm_glsl::SAMPLER_BINDING_OFFSET,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    let vblock = program.vertex_block.as_ref().unwrap();
+    let size = SIZE as f32;
+    let vbuf = uniform(
+        vblock,
+        &[
+            (
+                "u_m".into(),
+                Call::M3([size, 0., 0., 0., size, 0., 0., 0., 1.]),
+            ),
+            ("u_res".into(), Call::F(vec![size, size])),
+        ],
+    );
+    let vertex = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &program.vertex_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: vblock.binding,
+            resource: vbuf.as_entire_binding(),
+        }],
+    });
+    let draw = |pipeline: &wgpu::RenderPipeline, format| {
+        let out = Target::new(
+            device,
+            "packed glow readback",
+            SIZE,
+            SIZE,
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &fragment, &[]);
+            pass.set_bind_group(1, &vertex, &[]);
+            pass.draw(0..4, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+        pm_gpu::readback::read_raw(device, queue, &out.texture).unwrap()
+    };
+    for format in [
+        wgpu::TextureFormat::Rgba32Float,
+        wgpu::TextureFormat::Rgba16Float,
+    ] {
+        let original = draw(program.pipeline(device, format).unwrap(), format);
+        let rewritten = draw(
+            program
+                .glow_blur_pipeline(device, format)
+                .expect("the rewrite must compile"),
+            format,
+        );
+        assert!(original.iter().any(|&byte| byte != 0), "the blur must draw");
+        let different = original
+            .iter()
+            .zip(&rewritten)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(different, 0, "packed blur changed {format:?} bytes");
+        println!(
+            "packed glow blur: {} identical {format:?} bytes",
+            original.len()
         );
     }
 }

@@ -484,7 +484,8 @@ impl GpuProgram {
     /// The pinned packed glow's final blur for a zero-dispersion,
     /// standard-quality instance. Only the uniform loads change. The same
     /// shader samples the same texels and accumulates them in the same order.
-    pub(super) fn glow_blur_pipeline(
+    #[doc(hidden)]
+    pub fn glow_blur_pipeline(
         &mut self,
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
@@ -620,6 +621,21 @@ impl GpuProgram {
 mod tests {
     use super::*;
     use pm_glsl::reflect::Member;
+
+    #[test]
+    fn glow_rewrite_requires_simple_uniform_reads() {
+        let fields = "p.u_highQuality + (p).u_dispersion + p.u_passes";
+        for pass in ["p.u_pass", "(p).u_pass"] {
+            assert_eq!(
+                specialize_glow_blur(&format!("{pass} + {fields}")).as_deref(),
+                Some("6 + 0.0f + 0.0f + p.u_passes")
+            );
+        }
+        for pass in ["(*p).u_pass", "a[i].u_pass", "p.u_passes"] {
+            assert_eq!(specialize_glow_blur(&format!("{pass} + {fields}")), None);
+        }
+        assert_eq!(specialize_glow_blur("p.u_pass + p.u_highQuality"), None);
+    }
 
     fn block() -> Block {
         let m = |name: &str, offset, ty| Member {
