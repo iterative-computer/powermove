@@ -440,6 +440,12 @@ fn reach(kind: Kind, step: &EffectStep) -> Option<u32> {
             return dot_matrix_reach(step);
         }
         Kind::DeepGlow => return None,
+        // V2 shifts and blurs on its owner's plane; its padding is measured
+        // with the 2D `pixel_scale`, which a 2.5D/3D plane's perspective
+        // exceeds (a solid pushed back towards the camera magnifies its
+        // shadow's offset). Not bounded until the reach comes from the
+        // plane itself.
+        Kind::Shadow2 if step.owner.as_ref().is_some_and(|o| !o.planar) => return None,
         _ => {}
     }
     // Output-raster addressing is not covered for these kernels.
@@ -1051,6 +1057,7 @@ pub(crate) mod tests {
             size: [10., 10.],
             bounds: [0., 0., 10., 10.],
             pixel_scale: [1.5, 1.5],
+            planar: true,
         }));
         assert_eq!(reach(&owned, &dots), Some(11));
         // A huge pitch saturates (the whole target, `grow`); one whose

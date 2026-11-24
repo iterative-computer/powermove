@@ -1112,6 +1112,7 @@ impl Exec<'_> {
                     size: [asset.width as f64, asset.height as f64],
                     bounds: [0., 0., asset.width as f64, asset.height as f64],
                     pixel_scale: [1., 1.],
+                    planar: true,
                 },
                 origin: [0., 0.],
             });

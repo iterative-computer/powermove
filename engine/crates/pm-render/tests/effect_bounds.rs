@@ -248,7 +248,11 @@ fn wide_reaches_stay_bit_identical() {
     let mut r = Renderer::headless().unwrap();
     for amount in [0.5, 40., 200.] {
         let mut l = solid("w", "#FFFFFF", 12, 12, 128., 72.);
-        l["fx"] = json!([blur2(amount, false), glow(10., amount.min(120.), 200.), blur1(amount)]);
+        l["fx"] = json!([
+            blur2(amount, false),
+            glow(10., amount.min(120.), 200.),
+            blur1(amount)
+        ]);
         let v = project(W, H, 2., no_fill(), vec![l]);
         let variant = Variant {
             precision: Precision::Float32,
@@ -299,6 +303,44 @@ fn shadow_v1_and_v2_scissored_passes_are_bit_identical() {
     assert!(hits > 0, "shadow passes were not scissored");
 }
 
+/// Drop Shadow v2 on a 2.5D layer brought towards the camera: the plane
+/// magnifies the shadow's offset five times past what the layer's 2D
+/// transform says, and every shadow pixel still draws.
+#[test]
+fn shadow_v2_on_a_magnified_25d_plane_keeps_its_shadow() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    // Perspective 36 on a 256-wide frame: a focal length of 256 px, so a
+    // layer at Z = -0.8 × 256 is magnified 5×.
+    let mut l = solid("p", "#F0C040", 8, 8, 128., 72.);
+    l["threeD"] = json!(true);
+    set(&mut l, "anchor.x", json!(4));
+    set(&mut l, "anchor.y", json!(4));
+    set(&mut l, "position.z", json!(-204.8));
+    set(&mut l, "perspective", json!(36));
+    l["fx"] = json!([shadow2(12., 90., 0., 100., true)]);
+    let v = project(W, H, 2., no_fill(), vec![l]);
+    for (precision, kind, scale) in [
+        (Precision::Float16, OutputKind::Final, 1.0),
+        (Precision::Float32, OutputKind::Preview, 1.5),
+    ] {
+        let variant = Variant {
+            precision,
+            linear: false,
+            kind,
+            region: None,
+            scale,
+        };
+        compare(
+            &mut r,
+            &v,
+            0.,
+            &variant,
+            &format!("2.5D shadow {precision:?} {kind:?} scale {scale}"),
+        );
+    }
+}
+
 /// Steps that can lift a transparent pixel are never scissored, nor is any
 /// step after them.
 #[test]
@@ -313,7 +355,10 @@ fn steps_that_do_not_keep_zero_are_not_scissored() {
         scale: 1.,
     };
     for (what, fx) in [
-        ("blur v2 repeating edge pixels", json!([blur2(6., true), blur1(4.)])),
+        (
+            "blur v2 repeating edge pixels",
+            json!([blur2(6., true), blur1(4.)]),
+        ),
         ("levels v2 lifting alpha", json!([levels2(0.2), blur1(4.)])),
     ] {
         let mut l = solid("n", "#80FF80", 30, 30, 128., 72.);
