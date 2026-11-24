@@ -96,7 +96,8 @@ struct Sample {
     max_slice_ms: f64,
     /// Contiguous test-thread runs over `MAIN_SLICE_MS`.
     slices_over: u32,
-    /// The whole-window draw (`draw`: next-frame callbacks, layout, paint).
+    /// The display tick (`draw`: next-frame callbacks, and the draw of a
+    /// window they invalidate).
     frame_ms: f64,
 }
 
@@ -180,13 +181,16 @@ fn pump_until(
     }
 }
 
-/// A whole-window frame, as the next display-link tick draws it.
+/// The next display-link tick: its frame callbacks run, and the window
+/// draws if anything invalidated it, as `on_request_frame` does. Never a
+/// `refresh()`: that sets `refreshing`, which re-renders every cached view,
+/// work no display tick does (every sample paid it until PM-698). A draw
+/// the input caused runs in the input's own update.
 fn draw(vcx: &mut VisualTestContext, probe: &mut Probe) {
     let at = Instant::now();
     probe.run(|| {
         vcx.update(|window, cx| {
             window.simulate_next_frame(cx);
-            window.refresh();
         });
         vcx.run_until_parked();
     });
