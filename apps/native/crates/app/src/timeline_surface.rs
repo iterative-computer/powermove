@@ -7423,55 +7423,75 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
             let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
             let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
-            let (inner_top, floor) = (top + rim, top + h - rim);
-            // The strip's inside at `x`: its ceiling and floor, lifted
-            // round the rounded corners.
-            let inside = |x: f32| -> (f32, f32) {
-                if x < start || x > end {
-                    return (floor, floor);
-                }
-                let from_end = (x - start).min(end - x);
-                let lift = if from_end < radius {
-                    let d = radius - from_end;
-                    radius - (radius * radius - d * d).max(0.).sqrt()
-                } else {
-                    0.
-                };
-                (inner_top + lift, floor - lift)
-            };
-            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
-                // A tall stereo row: the left above, the right below.
-                Some(peak2) => {
-                    let half = (floor - inner_top) / 2.;
-                    vec![
-                        (soften(&decode(peak)), inner_top + half, half),
-                        (soften(&decode(peak2)), floor, half),
-                    ]
-                }
-                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
-            };
             // Only the columns the window shows (a frame is prepared wider
             // than the view): the path's work stays the screen's width.
             let shown = f32::from(window.viewport_size().width);
-            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
-            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
-            let x = |i: usize| x0 + (first + i) as f32 / per;
-            for (values, lane_floor, lane_h) in lanes {
-                let end_at = last.min(values.len());
-                if first >= end_at {
-                    continue;
+            let peak2 = d["peak2"].as_str();
+            let key = WaveKey {
+                peaks: {
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    (peak, peak2).hash(&mut hash);
+                    hash.finish()
+                },
+                geometry: [x0, top, w, h, per, rim, radius, start, end, shown].map(f32::to_bits),
+            };
+            let paths = waveform_paths(key, || {
+                let (inner_top, floor) = (top + rim, top + h - rim);
+                // The strip's inside at `x`: its ceiling and floor, lifted
+                // round the rounded corners.
+                let inside = |x: f32| -> (f32, f32) {
+                    if x < start || x > end {
+                        return (floor, floor);
+                    }
+                    let from_end = (x - start).min(end - x);
+                    let lift = if from_end < radius {
+                        let d = radius - from_end;
+                        radius - (radius * radius - d * d).max(0.).sqrt()
+                    } else {
+                        0.
+                    };
+                    (inner_top + lift, floor - lift)
+                };
+                let lanes: Vec<(Vec<f32>, f32, f32)> = match peak2 {
+                    // A tall stereo row: the left above, the right below.
+                    Some(peak2) => {
+                        let half = (floor - inner_top) / 2.;
+                        vec![
+                            (soften(&decode(peak)), inner_top + half, half),
+                            (soften(&decode(peak2)), floor, half),
+                        ]
+                    }
+                    None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
+                };
+                let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+                let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+                let x = |i: usize| x0 + (first + i) as f32 / per;
+                let mut paths = vec![];
+                for (values, lane_floor, lane_h) in lanes {
+                    let end_at = last.min(values.len());
+                    if first >= end_at {
+                        continue;
+                    }
+                    let values = &values[first..end_at];
+                    // The haze along the floor, then the shape over it.
+                    let haze = vec![WAVE_HAZE; values.len()];
+                    let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
+                    paths.push((
+                        glass_fill(&haze, &x, lane_floor, &inside),
+                        glass_fill(&heights, &x, lane_floor, &inside),
+                    ));
                 }
-                let values = &values[first..end_at];
-                // The haze along the floor, then the shape over it: more
-                // opaque at its base than at its tips.
-                let haze = vec![WAVE_HAZE; values.len()];
-                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
-                    window.paint_path(path, shade(tone, strength * 0.55));
+                paths
+            });
+            // More opaque at its base than at its tips.
+            for (haze, shape) in paths.iter() {
+                if let Some(path) = haze {
+                    window.paint_path(path.clone(), shade(tone, strength * 0.55));
                 }
-                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
-                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                if let Some(path) = shape {
                     window.paint_path(
-                        path,
+                        path.clone(),
                         linear_gradient(
                             180.,
                             linear_color_stop(shade(tone, strength * 0.78), 0.),
@@ -7881,6 +7901,43 @@ const WAVE_HAZE: f32 = 0.9;
 /// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so
 /// the strip's rounded corners cut it. Its top is a monotone cubic through
 /// the columns (no overshoot, no corner); `None` when nothing shows.
+/// What a waveform's paths are made of: its peaks (hashed) and the
+/// strip's place, size, corners and the window's width, to the bit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct WaveKey {
+    peaks: u64,
+    geometry: [u32; 10],
+}
+
+type WavePaths = Rc<Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>>;
+
+/// A waveform's paths (per channel: its haze and its shape), kept by what
+/// they are made of: a frame that only moved something else (a hover, the
+/// playhead, a panel) paints the same paths without decoding the peaks and
+/// tessellating their curves again. Bounded: the strips on screen.
+fn waveform_paths(
+    key: WaveKey,
+    make: impl FnOnce() -> Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>,
+) -> WavePaths {
+    thread_local! {
+        static PATHS: RefCell<std::collections::HashMap<WaveKey, WavePaths>> = RefCell::default();
+    }
+    if let Some(paths) = PATHS.with(|c| c.borrow().get(&key).cloned()) {
+        return paths;
+    }
+    let paths = Rc::new(make());
+    PATHS.with(|c| {
+        let mut cache = c.borrow_mut();
+        // A scroll or zoom makes new keys every step: start over rather
+        // than keep the old ones.
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, paths.clone());
+    });
+    paths
+}
+
 fn glass_fill(
     heights: &[f32],
     x: &dyn Fn(usize) -> f32,
