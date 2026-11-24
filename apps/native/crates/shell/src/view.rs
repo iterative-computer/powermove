@@ -3897,6 +3897,9 @@ impl Editor {
                                     w,
                                 );
                                 agent_header_width(label, &m)
+                            } else if id == "assets" {
+                                // Two view segments, Search, Add, and the header insets.
+                                4. * m.hit + 2. * (m.inset + m.pill_inset)
                             } else {
                                 2. * m.hit + m.gap
                             }

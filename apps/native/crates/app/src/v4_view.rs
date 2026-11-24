@@ -527,6 +527,8 @@ pub struct SurfaceView {
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
+    /// Keep the final readout through compilations already queued at commit.
+    scrub_settled: Option<(Id, f64, u64)>,
     grade_drawn: grade::Drawn,
     /// Each wheel's puck on its way to where its values put it.
     grade_motion: grade::Motion,
@@ -724,6 +726,7 @@ impl SurfaceView {
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
+            scrub_settled: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
             ease: Default::default(),
@@ -1087,6 +1090,12 @@ impl SurfaceView {
         }
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        if self.scrub_settled.is_some_and(|(id, value, ticket)| {
+            compiled.ticket > ticket || self.prepared.node(id).and_then(|n| n.number)
+                .is_none_or(|n| n.text(n.value) == n.text(value))
+        }) {
+            self.scrub_settled = None;
+        }
         self.quote_selection
             .borrow_mut()
             .blocks
@@ -1145,6 +1154,8 @@ impl SurfaceView {
         self.truncated.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
+        self.scrub_shown = None;
+        self.scrub_settled = None;
         self.pointer_move = None;
         self.error = None;
     }
@@ -1724,8 +1735,8 @@ impl SurfaceView {
         let id = view.id;
         // Number fields read at their display precision, as when scrubbed.
         let value = match (view.number, node.props.get("value")) {
-            (Some(number), Some(value)) if value.is_number() => {
-                number.text(value.as_f64().unwrap_or(number.value))
+            (Some(number), _) => {
+                number.text(self.scrub_readout(id).unwrap_or(number.value))
             }
             (_, value) => value.map(value_text).unwrap_or_default(),
         };
@@ -3441,6 +3452,17 @@ impl SurfaceView {
         .detach();
         cx.notify();
     }
+    fn scrub_readout(&self, id: Id) -> Option<f64> {
+        self.scrub_shown
+            .filter(|(target, _)| *target == id)
+            .map(|(_, value)| value)
+            .or_else(|| {
+                self.scrub_settled
+                    .filter(|(target, _, _)| *target == id)
+                    .map(|(_, value, _)| value)
+            })
+    }
+
     fn scrub_press(
         &mut self,
         id: Id,
@@ -3452,9 +3474,12 @@ impl SurfaceView {
         let Some(node) = self.prepared.node(id) else {
             return;
         };
-        let Some(number) = node.number else {
+        let Some(mut number) = node.number.filter(|_| !node.disabled) else {
             return;
         };
+        if let Some(value) = self.scrub_readout(id) {
+            number.value = value;
+        }
         // A press must not focus (and so open) the text field before a drag decides.
         window.prevent_default();
         self.scrub = Some(ScrubDrag {
@@ -3462,10 +3487,7 @@ impl SurfaceView {
             start: event.position,
             number,
             motion: pm_surface::kit::NumericMotion::new(
-                (
-                    f32::from(event.position.x) as f64,
-                    f32::from(event.position.y) as f64,
-                ),
+                f64::from(event.position.x),
                 number.value,
             ),
             binding: node.binding.clone().filter(|_| !node.local_change),
@@ -3481,23 +3503,27 @@ impl SurfaceView {
         if self.scrub.as_ref().is_some_and(|d| d.grade.is_some()) {
             return self.grade_move(event, cx);
         }
+        self.scrub_at(event.position.x, event.modifiers, cx);
+    }
+
+    fn scrub_at(&mut self, x: Pixels, modifiers: Modifiers, cx: &mut Context<Self>) {
         let threshold = self.table.tokens.metrics.drag_threshold;
-        let name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
+        let name = self
+            .scrub
+            .as_ref()
+            .filter(|d| !d.active)
+            .and_then(|d| self.undo_name(d.id));
         let Some(drag) = &mut self.scrub else {
             return;
         };
         let n = drag.number;
         let Some(value) = drag.motion.sample(
-            (
-                f32::from(event.position.x) as f64,
-                f32::from(event.position.y) as f64,
-            ),
-            relative_scrub_motion(),
+            f64::from(x),
             threshold as f64,
             n.step,
             n.speed,
-            event.modifiers.shift,
-            event.modifiers.alt,
+            modifiers.shift,
+            modifiers.alt,
             (n.min, n.max),
         ) else {
             return;
@@ -3505,6 +3531,9 @@ impl SurfaceView {
         let began = !drag.active;
         drag.active = true;
         let id = drag.id;
+        if !began && self.scrub_shown == Some((id, value)) {
+            return;
+        }
         let binding = drag.binding.clone();
         let deferred = if let Some((_, last)) = &mut drag.local_commit {
             *last = json!(value);
@@ -3551,6 +3580,7 @@ impl SurfaceView {
                 }
                 return;
             }
+            self.scrub_shown = None;
             let changed = from != live;
             let value = if commit { live } else { from };
             if drag.grade.is_some()
@@ -3562,7 +3592,6 @@ impl SurfaceView {
                     .insert(drag.id, (curve, std::time::Instant::now()));
             }
             if !commit {
-                self.scrub_shown = None;
                 if let Some(number) = value.as_f64()
                     && let Some(field) = self.fields.get(&drag.id)
                 {
@@ -3601,13 +3630,28 @@ impl SurfaceView {
             return;
         }
         if drag.active {
+            if !commit && drag.grade.is_none() {
+                self.scrub_shown = Some((drag.id, drag.number.value));
+                if let Some(field) = self.fields.get(&drag.id) {
+                    let text = drag.number.text(drag.number.value);
+                    field.update(cx, |f, cx| f.set_value(&text, cx));
+                }
+            }
             if drag.binding.is_some() {
+                if !commit {
+                    while matches!(self.scrub_ops.back(), Some(ScrubOp::Value(..))) {
+                        self.scrub_ops.pop_back();
+                    }
+                }
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
                 self.scrub_pump(cx);
+            } else if drag.grade.is_none() {
+                if !commit {
+                    self.change_sample(drag.id, json!(drag.number.value), cx);
+                }
+                self.scrub_shown = None;
             }
-            if drag.grade.is_some() {
-                cx.notify();
-            }
+            cx.notify();
         } else if drag.grade.is_some() {
             // A press on a grading control that never moved changes nothing.
         } else if commit {
@@ -3649,6 +3693,7 @@ impl SurfaceView {
         let runtime = self.runtime.clone();
         let panel = self.publication.panel.clone();
         let gesture = self.scrub_gesture;
+        let finishing = matches!(op, ScrubOp::Finish(_));
         crate::interaction_work::spawn!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -3672,6 +3717,12 @@ impl SurfaceView {
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.scrub_busy = false;
+                let finished = finishing && result.as_ref().is_ok_and(|ack|
+                    !matches!(ack.reply, pm_kernel::Reply::Throw(_))
+                );
+                if finishing {
+                    v.scrub_gesture = None;
+                }
                 match result {
                     Ok(ack) => match ack.reply {
                         pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
@@ -3684,7 +3735,9 @@ impl SurfaceView {
                 }
                 if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() && v.colour.is_none() {
                     v.scrub_gesture = None;
-                    v.scrub_shown = None;
+                    if let Some((id, value)) = v.scrub_shown.take() {
+                        v.scrub_settled = finished.then_some((id, value, v.latest));
+                    }
                 }
                 v.scrub_pump(cx);
             });
@@ -3697,7 +3750,12 @@ impl SurfaceView {
         let weak = cx.entity().downgrade();
         canvas(
             move |bounds, _, _| origin.set(bounds.origin),
-            move |_, _, window, _| {
+            move |_, _, window, cx| {
+                if let Some(view) = weak.upgrade()
+                    && view.read(cx).scrub.as_ref().is_some_and(|d| d.active && d.grade.is_none())
+                {
+                    window.set_window_cursor_style(gpui::CursorStyle::ResizeLeftRight);
+                }
                 let wheel = weak.clone();
                 window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
@@ -3797,7 +3855,9 @@ impl SurfaceView {
                 window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture && event.keystroke.key == "escape" {
                         let _ = cancelled.update(cx, |v, cx| {
-                            if v.dragging.is_some() {
+                            if v.scrub.is_some() && v.cancel_gesture(cx) {
+                                cx.stop_propagation();
+                            } else if v.dragging.is_some() {
                                 cx.stop_active_drag(window);
                                 v.end_drag(cx);
                                 cx.stop_propagation();
@@ -3807,10 +3867,13 @@ impl SurfaceView {
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Capture {
+                    if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
+                        if v.scrub.as_ref().is_some_and(|drag| drag.grade.is_none()) {
+                            v.scrub_at(event.position.x, event.modifiers, cx);
+                        }
                         v.release_pointer(event.position, event.click_count, event.modifiers, cx)
                     });
                 });
@@ -5593,7 +5656,7 @@ impl SurfaceView {
                     cx.stop_propagation();
                 });
         }
-        if let Some((layer, path)) = node.timeline_scrub.clone() {
+        if let Some((layer, path)) = node.timeline_scrub.clone().filter(|_| node.number.is_none()) {
             let outline = self.natives.outline.clone();
             element = element.cursor_col_resize().on_mouse_down(
                 MouseButton::Left,
@@ -6190,10 +6253,7 @@ impl SurfaceView {
             }
         }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
-            let shown = self
-                .scrub_shown
-                .filter(|(id, _)| *id == node.id)
-                .map_or(number.value, |(_, value)| value);
+            let shown = self.scrub_readout(node.id).unwrap_or(number.value);
             element = element.child(number.text(shown));
             if let Some(unit) = &node.unit {
                 element = element.child(
@@ -7247,21 +7307,6 @@ impl SurfaceView {
     }
 }
 
-/// Read the same hardware-relative travel Electron obtains as movementX/Y.
-/// GPUI carries absolute positions only. Query AppKit while dispatching its
-/// current drag event, before any publication can replace the field tree.
-fn relative_scrub_motion() -> Option<(f64, f64)> {
-    #[cfg(not(test))]
-    {
-        use objc2_app_kit::{NSApplication, NSEventType};
-        let event = objc2::MainThreadMarker::new()
-            .and_then(|main| NSApplication::sharedApplication(main).currentEvent())?;
-        if event.r#type() == NSEventType::LeftMouseDragged {
-            return Some((event.deltaX(), event.deltaY()));
-        }
-    }
-    None
-}
 impl Drop for SurfaceView {
     fn drop(&mut self) {
         for id in self.fields.keys() {

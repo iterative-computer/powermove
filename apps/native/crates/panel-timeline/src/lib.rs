@@ -25,7 +25,7 @@ pub use behaviour::*;
 pub use client::{ClientError, LayerPreviewFrame, TimelineClient};
 pub use interaction::*;
 pub use marquee::*;
-pub use reveal::{Disclosure, PropertyFacts, RevealState};
+pub use reveal::{Disclosure, PropertyFacts, RevealState, RevealTarget};
 pub use snapshot::{Channel, Key, Layer, Marker, Row, RowId, TimelineIndex, Transition, Window};
 
 use std::collections::{HashMap, HashSet};
@@ -136,7 +136,7 @@ pub struct TimelineModel {
     pub rebuilds: u64,
     /// Monotonic request, consumed once by the native scroll host.
     pub reveal_serial: u64,
-    pub reveal_target: Option<(String, String)>,
+    pub reveal_target: Option<RevealTarget>,
     /// The published timeline UI last restored. The native tracks and the
     /// outline each hold a model; a disclosure one publishes reaches the other.
     ui_seen: Option<pm_model::json::Value>,
@@ -346,40 +346,49 @@ impl TimelineModel {
                 }
                 let _ = self.open_property_rows(&layer, None);
                 self.reveal_serial += 1;
-                self.reveal_target = Some((layer, path));
+                self.reveal_target = Some(RevealTarget::Property { layer, path });
             }
             if disclosure_changed {
                 self.rebuild_rows();
             }
         }
         if selection_changed && !agent_edit {
-            let mut seen = HashSet::new();
-            let mut opened = false;
-            for id in self.selection.layers() {
-                let mut at = self.index.layer(id).and_then(|l| l.group.clone());
-                while let Some(id) = at {
-                    if !seen.insert(id.clone()) {
-                        break;
-                    }
-                    let base = self.index.layer(&id);
-                    let d = self
-                        .reveal
-                        .layers
-                        .entry(id.clone())
-                        .or_insert_with(|| Disclosure {
-                            collapsed: base.map(|l| l.collapsed).unwrap_or(true),
-                            group_collapsed: base.map(|l| l.group_collapsed).unwrap_or(true),
-                            paths: None,
-                        });
-                    opened |= d.group_collapsed;
-                    d.group_collapsed = false;
-                    at = base.and_then(|l| l.group.clone());
-                }
-            }
-            if opened {
-                self.rebuild_rows();
+            let selected = self.selection.layers().to_vec();
+            self.expand_ancestors(&selected);
+        }
+    }
+
+    fn expand_ancestors(&mut self, layers: &[String]) {
+        let mut seen = HashSet::new();
+        let mut opened = false;
+        for layer in layers {
+            let mut at = self.index.layer(layer).and_then(|l| l.group.as_deref());
+            while let Some(id) = at {
+                let Some(group) = self.index.layer(id).filter(|_| seen.insert(id)) else {
+                    break;
+                };
+                let d = self.reveal.layers.entry(id.to_owned()).or_insert_with(|| Disclosure {
+                    collapsed: group.collapsed,
+                    group_collapsed: group.group_collapsed,
+                    paths: None,
+                });
+                opened |= d.group_collapsed;
+                d.group_collapsed = false;
+                at = group.group.as_deref();
             }
         }
+        if opened {
+            self.rebuild_rows();
+        }
+    }
+
+    /// Open the group chain even if the palette chose an already-selected layer.
+    pub fn reveal_layer(&mut self, layer: String) {
+        // Tracks show lanes and clips. The named layer has its own row in Layers.
+        self.mode = TimelineMode::Layers;
+        self.expand_ancestors(std::slice::from_ref(&layer));
+        self.reveal_serial += 1;
+        self.reveal_target = Some(RevealTarget::Layer(layer));
     }
 
     fn has_closed_group(&self, layer: &str) -> bool {

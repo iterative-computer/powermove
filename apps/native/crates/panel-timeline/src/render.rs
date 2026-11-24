@@ -1029,6 +1029,18 @@ impl Scene {
     pub fn scroll_for(&self, id: &str) -> Option<f64> {
         self.positions.get(id).map(|i| self.tops[*i])
     }
+    /// Keep the current scroll whenever the complete row is already visible.
+    pub fn reveal_scroll(&self, id: &str, scroll: f64, height: f64) -> f64 {
+        let scroll = self.positions.get(id).and_then(|&i| self.span(i)).map_or(scroll, |(_, top, bottom)| {
+            if top < scroll || bottom - top > height {
+                top
+            } else {
+                scroll.max(bottom - height)
+            }
+        });
+        self.clamp_scroll(scroll, height)
+    }
+
     /// The first row edge at or after a content-space y (the end of the last
     /// row is one): where a pane under the rows starts without cutting one.
     pub fn edge_from(&self, y: f64) -> Option<f64> {
@@ -3189,6 +3201,20 @@ mod drop_tests {
             focused: false,
             content,
         }
+    }
+
+    #[test]
+    fn reveal_scroll_keeps_a_complete_row_in_view() {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let rows = (0..12).map(|i| row(RowId::Layer(format!("l{i}")), 0)).collect();
+        let scene = Scene::new(rows, 10., 30., &tokens).unwrap();
+        let target = crate::v4::row_id(&RowId::Layer("l8".into()));
+        let (_, top, bottom) = scene.span(8).unwrap();
+        let height = 3. * f64::from(tokens.metrics.track_row);
+        let scroll = scene.reveal_scroll(&target, 0., height);
+        assert!(scroll > 0. && top >= scroll && bottom <= scroll + height);
+        assert_eq!(scene.reveal_scroll(&target, scroll, height), scroll);
+        assert_eq!(scene.reveal_scroll(&target, scene.content_height(), height), top);
     }
 
     /// v1.2.0's `mediaDropAt`: upper half of a layer row above it, lower

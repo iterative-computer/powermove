@@ -1058,13 +1058,35 @@ fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext)
         .unwrap()
         .to_value();
     vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
-    for step in 1..=4 {
-        vcx.simulate_mouse_move(
-            at + point(px(-8. * step as f32), px(0.)),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
+    vcx.simulate_mouse_move(at + point(px(-1.), px(8.)), MouseButton::Left, Modifiers::none());
+    assert_eq!(view.read_with(&vcx, |v, _| v.wheel_reading()), None);
+    let mut last = 100.;
+    for (x, y, modifiers) in [
+        (-8., 10., Modifiers::none()),
+        (-8., -4., Modifiers { shift: true, ..Modifiers::none() }),
+        (-12., 2., Modifiers { shift: true, ..Modifiers::none() }),
+        (-12., 9., Modifiers { alt: true, ..Modifiers::none() }),
+        (-32., 0., Modifiers { alt: true, ..Modifiers::none() }),
+    ] {
+        vcx.simulate_mouse_move(at + point(px(x), px(y)), MouseButton::Left, modifiers);
+        let shown = view.read_with(&vcx, |v, _| v.wheel_reading()).unwrap();
+        if x == -8. && modifiers.shift || x == -12. && modifiers.alt {
+            assert_eq!(shown, last, "switching speed in place keeps the live value");
+        } else {
+            assert!(shown < last, "each horizontal step lowers the value");
+        }
+        last = shown;
     }
+    vcx.simulate_keystrokes("escape");
+    assert!(!view.read_with(&vcx, |v, _| v.scrubbing()));
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    settle(cx, |_| view.read_with(&vcx, |v, _| v.wheel_reading()).is_none());
+    let restored = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(restored.snapshot.root().unwrap().to_value(), before);
+    assert!(!restored.history.can_undo);
+
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(at + point(px(-32.), px(0.)), MouseButton::Left, Modifiers::none());
     vcx.simulate_mouse_up(
         at + point(px(-32.), px(0.)),
         MouseButton::Left,
@@ -1099,7 +1121,8 @@ fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext)
     let p = rig.kernel.published(PROJECT).unwrap();
     assert_eq!(p.snapshot.root().unwrap().to_value(), before);
     assert!(!p.history.can_undo);
-    vcx.simulate_click(at, Modifiers::none());
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(at + point(px(2.), px(0.)), MouseButton::Left, Modifiers::none());
     vcx.run_until_parked();
     assert!(
         view.read_with(&vcx, |v, _| v.number_edit_requested(&name)),

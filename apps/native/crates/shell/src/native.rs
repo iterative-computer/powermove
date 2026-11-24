@@ -7783,27 +7783,94 @@ fn rounded_popup_layer(view: &NSView, radius: f64) -> Retained<objc2_quartz_core
     layer
 }
 
+const POPUP_SHADOW_PAD: f64 = 52.;
+
+fn popup_card_size(frame: NSSize) -> NSSize {
+    NSSize::new(
+        frame.width - 2. * POPUP_SHADOW_PAD,
+        frame.height - 2. * POPUP_SHADOW_PAD,
+    )
+}
+
+fn popup_shadow_path(host: &NSView, size: NSSize, radius: f64) {
+    use objc2_app_kit::NSBezierPath;
+
+    // Match the continuous corner's long shoulder. Two mirrored cubics per
+    // corner meet diagonally and join the straight edges with zero curvature.
+    let reach = (1.5 * radius).min(0.5 * size.width.min(size.height));
+    let path = NSBezierPath::bezierPath();
+    for (i, (x, y, sx, sy)) in [
+        (0., 0., 1., 1.),
+        (size.width, 0., -1., 1.),
+        (size.width, size.height, -1., -1.),
+        (0., size.height, 1., -1.),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let point = |u, v| {
+            let (u, v) = if i % 2 == 0 { (u, v) } else { (v, u) };
+            NSPoint::new(x + sx * u * reach, y + sy * v * reach)
+        };
+        if i == 0 {
+            path.moveToPoint(point(0., 1.));
+        } else {
+            path.lineToPoint(point(0., 1.));
+        }
+        path.curveToPoint_controlPoint1_controlPoint2(
+            point(0.19, 0.19), point(0., 0.60), point(0., 0.38),
+        );
+        path.curveToPoint_controlPoint1_controlPoint2(
+            point(1., 0.), point(0.38, 0.), point(0.60, 0.),
+        );
+    }
+    path.closePath();
+    if let Some(layer) = host.layer() {
+        layer.setShadowPath(Some(&path.CGPath()));
+    }
+}
+
 fn popup_content_view(
     mtm: MainThreadMarker,
     size: NSSize,
     t: &Tokens,
     surface: Surface,
     opacity: f32,
-) -> (Retained<NSView>, Retained<NSView>) {
-    let frame = NSRect::new(NSPoint::ZERO, size);
-    let container = NSView::initWithFrame(NSView::alloc(mtm), frame);
-    let radius = f64::from(popup_shape(t, surface).radius);
-    let layer = rounded_popup_layer(&container, radius);
+) -> (Retained<NSView>, Retained<NSView>, Retained<NSView>) {
+    let root = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, size));
+    root.setWantsLayer(true);
+    let layer = root.layer().unwrap();
     layer.setBackgroundColor(None);
     layer.setOpacity(opacity);
 
-    // The window clips and fades this container, including the glass backdrop.
-    let material = popup_material(mtm, frame, t, surface);
-    material.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    let size = popup_card_size(size);
+    let host = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(POPUP_SHADOW_PAD, POPUP_SHADOW_PAD), size),
     );
+    let sizing = NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+    host.setAutoresizingMask(sizing);
+    root.addSubview(&host);
+    host.setWantsLayer(true);
+    let layer = host.layer().unwrap();
+    layer.setMasksToBounds(false);
+    layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
+    layer.setShadowOpacity(if t.scheme == Scheme::Dark { 0.42 } else { 0.22 });
+    layer.setShadowRadius(20.);
+    layer.setShadowOffset(NSSize::new(0., -8.));
+
+    let frame = NSRect::new(NSPoint::ZERO, size);
+    let container = NSView::initWithFrame(NSView::alloc(mtm), frame);
+    let radius = f64::from(popup_shape(t, surface).radius);
+    popup_shadow_path(&host, size, radius);
+    rounded_popup_layer(&container, radius).setBackgroundColor(None);
+    container.setAutoresizingMask(sizing);
+    host.addSubview(&container);
+
+    let material = popup_material(mtm, frame, t, surface);
+    material.setAutoresizingMask(sizing);
     container.addSubview(&material);
-    (container, contents(&material))
+    (root, host, contents(&material))
 }
 
 /// The surface of a palette or menu, in the menu's own corner: glass where
@@ -8091,6 +8158,7 @@ pub struct Popup {
     scroll: Retained<NSScrollView>,
     list: Retained<PopupList>,
     body: Retained<NSView>,
+    shadow_host: Retained<NSView>,
     spring: Option<(std::time::Instant, pm_design::motion::Analytic)>,
     rows: Vec<PopupRow>,
     /// Row decorations that are rebuilt instead of pooled.
@@ -8149,7 +8217,7 @@ impl Popup {
         } else {
             (m.field_menu_width, m.field_menu_height)
         };
-        let frame = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64, height as f64));
+        let frame = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64 + 2. * POPUP_SHADOW_PAD, height as f64 + 2. * POPUP_SHADOW_PAD));
         let window: Retained<PopupWindow> = unsafe {
             msg_send![PopupWindow::alloc(mtm),initWithContentRect:frame,styleMask:NSWindowStyleMask::Borderless,backing:NSBackingStoreType::Buffered,defer:false]
         };
@@ -8164,11 +8232,11 @@ impl Popup {
             "Field Menu"
         }));
         window.setOpaque(false);
-        window.setHasShadow(true);
+        window.setHasShadow(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         appearance(&window, t);
-        let (container, body) = popup_content_view(mtm, frame.size, t, surface, 0.);
-        window.setContentView(Some(&container));
+        let (root, shadow_host, body) = popup_content_view(mtm, frame.size, t, surface, 0.);
+        window.setContentView(Some(&root));
         let (search, scroll, list) = popup_controls(
             mtm,
             &body,
@@ -8182,7 +8250,6 @@ impl Popup {
         );
         let chrome = (surface == Surface::Palette)
             .then(|| spotlight::Chrome::new(mtm, &body, t, window.backingScaleFactor().recip()));
-        window.invalidateShadow();
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
         glider.setFillColor(&popup_highlight(t));
@@ -8205,6 +8272,7 @@ impl Popup {
             scroll,
             list,
             body,
+            shadow_host,
             spring: None,
             rows: vec![],
             parts: vec![],
@@ -8313,7 +8381,7 @@ impl Popup {
         let mut frame = self.window.frame();
         frame.size.width = self.composer.map_or(m.field_menu_width, |kind| {
             kind.width().min(interior.w)
-        }) as f64;
+        }) as f64 + 2. * POPUP_SHADOW_PAD;
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
             model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
         } else if self.composer.is_some() {
@@ -8331,7 +8399,7 @@ impl Popup {
         let surface = self.surface;
         appearance(&self.window, t);
         let opacity = if self.model.open { 1. } else { 0. };
-        let (container, body) =
+        let (root, shadow_host, body) =
             popup_content_view(self.window.mtm(), self.window.frame().size, t, surface, opacity);
         self.search.removeFromSuperview();
         self.scroll.removeFromSuperview();
@@ -8354,8 +8422,9 @@ impl Popup {
             self.color_search_caret();
         }
         self.glider.setFillColor(&popup_highlight(t));
-        self.window.setContentView(Some(&container));
-        self.window.invalidateShadow();
+        self.window.setContentView(Some(&root));
+        self.window.setHasShadow(false);
+        self.shadow_host = shadow_host;
         self.body = body;
         self.refresh();
     }
@@ -8446,10 +8515,11 @@ impl Popup {
         self.built = Some(key);
         self.update_row_selection(None);
         let mut frame = self.window.frame();
+        let card = popup_card_size(frame.size);
         let old_search = self.search.frame();
         let old_scroll = self.scroll.frame();
         let height = PopupLayout {
-            width: frame.size.width,
+            width: card.width,
             max_height: self.max_height,
             composer: self.composer,
             searchable: self.searchable,
@@ -8468,17 +8538,22 @@ impl Popup {
         .rebuild(chosen, unlisted);
         if let Some(chrome) = &mut self.chrome {
             chrome.layout(
-                frame.size.width,
+                card.width,
                 height,
                 self.window.backingScaleFactor().recip(),
             );
             chrome.update(&self.model.query, chosen.len(), unlisted);
         }
-        if (frame.size.height - height).abs() > 0.5 {
+        popup_shadow_path(
+            &self.shadow_host,
+            NSSize::new(card.width, height),
+            f64::from(popup_shape(&self.tokens, self.surface).radius),
+        );
+        if (card.height - height).abs() > 0.5 {
             if self.composer != Some(ComposerPicker::Model) {
-                frame.origin.y += frame.size.height - height;
+                frame.origin.y += card.height - height;
             }
-            frame.size.height = height;
+            frame.size.height = height + 2. * POPUP_SHADOW_PAD;
             if animate_height && !self.tokens.accessibility.reduce_motion {
                 let search = self.search.frame();
                 let scroll = self.scroll.frame();
@@ -8488,10 +8563,6 @@ impl Popup {
                 NSAnimationContext::beginGrouping();
                 let context = NSAnimationContext::currentContext();
                 context.setDuration(0.15);
-                let window = self.window.clone();
-                context.setCompletionHandler(Some(&block2::RcBlock::new(move || {
-                    window.invalidateShadow();
-                })));
                 let ease_out = CAMediaTimingFunction::functionWithName(unsafe {
                     kCAMediaTimingFunctionEaseOut
                 });
@@ -8507,7 +8578,6 @@ impl Popup {
                 NSAnimationContext::endGrouping();
             } else {
                 self.window.setFrame_display(frame, self.model.open);
-                self.window.invalidateShadow();
             }
         }
         self.light(false);
@@ -8591,13 +8661,14 @@ mod popup_corner_tests {
             let mut popup = popup.borrow_mut();
             let root = popup.window.contentView().unwrap();
             assert_eq!(root.class(), NSView::class());
-            assert_rounded(&root.layer().unwrap(), radius);
             assert_eq!(root.layer().unwrap().opacity(), 0.);
-            let material = root.subviews().firstObject().unwrap();
-            assert_eq!(material.frame(), root.bounds());
+            let container = popup.shadow_host.subviews().firstObject().unwrap();
+            assert_rounded(&container.layer().unwrap(), radius);
+            let material = container.subviews().firstObject().unwrap();
+            assert_eq!(material.frame(), container.bounds());
             popup.refresh();
             root.layoutSubtreeIfNeeded();
-            assert_eq!(material.frame(), root.bounds());
+            assert_eq!(material.frame(), container.bounds());
             assert_eq!(popup.body.frame(), material.bounds());
             if let Some(effect) = material.downcast_ref::<NSVisualEffectView>() {
                 assert_eq!(
@@ -8622,13 +8693,23 @@ mod popup_corner_tests {
             popup.restyle();
             let root = popup.window.contentView().unwrap();
             assert_eq!(root.class(), NSView::class());
-            assert_rounded(&root.layer().unwrap(), radius);
             assert_eq!(root.layer().unwrap().opacity(), 1.);
-            assert_eq!(popup.body.frame(), root.bounds());
+            assert_eq!(popup.body.frame(), popup.shadow_host.bounds());
+            assert_eq!(popup.shadow_host.frame().origin, NSPoint::new(POPUP_SHADOW_PAD, POPUP_SHADOW_PAD));
+            assert!(popup.shadow_host.layer().unwrap().shadowPath().is_some());
+            let press = |point| {
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    NSEventType::LeftMouseDown, point, NSEventModifierFlags::empty(),
+                    0., popup.window.windowNumber(), None, 0, 1, 1.,
+                ).unwrap();
+                popup.press(&event)
+            };
+            assert!(matches!(press(NSPoint::new(1., POPUP_SHADOW_PAD + 1.)), Press::Outside));
+            assert!(matches!(press(NSPoint::new(POPUP_SHADOW_PAD + 1., POPUP_SHADOW_PAD + 1.)), Press::Menu));
             assert!(!popup.window.isVisible());
             assert!(!popup.window.isOpaque());
             assert_eq!(popup.window.backgroundColor().alphaComponent(), 0.);
-            assert!(popup.window.hasShadow());
+            assert!(!popup.window.hasShadow());
             if surface == Surface::Palette {
                 assert_rounded(&popup.body.layer().unwrap(), radius);
                 let bounds = root.bounds();
@@ -8639,7 +8720,7 @@ mod popup_corner_tests {
                 let (w, h) = (bitmap.pixelsWide(), bitmap.pixelsHigh());
                 let alpha = |x, y| bitmap.colorAtX_y(x, y).unwrap().alphaComponent();
                 assert_eq!(alpha(w / 2, h / 2), 1.);
-                for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (0, h / 2), (w - 1, h / 2)] {
                     assert_eq!(alpha(x, y), 0., "corner pixel ({x}, {y})");
                 }
             }
@@ -8701,7 +8782,7 @@ pub fn check_palette_typing() {
         "⌘D".into(),
     );
     popup.refresh();
-    assert_eq!(popup.window.frame().size.width, 540.);
+    assert_eq!(popup_card_size(popup.window.frame().size).width, 540.);
     assert!(!popup.search.isBezeled());
     assert!(!popup.search.drawsBackground());
     assert_eq!(popup.glider.cornerRadius(), 10.);
@@ -10105,7 +10186,7 @@ impl Popup {
     fn place_at_composer(&self) {
         let Some(anchor) = self.anchor else { return };
         let parent = popup_rect(self.parent.contentRectForFrameRect(self.parent.frame()));
-        let size = self.window.frame().size;
+        let size = popup_card_size(self.window.frame().size);
         let dimensions = (size.width as f32, size.height as f32);
         let frame = if self.composer == Some(ComposerPicker::Model) {
             model_picker_frame(parent, popup_rect(anchor), dimensions)
@@ -10114,7 +10195,7 @@ impl Popup {
             let checked = popup_checked_offset(&self.model, &self.rows, &self.scroll, size.height, shape.row);
             composer_picker_frame(parent, popup_rect(anchor), dimensions, checked)
         };
-        self.window.setFrameOrigin(NSPoint::new(frame.x as f64, frame.y as f64));
+        self.window.setFrameOrigin(NSPoint::new(frame.x as f64 - POPUP_SHADOW_PAD, frame.y as f64 - POPUP_SHADOW_PAD));
     }
 
     fn provider_changed(&mut self, provider: &str, expanded: bool) {
@@ -10129,7 +10210,11 @@ impl Popup {
 
     fn press(&self, event: &NSEvent) -> Press {
         if event.windowNumber() == self.window.windowNumber() {
-            return Press::Menu;
+            return if objc2_foundation::NSPointInRect(event.locationInWindow(), self.shadow_host.frame()) {
+                Press::Menu
+            } else {
+                Press::Outside
+            };
         }
         let Some(window) = event.window(self.parent.mtm()) else {
             return Press::WindowChrome;
@@ -10197,7 +10282,7 @@ impl Popup {
         }
         self.sync_badges();
         let p = self.parent.frame();
-        let s = self.window.frame().size;
+        let s = popup_card_size(self.window.frame().size);
         let origin = match self.anchor {
             // Under the control that opened it, its trailing edge on the
             // control's (as a field's pop-up menu); above it if there is no
@@ -10220,7 +10305,7 @@ impl Popup {
                 p.origin.y + p.size.height - s.height - self.tokens.metrics.toolbar as f64,
             ),
         };
-        self.window.setFrameOrigin(origin);
+        self.window.setFrameOrigin(NSPoint::new(origin.x - POPUP_SHADOW_PAD, origin.y - POPUP_SHADOW_PAD));
         self.reveal_checked();
         if self.composer.is_some() {
             self.place_at_composer();
@@ -10234,7 +10319,6 @@ impl Popup {
         gpui_macos::child_window::show(&self.window, true);
         self.focus_search();
         animate_as(&self.window, true, true, &self.tokens, &mut self.spring);
-        self.window.invalidateShadow();
         // Development builds: what an open costs (`PM_NATIVE_PALETTE_TRACE`).
         if cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some() {
             eprintln!(

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TimelinePanel } from "../panel";
 import { checkFrame } from "../model";
-import type { Intent } from "../model";
+import type { Intent, PropertyRow } from "../model";
 import { states, frame, layer } from "./fixtures";
 import { recorder, nativeValidators } from "./helpers";
 import type { SurfaceRoot } from "../../../src/renderer";
@@ -64,6 +64,34 @@ describe("timeline: accepted six-op trees (provisional placeholders, not visual 
       expect(tree(root)).toMatchSnapshot();
       await root.dispose();
     });
+});
+
+test("Scale gives both full percentage wells and the link space in one row", async () => {
+  const { root, commits } = recorder();
+  const f = states["scale-compound"]();
+  const row = f.window.rows[0] as PropertyRow;
+  row.axes = [100, 200].map((value, i) => ({
+    path: i === 0 ? "scale.x" : "scale.y",
+    readout: `${value} %`,
+    numeric: { value, unit: "%", precision: 1, step: 1, binding: `scale:${i}` },
+  }));
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  const x = byId(root, "timeline:value:property:scale:scale.x");
+  const y = byId(root, "timeline:value:property:scale:scale.y");
+  const link = byId(root, "timeline:scale-link:property:scale");
+  expect(x.props).toMatchObject({ value: 100, unit: "%", precision: 1 });
+  expect(y.props).toMatchObject({ value: 200, unit: "%", precision: 1 });
+  expect(x.parent).toBe(y.parent);
+  expect(x.parent?.parent).toBe(link.parent);
+  expect(x.parent?.props.style).toMatchObject({
+    width: { token: "metrics.value_column" },
+    flexShrink: 0,
+    gap: { token: "space.xs" },
+  });
+  const accepted = replay(commits).at(-1);
+  expect(accepted.accepted).toBe(true);
+  expect(accepted.diagnostics).toEqual([]);
+  await root.dispose();
 });
 
 test("one track-area focus stop, non-focusable rows, conditional graph menu and tabs", async () => {

@@ -3360,7 +3360,7 @@ fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
     run(&mut c, p);
     assert!(c.model.row_position(&property).is_some());
     assert!(c.model.layer_disclosable("c"));
-    c.model.editing_property = Some(("c".into(), "opacity".into()));
+    c.model.editing_property = Some(pm_panel_timeline::RevealTarget::Property { layer: "c".into(), path: "opacity".into() });
     let p = c.model.property_diamond(&targets, 0.).unwrap();
     run(&mut c, p);
     assert!(c.model.row_position(&property).is_some());
