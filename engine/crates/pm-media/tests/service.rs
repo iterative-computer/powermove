@@ -13,6 +13,13 @@ use pm_media::decode::service::{
 use pm_media::vt::DecodePurpose;
 use std::sync::Arc;
 
+/// PM-604: the decoder keeps four software threads until a release build
+/// meets the memory bar with more (w83 P1-5).
+#[test]
+fn default_decoder_uses_four_threads() {
+    assert_eq!(ServiceConfig::default().threads, 4);
+}
+
 #[test]
 fn sessions_are_pooled_per_source_and_instance() {
     let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
