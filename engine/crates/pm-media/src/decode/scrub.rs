@@ -860,8 +860,13 @@ impl Shared {
         } else {
             // The playing viewer already pins its last shown frame. One
             // frame ahead can use the worker's existing latest slot when
-            // the cache share cannot keep both the shown and next frames.
-            AHEAD.min(self.cache_frames(st).max(usize::from(st.playing)))
+            // the cache share cannot keep both the shown and next frames,
+            // but only at stride one: at a larger or alternating stride
+            // (60 fps on a 24 fps timeline steps +3, +2) the frame one
+            // stride ahead can pass the next request, and decoding it can
+            // evict the frame that request needs (w84 review P0-1).
+            let free_slot = st.playing && stride == 1;
+            AHEAD.min(self.cache_frames(st).max(usize::from(free_slot)))
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();

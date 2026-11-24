@@ -279,3 +279,59 @@ fn long_gop_corpus() {
         assert_eq!(stats.errors, 0);
     }
 }
+
+/// w84 review P0-1: 60 fps footage on a 24 fps timeline steps the source by
+/// +3 and +2 in turn. With a one-picture session window and no room in the
+/// shared cache, a speculative decode ahead must never discard the next
+/// requested frame: every playback request lands exactly.
+#[test]
+fn alternating_playback_cadence_with_no_cache_room_lands_every_frame() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        session_window: 1,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc);
+    let n = src.pts.len();
+    let mut k = 1;
+    let mut asked = Vec::new();
+    let mut shown = Vec::new();
+    for step in [3, 2].into_iter().cycle() {
+        if k >= n {
+            break;
+        }
+        let f = viewer
+            .fetch(&src, 1, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(f.frame.md5_hex().unwrap(), want[f.shown], "frame {}", f.shown);
+        asked.push(k);
+        shown.push((f.shown, f.exact));
+        k += step;
+        // A frame's time passes before the next request: the look-ahead
+        // the worker chose is decoded by then.
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let expected: Vec<_> = asked.iter().map(|&k| (k, true)).collect();
+    assert_eq!(shown, expected, "every requested frame, exactly");
+    // No cache room and a stride above one: nothing is decoded ahead that
+    // could pass over the next request.
+    assert_eq!(viewer.stats().ahead, 0, "{:?}", viewer.stats());
+
+    // Stride one keeps its single frame ahead in the worker's own slot.
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        session_window: 1,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc);
+    for k in 1..12 {
+        let f = viewer
+            .fetch(&src, 1, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert!(f.exact && f.shown == k, "frame {k}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert!(viewer.stats().ahead > 0, "{:?}", viewer.stats());
+}
