@@ -312,7 +312,8 @@ fn keeps_zero(kind: Kind, step: &EffectStep) -> bool {
         return false;
     }
     match kind {
-        Kind::LegacyBlur | Kind::Glow1 | Kind::KeepsClear | Kind::Shadow1 | Kind::Shadow2 => true,
+        Kind::LegacyBlur | Kind::Glow1 | Kind::KeepsClear => true,
+        Kind::Shadow1 | Kind::Shadow2 => shadow_params(kind, step),
         Kind::Blur2 => value(step, "repeatEdgePixels").is_some_and(|v| v <= 0.5),
         Kind::Levels2 => levels2_keeps_zero(step),
         // Reviewed as one pass of its own input (the pin already excludes
@@ -337,6 +338,36 @@ fn keeps_zero(kind: Kind, step: &EffectStep) -> bool {
                 && deep_glow_params(step)
         }
     }
+}
+
+/// Drop Shadow's bindings, each within its catalog range. A saved or
+/// expression-driven value skips the UI's range and is narrowed to f32 at
+/// bind time: a finite `1e40` opacity becomes `+∞`, and the full pass shades
+/// a clear pixel `0 × ∞ = NaN`. Colours are hex (`0..=1`).
+fn shadow_params(kind: Kind, step: &EffectStep) -> bool {
+    const V1: &[(&str, f64, f64)] = &[
+        ("distance", 0., 400.),
+        ("angle", -360., 360.),
+        ("softness", 0., 300.),
+        ("opacity", 0., 100.),
+    ];
+    const V2: &[(&str, f64, f64)] = &[
+        ("opacity", 0., 100.),
+        ("angle", -360., 360.),
+        ("distance", 0., 400.),
+        ("softness", 0., 400.),
+        ("shadowOnly", 0., 1.),
+    ];
+    let numbers = if kind == Kind::Shadow1 { V1 } else { V2 };
+    step.params.len() == numbers.len() + 1
+        && numbers
+            .iter()
+            .all(|&(key, lo, hi)| value(step, key).is_some_and(|v| (lo..=hi).contains(&v)))
+        && step.params.iter().any(|p| {
+            p.key == "color"
+                && matches!(p.value, Binding::Color(rgb)
+                if rgb.iter().all(|v| (0.0..=1.0).contains(v)))
+        })
 }
 
 /// Keep the reviewed kernel and zero-preserving arithmetic within the
@@ -741,6 +772,42 @@ pub(crate) mod tests {
 
     fn step(def: &DefinitionSnapshot) -> EffectStep {
         super::super::plan::effect_step(def, "fx", &[])
+    }
+
+    /// Both Drop Shadow revisions keep zero only with every binding in its
+    /// catalog range: a finite value past it (one that overflows f32 at
+    /// bind time) refuses the proof, and so the scissor and group elision.
+    #[test]
+    fn shadow_values_out_of_range_refuse_the_zero_proof() {
+        use pm_eval::JsValue;
+        let set = super::super::versions::builtin_snapshot();
+        for (id, opacity, distance) in [
+            ("pm.history.main.shadow.1", 3, 0),
+            ("pm.history.main.shadow.2", 1, 3),
+        ] {
+            let def = set
+                .definitions
+                .iter()
+                .find(|d| d.id.as_str() == id)
+                .unwrap();
+            assert!(kind_of(def).is_some(), "{id}");
+            let at = |i: usize, v: f64| {
+                let mut values = vec![None; def.params.len()];
+                values[i] = Some(JsValue::Number(v));
+                super::super::plan::effect_step(def, "fx", &values)
+            };
+            assert!(preserves_zero(&step(def), def), "{id} defaults");
+            assert!(preserves_zero(&at(opacity, 100.), def), "{id}");
+            for (what, s) in [
+                ("opacity 1e40", at(opacity, 1e40)),
+                ("opacity -1", at(opacity, -1.)),
+                ("distance 401", at(distance, 401.)),
+                ("distance f64::MAX", at(distance, f64::MAX)),
+            ] {
+                assert!(!preserves_zero(&s, def), "{id} {what}");
+                assert_eq!(reach(&s, def), None, "{id} {what}");
+            }
+        }
     }
 
     /// The committed digest pins the reviewed id and nothing else: a digest
