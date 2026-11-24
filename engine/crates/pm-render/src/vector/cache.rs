@@ -795,13 +795,11 @@ impl VectorCache {
     pub fn set_budget(&mut self, max_bytes: u64, max_entries: usize) {
         self.max_bytes = max_bytes;
         self.max_entries = max_entries.max(1);
-        if self.scene_scratch_bytes() > max_bytes {
-            self.clear_scene_scratch();
-        }
+        self.fit_scene_scratch(max_bytes);
         self.evict(
             self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
             self.max_entries,
-            false,
+            true,
         );
     }
 
@@ -822,6 +820,7 @@ impl VectorCache {
             self.clear_scene_scratch();
         }
         self.frame_slots.reset(SLOT_KEEP_BYTES);
+        self.fit_scene_scratch(self.max_bytes);
         self.svg_fallbacks.clear();
         self.evict(
             self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
@@ -833,25 +832,29 @@ impl VectorCache {
     /// Evicts least recently used textures until at most `budget` bytes
     /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
-        if self.scene_scratch_bytes() > budget {
-            // The exact outline cache (CPU, bounded by SceneOutlines::MAX_BYTES,
-            // counted in `bytes`) survives a frame's trim; only a zero budget
-            // (idle, close) drops it. Otherwise a budget below one frame's
-            // scratch rebuilds every outline every frame.
-            // `PM_FIX_KEEP_OUTLINES=0` restores clearing it.
-            let keep = budget > 0
-                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") != Some(0);
-            let outlines = keep.then(|| std::mem::take(&mut self.scene_outlines));
-            self.clear_scene_scratch();
-            if let Some(outlines) = outlines {
-                self.scene_outlines = outlines;
-            }
-        }
+        self.fit_scene_scratch(budget);
         self.evict(
             budget.saturating_sub(self.scene_scratch_bytes()),
             self.max_entries,
             true,
         );
+    }
+
+    /// Raster hits avoid all coverage and paint work. Reclaim reusable
+    /// scratch before evicting completed rasters from the preceding frame.
+    fn fit_scene_scratch(&mut self, budget: u64) {
+        let scratch_budget = budget.saturating_sub(self.bytes);
+        if self.scene_scratch_bytes() > scratch_budget {
+            // Prepared CPU outlines are useful even when the GPU coverage
+            // pages are too expensive to keep.
+            let outlines = (self.scene_outlines.bytes() <= scratch_budget
+                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") != Some(0))
+            .then(|| std::mem::take(&mut self.scene_outlines));
+            self.clear_scene_scratch();
+            if let Some(outlines) = outlines {
+                self.scene_outlines = outlines;
+            }
+        }
     }
 
     fn scene_scratch_bytes(&self) -> u64 {
@@ -965,6 +968,7 @@ impl VectorCache {
         source: &VectorSource,
         precision: Precision,
     ) -> Result<wgpu::TextureView, String> {
+        let recording = encoder.is_some();
         self.tick += 1;
         let key = (source.key(), precision as u8);
         if let Some(e) = self.entries.get_mut(&key) {
@@ -1022,7 +1026,7 @@ impl VectorCache {
                         )?
                     {
                         self.svg_fallback_reason = None;
-                        return Ok(self.insert(key, texture, bytes));
+                        return Ok(self.insert(key, texture, bytes, recording));
                     }
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1044,7 +1048,7 @@ impl VectorCache {
                     )? {
                         queue.submit([encoder.finish()]);
                         self.svg_fallback_reason = None;
-                        return Ok(self.insert(key, texture, bytes));
+                        return Ok(self.insert(key, texture, bytes, recording));
                     }
                     (
                         painter
@@ -1070,7 +1074,7 @@ impl VectorCache {
         // Make room before inserting: earlier frames' entries go first, so
         // the bound holds within a frame too (a work item can be a whole
         // export).
-        Ok(self.insert(key, texture, bytes))
+        Ok(self.insert(key, texture, bytes, recording))
     }
 
     /// A playback frame from the persistent source raster: the raster is
@@ -1132,7 +1136,7 @@ impl VectorCache {
                 return Ok(None);
             };
             queue.submit([encoder.finish()]);
-            self.insert(raster_key, texture.clone(), bytes);
+            self.insert(raster_key, texture.clone(), bytes, false);
             texture
         };
         let sampler = self
@@ -1143,27 +1147,31 @@ impl VectorCache {
         ))
     }
 
-    /// Caches a new texture under `key`, making room first.
+    /// Caches a new texture under `key`. While recording, keep the bounded
+    /// previous set until the frame's draws have used it. At submission the
+    /// service trims the combined set, and standalone renderers trim at
+    /// the next frame's start.
     fn insert(
         &mut self,
         key: ([u8; 32], u8),
         texture: wgpu::Texture,
         bytes: u64,
+        recording: bool,
     ) -> wgpu::TextureView {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bytes_room = self
-            .max_bytes
-            .saturating_sub(bytes)
-            .saturating_sub(self.scene_scratch_bytes());
+        let bytes_room = if recording {
+            u64::MAX
+        } else {
+            self.max_bytes
+                .saturating_sub(bytes)
+                .saturating_sub(self.scene_scratch_bytes())
+        };
         let entries_room = self.max_entries.saturating_sub(1);
         if self.bytes > bytes_room || self.entries.len() > entries_room {
             // Animated content inserts every frame: evicting a sixteenth
             // below the bound lets one LRU pass serve the next inserts.
-            self.evict(
-                bytes_room - bytes_room / 16,
-                entries_room - entries_room / 16,
-                false,
-            );
+            let bytes = if recording { bytes_room } else { bytes_room - bytes_room / 16 };
+            self.evict(bytes, entries_room - entries_room / 16, false);
         }
         self.bytes += bytes;
         self.entries.insert(
@@ -1595,7 +1603,7 @@ impl VectorCache {
             );
             let bytes = u64::from(size.width) * u64::from(size.height) * pixel;
             self.tick += 1;
-            self.insert(key, out, bytes);
+            self.insert(key, out, bytes, true);
             if let Some(e) = self.entries.get_mut(&key) {
                 e.prepared = true;
             }
@@ -1954,7 +1962,7 @@ mod scene_pool_tests {
             let before = cache.len();
             let mut key = [0u8; 32];
             key[..4].copy_from_slice(&i.to_le_bytes());
-            cache.insert((key, 0), texture(), 4);
+            cache.insert((key, 0), texture(), 4, false);
             assert!(cache.len() <= 64, "the bound holds");
             if cache.len() < before {
                 passes += 1;

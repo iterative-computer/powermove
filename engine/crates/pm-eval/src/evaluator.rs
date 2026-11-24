@@ -413,6 +413,8 @@ pub struct Evaluator {
     springs: SpringTables,
     compiled: CompiledCache,
     errors: HashMap<ErrorKey, String>,
+    /// Outstanding error count by composition and layer.
+    error_layers: HashMap<(JsString, JsString), usize>,
     ids: HashMap<PropAddress, PropId>,
     slots: Vec<Slot>,
     free: Vec<u32>,
@@ -480,6 +482,7 @@ impl Evaluator {
             springs: SpringTables::new(),
             compiled: CompiledCache::default(),
             errors: HashMap::new(),
+            error_layers: HashMap::new(),
             ids: HashMap::new(),
             slots: Vec::new(),
             free: Vec::new(),
@@ -512,6 +515,7 @@ impl Evaluator {
         }
         self.indexes.clear();
         self.errors.clear();
+        self.error_layers.clear();
         self.last_revision = 0;
         self.last_root = 0;
         self.channel_memo.clear();
@@ -646,13 +650,39 @@ impl Evaluator {
         }
     }
 
+    fn has_layer_errors(&self, cx: &Comp<'_>, layer: Option<&Node>) -> bool {
+        !self.error_layers.is_empty()
+            && self.error_layers.contains_key(&(cx.id().clone(), layer_id_string(layer)))
+    }
+
+    fn record_error(&mut self, cx: &Comp<'_>, layer: Option<&Node>, key: &JsString, message: String) {
+        let key = Self::error_key(cx, layer, key);
+        let owner = (key.comp.clone(), key.layer.clone());
+        if self.errors.insert(key, message).is_none() {
+            *self.error_layers.entry(owner).or_default() += 1;
+        }
+    }
+
     /// Forgets the expression error of a channel that evaluated without one.
-    /// Most documents record none, and building the key (three strings, a
-    /// SipHash) on every channel read cost 12% of a viewer frame
-    /// (docs/engine/perf.md), so an empty map answers at once.
     fn clear_error(&mut self, cx: &Comp<'_>, layer: Option<&Node>, key: &JsString) {
-        if !self.errors.is_empty() {
-            self.errors.remove(&Self::error_key(cx, layer, key));
+        if self.error_layers.is_empty() {
+            return;
+        }
+        let owner = (cx.id().clone(), layer_id_string(layer));
+        if let std::collections::hash_map::Entry::Occupied(mut layer) = self.error_layers.entry(owner)
+            && self
+                .errors
+                .remove(&ErrorKey {
+                    comp: layer.key().0.clone(),
+                    layer: layer.key().1.clone(),
+                    key: key.clone(),
+                })
+                .is_some()
+        {
+            *layer.get_mut() -= 1;
+            if *layer.get() == 0 {
+                layer.remove();
+            }
         }
     }
 
@@ -742,7 +772,7 @@ impl Evaluator {
         cx: &Comp<'_>,
         layer: &Node,
     ) -> Option<Option<crate::transform::Mat2d>> {
-        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+        if self.hooks.overrides_channels() || self.has_layer_errors(cx, Some(layer)) {
             return None;
         }
         self.channel_memo.local(cx, layer)
@@ -756,7 +786,7 @@ impl Evaluator {
         cx: &Comp<'_>,
         layer: &Node,
     ) -> Option<Arc<crate::bounds::PathGeometry>> {
-        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+        if self.hooks.overrides_channels() || self.has_layer_errors(cx, Some(layer)) {
             return None;
         }
         self.channel_memo.path_geometry(cx, layer)
@@ -769,7 +799,7 @@ impl Evaluator {
         layer: &Node,
         geometry: Arc<crate::bounds::PathGeometry>,
     ) {
-        if !self.hooks.overrides_channels() && self.errors.is_empty() {
+        if !self.hooks.overrides_channels() && !self.has_layer_errors(cx, Some(layer)) {
             self.channel_memo.keep_path_geometry(cx, layer, geometry);
         }
     }
@@ -783,7 +813,7 @@ impl Evaluator {
         keys: &[&str],
         m: crate::transform::Mat2d,
     ) {
-        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+        if self.hooks.overrides_channels() || self.has_layer_errors(cx, Some(layer)) {
             return;
         }
         let fixed = keys
@@ -943,8 +973,13 @@ impl Evaluator {
     /// needs neither: no hook overrides channels, no expression error is
     /// recorded (none to clear), and `prop` is a channel object with no
     /// `expr` and no keyframes. `None` otherwise.
-    pub fn static_channel(&self, prop: Option<&Node>) -> Option<JsValue> {
-        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+    pub fn static_channel(
+        &self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        prop: Option<&Node>,
+    ) -> Option<JsValue> {
+        if self.hooks.overrides_channels() || self.has_layer_errors(cx, Some(layer)) {
             return None;
         }
         let p = prop.filter(|p| {
@@ -1037,10 +1072,7 @@ impl Evaluator {
         key: &JsString,
     ) -> JsResult<JsValue> {
         let Some(compiled) = compiled else {
-            self.errors.insert(
-                Self::error_key(cx, layer, key),
-                messages::INVALID.to_owned(),
-            );
+            self.record_error(cx, layer, key, messages::INVALID.to_owned());
             return Ok(value);
         };
         let fps = cx.expression_fps();
@@ -1070,15 +1102,14 @@ impl Evaluator {
                 Ok(r)
             }
             Ok(_) => {
-                self.errors.insert(
-                    Self::error_key(cx, layer, key),
-                    messages::NOT_FINITE.to_owned(),
-                );
+                self.record_error(cx, layer, key, messages::NOT_FINITE.to_owned());
                 Ok(value)
             }
             Err(e) => {
-                self.errors.insert(
-                    Self::error_key(cx, layer, key),
+                self.record_error(
+                    cx,
+                    layer,
+                    key,
                     e.message.unwrap_or_else(|| messages::FAILED.to_owned()),
                 );
                 Ok(value)

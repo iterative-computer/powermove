@@ -1697,6 +1697,16 @@ impl Renderer {
         self.media.reads_video()
     }
 
+    /// Bounds the auxiliary caches while playback budgets are applied
+    /// individually to targets, bindings, video, images and vector rasters.
+    pub fn trim_playback_aux(&mut self, bytes: u64) {
+        self.material.trim(bytes);
+        let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
+        self.release_frame_reuse();
+        self.source_reuse.trim(bytes);
+        self.text_gpu.trim(bytes.saturating_sub(self.source_reuse.bytes()));
+    }
+
     /// Frees idle intermediate targets and cached vector textures so that
     /// together they hold at most `bytes` (lease pressure): the pool trims
     /// first, and the vector cache gets what the pool leaves. The text

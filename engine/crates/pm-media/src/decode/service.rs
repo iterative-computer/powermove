@@ -510,6 +510,13 @@ impl SessionGuard<'_> {
         self.session.as_mut().unwrap().set_window(frames);
     }
 
+    pub(super) fn keep_playback_reorder(&mut self, playing: bool) {
+        self.session
+            .as_mut()
+            .unwrap()
+            .set_reorder(playing || self.service.scrubbing());
+    }
+
     /// See [`Session::set_keep_before`].
     pub fn set_keep_before(&mut self, frames: usize, stride: usize) {
         self.session

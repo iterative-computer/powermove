@@ -644,6 +644,7 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    surface_budget_peak_at: Instant,
     budgeted_grant: u64,
     budgeted_pressure: crate::memory::Pressure,
     visible_playback: bool,
@@ -931,13 +932,29 @@ impl Engine {
         self.renderer
             .set_memory_pressure(pressure == crate::memory::Pressure::Critical);
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
-        let surfaces = self.surface_bytes();
+        let mut surfaces = self.surface_bytes();
         let share = self.memory_client.grant();
         let extra = self.scrub_extra();
         let playback = self.visible_playback
-            && pressure == crate::memory::Pressure::Normal
+            && pressure != crate::memory::Pressure::Critical
             && extra == 0
             && std::env::var_os("PM_PLAYBACK_RETENTION").is_none_or(|v| v != "0");
+        // A completed submission can return a surface for a turn before the
+        // next needs it. Give that capacity back to the caches only after
+        // playback has lived without it for half a second.
+        if playback
+            && self.budgeted_playback
+            && share == self.budgeted_grant
+            && request == u64::MAX
+        {
+            if surfaces >= self.budgeted_surfaces {
+                self.surface_budget_peak_at = Instant::now();
+            } else if self.surface_budget_peak_at.elapsed() < Duration::from_millis(500) {
+                surfaces = self.budgeted_surfaces;
+            }
+        } else {
+            self.surface_budget_peak_at = Instant::now();
+        }
         if request != u64::MAX
             || surfaces != self.budgeted_surfaces
             || extra != self.budgeted_extra
@@ -962,7 +979,10 @@ impl Engine {
                     self.renderer.vector_cache_bytes(),
                 );
             }
-            self.budgeted_surfaces = surfaces;
+            if surfaces != self.budgeted_surfaces {
+                self.surface_budget_peak_at = Instant::now();
+                self.budgeted_surfaces = surfaces;
+            }
             // In-flight surfaces are pinned. Divide only the remainder,
             // so every independently reusable cache shares the same allowance.
             let knob = pm_media::decode::diag::knob;
@@ -982,47 +1002,50 @@ impl Engine {
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
             let shares = knob("PM_FIX_SHARES") == Some(1);
-            let (frame_part, image_part) = if shares { (35, 10) } else { (15, 20) };
-            // Fund retention from the still and decoded-frame shares.
-            // An explicit diagnostic share remains in force.
+            let (frame_part, image_part, decoder_part, vector_part, pool_part) = if playback {
+                // Playing frames need both the next decoded picture and hot
+                // rasters and targets. Keep these shares under the same grant.
+                (28, 5, 18, 20, 20)
+            } else if shares {
+                (35, 10, 25, 5, 10)
+            } else {
+                (15, 20, 25, 5, 10)
+            };
             let images = cache * image_part / 100;
             let frames =
                 knob("PM_ABL_FRAME_CACHE_MIB").map_or(cache * frame_part / 100, |m| m << 20);
-            let (image_donor, frame_donor) = if playback {
-                (
-                    images / 2,
-                    if knob("PM_ABL_FRAME_CACHE_MIB").is_none() {
-                        frames / 2
-                    } else {
-                        0
-                    },
-                )
-            } else {
-                (0, 0)
-            };
-            let loan = image_donor + frame_donor;
-            let shader_limit = (loan / 2).min(32 << 20);
-            let pool_limit = if playback {
-                ((cache / 10).min(pm_gpu::TargetPool::FREE_BUDGET) + loan - shader_limit)
-                    .min(96 << 20)
+            let shader_limit = if playback {
+                (cache * 3 / 100).min(32 << 20)
             } else {
                 0
             };
+            let pool_limit = if playback {
+                (cache * pool_part / 100).min(96 << 20)
+            } else {
+                0
+            };
+            self.renderer.set_image_cache_budget(images);
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
-                    frame_cache: (frames - frame_donor + extra * 6 / 10) as usize,
+                    frame_cache: (frames + extra * 6 / 10) as usize,
                     decoders: knob("PM_ABL_DECODERS_MIB")
-                        .map_or((cache / 4) as usize, |m| (m << 20) as usize),
+                        .map_or((cache * decoder_part / 100) as usize, |m| (m << 20) as usize),
                 });
-            self.renderer.set_image_cache_budget(images - image_donor);
             self.renderer.set_converted_frame_budget(
-                knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20) + extra * 4 / 10,
+                knob("PM_ABL_CONVERTED_MIB")
+                    .map_or(cache * if playback { 2 } else { 10 } / 100, |m| m << 20)
+                    + extra * 4 / 10,
             );
-            self.renderer.set_target_pool_budget(cache / 10);
+            self.renderer.set_target_pool_budget(cache * pool_part / 100);
             self.renderer
                 .set_playback_retention(pool_limit, shader_limit);
-            self.renderer.set_vector_cache_budget(cache / 20, 512);
-            self.renderer.trim(cache / 20);
+            let vectors = cache * vector_part / 100;
+            self.renderer.set_vector_cache_budget(vectors, 512);
+            if playback {
+                self.renderer.trim_playback_aux(cache / 25);
+            } else {
+                self.renderer.trim(vectors);
+            }
             if request != u64::MAX {
                 // The kept frames go; a settled picture handed over and
                 // about to be shown is not drawn a second time for a trim.
@@ -1291,6 +1314,7 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            surface_budget_peak_at: Instant::now(),
             budgeted_grant: 0,
             budgeted_pressure: crate::memory::Pressure::Normal,
             visible_playback: false,
