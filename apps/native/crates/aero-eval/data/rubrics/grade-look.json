@@ -1,0 +1,57 @@
+{
+ "id": "grade-look",
+ "title": "A grade described in words",
+ "scale": 2,
+ "pass_mean": 1.25,
+ "evaluator_sees": [
+  "the prompt",
+  "the fixture frame and the graded frame at the same time",
+  "the effect stack on the graded layer"
+ ],
+ "criteria": [
+  {
+   "id": "intent",
+   "question": "Does the frame read as the look the person asked for?",
+   "weight": 2,
+   "hard": true,
+   "anchors": {
+    "0": "No, or the opposite",
+    "1": "Partly; a colourist would push it further or pull it back",
+    "2": "Yes, at a glance"
+   }
+  },
+  {
+   "id": "restraint",
+   "question": "Are neutrals and skin-like patches believable, with no colour cast beyond the brief?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Obvious cast or clipped colour",
+    "1": "Slightly overdone",
+    "2": "Natural"
+   }
+  },
+  {
+   "id": "tonality",
+   "question": "Are shadows and highlights handled as asked, without milky blacks or crushed detail?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Broken tonality",
+    "1": "Acceptable with a flaw",
+    "2": "Clean"
+   }
+  },
+  {
+   "id": "editable",
+   "question": "Is the grade made of live, named, adjustable effects a colourist could keep working with?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Baked or opaque",
+    "1": "Live but messy",
+    "2": "Live and tidy"
+   }
+  }
+ ]
+}

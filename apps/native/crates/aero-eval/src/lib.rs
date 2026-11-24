@@ -3,7 +3,15 @@
 //! headless `powermove-mcp` host, run records with 90 % intervals, and the
 //! model-stream recorder/replayer that lets pm-gate catch harness regressions
 //! without a paid model. See `docs/native/aero-eval.md`.
+pub mod artifacts;
+pub mod graders;
+pub mod image;
+pub mod pmv;
+pub mod record;
 pub mod replay;
+pub mod stats;
+pub mod suite;
+pub mod verdict;
 
 use std::path::PathBuf;
 

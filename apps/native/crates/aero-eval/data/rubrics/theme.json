@@ -1,0 +1,57 @@
+{
+ "id": "theme",
+ "title": "A restyle",
+ "scale": 2,
+ "pass_mean": 1.25,
+ "evaluator_sees": [
+  "the prompt",
+  "captures of the timeline, viewer chrome, inspector and a list panel under the theme",
+  "the resolved tokens"
+ ],
+ "criteria": [
+  {
+   "id": "brief",
+   "question": "Does the app now have the look the person asked for?",
+   "weight": 2,
+   "hard": true,
+   "anchors": {
+    "0": "No",
+    "1": "Partly",
+    "2": "Clearly"
+   }
+  },
+  {
+   "id": "legibility",
+   "question": "Is every label, value and line legible on every surface captured?",
+   "weight": 1,
+   "hard": true,
+   "anchors": {
+    "0": "Something is unreadable",
+    "1": "Strained in places",
+    "2": "Easy everywhere"
+   }
+  },
+  {
+   "id": "consistency",
+   "question": "Do all surfaces agree (no leftover default colours, no clashing panels)?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Inconsistent",
+    "1": "Mostly consistent",
+    "2": "Consistent"
+   }
+  },
+  {
+   "id": "taste",
+   "question": "Would a pro keep using it for a day?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "No",
+    "1": "Maybe",
+    "2": "Yes"
+   }
+  }
+ ]
+}

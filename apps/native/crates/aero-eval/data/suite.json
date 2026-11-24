@@ -1,0 +1,1467 @@
+{
+ "format": "aero-eval-suite",
+ "version": 1,
+ "tasks": [
+  {
+   "id": "cut-drop-flubbed-take",
+   "kind": "cut",
+   "prompt": "Take 2 is the flubbed one. Lose it and close the gap, then move the B-roll so it plays right after Take 1.",
+   "fixture": {
+    "project": "projects/interview.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the flubbed take is gone",
+       "count": {
+        "select": {
+         "name": "Take 2"
+        },
+        "expect": {
+         "eq": 0
+        }
+       }
+      },
+      {
+       "name": "clips run Take 1, B-roll, Take 3, Take 4",
+       "order": {
+        "select": {
+         "type": "video"
+        },
+        "names": [
+         "Take 1",
+         "B-roll",
+         "Take 3",
+         "Take 4"
+        ]
+       }
+      },
+      {
+       "name": "no gaps, starting at zero",
+       "contiguous": {
+        "select": {
+         "type": "video"
+        },
+        "start": 0
+       }
+      },
+      {
+       "name": "takes keep their length",
+       "field": {
+        "select": {
+         "type": "video"
+        },
+        "path": "/dur",
+        "expect": {
+         "approx": 2,
+         "tol": 0.04
+        }
+       }
+      },
+      {
+       "name": "lower third untouched",
+       "unchanged": {
+        "select": {
+         "name": "Lower third"
+        },
+        "ignore": [
+         "/selected"
+        ]
+       }
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 900,
+    "steps": 60
+   },
+   "why": "Delete, ripple and reorder: the basic edit every editor does first."
+  },
+  {
+   "id": "cut-tighten-takes",
+   "kind": "cut",
+   "prompt": "Tighten every take to its middle second. Drop the first and last half second of each, B-roll included, and keep everything back to back.",
+   "fixture": {
+    "project": "projects/interview.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "each clip is one second",
+       "field": {
+        "select": {
+         "type": "video"
+        },
+        "path": "/dur",
+        "expect": {
+         "approx": 1,
+         "tol": 0.04
+        }
+       }
+      },
+      {
+       "name": "each clip starts half a second in",
+       "field": {
+        "select": {
+         "type": "video"
+        },
+        "path": "/d/trim",
+        "expect": {
+         "approx": 0.5,
+         "tol": 0.04
+        }
+       }
+      },
+      {
+       "name": "order kept",
+       "order": {
+        "select": {
+         "type": "video"
+        },
+        "names": [
+         "Take 1",
+         "Take 2",
+         "Take 3",
+         "B-roll",
+         "Take 4"
+        ]
+       }
+      },
+      {
+       "name": "no gaps, starting at zero",
+       "contiguous": {
+        "select": {
+         "type": "video"
+        },
+        "start": 0
+       }
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 900,
+    "steps": 80
+   },
+   "why": "Trims on both ends across many clips with a ripple: tests planning a batch edit."
+  },
+  {
+   "id": "grade-late-afternoon",
+   "kind": "grade",
+   "prompt": "Warm this shot up and lift the shadows a little. It should feel like late afternoon, not orange.",
+   "fixture": {
+    "project": "projects/chart-plate.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the plate carries the grade",
+       "field": {
+        "select": {
+         "name": "Plate"
+        },
+        "path": "/fx",
+        "expect": {
+         "len_ge": 1
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "warmth",
+       "expect": {
+        "between": [
+         0.02,
+         0.15
+        ]
+       },
+       "relative": true
+      },
+      {
+       "stat": "p10-l",
+       "expect": {
+        "ge": 1.5
+       },
+       "relative": true
+      },
+      {
+       "stat": "mean-l",
+       "expect": {
+        "between": [
+         -3,
+         12
+        ]
+       },
+       "relative": true
+      },
+      {
+       "stat": "correlation-baseline",
+       "expect": {
+        "ge": 0.9
+       }
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/grade-look.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 900,
+    "steps": 60
+   },
+   "why": "A look described in words; checks direction and restraint, the rubric judges taste."
+  },
+  {
+   "id": "grade-match-reference",
+   "kind": "grade",
+   "prompt": "Match the plate to the reference still: same neutral greys, same contrast. Leave the reference switched off.",
+   "fixture": {
+    "project": "projects/grade-match.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "reference stays off",
+       "field": {
+        "select": {
+         "name": "Reference"
+        },
+        "path": "/on",
+        "expect": {
+         "eq": false
+        }
+       }
+      },
+      {
+       "name": "the plate carries the grade",
+       "field": {
+        "select": {
+         "name": "Plate"
+        },
+        "path": "/fx",
+        "expect": {
+         "len_ge": 1
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frames",
+     "times": [
+      1.0
+     ],
+     "reference": {
+      "file": "references/grade-match/chart.png"
+     },
+     "tolerance": {
+      "mean": 4.0,
+      "p95": 9.0
+     }
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 80
+   },
+   "why": "Shot matching against a known target: measurable within a perceptual tolerance."
+  },
+  {
+   "id": "add-vignette",
+   "kind": "add-effect",
+   "prompt": "Put a soft vignette on the background plate, about half strength.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "vignette at about half",
+       "effect": {
+        "select": {
+         "name": "Background plate"
+        },
+        "type": "vignette",
+        "params": {
+         "amount": {
+          "between": [
+           35,
+           65
+          ]
+         }
+        }
+       }
+      },
+      {
+       "name": "title untouched",
+       "unchanged": {
+        "select": {
+         "name": "Title"
+        },
+        "ignore": [
+         "/selected"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "mean-l",
+       "expect": {
+        "le": -2
+       },
+       "region": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.12,
+        "h": 0.12
+       },
+       "relative": true
+      },
+      {
+       "stat": "mean-l",
+       "expect": {
+        "between": [
+         -2.5,
+         2.5
+        ]
+       },
+       "region": {
+        "x": 0.4,
+        "y": 0.4,
+        "w": 0.2,
+        "h": 0.2
+       },
+       "relative": true
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 600,
+    "steps": 40
+   },
+   "why": "Find an existing effect, apply it to the right layer, set a parameter from plain words."
+  },
+  {
+   "id": "add-blur-build",
+   "kind": "add-effect",
+   "prompt": "Blur the background plate so the title pops, and have the blur build up over the first second instead of snapping on.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "blur animates in over about a second",
+       "animated": {
+        "select": {
+         "name": "Background plate"
+        },
+        "effect": "blur",
+        "param": "amount",
+        "first": {
+         "t": {
+          "le": 0.15
+         },
+         "v": {
+          "le": 2
+         }
+        },
+        "last": {
+         "t": {
+          "between": [
+           0.6,
+           1.6
+          ]
+         },
+         "v": {
+          "ge": 8
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      0.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "le": 1.5
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      2.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "ge": 1.5
+       },
+       "region": {
+        "x": 0.5,
+        "y": 0.35,
+        "w": 0.3,
+        "h": 0.4
+       }
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 900,
+    "steps": 60
+   },
+   "why": "An existing effect plus keyframes: timing intent in words."
+  },
+  {
+   "id": "new-effect-chromatic-split",
+   "kind": "new-effect",
+   "prompt": "Make me a chromatic split effect, red and blue pulled apart sideways, with an amount I can animate. Put it on the title.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "effect",
+       "id": "$new",
+       "params_ge": 1
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the title carries the new effect",
+       "effect": {
+        "select": {
+         "name": "Title"
+        },
+        "type": "$new:effect"
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "ge": 1.0
+       },
+       "region": {
+        "x": 0.25,
+        "y": 0.38,
+        "w": 0.5,
+        "h": 0.24
+       }
+      },
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "le": 0.5
+       },
+       "region": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.12,
+        "h": 0.12
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-time",
+     "target": "$new:effect",
+     "budget_ms": 4.0
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "Write a shader effect from a description, prove it loads, renders and stays fast."
+  },
+  {
+   "id": "new-effect-halftone",
+   "kind": "new-effect",
+   "prompt": "I want a halftone dot look on the background plate, with the dot size adjustable.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "effect",
+       "id": "$new",
+       "params_ge": 1
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the plate carries the new effect",
+       "effect": {
+        "select": {
+         "name": "Background plate"
+        },
+        "type": "$new:effect"
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "ge": 3.0
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-time",
+     "target": "$new:effect",
+     "budget_ms": 4.0
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/effect-look.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "A stylised effect whose look matters: programmatic checks plus a rubric."
+  },
+  {
+   "id": "transition-push",
+   "kind": "new-transition",
+   "prompt": "Build a push transition where the next shot shoves the current one out to the left, and put a half-second one on the cut between the two shots.",
+   "fixture": {
+    "project": "projects/cards.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "transition",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "a half-second push on the cut",
+       "transition": {
+        "select": {
+         "type": "image"
+        },
+        "type": "$new:transition",
+        "dur": {
+         "approx": 0.5,
+         "tol": 0.05
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      2.8,
+      2.9,
+      3.0,
+      3.1,
+      3.2
+     ],
+     "quantifier": "any",
+     "checks": [
+      {
+       "stat": {
+        "near-any": {
+         "colors": [
+          [
+           232,
+           116,
+           59
+          ],
+          [
+           31,
+           138,
+           138
+          ]
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "between": [
+         0.15,
+         0.85
+        ]
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0,
+        "y": 0,
+        "w": 0.08,
+        "h": 1
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          31,
+          138,
+          138
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.92,
+        "y": 0,
+        "w": 0.08,
+        "h": 1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-time",
+     "target": "$new:transition",
+     "budget_ms": 3.0
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "A transition whose motion is checkable: mid-way the frame is split, not blended."
+  },
+  {
+   "id": "transition-iris",
+   "kind": "new-transition",
+   "prompt": "Make an iris transition, a circle that opens from the middle to reveal the next shot, and use it on the cut. One second long.",
+   "fixture": {
+    "project": "projects/cards.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "transition",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "a one-second iris on the cut",
+       "transition": {
+        "select": {
+         "type": "image"
+        },
+        "type": "$new:transition",
+        "dur": {
+         "approx": 1.0,
+         "tol": 0.05
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      2.6,
+      2.8,
+      3.0,
+      3.2,
+      3.4
+     ],
+     "quantifier": "any",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          31,
+          138,
+          138
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.47,
+        "y": 0.45,
+        "w": 0.06,
+        "h": 0.1
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0,
+        "y": 0,
+        "w": 0.06,
+        "h": 0.1
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          31,
+          138,
+          138
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "between": [
+         0.05,
+         0.9
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-time",
+     "target": "$new:transition",
+     "budget_ms": 3.0
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "A shaped wipe: centre and corners tell an iris from a dissolve."
+  },
+  {
+   "id": "panel-marker-list",
+   "kind": "build-panel",
+   "prompt": "I want a panel that lists every marker with its time, and clicking one jumps the playhead there.",
+   "fixture": {
+    "project": "projects/markers.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "panel",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "panel",
+     "panel": "$new:panel",
+     "contains": [
+      "Intro",
+      "Drop",
+      "Outro"
+     ],
+     "probe": {
+      "steps": [
+       {
+        "click": "Drop"
+       }
+      ]
+     },
+     "playhead": {
+      "approx": 2.5,
+      "tol": 0.04
+     }
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/panel-native.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "A small working panel reading project data and driving the transport."
+  },
+  {
+   "id": "panel-speed-buttons",
+   "kind": "build-panel",
+   "prompt": "Give me a panel with big buttons that set the speed of the selected clip to 50%, 100% and 200%.",
+   "fixture": {
+    "project": "projects/speed.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "panel",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "panel",
+     "panel": "$new:panel",
+     "contains": [
+      "50%",
+      "100%",
+      "200%"
+     ],
+     "probe": {
+      "select": [
+       "Clip"
+      ],
+      "steps": [
+       {
+        "click": "50%"
+       }
+      ]
+     },
+     "after": [
+      {
+       "name": "the selected clip plays at half speed",
+       "field": {
+        "select": {
+         "name": "Clip"
+        },
+        "path": "/d/speed",
+        "expect": {
+         "approx": 0.5,
+         "tol": 0.001
+        }
+       }
+      },
+      {
+       "name": "the other clip is untouched",
+       "field": {
+        "select": {
+         "name": "Clip 2"
+        },
+        "path": "/d/speed",
+        "expect": {
+         "approx": 1,
+         "tol": 0.001
+        }
+       }
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/panel-native.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1500,
+    "steps": 120
+   },
+   "why": "A panel that edits the project through selection: a real tool, not a mock-up."
+  },
+  {
+   "id": "fix-softglow-compile",
+   "kind": "fix-extension",
+   "prompt": "My Soft Glow effect disappeared from the title after I tweaked it last night. Can you get it working again?",
+   "fixture": {
+    "project": "projects/glow-title.pmv",
+    "extensions": [
+     "extensions/softglow"
+    ]
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "must_change": [
+      "softglow"
+     ],
+     "require": [
+      {
+       "kind": "effect",
+       "id": "softglow.effect",
+       "params_ge": 3
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the title still carries Soft Glow",
+       "effect": {
+        "select": {
+         "name": "Title"
+        },
+        "type": "softglow.effect"
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "ge": 0.8
+       },
+       "region": {
+        "x": 0.25,
+        "y": 0.38,
+        "w": 0.5,
+        "h": 0.24
+       }
+      },
+      {
+       "stat": "delta-e-baseline",
+       "expect": {
+        "le": 0.5
+       },
+       "region": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.12,
+        "h": 0.12
+       }
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 80
+   },
+   "why": "A shader that no longer compiles: read the error, fix the source, keep the parameters.",
+   "breakage": "compile"
+  },
+  {
+   "id": "fix-shot-notes-crash",
+   "kind": "fix-extension",
+   "prompt": "The Shot Notes panel crashes as soon as I open it. Please fix it without changing what it does: it lists each layer with a note.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": [
+     "extensions/shot-notes"
+    ]
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "must_change": [
+      "shot-notes"
+     ],
+     "require": [
+      {
+       "kind": "panel",
+       "id": "shot-notes.panel"
+      }
+     ]
+    },
+    {
+     "grader": "panel",
+     "panel": "shot-notes.panel",
+     "contains": [
+      "Background plate",
+      "Title"
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 80
+   },
+   "why": "A runtime error only visible when the panel opens: reproduce, then fix.",
+   "breakage": "runtime"
+  },
+  {
+   "id": "fix-mono-negative",
+   "kind": "fix-extension",
+   "prompt": "My Mono effect turns the picture into a negative. It should just be plain black and white. Can you fix it?",
+   "fixture": {
+    "project": "projects/chart-mono.pmv",
+    "extensions": [
+     "extensions/mono"
+    ]
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "must_change": [
+      "mono"
+     ],
+     "require": [
+      {
+       "kind": "effect",
+       "id": "mono.effect"
+      }
+     ]
+    },
+    {
+     "grader": "project",
+     "assertions": [
+      {
+       "name": "the plate still carries Mono",
+       "effect": {
+        "select": {
+         "name": "Plate"
+        },
+        "type": "mono.effect"
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": "chroma",
+       "expect": {
+        "le": 3
+       }
+      },
+      {
+       "stat": "correlation-baseline",
+       "expect": {
+        "le": -0.85
+       }
+      }
+     ]
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 80
+   },
+   "why": "Wrong output with no error: the fix is judged by the picture (the negative's tones reversed, no colour).",
+   "breakage": "output"
+  },
+  {
+   "id": "restyle-warm-studio",
+   "kind": "restyle",
+   "prompt": "Make the whole app feel like a dark, warm studio, with amber accents instead of blue.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "theme",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "theme",
+     "active_new": true,
+     "tokens": [
+      {
+       "token": "--pm-accent",
+       "hue_between": [
+        45,
+        95
+       ],
+       "chroma_ge": 40
+      },
+      {
+       "token": "--pm-ground",
+       "l_le": 22
+      },
+      {
+       "token": "--pm-window",
+       "l_le": 22
+      }
+     ],
+     "contrast": [
+      {
+       "fg": "--pm-text",
+       "bg": "--pm-ground",
+       "ge": 7
+      },
+      {
+       "fg": "--pm-text-2",
+       "bg": "--pm-ground",
+       "ge": 4.5
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/theme.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 100
+   },
+   "why": "A theme from a mood: hue and lightness are measurable, taste is the rubric's."
+  },
+  {
+   "id": "restyle-projector",
+   "kind": "restyle",
+   "prompt": "I'm presenting on a projector next week. Give the app a high-contrast light look so everything reads from the back of the room.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "theme",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "theme",
+     "active_new": true,
+     "tokens": [
+      {
+       "token": "--pm-ground",
+       "l_ge": 88
+      }
+     ],
+     "contrast": [
+      {
+       "fg": "--pm-text",
+       "bg": "--pm-ground",
+       "ge": 10
+      },
+      {
+       "fg": "--pm-text-2",
+       "bg": "--pm-ground",
+       "ge": 7
+      },
+      {
+       "fg": "--pm-hairline",
+       "bg": "--pm-ground",
+       "ge": 2
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/theme.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1200,
+    "steps": 100
+   },
+   "why": "Accessibility-driven restyle with hard contrast floors."
+  },
+  {
+   "id": "tool-beat-flash",
+   "kind": "multi-step",
+   "prompt": "Build me a beat flash tool: a panel with a Tap button that drops a marker at the playhead and flashes the picture white for two frames right there.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "panel",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "panel",
+     "panel": "$new:panel",
+     "contains": [
+      "Tap"
+     ],
+     "probe": {
+      "steps": [
+       {
+        "click": "Tap"
+       }
+      ]
+     },
+     "after": [
+      {
+       "name": "a marker was dropped",
+       "root": {
+        "path": "/markers",
+        "expect": {
+         "len_ge": 1
+        }
+       }
+      },
+      {
+       "name": "the plate and title are untouched",
+       "unchanged": {
+        "select": {
+         "type": "image"
+        },
+        "ignore": [
+         "/selected"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/tool-quality.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1800,
+    "steps": 150
+   },
+   "why": "Panel, project edit and a visual effect working together from one button."
+  },
+  {
+   "id": "tool-lower-third-kit",
+   "kind": "multi-step",
+   "prompt": "Make me a lower third kit: a panel where I type a name and a title, hit Add, and it drops an animated lower third at the playhead that slides in.",
+   "fixture": {
+    "project": "projects/promo.pmv",
+    "extensions": []
+   },
+   "graders": [
+    {
+     "grader": "extensions-load",
+     "require": [
+      {
+       "kind": "panel",
+       "id": "$new"
+      }
+     ]
+    },
+    {
+     "grader": "panel",
+     "panel": "$new:panel",
+     "probe": {
+      "steps": [
+       {
+        "type": {
+         "field": "Name",
+         "text": "Ada Park"
+        }
+       },
+       {
+        "type": {
+         "field": "Title",
+         "text": "Colourist"
+        }
+       },
+       {
+        "click": "Add"
+       }
+      ]
+     },
+     "after": [
+      {
+       "name": "the name is on the timeline",
+       "count": {
+        "select": {
+         "text_contains": "Ada Park"
+        },
+        "expect": {
+         "ge": 1
+        }
+       }
+      },
+      {
+       "name": "it slides in",
+       "any-of": [
+        {
+         "animated": {
+          "select": {
+           "text_contains": "Ada Park"
+          },
+          "param": "position.x"
+         }
+        },
+        {
+         "animated": {
+          "select": {
+           "text_contains": "Ada Park"
+          },
+          "param": "position.y"
+         }
+        },
+        {
+         "animated": {
+          "select": {
+           "name_prefix": "Lower third"
+          },
+          "param": "position.x"
+         }
+        },
+        {
+         "animated": {
+          "select": {
+           "name_prefix": "Lower third"
+          },
+          "param": "position.y"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "grader": "rubric",
+     "rubric": "rubrics/tool-quality.json"
+    }
+   ],
+   "limits": {
+    "wall_secs": 1800,
+    "steps": 150
+   },
+   "why": "A reusable tool that writes editable, animated layers from typed input."
+  }
+ ]
+}
