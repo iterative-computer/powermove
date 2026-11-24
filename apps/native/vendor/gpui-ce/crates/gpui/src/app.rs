@@ -682,6 +682,15 @@ pub(crate) enum GpuiMode {
     Production,
 }
 
+impl App {
+    /// Whether dirty windows draw when effects settle (tests and benches),
+    /// not only when their platform asks for a frame.
+    #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
+    fn draws_as_effects_settle(&self) -> bool {
+        cfg!(feature = "bench-support") || !matches!(self.mode, GpuiMode::Production)
+    }
+}
+
 impl GpuiMode {
     #[cfg(any(test, feature = "headless-support"))]
     pub fn test() -> Self {
@@ -1781,6 +1790,13 @@ impl App {
                     }
                 }
             } else {
+                // Powermove: only a test or headless app draws its dirty
+                // windows as its effects settle. The app links
+                // `headless-support` (MCP captures, the effect lab), and a
+                // real window drew there on every notify, outside its frame
+                // callback and without presenting: while a panel scrolled
+                // during playback the main thread drew five to seven times
+                // for each frame shown (PM-696).
                 #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
                 for window in self
                     .windows
@@ -1789,6 +1805,7 @@ impl App {
                         let window = window.as_deref()?;
                         window.invalidator.is_dirty().then_some(window.handle)
                     })
+                    .filter(|_| self.draws_as_effects_settle())
                     .collect::<Vec<_>>()
                 {
                     self.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
