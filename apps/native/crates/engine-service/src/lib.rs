@@ -906,6 +906,10 @@ struct Shared {
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    before_completed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    paused_flight_peak: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
     /// Test record: each drawn frame's stamp, time and scale, in order.
     #[cfg(test)]
@@ -1760,6 +1764,10 @@ impl EngineService {
             traffic: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            before_completed: Mutex::new(None),
+            #[cfg(test)]
+            paused_flight_peak: Default::default(),
             #[cfg(test)]
             first_picture: Mutex::new(None),
             #[cfg(test)]
@@ -3178,7 +3186,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
         }
         pass.mark("settled");
-        if !last_was_surface_query && state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty())) {
+        if !last_was_surface_query
+            && state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty())
+        {
             drop(state);
             surface::run_one(&mut engine, &shared);
             picker_sample::run_one(&mut engine, &shared);
@@ -4165,6 +4178,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 }
                             }
                         }
+                        #[cfg(test)]
+                        {
+                            s.before_completed = shared.before_completed.lock().unwrap().take();
+                        }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
                             plan.map(|p| p.requested),
@@ -4197,6 +4214,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             late_layers,
                             picture_only,
                         });
+                        #[cfg(test)]
+                        if spec.moment != Moment::Playing {
+                            let unfinished =
+                                flights.iter().filter(|f| f.id == id && !f.gpu_done).count();
+                            shared
+                                .paused_flight_peak
+                                .fetch_max(unfinished, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     Ok(None) => {
                         v.capture |= capture;
@@ -4384,9 +4409,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .values()
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
             // A dragged frame waiting to be drawn exact wakes the loop then.
+            // A viewer without a slot is woken by completion. An expired
+            // settle deadline cannot make it drawable before that wake.
             let settle = runtime
-                .values()
-                .flat_map(|r| [r.refine_at, r.settle_at.map(|(_, at)| at)])
+                .iter()
+                .filter(|(id, r)| {
+                    has_render_slot(
+                        flights.iter().map(|f| (f.id, f.gpu_done)),
+                        **id,
+                        r.transport.clock.is_playing(),
+                    )
+                })
+                .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
                 .map(|at| (at - now).max(0.001))
                 .fold((scrub_present_retry - now).max(0.001), f64::min);
@@ -4427,7 +4461,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Duration::from_secs(3600)
             };
-            let surface_query_waiting = state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty()));
+            let surface_query_waiting = state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty());
             drop(state);
             let tap = shared.scopes.lock().unwrap().clone();
             let timeout = engine
@@ -5992,6 +6029,45 @@ mod worker_tests {
             }
         }
         crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
+    }
+
+    #[test]
+    fn the_latest_scrub_reaches_the_viewer_after_one_unfinished_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("queued-scrub-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let wait_for_pose = |at| {
+            wait_for(&v, "scrub pose", |status| {
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                status.frame.as_ref().is_some_and(|f| {
+                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
+                })
+            });
+        };
+        wait_for_pose(seconds(0.));
+        let (entered, hold) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let release = Mutex::new(release);
+        *service.shared.before_completed.lock().unwrap() = Some(Arc::new(move || {
+            let _ = entered.send(());
+            let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }));
+        v.scrub(seconds(0.25)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        for i in 2..=8 {
+            v.scrub(seconds(f64::from(i) * 0.25)).unwrap();
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+        }
+        wait_for(&v, "worker polled the queued scrubs", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(seconds(2.));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
         v.retire();
     }
 

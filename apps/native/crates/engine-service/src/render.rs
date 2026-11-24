@@ -721,6 +721,8 @@ pub struct Submission {
     /// presentation's SDR clip.
     #[cfg(test)]
     pub presented: Option<metal::Buffer>,
+    #[cfg(test)]
+    pub before_completed: Option<Arc<dyn Fn() + Send + Sync>>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -2388,6 +2390,8 @@ impl Engine {
             readback,
             #[cfg(test)]
             presented,
+            #[cfg(test)]
+            before_completed: None,
             width: output.width,
             height: output.height,
             failures,
@@ -2870,9 +2874,15 @@ impl Submission {
         );
         let t = self.trace.clone();
         let lease = self.surface.clone();
+        #[cfg(test)]
+        let before_completed = self.before_completed.clone();
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                if let Some(hook) = &before_completed {
+                    hook();
+                }
                 #[cfg(test)]
                 std::thread::sleep(std::time::Duration::from_millis(
                     LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),
