@@ -2833,6 +2833,55 @@ fn a_row_hover_is_no_publication_of_the_panel(cx: &mut TestAppContext) {
     let hovered = s.view.read_with(&s.vcx, |v, _| v.hovered_row_for_test());
     assert_eq!(hovered.as_deref(), Some(r#"timeline:row:["layer","l1"]"#));
 }
+/// PM-698 review: a row's hover is the pointer's, found again every render.
+/// A hovered row scrolled out of the rows drawn gets no leave; scrolled back
+/// with the pointer elsewhere it shows neither the hover fill nor its lock.
+#[gpui::test]
+fn a_hovered_row_scrolled_out_and_back_is_not_hovered_away_from_the_pointer(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+        s.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        s.vcx.run_until_parked();
+    };
+    let lock = r#"timeline:lock:["layer","l1"]"#;
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(row, None, Modifiers::none());
+    settle(&mut s);
+    assert!(s.vcx.debug_bounds(lock).is_some(), "hovered: its lock shows");
+    // Far down the rows (l1 leaves the rows drawn), the pointer over the tracks.
+    let tracks = s.at(3, 0.2);
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: tracks,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-1500.))),
+            ..Default::default()
+        });
+        settle(&mut s);
+    }
+    // Off the rows, then back to the top with the pointer on another row's track.
+    s.vcx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
+    settle(&mut s);
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: tracks,
+            delta: ScrollDelta::Pixels(point(px(0.), px(1500.))),
+            ..Default::default()
+        });
+        settle(&mut s);
+    }
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 0.);
+    assert!(s.vcx.debug_bounds(r#"timeline:row:["layer","l1"]"#).is_some());
+    assert!(
+        s.vcx.debug_bounds(lock).is_none(),
+        "l1 is not under the pointer: no lock"
+    );
+    let hovered = s.view.read_with(&s.vcx, |v, _| v.hovered_row_for_test());
+    assert_ne!(hovered.as_deref(), Some(r#"timeline:row:["layer","l1"]"#));
+}
 /// A click right after the pointer enters a row selects it, although the
 /// hover restyles the row before the click lands.
 #[gpui::test]

@@ -14,7 +14,7 @@ use pm_surface::{
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -452,10 +452,17 @@ struct Compiled {
 }
 pub struct SurfaceView {
     panel_build: Option<crate::generated_panel::panel_build::State>,
-    /// The `metadata.hoverGroup` node (a row) the pointer is over: the host
-    /// draws its hover (`hoverStyle`, `hoverOnly`, `hoverHide`), so a row's
-    /// hover is no publication of the panel.
-    hovered_group: Option<Id>,
+    /// The `metadata.hoverGroup` nodes (rows) the pointer is over, as this
+    /// render found them: each group painted in the last frame whose hitbox
+    /// the pointer is in now. The host draws their hover (`hoverStyle`,
+    /// `hoverOnly`, `hoverHide`), so a row's hover is no publication of the
+    /// panel. Derived every render, never kept across one: a group that left
+    /// the frame (scrolled out of the rendered rows, deleted, another
+    /// generation) is hovered by nothing.
+    hovered_groups: BTreeSet<Id>,
+    /// The hover groups the last frame painted, with their hitboxes; filled
+    /// while painting, taken by the next render.
+    painted_groups: Rc<RefCell<HashMap<Id, gpui::HitboxId>>>,
     build_painted: Cell<u64>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
@@ -680,7 +687,8 @@ impl SurfaceView {
         .detach();
         let mut this = Self {
             panel_build: None,
-            hovered_group: None,
+            hovered_groups: BTreeSet::new(),
+            painted_groups: Rc::default(),
             build_painted: Cell::new(u64::MAX),
             runtime,
             publication,
@@ -919,6 +927,7 @@ impl SurfaceView {
         let handle = window.window_handle();
         if handle != self.window {
             self.keyboard_focused_user_message = None;
+            self.painted_groups.borrow_mut().clear();
         }
         if handle != self.window && (!self.controls.is_empty() || !self.fields.is_empty()) {
             // AppKit controls and editors live in the window they were
@@ -1075,6 +1084,8 @@ impl SurfaceView {
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
+            // Another realm's tree: its node ids are not the last frame's.
+            self.painted_groups.borrow_mut().clear();
             self.wheel_finish(false, cx);
             self.restart(cx);
         }
@@ -4261,12 +4272,38 @@ impl SurfaceView {
                 _ => children.push(self.element(*child, window, cx, skip)),
             }
         }
+        if node.hover_group {
+            children.push(self.hover_probe(id, cx));
+        }
         self.element_close(id, element, children, window, cx)
+    }
+    /// A hover group's hitbox, recorded as it paints for the next render to
+    /// test against the pointer. A layout that moved the group under a still
+    /// pointer (rows scrolled, a row added above) changes what it covers:
+    /// then the view draws once more with the groups the pointer is over.
+    fn hover_probe(&self, id: Id, cx: &mut Context<Self>) -> AnyElement {
+        let (painted, view) = (self.painted_groups.clone(), cx.entity().downgrade());
+        let rendered = self.hovered_groups.contains(&id);
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, window, cx| {
+                painted.borrow_mut().insert(id, hitbox.id);
+                if hitbox.is_hovered(window) != rendered {
+                    let view = view.clone();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
     }
     /// The hover group the pointer is over, by its semantic id (tests).
     #[cfg(test)]
     pub(crate) fn hovered_row_for_test(&self) -> Option<String> {
-        let id = self.hovered_group?;
+        let id = *self.hovered_groups.iter().next()?;
         self.prepared
             .node(id)?
             .semantic
@@ -4294,7 +4331,7 @@ impl SurfaceView {
                 break;
             };
             if node.hover_group {
-                return (self.hovered_group == Some(parent)) == shows;
+                return self.hovered_groups.contains(&parent) == shows;
             }
             at = node.parent;
         }
@@ -4468,7 +4505,7 @@ impl SurfaceView {
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
         if node.hover_group
-            && self.hovered_group == Some(id)
+            && self.hovered_groups.contains(&id)
             && let Some(background) = &node.hover_background
         {
             element.style().background = Some(background.clone());
@@ -5820,12 +5857,10 @@ impl SurfaceView {
         let group = node.hover_group;
         if wash || events.hover || group {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                // The pointer crossed a group: draw again, which finds the
+                // groups under it (`hovered_groups`).
                 if group {
-                    if *hovered {
-                        v.hovered_group = Some(id);
-                    } else if v.hovered_group == Some(id) {
-                        v.hovered_group = None;
-                    }
+                    let _ = hovered;
                     cx.notify();
                 }
                 if wash {
@@ -6528,6 +6563,12 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let painted = std::mem::take(&mut *self.painted_groups.borrow_mut());
+        self.hovered_groups = painted
+            .into_iter()
+            .filter(|(_, hitbox)| hitbox.is_hovered(window))
+            .map(|(id, _)| id)
+            .collect();
         if self.focus_requested.is_some() && pm_shell::typing::expecting() {
             self.typing_ready(cx);
         }
