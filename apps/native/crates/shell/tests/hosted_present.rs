@@ -21,6 +21,7 @@ fn main() {
     macos::hidden_moves(mtm);
     macos::regions(mtm);
     macos::unprepared_frames(mtm);
+    macos::present_modes();
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -43,6 +44,23 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: a drawable the layer gave (a direct window's, taken
+    /// off the main thread) is presented by its command buffer once its
+    /// rendering is scheduled, never right after the commit as a
+    /// CAMetalDisplayLink's drawable is; a moving frame presents with the
+    /// transaction.
+    pub fn present_modes() {
+        use gpui_apple::metal_renderer::{PresentMode, present_mode};
+        let drawable = |supplied: bool, link_bound: bool| {
+            gpui_apple::metal_renderer::supplied_from_link(supplied, link_bound)
+        };
+        assert_eq!(present_mode(false, drawable(true, false)), PresentMode::Queued, "a direct window's drawable");
+        assert_eq!(present_mode(false, drawable(false, false)), PresentMode::Queued, "one asked for on the main thread");
+        assert_eq!(present_mode(false, drawable(true, true)), PresentMode::Link, "a CAMetalDisplayLink update");
+        assert_eq!(present_mode(true, drawable(true, false)), PresentMode::Transaction);
+        assert_eq!(present_mode(true, drawable(true, true)), PresentMode::Transaction);
+    }
 
     /// PM-696 review: hosted views are published only with a frame that
     /// presents. A frame whose Metal frame could not be prepared (no drawable,

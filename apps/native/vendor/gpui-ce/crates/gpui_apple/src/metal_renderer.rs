@@ -431,6 +431,13 @@ pub enum PresentMode {
     Queued,
 }
 
+/// Whether a supplied drawable is a CAMetalDisplayLink's: only while a link
+/// owns the layer (`link_bound`). A direct window's drawables are supplied
+/// too, but the layer gave them.
+pub fn supplied_from_link(supplied: bool, link_bound: bool) -> bool {
+    supplied && link_bound
+}
+
 /// The present for a frame: with the transaction when it moves hosted views,
 /// at its link's update when a CAMetalDisplayLink supplied its drawable, and
 /// otherwise queued on its commands (a drawable the layer gave must never be
@@ -1013,7 +1020,7 @@ impl MetalRenderer {
         // Only a CAMetalDisplayLink's drawable is presented at its update
         // (before its deadline, without a scheduled wait); one the layer gave
         // (directly or through `DrawableSource`) is queued on its commands.
-        let from_link = supplied.is_some();
+        let from_link = supplied_from_link(supplied.is_some(), self.display_link_bound);
         let asked = present_trace().then(std::time::Instant::now);
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
             supplied.as_deref().or_else(|| layer.next_drawable())
