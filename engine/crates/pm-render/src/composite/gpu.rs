@@ -43,6 +43,8 @@ pub(crate) enum Op {
     SceneOutput,
     /// The final row flip, encoding linear light with E.
     EncodeFlip,
+    /// 2.5D depth-of-field bokeh pass.
+    Dof,
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
@@ -140,6 +142,7 @@ impl OpPipelines {
             Op::DecodeSource,
             Op::SceneOutput,
             Op::EncodeFlip,
+            Op::Dof,
         ] {
             let entry = match op {
                 Op::Layer => "fs_layer",
@@ -149,6 +152,7 @@ impl OpPipelines {
                 Op::SceneOutput => "fs_scene_output",
                 Op::DecodeSource => "fs_decode_source",
                 Op::EncodeFlip => "fs_encode_flip",
+                Op::Dof => "fs_dof",
             };
             for format in FORMATS {
                 let device = device.clone();

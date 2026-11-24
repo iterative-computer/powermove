@@ -2237,6 +2237,68 @@ fn linked_scale_value_preserves_ratio_and_zero_baseline_rules() {
         Some(20.)
     );
 }
+
+#[test]
+fn three_d_timeline_scale_and_position_channels_include_z_axis() {
+    let mut v = fixture();
+    {
+        let l = layer_mut(&mut v, 0);
+        l.insert("threeD", Value::Bool(true));
+        l.insert("scaleLinked", Value::Bool(true));
+        let p = l.get_mut("p").unwrap().as_object_mut().unwrap();
+        p.insert("position.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("position.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("position.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("scale.x", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("scale.y", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("scale.z", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("anchor.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("anchor.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("anchor.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+    }
+    let (_a, mut c) = client_with(v);
+    for (track, expected) in [
+        ("position", vec!["position.x", "position.y", "position.z"]),
+        ("scale", vec!["scale.x", "scale.y", "scale.z"]),
+        ("anchor", vec!["anchor.x", "anchor.y", "anchor.z"]),
+        (
+            "orientation",
+            vec!["orientation.x", "orientation.y", "orientation.z"],
+        ),
+    ] {
+        let channels: Vec<&str> = c
+            .model
+            .track_channels("a", track)
+            .into_iter()
+            .map(|ch| ch.path.as_str())
+            .collect();
+        assert_eq!(channels, expected, "track_channels for {track}");
+    }
+    let plan = c
+        .model
+        .scale_values("a", "scale.x", 200., 2., 100., &[("scale.y", 50.), ("scale.z", 100.)])
+        .unwrap();
+    run(&mut c, plan);
+    let pubd = c.kernel.published("P").unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&pubd);
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.y", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(100.)
+    );
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.z", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(200.)
+    );
+}
 #[test]
 fn property_target_translation_respects_mask_effect_ordinals_and_type() {
     let mut v = fixture();
@@ -4855,7 +4917,10 @@ fn keyframe_reveal_opens_a_collapsed_layer_and_explicit_property_filter() {
     assert!(has_property(&c, "c", "opacity"));
     assert_eq!(
         c.model.reveal_target,
-        Some(pm_panel_timeline::RevealTarget::Property { layer: "c".into(), path: "opacity".into() })
+        Some(pm_panel_timeline::RevealTarget::Property {
+            layer: "c".into(),
+            path: "opacity".into()
+        })
     );
 }
 #[test]

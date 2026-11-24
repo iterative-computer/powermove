@@ -138,6 +138,7 @@ impl TimelineModel {
             if let Some((l, c, k)) = resolve(id)
                 && (c.path == "scale.x"
                     || c.path == "scale.y"
+                    || (l.three_d && c.path == "scale.z")
                     || (!l.separate_dimensions && c.path.starts_with("position.")))
             {
                 let path = if c.path.starts_with("position.") {
@@ -1041,10 +1042,31 @@ impl TimelineModel {
         primary: f64,
         other: f64,
     ) -> Result<Plan, ModelError> {
-        for n in [value, time, primary, other] {
+        let paired = match axis {
+            "scale.x" => "scale.y",
+            "scale.y" => "scale.x",
+            _ => return Err(ModelError::UnknownId(axis.into())),
+        };
+        self.scale_values(layer, axis, value, time, primary, &[(paired, other)])
+    }
+    /// Linked scale semantics across all active axes (`scale.x`, `scale.y`, and
+    /// `scale.z` in 3D mode), matching `panel-inspector`.
+    pub fn scale_values(
+        &self,
+        layer: &str,
+        axis: &str,
+        value: f64,
+        time: f64,
+        primary: f64,
+        peers: &[(&str, f64)],
+    ) -> Result<Plan, ModelError> {
+        for n in [value, time, primary] {
             finite(n)?;
         }
-        if axis != "scale.x" && axis != "scale.y" {
+        for (_, other) in peers {
+            finite(*other)?;
+        }
+        if !matches!(axis, "scale.x" | "scale.y" | "scale.z") {
             return Err(ModelError::UnknownId(axis.into()));
         }
         let l = self
@@ -1052,13 +1074,8 @@ impl TimelineModel {
             .layer(layer)
             .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
         self.require_channel(layer, axis)?;
-        let paired = if axis == "scale.x" {
-            "scale.y"
-        } else {
-            "scale.x"
-        };
-        let animated = [axis, paired]
-            .iter()
+        let animated = std::iter::once(axis)
+            .chain(peers.iter().map(|(p, _)| *p))
             .filter_map(|p| self.index.channel(layer, p))
             .any(|c| !c.keys.is_empty());
         let mut set = SetProperty::new(layer, axis, value, time);
@@ -1069,18 +1086,22 @@ impl TimelineModel {
         }
         let mut commands = vec![PropertyCommand::Set(set.clone()).into()];
         if l.scale_linked {
-            set.channel = paired.into();
-            set.value = Value::Number(if l.scale_linked {
-                value
-                    * if primary.abs() > 1e-8 {
-                        other / primary
-                    } else {
-                        1.
-                    }
-            } else {
-                other
-            });
-            commands.push(PropertyCommand::Set(set).into());
+            for (paired, other) in peers {
+                if *paired == axis || self.index.channel(layer, paired).is_none() {
+                    continue;
+                }
+                let mut peer_set = set.clone();
+                peer_set.channel = (*paired).into();
+                peer_set.value = Value::Number(
+                    value
+                        * if primary.abs() > 1e-8 {
+                            *other / primary
+                        } else {
+                            1.
+                        },
+                );
+                commands.push(PropertyCommand::Set(peer_set).into());
+            }
         }
         Ok(Plan::edit(commands, self.index.revision))
     }

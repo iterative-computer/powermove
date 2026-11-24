@@ -4592,7 +4592,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
 
     let (mut model, p) = publish(&mut presenter, "cam");
-    assert_eq!(titles(&p), ["Camera", "Environment", "Shot"]);
+    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment", "Shot"]);
     assert_eq!(
         labels(&p, "Camera"),
         [
@@ -4601,9 +4601,11 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Field of View",
             "Clip Start",
             "Clip End",
-            "f-Stop",
-            "Focus"
         ]
+    );
+    assert_eq!(
+        labels(&p, "Depth of Field"),
+        ["Depth of Field"]
     );
     assert_eq!(
         labels(&p, "Environment"),
@@ -7160,6 +7162,99 @@ fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
             .as_f64(),
         Some(35.)
     );
+}
+
+#[test]
+fn properties_keyframing_3d_transform_rows_keys_all_three_axes() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let enable = model
+        .set(
+            Caller::native(),
+            pm_panel_inspector::Binding::Layer {
+                layer: "a".into(),
+                field: "threeD".into(),
+            },
+            true.into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", enable).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+
+    for (row, expected_paths) in [
+        ("position", ["position.x", "position.y", "position.z"]),
+        ("scale", ["scale.x", "scale.y", "scale.z"]),
+        ("anchor", ["anchor.x", "anchor.y", "anchor.z"]),
+        (
+            "orientation",
+            ["orientation.x", "orientation.y", "orientation.z"],
+        ),
+    ] {
+        presenter.snapshot(&mut model, 1., false).unwrap();
+        let req = presenter
+            .intent(
+                &mut model,
+                Caller::native(),
+                &json!({"type":"key","row":row}),
+                1.,
+            )
+            .unwrap()
+            .expect("keyframe intent request");
+        let ack = kernel.call("synthetic", req).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "keyframing {row} failed: {:?}",
+            ack.reply
+        );
+        model.sync(kernel.published("synthetic").unwrap());
+        let layer = model.layer("a").unwrap();
+        let p = layer.get("p").unwrap();
+        for path in expected_paths {
+            let kf = p
+                .get(path)
+                .unwrap_or_else(|| panic!("missing channel {path} after keyframing {row}"))
+                .get("kf")
+                .and_then(|v| v.as_array())
+                .unwrap();
+            assert_eq!(kf.len(), 1, "expected 1 keyframe on {path} for row {row}");
+        }
+        // Toggling again at the same playhead removes keyframes from all 3 axes.
+        presenter.snapshot(&mut model, 1., false).unwrap();
+        let req = presenter
+            .intent(
+                &mut model,
+                Caller::native(),
+                &json!({"type":"key","row":row}),
+                1.,
+            )
+            .unwrap()
+            .expect("remove keyframe intent request");
+        let ack = kernel.call("synthetic", req).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+        model.sync(kernel.published("synthetic").unwrap());
+        let layer = model.layer("a").unwrap();
+        let p = layer.get("p").unwrap();
+        for path in expected_paths {
+            let kf = p
+                .get(path)
+                .unwrap()
+                .get("kf")
+                .and_then(|v| v.as_array())
+                .unwrap();
+            assert!(
+                kf.is_empty(),
+                "expected 0 keyframes on {path} after toggling off {row}"
+            );
+        }
+    }
 }
 
 /// PM-699: the Export panel's worker holds its entry and backend for a whole

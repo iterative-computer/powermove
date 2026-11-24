@@ -28,6 +28,11 @@ pub struct Properties {
     pub(crate) commands: Vec<(String, Vec<Value>)>,
     /// Each listed row's label, for what a row action shows about it.
     labels: BTreeMap<String, String>,
+    /// Multi-axis property rows (`position`, `scale`, `anchor`, `orientation`,
+    /// `rotation3d`, `target`) mapped to their exact active channel paths on
+    /// the current layer so row-level keyframing, reset, expressions and graph
+    /// actions always target every visible axis (including 3D Z / X / Y).
+    row_channels: BTreeMap<String, Vec<String>>,
     /// Imported files by asset ID, for a model's material slots (read once
     /// per asset into `slots`).
     pub originals: BTreeMap<String, std::path::PathBuf>,
@@ -160,6 +165,7 @@ impl Properties {
         if self.document != Some(model.document_id()) || self.selection != model.selected_layers() {
             self.adapter.retire();
             self.handles.clear();
+            self.row_channels.clear();
             self.selection = model.selected_layers().to_vec();
             self.document = Some(model.document_id());
             self.sequence = self
@@ -570,7 +576,9 @@ impl Properties {
                 ]);
                 for (id, label, paths, unit, step) in groups {
                     let mut axes = vec![];
-                    let mut animation = "static";
+                    let mut all_keyed = true;
+                    let mut any_animated = false;
+                    let mut active_paths = vec![];
                     let (mut bound, mut expression) = (vec![], None);
                     for (index, path) in paths.iter().enumerate() {
                         let binding = Binding::Property(PropertyId::new(&layer, *path));
@@ -583,11 +591,13 @@ impl Properties {
                             .value
                             .as_f64()
                             .ok_or_else(|| format!("Non-numeric {path}"))?;
-                        if state.key_at_playhead {
-                            animation = "key-at-playhead";
-                        } else if state.animated && animation == "static" {
-                            animation = "animated";
+                        if !state.key_at_playhead {
+                            all_keyed = false;
                         }
+                        if state.key_at_playhead || state.animated {
+                            any_animated = true;
+                        }
+                        active_paths.push((*path).to_owned());
                         bound.push(binding.clone());
                         expression = expression.or_else(|| state.expression.clone());
                         let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
@@ -603,6 +613,18 @@ impl Properties {
                         axes.push(axis);
                     }
                     if !axes.is_empty() {
+                        let animation = if all_keyed {
+                            "key-at-playhead"
+                        } else if any_animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
+                        if active_paths.len() > 1 {
+                            self.row_channels.insert(id.into(), active_paths);
+                        } else {
+                            self.row_channels.remove(id);
+                        }
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
                         if id == "position" {
                             row["separateDimensions"] = json!(
@@ -635,6 +657,76 @@ impl Properties {
                 // A layer saved without transform channels has nothing to list.
                 if !rows.is_empty() {
                     sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                }
+                if three_d {
+                    let locked = !model.editable(&layer);
+                    let dof_blur_binding = Binding::Property(PropertyId::new(&layer, "dofBlur"));
+                    let dof_blur_state = model.binding_state(&dof_blur_binding, time).ok();
+                    let dof_blur_val = dof_blur_state
+                        .as_ref()
+                        .and_then(|s| s.value.as_f64())
+                        .unwrap_or(0.);
+                    let dof_on = dof_blur_val > 0.;
+                    let toggle_lease = self.control_lease("25d.dof.enabled");
+                    let mut dof_rows = vec![json!({
+                        "id": "25d.dof.enabled",
+                        "label": "Depth of Field",
+                        "locked": locked,
+                        "control": {"kind": "toggle", "binding": toggle_lease, "value": dof_on}
+                    })];
+                    if dof_on {
+                        for (id, label, path, unit, step, min, max) in [
+                            ("dofFocus", "Focus Distance", "dofFocus", "px", 5., None, None),
+                            ("dofBlur", "Blur Strength", "dofBlur", "%", 1., Some(0.), Some(100.)),
+                        ] {
+                            let binding = Binding::Property(PropertyId::new(&layer, path));
+                            if let Ok(state) = model.binding_state(&binding, time)
+                                && let Some(val) = state.value.as_f64()
+                            {
+                                let animation = if state.key_at_playhead {
+                                    "key-at-playhead"
+                                } else if state.animated {
+                                    "animated"
+                                } else {
+                                    "static"
+                                };
+                                let mut axis = json!({
+                                    "binding": self.lease(model, path, binding.clone())?,
+                                    "value": val,
+                                    "unit": unit,
+                                    "step": step,
+                                    "precision": 2,
+                                    "mixed": state.mixed,
+                                    "animation": animation
+                                });
+                                if let Some(min) = min {
+                                    axis["min"] = json!(min);
+                                }
+                                if let Some(max) = max {
+                                    axis["max"] = json!(max);
+                                }
+                                let mut row = json!({
+                                    "id": id,
+                                    "label": label,
+                                    "locked": locked,
+                                    "animation": animation,
+                                    "control": {"kind": "number", "axes": [axis]}
+                                });
+                                if let Some(expression) =
+                                    self.expression(model, id, vec![binding], state.expression.clone(), time)?
+                                {
+                                    row["expression"] = expression;
+                                }
+                                dof_rows.push(row);
+                            }
+                        }
+                    }
+                    sections.push(json!({
+                        "id": "dof",
+                        "title": "Depth of Field",
+                        "collapsed": self.collapsed.get("dof").copied().unwrap_or(false),
+                        "rows": dof_rows
+                    }));
                 }
             }
             if target["first"]["type"] == "text" {
@@ -914,7 +1006,9 @@ impl Properties {
         }
         for (id, label, paths, unit, step) in groups {
             let mut axes = vec![];
-            let mut animation = "static";
+            let mut all_keyed = true;
+            let mut any_animated = false;
+            let mut active_paths = vec![];
             for (path, axis) in paths {
                 let binding = Binding::Property(PropertyId::new(layer, path));
                 let state = match model.binding_state(&binding, time) {
@@ -932,9 +1026,13 @@ impl Properties {
                 } else {
                     "static"
                 };
-                if a != "static" && animation != "key-at-playhead" {
-                    animation = a;
+                if !state.key_at_playhead {
+                    all_keyed = false;
                 }
+                if state.key_at_playhead || state.animated {
+                    any_animated = true;
+                }
+                active_paths.push(path.to_owned());
                 // Three narrow wells hold four characters: one place below
                 // ten (-1.7), none above (-12). Typing still sets exact values.
                 let shown = if value.abs() >= 10. {
@@ -944,6 +1042,13 @@ impl Properties {
                 };
                 axes.push(json!({"binding":self.lease(model,path,binding)?,"value":shown,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
             }
+            let animation = if !axes.is_empty() && all_keyed {
+                "key-at-playhead"
+            } else if any_animated {
+                "animated"
+            } else {
+                "static"
+            };
             // A light's rotation does nothing it can show: only kept in view
             // while a value or keyframe is there to clear.
             if role == Role::Light
@@ -954,6 +1059,11 @@ impl Properties {
                 continue;
             }
             if !axes.is_empty() {
+                if active_paths.len() > 1 {
+                    self.row_channels.insert(id.into(), active_paths);
+                } else {
+                    self.row_channels.remove(id);
+                }
                 // Three axes fill the value column; no room for a link button.
                 rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
             }
@@ -1842,9 +1952,111 @@ impl Properties {
                             {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
                     ),
                 );
+                if data["camera"]["projection"] != "orthographic" {
+                    let fstop = model
+                        .binding_state(
+                            &Binding::Property(PropertyId::new(layer, "camera.fStop")),
+                            time,
+                        )
+                        .ok()
+                        .and_then(|s| s.value.as_f64())
+                        .unwrap_or(0.);
+                    let dof_on = fstop > 0.;
+                    push(
+                        &mut groups,
+                        "Depth of Field",
+                        toggle(self, "3d.dof.enabled", "Depth of Field", dof_on),
+                    );
+                    if dof_on {
+                        let focus_dist = model
+                            .binding_state(
+                                &Binding::Property(PropertyId::new(layer, "camera.focusDistance")),
+                                time,
+                            )
+                            .ok()
+                            .and_then(|s| s.value.as_f64())
+                            .unwrap_or(0.);
+                        if let Ok((focus_val, focus_opts)) =
+                            pm_panel_studio3d::properties::dof_focus_options(
+                                model.published(),
+                                layer,
+                                time,
+                                focus_dist,
+                            )
+                        {
+                            let lease = self.control_lease("3d.dof.focusTarget");
+                            push(
+                                &mut groups,
+                                "Depth of Field",
+                                row(
+                                    "3d.dof.focusTarget",
+                                    "Focus On",
+                                    json!({"kind":"choice","binding":lease,"value":focus_val,"options":focus_opts}),
+                                ),
+                            );
+                        }
+                        let iris_blades = model
+                            .binding_state(
+                                &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
+                                time,
+                            )
+                            .ok()
+                            .and_then(|s| s.value.as_f64())
+                            .map(|v| v.round() as i64)
+                            .unwrap_or(0);
+                        let iris_val = match iris_blades {
+                            5 | 6 | 7 | 8 => iris_blades.to_string(),
+                            _ => "0".to_owned(),
+                        };
+                        let lease = self.control_lease("3d.dof.irisShape");
+                        push(
+                            &mut groups,
+                            "Depth of Field",
+                            row(
+                                "3d.dof.irisShape",
+                                "Bokeh Shape",
+                                json!({"kind":"choice","binding":lease,"value":iris_val,"options":[
+                                    {"v":"0","label":"Circular"},
+                                    {"v":"5","label":"Pentagon (5 Blades)"},
+                                    {"v":"6","label":"Hexagon (6 Blades)"},
+                                    {"v":"7","label":"Heptagon (7 Blades)"},
+                                    {"v":"8","label":"Octagon (8 Blades)"}]}),
+                            ),
+                        );
+                    }
+                }
             }
         }
+        let camera_dof_on = role == Role::Camera
+            && data["camera"]["projection"] != "orthographic"
+            && model
+                .binding_state(
+                    &Binding::Property(PropertyId::new(layer, "camera.fStop")),
+                    time,
+                )
+                .ok()
+                .and_then(|s| s.value.as_f64())
+                .unwrap_or(0.)
+                > 0.;
+        let camera_iris_blades = if camera_dof_on {
+            model
+                .binding_state(
+                    &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
+                    time,
+                )
+                .ok()
+                .and_then(|s| s.value.as_f64())
+                .unwrap_or(0.)
+        } else {
+            0.
+        };
         for field in fields {
+            if field.group == "Depth of Field" && !camera_dof_on {
+                continue;
+            }
+            if field.id == "camera.irisRoundness" && camera_iris_blades < 3. {
+                continue;
+            }
             let binding = Binding::Property(PropertyId::new(layer, &field.id));
             let state = match model.binding_state(&binding, time) {
                 Ok(state) => state,
@@ -1859,6 +2071,15 @@ impl Properties {
                 }
                 ("number", Value::Number(_)) => {
                     let fine = field.max.is_some_and(|max| max <= 2.);
+                    let step = if matches!(field.id.as_str(), "camera.fStop" | "camera.focusDistance") {
+                        0.1
+                    } else if field.id == "camera.irisAspect" {
+                        0.05
+                    } else if fine {
+                        0.01
+                    } else {
+                        1.
+                    };
                     // A small value (fog density 0.002) shows its first two
                     // significant digits instead of reading "0".
                     let n = value.as_f64().unwrap_or(0.).abs();
@@ -1872,7 +2093,7 @@ impl Properties {
                     } else {
                         2
                     };
-                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":floor.max(small)});
+                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":step,"precision":floor.max(small)});
                     if let Some(min) = field.min {
                         axis["min"] = json!(min);
                     }
@@ -2867,6 +3088,47 @@ impl Properties {
                 V4Plan::Service(_) => Err("Expected an edit".into()),
             };
         }
+        if self
+            .handles
+            .iter()
+            .any(|(path, h)| h == handle && path == "25d.dof.enabled")
+        {
+            let layer = model.primary().ok_or("Choose a layer")?.to_owned();
+            let on = value.as_bool().ok_or("Expected checkbox")?;
+            let mut commands: Vec<pm_kernel::Command> = Vec::new();
+            let mut set_blur = pm_kernel::commands::properties::SetProperty::new(
+                &layer,
+                "dofBlur",
+                pm_model::Value::Number(if on { 35.0 } else { 0.0 }),
+                time,
+            );
+            set_blur.preserve_hand_edits = false;
+            set_blur.mark_intent = true;
+            commands.push(pm_kernel::PropertyCommand::Set(set_blur).into());
+            if on
+                && model
+                    .binding_state(&Binding::Property(PropertyId::new(&layer, "dofFocus")), time)
+                    .is_err()
+            {
+                let mut set_focus = pm_kernel::commands::properties::SetProperty::new(
+                    &layer,
+                    "dofFocus",
+                    pm_model::Value::Number(0.0),
+                    time,
+                );
+                set_focus.preserve_hand_edits = false;
+                set_focus.mark_intent = true;
+                commands.push(pm_kernel::PropertyCommand::Set(set_focus).into());
+            }
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Depth of Field".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
+                },
+            ));
+        }
         if let Some(control) = self
             .handles
             .iter()
@@ -3145,12 +3407,18 @@ impl Properties {
             )));
         }
         let row = intent["row"].as_str().unwrap_or("");
-        let path = match row {
-            "position" => "position.x",
-            "scale" => "scale.x",
-            "anchor" => "anchor.x",
-            _ => row,
-        };
+        let group_channels = self.row_channels.get(row).cloned();
+        let path = group_channels
+            .as_ref()
+            .and_then(|channels| channels.first().map(String::as_str))
+            .unwrap_or(match row {
+                "position" => "position.x",
+                "scale" => "scale.x",
+                "anchor" => "anchor.x",
+                "orientation" => "orientation.x",
+                "rotation3d" => "rotation.x",
+                _ => row,
+            });
         if intent["type"] == "collapse" {
             self.collapsed.insert(
                 intent["section"].as_str().ok_or("section")?.into(),
@@ -3223,17 +3491,16 @@ impl Properties {
             return self.write(model, caller, handle, value, time).map(Some);
         }
         let group;
-        let handle = if matches!(row, "position" | "scale" | "anchor") {
+        let has_group = group_channels.as_ref().is_some_and(|c| c.len() > 1);
+        let handle = if let Some(channels) = group_channels.as_ref().filter(|c| c.len() > 1) {
             let layer = model.primary().ok_or("No selected layer")?.to_owned();
             group = self
                 .adapter
                 .register(
                     model,
-                    ["x", "y"]
+                    channels
                         .iter()
-                        .map(|axis| {
-                            Binding::Property(PropertyId::new(&layer, format!("{row}.{axis}")))
-                        })
+                        .map(|channel| Binding::Property(PropertyId::new(&layer, channel)))
                         .collect(),
                 )
                 .map_err(|e| e.to_string())?;
@@ -3249,7 +3516,7 @@ impl Properties {
                 .adapter
                 .read(model, handle, time)
                 .map(|states| states.into_iter().find_map(|s| s.expression));
-            if matches!(row, "position" | "scale" | "anchor") {
+            if has_group {
                 self.adapter.dispose(handle);
             }
             let targets = targets.map_err(|e| e.to_string())?;
@@ -3311,7 +3578,7 @@ impl Properties {
             self.commands
                 .push(("timeline.focusGraph".into(), vec![json!(layer), json!(path)]));
         }
-        if matches!(row, "position" | "scale" | "anchor") {
+        if has_group {
             self.adapter.dispose(handle);
         }
         match result.map_err(|e| e.to_string())? {

@@ -281,6 +281,11 @@ pub struct Pose {
     /// Images and video keep their picture's aspect, as in the shipped viewer.
     keeps_aspect: bool,
     world: [f64; 6],
+    /// Column-major 3×3 perspective homography for 2.5D 3D layers (`planeMatrix`).
+    plane: Option<[f64; 9]>,
+    /// Positioning homography (`planeMatrix(..., true)`) mapping parent-plane XY
+    /// at the layer's Z depth to composition pixels for 1:1 3D drag moves.
+    plane_pos: Option<[f64; 9]>,
     /// Rotation, skew and scale of the layer alone.
     linear: [f64; 4],
     /// Maps composition deltas into the layer's parent space.
@@ -374,9 +379,11 @@ struct Drag {
 }
 impl Drag {
     /// A move, or one layer's turn, predicts its outline as the pointer
-    /// goes; the rest wait for the kernel's read-back.
+    /// goes; the rest (and 2.5D 3D layers whose perspective shape changes
+    /// with position/rotation) wait for the kernel's read-back.
     fn draws_own_outline(&self) -> bool {
-        self.hit == Hit::Body || (self.hit == Hit::Rotate && self.poses.len() == 1)
+        !self.poses.iter().any(|p| p.plane.is_some())
+            && (self.hit == Hit::Body || (self.hit == Hit::Rotate && self.poses.len() == 1))
     }
 }
 #[derive(Clone, Copy)]
@@ -519,6 +526,51 @@ fn transform(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
         m[1] * p[0] + m[3] * p[1] + m[5],
     ]
 }
+pub(crate) fn project_plane(m: &[f64; 9], p: [f64; 2]) -> Option<[f64; 2]> {
+    let w = m[2] * p[0] + m[5] * p[1] + m[8];
+    if !w.is_finite() || w <= 1e-4 {
+        return None;
+    }
+    let x = (m[0] * p[0] + m[3] * p[1] + m[6]) / w;
+    let y = (m[1] * p[0] + m[4] * p[1] + m[7]) / w;
+    (x.is_finite() && y.is_finite()).then_some([x, y])
+}
+/// Project a 2D box `[x0, y0, x1, y1]` through `plane_matrix` for 2.5D 3D
+/// layers or 2D `world_matrix` for flat layers.
+pub(crate) fn project_box(
+    q: &mut pm_kernel::QueryContext,
+    id: &str,
+    time: f64,
+    bounds: pm_kernel::Bounds,
+) -> Option<([[f64; 2]; 4], Option<[f64; 9]>)> {
+    let local = [
+        [bounds.x0, bounds.y0],
+        [bounds.x1, bounds.y0],
+        [bounds.x1, bounds.y1],
+        [bounds.x0, bounds.y1],
+    ];
+    if q.is_3d_layer(None, id, time).unwrap_or(false) {
+        let plane = q.plane_matrix(None, id, time, false).ok()?;
+        let corners = [
+            project_plane(&plane, local[0])?,
+            project_plane(&plane, local[1])?,
+            project_plane(&plane, local[2])?,
+            project_plane(&plane, local[3])?,
+        ];
+        Some((corners, Some(plane)))
+    } else {
+        let world = q.world_matrix(None, id, time).ok()?;
+        Some((
+            [
+                transform(&world, local[0]),
+                transform(&world, local[1]),
+                transform(&world, local[2]),
+                transform(&world, local[3]),
+            ],
+            None,
+        ))
+    }
+}
 fn inverse_linear(m: [f64; 4]) -> Option<[f64; 4]> {
     let det = m[0] * m[3] - m[1] * m[2];
     (det.abs() > 1e-12).then(|| [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det])
@@ -575,8 +627,21 @@ impl Pose {
         let b = self.bounds;
         [b[0] + (b[2] - b[0]) * u, b[1] + (b[3] - b[1]) * v]
     }
+    fn to_local(&self, p: [f64; 2]) -> Option<[f64; 2]> {
+        if let Some(plane) = &self.plane {
+            let inv = pm_eval::space3d::inverse_plane(plane)?;
+            project_plane(&inv, p)
+        } else {
+            inverse_point(&self.world, p)
+        }
+    }
     fn handle(&self, index: usize) -> [f64; 2] {
         let (u, v) = HANDLES[index];
+        if let Some(plane) = &self.plane
+            && let Some(projected) = project_plane(plane, self.local(u, v))
+        {
+            return projected;
+        }
         let top = lerp(self.corners[0], self.corners[1], u);
         let bottom = lerp(self.corners[3], self.corners[2], u);
         lerp(top, bottom, v)
@@ -685,33 +750,156 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         } else {
             None
         };
+        let text_size = if kind == "text" {
+            content("size")
+        } else {
+            None
+        };
+        let has_skew = number("skew").is_some();
+        let rotation = number("rotation").unwrap_or(0.);
+        let is_3d = mirror.queries().is_3d_layer(None, id, time).unwrap_or(false);
+        let (plane, plane_pos, corners, anchor) = if is_3d {
+            let Ok(plane) = mirror.queries().plane_matrix(None, id, time, false) else {
+                continue;
+            };
+            let plane_pos = mirror.queries().plane_matrix(None, id, time, true).ok();
+            // For a 3D group whose children have independent Z depth or 3D tilt,
+            // expand the group's plane bounds so its perspective box encloses all
+            // active descendants as rendered.
+            let mut b = bounds;
+            if kind == "group"
+                && let Some(inv_group) = pm_eval::space3d::inverse_plane(&plane)
+            {
+                let mut descendants: Vec<String> = Vec::new();
+                for info in &list {
+                    if info.kind == "group" {
+                        continue;
+                    }
+                    let mut cur = info.group.as_deref();
+                    while let Some(g) = cur {
+                        if g == id {
+                            descendants.push(info.id.clone());
+                            break;
+                        }
+                        cur = list
+                            .iter()
+                            .find(|l| l.id == g)
+                            .and_then(|l| l.group.as_deref());
+                    }
+                }
+                for child_id in descendants {
+                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
+                        continue;
+                    }
+                    let Ok(Some(cb)) =
+                        crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
+                    else {
+                        continue;
+                    };
+                    if let Some((cc, _)) = project_box(mirror.queries(), &child_id, time, cb) {
+                        for corner in cc {
+                            if let Some(in_group) = project_plane(&inv_group, corner) {
+                                b.x0 = b.x0.min(in_group[0]);
+                                b.y0 = b.y0.min(in_group[1]);
+                                b.x1 = b.x1.max(in_group[0]);
+                                b.y1 = b.y1.max(in_group[1]);
+                            }
+                        }
+                    }
+                }
+            }
+            let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                project_plane(&plane, [b.x0, b.y0]),
+                project_plane(&plane, [b.x1, b.y0]),
+                project_plane(&plane, [b.x1, b.y1]),
+                project_plane(&plane, [b.x0, b.y1]),
+            ) else {
+                continue;
+            };
+            let anchor = project_plane(&plane, local_anchor)
+                .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+            (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
+        } else {
+            let mut corners = [
+                transform(&world, [bounds.x0, bounds.y0]),
+                transform(&world, [bounds.x1, bounds.y0]),
+                transform(&world, [bounds.x1, bounds.y1]),
+                transform(&world, [bounds.x0, bounds.y1]),
+            ];
+            // A 2D group containing 3D children: project its active descendants
+            // through their own 3D plane matrices so the group box matches them.
+            if kind == "group" {
+                let mut any_3d_child = false;
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                for info in &list {
+                    if info.kind == "group" {
+                        continue;
+                    }
+                    let mut in_group = false;
+                    let mut cur = info.group.as_deref();
+                    while let Some(g) = cur {
+                        if g == id {
+                            in_group = true;
+                            break;
+                        }
+                        cur = list
+                            .iter()
+                            .find(|l| l.id == g)
+                            .and_then(|l| l.group.as_deref());
+                    }
+                    if !in_group || !mirror.queries().active(None, &info.id, time).unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Ok(Some(cb)) =
+                        crate::text_host::query(p, |q| q.bounds(None, &info.id, time))
+                    else {
+                        continue;
+                    };
+                    if let Some((cc, child_plane)) =
+                        project_box(mirror.queries(), &info.id, time, cb)
+                    {
+                        any_3d_child |= child_plane.is_some();
+                        for pt in cc {
+                            lo[0] = lo[0].min(pt[0]);
+                            lo[1] = lo[1].min(pt[1]);
+                            hi[0] = hi[0].max(pt[0]);
+                            hi[1] = hi[1].max(pt[1]);
+                        }
+                    }
+                }
+                if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+                    corners = [
+                        [lo[0], lo[1]],
+                        [hi[0], lo[1]],
+                        [hi[0], hi[1]],
+                        [lo[0], hi[1]],
+                    ];
+                }
+            }
+            (None, None, corners, transform(&world, local_anchor))
+        };
         poses.push(Pose {
             id: id.clone(),
             locked,
             root: roots.contains(id.as_str()),
             keeps_aspect: matches!(kind, "image" | "video"),
             world,
+            plane,
+            plane_pos,
             linear: [local[0], local[1], local[2], local[3]],
             to_parent,
             bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
             shape,
-            text_size: if kind == "text" {
-                content("size")
-            } else {
-                None
-            },
-            has_skew: number("skew").is_some(),
-            corners: [
-                transform(&world, [bounds.x0, bounds.y0]),
-                transform(&world, [bounds.x1, bounds.y0]),
-                transform(&world, [bounds.x1, bounds.y1]),
-                transform(&world, [bounds.x0, bounds.y1]),
-            ],
-            anchor: transform(&world, local_anchor),
+            text_size,
+            has_skew,
+            corners,
+            anchor,
             local_anchor,
             position: [px, py],
             scale: [sx, sy],
-            rotation: number("rotation").unwrap_or(0.),
+            rotation,
         });
     }
     Some(poses)
@@ -2329,6 +2517,8 @@ fn group_pose(poses: &[Pose]) -> Option<Pose> {
         root: false,
         keeps_aspect: false,
         world: [1., 0., 0., 1., 0., 0.],
+        plane: None,
+        plane_pos: None,
         linear: [1., 0., 0., 1.],
         to_parent: [1., 0., 0., 1.],
         bounds: [x0, y0, x1, y1],
@@ -2654,7 +2844,16 @@ fn commands(
         let id = &pose.id;
         match drag.hit {
             Hit::Body => {
-                let d = apply(pose.to_parent, delta);
+                let d = pose
+                    .plane_pos
+                    .as_ref()
+                    .and_then(pm_eval::space3d::inverse_plane)
+                    .and_then(|inv| {
+                        let a = project_plane(&inv, origin)?;
+                        let b = project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
+                        Some([b[0] - a[0], b[1] - a[1]])
+                    })
+                    .unwrap_or_else(|| apply(pose.to_parent, delta));
                 out.push(set(id, "position.x", pose.position[0] + d[0], t));
                 out.push(set(id, "position.y", pose.position[1] + d[1], t));
             }
@@ -2728,10 +2927,7 @@ fn resize(
     mods: Mods,
     t: f64,
 ) -> Vec<Command> {
-    let (Some(start), Some(now)) = (
-        inverse_point(&pose.world, origin),
-        inverse_point(&pose.world, at),
-    ) else {
+    let (Some(start), Some(now)) = (pose.to_local(origin), pose.to_local(at)) else {
         return vec![];
     };
     let (u, v) = HANDLES[index];
@@ -2839,19 +3035,12 @@ fn resize_shape(
         ),
     ]
 }
-/// A layer's box in the composition at `time`: its transformed bounds.
+/// A layer's box in the composition at `time`: its transformed bounds
+/// (perspective-projected through `planeMatrix` for 2.5D 3D layers).
 fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
-    let world = QueryMirror::new(p)
-        .queries()
-        .world_matrix(None, id, time)
-        .ok()?;
     let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
-    Some([
-        transform(&world, [b.x0, b.y0]),
-        transform(&world, [b.x1, b.y0]),
-        transform(&world, [b.x1, b.y1]),
-        transform(&world, [b.x0, b.y1]),
-    ])
+    let mut mirror = QueryMirror::new(p);
+    project_box(mirror.queries(), id, time, b).map(|(corners, _)| corners)
 }
 /// What a Select-tool double-click does, in viewer.ts order (onDown's
 /// remembered text, `drillTarget`, then the `dblclick` handler).
@@ -3256,14 +3445,36 @@ fn extruded_item(
     let depth = q("geo.depth", 0.).max(0.);
     let u = 6. / height.max(1.);
     let to_scene = |x: f64, y: f64, z: f64| [x * u - width * u / 2., 3. - y * u, -z * u];
+    let world3d = mirror.queries().world_3d(None, &pose.id, time, false).ok();
+    let [x0, y0, x1, y1] = pose.bounds;
     let mut lo = [f64::MAX; 3];
     let mut hi = [f64::MIN; 3];
-    for c in pose.corners {
-        for z in [position[2], position[2] + depth] {
-            let s = to_scene(c[0], c[1], z);
+    let box_corners = world3d.map(|m| {
+        let mut corners = [[0.; 3]; 8];
+        for (n, slot) in corners.iter_mut().enumerate() {
+            let lx = if n & 1 == 0 { x0 } else { x1 };
+            let ly = if n & 2 == 0 { y0 } else { y1 };
+            let lz = if n & 4 == 0 { 0. } else { depth };
+            let wx = m[0] * lx + m[4] * ly + m[8] * lz + m[12];
+            let wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13];
+            let wz = m[2] * lx + m[6] * ly + m[10] * lz + m[14];
+            let s = to_scene(wx, wy, wz);
+            *slot = s;
             for a in 0..3 {
                 lo[a] = lo[a].min(s[a]);
                 hi[a] = hi[a].max(s[a]);
+            }
+        }
+        corners
+    });
+    if box_corners.is_none() {
+        for c in pose.corners {
+            for z in [position[2], position[2] + depth] {
+                let s = to_scene(c[0], c[1], z);
+                for a in 0..3 {
+                    lo[a] = lo[a].min(s[a]);
+                    hi[a] = hi[a].max(s[a]);
+                }
             }
         }
     }
@@ -3282,6 +3493,7 @@ fn extruded_item(
         name,
         locked: pose.locked,
         bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
+        box_corners,
         pivot: to_scene(position[0], position[1], position[2]),
         target: None,
         aim: None,

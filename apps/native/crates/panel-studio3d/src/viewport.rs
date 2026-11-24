@@ -24,6 +24,10 @@ pub struct Item {
     pub locked: bool,
     /// World-space box (axis aligned).
     pub bounds: Bounds,
+    /// Oriented 8 world-space corners of the object's local bounding box
+    /// (bit 0 = +X, bit 1 = +Y, bit 2 = +Z), so selection wireframes match
+    /// rotated 3D objects tightly rather than expanding to a world AABB.
+    pub box_corners: Option<[Vec3; 8]>,
     /// Where handles sit: the layer's world origin.
     pub pivot: Vec3,
     /// The light's aim point, for lights (world space).
@@ -514,6 +518,21 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                 let Ok(bounds) = pm_scene3d::geometry::transform(local, *world) else {
                     continue;
                 };
+                let box_corners = (0..8)
+                    .map(|n| {
+                        let c: Vec3 = std::array::from_fn(|i| {
+                            if n & (1 << i) == 0 {
+                                local.min[i]
+                            } else {
+                                local.max[i]
+                            }
+                        });
+                        pm_scene3d::geometry::transform(Bounds { min: c, max: c }, *world)
+                            .ok()
+                            .map(|b| b.min)
+                    })
+                    .collect::<Option<Vec<Vec3>>>()
+                    .and_then(|v| v.try_into().ok());
                 items.push(Item {
                     position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
                     rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
@@ -524,6 +543,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     name,
                     locked,
                     bounds,
+                    box_corners,
                     pivot: translation(world),
                     target: None,
                     aim: None,
@@ -550,6 +570,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                         min: [pivot[0] - s, pivot[1] - s, pivot[2] - s],
                         max: [pivot[0] + s, pivot[1] + s, pivot[2] + s],
                     },
+                    box_corners: None,
                     pivot,
                     target: r.targets.get(&id).copied(),
                     aim: Some(light_values(
@@ -697,6 +718,7 @@ mod tests {
             name: id.into(),
             locked: false,
             bounds: b(z),
+            box_corners: None,
             pivot: [0., 0., z],
             target: None,
             aim: None,

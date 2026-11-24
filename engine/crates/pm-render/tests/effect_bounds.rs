@@ -27,6 +27,18 @@ fn blur2(amount: f64, repeat_edges: bool) -> Value {
 fn blur1(amount: f64) -> Value {
     json!({"id":"b1","type":"blur","version":1,"on":true,"p":{"amount":ch(json!(amount))}})
 }
+fn shadow1(distance: f64, angle: f64, softness: f64, opacity: f64) -> Value {
+    json!({"id":"s1","type":"shadow","version":1,"on":true,"p":{
+        "distance":ch(json!(distance)),"angle":ch(json!(angle)),
+        "softness":ch(json!(softness)),"opacity":ch(json!(opacity)),
+        "color":ch(json!("#182040"))}})
+}
+fn shadow2(distance: f64, angle: f64, softness: f64, opacity: f64, shadow_only: bool) -> Value {
+    json!({"id":"s2","type":"shadow","version":2,"on":true,"p":{
+        "color":ch(json!("#201030")),"opacity":ch(json!(opacity)),
+        "angle":ch(json!(angle)),"distance":ch(json!(distance)),
+        "softness":ch(json!(softness)),"shadowOnly":ch(json!(shadow_only))}})
+}
 fn glow(threshold: f64, radius: f64, intensity: f64) -> Value {
     json!({"id":"g","type":"glow","version":1,"on":true,"p":{
         "threshold":ch(json!(threshold)),"radius":ch(json!(radius)),"intensity":ch(json!(intensity))}})
@@ -247,6 +259,44 @@ fn wide_reaches_stay_bit_identical() {
         };
         compare(&mut r, &v, 0., &variant, &format!("amount {amount}"));
     }
+}
+
+/// Drop Shadow v1 and v2 are zero-preserving and scissor bit-identically
+/// across angles, distances, softness, shadow-only mode, rotation, and scale.
+#[test]
+fn shadow_v1_and_v2_scissored_passes_are_bit_identical() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let mut a = solid("a", "#F0C040", 32, 24, 90., 60.);
+    a["p"]["rotation"] = ch(json!(28.));
+    a["fx"] = json!([shadow2(18., 135., 16., 75., false)]);
+    let mut b = solid("b", "#40A0F0", 28, 20, 175., 95.);
+    b["fx"] = json!([shadow2(12., -45., 24., 85., true)]);
+    let mut c = solid("c", "#E04080", 26, 22, 60., 110.);
+    c["fx"] = json!([shadow1(14., 210., 18., 70.)]);
+    let v = project(W, H, 2., no_fill(), vec![a, b, c]);
+    let mut hits = 0;
+    for (precision, linear, kind, scale) in [
+        (Precision::Float16, false, OutputKind::Final, 1.0),
+        (Precision::Float32, true, OutputKind::Final, 1.0),
+        (Precision::Float16, false, OutputKind::Preview, 1.5),
+    ] {
+        let variant = Variant {
+            precision,
+            linear,
+            kind,
+            region: None,
+            scale,
+        };
+        hits += compare(
+            &mut r,
+            &v,
+            0.,
+            &variant,
+            &format!("shadow {precision:?} linear {linear} {kind:?} scale {scale}"),
+        );
+    }
+    assert!(hits > 0, "shadow passes were not scissored");
 }
 
 /// Steps that can lift a transparent pixel are never scissored, nor is any

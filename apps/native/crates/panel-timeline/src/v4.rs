@@ -393,16 +393,25 @@ pub async fn dispatch(
                             .ok_or(Error::InvalidIntent("numeric property"))
                     };
                 let baseline = evaluated(&mut mirror, &path)?;
-                if matches!(path.as_str(), "scale.x" | "scale.y") {
-                    let paired = if path == "scale.x" {
-                        "scale.y"
-                    } else {
-                        "scale.x"
-                    };
-                    let other = evaluated(&mut mirror, paired)?;
+                if matches!(path.as_str(), "scale.x" | "scale.y" | "scale.z") {
+                    let three_d = client
+                        .model
+                        .index
+                        .layer(&layer)
+                        .is_some_and(|l| l.three_d);
+                    let mut peers = Vec::new();
+                    for paired in ["scale.x", "scale.y", "scale.z"] {
+                        if paired == path || (paired == "scale.z" && !three_d) {
+                            continue;
+                        }
+                        if client.model.index.channel(&layer, paired).is_none() {
+                            continue;
+                        }
+                        peers.push((paired, evaluated(&mut mirror, paired)?));
+                    }
                     for call in client
                         .model
-                        .scale_value(&layer, &path, value, context.time, baseline, other)?
+                        .scale_values(&layer, &path, value, context.time, baseline, &peers)?
                         .calls
                     {
                         if let pm_kernel::Call::Transact {

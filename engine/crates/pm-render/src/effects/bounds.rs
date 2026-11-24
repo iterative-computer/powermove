@@ -54,6 +54,13 @@ enum Kind {
     /// Levels v2: zero outside the layer; inside, a zero pixel maps through
     /// `level` (checked on the parameters).
     Levels2,
+    /// Legacy Drop Shadow (`shadow` v1): pass 0 shifts alpha, passes 1–2 blur
+    /// alpha, pass 2 composites `orig + (color * a, a) * (1 - orig.a)`.
+    Shadow1,
+    /// Main Drop Shadow (`shadow` v2): pass 0 shifts alpha via `samplePixel`
+    /// (zero outside source), passes 1–2 blur alpha via `samplePixel`, pass 2
+    /// composites `orig + shaded * (1 - orig.a)` (or `shaded` when shadowOnly).
+    Shadow2,
     /// A reviewed extension (`dot-matrix-resolve` 1.2.0: one pass, reading
     /// only its input, `u_tex`), pinned by its SHA-256. Reviewed properties,
     /// for finite parameters:
@@ -114,6 +121,18 @@ const REVIEWED: &[(&str, u64, &str, Kind)] = &[
         2,
         "29cef8b783bb856e0a199a2a3f20f74c1c3f0b5fba3b7b32f8b7f8e11fb2b3c0",
         Kind::Levels2,
+    ),
+    (
+        "shadow",
+        1,
+        "6e62e717d61823f806bb0d2728ce5ebbfcd513fd2566f0709248678b055b5ee9",
+        Kind::Shadow1,
+    ),
+    (
+        "shadow",
+        2,
+        "1ddde3c5afbb931867a44229a273e240087a697643f25a07a962909295d0cea1",
+        Kind::Shadow2,
     ),
 ];
 
@@ -265,7 +284,8 @@ fn levels2_keeps_zero(step: &EffectStep) -> bool {
 fn finite(step: &EffectStep) -> bool {
     step.params.iter().all(|p| match &p.value {
         Binding::Float(v) => v.is_finite(),
-        _ => true,
+        Binding::Color(rgb) => rgb.iter().all(|v| v.is_finite()),
+        Binding::Stops(_) => true,
     })
 }
 
@@ -292,7 +312,7 @@ fn keeps_zero(kind: Kind, step: &EffectStep) -> bool {
         return false;
     }
     match kind {
-        Kind::LegacyBlur | Kind::Glow1 | Kind::KeepsClear => true,
+        Kind::LegacyBlur | Kind::Glow1 | Kind::KeepsClear | Kind::Shadow1 | Kind::Shadow2 => true,
         Kind::Blur2 => value(step, "repeatEdgePixels").is_some_and(|v| v <= 0.5),
         Kind::Levels2 => levels2_keeps_zero(step),
         // Reviewed as one pass of its own input (the pin already excludes
@@ -587,7 +607,7 @@ pub(crate) mod tests {
     #[test]
     fn legacy_builtins_are_reviewed_sources() {
         let set = crate::effects::builtin_definitions();
-        for id in ["blur", "glow", "color", "levels"] {
+        for id in ["blur", "glow", "color", "levels", "shadow"] {
             let def = set
                 .definitions
                 .iter()
@@ -596,12 +616,12 @@ pub(crate) mod tests {
             assert!(kind_of(def).is_some(), "{id}");
         }
         // Others are never bounded.
-        let shadow = set
+        let vignette = set
             .definitions
             .iter()
-            .find(|d| d.id.as_str() == "shadow")
+            .find(|d| d.id.as_str() == "vignette")
             .unwrap();
-        assert_eq!(kind_of(shadow), None);
+        assert_eq!(kind_of(vignette), None);
     }
 
     /// A synthetic stand-in for the wrapped source of a reviewed extension

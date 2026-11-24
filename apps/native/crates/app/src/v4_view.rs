@@ -380,6 +380,7 @@ struct ScrubDrag {
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     motion: pm_surface::kit::NumericMotion,
+    pub(super) infinite: crate::infinite_drag::InfiniteDrag,
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
@@ -505,6 +506,7 @@ pub struct SurfaceView {
     /// in they are this frame, 0–1. Set before the motion frame steps.
     presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
+    _escape_intercept: Subscription,
     focus_events: std::collections::BTreeSet<Id>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -722,6 +724,22 @@ impl SurfaceView {
             ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
+            _escape_intercept: {
+                let cancelled = cx.entity().downgrade();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        let _ = cancelled.update(cx, |v, cx| {
+                            if v.scrub.is_some() && v.cancel_gesture(cx) {
+                                cx.stop_propagation();
+                            } else if v.dragging.is_some() {
+                                cx.stop_active_drag(window);
+                                v.end_drag(cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                })
+            },
             focus_events: Default::default(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -3562,6 +3580,7 @@ impl SurfaceView {
                 f64::from(event.position.x),
                 number.value,
             ),
+            infinite: crate::infinite_drag::InfiniteDrag::new(),
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
@@ -3589,19 +3608,35 @@ impl SurfaceView {
             return;
         };
         let n = drag.number;
-        let Some(value) = drag.motion.sample(
-            f64::from(x),
-            threshold as f64,
-            n.step,
-            n.speed,
-            modifiers.shift,
-            modifiers.alt,
-            (n.min, n.max),
-        ) else {
+        let sampled = if let Some(dx) = drag.infinite.take_delta_x() {
+            drag.motion.sample_delta(
+                dx,
+                threshold as f64,
+                n.step,
+                n.speed,
+                modifiers.shift,
+                modifiers.alt,
+                (n.min, n.max),
+            )
+        } else {
+            drag.motion.sample(
+                f64::from(x),
+                threshold as f64,
+                n.step,
+                n.speed,
+                modifiers.shift,
+                modifiers.alt,
+                (n.min, n.max),
+            )
+        };
+        let Some(value) = sampled else {
             return;
         };
         let began = !drag.active;
         drag.active = true;
+        if began {
+            drag.infinite.engage();
+        }
         let id = drag.id;
         if !began && self.scrub_shown == Some((id, value)) {
             return;
@@ -3922,20 +3957,6 @@ impl SurfaceView {
                             v.release_pointer(event.position, 1, event.modifiers, cx);
                         }
                     });
-                });
-                let cancelled = weak.clone();
-                window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Capture && event.keystroke.key == "escape" {
-                        let _ = cancelled.update(cx, |v, cx| {
-                            if v.scrub.is_some() && v.cancel_gesture(cx) {
-                                cx.stop_propagation();
-                            } else if v.dragging.is_some() {
-                                cx.stop_active_drag(window);
-                                v.end_drag(cx);
-                                cx.stop_propagation();
-                            }
-                        });
-                    }
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {

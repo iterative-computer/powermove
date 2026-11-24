@@ -2130,3 +2130,129 @@ fn enabling_three_d_initializes_missing_channels_and_depth_affects_projection() 
     );
     assert_ne!(projected_anchor(&store, "box"), before);
 }
+
+#[test]
+fn duplicate_group_duplicates_all_children_and_nested_subgroups_with_remapped_links() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"g1","type":"group","name":"Card","from":0,"dur":4,"on":true,"p":{"position.x":{"v":100,"kf":[]},"position.y":{"v":100,"kf":[]}},"d":{},"fx":[]},
+                    {"id":"c1","type":"shape","name":"BG","group":"g1","from":0,"dur":4,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"g2","type":"group","name":"Inner","group":"g1","from":0,"dur":4,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]}},"d":{},"fx":[]},
+                    {"id":"c2","type":"shape","name":"Icon","group":"g2","parent":"c1","matteSource":"c1","from":0,"dur":4,"on":true,"p":{"position.x":{"v":10,"kf":[]},"position.y":{"v":10,"kf":[]}},"d":{"w":20,"h":20},"fx":[{"id":"fx1","type":"displacement","on":true,"p":{},"inputs":{"map":{"layerId":"c1"}}}]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+
+    run(
+        &mut s,
+        LayerCommand::Duplicate {
+            layer_ids: vec!["g1".into()],
+            new_ids: vec!["g1_copy".into()],
+        },
+    );
+
+    let arr: Vec<Value> = ids(&s).into_iter().map(|id| layer(&s, &id)).collect();
+    assert_eq!(arr.len(), 8, "original 4 + duplicated 4");
+
+    // Originals stay intact.
+    assert!(arr.iter().any(|l| l.get("id").and_then(Value::as_str) == Some("g1")));
+    assert_eq!(
+        layer(&s, "c1").get("group").and_then(Value::as_str),
+        Some("g1")
+    );
+    assert_eq!(
+        layer(&s, "c2").get("group").and_then(Value::as_str),
+        Some("g2")
+    );
+
+    // Duplicated group has fresh duplicated direct child and nested subgroup + grandchild.
+    let copy_children: Vec<&Value> = arr
+        .iter()
+        .filter(|l| l.get("group").and_then(Value::as_str) == Some("g1_copy"))
+        .collect();
+    assert_eq!(copy_children.len(), 2, "copied BG and copied Inner subgroup");
+
+    let c1_copy = copy_children
+        .iter()
+        .find(|l| l.get("type").and_then(Value::as_str) == Some("shape"))
+        .expect("copied BG");
+    let c1_copy_id = c1_copy.get("id").and_then(Value::as_str).unwrap();
+    assert_ne!(c1_copy_id, "c1");
+
+    let g2_copy = copy_children
+        .iter()
+        .find(|l| l.get("type").and_then(Value::as_str) == Some("group"))
+        .expect("copied Inner subgroup");
+    let g2_copy_id = g2_copy.get("id").and_then(Value::as_str).unwrap();
+    assert_ne!(g2_copy_id, "g2");
+
+    let c2_copy = arr
+        .iter()
+        .find(|l| l.get("group").and_then(Value::as_str) == Some(g2_copy_id))
+        .expect("copied grandchild Icon");
+    assert_ne!(c2_copy.get("id").and_then(Value::as_str), Some("c2"));
+    assert_eq!(
+        c2_copy.get("parent").and_then(Value::as_str),
+        Some(c1_copy_id),
+        "internal parent reference remapped to duplicated child"
+    );
+    assert_eq!(
+        c2_copy.get("matteSource").and_then(Value::as_str),
+        Some(c1_copy_id),
+        "internal matteSource remapped to duplicated child"
+    );
+    assert_eq!(
+        c2_copy
+            .get("fx")
+            .and_then(Value::as_array)
+            .and_then(|fx| fx.first())
+            .and_then(|e| e.get("inputs"))
+            .and_then(|i| i.get("map"))
+            .and_then(|m| m.get("layerId"))
+            .and_then(Value::as_str),
+        Some(c1_copy_id),
+        "internal fx layer input remapped to duplicated child"
+    );
+}
+
+#[test]
+fn duplicate_group_and_explicit_child_preserves_caller_ids_without_double_copy() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"g1","type":"group","name":"Card","from":0,"dur":4,"on":true,"p":{},"d":{},"fx":[]},
+                    {"id":"c1","type":"shape","name":"BG","group":"g1","from":0,"dur":4,"on":true,"p":{},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"c2","type":"shape","name":"FG","group":"g1","from":0,"dur":4,"on":true,"p":{},"d":{"w":50,"h":50},"fx":[]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+
+    run(
+        &mut s,
+        LayerCommand::Duplicate {
+            layer_ids: vec!["g1".into(), "c1".into()],
+            new_ids: vec!["g1_new".into(), "c1_new".into()],
+        },
+    );
+
+    let arr: Vec<Value> = ids(&s).into_iter().map(|id| layer(&s, &id)).collect();
+    assert_eq!(arr.len(), 6, "3 originals + 3 copies (no double copy of c1)");
+    assert_eq!(
+        layer(&s, "c1_new").get("group").and_then(Value::as_str),
+        Some("g1_new")
+    );
+    let children_of_copy = arr
+        .iter()
+        .filter(|l| l.get("group").and_then(Value::as_str) == Some("g1_new"))
+        .count();
+    assert_eq!(children_of_copy, 2);
+}

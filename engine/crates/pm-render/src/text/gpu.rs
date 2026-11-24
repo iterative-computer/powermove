@@ -631,6 +631,7 @@ pub struct TextGpu {
     raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
+    cache_budget: u64,
     // Cached rasters can still be sampled by this frame's encoder after an
     // LRU eviction. begin_frame gives them back to this pool only after the
     // preceding frame's submission.
@@ -1273,6 +1274,7 @@ impl TextGpu {
             raster_pool: TargetPool::new(),
             cache: HashMap::new(),
             cache_bytes: 0,
+            cache_budget: CACHE_BYTES,
             retired: VecDeque::new(),
             retired_bytes: 0,
             chunks_retired: Vec::new(),
@@ -2149,16 +2151,23 @@ impl TextGpu {
         self.stats.painted += 1;
         let view = raster.view.clone();
         self.insert(plan, precision, working, raster);
-        self.raster_pool.trim(CACHE_BYTES);
+        self.raster_pool.trim(self.cache_budget);
         Ok(view)
     }
 
+    /// Sets the standing raster cache ceiling (bytes of texel storage).
+    pub fn set_cache_budget(&mut self, bytes: u64) {
+        self.cache_budget = bytes;
+        self.evict(self.cache_budget, true);
+        self.raster_pool.trim(self.cache_budget);
+    }
+
     /// A frame's commands are submitted and own what they read: the rasters
-    /// it retired go, and the raster pool keeps at most [`CACHE_BYTES`] idle.
-    /// The glyph caches stay. Each holds at most its own cap
-    /// ([`CACHE_BYTES`] of rasters, [`IMAGE_CACHE_BYTES`] of color glyph
-    /// images, [`DIRECT_CACHE_BYTES`] of glyph outlines), so text a later
-    /// frame draws unchanged is neither resolved nor uploaded again.
+    /// it retired go, and the raster pool keeps at most the raster cache
+    /// budget idle. The glyph caches stay. Each holds at most its own cap
+    /// (rasters, [`IMAGE_CACHE_BYTES`] of color glyph images,
+    /// [`DIRECT_CACHE_BYTES`] of glyph outlines), so text a later frame draws
+    /// unchanged is neither resolved nor uploaded again.
     pub fn end_frame(&mut self) {
         self.frame_glyphs.submitted();
         self.item_uniforms.reset();
@@ -2166,7 +2175,7 @@ impl TextGpu {
             self.raster_pool.release(target);
         }
         self.retired_bytes = 0;
-        self.raster_pool.trim(CACHE_BYTES);
+        self.raster_pool.trim(self.cache_budget);
     }
 
     /// Evicts least recently used rasters until the cache holds at most
@@ -2241,11 +2250,12 @@ impl TextGpu {
         target: Target,
     ) {
         let bytes = target.bytes();
-        if bytes > CACHE_BYTES / 2 {
+        let budget = self.cache_budget;
+        if bytes > budget / 2 {
             self.raster_pool.release(target);
             return;
         }
-        self.evict(CACHE_BYTES.saturating_sub(bytes), true);
+        self.evict(budget.saturating_sub(bytes), true);
         self.cache_bytes += bytes;
         self.cache.insert(
             (plan.key, precision, working),
@@ -3334,10 +3344,12 @@ mod atlas_tests {
                         let uploads = atlas.stats.image_uploads - before.image_uploads;
                         let pages = atlas.stats.image_pages - before.image_pages;
                         if !uploaded.contains(&working) {
+                            let first = uploaded.is_empty();
                             uploaded.push(working);
                             // 14 masks (one also blurred), a rotated mask
-                            // and a float image, on one page.
-                            assert_eq!((uploads, pages), (16, 1), "{label}");
+                            // and a float image; both encodings share the
+                            // first 512x512 atlas page.
+                            assert_eq!((uploads, pages), (16, u64::from(first)), "{label}");
                         } else {
                             // The same masks at another scale, phase or
                             // precision: all cached.

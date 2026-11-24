@@ -463,11 +463,10 @@ impl DocumentSource {
             .capture_bindings
             .lock()
             .map_err(|_| "Material capture bindings poisoned")?;
-        let Some(frame) = bindings
-            .as_ref()
-            .filter(|b| b.request == *request)
-            .and_then(|b| b.frames.get(&(owner.into(), map_key(source))))
-        else {
+        let Some(bindings) = bindings.as_ref().filter(|b| b.request == *request) else {
+            return Err("Live layer/group material capture is not ready".into());
+        };
+        let Some(frame) = bindings.frames.get(&(owner.into(), map_key(source))) else {
             return Ok(None);
         };
         Ok(frame
