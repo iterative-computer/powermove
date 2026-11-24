@@ -194,17 +194,29 @@ impl Environment {
             compatible: None,
         }
     }
-    /// Explicit override, then an updated managed runtime, then the bundled one.
+    /// Managed on-demand runtime installs live under the profile's `runtimes` folder.
+    pub fn runtimes_root(&self) -> PathBuf {
+        self.profile.join("runtimes")
+    }
+    /// Explicit override, then an on-demand managed runtime, then a bundled one.
     pub fn binary(&self, provider: Runtime) -> Option<PathBuf> {
         let name = provider.name();
         let bundled = || Some(self.resources.as_ref()?.join(name).join("bin").join(name));
-        let managed =
-            runtime::candidate(&self.profile.join("runtimes"), provider, &self.app_version);
+        let root = self.runtimes_root();
+        let pin = runtime::bundled_pin(provider, runtime::current_arch());
+        let managed = runtime::candidate_for_pin(&root, &pin)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                runtime::candidate(&root, provider, &self.app_version)
+                    .ok()
+                    .flatten()
+            });
         [
             self.vars
                 .get(&format!("{}_BINARY", name.to_uppercase()))
                 .map(PathBuf::from),
-            managed.ok().flatten(),
+            managed,
             bundled(),
         ]
         .into_iter()
@@ -416,7 +428,7 @@ fn compatible(env: &Environment, request: Request, token: &str) -> Result<Handle
     Ok(compatible::start(host, run))
 }
 fn missing(name: &str) -> String {
-    format!("Powermove's built-in {name} runtime is missing. Reinstall Powermove.")
+    format!("Sign in to {name} in Settings to download and connect its runtime.")
 }
 fn claude(
     env: &Environment,

@@ -253,6 +253,10 @@ fn codex_update_retains_helper_binary_and_resource_tree() {
             "package/vendor/aarch64-apple-darwin/codex-resources/runtime.json",
             b"{\"version\":1}".as_slice(),
         ),
+        (
+            "package/vendor/aarch64-apple-darwin/codex-resources/voice/model.bin",
+            b"unused voice payload".as_slice(),
+        ),
     ] {
         let archive = tar(name, b'0', data);
         let mut raw = vec![];
@@ -271,6 +275,7 @@ fn codex_update_retains_helper_binary_and_resource_tree() {
     f.metadata["dist"]["integrity"] = json!(p.integrity);
     let binary = runtime::install(&t.0, "app", &p, &mut f, &mut Version("1.2.3")).unwrap();
     let root = binary.parent().unwrap().parent().unwrap();
+    assert!(!root.join("package.tgz").exists());
     assert_eq!(
         fs::read(root.join("bin/codex-code-mode-host")).unwrap(),
         b"native helper"
@@ -280,4 +285,24 @@ fn codex_update_retains_helper_binary_and_resource_tree() {
         b"native search"
     );
     assert!(root.join("codex-resources/runtime.json").is_file());
+    assert!(!root.join("codex-resources/voice").exists());
+}
+#[test]
+fn pin_keyed_lookup_survives_app_updates_and_prunes_inactive_versions() {
+    let t = Temp::new();
+    let root = t.0.join("runtimes");
+    let (p, mut f) = fake(Runtime::Claude, "package/claude", b'0');
+    let first = runtime::install(&root, "app-1", &p, &mut f, &mut Version("1.2.3")).unwrap();
+    let second = runtime::install(&root, "app-2", &p, &mut f, &mut Version("1.2.3")).unwrap();
+    assert_eq!(
+        runtime::candidate_for_pin(&root, &p).unwrap(),
+        Some(second.clone())
+    );
+    let mut different = p.clone();
+    different.version = "9.9.9".into();
+    assert_eq!(runtime::candidate_for_pin(&root, &different).unwrap(), None);
+    let removed = runtime::prune_inactive(&root, Runtime::Claude).unwrap();
+    assert_eq!(removed, 1);
+    assert!(!first.exists());
+    assert!(second.exists());
 }

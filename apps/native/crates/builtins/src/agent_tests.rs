@@ -886,7 +886,13 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     let mut environment = environment(root.path(), "reply");
     environment.resources = None;
     let mut panel = Agent::mount(&actor, environment);
-    assert!(panel.text().contains("runtime is missing"));
+    let accounts = panel.panels.broker.agent.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while accounts.connection(Provider::Chatgpt).0 == "checking" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(panel.text().contains("Connect ChatGPT"));
     panel.panels.close();
 }
 #[test]

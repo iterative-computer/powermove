@@ -34,6 +34,16 @@ pub enum Arch {
     Arm64,
     X64,
 }
+pub fn current_arch() -> Arch {
+    #[cfg(target_arch = "x86_64")]
+    {
+        Arch::X64
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Arch::Arm64
+    }
+}
 impl Arch {
     fn name(self) -> &'static str {
         match self {
@@ -89,6 +99,8 @@ pub trait Probe {
 pub struct Installed {
     pub version: String,
     pub app_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
 }
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn unique() -> String {
@@ -203,6 +215,7 @@ pub fn install(
     }
     real_dir(root)?;
     let root = fs::canonicalize(root)?;
+    exclude_from_backup(&root);
     let versions = root.join(".versions");
     real_dir(&versions)?;
     // Never replace a previous version directory, even on same-version retries.
@@ -213,6 +226,21 @@ pub fn install(
         unique()
     ));
     fs::create_dir(&target)?;
+    struct CleanupGuard<'a> {
+        path: &'a Path,
+        armed: bool,
+    }
+    impl Drop for CleanupGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = fs::remove_dir_all(self.path);
+            }
+        }
+    }
+    let mut cleanup = CleanupGuard {
+        path: &target,
+        armed: true,
+    };
     let archive = target.join("package.tgz");
     let mut source = registry.download(url)?;
     let mut out = OpenOptions::new()
@@ -224,12 +252,15 @@ pub fn install(
         &mut out,
     )?;
     out.sync_all()?;
+    drop(out);
     if n > 512 * 1024 * 1024 || digest_file(&archive)? != pin.integrity {
         return Err(error(
             "The downloaded runtime didn’t match its published checksum.",
         ));
     }
     extract(&archive, &target, pin)?;
+    // Drop the verified tarball once extracted so we never keep ~100 MB archives on disk.
+    fs::remove_file(&archive)?;
     let binary = target.join("bin").join(pin.provider.name());
     #[cfg(unix)]
     {
@@ -240,13 +271,12 @@ pub fn install(
     if !observed.split_whitespace().any(|v| v == pin.version) {
         return Err(error("Installed runtime reports a different version"));
     }
-    atomic_write(
-        &target.join("installed.json"),
-        &serde_json::to_vec(&Installed {
-            version: pin.version.clone(),
-            app_version: app_version.into(),
-        })?,
-    )?;
+    let installed = Installed {
+        version: pin.version.clone(),
+        app_version: app_version.into(),
+        integrity: Some(pin.integrity.clone()),
+    };
+    atomic_write(&target.join("installed.json"), &serde_json::to_vec(&installed)?)?;
     sync_tree(&target)?;
     #[cfg(unix)]
     {
@@ -256,19 +286,38 @@ pub fn install(
         fs::rename(staged, root.join(pin.provider.name()))?;
         File::open(&root)?.sync_all()?;
     }
+    cleanup.armed = false;
     // Legacy metadata remains compatible; discovery validates metadata embedded
     // in the atomically swapped tree, surviving death before this sidecar write.
     atomic_write(
         &root.join(format!("{}.json", pin.provider.name())),
-        &serde_json::to_vec(&Installed {
-            version: pin.version.clone(),
-            app_version: app_version.into(),
-        })?,
+        &serde_json::to_vec(&installed)?,
     )?;
     Ok(binary)
 }
 /// Read only the managed versions tree. No caller-provided OAuth directory.
 pub fn candidate(root: &Path, provider: Runtime, app_version: &str) -> io::Result<Option<PathBuf>> {
+    let Some((installed, bin)) = resolve_installed(root, provider)? else {
+        return Ok(None);
+    };
+    if installed.app_version != app_version {
+        return Ok(None);
+    }
+    Ok(Some(bin))
+}
+/// Pin-keyed lookup: survives app updates while the reviewed runtime pin stays identical.
+pub fn candidate_for_pin(root: &Path, pin: &Pin) -> io::Result<Option<PathBuf>> {
+    let Some((installed, bin)) = resolve_installed(root, pin.provider)? else {
+        return Ok(None);
+    };
+    if installed.version != pin.version
+        || installed.integrity.as_deref() != Some(pin.integrity.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(bin))
+}
+fn resolve_installed(root: &Path, provider: Runtime) -> io::Result<Option<(Installed, PathBuf)>> {
     let link = root.join(provider.name());
     let target = match fs::canonicalize(&link) {
         Ok(v) => v,
@@ -279,16 +328,69 @@ pub fn candidate(root: &Path, provider: Runtime, app_version: &str) -> io::Resul
         return Err(error("Runtime link leaves managed versions"));
     }
     let installed: Installed = serde_json::from_slice(&fs::read(target.join("installed.json"))?)?;
-    if installed.app_version != app_version {
-        return Ok(None);
-    }
     let bin = target.join("bin").join(provider.name());
     let m = fs::symlink_metadata(&bin)?;
     if !m.is_file() || m.file_type().is_symlink() {
         return Err(error("Runtime is not a regular native binary"));
     }
-    Ok(Some(bin))
+    Ok(Some((installed, bin)))
 }
+/// Remove superseded `.versions/<provider>-*` directories that are no longer active.
+pub fn prune_inactive(root: &Path, provider: Runtime) -> io::Result<usize> {
+    let versions = match fs::canonicalize(root.join(".versions")) {
+        Ok(v) => v,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let active = fs::canonicalize(root.join(provider.name())).ok();
+    let prefix = format!("{}-", provider.name());
+    let mut removed = 0;
+    for entry in fs::read_dir(&versions)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let path = entry.path();
+        if active.as_ref().is_some_and(|a| fs::canonicalize(&path).ok().as_ref() == Some(a)) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() && fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+#[cfg(target_os = "macos")]
+fn exclude_from_backup(path: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    // Standard macOS `NSURLIsExcludedFromBackupKey` binary plist ("com.apple.backupd").
+    const EXCLUDE_PLIST: [u8; 61] = [
+        98, 112, 108, 105, 115, 116, 48, 48, 95, 16, 17, 99, 111, 109, 46, 97, 112, 112, 108,
+        101, 46, 98, 97, 99, 107, 117, 112, 100, 8, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28,
+    ];
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    let attr = c"com.apple.metadata:com_apple_backup_excludeItem";
+    unsafe {
+        let _ = libc::setxattr(
+            c_path.as_ptr(),
+            attr.as_ptr(),
+            EXCLUDE_PLIST.as_ptr().cast(),
+            EXCLUDE_PLIST.len(),
+            0,
+            0,
+        );
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn exclude_from_backup(_: &Path) {}
 /// Extract the reviewed native vendor tree, including required helpers and
 /// resources. Links, special files and path traversal are never followed.
 fn extract(archive: &Path, target: &Path, pin: &Pin) -> io::Result<()> {
@@ -344,7 +446,11 @@ fn extract(archive: &Path, target: &Path, pin: &Pin) -> io::Result<()> {
             Runtime::Claude => (name == "package/claude").then(|| "bin/claude".to_owned()),
             Runtime::Codex => name
                 .strip_prefix(&format!("package/vendor/{}/", pin.arch.triple()))
-                .filter(|s| !s.is_empty())
+                .filter(|s| {
+                    !s.is_empty()
+                        && *s != "codex-resources/voice"
+                        && !s.starts_with("codex-resources/voice/")
+                })
                 .map(str::to_owned),
         };
         if let Some(relative) = selected {
