@@ -429,14 +429,64 @@ pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Whether Paste can handle the system clipboard without reading image bytes.
+/// Live: a menu that offers Paste asks as it opens.
 pub fn has_pasteboard_content() -> bool {
-    let board = paste_board();
-    let types = objc2_foundation::NSArray::from_slice(&unsafe {
-        [NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF]
+    content_on(&paste_board())
+}
+fn content_on(board: &NSPasteboard) -> bool {
+    let (files_or_images, html) = advertised(board);
+    files_or_images || html && figma_html(board)
+}
+
+/// The same answer for the menus' state, which is asked on every frame the
+/// window draws. Which types the pasteboard advertises is kept by its change
+/// count (resolving them goes through LaunchServices); the HTML itself is
+/// read every time it decides, since a writer can replace it without the
+/// count moving (PM-698 review).
+pub fn has_pasteboard_content_per_frame() -> bool {
+    content_per_frame_on(paste_board())
+}
+fn content_per_frame_on(board: Retained<NSPasteboard>) -> bool {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<Option<(Retained<NSPasteboard>, isize, (bool, bool))>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let count = board.changeCount();
+    let known = KNOWN.with(|k| {
+        k.borrow()
+            .as_ref()
+            .filter(|(b, c, _)| Retained::as_ptr(b) == Retained::as_ptr(&board) && *c == count)
+            .map(|(_, _, types)| *types)
     });
-    board.availableTypeFromArray(&types).is_some()
-        || board.stringForType(unsafe { NSPasteboardTypeHTML })
-            .is_some_and(|html| html.to_string().contains("(figma)"))
+    let (files_or_images, html) = known.unwrap_or_else(|| {
+        let types = advertised(&board);
+        KNOWN.with(|k| *k.borrow_mut() = Some((board.clone(), count, types)));
+        types
+    });
+    files_or_images || html && figma_html(&board)
+}
+
+/// Whether the pasteboard advertises a file, a PNG or a TIFF, and HTML.
+fn advertised(board: &NSPasteboard) -> (bool, bool) {
+    let types = objc2_foundation::NSArray::from_slice(&unsafe {
+        [
+            NSPasteboardTypeFileURL,
+            NSPasteboardTypePNG,
+            NSPasteboardTypeTIFF,
+        ]
+    });
+    let html = objc2_foundation::NSArray::from_slice(&unsafe { [NSPasteboardTypeHTML] });
+    (
+        board.availableTypeFromArray(&types).is_some(),
+        board.availableTypeFromArray(&html).is_some(),
+    )
+}
+
+/// HTML a Figma copy leaves (its marker), read now.
+fn figma_html(board: &NSPasteboard) -> bool {
+    board
+        .stringForType(unsafe { NSPasteboardTypeHTML })
+        .is_some_and(|html| html.to_string().contains("(figma)"))
 }
 
 /// The pasteboard's HTML and PNG, for Figma paste. Main thread: the
@@ -983,6 +1033,41 @@ mod paste_tests {
         let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
         board.clearContents();
         board
+    }
+    /// PM-698 review: a writer that keeps the pasteboard can replace its HTML
+    /// without the change count moving. The menus' per-frame answer keeps only
+    /// which types are there, so Paste follows a Figma copy both ways.
+    #[test]
+    fn paste_follows_html_replaced_without_a_new_change_count() {
+        let html = board("figma-html");
+        let kind = unsafe { NSPasteboardTypeHTML };
+        html.setString_forType(&NSString::from_str("<p>words</p>"), kind);
+        assert!(!super::content_on(&html));
+        assert!(!super::content_per_frame_on(html.clone()));
+        let count = html.changeCount();
+        // The same owner puts Figma's HTML there.
+        html.setString_forType(&NSString::from_str("<!--(figma)meta--><p>frame</p>"), kind);
+        // The case the review found: same owner, same count, other HTML.
+        assert_eq!(html.changeCount(), count);
+        assert!(super::content_on(&html));
+        assert!(
+            super::content_per_frame_on(html.clone()),
+            "count {count} -> {}",
+            html.changeCount()
+        );
+        // And back to plain HTML.
+        html.setString_forType(&NSString::from_str("<p>words again</p>"), kind);
+        assert!(!super::content_per_frame_on(html.clone()));
+        assert!(!super::content_on(&html));
+        // A picture decides without reading the HTML.
+        html.clearContents();
+        let png = crate::mcp_services::png(&[10, 20, 30, 255], 1, 1).unwrap();
+        html.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        assert!(super::content_per_frame_on(html.clone()));
+        html.clearContents();
+        assert!(!super::content_per_frame_on(html.clone()));
     }
     #[test]
     fn paste_reads_copied_files_then_a_copied_picture_and_nothing_from_text() {

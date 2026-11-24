@@ -3081,20 +3081,29 @@ impl EngineProxy for Broker {
                     Ok(_) => {
                         let applied = started.elapsed();
                         entry.interaction.reconcile(&entry.surface);
-                        let surface = Arc::new(entry.surface.clone());
                         if tracing() {
                             trace(json!({"panel": panel, "commit_ms": ms(applied),
                                 "publish_ms": ms(started.elapsed()), "input_bytes": input.to_string().len()}));
                         }
-                        self.publications.shared().insert(
-                            panel.into(),
-                            Publication {
-                                panel: panel.into(),
-                                generation: generation.number,
-                                surface,
-                            },
-                        );
-                        (self.wake)();
+                        // A commit that set the tree to what it was (a
+                        // re-render that came out the same: the Effects
+                        // browser and the viewer's chrome on every selection
+                        // change) is acknowledged, not published: the panel's
+                        // view would compile, install and draw it again for
+                        // nothing. Its revision still counts, and the view's
+                        // events stay valid (nothing in them changed).
+                        if entry.surface.last_commit_changed() {
+                            let surface = Arc::new(entry.surface.clone());
+                            self.publications.shared().insert(
+                                panel.into(),
+                                Publication {
+                                    panel: panel.into(),
+                                    generation: generation.number,
+                                    surface,
+                                },
+                            );
+                            (self.wake)();
+                        }
                         Ok(json!({"accepted":true,"revision":entry.surface.revision()}))
                     }
                     Err(error) => Ok(

@@ -619,6 +619,7 @@ impl TimelineSurface {
         };
         outline.column.set(layer_column as f32);
         outline.bind_surface(cx.entity().downgrade());
+        timeline_opened();
         let mut this = Self {
             agent_ink: Default::default(),
             agent_dot_groups: Vec::new(),
@@ -7423,55 +7424,75 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
             let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
             let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
-            let (inner_top, floor) = (top + rim, top + h - rim);
-            // The strip's inside at `x`: its ceiling and floor, lifted
-            // round the rounded corners.
-            let inside = |x: f32| -> (f32, f32) {
-                if x < start || x > end {
-                    return (floor, floor);
-                }
-                let from_end = (x - start).min(end - x);
-                let lift = if from_end < radius {
-                    let d = radius - from_end;
-                    radius - (radius * radius - d * d).max(0.).sqrt()
-                } else {
-                    0.
-                };
-                (inner_top + lift, floor - lift)
-            };
-            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
-                // A tall stereo row: the left above, the right below.
-                Some(peak2) => {
-                    let half = (floor - inner_top) / 2.;
-                    vec![
-                        (soften(&decode(peak)), inner_top + half, half),
-                        (soften(&decode(peak2)), floor, half),
-                    ]
-                }
-                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
-            };
             // Only the columns the window shows (a frame is prepared wider
             // than the view): the path's work stays the screen's width.
             let shown = f32::from(window.viewport_size().width);
-            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
-            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
-            let x = |i: usize| x0 + (first + i) as f32 / per;
-            for (values, lane_floor, lane_h) in lanes {
-                let end_at = last.min(values.len());
-                if first >= end_at {
-                    continue;
+            let peak2 = d["peak2"].as_str();
+            let key = WaveKey {
+                peaks: {
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    (peak, peak2).hash(&mut hash);
+                    hash.finish()
+                },
+                geometry: [x0, top, w, h, per, rim, radius, start, end, shown].map(f32::to_bits),
+            };
+            let paths = waveform_paths(key, peak, peak2, || {
+                let (inner_top, floor) = (top + rim, top + h - rim);
+                // The strip's inside at `x`: its ceiling and floor, lifted
+                // round the rounded corners.
+                let inside = |x: f32| -> (f32, f32) {
+                    if x < start || x > end {
+                        return (floor, floor);
+                    }
+                    let from_end = (x - start).min(end - x);
+                    let lift = if from_end < radius {
+                        let d = radius - from_end;
+                        radius - (radius * radius - d * d).max(0.).sqrt()
+                    } else {
+                        0.
+                    };
+                    (inner_top + lift, floor - lift)
+                };
+                let lanes: Vec<(Vec<f32>, f32, f32)> = match peak2 {
+                    // A tall stereo row: the left above, the right below.
+                    Some(peak2) => {
+                        let half = (floor - inner_top) / 2.;
+                        vec![
+                            (soften(&decode(peak)), inner_top + half, half),
+                            (soften(&decode(peak2)), floor, half),
+                        ]
+                    }
+                    None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
+                };
+                let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+                let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+                let x = |i: usize| x0 + (first + i) as f32 / per;
+                let mut paths = vec![];
+                for (values, lane_floor, lane_h) in lanes {
+                    let end_at = last.min(values.len());
+                    if first >= end_at {
+                        continue;
+                    }
+                    let values = &values[first..end_at];
+                    // The haze along the floor, then the shape over it.
+                    let haze = vec![WAVE_HAZE; values.len()];
+                    let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
+                    paths.push((
+                        glass_fill(&haze, &x, lane_floor, &inside),
+                        glass_fill(&heights, &x, lane_floor, &inside),
+                    ));
                 }
-                let values = &values[first..end_at];
-                // The haze along the floor, then the shape over it: more
-                // opaque at its base than at its tips.
-                let haze = vec![WAVE_HAZE; values.len()];
-                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
-                    window.paint_path(path, shade(tone, strength * 0.55));
+                paths
+            });
+            // More opaque at its base than at its tips.
+            for (haze, shape) in paths.iter() {
+                if let Some(path) = haze {
+                    window.paint_path(path.clone(), shade(tone, strength * 0.55));
                 }
-                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
-                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                if let Some(path) = shape {
                     window.paint_path(
-                        path,
+                        path.clone(),
                         linear_gradient(
                             180.,
                             linear_color_stop(shade(tone, strength * 0.78), 0.),
@@ -7813,6 +7834,7 @@ mod transform_box_tests {
 
 impl Drop for TimelineSurface {
     fn drop(&mut self) {
+        timeline_closed();
         if let Some(id) = self.agent_drag_touch.take() {
             pm_mcp::coedit::touch_field(&self.project, &id, false);
         }
@@ -7876,6 +7898,226 @@ fn shade(rgb: u32, alpha: f64) -> Rgba {
 
 /// The waveform's haze along the floor, in points: about two device pixels.
 const WAVE_HAZE: f32 = 0.9;
+
+/// What a waveform's paths are made of: its peaks (hashed for lookup, then
+/// compared whole) and the strip's place, size, corners and the window's
+/// width, to the bit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct WaveKey {
+    peaks: u64,
+    geometry: [u32; 10],
+}
+
+type WavePaths = Rc<Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>>;
+
+/// What the waveform paths may keep: their vertex buffers and peaks, well
+/// under PM-604's footprint (a wide stereo strip's meshes are 6-12 MiB).
+const WAVE_CACHE_BYTES: usize = 16 << 20;
+
+struct WaveEntry {
+    peak: Box<str>,
+    peak2: Option<Box<str>>,
+    paths: WavePaths,
+    bytes: usize,
+    drawn: u64,
+}
+
+/// The waveform paths last drawn, least recently drawn out first, within
+/// `WAVE_CACHE_BYTES`. One per UI thread (GPUI's), emptied when the last
+/// timeline closes.
+#[derive(Default)]
+struct WaveCache {
+    entries: std::collections::HashMap<WaveKey, WaveEntry>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl WaveCache {
+    fn path_bytes(path: &Path<Pixels>) -> usize {
+        std::mem::size_of::<Path<Pixels>>()
+            + path.vertices.capacity() * std::mem::size_of::<gpui::PathVertex<Pixels>>()
+    }
+    fn get(&mut self, key: &WaveKey, peak: &str, peak2: Option<&str>) -> Option<WavePaths> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(key)?;
+        // The digest found it; the peaks themselves decide.
+        if &*entry.peak != peak || entry.peak2.as_deref() != peak2 {
+            return None;
+        }
+        entry.drawn = self.clock;
+        Some(entry.paths.clone())
+    }
+    /// Keeps `paths` unless they alone exceed the budget (they are drawn,
+    /// not kept); makes room by dropping the least recently drawn.
+    fn insert(&mut self, key: WaveKey, peak: &str, peak2: Option<&str>, paths: WavePaths) {
+        let bytes = std::mem::size_of::<WaveEntry>()
+            + peak.len()
+            + peak2.map_or(0, str::len)
+            + paths
+                .iter()
+                .flat_map(|(haze, shape)| [haze, shape])
+                .flatten()
+                .map(Self::path_bytes)
+                .sum::<usize>();
+        if let Some(old) = self.entries.remove(&key) {
+            self.bytes -= old.bytes;
+        }
+        if bytes > WAVE_CACHE_BYTES {
+            return;
+        }
+        while self.bytes + bytes > WAVE_CACHE_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.drawn)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&oldest) {
+                self.bytes -= old.bytes;
+            }
+        }
+        self.clock += 1;
+        self.bytes += bytes;
+        self.entries.insert(
+            key,
+            WaveEntry {
+                peak: peak.into(),
+                peak2: peak2.map(Into::into),
+                paths,
+                bytes,
+                drawn: self.clock,
+            },
+        );
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+thread_local! {
+    static WAVE_CACHE: RefCell<WaveCache> = RefCell::default();
+    /// Timelines open on this thread: the last one closing empties the cache.
+    static TIMELINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn timeline_opened() {
+    TIMELINES.with(|n| n.set(n.get() + 1));
+}
+
+fn timeline_closed() {
+    let left = TIMELINES.with(|n| {
+        n.set(n.get().saturating_sub(1));
+        n.get()
+    });
+    if left == 0 {
+        WAVE_CACHE.with(|c| c.borrow_mut().clear());
+    }
+}
+
+/// A waveform's paths (per channel: its haze and its shape), kept by what
+/// they are made of: a frame that only moved something else (a hover, the
+/// playhead, a panel) paints the same paths without decoding the peaks and
+/// tessellating their curves again.
+fn waveform_paths(
+    key: WaveKey,
+    peak: &str,
+    peak2: Option<&str>,
+    make: impl FnOnce() -> Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>,
+) -> WavePaths {
+    if let Some(paths) = WAVE_CACHE.with(|c| c.borrow_mut().get(&key, peak, peak2)) {
+        return paths;
+    }
+    let paths = Rc::new(make());
+    WAVE_CACHE.with(|c| c.borrow_mut().insert(key, peak, peak2, paths.clone()));
+    paths
+}
+
+#[cfg(test)]
+mod wave_cache_tests {
+    use super::*;
+
+    /// A mesh whose vertex buffer holds `mib` MiB, as a wide strip's does.
+    fn mesh(mib: usize) -> WavePaths {
+        let mut path = Path::new(point(px(0.), px(0.)));
+        let vertex = std::mem::size_of::<gpui::PathVertex<Pixels>>();
+        path.vertices.reserve_exact((mib << 20) / vertex);
+        Rc::new(vec![(Some(path), None)])
+    }
+    fn key(n: u32) -> WaveKey {
+        WaveKey {
+            peaks: 7,
+            geometry: [n; 10],
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn panning_a_wide_stereo_strip_stays_within_the_byte_budget() {
+        let mut cache = WaveCache::default();
+        // Every pan step makes a new key; each strip's meshes are ~6 MiB.
+        for step in 0..200 {
+            cache.insert(key(step), "peaks", Some("right"), mesh(6));
+            assert!(cache.bytes <= WAVE_CACHE_BYTES, "{} bytes", cache.bytes);
+        }
+        assert!(cache.entries.len() <= 2);
+        // The newest is the one kept.
+        assert!(cache.get(&key(199), "peaks", Some("right")).is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_least_recently_drawn_goes_first() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "a", None, mesh(5));
+        cache.insert(key(2), "b", None, mesh(5));
+        cache.insert(key(3), "c", None, mesh(5));
+        // 1 is drawn again: 2 is now the oldest.
+        assert!(cache.get(&key(1), "a", None).is_some());
+        cache.insert(key(4), "d", None, mesh(5));
+        assert!(cache.get(&key(2), "b", None).is_none());
+        assert!(cache.get(&key(1), "a", None).is_some());
+        assert!(cache.get(&key(4), "d", None).is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_mesh_over_the_budget_is_drawn_not_kept() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "a", None, mesh(2));
+        cache.insert(key(9), "huge", None, mesh(17));
+        assert!(cache.get(&key(9), "huge", None).is_none());
+        // What was kept stays.
+        assert!(cache.get(&key(1), "a", None).is_some());
+        // Through the painter's path: the paths are still drawn.
+        let paths = waveform_paths(key(9), "huge", None, || Rc::try_unwrap(mesh(17)).unwrap());
+        assert!(paths[0].0.is_some());
+        WAVE_CACHE.with(|c| assert_eq!(c.borrow().bytes, 0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_same_digest_with_other_peaks_is_a_miss() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "left", Some("right"), mesh(1));
+        assert!(cache.get(&key(1), "left", Some("right")).is_some());
+        assert!(cache.get(&key(1), "other", Some("right")).is_none());
+        assert!(cache.get(&key(1), "left", None).is_none());
+        // Replaced under the same key, counted once.
+        cache.insert(key(1), "other", None, mesh(1));
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.bytes < (2 << 20));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_last_timeline_closing_releases_the_meshes() {
+        timeline_opened();
+        timeline_opened();
+        WAVE_CACHE.with(|c| c.borrow_mut().insert(key(1), "a", None, mesh(1)));
+        timeline_closed();
+        WAVE_CACHE.with(|c| assert_eq!(c.borrow().entries.len(), 1));
+        timeline_closed();
+        WAVE_CACHE.with(|c| assert_eq!((c.borrow().entries.len(), c.borrow().bytes), (0, 0)));
+    }
+}
 
 /// A waveform shape: `heights` (points above `base`, one per column at
 /// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so

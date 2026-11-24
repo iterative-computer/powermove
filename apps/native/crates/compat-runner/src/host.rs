@@ -1126,6 +1126,13 @@ impl ExtensionHost {
         let published = self.shared.published.lock().unwrap();
         published.records.values().cloned().collect()
     }
+    /// Reads the records in place, without the copy `records` makes (each
+    /// a whole manifest): for callers that look at a few fields on every
+    /// frame. `read` runs under the host's lock: keep it short.
+    pub fn read_records<R>(&self, read: impl FnOnce(&mut dyn Iterator<Item = &Value>) -> R) -> R {
+        let published = self.shared.published.lock().unwrap();
+        read(&mut published.records.values())
+    }
     /// Enabled v4 surface extensions with their compiled graphs.
     pub fn surfaces(&self) -> Vec<Value> {
         self.shared.published.lock().unwrap().surfaces.clone()

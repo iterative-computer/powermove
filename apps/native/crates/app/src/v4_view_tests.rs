@@ -1023,6 +1023,78 @@ fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
     assert_eq!(after.snapshot.root().unwrap().to_value(), before);
     assert!(!after.history.can_undo);
 }
+/// PM-698 review: Escape during a horizontal wheel scrub, before any step
+/// reached the view, shows the number it started from. The rollback's tree
+/// is the one already shown (not published again), so nothing else would.
+#[gpui::test]
+fn a_cancelled_wheel_scrub_shows_the_number_it_started_from(cx: &mut TestAppContext) {
+    let rig = rig_project("inspector", &project_json(1));
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.update(|window, _| window.activate());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.number_containing("opacity"))
+        .unwrap();
+    let start = view.read_with(&vcx, |v, _| v.shown_number(&name));
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Moved] {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(24.), px(0.))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+    }
+    let preview = view.read_with(&vcx, |v, _| v.wheel_reading()).unwrap();
+    assert_ne!(preview, start);
+    // Escape before the panel's tree for any step reached the view.
+    let _ = rig.runtime.take_publications();
+    view.update(&mut vcx, |v, cx| assert!(v.cancel_gesture(cx)));
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().snapshot.root().unwrap().to_value() == before
+    });
+    // The view takes what the panel publishes from here (as the app does).
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        for p in rig.runtime.take_publications() {
+            view.update(&mut vcx, |v, cx| v.publish(p, cx));
+        }
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(view.read_with(&vcx, |v, _| v.shown_number(&name)), start);
+    assert!(!rig.kernel.published(PROJECT).unwrap().history.can_undo);
+}
 /// Timeline's expanded rows mount exactly the same field, with a real lease.
 #[gpui::test]
 fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext) {
@@ -3440,4 +3512,107 @@ fn a_panel_whose_height_changes_draws_no_other_panel_again(cx: &mut TestAppConte
     }
     assert!(a.read_with(&vcx, |v, _| v.natural_body_height()) >= 300., "the panel measured its new height");
     assert_eq!(b.read_with(&vcx, |v, _| v.renders), before, "the other panel kept its drawing");
+}
+
+/// PM-698: a selection change re-renders the Effects browser and the
+/// viewer's chrome to the same trees; those commits are acknowledged, not
+/// published, so the views draw nothing again. Properties, which shows the
+/// selected layer, still publishes.
+#[::core::prelude::v1::test]
+fn a_selection_change_publishes_only_the_panels_it_changes() {
+    for (panel, publishes) in [("fxbrowser", false), ("viewer", false), ("inspector", true)] {
+        let rig = rig(panel, 3);
+        let _ = publication(&rig);
+        // From one selected layer to another (the first selection changes
+        // the viewer's chrome for real).
+        for (layer, measured) in [("l0", false), ("l1", true), ("l2", true)] {
+            rig.kernel
+                .call(
+                    PROJECT,
+                    pm_kernel::Request::new(
+                        pm_kernel::Caller::native(),
+                        pm_kernel::SelectionCall::Layers {
+                            ids: vec![layer.into()],
+                            add: false,
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            for (_, ticket) in rig.runtime.publish() {
+                let ticket = ticket.unwrap();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while ticket.try_take().is_none() {
+                    assert!(Instant::now() < deadline, "{panel} did not settle");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let published = rig
+                .runtime
+                .take_publications()
+                .iter()
+                .any(|p| p.panel == panel);
+            if measured {
+                assert_eq!(published, publishes, "{panel} on selecting {layer}");
+            }
+        }
+    }
+}
+
+/// PM-698 review: a retheme while a newer tree is still compiling compiles
+/// that tree, not the one shown; a later identical commit is not published
+/// again, so nothing else would bring it.
+#[gpui::test]
+fn a_retheme_while_a_tree_compiles_shows_that_tree(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 2);
+    let select = |layer: &str| {
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Layers {
+                        ids: vec![layer.into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        rig.runtime
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "inspector")
+            .unwrap()
+    };
+    let a = select("l0");
+    let (view, mut vcx) = window(cx, &rig, a, Default::default());
+    vcx.run_until_parked();
+    let b = select("l1");
+    let shown = b.surface.revision();
+    view.update(&mut vcx, |v, cx| {
+        v.publish(b, cx);
+        v.retheme(
+            pm_design::Tokens::new(pm_design::Scheme::Light, Default::default()),
+            cx,
+        );
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until && view.read_with(&vcx, |v, _| v.compiling()) {
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.publication.surface.revision()),
+        shown,
+        "the newer tree, in the new theme"
+    );
 }

@@ -4573,7 +4573,7 @@ pub fn timeline_chrome(
 /// for nothing; with native controls hosted that held each present behind a
 /// control transaction (Fable 5.5 at 36 s: 24 fps with Properties open, 29.5
 /// closed).
-fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
+pub(crate) fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
     published.is_some_and(|p| !p.selection.layers().is_empty())
 }
 
@@ -4588,7 +4588,7 @@ const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// `FOLLOW_EVERY`, except a jump (a seek or a loop wrap) of more than half a
 /// second, which shows at once. Pause, stop and selection changes publish
 /// through `update_builtins`, not here, so they are never held back.
-fn follow_due(
+pub(crate) fn follow_due(
     last_frame: Option<i64>,
     last_at: Option<std::time::Instant>,
     frame: i64,

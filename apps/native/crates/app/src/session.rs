@@ -698,16 +698,23 @@ impl pm_shell::integration::Integration for Bridge {
             }
         }
         if let Some(host) = &v.extensions.host {
-            for surface in host.records().into_iter().filter(|record| {
-                record["surface"] == true && record["enabled"] == true && record["health"]["state"] == "ok"
-                    && crate::extension_authoring::replaced_panel(&record["manifest"]).is_none()
-            }) {
-                if let (Some(id), Some(title)) = (surface["id"].as_str(), surface["manifest"]["name"].as_str()) {
-                    if !panels.iter().any(|(known, _)| known == id) {
-                        panels.push((id.to_owned(), title.to_owned()));
+            // Asked several times a frame: the records are read in place.
+            host.read_records(|records| {
+                for surface in records.filter(|record| {
+                    record["surface"] == true
+                        && record["enabled"] == true
+                        && record["health"]["state"] == "ok"
+                        && crate::extension_authoring::replaced_panel(&record["manifest"]).is_none()
+                }) {
+                    if let (Some(id), Some(title)) =
+                        (surface["id"].as_str(), surface["manifest"]["name"].as_str())
+                    {
+                        if !panels.iter().any(|(known, _)| known == id) {
+                            panels.push((id.to_owned(), title.to_owned()));
+                        }
                     }
                 }
-            }
+            });
         }
         panels
     }
@@ -951,7 +958,7 @@ impl Controller {
         let mut off = v.disabled.clone();
         // Read at menu time so copies and pasteboard changes in another
         // window are visible without a fresh project publication here.
-        if v.published.is_some() && crate::layer_commands::can_paste() {
+        if v.published.is_some() && crate::layer_commands::can_paste_per_frame() {
             off.remove("pasteLayers");
         }
         if v.transition_refusal().is_some() {
