@@ -488,18 +488,10 @@ impl DocumentSource {
             .clone()
     }
 
-    pub(super) fn capture_materials(
+    pub(super) fn bind_capture_renderer(
         &self,
         renderer: &mut pm_render::Renderer,
-        request: &SceneRequest,
-        tier: Tier,
-    ) -> Result<bool, String> {
-        let refs = self.material_references(request)?;
-        let interrupt = crate::MATERIAL_PLAYBACK.with(|value| value.borrow().clone());
-        let playback = interrupt.is_some() && !matches!(tier, Tier::Final { .. });
-        if refs.is_empty() {
-            return Ok(false);
-        }
+    ) -> Result<(), String> {
         if renderer.material_capture_binding() != Some(self.capture_id) {
             if let Some(fonts) = &self.capture_fonts {
                 renderer.set_text_fonts(Some(Box::new(pm_render::text::host::EngineFonts::new(
@@ -516,6 +508,22 @@ impl DocumentSource {
             )?;
             renderer.set_material_capture_binding(self.capture_id);
         }
+        Ok(())
+    }
+
+    pub(super) fn capture_materials(
+        &self,
+        renderer: &mut pm_render::Renderer,
+        request: &SceneRequest,
+        tier: Tier,
+    ) -> Result<bool, String> {
+        let refs = self.material_references(request)?;
+        let interrupt = crate::MATERIAL_PLAYBACK.with(|value| value.borrow().clone());
+        let playback = interrupt.is_some() && !matches!(tier, Tier::Final { .. });
+        if refs.is_empty() {
+            return Ok(false);
+        }
+        self.bind_capture_renderer(renderer)?;
         let receiver = Comp::resolve(&self.snapshot.document, &request.composition)
             .map_err(|e| e.to_string())?;
         let mut evaluator =
@@ -527,6 +535,14 @@ impl DocumentSource {
             .unwrap_or_else(|| receiver.clone());
         let mut scope = Scope::new(&mut evaluator, &receiver, &project);
         let time = request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        let has_scatter = receiver.layers().iter().any(|layer| {
+            layer
+                .get("d")
+                .and_then(|d| d.get("data"))
+                .and_then(|d| d.get("object"))
+                .and_then(|o| o.get("scatter"))
+                .is_some()
+        });
         let mut frames = HashMap::new();
         for (owner, source) in refs {
             let receiver_layer = receiver
@@ -534,15 +550,16 @@ impl DocumentSource {
                 .iter()
                 .find(|layer| pm_eval::node::is_str(layer.get("id"), &owner));
             // Start decoding the first map just before its receiver's cut.
-            // Match timing only: a hidden Studio object can still supply
-            // geometry and materials to a visible scatter.
-            let time = if playback
+            // When the composition has a scatter layer, a hidden/out-of-range
+            // Studio object can still supply geometry and materials to it.
+            let time = if !has_scatter
                 && let Some(receiver) = receiver_layer
                 && let Some(start) = pm_eval::node::number(receiver.get("from"))
             {
                 let end =
                     pm_eval::node::number(receiver.get("dur")).map(|duration| start + duration);
-                if time < start - 0.25 || end.is_some_and(|end| time > end + 1e-6) {
+                let lookahead = if playback { 0.25 } else { 1e-6 };
+                if time < start - lookahead || end.is_some_and(|end| time > end + 1e-6) {
                     continue;
                 }
                 time.max(start)

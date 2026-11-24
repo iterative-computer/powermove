@@ -1914,6 +1914,26 @@ impl Renderer {
             });
     }
 
+    /// Prewarms Studio's Fast raster pipelines and material-capture renderer
+    /// pipelines for `document` so the first frame entering a 3D section does
+    /// not stall compiling shaders.
+    pub fn prewarm_studio(&mut self, document: &Document, composition: &str, ticks: i64) {
+        let Some(settings) = self.options3d.studio else {
+            return;
+        };
+        let Some(pass) = self.scene3d.provider.as_mut() else {
+            return;
+        };
+        let request = crate::scene3d::provider::SceneRequest {
+            composition: composition.to_owned(),
+            revision: document.revision(),
+            ticks,
+            width: 1,
+            height: 1,
+        };
+        pass.prewarm(&self.device, &self.queue, document, &request, settings.preview);
+    }
+
     /// Asks the font registry for the faces `document`'s text layers lay out
     /// with ([`crate::text::TextContext::prefetch_fonts`]): the presenter
     /// calls this at rest, so the first seek to a text layer does not wait

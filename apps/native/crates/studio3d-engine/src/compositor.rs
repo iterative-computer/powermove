@@ -15,6 +15,13 @@ pub trait Source: SceneSource {
     fn needs_materials(&self, _request: &SceneRequest) -> Result<bool, String> {
         Ok(false)
     }
+    fn prewarm_materials(
+        &self,
+        _renderer: &mut pm_render::Renderer,
+        _request: &SceneRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn prepare_materials(
         &self,
         _renderer: &mut pm_render::Renderer,
@@ -265,6 +272,29 @@ impl Backend for Pass {
     }
     fn begin_frame(&mut self) {
         Pass::begin_frame(self);
+    }
+    fn prewarm(
+        &mut self,
+        document: &pm_render::scene3d::provider::Document,
+        request: &SceneRequest,
+        tier: Tier,
+    ) {
+        if tier == Tier::Fast
+            && let Some(service) = self.service.as_mut()
+        {
+            let _ = service.prewarm_fast();
+        }
+        if self.source.needs_materials(request).unwrap_or(false)
+            && let Some(service) = self.service.as_ref()
+            && let (Some(device), Some(queue)) = (service.device(), service.queue())
+        {
+            let capture = self
+                .capture
+                .get_or_insert_with(|| pm_render::Renderer::new(device.clone(), queue.clone()));
+            capture.prewarm(document);
+            let _ = self.source.prewarm_materials(capture, request);
+            capture.prewarm_programs(document);
+        }
     }
     fn counters(&self) -> Counters {
         Pass::counters(self)

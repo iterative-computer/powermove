@@ -1332,19 +1332,27 @@ impl Viewer {
             v.input = Some(input);
             v.pipeline.request = trace::now();
             // Replace an unconsumed scrub pair atomically, even under a burst
-            // of HID input. A pause can never be accepted without its seek.
+            // of HID input (including while an earlier request_pause() is still
+            // pending on the worker thread).
             if matches!(
                 v.commands.back(),
                 Some(TransportCommand::Seek {
                     mode: pm_protocol::clock::SeekMode::Scrub,
                     ..
                 })
-            ) && v.pause_requested_at.is_none()
-                && v.commands.len() >= 2
+            ) && v.commands.len() >= 2
                 && v.commands[v.commands.len() - 2] == TransportCommand::Pause
             {
-                v.commands.pop_back();
-                v.commands.pop_back();
+                return v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                });
+            }
+            if v.commands.back() == Some(&TransportCommand::Pause) {
+                return v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                });
             }
             ensure!(v.commands.len() <= 61, "transport queue full");
             v.enqueue(TransportCommand::Pause)?;
@@ -4021,7 +4029,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     };
                     let interrupt = (superseded.clone(), armed);
                     engine.set_interrupt(Some(interrupt.clone()));
-                    if spec.moment == Moment::Playing && !spec.exact {
+                    if matches!(spec.moment, Moment::Playing | Moment::Scrub) && !spec.exact {
                         MATERIAL_PLAYBACK.replace(Some(interrupt));
                     }
                     let frame = engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
@@ -5161,6 +5169,43 @@ mod worker_tests {
         assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn scrub_burst_after_pause_coalesces_without_filling_transport_queue() {
+        let service = EngineService::start(pm_gpu::Gpu::new("scrub-burst-pause").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        // Trigger one frame that blocks the worker on `before_submit`.
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Now pause (sets `pause_requested_at = Some(...)`) and immediately
+        // fire a 120 Hz scrub burst while the worker is still blocked.
+        v.command(TransportCommand::Pause).unwrap();
+        for step in 0..100 {
+            v.scrub_at(Ticks::new((step + 1) * 1000).unwrap(), trace::now())
+                .expect("scrub burst after pause must coalesce and never overflow queue");
+        }
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.pause_requested_at.is_some());
+            assert!(view.commands.len() <= 3, "commands={:?}", view.commands);
+        }
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
     }
     #[test]
     fn fly_camera_updates_do_not_select_auto_scrub_quality() {

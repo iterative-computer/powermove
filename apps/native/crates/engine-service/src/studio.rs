@@ -119,7 +119,7 @@ pub fn probe_environment(path: &std::path::Path) -> Result<[u32; 2], String> {
 #[cfg(feature = "kernel")]
 mod native;
 #[cfg(feature = "kernel")]
-pub use native::DocumentSource;
+pub use native::{DocumentSource, StudioResourceCache};
 
 /// Freeze scene/resources onto the renderer on its worker, for both the viewer
 /// and same-executable export child. No document mutation or platform UI work.
@@ -177,7 +177,9 @@ pub fn attach_with_camera_fonts(
     camera: ViewCamera,
     fonts: Option<&pm_render::text::host::RenderFonts>,
 ) -> Result<(), String> {
-    attach_with_camera_fonts_progress(renderer,doc,media,request,preview,camera,fonts,None)
+    attach_with_camera_fonts_progress(
+        renderer, doc, media, request, preview, camera, fonts, None, None,
+    )
 }
 #[cfg(feature = "kernel")]
 pub(crate) fn attach_with_camera_fonts_progress(
@@ -189,16 +191,20 @@ pub(crate) fn attach_with_camera_fonts_progress(
     camera: ViewCamera,
     fonts: Option<&pm_render::text::host::RenderFonts>,
     observer: Option<RefineObserver>,
+    resource_cache: Option<StudioResourceCache>,
 ) -> Result<(), String> {
     if keep_electron_renderer(renderer, &doc) {
         return Ok(());
     }
     camera.validate()?;
     use pm_studio3d_engine::compositor::Source;
-    let source = DocumentSource::new(doc, media.clone())
+    let mut source = DocumentSource::new(doc, media.clone())
         .with_native_fonts(fonts)
         .with_camera_for(&request.composition, camera)
         .with_refine_observer(observer);
+    if let Some(cache) = resource_cache {
+        source = source.with_resource_cache(cache);
+    }
     let tier = match preview {
         Preview::Fast => Tier::Fast,
         Preview::Live => Tier::QualityLive,
@@ -209,7 +215,9 @@ pub(crate) fn attach_with_camera_fonts_progress(
             denoise: Denoise::Oidn,
         },
     };
-    attach_source(renderer, source, tier);
+    let source = std::sync::Arc::new(source.with_capture_definitions(renderer.definitions()));
+    source.spawn_prewarm(&request.composition);
+    attach_arc_source(renderer, source, tier);
     Ok(())
 }
 
@@ -240,11 +248,19 @@ pub fn attach_with_export_options_fonts(
 }
 #[cfg(feature = "kernel")]
 fn attach_source(renderer: &mut pm_render::Renderer, source: DocumentSource, preview: Tier) {
-    let source = source.with_capture_definitions(renderer.definitions());
+    let source = std::sync::Arc::new(source.with_capture_definitions(renderer.definitions()));
+    attach_arc_source(renderer, source, preview);
+}
+#[cfg(feature = "kernel")]
+fn attach_arc_source(
+    renderer: &mut pm_render::Renderer,
+    source: std::sync::Arc<DocumentSource>,
+    preview: Tier,
+) {
     let revision = source.revision();
     renderer.set_studio_source(
         Some(std::sync::Arc::new(
-            pm_studio3d_engine::compositor::Adapter(std::sync::Arc::new(source)),
+            pm_studio3d_engine::compositor::Adapter(source),
         )),
         pm_render::scene3d::provider::Settings {
             revision,

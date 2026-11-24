@@ -1,5 +1,6 @@
 //! Worker-owned GPU backend seam. Native document evaluation and Studio
 //! integration live outside the renderer; the compositor owns ordinary blending.
+pub use pm_model::Document;
 use pm_gpu::TargetPool;
 use std::sync::Arc;
 
@@ -59,6 +60,7 @@ pub trait Backend: Send {
         false
     }
     fn begin_frame(&mut self);
+    fn prewarm(&mut self, _document: &pm_model::Document, _request: &SceneRequest, _tier: Tier) {}
     fn counters(&self) -> Counters;
     /// Premultiplied display-sRGB pixels in compositor (bottom-up) row order.
     fn render(
@@ -127,6 +129,28 @@ impl Pass {
     pub fn begin_frame(&mut self) {
         if let Some(backend) = &mut self.backend {
             backend.begin_frame();
+        }
+    }
+    pub fn prewarm(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        document: &pm_model::Document,
+        request: &SceneRequest,
+        tier: Tier,
+    ) {
+        if self.backend.is_none()
+            && let Ok(backend) = self.source.create(
+                device.clone(),
+                queue.clone(),
+                request.width.max(1),
+                request.height.max(1),
+            )
+        {
+            self.backend = Some(backend);
+        }
+        if let Some(backend) = &mut self.backend {
+            backend.prewarm(document, request, tier);
         }
     }
     pub fn counters(&self) -> Counters {

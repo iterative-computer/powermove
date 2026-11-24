@@ -19,7 +19,7 @@ struct Vary { @invariant @builtin(position) clip:vec4f, @location(0) world:vec3f
  // Orthographic depth is already linear and keeps precision near the camera.
  let depth=select(near*(far-z)/(far-near),(z-near)/(far-near),ortho);
  var o:Vary;o.clip=vec4f(dot(delta,camera.right.xyz)/camera.right.w,dot(delta,camera.up.xyz)/camera.up.w*camera.clip.w,depth,w);
- o.world=world;o.normal=(instances[instance].normal*vec4f(normal,0.)).xyz;o.uv=uv;o.uv1=uv1;o.color=color;o.material=material;o.mirrored=select(0u,1u,instances[instance].normal[3].w<0.);return o;
+ o.world=world;o.normal=(instances[instance].normal*vec4f(normal,0.)).xyz;o.uv=uv;o.uv1=uv1;o.color=color;o.material=material+u32(instances[instance].normal[3].x);o.mirrored=select(0u,1u,instances[instance].normal[3].w<0.);return o;
 }
 fn decode(c:vec3f)->vec3f { return select(c/12.92,pow((c+0.055)/1.055,vec3f(2.4)),c>vec3f(0.04045)); }
 fn tex(layer:f32,uv:vec2f)->vec4f {if(layer<0.){return vec4f(1.);}return textureSampleLevel(maps,smp,fract(uv),i32(layer),0.);}

@@ -601,6 +601,8 @@ pub struct Engine {
     pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
+    #[cfg(feature = "kernel")]
+    studio_resources: crate::studio::StudioResourceCache,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
@@ -874,6 +876,8 @@ impl Engine {
         self.compat_document = None;
         self.resources = Arc::default();
         self.studio_content = None;
+        #[cfg(feature = "kernel")]
+        self.studio_resources.clear();
         self.font_generation = None;
         self.hdr = None;
         self.missing_effects.clear();
@@ -1303,6 +1307,8 @@ impl Engine {
             studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
             studio_view: crate::studio::ViewCamera::Active,
+            #[cfg(feature = "kernel")]
+            studio_resources: crate::studio::StudioResourceCache::default(),
             lost,
             failed,
             waker,
@@ -1768,6 +1774,7 @@ impl Engine {
                 self.studio_view.clone(),
                 self.fonts.as_ref(),
                 self.studio_progress.clone(),
+                Some(self.studio_resources.clone()),
             )
             .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines
@@ -1778,6 +1785,23 @@ impl Engine {
             // renderer's worker now, not inside the first frame that draws
             // each one while playing.
             self.renderer.prewarm_programs(&scene.doc);
+            // Precompile Studio Fast raster & material-capture pipelines on
+            // attach when the composition has Studio 3D layers so entering a
+            // 3D section does not compile shaders mid-scrub/playback.
+            if pm_eval::Comp::resolve(&scene.doc, &scene.comp).is_ok_and(|comp| {
+                comp.layers().iter().any(|layer| {
+                    pm_eval::parenting::Role3d::of(layer).is_some()
+                        || pm_eval::node::truthy(
+                            layer
+                                .get("d")
+                                .and_then(|d| d.get("extrusion"))
+                                .and_then(|e| e.get("enabled")),
+                        )
+                })
+            }) {
+                self.renderer
+                    .prewarm_studio(&scene.doc, &scene.comp, time.get());
+            }
             self.studio_content = Some(key);
         }
         Ok(())
