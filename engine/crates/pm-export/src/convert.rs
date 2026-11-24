@@ -653,12 +653,13 @@ pub fn convert_tagged(
             "subsampled encoder input needs even dimensions".into(),
         ));
     }
+    let dither = params
+        .dither
+        .then(|| crate::dither::FrameDither::new(params.frame));
     let d = |x: usize, y: usize, ch: u32| -> f64 {
-        if params.dither {
-            dither_offset(params.frame, x as u32, y as u32, ch)
-        } else {
-            0.0
-        }
+        dither
+            .as_ref()
+            .map_or(0.0, |tile| tile.at(x, y, ch as usize))
     };
     // SDR Y′CbCr carries extended RGB that the stream can code (superwhites,
     // sub-blacks and footage's own out-of-gamut colors keep their values, so
@@ -682,8 +683,7 @@ pub fn convert_tagged(
     };
     // Whether the stream can code a colour (extended RGB in the output
     // encoding) as it is.
-    let fit_of = |c: [f64; 3]| {
-        let v = rgb_to_ycbcr(c);
+    let fit_of = |v: [f64; 3]| {
         (luma[0]..=luma[1]).contains(&v[0])
             && (chroma[0]..=chroma[1]).contains(&v[1])
             && (chroma[0]..=chroma[1]).contains(&v[2])
@@ -696,9 +696,14 @@ pub fn convert_tagged(
         if tags.is_hdr() {
             crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
         } else {
-            let own = extended(x, y);
-            let (c, a) = if fit_of(own.0) { own } else { delivered(x, y) };
-            (rgb_to_ycbcr(c), a)
+            let (rgb, alpha) = extended(x, y);
+            let v = rgb_to_ycbcr(rgb);
+            if fit_of(v) {
+                (v, alpha)
+            } else {
+                let (rgb, alpha) = delivered(x, y);
+                (rgb_to_ycbcr(rgb), alpha)
+            }
         }
     };
     // One luma row of a subsampled output as normalized Y′CbCr, every pixel
@@ -745,28 +750,27 @@ pub fn convert_tagged(
             let sited = if vertical { y - y % 2 } else { y };
             if sited != y && *fits_row != sited {
                 for (cx, fit) in fits.iter_mut().enumerate() {
-                    *fit = fit_of(extended(2 * cx, sited).0);
+                    *fit = fit_of(rgb_to_ycbcr(extended(2 * cx, sited).0));
                 }
                 *fits_row = sited;
             }
             for (cx, fit) in fits.iter_mut().enumerate() {
                 let (x0, x1) = (2 * cx, 2 * cx + 1);
-                let first = if sited == y {
-                    let own = extended(x0, y);
-                    *fit = fit_of(own.0);
-                    if *fit { own } else { delivered(x0, y) }
-                } else if *fit {
-                    extended(x0, y)
+                let (rgb, a) = extended(x0, y);
+                let v = rgb_to_ycbcr(rgb);
+                if sited == y {
+                    *fit = fit_of(v);
+                }
+                if *fit {
+                    put(x0, (v, a));
+                    let (rgb, alpha) = extended(x1, y);
+                    put(x1, (rgb_to_ycbcr(rgb), alpha));
                 } else {
-                    delivered(x0, y)
-                };
-                let second = if *fit {
-                    extended(x1, y)
-                } else {
-                    delivered(x1, y)
-                };
-                put(x0, (rgb_to_ycbcr(first.0), first.1));
-                put(x1, (rgb_to_ycbcr(second.0), second.1));
+                    for x in [x0, x1] {
+                        let (rgb, alpha) = delivered(x, y);
+                        put(x, (rgb_to_ycbcr(rgb), alpha));
+                    }
+                }
             }
             *fits_row = sited;
         }

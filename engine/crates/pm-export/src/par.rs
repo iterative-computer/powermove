@@ -4,13 +4,178 @@
 //! A user export also refreshes its class while converting rows, so playback
 //! transitions reach workers inside a frame (contract 13, invariant 10).
 
+use std::any::Any;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 type Refresh = Arc<dyn Fn() + Send + Sync>;
 
+struct WorkSlot {
+    /// Raw pointer to `dyn Fn(usize) + Sync` living on the calling thread's
+    /// stack. Workers run it only while `DispatchGuard` is alive on that stack.
+    job: Option<(*const (dyn Fn(usize) + Sync), usize, Qos)>,
+    generation: u64,
+    pending: usize,
+    panic: Option<Box<dyn Any + Send>>,
+    shutdown: bool,
+}
+
+// SAFETY: the raw closure pointer refers to a `Sync` closure on the caller's
+// stack and is cleared before `dispatch` returns (even on unwind).
+unsafe impl Send for WorkSlot {}
+
+struct WorkerPool {
+    shared: Arc<(Mutex<WorkSlot>, Condvar, Condvar)>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl WorkerPool {
+    fn new(worker_count: usize) -> Self {
+        let shared = Arc::new((
+            Mutex::new(WorkSlot {
+                job: None,
+                generation: 0,
+                pending: 0,
+                panic: None,
+                shutdown: false,
+            }),
+            Condvar::new(),
+            Condvar::new(),
+        ));
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker_idx in 0..worker_count {
+            let band = worker_idx + 1;
+            let shared = shared.clone();
+            workers.push(std::thread::spawn(move || {
+                let (lock, work_cv, done_cv) = &*shared;
+                let mut seen = 0u64;
+                loop {
+                    let (job_ptr, active_bands, qos) = {
+                        let mut slot = lock.lock().unwrap();
+                        while slot.generation == seen && !slot.shutdown {
+                            slot = work_cv.wait(slot).unwrap();
+                        }
+                        if slot.shutdown {
+                            return;
+                        }
+                        seen = slot.generation;
+                        match slot.job {
+                            Some(job) => job,
+                            None => continue,
+                        }
+                    };
+                    if band < active_bands {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            apply_qos(qos);
+                            // SAFETY: `dispatch` keeps the referent alive until
+                            // every active worker decrements `pending` to 0.
+                            let f = unsafe { &*job_ptr };
+                            f(band);
+                        }));
+                        let mut slot = lock.lock().unwrap();
+                        if let Err(err) = result
+                            && slot.panic.is_none()
+                        {
+                            slot.panic = Some(err);
+                        }
+                        slot.pending -= 1;
+                        if slot.pending == 0 {
+                            done_cv.notify_one();
+                        }
+                    }
+                }
+            }));
+        }
+        Self { shared, workers }
+    }
+
+    fn dispatch<F: Fn(usize) + Sync>(&mut self, bands: usize, qos: Qos, f: F) {
+        if bands <= 1 {
+            f(0);
+            return;
+        }
+        let needed_workers = bands - 1;
+        if self.workers.len() < needed_workers {
+            // Recreate with enough workers if a larger call arrives later.
+            *self = Self::new(needed_workers);
+        }
+        let f_ref: &(dyn Fn(usize) + Sync) = &f;
+        // Erase the stack lifetime; `DispatchGuard` guarantees all workers
+        // finish before `f` is dropped, even if band 0 unwinds.
+        let job_ptr: *const (dyn Fn(usize) + Sync) =
+            unsafe { std::mem::transmute::<*const (dyn Fn(usize) + Sync), *const (dyn Fn(usize) + Sync)>(f_ref) };
+        let (lock, work_cv, _done_cv) = &*self.shared;
+        {
+            let mut slot = lock.lock().unwrap();
+            slot.job = Some((job_ptr, bands, qos));
+            slot.pending = needed_workers;
+            slot.panic = None;
+            slot.generation = slot.generation.wrapping_add(1);
+            work_cv.notify_all();
+        }
+        struct DispatchGuard<'a> {
+            shared: &'a (Mutex<WorkSlot>, Condvar, Condvar),
+        }
+        impl Drop for DispatchGuard<'_> {
+            fn drop(&mut self) {
+                let (lock, _, done_cv) = self.shared;
+                let mut slot = lock.lock().unwrap();
+                while slot.pending > 0 {
+                    slot = done_cv.wait(slot).unwrap();
+                }
+                slot.job = None;
+            }
+        }
+        let guard = DispatchGuard {
+            shared: &self.shared,
+        };
+        let band0 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(0)));
+        drop(guard);
+        let worker_panic = lock.lock().unwrap().panic.take();
+        if let Err(err) = band0 {
+            std::panic::resume_unwind(err);
+        }
+        if let Some(err) = worker_panic {
+            std::panic::resume_unwind(err);
+        }
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        let (lock, work_cv, _) = &*self.shared;
+        {
+            let mut slot = lock.lock().unwrap();
+            slot.shutdown = true;
+            work_cv.notify_all();
+        }
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 thread_local! {
     static QOS_REFRESH: RefCell<Option<Refresh>> = RefCell::new(None);
+    static WORKER_POOL: RefCell<Option<WorkerPool>> = RefCell::new(None);
+}
+
+fn dispatch_bands<F: Fn(usize) + Sync>(bands: usize, qos: Qos, f: F) {
+    if bands <= 1 {
+        f(0);
+        return;
+    }
+    WORKER_POOL.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            let pool = guard.get_or_insert_with(|| WorkerPool::new(bands - 1));
+            pool.dispatch(bands, qos, f);
+        } else {
+            // Re-entrant call from inside a band: run inline to avoid RefCell panic.
+            for band in 0..bands {
+                f(band);
+            }
+        }
+    });
 }
 
 /// Installs a playback-aware refresh callback for conversions on this thread.
@@ -93,16 +258,19 @@ pub(crate) fn rows_limited<T: Send>(
     let per = total.div_ceil(threads);
     let qos = current_qos();
     let f = &f;
-    std::thread::scope(|scope| {
-        for (band, chunk) in out.chunks_mut(per * row_len).enumerate() {
-            let refresh = refresh.clone();
-            scope.spawn(move || {
-                apply_qos(qos);
-                for (i, row) in chunk.chunks_mut(row_len).enumerate() {
-                    refresh_rows(refresh.as_ref(), i);
-                    f(band * per + i, row);
-                }
-            });
+    let out_ptr = out.as_mut_ptr() as usize;
+    let out_len = out.len();
+    let bands = out_len.div_ceil(per * row_len);
+    dispatch_bands(bands, qos, |band| {
+        let start = band * per * row_len;
+        let end = (start + per * row_len).min(out_len);
+        // SAFETY: bands partition `out` into strictly disjoint mutable ranges.
+        let chunk = unsafe {
+            std::slice::from_raw_parts_mut((out_ptr as *mut T).add(start), end - start)
+        };
+        for (i, row) in chunk.chunks_mut(row_len).enumerate() {
+            refresh_rows(refresh.as_ref(), i);
+            f(band * per + i, row);
         }
     });
 }
@@ -164,19 +332,41 @@ pub(crate) fn planes_with<A: Send, B: Send, C: Send, S>(
     }
     let qos = current_qos();
     let band = &band;
-    std::thread::scope(|scope| {
-        let (mut b, mut c) = (b, c);
-        for (n, a) in a.chunks_mut(per * a_len).enumerate() {
-            let rows = a.len() / a_len;
-            let (b_here, b_rest) = std::mem::take(&mut b).split_at_mut(rows * b_len);
-            let (c_here, c_rest) = std::mem::take(&mut c).split_at_mut(rows * c_len);
-            (b, c) = (b_rest, c_rest);
-            let refresh = refresh.clone();
-            scope.spawn(move || {
-                apply_qos(qos);
-                band(n * per, a, b_here, c_here, refresh.as_ref());
-            });
-        }
+    let a_ptr = a.as_mut_ptr() as usize;
+    let a_total = a.len();
+    let b_ptr = b.as_mut_ptr() as usize;
+    let c_ptr = c.as_mut_ptr() as usize;
+    let bands = a_total.div_ceil(per * a_len);
+    dispatch_bands(bands, qos, |n| {
+        let a_start = n * per * a_len;
+        let a_end = (a_start + per * a_len).min(a_total);
+        let rows = (a_end - a_start) / a_len;
+        let row_start = n * per;
+        // SAFETY: bands partition `a`, `b`, and `c` into disjoint mutable ranges.
+        let a_here = unsafe {
+            std::slice::from_raw_parts_mut((a_ptr as *mut A).add(a_start), a_end - a_start)
+        };
+        let b_here = if b_len == 0 {
+            &mut []
+        } else {
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    (b_ptr as *mut B).add(row_start * b_len),
+                    rows * b_len,
+                )
+            }
+        };
+        let c_here = if c_len == 0 {
+            &mut []
+        } else {
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    (c_ptr as *mut C).add(row_start * c_len),
+                    rows * c_len,
+                )
+            }
+        };
+        band(row_start, a_here, b_here, c_here, refresh.as_ref());
     });
 }
 
