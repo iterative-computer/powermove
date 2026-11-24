@@ -9,6 +9,7 @@ pub mod image;
 pub mod pmv;
 pub mod record;
 pub mod replay;
+pub mod runner;
 pub mod stats;
 pub mod suite;
 pub mod verdict;
