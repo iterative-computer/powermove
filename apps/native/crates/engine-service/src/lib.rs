@@ -2206,6 +2206,8 @@ struct Flight {
     /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
     settled: bool,
     submission: render::Submission,
+    /// The completion callback has run, even if the drawable has yet to present.
+    gpu_done: bool,
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
@@ -2217,6 +2219,17 @@ struct Flight {
     /// Read back only for the trace's picture hash, not asked as a capture.
     picture_only: bool,
 }
+/// Timed playback pipelines up to three presents. Paused views (including
+/// scrubs, layer drags, and zoom) can take the latest input as soon as their
+/// previous GPU work completes, without waiting for the display callback.
+fn has_render_slot(
+    mut flights: impl ExactSizeIterator<Item = (u64, bool)>,
+    view: u64,
+    playing: bool,
+) -> bool {
+    flights.len() < 3 && (playing || !flights.any(|(id, gpu_done)| id == view && !gpu_done))
+}
+
 /// A settled picture asked of the engine and not handed over yet.
 struct Settling {
     id: u64,
@@ -2792,6 +2805,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 i += 1;
                 continue;
             }
+            flights[i].gpu_done = true;
             if flights[i].submission.drawable.is_some() {
                 let flight = &flights[i];
                 let trace = flight.submission.trace.lock().unwrap();
@@ -3503,7 +3517,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 None
             };
-            if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 3 {
+            let playing = r.transport.clock.is_playing();
+            if !has_render_slot(flights.iter().map(|f| (f.id, f.gpu_done)), id, playing) {
                 continue;
             }
             // A playing frame starts a whole content frame before its vsync
@@ -3526,7 +3541,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 1.
             };
-            let playing = r.transport.clock.is_playing();
             // The exact frame of a stop, and of a stand-in whose decode landed.
             if std::mem::replace(&mut r.was_playing, playing) && !playing {
                 r.scrub = false;
@@ -4175,6 +4189,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             spec,
                             settled: spec.final_picture(&scene),
                             submission: s,
+                            gpu_done: false,
                             input,
                             audio_host,
                             pipeline,
@@ -4397,11 +4412,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else if busy {
                 let now = trace::now();
                 let next = runtime
-                    .iter()
-                    .filter_map(|(id, r)| {
-                        let room =
-                            flights.len() < 3 && flights.iter().filter(|f| f.id == *id).count() < 3;
-                        if r.transport.clock.is_playing() && room {
+                    .values()
+                    .filter_map(|r| {
+                        if r.transport.clock.is_playing() && flights.len() < 3 {
                             Some((r.next - r.ahead * r.interval - now).max(0.0001))
                         } else if r.transport.running() && !r.transport.clock.is_playing() {
                             Some(0.001) // waiting for the first audio epoch
@@ -4691,6 +4704,23 @@ fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn a_paused_view_limits_gpu_work_without_waiting_for_the_display() {
+        assert!(!has_render_slot([(1, false)].into_iter(), 1, false));
+        assert!(has_render_slot([(1, true)].into_iter(), 1, false));
+        assert!(has_render_slot([(1, false)].into_iter(), 2, false));
+        assert!(has_render_slot(
+            [(1, false), (1, false)].into_iter(),
+            1,
+            true
+        ));
+        assert!(!has_render_slot(
+            [(1, false), (1, true), (2, false)].into_iter(),
+            1,
+            true
+        ));
+    }
 
     #[test]
     fn the_first_viewer_picture_draws_current_and_saved_builtins() {
