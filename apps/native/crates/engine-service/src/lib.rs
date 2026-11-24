@@ -2777,6 +2777,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
         }
         // Completion is distinct from display. Never synthesize presentedTime.
+        let mut scrub_present_retry = f64::INFINITY;
         let mut i = 0;
         while i < flights.len() {
             // Retired once its completion handler has recorded the outcome:
@@ -2792,8 +2793,35 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 continue;
             }
             if flights[i].submission.drawable.is_some() {
-                let trace = flights[i].submission.trace.lock().unwrap();
-                if trace.display.is_none() && trace::now() - trace.commit < 0.25 {
+                let flight = &flights[i];
+                let trace = flight.submission.trace.lock().unwrap();
+                let now = trace::now();
+                if trace.display.is_none() && now - trace.commit < 0.25 {
+                    // An untimed scrub can finish on the GPU but miss the
+                    // display. Give its current picture one earlier retry;
+                    // retain the original flight so its callback still wins
+                    // if it does get to the glass. Timed playback is unchanged.
+                    if trace.gpu_ok
+                        && flight.spec.moment == Moment::Scrub
+                        && let Some(view) = state.views.get_mut(&flight.id)
+                        && view.stamp == flight.stamp
+                        && view.commands.is_empty()
+                        && !view.hidden
+                        && !view.dirty
+                        && let Some(r) = runtime.get_mut(&flight.id)
+                        && r.scrub
+                        && r.last == Some((flight.stamp, flight.spec.time))
+                        && r.represented != Some(flight.stamp)
+                    {
+                        let retry = trace.completed + (3. * r.interval).max(0.025);
+                        if now >= retry {
+                            r.represented = Some(flight.stamp);
+                            view.dirty = true;
+                            view.status.represented += 1;
+                        } else {
+                            scrub_present_retry = scrub_present_retry.min(retry);
+                        }
+                    }
                     i += 1;
                     continue;
                 }
@@ -2911,6 +2939,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
+                            "render_size": f.spec.render_size(),
+                            "drawable_size": [f.submission.width, f.submission.height],
                             "picture": traced_picture
                                 .then(|| format!("{:016x}", f.submission.picture_hash())),
                             // Traced runs only: the decode service's running
@@ -4344,7 +4374,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .flat_map(|r| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
                 .map(|at| (at - now).max(0.001))
-                .fold(f64::INFINITY, f64::min);
+                .fold((scrub_present_retry - now).max(0.001), f64::min);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             // Only back-offs pending, nothing playing: sleep until the first is due.
