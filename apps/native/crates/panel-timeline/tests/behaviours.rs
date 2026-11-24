@@ -3441,7 +3441,7 @@ fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
     run(&mut c, p);
     assert!(c.model.row_position(&property).is_some());
     assert!(c.model.layer_disclosable("c"));
-    c.model.editing_property = Some(pm_panel_timeline::RevealTarget::Property { layer: "c".into(), path: "opacity".into() });
+    c.model.editing_property = Some(("c".into(), "opacity".into()));
     let p = c.model.property_diamond(&targets, 0.).unwrap();
     run(&mut c, p);
     assert!(c.model.row_position(&property).is_some());
@@ -4853,7 +4853,10 @@ fn keyframe_reveal_opens_a_collapsed_layer_and_explicit_property_filter() {
     assert!(!has_property(&c, "c", "opacity"));
     add_reveal_key(&mut c, "c", "opacity", "new", 0.);
     assert!(has_property(&c, "c", "opacity"));
-    assert_eq!(c.model.reveal_target, Some(("c".into(), "opacity".into())));
+    assert_eq!(
+        c.model.reveal_target,
+        Some(pm_panel_timeline::RevealTarget::Property { layer: "c".into(), path: "opacity".into() })
+    );
 }
 #[test]
 fn keyframe_reveal_does_not_reopen_a_user_collapse_until_the_next_edit() {
