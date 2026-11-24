@@ -634,9 +634,6 @@ struct View {
     phase: Option<(f64, f64)>,
     input: Option<f64>,
     pending_input: Option<f64>,
-    /// A seek the worker has not taken yet. The status shows it at once, so
-    /// the playhead and timecode never wait for a slow frame (PM-699).
-    requested_time: Option<Ticks>,
     /// The status line is a wait for extensions still loading
     /// (`render::DefinitionsPending`): new pins end it.
     waiting_definitions: bool,
@@ -795,11 +792,6 @@ impl View {
                 | TransportCommand::PlayAround { .. }
         ) {
             self.resume_on_show = None;
-        }
-        match cmd {
-            TransportCommand::Seek { time, .. } => self.requested_time = Some(time),
-            TransportCommand::Step { .. } => self.requested_time = None,
-            _ => {}
         }
         match cmd {
             TransportCommand::Play { rate } => self.desired_rate = rate,
@@ -1651,12 +1643,6 @@ impl Viewer {
             .get(&self.id)
             .map(|v| {
                 let mut status = v.status.clone();
-                if let (Some(time), Some(clock)) = (v.requested_time, status.clock.as_mut()) {
-                    clock.media_time = time;
-                    clock.host_time =
-                        pm_protocol::common::HostMicros::new((trace::now() * 1e6).max(0.) as u64)
-                            .unwrap_or(clock.host_time);
-                }
                 if v.refine_progress_stamp != Some(v.stamp) { status.refine_progress = None; }
                 if v.export_estimate_stamp != Some(v.stamp) {
                     status.export_estimate = ExportEstimateState::Idle;
@@ -2022,7 +2008,6 @@ impl EngineService {
                 phase: None,
                 input: None,
                 pending_input: None,
-                requested_time: None,
                 waiting_definitions: false,
                 pipeline: Default::default(),
                 mastering: Default::default(),
@@ -3457,8 +3442,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .as_ref()
                 .is_none_or(|old| old.rate != sample.rate || old.state != sample.state);
             v.status.clock = Some(sample);
-            // Its commands were drained above, under this same lock.
-            v.requested_time = None;
             v.desired_rate = r.transport.rate();
             v.status.audio_fallback = r.transport.fallback;
             changed |= v.status.wants_display != r.transport.running();
@@ -6961,48 +6944,6 @@ mod worker_tests {
         assert_eq!(service.shared.project_device_renewals.load(Ordering::Acquire), 1);
         assert_eq!(viewer.status().device_losses, 0);
         viewer.retire();
-    }
-
-    /// PM-699: a seek shows at once (the timeline's playhead and timecode
-    /// read this status) even while the worker is inside a slow frame.
-    #[test]
-    fn a_seek_shows_at_once_while_a_frame_is_slow() {
-        let service = EngineService::start(pm_gpu::Gpu::new("seek-at-once-test").unwrap()).unwrap();
-        let v = shapes_viewer(&service, None);
-        wait_for(&v, "a first frame", |s| {
-            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
-        });
-        use pm_perf::stall::{Stage, set};
-        set(Stage::Render, Duration::from_millis(600));
-        v.scrub(seconds(1.)).unwrap();
-        wait_for(&v, "the first seek taken", |s| {
-            s.clock
-                .as_ref()
-                .is_some_and(|c| c.media_time == seconds(1.))
-        });
-        // The worker is now inside the stalled frame.
-        std::thread::sleep(Duration::from_millis(150));
-        let at = std::time::Instant::now();
-        v.scrub(seconds(2.)).unwrap();
-        let shown = v.status().clock.map(|c| c.media_time);
-        let took = at.elapsed();
-        set(Stage::Render, Duration::ZERO);
-        assert_eq!(
-            shown,
-            Some(seconds(2.)),
-            "the playhead waited for the frame"
-        );
-        assert!(
-            took < Duration::from_micros(8_333),
-            "the seek took {took:?}"
-        );
-        wait_for(&v, "the seek taken", |s| {
-            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
-                && s.clock
-                    .as_ref()
-                    .is_some_and(|c| c.media_time == seconds(2.))
-        });
-        v.retire();
     }
 
     /// A capture is an exact read: full resolution and paused whatever the
