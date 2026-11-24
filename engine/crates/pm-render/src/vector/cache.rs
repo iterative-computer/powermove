@@ -912,8 +912,7 @@ impl VectorCache {
     /// same queue. Keep their shared scratch until the frame is submitted, so
     /// its next scene can reuse pages that are already held by the GPU.
     pub(crate) fn end_frame(&mut self) {
-        let in_frame =
-            self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>() + self.frame_slots.bytes();
+        let in_frame = self.frame_held() - self.frame_replaced;
         let own = self.scene_scratch_bytes().saturating_sub(in_frame);
         if own > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
             self.clear_own_scratch();
