@@ -1,0 +1,457 @@
+const std = @import("std");
+const observation = @import("observation.zig");
+const cache_warmer = @import("cache_warmer.zig");
+const skill_contract = @import("../../skills/skill_contract.zig");
+const agent_stream_provider = @import("../stream_provider.zig");
+const auth_runtime = @import("../../auth/auth_runtime.zig");
+const session_codec = @import("../../session/session_codec.zig");
+const command_admission = @import("../../permissions/command_admission.zig");
+const permission_auto_classifier = @import("../../permissions/auto_classifier.zig");
+const model_capabilities = @import("../../config/model_capabilities.zig");
+const model_catalog = @import("../../gateway/model_catalog.zig");
+const types = @import("../../shared/types.zig");
+const worker_runtime = @import("../worker_runtime.zig");
+const file_mutation = @import("../../tooling/file_mutation.zig");
+const tool_admission = @import("../../tooling/tool_admission.zig");
+const tool_dispatch = @import("../../tooling/tool_dispatch.zig");
+const tool_contracts = @import("tool_contracts.zig");
+const context_contract = @import("../../workspace/context_contract.zig");
+const compaction_activity = @import("../../output/compaction_activity.zig");
+
+const Allocator = std.mem.Allocator;
+const ChatMessage = types.ChatMessage;
+const HistoryTurn = types.HistoryTurn;
+const PermissionGrant = types.PermissionGrant;
+const PermissionMode = types.PermissionMode;
+const ToolCall = types.ToolCall;
+const WorkerEvent = worker_runtime.WorkerEvent;
+
+const DeferredToolCompletion = tool_contracts.DeferredToolCompletion;
+const DiffEntryPayload = tool_contracts.DiffEntryPayload;
+const ToolCallValidationResult = tool_contracts.ToolCallValidationResult;
+const ToolExecutionRequest = tool_contracts.ToolExecutionRequest;
+const ToolExecutionResult = tool_contracts.ToolExecutionResult;
+const TransportPublicationOutcome = tool_contracts.TransportPublicationOutcome;
+pub const LiveToolAuthority = tool_contracts.LiveToolAuthority;
+
+/// The turn so far: the user's message and every piece completed since.
+/// Borrowed only for the call; a sink copies or serializes what it keeps.
+pub const TurnProgress = struct {
+    user: types.UserTurn,
+    execution: types.ExecutionMemory,
+    /// Tool calls the model issued that have no result yet, in their saved
+    /// form, so a crash while they run leaves them in the session (D28).
+    running_calls: []const types.ToolCall = &.{},
+    /// The text of the message that issued `running_calls`, so a crash also
+    /// leaves what fx already showed (D51).
+    running_assistant: ?[]const u8 = null,
+    /// The recovery module's record for the send this write goes before,
+    /// saved in the same write (`tests/tla/recovery/Resume.tla`).
+    recovery_record: types.RecoveryRecordWrite = .keep,
+};
+
+/// Borrows checkpoint slices only for the call. A sink must synchronously copy
+/// or serialize anything it retains, including when a save fails.
+pub const RecoveryCheckpointEffect = struct {
+    set: *const fn (ctx: *anyopaque, checkpoint: session_codec.RecoveryCheckpoint) anyerror!void,
+    /// Terminally dead turns clear the durable checkpoint so a later resume
+    /// cannot resurrect a turn the product already called stopped.
+    clear: *const fn (ctx: *anyopaque) anyerror!void,
+};
+
+/// Presentation only. Called outside history publication's worker critical section.
+pub const CompactionActivityEffect = struct {
+    begin: *const fn (ctx: *anyopaque, origin: compaction_activity.Origin, turn_id: ?u64) compaction_activity.OperationId,
+    running: *const fn (ctx: *anyopaque, id: compaction_activity.OperationId, stage: compaction_activity.Stage) void,
+    settle: *const fn (ctx: *anyopaque, id: compaction_activity.OperationId, feedback: compaction_activity.Feedback) void,
+    /// How much of the summary the model has written, from 1 to 100. The row holds it below 100% until fx saves.
+    written: ?*const fn (ctx: *anyopaque, id: compaction_activity.OperationId, percent: u8) void = null,
+    /// A summary request is about to be sent; the row counts its wait.
+    asked: ?*const fn (ctx: *anyopaque, id: compaction_activity.OperationId) void = null,
+};
+
+pub const ContextCompactionCommitEffect = struct {
+    commit: *const fn (
+        ctx: *anyopaque,
+        summary: types.CompactedSummaryHistoryTurn,
+        active_prefix: ?types.AssistantHistoryTurn,
+        retained_from: ?types.ContextHistoryCut,
+    ) anyerror!void,
+};
+
+pub const LiveToolAuthorityDecision = enum {
+    allow,
+    ask,
+    deny,
+    unavailable,
+};
+
+pub const ResolvedLiveToolAuthority = struct {
+    authority: LiveToolAuthority,
+    decision: LiveToolAuthorityDecision,
+};
+
+/// Child-only provider. Any returned slices borrow `alloc`, whose action arena
+/// remains alive through permission admission and tool execution.
+pub const LiveToolAuthorityProvider = struct {
+    context: *anyopaque,
+    resolve_fn: *const fn (
+        *anyopaque,
+        Allocator,
+        ToolCall,
+        []const u8,
+        []const u8,
+        tool_dispatch.PermissionTargetKind,
+    ) anyerror!ResolvedLiveToolAuthority,
+
+    pub fn resolve(
+        self: LiveToolAuthorityProvider,
+        alloc: Allocator,
+        call: ToolCall,
+        workspace_root: []const u8,
+        target: []const u8,
+        target_kind: tool_dispatch.PermissionTargetKind,
+    ) !ResolvedLiveToolAuthority {
+        return self.resolve_fn(
+            self.context,
+            alloc,
+            call,
+            workspace_root,
+            target,
+            target_kind,
+        );
+    }
+};
+
+pub const ToolActivityPhase = enum { started, succeeded, failed, denied };
+
+pub const ToolActivityRecorder = struct {
+    context: *anyopaque,
+    record_fn: *const fn (
+        *anyopaque,
+        []const u8,
+        []const u8,
+        ToolActivityPhase,
+    ) anyerror!void,
+
+    pub fn record(
+        self: ToolActivityRecorder,
+        call_id: []const u8,
+        tool_name: []const u8,
+        phase: ToolActivityPhase,
+    ) !void {
+        return self.record_fn(self.context, call_id, tool_name, phase);
+    }
+};
+
+fn acknowledgePromptFinalization(_: *anyopaque, _: u64, _: types.TurnPresentationOutcome, _: ?types.ProviderCompletionDisposition) !void {}
+fn discardToolLifecycle(_: *anyopaque, _: types.ToolLifecycleEvent) !void {}
+fn discardRouteRecoveryStatus(_: *anyopaque, _: types.RouteRecoveryStatus) !void {}
+fn localAvailableModelCapabilities(_: *anyopaque, model: []const u8) model_capabilities.Capabilities {
+    return model_capabilities.capabilitiesForModel(model);
+}
+fn localModelCapabilities(_: *anyopaque, _: Allocator, model: []const u8) !model_capabilities.Capabilities {
+    return model_capabilities.capabilitiesForModel(model);
+}
+
+/// The user's answer when the account is out of credits.
+pub const OutOfCreditsChoice = enum {
+    /// "I added credits, retry": resend the request.
+    retry,
+    /// "Switch to another model": end the turn with the prompt back in the
+    /// composer and the model picker open.
+    switch_model,
+    /// "Cancel this turn", or Esc.
+    cancel,
+};
+
+pub const CredentialRefreshMode = auth_runtime.CredentialRefreshMode;
+
+/// Ordered text emitted by the agent runtime. Payloads are borrowed for the
+/// duration of the callback.
+pub const TextEmission = union(enum) {
+    assistant_started,
+    assistant_source: []const u8,
+    assistant_rendered: []const u8,
+    assistant_restarted: []const u8,
+    operational: []const u8,
+};
+
+/// Accent colors for diff add/remove markers. Named fields so the two styles
+/// cannot be swapped silently at a call site. Empty means the neutral accent.
+pub const DiffMarkerStyles = struct {
+    added: []const u8 = "",
+    removed: []const u8 = "",
+};
+
+/// A refreshed login for the request that asked for it. Every field is
+/// allocated with the allocator the hook was given, and the caller owns it;
+/// the caller zeroes `token` when it frees it.
+pub const RefreshedGatewayCredential = struct {
+    token: []u8,
+    /// The Vercel team the refreshed login sends. Null keeps the request's
+    /// team, which is what a host that refuses a team change during a request
+    /// returns.
+    gateway_team: ?[]u8 = null,
+    /// That team's slug, which fx shows the user.
+    gateway_team_label: ?[]u8 = null,
+};
+
+pub const AgentRuntimeDeps = struct {
+    /// The steps of `start_workspace_capture`.
+    pub const WorkspaceCaptureStep = enum { begin, capture, settle };
+
+    /// What `wait_for_handoff_mail` ended on.
+    pub const HandoffMailWait = enum {
+        /// Nothing waits in the hand-off for this agent, so the call did not wait.
+        none,
+        /// The mail reached the worker's queue and joins the turn.
+        joined,
+        /// The mail does not join the turn, either because older work waits
+        /// ahead of it or because the hand-off no longer holds it, so it goes to
+        /// a later turn.
+        delivered,
+        /// The turn takes no more mail, so the call did not wait.
+        closed,
+        /// A stop, a shutdown, or a cancel ended the wait.
+        interrupted,
+        /// The time ran out with the mail still in the hand-off.
+        timed_out,
+    };
+
+    ctx: *anyopaque,
+    observer: ?*observation.Observer = null,
+    agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
+    flush_assistant_stream_per_content_chunk: bool = false,
+    render_assistant_text: bool = true,
+    cooperative_transport_pulse: ?agent_stream_provider.CooperativePulse = null,
+    tool_registry: tool_dispatch.Registry = .{},
+    context_registry: ?context_contract.Registry = null,
+    context_enabled: bool = false,
+    /// True where a turn's images are files the user named by path, as in the
+    /// TUI and `fx ask`. The rules of each image's folder then reach the model
+    /// the way a tool call's do: a note on the turn's own message, so the
+    /// instructions stay as they were cached. Hosts whose images carry no
+    /// workspace path leave it false. Other attached files reach the model the
+    /// same way through the prompt's `attached_files`.
+    image_folder_rules: bool = false,
+    live_tool_authority: ?LiveToolAuthorityProvider = null,
+    /// Samples host-owned root permission mode at an action boundary.
+    snapshot_root_permission_mode: ?*const fn (ctx: *anyopaque) PermissionMode = null,
+    tool_activity_recorder: ?ToolActivityRecorder = null,
+    finalize_turn: *const fn (ctx: *anyopaque, turn_id: u64, outcome: types.TurnPresentationOutcome, disposition: ?types.ProviderCompletionDisposition) anyerror!void = acknowledgePromptFinalization,
+    /// Classifies one observed steering boundary. Continued text is arena-owned
+    /// non-authoritative context; handoff leaves the prompt host-owned.
+    take_steering_boundary: ?*const fn (
+        ctx: *anyopaque,
+        arena: Allocator,
+        turn_id: u64,
+        kind: worker_runtime.SteeringBoundaryKind,
+    ) anyerror!worker_runtime.SteeringBoundaryResult = null,
+    /// Set only by a host whose subagents' reports and messages reach this
+    /// agent's worker through a hand-off that the worker cannot see, as the
+    /// TUI's main loop is. Called as an empty reply's step ends, with no lock
+    /// held. When the hand-off holds mail for this agent, it waits at most
+    /// `bound_ms` for that mail to reach the worker's queue, so the check for
+    /// mail that follows finds it.
+    wait_for_handoff_mail: ?*const fn (ctx: *anyopaque, turn_id: u64, bound_ms: i64) HandoffMailWait = null,
+    release_agent_terminal_lease: *const fn (ctx: *anyopaque, session_id: []const u8) anyerror!void = terminalLeaseCleanupUnavailable,
+    /// Whether turn `turn_id`, which ends interrupted, ends because the user
+    /// cancelled it rather than because steering ended it. Asked before the
+    /// turn is reported, since a prompt typed once it is reported can join
+    /// its ending as steering. Hosts without steering leave it unset.
+    turn_ends_by_explicit_cancel: ?*const fn (ctx: *anyopaque, turn_id: u64) bool = null,
+    /// Stops the commands that steering moved to the background during turn
+    /// `turn_id`, after the user cancelled it (`turn_ends_by_explicit_cancel`).
+    /// Called once the turn is reported. It starts the stops and returns
+    /// without waiting for them, so a command that ignores SIGTERM and takes
+    /// seconds to stop holds neither the turn's end nor the next prompt.
+    /// Hosts without steering leave it unset.
+    stop_steering_detached_commands: ?*const fn (ctx: *anyopaque, turn_id: u64) anyerror!void = null,
+    append_runtime_context: *const fn (ctx: *anyopaque, arena: Allocator, messages: *std.ArrayList(ChatMessage)) anyerror!void,
+    append_static_context: ?*const fn (ctx: *anyopaque, arena: Allocator, messages: *std.ArrayList(ChatMessage)) anyerror!void = null,
+    validate_tool_call: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall) anyerror!ToolCallValidationResult = null,
+    snapshot_mcp_definition: ?*const fn (*anyopaque, Allocator, []const u8, types.McpToolBinding) anyerror!@import("../../tooling/tool_mcp_runtime.zig").DefinitionSnapshot = null,
+    /// Resolves a model call naming a live MCP tool that this step did not
+    /// advertise. A returned definition is advertised before admission, so
+    /// the call runs under the normal MCP validation and permission path.
+    resolve_unselected_mcp_tool: ?*const fn (ctx: *anyopaque, arena: Allocator, name: []const u8) anyerror!?@import("../../tooling/tool_mcp_runtime.zig").SelectedTool = null,
+    check_tool_availability: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall) anyerror!?[]const u8 = null,
+    request_tool_permission: *const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?LiveToolAuthority, revalidation: ?tool_contracts.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8, mcp_review_schema_json: ?[]const u8) anyerror!command_admission.PermissionOutcome,
+    /// Admission consumes `prepared`; callers must not retry the same value through the raw callback.
+    request_prepared_file_mutation_permission: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?LiveToolAuthority, advertised_dynamic_tool_names: []const []const u8) anyerror!command_admission.PermissionOutcome = null,
+    resolve_tool_action_display_target: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall) anyerror!?[]const u8 = null,
+    describe_tool_action: *const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) anyerror![]const u8,
+    describe_tool_action_completed: *const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) anyerror![]const u8,
+    describe_tool_action_denied: *const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) anyerror![]const u8,
+    subagent_status_renderer: ?types.SubagentStatusRenderer = null,
+    permission_target_for_call: *const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) anyerror![]const u8,
+    execute_tool_call: *const fn (ctx: *anyopaque, request: ToolExecutionRequest) anyerror!ToolExecutionResult,
+    publish_committed_file_handoff: *const fn (ctx: *anyopaque, handoff: file_mutation.CommittedFileHandoff) tool_contracts.SecondaryPublicationReport,
+    publish_deferred_tool_completion: ?*const fn (ctx: *anyopaque, completion: DeferredToolCompletion) TransportPublicationOutcome = null,
+    propagate_history_turn: *const fn (ctx: *anyopaque, turn: HistoryTurn) anyerror!void,
+    commit_context_compaction: ?ContextCompactionCommitEffect = null,
+    compaction_activity: ?CompactionActivityEffect = null,
+    /// Call-scoped output for the exact error returned through compaction, never retained.
+    compaction_failure: ?*?compaction_activity.ErrorProvenance = null,
+    recovery_checkpoint: ?RecoveryCheckpointEffect = null,
+    /// Called at every model-request boundary with the turn so far, so each
+    /// completed piece is saved as it happens rather than at the turn's end.
+    append_turn_piece: ?*const fn (ctx: *anyopaque, progress: TurnProgress) anyerror!void = null,
+    /// Saves or clears the recovery module's record in the open turn outside
+    /// the writes before and after each send, which carry it in
+    /// `TurnProgress.recovery_record`. Returns false when the turn has no
+    /// pieces on disk yet. Null on hosts that never resume a request, which
+    /// keep no record.
+    save_recovery_record: ?*const fn (ctx: *anyopaque, record: types.RecoveryRecordWrite) anyerror!bool = null,
+    /// Called once with each main-model completion's provider usage, as soon
+    /// as it arrives, so a saved session keeps the usage of every reply even
+    /// when the turn never ends. A failure is traced and never fails the turn.
+    record_usage: ?*const fn (ctx: *anyopaque, usage: types.Usage) anyerror!void = null,
+    /// Keeps the conversation's Claude prompt cache warm between requests.
+    /// Owned by the conversation's `SessionRuntime`; null where no one waits
+    /// on the conversation, as in `fx ask` and subagents.
+    cache_warmer: ?*cache_warmer.Warmer = null,
+    /// Saves the turn's prompt images in the session before its first
+    /// request is built, so the note naming each saved file is true when
+    /// that request is sent (D89). It sets `blob_path`, allocated with
+    /// `alloc`, which owns `images`, on each image it saves and clears its
+    /// `inline_data`, so the turn holds only the handle; those bytes stay
+    /// the caller's. An image the session cannot save keeps its bytes
+    /// inline and gets no path.
+    save_prompt_images: ?*const fn (ctx: *anyopaque, alloc: Allocator, images: []types.ImageAttachment) anyerror!void = null,
+    /// Captures the repository the session works in as the turn starts,
+    /// before any tool acts, when `experimental.workspace_capture` is on
+    /// (D98, `src/core/workspace/turn_capture.zig`). `.begin` takes the
+    /// turn's capture token; once the user's prompt is saved through
+    /// `append_turn_piece`, so a kill during the capture keeps it,
+    /// `.capture` starts the start capture, which runs beside the turn's
+    /// first request; and `.settle`, which `executeToolCall` sends before
+    /// every tool and the turn sends as it returns, however it ends, waits
+    /// until it is saved. `fresh` is false for a steering
+    /// message inside the turn, which keeps the turn's capture. It never
+    /// fails the turn.
+    start_workspace_capture: ?*const fn (ctx: *anyopaque, fresh: bool, step: WorkspaceCaptureStep) void = null,
+    /// An admitted tool is about to act in `dir`: a command's working folder
+    /// or the folder of the file a mutation writes. Captures a repository the
+    /// turn had not reached yet before the action runs (D98). Never fails
+    /// the call.
+    reach_workspace: ?*const fn (ctx: *anyopaque, dir: []const u8, tool_name: []const u8) void = null,
+    /// Confirms, without writing, that this process still owns the saved
+    /// session after a main-model completion and before its tool calls run.
+    /// Another process may have taken the session over.
+    confirm_session_writer: ?*const fn (ctx: *anyopaque) anyerror!void = null,
+    propagate_grant: *const fn (ctx: *anyopaque, tool_name: []const u8, target_path: []const u8) anyerror!void,
+    push_event: *const fn (ctx: *anyopaque, event: WorkerEvent) anyerror!void,
+    push_text: *const fn (ctx: *anyopaque, emission: TextEmission) anyerror!void,
+    push_reasoning_delta: ?*const fn (ctx: *anyopaque, delta: []const u8) anyerror!void = null,
+    push_tool_lifecycle: *const fn (ctx: *anyopaque, event: types.ToolLifecycleEvent) anyerror!void = discardToolLifecycle,
+    push_diff_block: *const fn (ctx: *anyopaque, payload: DiffEntryPayload) anyerror!void,
+    push_system_notice: *const fn (ctx: *anyopaque, text: []const u8) anyerror!void,
+    push_interactive_notice: ?*const fn (ctx: *anyopaque, notice: types.SemanticNotice) anyerror!void = null,
+    /// Source-limit notices use a session-scoped deduplicating path when the
+    /// host provides one; ordinary system notices remain unaffected.
+    push_context_notice: ?*const fn (ctx: *anyopaque, text: []const u8) anyerror!void = null,
+    /// A notice the person should see once in a live session, however many
+    /// turns repeat its cause. The host shows it where they read the
+    /// transcript and drops a text it has already shown. Null: the host has
+    /// no session to remember it in, and the notice is not shown.
+    push_session_notice: ?*const fn (ctx: *anyopaque, text: []const u8) anyerror!void = null,
+    push_route_recovery_status: *const fn (ctx: *anyopaque, status: types.RouteRecoveryStatus) anyerror!void = discardRouteRecoveryStatus,
+    /// Saves a recovery status in the session log's open turn, as a
+    /// `model_recovery` item. `RequestRecovery` calls it when the status's
+    /// kind or attempt changes, and for the request's outcome. Null: the host
+    /// keeps no session log.
+    save_route_recovery_status: ?*const fn (ctx: *anyopaque, status: types.RouteRecoveryStatus) anyerror!void = null,
+    /// A new model request starts. A host that reports the last request's
+    /// recovery, as `fx ask --json` does, forgets the previous request's
+    /// here. Null: the host keeps no per-request report.
+    begin_route_recovery_request: ?*const fn (ctx: *anyopaque) void = null,
+    /// A turn that can never recover hands the user's prompt back to the
+    /// composer so nothing typed is lost. Null: host keeps the prompt as-is.
+    restore_failed_prompt: ?*const fn (ctx: *anyopaque, prompt: []const u8) anyerror!void = null,
+    push_command_output_complete: *const fn (ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId) anyerror!void,
+    push_http_error: *const fn (ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) anyerror!void,
+    /// `rejected_token` is the access token the provider just answered 401
+    /// for, with `.force`; see `auth_runtime.refreshCredentialForAccount`.
+    refresh_gateway_credential: ?*const fn (ctx: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: CredentialRefreshMode, expected_account_id: ?[]const u8, rejected_token: ?[]const u8) anyerror!?RefreshedGatewayCredential = null,
+    /// Asks the user what to do when the account is out of credits, and
+    /// blocks until they answer. Only the TUI sets it.
+    ask_out_of_credits: ?*const fn (ctx: *anyopaque) anyerror!OutOfCreditsChoice = null,
+    available_model_capabilities: *const fn (ctx: *anyopaque, model: []const u8) model_capabilities.Capabilities = localAvailableModelCapabilities,
+    resolve_model_capabilities: *const fn (ctx: *anyopaque, arena: Allocator, model: []const u8) anyerror!model_capabilities.Capabilities = localModelCapabilities,
+    /// The failure that keeps the model catalog down, so capability drops are
+    /// provenance-attributed instead of silent and the notice can name the
+    /// cause. Returns null while the catalog loads, after it loaded, or when a
+    /// failed refresh kept an earlier copy. A null callback means the host
+    /// cannot tell, and capability drops stay quiet.
+    model_catalog_failure: ?*const fn (ctx: *anyopaque) ?model_catalog.FailureCategory = null,
+    format_tool_execution_error: *const fn (ctx: *anyopaque, arena: Allocator, tool_name: []const u8, err: anyerror) anyerror![]const u8,
+    record_tool_call_rejected: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, model_output: []const u8, command_result_json: ?[]const u8) anyerror!void = null,
+    /// Records a call that reached the tool's own preflight/content checks and
+    /// failed them (never denied, never fully executed its effect). Kept
+    /// distinct from record_tool_call_rejected so diagnostics do not report
+    /// content failures as permission rejections.
+    record_tool_call_failed: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, model_output: []const u8, command_result_json: ?[]const u8) anyerror!void = null,
+    report_usage: ?*const fn (ctx: *anyopaque, usage: types.Usage) void = null,
+    report_inner_tool_usage: ?*const fn (ctx: *anyopaque, tool_name: []const u8, usage: types.ToolUsage) void = null,
+    // Accent for the +N / -N counts in a committed file's status line.
+    // Captured by value at construction; that is safe only while the marker
+    // colors never change after startup (they are theme-independent).
+    diff_marker_styles: DiffMarkerStyles = .{},
+
+    pub fn pushContextNotice(self: *const AgentRuntimeDeps, text: []const u8) !void {
+        if (self.push_context_notice) |push| return push(self.ctx, text);
+        return self.push_system_notice(self.ctx, text);
+    }
+
+    pub fn executeToolCall(self: *const AgentRuntimeDeps, request: ToolExecutionRequest) !ToolExecutionResult {
+        // No tool acts before the turn's start capture is saved (D98).
+        if (self.start_workspace_capture) |capture| capture(self.ctx, false, .settle);
+        if (self.reach_workspace) |reach| if (reachedDirectory(request.authority)) |dir| reach(self.ctx, dir, request.call.name);
+        if (self.observer) |observer| observer.emit(.{ .tool_start = .{ .call = request.call } });
+        var observed_request = request;
+        observed_request.observer = self.observer orelse request.observer;
+        const result = self.execute_tool_call(self.ctx, observed_request) catch |err| {
+            if (self.observer) |observer| observer.emit(.{ .tool_end = .{
+                .call = request.call,
+                .status = if (err == error.Cancelled) "cancelled" else "failure",
+                .error_name = @errorName(err),
+            } });
+            return err;
+        };
+        if (self.observer) |observer| observer.emit(.{ .tool_end = .{
+            .call = request.call,
+            .output = result.model_output,
+            .status = if (result.cancelled) "cancelled" else @tagName(result.status),
+            .usage = result.inner_usage,
+        } });
+        return result;
+    }
+};
+
+/// The folder an admitted action works in, from its typed authority: a
+/// command's resolved working folder, or the folder of a mutation's
+/// canonical target. Permission text is never parsed for a path (D98).
+fn reachedDirectory(authority: command_admission.ToolExecutionAuthority) ?[]const u8 {
+    return switch (authority) {
+        .run_command => |command| switch (command) {
+            .direct_only => |fingerprint| fingerprint.resolved_cwd,
+            .shell_allowed => |allowed| allowed.fingerprint.resolved_cwd,
+        },
+        .file_mutation => |mutation| std.Io.Dir.path.dirname(mutation.policy_targets.canonical_target_path),
+        .ordinary, .vision_paths => null,
+    };
+}
+
+fn terminalLeaseCleanupUnavailable(_: *anyopaque, _: []const u8) !void {
+    return error.TerminalLeaseCleanupUnavailable;
+}
+
+test "a reached directory comes only from a command's or a mutation's typed authority" {
+    const fingerprint: command_admission.AdmissionFingerprint = .{ .command = "make", .resolved_cwd = "/repo/sub", .target_os = .linux };
+    try std.testing.expectEqualStrings("/repo/sub", reachedDirectory(.{ .run_command = .{ .direct_only = fingerprint } }).?);
+    try std.testing.expectEqualStrings("/repo/sub", reachedDirectory(.{ .run_command = .{ .shell_allowed = .{ .fingerprint = fingerprint, .source = .auto_mode } } }).?);
+    try std.testing.expect(reachedDirectory(.ordinary) == null);
+    try std.testing.expect(reachedDirectory(.{ .vision_paths = .{ .targets = &.{} } }) == null);
+}

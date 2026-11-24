@@ -1,0 +1,2986 @@
+const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
+const builtin = @import("builtin");
+const command_admission = @import("../permissions/command_admission.zig");
+const command_contract = @import("command_contract.zig");
+const command_environment = @import("command_environment.zig");
+const command_runner = @import("command_runner.zig");
+const contract = @import("managed_execution_contract.zig");
+const debug_trace = @import("../shared/debug_trace.zig");
+const execution_router = @import("router.zig");
+const io_mod = @import("../shared/io.zig");
+const types = @import("../shared/types.zig");
+const command_replay_store = @import("../session/command_replay_store.zig");
+const quiet_notice = @import("quiet_notice.zig");
+const session_child_store = @import("../session/session_child_store.zig");
+const text_utils = @import("../shared/text_utils.zig");
+
+const Allocator = std.mem.Allocator;
+const max_entries = contract.max_live_entries + contract.max_tombstones;
+const captured_stop_settle_timeout_ms: i64 = if (builtin.is_test)
+    100
+else
+    command_runner.termination_settle_timeout_ms + 1_000;
+
+/// The quiet limit (`quiet_notice.zig`), or the shorter one the end-to-end
+/// tests set with `FX_TEST_SHELL_QUIET_NOTICE_MS`. Read when a wait or a
+/// result needs it, since `Runtime.init` also runs at compile time as a
+/// default field value.
+fn quietLimitMs() u64 {
+    return quiet_notice.limitFromValue(io_mod.getenv("FX_TEST_SHELL_QUIET_NOTICE_MS"));
+}
+
+/// How long a wait still runs after it starts when steering asks it to
+/// yield, so a quick command, shell startup included, returns its result
+/// instead of a session. A command already past it yields at once.
+const default_steer_yield_grace_ms: i64 = 1_000;
+
+/// The steering yield grace, or the one the end-to-end tests set with
+/// `FX_TEST_STEER_YIELD_GRACE_MS` to hold steering behind a running command.
+/// Read once per wait.
+pub fn steerYieldGraceMs() i64 {
+    return steerYieldGraceFromValue(io_mod.getenv("FX_TEST_STEER_YIELD_GRACE_MS"));
+}
+
+/// The grace `value` names in whole milliseconds, or the default when it is
+/// missing, not a number, or negative.
+fn steerYieldGraceFromValue(value: ?[]const u8) i64 {
+    const raw = value orelse return default_steer_yield_grace_ms;
+    const parsed = std.fmt.parseInt(i64, raw, 10) catch return default_steer_yield_grace_ms;
+    return if (parsed < 0) default_steer_yield_grace_ms else parsed;
+}
+
+/// Whether a wait that began at `started_ms` stops now for steering: the
+/// flag is set and `grace_ms` has passed.
+pub fn steerYieldDue(
+    flag: ?*const std.atomic.Value(bool),
+    started_ms: i64,
+    now_ms: i64,
+    grace_ms: i64,
+) bool {
+    const yield_flag = flag orelse return false;
+    if (!yield_flag.load(.seq_cst)) return false;
+    return now_ms - started_ms >= grace_ms;
+}
+
+pub const StartCapturedInput = struct {
+    execution_id: []const u8,
+    command: []const u8,
+    cwd: []const u8,
+    environment: command_environment.Environment,
+    authority: command_admission.CommandExecutionAuthority,
+    max_output_bytes: usize,
+    timeout_ms: ?usize,
+    command_artifact_dir: ?[]const u8,
+    replay_capability: ?*const session_child_store.SessionChildCapability = null,
+    output_chunk_lifecycle_id: ?types.ToolLifecycleId = null,
+    output_chunk_ctx: ?*anyopaque = null,
+    on_output_chunk: ?command_runner.CommandOutputCallback = null,
+    yield_time_ms: u32 = contract.default_yield_time_ms,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    /// When set, `startCaptured` stops waiting before `yield_time_ms` and
+    /// returns the command running (`steerYieldDue`). It never stops it.
+    tool_yield_flag: ?*const std.atomic.Value(bool) = null,
+    /// Added to the command's environment. Copied before `startCaptured`
+    /// returns.
+    extra_environment: []const command_runner.EnvironmentVariable = &.{},
+    /// While this count is above zero, `startCaptured` waits past
+    /// `yield_time_ms`: the command is waiting on an `fx mcp call` whose
+    /// owner is this call, which must not end before the answer does.
+    yield_hold: ?*const std.atomic.Value(u32) = null,
+};
+
+pub const TtyCursor = struct {
+    segment: u64 = 1,
+    offset: u64 = 0,
+
+    fn validate(self: TtyCursor) !void {
+        if (self.segment == 0) return error.InvalidTtyCursor;
+    }
+};
+
+pub const TtyUpdate = struct {
+    execution_id: []const u8,
+    command: []const u8,
+    cwd: ?[]const u8 = null,
+    state: SnapshotState,
+    output: []const u8 = "",
+    replay_output: ?[]const u8 = null,
+    next_cursor: ?TtyCursor = null,
+    output_incomplete: bool = false,
+    error_name: ?[]const u8 = null,
+    max_output_bytes: usize,
+    published_running: bool,
+    capacity_reserved: bool = false,
+    replay_capability: ?*const session_child_store.SessionChildCapability = null,
+};
+
+pub const SnapshotState = union(enum) {
+    running,
+    completed: command_contract.CommandStatus,
+    stopped: ?command_contract.CommandStatus,
+    lost,
+};
+
+pub const Snapshot = struct {
+    execution_id: []u8,
+    command: []u8,
+    cwd: []u8,
+    retained: bool,
+    state: SnapshotState,
+    backend: contract.Backend = .captured,
+    persistence: contract.Persistence = .process,
+    output_delta: []u8,
+    output_truncated: bool,
+    output_incomplete: bool = false,
+    duration_ms: ?u64 = null,
+    output_file: ?[]u8 = null,
+    output_framed_bytes: usize = 0,
+    stdout_bytes: usize = 0,
+    stderr_bytes: usize = 0,
+    error_name: ?[]u8 = null,
+    /// How long a running captured command has run and printed nothing, and
+    /// whether that quiet time has reached the limit
+    /// (`quiet_notice.zig`). Null and false on every other snapshot.
+    running_ms: ?u64 = null,
+    quiet_ms: ?u64 = null,
+    quiet_notice: bool = false,
+    /// Set when this snapshot ends a wait at the quiet crossing: the
+    /// command still runs and its quiet spell crossed the limit during this
+    /// wait. A spell crosses once, so a later wait in it leaves this false
+    /// (`tests/tla/managed_execution/QuietWait.tla`).
+    quiet_crossed: bool = false,
+
+    pub fn deinit(self: *Snapshot, alloc: Allocator) void {
+        alloc.free(self.execution_id);
+        alloc.free(self.command);
+        alloc.free(self.cwd);
+        alloc.free(self.output_delta);
+        if (self.output_file) |value| alloc.free(value);
+        if (self.error_name) |value| alloc.free(value);
+        self.* = undefined;
+    }
+};
+
+pub const PreparedSnapshot = struct {
+    snapshot: Snapshot,
+    reservation_id: u64,
+
+    pub fn deinit(self: *PreparedSnapshot, alloc: Allocator) void {
+        self.snapshot.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+pub fn modelOutputDelta(
+    alloc: Allocator,
+    encoded: []const u8,
+) Allocator.Error!?[]u8 {
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        encoded,
+        .{},
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => null,
+    };
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return null,
+    };
+    const output_delta = switch (object.get("output_delta") orelse return null) {
+        .string => |value| value,
+        else => return null,
+    };
+    return try alloc.dupe(u8, output_delta);
+}
+
+pub const ListItem = struct {
+    execution_id: []u8,
+    command: []u8,
+    state: SnapshotState,
+    backend: contract.Backend,
+    persistence: contract.Persistence,
+
+    pub fn deinit(self: *ListItem, alloc: Allocator) void {
+        alloc.free(self.execution_id);
+        alloc.free(self.command);
+        self.* = undefined;
+    }
+};
+
+const CapturedAuthority = struct {
+    route: execution_router.PreparedCommandRoute,
+};
+
+const TtyAuthority = struct {
+    session_id: []const u8,
+    cursor: TtyCursor,
+};
+
+const BackendState = union(enum) {
+    captured: CapturedAuthority,
+    tty: TtyAuthority,
+    tombstone,
+};
+
+const Entry = struct {
+    runtime: *Runtime,
+    arena: *std.heap.ArenaAllocator,
+    execution_id: []const u8,
+    command: []const u8,
+    cwd: []const u8,
+    environment: command_environment.Environment,
+    max_output_bytes: usize,
+    timeout_ms: ?usize,
+    command_artifact_dir: ?[]const u8,
+    backend_kind: contract.Backend,
+    persistence_kind: contract.Persistence,
+    mutex: std.Io.Mutex = .init,
+    state: contract.State = .starting,
+    barrier: contract.CompletionBarrier = .{},
+    backend_state: BackendState,
+    /// Output not yet delivered (`appendBoundedOutput`). Once some was
+    /// dropped, `output.items[0..output_gap_at]` is its start, the rest its
+    /// newest bytes, and `output_dropped` bytes between them were left out.
+    output: std.ArrayList(u8) = .empty,
+    output_gap_at: usize = 0,
+    output_dropped: u64 = 0,
+    replay_capture: ?*command_replay_store.Capture = null,
+    replay_capability: ?*session_child_store.SessionChildCapability = null,
+    output_chunk_lifecycle_id: ?types.ToolLifecycleId = null,
+    output_chunk_ctx: ?*anyopaque = null,
+    on_output_chunk: ?command_runner.CommandOutputCallback = null,
+    extra_environment: []const command_runner.EnvironmentVariable = &.{},
+    output_handle: ?[]const u8 = null,
+    output_framed_bytes: usize = 0,
+    stdout_bytes: usize = 0,
+    stderr_bytes: usize = 0,
+    output_truncated: bool = false,
+    output_incomplete: bool = false,
+    /// When the entry was made, and when its command last printed: its
+    /// start until then. Guarded by `mutex`.
+    started_ms: i64 = 0,
+    last_output_ms: i64 = 0,
+    delivery: contract.DeliveryState = .{},
+    active_waiter: ?u64 = null,
+    preempted_waiter: ?u64 = null,
+    result: ?command_contract.RunCommandResult = null,
+    error_name: ?[]const u8 = null,
+    cancel: std.atomic.Value(bool) = .init(false),
+    force_cancel: std.atomic.Value(bool) = .init(false),
+    start_gate: std.Io.Event = .unset,
+    thread: ?std.Thread = null,
+    /// Serializes joins of `thread`; see `Runtime.joinEntry`.
+    join_mutex: std.Io.Mutex = .init,
+    published_running: bool = false,
+    /// The turn whose steering returned this command running, if one did.
+    /// An explicit cancel of that turn stops the command
+    /// (`Runtime.takeSteeringDetached`).
+    steering_detached_turn_id: ?u64 = null,
+    tombstone_sequence: std.atomic.Value(u32) = .init(0),
+    active_operations: usize = 0,
+    pending_delete: bool = false,
+
+    fn init(runtime: *Runtime, input: StartCapturedInput) !*Entry {
+        const entry = try runtime.alloc.create(Entry);
+        errdefer runtime.alloc.destroy(entry);
+        const arena = try runtime.alloc.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(runtime.alloc);
+        errdefer {
+            arena.deinit();
+            runtime.alloc.destroy(arena);
+        }
+        const owned = arena.allocator();
+        const command = try owned.dupe(u8, input.command);
+        const cwd = try owned.dupe(u8, input.cwd);
+        const execution_id = try owned.dupe(u8, input.execution_id);
+        const environment = try dupeEnvironment(owned, input.environment);
+        const extra_environment = try owned.alloc(command_runner.EnvironmentVariable, input.extra_environment.len);
+        for (input.extra_environment, extra_environment) |source, *target| {
+            target.* = .{ .name = try owned.dupe(u8, source.name), .value = try owned.dupe(u8, source.value) };
+        }
+        const command_artifact_dir = if (input.command_artifact_dir) |path|
+            try owned.dupe(u8, path)
+        else
+            null;
+        const command_ctx = command_admission.CommandContext{
+            .command = command,
+            .resolved_cwd = cwd,
+            .target_os = builtin.target.os.tag,
+            .environment = environment,
+        };
+        const authority = rebindAuthority(input.authority, command_ctx);
+        var route = try execution_router.prepareAuthorizedRoute(
+            owned,
+            command_ctx,
+            authority,
+        );
+        errdefer route.deinit(owned);
+        const replay_capability = try duplicateReplayCapability(
+            runtime,
+            input.replay_capability,
+        );
+        errdefer deinitReplayCapability(runtime, replay_capability);
+        const replay_capture = if (replay_capability) |capability|
+            try command_replay_store.Capture.create(owned, 0, capability)
+        else
+            try command_replay_store.Capture.createEphemeral(
+                owned,
+                0,
+                &runtime.replay_store,
+            );
+        const output_chunk_lifecycle_id = if (input.output_chunk_lifecycle_id) |id|
+            types.ToolLifecycleId{
+                .turn_id = id.turn_id,
+                .call_id = try owned.dupe(u8, id.call_id),
+            }
+        else
+            null;
+        entry.* = .{
+            .runtime = runtime,
+            .arena = arena,
+            .execution_id = execution_id,
+            .command = command,
+            .cwd = cwd,
+            .environment = environment,
+            .max_output_bytes = input.max_output_bytes,
+            .timeout_ms = input.timeout_ms,
+            .command_artifact_dir = command_artifact_dir,
+            .backend_kind = .captured,
+            .persistence_kind = .process,
+            .backend_state = .{ .captured = .{ .route = route } },
+            .replay_capture = replay_capture,
+            .replay_capability = replay_capability,
+            .output_chunk_lifecycle_id = output_chunk_lifecycle_id,
+            .output_chunk_ctx = input.output_chunk_ctx,
+            .on_output_chunk = input.on_output_chunk,
+            .extra_environment = extra_environment,
+        };
+        entry.started_ms = io_mod.milliTimestamp();
+        entry.last_output_ms = entry.started_ms;
+        return entry;
+    }
+
+    fn initTty(runtime: *Runtime, input: TtyUpdate) !*Entry {
+        if (input.next_cursor) |cursor| try cursor.validate();
+        const entry = try runtime.alloc.create(Entry);
+        errdefer runtime.alloc.destroy(entry);
+        const arena = try runtime.alloc.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(runtime.alloc);
+        errdefer {
+            arena.deinit();
+            runtime.alloc.destroy(arena);
+        }
+        const owned = arena.allocator();
+        const execution_id = try owned.dupe(u8, input.execution_id);
+        const command = try owned.dupe(u8, input.command);
+        const cwd = try owned.dupe(u8, input.cwd orelse "");
+        const replay_capability = try duplicateReplayCapability(
+            runtime,
+            input.replay_capability,
+        );
+        errdefer deinitReplayCapability(runtime, replay_capability);
+        const replay_capture = if (replay_capability) |capability|
+            try command_replay_store.Capture.create(owned, 0, capability)
+        else
+            try command_replay_store.Capture.createEphemeral(
+                owned,
+                0,
+                &runtime.replay_store,
+            );
+        const raw_output = input.replay_output orelse input.output;
+        if (raw_output.len != 0) {
+            replay_capture.appendAccepted(owned, .stdout, raw_output);
+        }
+        const error_name = if (input.error_name) |value|
+            try owned.dupe(u8, value)
+        else
+            null;
+        entry.* = .{
+            .runtime = runtime,
+            .arena = arena,
+            .execution_id = execution_id,
+            .command = command,
+            .cwd = cwd,
+            .environment = .legacy,
+            .max_output_bytes = input.max_output_bytes,
+            .timeout_ms = null,
+            .command_artifact_dir = null,
+            .backend_kind = .tty,
+            .persistence_kind = .session,
+            .state = contractStateFromSnapshot(input.state),
+            .backend_state = .{ .tty = .{
+                .session_id = execution_id,
+                .cursor = input.next_cursor orelse .{},
+            } },
+            .replay_capture = replay_capture,
+            .replay_capability = replay_capability,
+            .published_running = input.published_running,
+            .output_incomplete = input.output_incomplete,
+            .stdout_bytes = raw_output.len,
+            .error_name = error_name,
+        };
+        errdefer entry.output.deinit(runtime.alloc);
+        try entry.appendBoundedOutput(input.output);
+        if (entry.isTerminal()) entry.finalizeReplayLocked();
+        return entry;
+    }
+
+    fn deinit(self: *Entry) void {
+        std.debug.assert(self.active_operations == 0);
+        std.debug.assert(self.thread == null);
+        switch (self.backend_state) {
+            .captured => |*captured| captured.route.deinit(self.arena.allocator()),
+            .tty, .tombstone => {},
+        }
+        if (self.replay_capture) |capture| {
+            capture.releaseRetained(self.arena.allocator());
+        }
+        deinitReplayCapability(self.runtime, self.replay_capability);
+        self.output.deinit(self.runtime.alloc);
+        self.arena.deinit();
+        self.runtime.alloc.destroy(self.arena);
+        self.runtime.alloc.destroy(self);
+    }
+
+    fn matchesCapturedInput(self: *const Entry, input: StartCapturedInput) bool {
+        return self.backend_kind == .captured and
+            std.mem.eql(u8, self.command, input.command) and
+            std.mem.eql(u8, self.cwd, input.cwd) and
+            self.environment.eql(input.environment) and
+            self.max_output_bytes == input.max_output_bytes and
+            self.timeout_ms == input.timeout_ms and
+            optionalStringEql(self.command_artifact_dir, input.command_artifact_dir);
+    }
+
+    fn statusSnapshot(self: *Entry) SnapshotState {
+        return switch (self.state) {
+            .starting, .running, .stopping => .running,
+            .completed => |status| .{ .completed = status },
+            .stopped => |status| .{ .stopped = status },
+            .lost => .lost,
+        };
+    }
+
+    fn isTerminal(self: *Entry) bool {
+        return self.state.isTerminal();
+    }
+
+    fn backend(self: *const Entry) contract.Backend {
+        return self.backend_kind;
+    }
+
+    fn persistence(self: *const Entry) contract.Persistence {
+        return self.persistence_kind;
+    }
+
+    /// Keeps at most `max_output_bytes` of the output not yet delivered:
+    /// all of it while it fits, then its first half as a head and its newest
+    /// bytes as a rolling tail, so a long command's end stays in view
+    /// (`command_runner.StreamPreview` splits the same way).
+    fn appendBoundedOutput(self: *Entry, chunk: []const u8) !void {
+        if (chunk.len == 0) return;
+        const alloc = self.runtime.alloc;
+        if (self.output_dropped == 0 and
+            chunk.len <= self.max_output_bytes -| self.output.items.len)
+        {
+            return self.output.appendSlice(alloc, chunk);
+        }
+        // The output never grows past the limit from here.
+        try self.output.ensureTotalCapacity(alloc, self.max_output_bytes);
+        var rest = chunk;
+        if (self.output_dropped == 0) {
+            const head_limit = (self.max_output_bytes + 1) / 2;
+            if (self.output.items.len < head_limit) {
+                const take = head_limit - self.output.items.len;
+                self.output.appendSliceAssumeCapacity(rest[0..take]);
+                rest = rest[take..];
+            }
+            self.output_gap_at = head_limit;
+        }
+        const tail_limit = self.max_output_bytes - self.output_gap_at;
+        const tail_len = self.output.items.len - self.output_gap_at;
+        if (rest.len >= tail_limit) {
+            self.output_dropped += tail_len + (rest.len - tail_limit);
+            self.output.items.len = self.output_gap_at;
+            self.output.appendSliceAssumeCapacity(rest[rest.len - tail_limit ..]);
+        } else {
+            const drop = (tail_len + rest.len) -| tail_limit;
+            if (drop != 0) {
+                const tail = self.output.items[self.output_gap_at..];
+                @memmove(tail[0 .. tail.len - drop], tail[drop..]);
+                self.output.items.len -= drop;
+                self.output_dropped += drop;
+            }
+            self.output.appendSliceAssumeCapacity(rest);
+        }
+        self.output_truncated = true;
+    }
+
+    /// The output not yet delivered, counted as the command printed it,
+    /// dropped bytes included: the unit of `delivery`'s ranges.
+    fn pendingOutputBytes(self: *const Entry) u64 {
+        return @as(u64, self.output.items.len) + self.output_dropped;
+    }
+
+    /// Removes the first `delivered` bytes of the output not yet delivered,
+    /// counted as `pendingOutputBytes` counts them. What stays is exactly
+    /// the output after them, with the bytes of it that were dropped still
+    /// counted in `output_dropped`.
+    fn removeDeliveredOutput(self: *Entry, delivered: u64) error{InvalidOutputRange}!void {
+        if (delivered > self.pendingOutputBytes()) return error.InvalidOutputRange;
+        const len = self.output.items.len;
+        const gap_at: u64 = if (self.output_dropped == 0) len else self.output_gap_at;
+        const gap_end = gap_at + self.output_dropped;
+        // How many kept bytes go.
+        var removed: usize = undefined;
+        if (delivered <= gap_at) {
+            // Delivered ends in the head.
+            removed = @intCast(delivered);
+            self.output_gap_at = @intCast(gap_at - delivered);
+        } else if (delivered >= gap_end) {
+            // Delivered ends in the tail; nothing ahead was dropped.
+            removed = @intCast(delivered - self.output_dropped);
+            self.output_gap_at = 0;
+            self.output_dropped = 0;
+        } else {
+            // Delivered ends in the gap; what stays starts with dropped bytes.
+            removed = @intCast(gap_at);
+            self.output_gap_at = 0;
+            self.output_dropped = gap_end - delivered;
+        }
+        @memmove(self.output.items[0 .. len - removed], self.output.items[removed..]);
+        self.output.items.len -= removed;
+    }
+
+    /// The output not yet delivered as a snapshot shows it: whole, or its
+    /// head, a line that counts the bytes left out, and its tail, both cut
+    /// on UTF-8 boundaries. Caller owns the returned bytes.
+    fn outputDeltaAlloc(self: *const Entry, alloc: Allocator) ![]u8 {
+        if (self.output_dropped == 0) return alloc.dupe(u8, self.output.items);
+        const kept_head = self.output.items[0..self.output_gap_at];
+        const head = withoutCutSequence(kept_head);
+        const kept_tail = self.output.items[self.output_gap_at..];
+        const tail = kept_tail[text_utils.utf8ForwardBoundary(kept_tail, 0)..];
+        const omitted = self.output_dropped + (kept_head.len - head.len) + (kept_tail.len - tail.len);
+        const line_break = if (head.len == 0 or std.mem.endsWith(u8, head, "\n")) "" else "\n";
+        return alloc.print("{s}{s}[... {d} bytes truncated ...]\n{s}", .{ head, line_break, omitted, tail });
+    }
+
+    fn appendOutput(raw: *anyopaque, _: ?@import("../shared/types.zig").ToolLifecycleId, stream: command_contract.CommandOutputStream, chunk: []const u8) !void {
+        const self: *Entry = @ptrCast(@alignCast(raw));
+        if (chunk.len == 0) return;
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        self.last_output_ms = io_mod.milliTimestamp();
+        if (self.replay_capture) |capture| {
+            capture.appendAccepted(self.arena.allocator(), stream, chunk);
+        }
+        switch (stream) {
+            .stdout => self.stdout_bytes +|= chunk.len,
+            .stderr => self.stderr_bytes +|= chunk.len,
+        }
+        try self.appendBoundedOutput(chunk);
+    }
+
+    fn workerMain(self: *Entry) void {
+        self.start_gate.waitUncancelable(io_mod.getIo());
+        const captured = switch (self.backend_state) {
+            .captured => |*value| value,
+            .tty, .tombstone => return,
+        };
+        const started_ms = io_mod.milliTimestamp();
+        const routed = execution_router.executePreparedRoute(.{
+            .max_command_output_bytes = self.max_output_bytes,
+            .cancel_flag = &self.cancel,
+            .force_cancel_flag = &self.force_cancel,
+            .output_chunk_lifecycle_id = self.output_chunk_lifecycle_id,
+            .output_chunk_ctx = self.output_chunk_ctx,
+            .on_output_chunk = self.on_output_chunk,
+            .accepted_output_chunk_ctx = self,
+            .on_accepted_output_chunk = appendOutput,
+            .callback_projection = .raw,
+            .timeout_ms = self.timeout_ms,
+            .timeout_started_ms = started_ms,
+            .command_artifact_dir = self.command_artifact_dir,
+            .extra_environment = self.extra_environment,
+        }, self.arena.allocator(), captured.route) catch |err| {
+            const zio = io_mod.getIo();
+            self.mutex.lockUncancelable(zio);
+            self.finalizeReplayLocked();
+            self.error_name = @errorName(err);
+            debug_trace.logf(
+                "core",
+                "managed execution became lost boundary=worker_route execution_id={s} err={s}",
+                .{ self.execution_id, @errorName(err) },
+            );
+            self.state = state_for_worker_error(err);
+            self.barrier.output_drained = true;
+            self.mutex.unlock(zio);
+            return;
+        };
+
+        const status = statusFromResult(self.execution_id, routed.result);
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        self.finalizeReplayLocked();
+        self.result = routed.result;
+        var next = contract.transition(
+            self.state,
+            self.barrier,
+            .{ .process_terminated = status },
+        );
+        next = contract.transition(next.state, next.barrier, .output_drained);
+        self.state = next.state;
+        self.barrier = next.barrier;
+        self.mutex.unlock(zio);
+    }
+
+    fn finalizeReplayLocked(self: *Entry) void {
+        if (self.output_handle != null) return;
+        const capture = self.replay_capture orelse return;
+        const replay = capture.retain(self.arena.allocator()) orelse return;
+        switch (replay) {
+            .available => |descriptor| {
+                self.output_handle = self.arena.allocator().dupe(
+                    u8,
+                    descriptor.handle,
+                ) catch null;
+                self.output_framed_bytes = descriptor.framed_bytes;
+            },
+            .unavailable => {},
+        }
+        capture.releaseRetained(self.arena.allocator());
+    }
+};
+
+pub const Runtime = struct {
+    alloc: Allocator,
+    mutex: std.Io.Mutex = .init,
+    entries: [max_entries]?*Entry = @splat(null),
+    next_reservation_id: u64 = 1,
+    next_generated_id: u64 = 1,
+    next_tombstone_sequence: std.atomic.Value(u32) = .init(1),
+    shutting_down: bool = false,
+    replay_store: command_replay_store.EphemeralStore,
+    pending_admissions: usize = 0,
+    /// Work on this runtime's commands that runs after the call that starts
+    /// it returns, such as the stops of the commands steering moved to the
+    /// background in a cancelled turn. Tasks start only through
+    /// `startBackground`, and `stopAllAndJoin` awaits them; at process exit
+    /// it cancels them first.
+    background: std.Io.Group = .init,
+    /// Set when process exit begins (`terminateForProcessExit`). Background
+    /// tasks pass it as the cancel flag of their terminal requests and start
+    /// no new work after it is set.
+    background_cancel: std.atomic.Value(bool) = .init(false),
+
+    pub fn init(alloc: Allocator) Runtime {
+        return .{
+            .alloc = alloc,
+            .replay_store = command_replay_store.EphemeralStore.init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.shutdown();
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        for (&self.entries) |*slot| {
+            const entry = slot.* orelse continue;
+            std.debug.assert(entry.active_operations == 0);
+            slot.* = null;
+            self.joinEntry(entry);
+            entry.deinit();
+        }
+        self.replay_store.deinit();
+        self.mutex.unlock(zio);
+        self.* = undefined;
+    }
+
+    pub fn generatedId(self: *Runtime, buffer: []u8) ![]const u8 {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        const value = self.next_generated_id;
+        self.next_generated_id +%= 1;
+        if (self.next_generated_id == 0) self.next_generated_id = 1;
+        return std.mem.print(buffer, "shell-{d}", .{value});
+    }
+
+    pub fn replayStore(
+        self: *Runtime,
+    ) *command_replay_store.EphemeralStore {
+        return &self.replay_store;
+    }
+
+    pub fn startCaptured(
+        self: *Runtime,
+        alloc: Allocator,
+        input: StartCapturedInput,
+    ) !PreparedSnapshot {
+        if (input.yield_time_ms > contract.max_wait_ceiling_ms) {
+            return error.InvalidYieldTime;
+        }
+        const admission = try self.admitCaptured(input);
+        const entry = admission.entry;
+        var published = false;
+        errdefer if (admission.created and !published) {
+            self.cancelUnpublished(entry.execution_id);
+        };
+
+        if (!admission.created) {
+            published = true;
+            return self.prepareSnapshot(alloc, entry.execution_id);
+        }
+
+        if (input.yield_time_ms == 0) {
+            const prepared = try self.prepareSnapshot(alloc, entry.execution_id);
+            const zio = io_mod.getIo();
+            entry.mutex.lockUncancelable(zio);
+            entry.published_running = true;
+            entry.mutex.unlock(zio);
+            published = true;
+            entry.start_gate.set(zio);
+            return prepared;
+        }
+
+        entry.start_gate.set(io_mod.getIo());
+
+        const started_ms = io_mod.milliTimestamp();
+        const yield_grace_ms = if (input.tool_yield_flag != null) steerYieldGraceMs() else 0;
+        const zio = io_mod.getIo();
+        // The wait ends at its yield, or when the command reaches the quiet
+        // limit after the wait saw it under it, as an `interact` wait does
+        // (`quiet_notice.poll`).
+        const limit_ms = quietLimitMs();
+        entry.mutex.lockUncancelable(zio);
+        var quiet_wait = quiet_notice.beginWait(started_ms, entry.last_output_ms, input.yield_time_ms, limit_ms);
+        entry.mutex.unlock(zio);
+        var quiet_crossed = false;
+        while (true) {
+            entry.mutex.lockUncancelable(zio);
+            const terminal = entry.isTerminal();
+            const last_output_ms = entry.last_output_ms;
+            entry.mutex.unlock(zio);
+            if (terminal) break;
+            if (input.cancel_flag) |flag| {
+                if (flag.load(.seq_cst)) {
+                    entry.cancel.store(true, .seq_cst);
+                    self.joinEntry(entry);
+                    const prepared = try self.prepareSnapshot(
+                        alloc,
+                        entry.execution_id,
+                    );
+                    published = true;
+                    return prepared;
+                }
+            }
+            const now_ms = io_mod.milliTimestamp();
+            const elapsed = now_ms - started_ms;
+            const held = if (input.yield_hold) |hold| hold.load(.acquire) > 0 else false;
+            if (elapsed >= input.yield_time_ms and !held) break;
+            if (!held and steerYieldDue(input.tool_yield_flag, started_ms, now_ms, yield_grace_ms)) {
+                debug_trace.logf("managed-execution", "run yielded for steering execution={s} elapsed_ms={d}", .{ entry.execution_id, elapsed });
+                break;
+            }
+            if (!held) {
+                const step = quiet_notice.poll(quiet_wait, now_ms, last_output_ms, limit_ms);
+                quiet_wait = step.wait;
+                if (step.end == .quiet) {
+                    quiet_crossed = true;
+                    break;
+                }
+            }
+            io_mod.sleep(10 * std.time.ns_per_ms);
+        }
+
+        var prepared = try self.prepareSnapshot(alloc, entry.execution_id);
+        // A command that ended as the wait crossed is no crossing.
+        if (quiet_crossed) prepared.snapshot.quiet_crossed = prepared.snapshot.quiet_notice;
+        entry.mutex.lockUncancelable(zio);
+        if (!entry.isTerminal()) entry.published_running = true;
+        entry.mutex.unlock(zio);
+        published = true;
+        return prepared;
+    }
+
+    pub fn registerTty(
+        self: *Runtime,
+        alloc: Allocator,
+        input: TtyUpdate,
+    ) !PreparedSnapshot {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        if (self.shutting_down) {
+            self.mutex.unlock(zio);
+            return error.RuntimeStopping;
+        }
+        if (self.findEntryLocked(input.execution_id)) |existing| {
+            if (input.capacity_reserved and self.pending_admissions != 0) {
+                self.pending_admissions -= 1;
+            }
+            existing.active_operations += 1;
+            self.mutex.unlock(zio);
+            defer self.releaseEntry(existing);
+            return self.updateTtyEntry(alloc, existing, input);
+        }
+        if (input.capacity_reserved) {
+            if (self.pending_admissions == 0) {
+                self.mutex.unlock(zio);
+                return error.InvalidCapacityReservation;
+            }
+        } else if (contract.decideAdmission(
+            self.liveCountLocked() + self.pending_admissions,
+        ) == .capacity_exhausted) {
+            self.mutex.unlock(zio);
+            return error.ExecutionCapacityExceeded;
+        }
+        self.evictOldestTombstoneLocked();
+        const slot = self.emptySlotLocked() orelse {
+            self.mutex.unlock(zio);
+            return error.ExecutionCapacityExceeded;
+        };
+        const entry = Entry.initTty(self, input) catch |err| {
+            self.mutex.unlock(zio);
+            return err;
+        };
+        entry.active_operations = 1;
+        self.entries[slot] = entry;
+        if (input.capacity_reserved) self.pending_admissions -= 1;
+        self.mutex.unlock(zio);
+        defer self.releaseEntry(entry);
+        return self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    pub fn reserveTtyCapacity(self: *Runtime) !void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        if (self.shutting_down) return error.RuntimeStopping;
+        if (contract.decideAdmission(
+            self.liveCountLocked() + self.pending_admissions,
+        ) == .capacity_exhausted) {
+            return error.ExecutionCapacityExceeded;
+        }
+        self.pending_admissions += 1;
+    }
+
+    pub fn releaseTtyCapacity(self: *Runtime) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        if (self.pending_admissions != 0) self.pending_admissions -= 1;
+    }
+
+    pub fn updateTty(
+        self: *Runtime,
+        alloc: Allocator,
+        input: TtyUpdate,
+    ) !PreparedSnapshot {
+        const entry = self.acquireEntry(input.execution_id) orelse
+            return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        return self.updateTtyEntry(alloc, entry, input);
+    }
+
+    pub fn observeTtyState(
+        self: *Runtime,
+        execution_id: []const u8,
+        state: SnapshotState,
+    ) void {
+        const entry = self.acquireEntry(execution_id) orelse return;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        if (entry.backend() != .tty or entry.backend_state == .tombstone) {
+            entry.mutex.unlock(zio);
+            return;
+        }
+        entry.state = contractStateFromSnapshot(state);
+        entry.mutex.unlock(zio);
+    }
+
+    pub fn backendFor(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) ?contract.Backend {
+        const entry = self.acquireEntry(execution_id) orelse return null;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        return entry.backend();
+    }
+
+    /// Copies retained captured-command metadata without reserving output or changing authority.
+    /// The caller owns the returned bytes. Missing and TTY executions return null.
+    pub fn captured_command_alloc(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+    ) Allocator.Error!?[]u8 {
+        const entry = self.acquireEntry(execution_id) orelse return null;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        if (entry.backend() != .captured) return null;
+        return try alloc.dupe(u8, entry.command);
+    }
+
+    pub fn stateFor(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) ?SnapshotState {
+        const entry = self.acquireEntry(execution_id) orelse return null;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        return entry.statusSnapshot();
+    }
+
+    pub fn ttyCursorFor(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) ?TtyCursor {
+        const entry = self.acquireEntry(execution_id) orelse return null;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        return switch (entry.backend_state) {
+            .tty => |tty| tty.cursor,
+            .captured, .tombstone => null,
+        };
+    }
+
+    pub fn refreshTty(
+        self: *Runtime,
+        input: TtyUpdate,
+    ) !void {
+        const entry = self.acquireEntry(input.execution_id) orelse
+            return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        try applyTtyUpdateLocked(entry, input);
+    }
+
+    pub fn retainedTerminalSnapshot(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+    ) !?PreparedSnapshot {
+        const entry = self.acquireEntry(execution_id) orelse
+            return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        const tombstone = entry.backend_state == .tombstone;
+        entry.mutex.unlock(zio);
+        if (!tombstone) return null;
+        return try self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    pub fn isTombstone(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) bool {
+        const entry = self.acquireEntry(execution_id) orelse return false;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        return entry.backend_state == .tombstone;
+    }
+
+    pub fn reserveExternalWait(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) !u64 {
+        const entry = self.acquireEntry(execution_id) orelse
+            return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        const waiter_id = self.nextReservationId();
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        if (entry.active_waiter != null or entry.delivery.reservation != null) {
+            return error.ExecutionBusy;
+        }
+        entry.active_waiter = waiter_id;
+        return waiter_id;
+    }
+
+    pub fn externalWaitPreempted(
+        self: *Runtime,
+        execution_id: []const u8,
+        waiter_id: u64,
+    ) bool {
+        const entry = self.acquireEntry(execution_id) orelse return true;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        return entry.preempted_waiter == waiter_id;
+    }
+
+    pub fn releaseExternalWait(
+        self: *Runtime,
+        execution_id: []const u8,
+        waiter_id: u64,
+    ) void {
+        const entry = self.acquireEntry(execution_id) orelse return;
+        defer self.releaseEntry(entry);
+        self.clearActiveWaiter(entry, waiter_id);
+    }
+
+    pub fn preemptWait(
+        self: *Runtime,
+        execution_id: []const u8,
+    ) void {
+        const entry = self.acquireEntry(execution_id) orelse return;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        if (entry.active_waiter) |waiter_id| {
+            entry.preempted_waiter = waiter_id;
+        }
+        entry.mutex.unlock(zio);
+    }
+
+    pub fn wait(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+        wait_ceiling_ms: u32,
+        cancel_flag: ?*std.atomic.Value(bool),
+    ) !PreparedSnapshot {
+        // `waitOrYield` without steering, for callers no steering reaches,
+        // such as tests.
+        return self.waitOrYield(alloc, execution_id, wait_ceiling_ms, cancel_flag, null);
+    }
+
+    /// `wait`, which also returns the command running once `tool_yield_flag`
+    /// is set and `steerYieldDue` passes, so steering need not wait for it.
+    pub fn waitOrYield(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+        wait_ceiling_ms: u32,
+        cancel_flag: ?*std.atomic.Value(bool),
+        tool_yield_flag: ?*const std.atomic.Value(bool),
+    ) !PreparedSnapshot {
+        if (wait_ceiling_ms > contract.max_wait_ceiling_ms) {
+            return error.InvalidWaitCeiling;
+        }
+        const entry = self.acquireEntry(execution_id) orelse return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        const waiter_id = self.nextReservationId();
+        entry.mutex.lockUncancelable(zio);
+        const captured = entry.backend() == .captured;
+        if (!captured) {
+            entry.mutex.unlock(zio);
+            return error.TtyEffectRequired;
+        }
+        if (entry.active_waiter != null or entry.delivery.reservation != null) {
+            entry.mutex.unlock(zio);
+            return error.ExecutionBusy;
+        }
+        entry.active_waiter = waiter_id;
+        // The wait ends at its ceiling, or when the command reaches the quiet
+        // limit after the wait saw it under it (`quiet_notice.poll`).
+        const limit_ms = quietLimitMs();
+        const wait_started_ms = io_mod.milliTimestamp();
+        const yield_grace_ms = if (tool_yield_flag != null) steerYieldGraceMs() else 0;
+        var quiet_wait = quiet_notice.beginWait(wait_started_ms, entry.last_output_ms, wait_ceiling_ms, limit_ms);
+        entry.mutex.unlock(zio);
+        defer self.clearActiveWaiter(entry, waiter_id);
+        while (true) {
+            entry.mutex.lockUncancelable(zio);
+            const terminal = entry.isTerminal();
+            const preempted = entry.preempted_waiter == waiter_id;
+            const last_output_ms = entry.last_output_ms;
+            entry.mutex.unlock(zio);
+            if (preempted) return error.WaitPreempted;
+            if (terminal) break;
+            if (cancel_flag) |flag| {
+                if (flag.load(.seq_cst)) return error.Cancelled;
+            }
+            const now_ms = io_mod.milliTimestamp();
+            if (steerYieldDue(tool_yield_flag, wait_started_ms, now_ms, yield_grace_ms)) {
+                debug_trace.logf("managed-execution", "wait yielded for steering execution={s} elapsed_ms={d}", .{ execution_id, now_ms - wait_started_ms });
+                break;
+            }
+            const step = quiet_notice.poll(quiet_wait, now_ms, last_output_ms, limit_ms);
+            quiet_wait = step.wait;
+            if (step.end) |end| {
+                if (end == .quiet) {
+                    var prepared = try self.prepareSnapshotForEntry(alloc, entry);
+                    // A command that ended as the wait crossed is no crossing.
+                    prepared.snapshot.quiet_crossed = prepared.snapshot.quiet_notice;
+                    return prepared;
+                }
+                break;
+            }
+            io_mod.sleep(10 * std.time.ns_per_ms);
+        }
+        return self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    pub fn stop(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+        force: bool,
+    ) !PreparedSnapshot {
+        return self.stop_with_ceiling(
+            alloc,
+            execution_id,
+            force,
+            captured_stop_settle_timeout_ms,
+        );
+    }
+
+    fn stop_with_ceiling(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+        force: bool,
+        settle_timeout_ms: i64,
+    ) !PreparedSnapshot {
+        const entry = self.acquireEntry(execution_id) orelse return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        if (entry.backend() != .captured) {
+            entry.mutex.unlock(zio);
+            return error.TtyEffectRequired;
+        }
+        if (!entry.isTerminal()) {
+            const next = contract.transition(entry.state, entry.barrier, .stop_requested);
+            entry.state = next.state;
+            entry.barrier = next.barrier;
+            // Force only escalates: a later cooperative stop must not undo a
+            // force-kill already requested, such as the one at process exit.
+            if (force) entry.force_cancel.store(true, .seq_cst);
+            entry.cancel.store(true, .seq_cst);
+            if (entry.active_waiter) |waiter_id| {
+                entry.preempted_waiter = waiter_id;
+            }
+        }
+        entry.mutex.unlock(zio);
+        const started_ms = io_mod.milliTimestamp();
+        while (true) {
+            entry.mutex.lockUncancelable(zio);
+            const terminal = entry.isTerminal();
+            entry.mutex.unlock(zio);
+            if (terminal) break;
+            const now_ms = io_mod.milliTimestamp();
+            if (stop_wait_expired(started_ms, now_ms, settle_timeout_ms)) {
+                debug_trace.logf(
+                    "core",
+                    "managed execution stop became lost boundary=settle_deadline execution_id={s} force={s}",
+                    .{ execution_id, if (force) "true" else "false" },
+                );
+                var prepared = try self.prepareSnapshotForEntry(alloc, entry);
+                if (prepared.snapshot.state == .running) {
+                    prepared.snapshot.state = .lost;
+                    prepared.snapshot.output_incomplete = true;
+                    // Time fields belong to a running command only.
+                    prepared.snapshot.running_ms = null;
+                    prepared.snapshot.quiet_ms = null;
+                    prepared.snapshot.quiet_notice = false;
+                    if (prepared.snapshot.error_name) |name| alloc.free(name);
+                    prepared.snapshot.error_name = try alloc.dupe(
+                        u8,
+                        "StopSettlementTimedOut",
+                    );
+                }
+                return prepared;
+            }
+            io_mod.sleep(10 * std.time.ns_per_ms);
+        }
+        return self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    pub fn list(self: *Runtime, alloc: Allocator) ![]ListItem {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        var result: std.ArrayList(ListItem) = .empty;
+        errdefer {
+            for (result.items) |*item| item.deinit(alloc);
+            result.deinit(alloc);
+        }
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            entry.mutex.lockUncancelable(zio);
+            defer entry.mutex.unlock(zio);
+            if (entry.isTerminal() and
+                (entry.backend() != .tty or entry.backend_state == .tombstone))
+            {
+                continue;
+            }
+            try result.append(alloc, .{
+                .execution_id = try alloc.dupe(u8, entry.execution_id),
+                .command = try alloc.dupe(u8, entry.command),
+                .state = entry.statusSnapshot(),
+                .backend = entry.backend(),
+                .persistence = entry.persistence(),
+            });
+        }
+        return result.toOwnedSlice(alloc);
+    }
+
+    /// Records that steering in turn `turn_id` returned the running command
+    /// `execution_id` to the model, so it now runs in the background. A
+    /// later mark replaces an earlier one. A missing or ended command is
+    /// left alone.
+    pub fn markSteeringDetached(
+        self: *Runtime,
+        execution_id: []const u8,
+        turn_id: u64,
+    ) void {
+        const entry = self.acquireEntry(execution_id) orelse return;
+        defer self.releaseEntry(entry);
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        if (entry.isTerminal()) return;
+        entry.steering_detached_turn_id = turn_id;
+    }
+
+    /// The ids of the commands steering detached in turn `turn_id` that
+    /// still run, for an explicit cancel of that turn to stop. Their marks
+    /// are cleared, so each id is returned once. Commands the model left in
+    /// the background itself, and those of other turns, are not returned.
+    /// The caller owns the slice and each id.
+    pub fn takeSteeringDetached(
+        self: *Runtime,
+        alloc: Allocator,
+        turn_id: u64,
+    ) Allocator.Error![][]u8 {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        var result: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (result.items) |id| alloc.free(id);
+            result.deinit(alloc);
+        }
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            entry.mutex.lockUncancelable(zio);
+            defer entry.mutex.unlock(zio);
+            const marked = entry.steering_detached_turn_id orelse continue;
+            if (marked != turn_id) continue;
+            if (entry.isTerminal()) {
+                entry.steering_detached_turn_id = null;
+                continue;
+            }
+            try result.ensureUnusedCapacity(alloc, 1);
+            result.appendAssumeCapacity(try alloc.dupe(u8, entry.execution_id));
+            entry.steering_detached_turn_id = null;
+        }
+        return result.toOwnedSlice(alloc);
+    }
+
+    pub fn commitDelivery(
+        self: *Runtime,
+        execution_id: []const u8,
+        reservation_id: u64,
+    ) !void {
+        const entry = self.acquireEntry(execution_id) orelse return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        return self.commitEntryDelivery(entry, reservation_id);
+    }
+
+    fn commitEntryDelivery(
+        self: *Runtime,
+        entry: *Entry,
+        reservation_id: u64,
+    ) !void {
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        const reservation = entry.delivery.reservation orelse {
+            entry.mutex.unlock(zio);
+            return error.UnknownReservation;
+        };
+        const next = try entry.delivery.commit(reservation_id);
+        entry.removeDeliveredOutput(reservation.range.end - reservation.range.start) catch |err| {
+            entry.mutex.unlock(zio);
+            return err;
+        };
+        entry.delivery = next;
+        entry.output_truncated = entry.output_dropped != 0;
+        const terminal = entry.isTerminal();
+        const should_remove = terminal and !entry.published_running;
+        if (terminal and entry.published_running) self.clearAuthorityLocked(entry);
+        entry.mutex.unlock(zio);
+        if (should_remove) self.markDelete(entry);
+    }
+
+    pub fn cancelDelivery(
+        self: *Runtime,
+        execution_id: []const u8,
+        reservation_id: u64,
+    ) !void {
+        const entry = self.acquireEntry(execution_id) orelse return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        return self.cancelEntryDelivery(entry, reservation_id);
+    }
+
+    fn cancelEntryDelivery(
+        _: *Runtime,
+        entry: *Entry,
+        reservation_id: u64,
+    ) !void {
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        entry.delivery = try entry.delivery.cancel(reservation_id);
+        entry.mutex.unlock(zio);
+    }
+
+    pub fn commitReservation(
+        self: *Runtime,
+        reservation_id: u64,
+    ) !void {
+        const entry = self.acquireEntryForReservation(reservation_id) orelse
+            return error.UnknownReservation;
+        defer self.releaseEntry(entry);
+        return self.commitEntryDelivery(entry, reservation_id);
+    }
+
+    pub fn cancelReservation(
+        self: *Runtime,
+        reservation_id: u64,
+    ) !void {
+        const entry = self.acquireEntryForReservation(reservation_id) orelse
+            return error.UnknownReservation;
+        defer self.releaseEntry(entry);
+        return self.cancelEntryDelivery(entry, reservation_id);
+    }
+
+    /// Stops this runtime's commands and lets its background tasks finish,
+    /// as an agent or instance close needs: the close does not end tty
+    /// commands, so the stops of steered ones must run to their end.
+    pub fn shutdown(self: *Runtime) void {
+        self.stopAllAndJoin(.cooperative);
+    }
+
+    /// Process exit: force-kill every live command's process group instead of
+    /// granting the cooperative termination grace, then wait only for each
+    /// worker thread to observe the kill so no command outlives fx. It also
+    /// cancels the background tasks' terminal requests, since the caller
+    /// closes every terminal next.
+    pub fn terminateForProcessExit(self: *Runtime) void {
+        self.stopAllAndJoin(.force);
+    }
+
+    const StopMode = enum { cooperative, force };
+
+    /// Runs `function` with `args` as a task of this runtime's background
+    /// group, on a thread of its own. Shutdown awaits the task, so the
+    /// runtime outlives it. Fails with `error.RuntimeStopping` once shutdown
+    /// began, and with `error.ConcurrencyUnavailable` when no thread can
+    /// take the task; then it never runs.
+    pub fn startBackground(
+        self: *Runtime,
+        function: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(function)),
+    ) error{ RuntimeStopping, ConcurrencyUnavailable }!void {
+        const zio = io_mod.getIo();
+        // Held while the task starts, so shutdown never awaits the group
+        // while a task joins it.
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        if (self.shutting_down) return error.RuntimeStopping;
+        return self.background.concurrent(zio, function, args);
+    }
+
+    /// The flag background tasks pass as the cancel flag of their terminal
+    /// requests. It is set once process exit begins.
+    pub fn backgroundCancelFlag(self: *Runtime) *std.atomic.Value(bool) {
+        return &self.background_cancel;
+    }
+
+    /// Whether process exit began, so a background task must start no new
+    /// work.
+    pub fn backgroundCancelled(self: *const Runtime) bool {
+        return self.background_cancel.load(.acquire);
+    }
+
+    fn stopAllAndJoin(self: *Runtime, mode: StopMode) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        if (self.shutting_down) {
+            self.mutex.unlock(zio);
+            return;
+        }
+        self.shutting_down = true;
+        // No background task starts after this. A cooperative shutdown, as
+        // an agent or instance close does, lets the running tasks finish:
+        // the close does not end tty commands, and the app closes terminals
+        // only when it exits, so a stop cut short would leave its command
+        // running. Only process exit, which closes every terminal next,
+        // cancels the tasks' terminal requests, and they log the stops they
+        // drop.
+        if (mode == .force) self.background_cancel.store(true, .release);
+        var live: [contract.max_live_entries]*Entry = undefined;
+        var live_len: usize = 0;
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            entry.mutex.lockUncancelable(zio);
+            if (!entry.isTerminal()) {
+                if (mode == .force) entry.force_cancel.store(true, .seq_cst);
+                entry.cancel.store(true, .seq_cst);
+                entry.start_gate.set(zio);
+                live[live_len] = entry;
+                live_len += 1;
+            }
+            entry.mutex.unlock(zio);
+        }
+        self.mutex.unlock(zio);
+        // After the commands are told to end, so a background stop that
+        // waits on one returns soon, and before the joins and the caller's
+        // teardown, which the tasks still use.
+        self.background.await(zio) catch |err| debug_trace.logf(
+            "shell",
+            "background command work awaited at shutdown err={s}",
+            .{@errorName(err)},
+        );
+        for (live[0..live_len]) |entry| self.joinEntry(entry);
+    }
+
+    const AdmissionResult = struct {
+        entry: *Entry,
+        created: bool,
+    };
+
+    fn admitCaptured(self: *Runtime, input: StartCapturedInput) !AdmissionResult {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        if (self.shutting_down) return error.RuntimeStopping;
+        if (self.findEntryLocked(input.execution_id)) |existing| {
+            if (!existing.matchesCapturedInput(input)) {
+                return error.ExecutionIdentityConflict;
+            }
+            return .{ .entry = existing, .created = false };
+        }
+        const live_count = self.liveCountLocked() + self.pending_admissions;
+        if (contract.decideAdmission(live_count) == .capacity_exhausted) {
+            return error.ExecutionCapacityExceeded;
+        }
+        self.evictOldestTombstoneLocked();
+        const slot = self.emptySlotLocked() orelse return error.ExecutionCapacityExceeded;
+        const entry = try Entry.init(self, input);
+        self.entries[slot] = entry;
+        if (comptime builtin.single_threaded) {
+            self.entries[slot] = null;
+            entry.deinit();
+            return error.ManagedExecutionUnavailable;
+        } else {
+            entry.thread = std.Thread.spawn(.{}, Entry.workerMain, .{entry}) catch |err| {
+                self.entries[slot] = null;
+                entry.deinit();
+                return err;
+            };
+        }
+        const next = contract.transition(entry.state, entry.barrier, .child_started);
+        entry.state = next.state;
+        entry.barrier = next.barrier;
+        return .{ .entry = entry, .created = true };
+    }
+
+    fn prepareSnapshot(
+        self: *Runtime,
+        alloc: Allocator,
+        execution_id: []const u8,
+    ) !PreparedSnapshot {
+        const entry = self.acquireEntry(execution_id) orelse return error.ExecutionNotFound;
+        defer self.releaseEntry(entry);
+        return self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    fn prepareSnapshotForEntry(
+        self: *Runtime,
+        alloc: Allocator,
+        entry: *Entry,
+    ) !PreparedSnapshot {
+        const reservation_id = self.nextReservationId();
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        defer entry.mutex.unlock(zio);
+        entry.delivery = try entry.delivery.prepare(
+            reservation_id,
+            entry.delivery.committed + entry.pendingOutputBytes(),
+        );
+        errdefer entry.delivery = entry.delivery.cancel(reservation_id) catch entry.delivery;
+        const metadata = if (entry.result) |result|
+            result.command_result orelse return error.InvalidCommandResult
+        else
+            null;
+        const execution_id = try alloc.dupe(u8, entry.execution_id);
+        errdefer alloc.free(execution_id);
+        const command = try alloc.dupe(u8, entry.command);
+        errdefer alloc.free(command);
+        const cwd = try alloc.dupe(u8, entry.cwd);
+        errdefer alloc.free(cwd);
+        const output_delta = try entry.outputDeltaAlloc(alloc);
+        errdefer alloc.free(output_delta);
+        const output_file = if (entry.output_handle) |handle|
+            try alloc.dupe(u8, handle)
+        else
+            null;
+        errdefer if (output_file) |value| alloc.free(value);
+        const error_name = if (entry.error_name) |name|
+            try alloc.dupe(u8, name)
+        else
+            null;
+        // Only a running captured command reports its time: a terminal
+        // session waits for input by design.
+        const times = if (entry.backend() == .captured)
+            quiet_notice.timesFor(
+                !entry.isTerminal(),
+                io_mod.milliTimestamp(),
+                entry.started_ms,
+                entry.last_output_ms,
+                quietLimitMs(),
+            )
+        else
+            null;
+        return .{
+            .reservation_id = reservation_id,
+            .snapshot = .{
+                .execution_id = execution_id,
+                .command = command,
+                .cwd = cwd,
+                .retained = entry.published_running or !entry.isTerminal(),
+                .state = entry.statusSnapshot(),
+                .backend = entry.backend(),
+                .persistence = entry.persistence(),
+                .output_delta = output_delta,
+                .output_truncated = entry.output_truncated or
+                    if (metadata) |value| value.truncated else false,
+                .output_incomplete = entry.output_incomplete or
+                    if (metadata) |value| value.output_incomplete else false,
+                .duration_ms = if (metadata) |value| value.duration_ms else null,
+                .output_file = output_file,
+                .output_framed_bytes = entry.output_framed_bytes,
+                .stdout_bytes = if (metadata) |value|
+                    value.stdout_bytes
+                else
+                    entry.stdout_bytes,
+                .stderr_bytes = if (metadata) |value|
+                    value.stderr_bytes
+                else
+                    entry.stderr_bytes,
+                .error_name = error_name,
+                .running_ms = if (times) |value| value.running_ms else null,
+                .quiet_ms = if (times) |value| value.quiet_ms else null,
+                .quiet_notice = if (times) |value| value.notice else false,
+            },
+        };
+    }
+
+    fn updateTtyEntry(
+        self: *Runtime,
+        alloc: Allocator,
+        entry: *Entry,
+        input: TtyUpdate,
+    ) !PreparedSnapshot {
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        if (entry.backend() != .tty or entry.backend_state == .tombstone) {
+            entry.mutex.unlock(zio);
+            return error.InvalidBackend;
+        }
+        applyTtyUpdateLocked(entry, input) catch |err| {
+            entry.mutex.unlock(zio);
+            return err;
+        };
+        entry.mutex.unlock(zio);
+        return self.prepareSnapshotForEntry(alloc, entry);
+    }
+
+    fn nextReservationId(self: *Runtime) u64 {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        const result = self.next_reservation_id;
+        self.next_reservation_id +%= 1;
+        if (self.next_reservation_id == 0) self.next_reservation_id = 1;
+        return result;
+    }
+
+    fn clearActiveWaiter(
+        _: *Runtime,
+        entry: *Entry,
+        waiter_id: u64,
+    ) void {
+        const zio = io_mod.getIo();
+        entry.mutex.lockUncancelable(zio);
+        if (entry.active_waiter == waiter_id) entry.active_waiter = null;
+        if (entry.preempted_waiter == waiter_id) entry.preempted_waiter = null;
+        entry.mutex.unlock(zio);
+    }
+
+    fn cancelUnpublished(self: *Runtime, execution_id: []const u8) void {
+        const entry = self.acquireEntry(execution_id) orelse return;
+        entry.cancel.store(true, .seq_cst);
+        entry.start_gate.set(io_mod.getIo());
+        self.joinEntry(entry);
+        self.markDelete(entry);
+        self.releaseEntry(entry);
+    }
+
+    fn acquireEntry(self: *Runtime, execution_id: []const u8) ?*Entry {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        const entry = self.findEntryLocked(execution_id) orelse return null;
+        entry.active_operations += 1;
+        return entry;
+    }
+
+    fn acquireEntryForReservation(
+        self: *Runtime,
+        reservation_id: u64,
+    ) ?*Entry {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        defer self.mutex.unlock(zio);
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            entry.mutex.lockUncancelable(zio);
+            const matches = if (entry.delivery.reservation) |reservation|
+                reservation.waiter_id == reservation_id
+            else
+                false;
+            entry.mutex.unlock(zio);
+            if (matches) {
+                entry.active_operations += 1;
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    fn releaseEntry(self: *Runtime, entry: *Entry) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        std.debug.assert(entry.active_operations > 0);
+        entry.active_operations -= 1;
+        const destroy = entry.active_operations == 0 and entry.pending_delete;
+        if (destroy) self.removeEntryLocked(entry);
+        self.mutex.unlock(zio);
+        if (destroy) {
+            self.joinEntry(entry);
+            entry.deinit();
+        }
+    }
+
+    fn markDelete(self: *Runtime, entry: *Entry) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        entry.pending_delete = true;
+        self.mutex.unlock(zio);
+    }
+
+    fn clearAuthorityLocked(self: *Runtime, entry: *Entry) void {
+        if (entry.backend_state == .tombstone) return;
+        self.joinEntry(entry);
+        switch (entry.backend_state) {
+            .captured => |*captured| captured.route.deinit(entry.arena.allocator()),
+            .tty => {},
+            .tombstone => unreachable,
+        }
+        if (entry.replay_capture) |capture| {
+            capture.releaseRetained(entry.arena.allocator());
+            entry.replay_capture = null;
+        }
+        deinitReplayCapability(self, entry.replay_capability);
+        entry.replay_capability = null;
+        entry.backend_state = .tombstone;
+        entry.tombstone_sequence.store(
+            self.next_tombstone_sequence.fetchAdd(1, .seq_cst),
+            .seq_cst,
+        );
+    }
+
+    /// Joins the entry's worker thread exactly once. A cancelled foreground
+    /// wait and runtime shutdown can both reach this concurrently; the second
+    /// caller blocks until the first join finishes, so every caller returns
+    /// only after the thread has exited.
+    fn joinEntry(_: *Runtime, entry: *Entry) void {
+        const zio = io_mod.getIo();
+        entry.join_mutex.lockUncancelable(zio);
+        defer entry.join_mutex.unlock(zio);
+        if (entry.thread) |thread| {
+            thread.join();
+            entry.thread = null;
+        }
+    }
+
+    fn findEntryLocked(self: *Runtime, execution_id: []const u8) ?*Entry {
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            if (std.mem.eql(u8, entry.execution_id, execution_id)) return entry;
+        }
+        return null;
+    }
+
+    fn liveCountLocked(self: *Runtime) usize {
+        var count: usize = 0;
+        const zio = io_mod.getIo();
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            entry.mutex.lockUncancelable(zio);
+            if (entry.backend_state != .tombstone) count += 1;
+            entry.mutex.unlock(zio);
+        }
+        return count;
+    }
+
+    fn emptySlotLocked(self: *Runtime) ?usize {
+        for (self.entries, 0..) |entry, index| {
+            if (entry == null) return index;
+        }
+        return null;
+    }
+
+    fn evictOldestTombstoneLocked(self: *Runtime) void {
+        var tombstone_count: usize = 0;
+        var oldest: ?*Entry = null;
+        for (self.entries) |candidate| {
+            const entry = candidate orelse continue;
+            if (entry.backend_state != .tombstone) continue;
+            tombstone_count += 1;
+            if (entry.active_operations != 0) continue;
+            if (oldest == null or
+                entry.tombstone_sequence.load(.seq_cst) <
+                    oldest.?.tombstone_sequence.load(.seq_cst))
+            {
+                oldest = entry;
+            }
+        }
+        if (tombstone_count < contract.max_tombstones) return;
+        const entry = oldest orelse return;
+        self.removeEntryLocked(entry);
+        entry.deinit();
+    }
+
+    fn removeEntryLocked(self: *Runtime, entry: *Entry) void {
+        for (&self.entries) |*slot| {
+            if (slot.* != entry) continue;
+            slot.* = null;
+            return;
+        }
+        unreachable;
+    }
+};
+
+fn applyTtyUpdateLocked(entry: *Entry, input: TtyUpdate) !void {
+    const tty = switch (entry.backend_state) {
+        .tty => |*value| value,
+        .captured, .tombstone => return error.InvalidBackend,
+    };
+    if (input.next_cursor) |cursor| {
+        try cursor.validate();
+        if (cursor.segment < tty.cursor.segment or
+            (cursor.segment == tty.cursor.segment and
+                cursor.offset < tty.cursor.offset))
+        {
+            return error.InvalidTtyCursor;
+        }
+        tty.cursor = cursor;
+    }
+    if (!entry.state.isTerminal()) {
+        entry.state = contractStateFromSnapshot(input.state);
+    }
+    entry.published_running = entry.published_running or input.published_running;
+    const replay_output = input.replay_output orelse input.output;
+    if (replay_output.len != 0) {
+        entry.stdout_bytes +|= replay_output.len;
+        if (entry.replay_capture) |capture| {
+            capture.appendAccepted(
+                entry.arena.allocator(),
+                .stdout,
+                replay_output,
+            );
+        }
+    }
+    try entry.appendBoundedOutput(input.output);
+    entry.output_truncated = entry.output_truncated or input.output_incomplete;
+    entry.output_incomplete = entry.output_incomplete or input.output_incomplete;
+    if (input.error_name) |error_name| {
+        entry.error_name = try entry.arena.allocator().dupe(u8, error_name);
+    }
+    if (entry.isTerminal()) entry.finalizeReplayLocked();
+}
+
+/// `text` without the UTF-8 sequence its end cuts short, if it ends in one.
+fn withoutCutSequence(text: []const u8) []const u8 {
+    var start = text.len;
+    while (start > 0 and text.len - start < 4) {
+        start -= 1;
+        if (text[start] & 0b1100_0000 == 0b1000_0000) continue;
+        const sequence_len = std.unicode.utf8ByteSequenceLength(text[start]) catch return text;
+        return if (text.len - start < sequence_len) text[0..start] else text;
+    }
+    return text;
+}
+
+fn optionalStringEql(left: ?[]const u8, right: ?[]const u8) bool {
+    if ((left == null) != (right == null)) return false;
+    if (left) |value| return std.mem.eql(u8, value, right.?);
+    return true;
+}
+
+fn duplicateReplayCapability(
+    runtime: *Runtime,
+    source: ?*const session_child_store.SessionChildCapability,
+) !?*session_child_store.SessionChildCapability {
+    const value = source orelse return null;
+    const owned = try runtime.alloc.create(
+        session_child_store.SessionChildCapability,
+    );
+    errdefer runtime.alloc.destroy(owned);
+    owned.* = try value.duplicate(runtime.alloc);
+    return owned;
+}
+
+fn deinitReplayCapability(
+    runtime: *Runtime,
+    capability: ?*session_child_store.SessionChildCapability,
+) void {
+    const value = capability orelse return;
+    value.deinit();
+    runtime.alloc.destroy(value);
+}
+
+fn dupeEnvironment(
+    alloc: Allocator,
+    environment: command_environment.Environment,
+) !command_environment.Environment {
+    return switch (environment) {
+        .legacy => .legacy,
+        .workspace_clean => .workspace_clean,
+        .clean => |path| .{ .clean = try alloc.dupe(u8, path) },
+        .user => |path| .{ .user = try alloc.dupe(u8, path) },
+    };
+}
+
+fn rebindAuthority(
+    authority: command_admission.CommandExecutionAuthority,
+    command_ctx: command_admission.CommandContext,
+) command_admission.CommandExecutionAuthority {
+    return switch (authority) {
+        .direct_only => .{ .direct_only = .init(command_ctx) },
+        .shell_allowed => |shell| .{ .shell_allowed = .{
+            .fingerprint = .init(command_ctx),
+            .source = shell.source,
+            .grant_epoch = shell.grant_epoch,
+        } },
+    };
+}
+
+fn statusFromResult(
+    execution_id: []const u8,
+    result: command_contract.RunCommandResult,
+) command_contract.CommandStatus {
+    const command = result.command_result orelse {
+        debug_trace.logf(
+            "core",
+            "managed execution termination indeterminate boundary=missing_command_result execution_id={s}",
+            .{execution_id},
+        );
+        return .indeterminate;
+    };
+    if (command.termination_indeterminate) {
+        debug_trace.logf(
+            "core",
+            "managed execution termination indeterminate boundary=command_result execution_id={s}",
+            .{execution_id},
+        );
+        return .indeterminate;
+    }
+    if (command.exit_code) |code| return .{ .exit_code = code };
+    if (command.signal) |signal| return .{ .signal = signal };
+    return .finished;
+}
+
+fn state_for_worker_error(err: anyerror) contract.State {
+    return if (err == error.TimeoutExpired)
+        .{ .stopped = null }
+    else
+        .lost;
+}
+
+test "worker errors do not turn ambiguous cancellation into success" {
+    try std.testing.expectEqual(
+        contract.State.lost,
+        state_for_worker_error(error.Cancelled),
+    );
+    try std.testing.expectEqual(
+        contract.State{ .stopped = null },
+        state_for_worker_error(error.TimeoutExpired),
+    );
+    try std.testing.expectEqual(
+        contract.State.lost,
+        state_for_worker_error(error.Unexpected),
+    );
+}
+
+fn stop_wait_expired(started_ms: i64, now_ms: i64, settle_timeout_ms: i64) bool {
+    return now_ms >= started_ms and
+        now_ms - started_ms >= settle_timeout_ms;
+}
+
+test "stop wait expires only at its deterministic bound" {
+    try std.testing.expect(!stop_wait_expired(1_000, 999, 100));
+    try std.testing.expect(!stop_wait_expired(1_000, 1_099, 100));
+    try std.testing.expect(stop_wait_expired(1_000, 1_100, 100));
+}
+
+fn contractStateFromSnapshot(state: SnapshotState) contract.State {
+    return switch (state) {
+        .running => .running,
+        .completed => |status| .{ .completed = status },
+        .stopped => |status| .{ .stopped = status },
+        .lost => .lost,
+    };
+}
+
+fn testAuthority(input: StartCapturedInput) command_admission.CommandExecutionAuthority {
+    const ctx = command_admission.CommandContext{
+        .command = input.command,
+        .resolved_cwd = input.cwd,
+        .target_os = builtin.target.os.tag,
+        .environment = input.environment,
+    };
+    return .{ .shell_allowed = .{
+        .fingerprint = .init(ctx),
+        .source = .yolo,
+    } };
+}
+
+test "captured managed execution yields one handle and delivers ordered output once" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = testing_allocator.no_resize;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var input = StartCapturedInput{
+        .execution_id = "managed-yield",
+        .command = "printf first; printf second",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 4096,
+        .timeout_ms = 2_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+    };
+    input.authority = testAuthority(input);
+    var started = try runtime.startCaptured(alloc, input);
+    defer started.deinit(alloc);
+    try std.testing.expectEqual(SnapshotState.running, started.snapshot.state);
+    try std.testing.expectEqual(@as(?[]u8, null), try runtime.captured_command_alloc(alloc, "missing"));
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, runtime.captured_command_alloc(failing.allocator(), input.execution_id));
+    const command = (try runtime.captured_command_alloc(alloc, input.execution_id)).?;
+    defer alloc.free(command);
+    try std.testing.expectEqualStrings(input.command, command);
+    command[0] = 'P';
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+
+    var completed = try runtime.wait(alloc, input.execution_id, 2_000, null);
+    defer completed.deinit(alloc);
+    try std.testing.expect(completed.snapshot.state != .running);
+    const first_in_started = std.mem.find(u8, started.snapshot.output_delta, "first") != null;
+    const first_in_completed = std.mem.find(u8, completed.snapshot.output_delta, "first") != null;
+    const second_in_started = std.mem.find(u8, started.snapshot.output_delta, "second") != null;
+    const second_in_completed = std.mem.find(u8, completed.snapshot.output_delta, "second") != null;
+    try std.testing.expect(first_in_started != first_in_completed);
+    try std.testing.expect(second_in_started != second_in_completed);
+    try runtime.commitDelivery(completed.snapshot.execution_id, completed.reservation_id);
+
+    var repeated = try runtime.wait(alloc, input.execution_id, 0, null);
+    defer repeated.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), repeated.snapshot.output_delta.len);
+    try runtime.commitDelivery(repeated.snapshot.execution_id, repeated.reservation_id);
+    const retained_command = (try runtime.captured_command_alloc(alloc, input.execution_id)).?;
+    defer alloc.free(retained_command);
+    try std.testing.expectEqualStrings(input.command, retained_command);
+    try std.testing.expect(runtime.isTombstone(input.execution_id));
+}
+
+test "process-exit termination joins a command a cancelled foreground wait is already joining" {
+    if (comptime builtin.target.os.tag == .wasi or builtin.target.os.tag == .windows) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var cancel = std.atomic.Value(bool).init(false);
+    var input = StartCapturedInput{
+        .execution_id = "exit-while-cancelling",
+        // Ignoring TERM keeps the cancelled foreground wait inside its join
+        // for the whole cooperative termination grace.
+        .command = "trap '' TERM; while :; do sleep 1; done",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 4096,
+        .timeout_ms = 30_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 30_000,
+        .cancel_flag = &cancel,
+    };
+    input.authority = testAuthority(input);
+
+    const Foreground = struct {
+        fn run(rt: *Runtime, start_input: StartCapturedInput) void {
+            var prepared = rt.startCaptured(std.testing.allocator, start_input) catch return;
+            prepared.deinit(std.testing.allocator);
+        }
+    };
+    const foreground = try std.Thread.spawn(.{}, Foreground.run, .{ &runtime, input });
+
+    const admitted_deadline_ms = io_mod.milliTimestamp() + 2_000;
+    while (true) {
+        if (try runtime.captured_command_alloc(alloc, input.execution_id)) |command| {
+            alloc.free(command);
+            break;
+        }
+        if (io_mod.milliTimestamp() > admitted_deadline_ms) return error.TestUnexpectedResult;
+        io_mod.sleep(5 * std.time.ns_per_ms);
+    }
+    // Let the shell install its trap, then cancel the foreground wait so it
+    // parks in joinEntry behind the ignored TERM. Process-exit termination
+    // then joins the same thread; unserialized, glibc rejects the second
+    // pthread_join with EINVAL, and a join that races the first one's
+    // completion reuses a released handle.
+    io_mod.sleep(200 * std.time.ns_per_ms);
+    cancel.store(true, .seq_cst);
+    io_mod.sleep(100 * std.time.ns_per_ms);
+
+    const started_ms = io_mod.milliTimestamp();
+    runtime.terminateForProcessExit();
+    const elapsed_ms = io_mod.milliTimestamp() - started_ms;
+    foreground.join();
+    // Force escalation lands well inside the 800 ms cooperative grace.
+    try std.testing.expect(elapsed_ms < 500);
+}
+
+test "captured stop returns lost when its worker cannot settle" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+
+    const BlockingOutput = struct {
+        fn append(
+            raw: *anyopaque,
+            _: ?types.ToolLifecycleId,
+            _: command_contract.CommandOutputStream,
+            _: []const u8,
+        ) !void {
+            const flags: *[2]std.atomic.Value(bool) = @ptrCast(@alignCast(raw));
+            flags[0].store(true, .seq_cst);
+            while (!flags[1].load(.seq_cst)) io_mod.sleep(std.time.ns_per_ms);
+        }
+    };
+    var callback_flags = [_]std.atomic.Value(bool){
+        .init(false),
+        .init(false),
+    };
+    var input = StartCapturedInput{
+        .execution_id = "managed-stop-stalled",
+        .command = "printf 'ready\\n'; sleep 30",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 4096,
+        .timeout_ms = null,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+        .output_chunk_ctx = &callback_flags,
+        .on_output_chunk = BlockingOutput.append,
+    };
+    input.authority = testAuthority(input);
+    var started = try runtime.startCaptured(alloc, input);
+    defer started.deinit(alloc);
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+
+    const callback_deadline_ms = io_mod.milliTimestamp() + 2_000;
+    while (!callback_flags[0].load(.seq_cst) and
+        io_mod.milliTimestamp() < callback_deadline_ms)
+    {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(callback_flags[0].load(.seq_cst));
+
+    var stop_finished = std.atomic.Value(bool).init(false);
+    var stop_lost = std.atomic.Value(bool).init(false);
+    var stop_failed = std.atomic.Value(bool).init(false);
+    const StopTask = struct {
+        fn run(
+            rt: *Runtime,
+            finished: *std.atomic.Value(bool),
+            lost: *std.atomic.Value(bool),
+            failed: *std.atomic.Value(bool),
+        ) void {
+            var stopped = rt.stop(std.testing.allocator, "managed-stop-stalled", true) catch {
+                failed.store(true, .seq_cst);
+                finished.store(true, .seq_cst);
+                return;
+            };
+            // A lost result carries no running time, quiet time, or notice:
+            // those belong to a command still running.
+            lost.store(
+                stopped.snapshot.state == .lost and
+                    stopped.snapshot.output_incomplete and
+                    stopped.snapshot.running_ms == null and
+                    stopped.snapshot.quiet_ms == null and
+                    !stopped.snapshot.quiet_notice and
+                    if (stopped.snapshot.error_name) |name|
+                        std.mem.eql(u8, name, "StopSettlementTimedOut")
+                    else
+                        false,
+                .seq_cst,
+            );
+            rt.commitDelivery(stopped.snapshot.execution_id, stopped.reservation_id) catch {
+                failed.store(true, .seq_cst);
+            };
+            stopped.deinit(std.testing.allocator);
+            finished.store(true, .seq_cst);
+        }
+    };
+    const stop_thread = try std.Thread.spawn(
+        .{},
+        StopTask.run,
+        .{ &runtime, &stop_finished, &stop_lost, &stop_failed },
+    );
+    io_mod.sleep(250 * std.time.ns_per_ms);
+    const settled_before_release = stop_finished.load(.seq_cst);
+    callback_flags[1].store(true, .seq_cst);
+    stop_thread.join();
+
+    try std.testing.expect(settled_before_release);
+    try std.testing.expect(stop_lost.load(.seq_cst));
+    try std.testing.expect(!stop_failed.load(.seq_cst));
+}
+
+test "generated captured execution identities do not depend on provider call ids" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var first_id_buffer: [64]u8 = undefined;
+    const first_id = try runtime.generatedId(&first_id_buffer);
+    var first = StartCapturedInput{
+        .execution_id = first_id,
+        .command = "sleep 1",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 1024,
+        .timeout_ms = 2_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+    };
+    first.authority = testAuthority(first);
+    var started = try runtime.startCaptured(alloc, first);
+    defer started.deinit(alloc);
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+
+    var second_id_buffer: [64]u8 = undefined;
+    const second_id = try runtime.generatedId(&second_id_buffer);
+    try std.testing.expect(!std.mem.eql(u8, first_id, second_id));
+
+    var second = first;
+    second.execution_id = second_id;
+    second.command = "printf should-run";
+    second.authority = testAuthority(second);
+    var next = try runtime.startCaptured(alloc, second);
+    defer next.deinit(alloc);
+    try runtime.commitDelivery(next.snapshot.execution_id, next.reservation_id);
+}
+
+test "captured managed execution capacity rejects before spawn" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var reservations: usize = 0;
+    defer while (reservations != 0) {
+        runtime.releaseTtyCapacity();
+        reservations -= 1;
+    };
+    for (0..contract.max_live_entries) |_| {
+        try runtime.reserveTtyCapacity();
+        reservations += 1;
+    }
+    var overflow = StartCapturedInput{
+        .execution_id = "managed-capacity-overflow",
+        .command = "printf should-not-run",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 1024,
+        .timeout_ms = 1_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+    };
+    overflow.authority = testAuthority(overflow);
+    try std.testing.expectError(
+        error.ExecutionCapacityExceeded,
+        runtime.startCaptured(alloc, overflow),
+    );
+}
+
+test "steering yield returns a captured command running and keeps it running" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var yield_flag = std.atomic.Value(bool).init(true);
+    var input = StartCapturedInput{
+        .execution_id = "managed-steer-yield",
+        .command = "sleep 4; printf done",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 4096,
+        .timeout_ms = 10_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = contract.max_yield_time_ms,
+        .tool_yield_flag = &yield_flag,
+    };
+    input.authority = testAuthority(input);
+    const started_ms = io_mod.milliTimestamp();
+    var started = try runtime.startCaptured(alloc, input);
+    defer started.deinit(alloc);
+    try std.testing.expectEqual(SnapshotState.running, started.snapshot.state);
+    // It returns after the grace time, long before `yield_time_ms`.
+    const returned_after_ms = io_mod.milliTimestamp() - started_ms;
+    try std.testing.expect(returned_after_ms >= steerYieldGraceMs());
+    try std.testing.expect(returned_after_ms < 3_000);
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+
+    // A follow-up wait yields too, and the command still runs.
+    var followed = try runtime.waitOrYield(alloc, input.execution_id, 30_000, null, &yield_flag);
+    defer followed.deinit(alloc);
+    try std.testing.expectEqual(SnapshotState.running, followed.snapshot.state);
+    try runtime.commitDelivery(followed.snapshot.execution_id, followed.reservation_id);
+
+    // Once the turn takes its steering, a wait sees the command finish.
+    yield_flag.store(false, .seq_cst);
+    var completed = try runtime.wait(alloc, input.execution_id, 10_000, null);
+    defer completed.deinit(alloc);
+    switch (completed.snapshot.state) {
+        .completed => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.mem.find(u8, completed.snapshot.output_delta, "done") != null);
+    try runtime.commitDelivery(completed.snapshot.execution_id, completed.reservation_id);
+}
+
+test "a command that ends inside the steering grace returns its result" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var yield_flag = std.atomic.Value(bool).init(true);
+    var input = StartCapturedInput{
+        .execution_id = "managed-steer-grace",
+        .command = "printf quick",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 4096,
+        .timeout_ms = 10_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = contract.max_yield_time_ms,
+        .tool_yield_flag = &yield_flag,
+    };
+    input.authority = testAuthority(input);
+    var started = try runtime.startCaptured(alloc, input);
+    defer started.deinit(alloc);
+    switch (started.snapshot.state) {
+        .completed => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.mem.find(u8, started.snapshot.output_delta, "quick") != null);
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+}
+
+test "a cancel takes only the running commands steering detached in its turn" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    const ids = [_][]const u8{ "steered-in-7", "steered-in-8", "background", "ended" };
+    for (ids) |id| {
+        var input = StartCapturedInput{
+            .execution_id = id,
+            .command = if (std.mem.eql(u8, id, "ended")) "printf done" else "sleep 30",
+            .cwd = "/tmp",
+            .environment = .legacy,
+            .authority = undefined,
+            .max_output_bytes = 4096,
+            .timeout_ms = 60_000,
+            .command_artifact_dir = null,
+            .yield_time_ms = 0,
+        };
+        input.authority = testAuthority(input);
+        var started = try runtime.startCaptured(alloc, input);
+        defer started.deinit(alloc);
+        try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+    }
+    var ended = try runtime.wait(alloc, "ended", 10_000, null);
+    defer ended.deinit(alloc);
+    try std.testing.expect(ended.snapshot.state != .running);
+    try runtime.commitDelivery(ended.snapshot.execution_id, ended.reservation_id);
+
+    runtime.markSteeringDetached("steered-in-7", 7);
+    runtime.markSteeringDetached("steered-in-8", 8);
+    // An ended command and an unknown id take no mark.
+    runtime.markSteeringDetached("ended", 7);
+    runtime.markSteeringDetached("missing", 7);
+
+    const taken = try runtime.takeSteeringDetached(alloc, 7);
+    defer {
+        for (taken) |id| alloc.free(id);
+        alloc.free(taken);
+    }
+    try std.testing.expectEqual(@as(usize, 1), taken.len);
+    try std.testing.expectEqualStrings("steered-in-7", taken[0]);
+
+    // Each id is taken once, and a turn with no steered command takes none.
+    const again = try runtime.takeSteeringDetached(alloc, 7);
+    defer alloc.free(again);
+    try std.testing.expectEqual(@as(usize, 0), again.len);
+    const unmarked = try runtime.takeSteeringDetached(alloc, 9);
+    defer alloc.free(unmarked);
+    try std.testing.expectEqual(@as(usize, 0), unmarked.len);
+
+    // A later steering mark moves the command to its own turn.
+    runtime.markSteeringDetached("steered-in-8", 9);
+    const moved_from = try runtime.takeSteeringDetached(alloc, 8);
+    defer alloc.free(moved_from);
+    try std.testing.expectEqual(@as(usize, 0), moved_from.len);
+    const moved_to = try runtime.takeSteeringDetached(alloc, 9);
+    defer {
+        for (moved_to) |id| alloc.free(id);
+        alloc.free(moved_to);
+    }
+    try std.testing.expectEqual(@as(usize, 1), moved_to.len);
+    try std.testing.expectEqualStrings("steered-in-8", moved_to[0]);
+    try std.testing.expectEqual(SnapshotState.running, runtime.stateFor("background").?);
+}
+
+test "a close awaits background work to its end and process exit cancels it" {
+    if (comptime builtin.single_threaded) return;
+    const Work = struct {
+        runtime: *Runtime,
+        wait_for_cancel: bool,
+        saw_cancel: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            if (self.wait_for_cancel) {
+                // Runs until process exit sets the cancel flag, as a stop
+                // waiting on a stubborn command does.
+                while (!self.runtime.backgroundCancelled()) io_mod.sleep(std.time.ns_per_ms);
+                self.saw_cancel.store(true, .release);
+            } else {
+                // A stop that ends its command on its own, after its wait.
+                io_mod.sleep(100 * std.time.ns_per_ms);
+                self.saw_cancel.store(self.runtime.backgroundCancelled(), .release);
+            }
+            self.done.store(true, .release);
+        }
+    };
+
+    // An agent or instance close lets the work finish uncancelled, since the
+    // close does not end tty commands.
+    {
+        var runtime = Runtime.init(std.testing.allocator);
+        defer runtime.deinit();
+        var work: Work = .{ .runtime = &runtime, .wait_for_cancel = false };
+        runtime.startBackground(Work.run, .{&work}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+            else => return err,
+        };
+        try std.testing.expect(!work.done.load(.acquire));
+        runtime.shutdown();
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(!work.saw_cancel.load(.acquire));
+        try std.testing.expect(!runtime.backgroundCancelled());
+        try std.testing.expectError(error.RuntimeStopping, runtime.startBackground(Work.run, .{&work}));
+    }
+    // Process exit cancels the work, which then ends at once.
+    {
+        var runtime = Runtime.init(std.testing.allocator);
+        defer runtime.deinit();
+        var work: Work = .{ .runtime = &runtime, .wait_for_cancel = true };
+        runtime.startBackground(Work.run, .{&work}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+            else => return err,
+        };
+        runtime.terminateForProcessExit();
+        try std.testing.expect(work.saw_cancel.load(.acquire));
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(runtime.backgroundCancelled());
+        try std.testing.expectError(error.RuntimeStopping, runtime.startBackground(Work.run, .{&work}));
+    }
+}
+
+test "steering yield waits out its grace time" {
+    var flag = std.atomic.Value(bool).init(false);
+    try std.testing.expect(!steerYieldDue(&flag, 0, 10_000, 1_000));
+    flag.store(true, .seq_cst);
+    try std.testing.expect(!steerYieldDue(&flag, 0, 999, 1_000));
+    try std.testing.expect(steerYieldDue(&flag, 0, 1_000, 1_000));
+    try std.testing.expect(!steerYieldDue(null, 0, 10_000, 1_000));
+}
+
+test "the steering grace falls back to the default for a bad test value" {
+    try std.testing.expectEqual(default_steer_yield_grace_ms, steerYieldGraceFromValue(null));
+    try std.testing.expectEqual(default_steer_yield_grace_ms, steerYieldGraceFromValue(""));
+    try std.testing.expectEqual(default_steer_yield_grace_ms, steerYieldGraceFromValue("-5"));
+    try std.testing.expectEqual(default_steer_yield_grace_ms, steerYieldGraceFromValue("abc"));
+    try std.testing.expectEqual(@as(i64, 0), steerYieldGraceFromValue("0"));
+    try std.testing.expectEqual(@as(i64, 2_500), steerYieldGraceFromValue("2500"));
+}
+
+test "captured managed execution exposes full output only by opaque replay handle" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var input = StartCapturedInput{
+        .execution_id = "managed-large-output",
+        .command = "i=0; while [ $i -lt 100 ]; do printf 'chunk-%03d\\n' \"$i\"; i=$((i+1)); done",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .authority = undefined,
+        .max_output_bytes = 64,
+        .timeout_ms = 2_000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+    };
+    input.authority = testAuthority(input);
+    var started = try runtime.startCaptured(alloc, input);
+    defer started.deinit(alloc);
+    try runtime.commitDelivery(started.snapshot.execution_id, started.reservation_id);
+    var completed = try runtime.wait(alloc, input.execution_id, 2_000, null);
+    defer completed.deinit(alloc);
+    try std.testing.expect(completed.snapshot.output_truncated);
+    const handle = completed.snapshot.output_file orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.Io.Dir.path.dirname(handle) == null);
+    try runtime.commitDelivery(completed.snapshot.execution_id, completed.reservation_id);
+
+    var reader = try command_replay_store.Reader.openEphemeralHandle(
+        alloc,
+        runtime.replayStore(),
+        handle,
+    );
+    defer reader.deinit();
+    var replay: std.ArrayList(u8) = .empty;
+    defer replay.deinit(alloc);
+    while (try reader.next(alloc)) |frame| {
+        defer alloc.free(frame.payload);
+        try replay.appendSlice(alloc, frame.payload);
+    }
+    try std.testing.expect(std.mem.find(u8, replay.items, "chunk-099") != null);
+}
+
+test "managed execution retains thirty two authority free terminal snapshots" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var ids: [contract.max_tombstones + 1][32]u8 = undefined;
+    var id_lengths: [ids.len]usize = undefined;
+    for (0..ids.len) |index| {
+        const id = try std.mem.print(&ids[index], "tty-tombstone-{d}", .{index});
+        id_lengths[index] = id.len;
+        var prepared = try runtime.registerTty(alloc, .{
+            .execution_id = id,
+            .command = "true",
+            .state = .{ .completed = .{ .exit_code = 0 } },
+            .max_output_bytes = 64,
+            .published_running = true,
+        });
+        defer prepared.deinit(alloc);
+        try runtime.commitDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        );
+    }
+    try std.testing.expectError(
+        error.ExecutionNotFound,
+        runtime.retainedTerminalSnapshot(alloc, ids[0][0..id_lengths[0]]),
+    );
+    var retained = (try runtime.retainedTerminalSnapshot(
+        alloc,
+        ids[ids.len - 1][0..id_lengths[id_lengths.len - 1]],
+    )).?;
+    defer retained.deinit(alloc);
+    try std.testing.expect(retained.snapshot.state != .running);
+    try runtime.commitDelivery(
+        retained.snapshot.execution_id,
+        retained.reservation_id,
+    );
+}
+
+test "delivery reservation pins a tombstone across capacity eviction" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var ids: [contract.max_tombstones + 1][32]u8 = undefined;
+    var lengths: [ids.len]usize = undefined;
+    for (0..contract.max_tombstones) |index| {
+        const id = try std.mem.print(&ids[index], "tty-pinned-{d}", .{index});
+        lengths[index] = id.len;
+        var prepared = try runtime.registerTty(alloc, .{
+            .execution_id = id,
+            .command = "true",
+            .state = .{ .completed = .{ .exit_code = 0 } },
+            .max_output_bytes = 64,
+            .published_running = true,
+        });
+        defer prepared.deinit(alloc);
+        try runtime.commitDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        );
+    }
+
+    var reserved = (try runtime.retainedTerminalSnapshot(
+        alloc,
+        ids[0][0..lengths[0]],
+    )).?;
+    defer reserved.deinit(alloc);
+    const pinned = runtime.acquireEntryForReservation(
+        reserved.reservation_id,
+    ) orelse return error.TestExpectedEqual;
+    defer runtime.releaseEntry(pinned);
+
+    const replacement_id = try std.mem.print(
+        &ids[contract.max_tombstones],
+        "tty-pinned-{d}",
+        .{contract.max_tombstones},
+    );
+    lengths[contract.max_tombstones] = replacement_id.len;
+    var replacement = try runtime.registerTty(alloc, .{
+        .execution_id = replacement_id,
+        .command = "true",
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .max_output_bytes = 64,
+        .published_running = true,
+    });
+    defer replacement.deinit(alloc);
+    try runtime.commitDelivery(
+        replacement.snapshot.execution_id,
+        replacement.reservation_id,
+    );
+
+    try runtime.commitEntryDelivery(pinned, reserved.reservation_id);
+    var retained = (try runtime.retainedTerminalSnapshot(
+        alloc,
+        ids[0][0..lengths[0]],
+    )).?;
+    defer retained.deinit(alloc);
+    try runtime.commitDelivery(
+        retained.snapshot.execution_id,
+        retained.reservation_id,
+    );
+    try std.testing.expectError(
+        error.ExecutionNotFound,
+        runtime.retainedTerminalSnapshot(
+            alloc,
+            ids[1][0..lengths[1]],
+        ),
+    );
+}
+
+test "terminal tombstone retains raw output behind an opaque replay handle" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var prepared = try runtime.registerTty(alloc, .{
+        .execution_id = "tty-replay",
+        .command = "full-screen-command",
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output = "current screen",
+        .replay_output = "raw-frame-one\nraw-frame-two\n",
+        .max_output_bytes = 8,
+        .published_running = true,
+    });
+    defer prepared.deinit(alloc);
+    const handle = prepared.snapshot.output_file orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(prepared.snapshot.output_truncated);
+    try runtime.commitDelivery(
+        prepared.snapshot.execution_id,
+        prepared.reservation_id,
+    );
+    var reader = try command_replay_store.Reader.openEphemeralHandle(
+        alloc,
+        runtime.replayStore(),
+        handle,
+    );
+    defer reader.deinit();
+    const frame = (try reader.next(alloc)) orelse return error.TestExpectedEqual;
+    defer alloc.free(frame.payload);
+    try std.testing.expectEqualStrings(
+        "raw-frame-one\nraw-frame-two\n",
+        frame.payload,
+    );
+}
+
+test "terminal tombstone releases consumed replay authority" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(
+        io_mod.getIo(),
+        "session",
+        std.Io.File.Permissions.fromMode(0o700),
+    );
+    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
+        .iterate = true,
+        .follow_symlinks = false,
+    });
+    defer session_dir.close(io_mod.getIo());
+    const display_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
+    defer alloc.free(display_path);
+    var capability = try session_child_store.SessionChildCapability.initForTesting(
+        alloc,
+        session_dir,
+        display_path,
+        .writable,
+        .{},
+    );
+    defer capability.deinit();
+
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var prepared = try runtime.registerTty(alloc, .{
+        .execution_id = "tty-saved-replay",
+        .command = "saved-replay-command",
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output = "current screen",
+        .replay_output = "durable raw output\n",
+        .max_output_bytes = 64,
+        .published_running = true,
+        .replay_capability = &capability,
+    });
+    defer prepared.deinit(alloc);
+    const handle = prepared.snapshot.output_file orelse
+        return error.TestExpectedEqual;
+    try runtime.commitDelivery(
+        prepared.snapshot.execution_id,
+        prepared.reservation_id,
+    );
+
+    const entry = runtime.acquireEntry(prepared.snapshot.execution_id) orelse
+        return error.TestExpectedEqual;
+    defer runtime.releaseEntry(entry);
+    try std.testing.expect(entry.backend_state == .tombstone);
+    try std.testing.expect(entry.replay_capture == null);
+    try std.testing.expect(entry.replay_capability == null);
+
+    var reader = try command_replay_store.Reader.openHandle(
+        alloc,
+        &capability,
+        handle,
+    );
+    defer reader.deinit();
+    const frame = (try reader.next(alloc)) orelse return error.TestExpectedEqual;
+    defer alloc.free(frame.payload);
+    try std.testing.expectEqualStrings("durable raw output\n", frame.payload);
+}
+
+test "TTY cursor advances monotonically and delivers each delta once" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var started = try runtime.registerTty(alloc, .{
+        .execution_id = "tty-cursor",
+        .command = "interactive",
+        .state = .running,
+        .next_cursor = .{ .segment = 1, .offset = 5 },
+        .max_output_bytes = 64,
+        .published_running = true,
+    });
+    defer started.deinit(alloc);
+    try runtime.commitDelivery(
+        started.snapshot.execution_id,
+        started.reservation_id,
+    );
+    try std.testing.expectEqual(@as(?[]u8, null), try runtime.captured_command_alloc(alloc, "tty-cursor"));
+
+    try runtime.refreshTty(.{
+        .execution_id = "tty-cursor",
+        .command = "interactive",
+        .state = .running,
+        .output = "ab",
+        .replay_output = "ab",
+        .next_cursor = .{ .segment = 1, .offset = 7 },
+        .max_output_bytes = 64,
+        .published_running = true,
+    });
+    var delivered = try runtime.updateTty(alloc, .{
+        .execution_id = "tty-cursor",
+        .command = "interactive",
+        .state = .running,
+        .next_cursor = .{ .segment = 1, .offset = 7 },
+        .max_output_bytes = 64,
+        .published_running = true,
+    });
+    defer delivered.deinit(alloc);
+    try std.testing.expectEqualStrings("ab", delivered.snapshot.output_delta);
+    try runtime.commitDelivery(
+        delivered.snapshot.execution_id,
+        delivered.reservation_id,
+    );
+    try std.testing.expectEqual(
+        TtyCursor{ .segment = 1, .offset = 7 },
+        runtime.ttyCursorFor("tty-cursor").?,
+    );
+    try std.testing.expectError(error.InvalidTtyCursor, runtime.refreshTty(.{
+        .execution_id = "tty-cursor",
+        .command = "interactive",
+        .state = .running,
+        .next_cursor = .{ .segment = 1, .offset = 6 },
+        .max_output_bytes = 64,
+        .published_running = true,
+    }));
+}
+
+/// An entry with only what the output buffer uses.
+fn testOutputEntry(runtime: *Runtime, max_output_bytes: usize) Entry {
+    return .{
+        .runtime = runtime,
+        .arena = undefined,
+        .execution_id = "output-test",
+        .command = "true",
+        .cwd = "/tmp",
+        .environment = .legacy,
+        .max_output_bytes = max_output_bytes,
+        .timeout_ms = null,
+        .command_artifact_dir = null,
+        .backend_kind = .captured,
+        .persistence_kind = .process,
+        .backend_state = .tombstone,
+    };
+}
+
+fn expectOutputDelta(entry: *const Entry, expected: []const u8) !void {
+    const delta = try entry.outputDeltaAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(delta);
+    try std.testing.expectEqualStrings(expected, delta);
+}
+
+const TestDeltaParts = struct { head: []const u8, omitted: ?u64, tail: []const u8 };
+
+/// Splits a delta of output with no line breaks at its marker.
+fn splitTestDelta(delta: []const u8) !TestDeltaParts {
+    const open = "[... ";
+    const close = " bytes truncated ...]\n";
+    const at = std.mem.find(u8, delta, open) orelse return .{ .head = delta, .omitted = null, .tail = "" };
+    const count_end = std.mem.findPos(u8, delta, at, close) orelse return error.TestUnexpectedDelta;
+    var head = delta[0..at];
+    if (std.mem.endsWith(u8, head, "\n")) head = head[0 .. head.len - 1];
+    return .{
+        .head = head,
+        .omitted = try std.fmt.parseInt(u64, delta[at + open.len .. count_end], 10),
+        .tail = delta[count_end + close.len ..],
+    };
+}
+
+test "command output under the limit is kept whole" {
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var entry = testOutputEntry(&runtime, 16);
+    defer entry.output.deinit(std.testing.allocator);
+    try entry.appendBoundedOutput("abc");
+    try entry.appendBoundedOutput("");
+    try entry.appendBoundedOutput("defghijklmnop");
+    try std.testing.expect(!entry.output_truncated);
+    try std.testing.expectEqual(@as(u64, 16), entry.pendingOutputBytes());
+    try expectOutputDelta(&entry, "abcdefghijklmnop");
+}
+
+test "command output over the limit keeps its head and newest tail for any chunk size" {
+    const stream = "0123456789ABCDEF";
+    for (1..stream.len + 1) |chunk_len| {
+        var runtime = Runtime.init(std.testing.allocator);
+        defer runtime.deinit();
+        var entry = testOutputEntry(&runtime, 10);
+        defer entry.output.deinit(std.testing.allocator);
+        var start: usize = 0;
+        while (start < stream.len) : (start += chunk_len) {
+            try entry.appendBoundedOutput(stream[start..@min(stream.len, start + chunk_len)]);
+        }
+        try std.testing.expect(entry.output_truncated);
+        try std.testing.expectEqual(@as(usize, 10), entry.output.items.len);
+        try std.testing.expectEqual(@as(u64, stream.len), entry.pendingOutputBytes());
+        try expectOutputDelta(&entry, "01234\n[... 6 bytes truncated ...]\nBCDEF");
+    }
+}
+
+test "command output head and tail are cut on UTF-8 boundaries" {
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var entry = testOutputEntry(&runtime, 10);
+    defer entry.output.deinit(std.testing.allocator);
+    // The head's fifth byte starts "é", and the tail's first two bytes end "€".
+    try entry.appendBoundedOutput("abcd\xc3\xa9XYZ\xe2\x82\xaclmn");
+    const delta = try entry.outputDeltaAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(delta);
+    try std.testing.expectEqualStrings("abcd\n[... 8 bytes truncated ...]\nlmn", delta);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(delta));
+}
+
+test "a delivery that ends in the head, the gap, or the tail keeps exactly the later output" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+
+    // Ends in the head: the output overflows while the delivery is pending.
+    var head = testOutputEntry(&runtime, 10);
+    defer head.output.deinit(alloc);
+    try head.appendBoundedOutput("abc");
+    const head_delivered = head.pendingOutputBytes();
+    try head.appendBoundedOutput("defghijklmnop");
+    try head.removeDeliveredOutput(head_delivered);
+    try std.testing.expectEqual(@as(u64, 13), head.pendingOutputBytes());
+    try expectOutputDelta(&head, "de\n[... 6 bytes truncated ...]\nlmnop");
+
+    // Ends in the gap: more bytes were dropped than the tail held.
+    var gap = testOutputEntry(&runtime, 10);
+    defer gap.output.deinit(alloc);
+    try gap.appendBoundedOutput("0123456789ABCDEF");
+    const gap_delivered = gap.pendingOutputBytes();
+    try gap.appendBoundedOutput("ghijklm");
+    try gap.removeDeliveredOutput(gap_delivered);
+    try std.testing.expectEqual(@as(u64, 7), gap.pendingOutputBytes());
+    try expectOutputDelta(&gap, "[... 2 bytes truncated ...]\nijklm");
+
+    // Ends in the tail: nothing after the delivery was dropped.
+    var tail = testOutputEntry(&runtime, 10);
+    defer tail.output.deinit(alloc);
+    try tail.appendBoundedOutput("0123456789ABCDEF");
+    const tail_delivered = tail.pendingOutputBytes();
+    try tail.appendBoundedOutput("gh");
+    try tail.removeDeliveredOutput(tail_delivered);
+    try std.testing.expectEqual(@as(u64, 2), tail.pendingOutputBytes());
+    try std.testing.expectEqual(@as(u64, 0), tail.output_dropped);
+    try expectOutputDelta(&tail, "gh");
+
+    try std.testing.expectError(error.InvalidOutputRange, tail.removeDeliveredOutput(3));
+}
+
+test "command output deliveries neither repeat nor skip bytes when output, delivery, and cancel interleave" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed_0f_0a7);
+    const random = prng.random();
+    for ([_]usize{ 1, 2, 7, 10, 33 }) |max| {
+        var runtime = Runtime.init(alloc);
+        defer runtime.deinit();
+        var entry = testOutputEntry(&runtime, max);
+        defer entry.output.deinit(alloc);
+        var stream: std.ArrayList(u8) = .empty;
+        defer stream.deinit(alloc);
+        var committed: u64 = 0;
+        var pending: ?u64 = null;
+        for (0..2000) |_| {
+            switch (random.uintLessThan(u8, 4)) {
+                0, 1 => {
+                    var chunk: [80]u8 = undefined;
+                    const chunk_len = random.uintAtMost(usize, @min(chunk.len, 3 * max));
+                    for (chunk[0..chunk_len]) |*byte| byte.* = 'a' + random.uintLessThan(u8, 26);
+                    try stream.appendSlice(alloc, chunk[0..chunk_len]);
+                    try entry.appendBoundedOutput(chunk[0..chunk_len]);
+                },
+                2 => if (pending) |end| {
+                    try entry.removeDeliveredOutput(end - committed);
+                    committed = end;
+                    pending = null;
+                } else {
+                    const end = committed + entry.pendingOutputBytes();
+                    const delta = try entry.outputDeltaAlloc(alloc);
+                    defer alloc.free(delta);
+                    const delivered = stream.items[@intCast(committed)..@intCast(end)];
+                    const parts = try splitTestDelta(delta);
+                    if (parts.omitted) |omitted| {
+                        try std.testing.expectEqual(@as(u64, delivered.len), parts.head.len + omitted + parts.tail.len);
+                        try std.testing.expectEqualStrings(delivered[0..parts.head.len], parts.head);
+                        try std.testing.expectEqualStrings(delivered[delivered.len - parts.tail.len ..], parts.tail);
+                        try std.testing.expect(parts.head.len <= (max + 1) / 2);
+                        try std.testing.expect(parts.head.len + parts.tail.len <= max);
+                    } else {
+                        try std.testing.expectEqualStrings(delivered, delta);
+                    }
+                    pending = end;
+                },
+                // A delivery the caller drops is shown again with the next one.
+                else => pending = null,
+            }
+            try std.testing.expect(entry.output.items.len <= max);
+            try std.testing.expectEqual(@as(u64, stream.items.len) - committed, entry.pendingOutputBytes());
+        }
+    }
+}
+
+test "terminal output keeps its head and tail through restore, refresh, and delivery" {
+    const alloc = std.testing.allocator;
+    var runtime = Runtime.init(alloc);
+    defer runtime.deinit();
+    var restored = try runtime.registerTty(alloc, .{
+        .execution_id = "tty-head-tail",
+        .command = "interactive",
+        .state = .running,
+        .output = "0123456789ABCDEF",
+        .max_output_bytes = 10,
+        .published_running = true,
+    });
+    defer restored.deinit(alloc);
+    try std.testing.expect(restored.snapshot.output_truncated);
+    try std.testing.expectEqualStrings("01234\n[... 6 bytes truncated ...]\nBCDEF", restored.snapshot.output_delta);
+
+    // Output that arrives before the delivery commits comes in the next one.
+    try runtime.refreshTty(.{
+        .execution_id = "tty-head-tail",
+        .command = "interactive",
+        .state = .running,
+        .output = "gh",
+        .max_output_bytes = 10,
+        .published_running = true,
+    });
+    try runtime.commitDelivery(restored.snapshot.execution_id, restored.reservation_id);
+    var next = try runtime.updateTty(alloc, .{
+        .execution_id = "tty-head-tail",
+        .command = "interactive",
+        .state = .running,
+        .max_output_bytes = 10,
+        .published_running = true,
+    });
+    defer next.deinit(alloc);
+    try std.testing.expectEqualStrings("gh", next.snapshot.output_delta);
+    try std.testing.expect(!next.snapshot.output_truncated);
+    try runtime.commitDelivery(next.snapshot.execution_id, next.reservation_id);
+}

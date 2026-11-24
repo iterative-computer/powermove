@@ -1,0 +1,2909 @@
+//! One server as the client sees it: era detection, the tool catalog,
+//! and tool calls, over Streamable HTTP (`io/http.zig`) or a process on
+//! stdio (`io/process.zig`). Every request goes through the request table.
+//!
+//! On stdio each request is one line: the request table ends it,
+//! a process exit loses what is in flight, a cancel is notifications/cancelled,
+//! each new process detects again, and the host starts the process
+//! with `connect`. A 2026 call's rounds run as on HTTP.
+//!
+//! On a 2026 server every logical request is a `core/http_modern.zig`
+//! exchange: a broken stream is re-issued with a new id, and a cancel closes
+//! the stream, and a call that comes back `input_required` runs as a
+//! `core/mrtr.zig` chain of rounds. On a 2025 server the requests run in the session of
+//! `core/http_legacy.zig`: they carry its `Mcp-Session-Id`, a 404 starts a new
+//! session, a broken stream is resumed with GET and Last-Event-ID, and a
+//! cancel is a notifications/cancelled POST.
+//!
+//! Every request passes `auth/client.zig`: it carries the token, a
+//! request rejected with 401 goes out again once with a newer one, and the
+//! host signs in with `signIn` and `finishSignIn` when a refresh can't help.
+//!
+//! With `listen_tools`, a 2026 server's tool list changes come on a
+//! `subscriptions/listen` stream, run by `core/subscription.zig`.
+//!
+//! A 2025 server's elicitations run in `core/elicitation.zig`: the host
+//! hears `elicit` and answers with `answerElicitation`. A 2026 call's come in
+//! its rounds; both are read and checked by `protocol/elicitation.zig`.
+//!
+//! The host drives it with `connect` (or `detect` over HTTP), `needTools`,
+//! `call`, `cancel`, `next` or `poll`, and `close`; `engine.zig` does.
+
+const std = @import("std");
+const era = @import("core/era.zig");
+const catalog = @import("core/catalog.zig");
+const request = @import("core/request.zig");
+const http_modern = @import("core/http_modern.zig");
+const http_legacy = @import("core/http_legacy.zig");
+const mrtr_core = @import("core/mrtr.zig");
+const mrtr = @import("protocol/mrtr.zig");
+const http = @import("io/http.zig");
+const process = @import("io/process.zig");
+const stdio_conn = @import("core/stdio_conn.zig");
+const http_headers = @import("protocol/http_headers.zig");
+const tools = @import("protocol/tools.zig");
+const trace = @import("io/trace.zig");
+const wire = @import("protocol/wire.zig");
+const auth_client = @import("auth/client.zig");
+const oauth = @import("auth/oauth.zig");
+const elicitation = @import("protocol/elicitation.zig");
+const elicit_core = @import("core/elicitation.zig");
+const auth_core = @import("core/auth.zig");
+const subscription = @import("core/subscription.zig");
+const subscriptions = @import("protocol/subscriptions.zig");
+
+/// Bytes of a line an excerpt keeps, before "...".
+const excerpt_max = 80;
+/// Bytes of a progress note the host is shown, before "...".
+const note_max = 160;
+
+/// The start of `line`, at most `max` bytes, terminal-safe, in `buf`: valid
+/// UTF-8 that never ends in a cut sequence, control bytes and bytes that are no
+/// part of a sequence as '?', and "..." when cut. A server's line may hold
+/// bytes that are not UTF-8, and the excerpt goes into a JSON string.
+fn excerptOf(comptime max: usize, buf: *[max + 3]u8, line: []const u8) []const u8 {
+    const n = process.maskedPrefix(buf[0..max], line).len;
+    maskBytesOutsideSequences(buf[0..n]);
+    if (n == line.len) return buf[0..n];
+    @memcpy(buf[n..][0..3], "...");
+    return buf[0 .. n + 3];
+}
+
+/// Each byte of `text` that is not part of a valid UTF-8 sequence becomes '?'.
+fn maskBytesOutsideSequences(text: []u8) void {
+    var at: usize = 0;
+    while (at < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[at]) catch 0;
+        if (len != 0 and at + len <= text.len and std.unicode.utf8ValidateSlice(text[at..][0..len])) {
+            at += len;
+        } else {
+            text[at] = '?';
+            at += 1;
+        }
+    }
+}
+
+pub const Link = union(enum) {
+    http: http.Options,
+    /// Its `config` is replaced: the process never backs off or gives up on
+    /// its own, since the engine does both for every server.
+    stdio: process.Options,
+};
+
+pub const Options = struct {
+    link: Link,
+    client: era.Client,
+    era: era.Config = .{},
+    catalog: catalog.Config = .{},
+    exchange: http_modern.Config = .{},
+    session: http_legacy.Config = .{},
+    mrtr: mrtr_core.Config = .{},
+    auth: auth_client.Options = .{},
+    /// Listen for tool list changes once a 2026 server is ready, so the
+    /// catalog hears of them. fx turns it on.
+    listen_tools: bool = false,
+    subscription: subscription.Config = .{},
+    timeouts: request.Timeouts = .{},
+    /// 2025: how long a new session's requests wait for its listening
+    /// GET to open, so what the server sends there isn't lost.
+    listen_wait_ms: u32 = 1000,
+    trace: ?*trace.Writer = null,
+};
+
+pub const Handle = u32;
+
+pub const Failure = union(enum) {
+    era: era.Failure,
+    /// A 2025 session ended and a new one couldn't be started.
+    session,
+    /// A 2025 server didn't answer the initialized notification within the
+    /// request timeout, so nothing else could be sent.
+    initialized_timed_out,
+    /// Detection needs a sign-in first; `detect` again after it.
+    needs_auth,
+    /// Detection needed a refresh, and the authorization server gave no
+    /// usable answer: a 429, a 5xx, or none. The login stays, and the
+    /// server starts again after its backoff.
+    auth_unavailable,
+};
+
+/// How a call ended: the exchange's outcomes, and a chain's.
+pub const CallOutcome = enum { result, failure, lost, http_failure, cancelled, rounds_exceeded, unsupported_input, malformed, needs_auth, auth_unavailable };
+
+/// Why a call ended lost: the ending that lost it, or the process going away.
+pub const LostWhy = enum {
+    /// The stream broke before the answer.
+    stream_broken,
+    /// The stream ended without the answer.
+    stream_ended,
+    /// The answer was over the message limit.
+    too_large,
+    /// A resumed stream was refused.
+    resume_refused,
+    /// The session expired while the call was resuming.
+    session_expired,
+    /// The session changed, or was not ready, when the call was to resume.
+    session_changed,
+    /// The stdio process went away.
+    link_down,
+};
+
+pub const Event = union(enum) {
+    /// Detection finished; requests carry this version.
+    ready: []const u8,
+    failed: Failure,
+    /// A listing ended (or a need was served from the cache). Read the list
+    /// with `toolList`.
+    tools: struct { ok: bool, fresh: bool, dropped: tools.Added = .{}, needs_auth: bool = false },
+    /// The tool list may have changed: `list_changed`, a call answer that
+    /// suggests so, a new process, or a fresh list's TTL ran out. A host
+    /// that keeps its own copy lists again before its next call (CAT-05).
+    tools_stale,
+    /// A call ended. `answer` is set when the server answered, valid until the next `next`.
+    /// `oversized` says a lost call's answer was over the message limit: a
+    /// stdio line over `max_line`, or an HTTP answer over `max_message`.
+    /// `refused_bytes` is the length of what fx could not read, for a `malformed` call, and
+    /// `refused_body` says which it was: a 2xx HTTP body that is no JSON-RPC message, or, when
+    /// it is false, the last line with no readable id that the server wrote before the call's
+    /// grace ran out (see `request.Timeouts.refused_ms`). Both are 0 and false for any other call.
+    /// `lost_why` and `status` are null and 0 unless the outcome is `lost`: why it was lost, and the
+    /// HTTP status of the ending that lost it (0 when none).
+    called: struct { handle: Handle, outcome: CallOutcome, maybe_ran: bool, timed_out: bool, answer: ?tools.Call, oversized: bool = false, refused_bytes: u32 = 0, refused_body: bool = false, lost_why: ?LostWhy = null, status: u16 = 0 },
+    /// A call's server reported progress that the request core accepted.
+    /// `message` is terminal-safe and cut to 160 bytes, valid until the
+    /// next `next`.
+    progress: struct { handle: Handle, progress: f64, total: ?f64, message: ?[]const u8 },
+    /// A call needs the host's answers to its input requests: `respond` with
+    /// one value per request, in order, or `cancel`. The requests stay
+    /// valid until then.
+    input: struct { handle: Handle, requests: []const mrtr.Request },
+    /// Requests need a sign-in: after a 401 a refresh can't fix, or a
+    /// 403 asking for more scopes (`step_up`). `refused` is the refresh the
+    /// token endpoint refused, when that ended the login. `rejected` is why
+    /// the server refused the token the request carried, with the words its
+    /// 401 named. They borrow the sign-in's buffers: the host copies them as it
+    /// reads the event, before it calls into the engine again.
+    auth_required: struct { step_up: bool, refused: ?oauth.Refusal = null, rejected: ?auth_client.Rejected = null },
+    /// The host opens this URL in a browser, and passes the URL it comes back
+    /// to to `finishSignIn`.
+    authorize: []const u8,
+    /// The tokens a sign-in brought are held, not saved: send a request with
+    /// them, and `saveCredential` once the server has answered it.
+    /// `discardLogin` forgets them when it refuses them.
+    signed_in,
+    /// `message` is the authorization server's own, from a checked response
+    /// or from its token endpoint.
+    sign_in_failed: struct { why: auth_client.Failure, message: ?[]const u8 },
+    /// A refresh is due (`refresh_via_host`): answer with `refresh`, or with
+    /// `useCredential` and a newer credential another process saved.
+    refresh_due,
+    /// That refresh ended, or a sign-in or sign-out replaced it.
+    refresh_ended,
+    /// The tool list subscription is acknowledged: the server will send these.
+    listening: subscription.Filter,
+    /// It ended for good.
+    listen_ended: subscription.End,
+    /// A 2025 server asks the user something: read `params` with
+    /// `elicitation.parse` and answer with `answerElicitation`. `params` stays
+    /// valid until the slot is used again. `required`: listed in a call's
+    /// -32042 error, so nothing is sent back, accept is the user's consent to
+    /// open the URL, and the host calls again when it completes. The answer
+    /// names `id`, so one to an elicitation that is gone is refused.
+    elicit: struct { id: elicit_core.Id, params: []const u8, required: bool },
+    /// The host no longer holds `slot`: the server cancelled it, or the
+    /// session ended.
+    elicit_withdrawn: u8,
+    /// The URL interaction of `slot` completed.
+    elicitation_complete: u8,
+    /// Stdio: the process didn't start, or it ended; what was in flight on
+    /// it was lost.
+    down,
+    /// The sign-in credential to keep changed; write it with
+    /// `saveCredential`.
+    credential,
+    timeout,
+};
+
+pub const Error = http.Error || process.Error || std.mem.Allocator.Error || wire.EncodeError || std.Io.Writer.Error || auth_client.Error ||
+    error{ NotReady, TooManyRequests, UnknownCall, InvalidInputResponses, UnknownElicitation, InvalidAnswer };
+
+const What = union(enum) { discover: u8, initialize, list, call, listen };
+
+const Logical = struct {
+    used: bool = false,
+    handle: Handle = 0,
+    what: What = .list,
+    /// 2026 only.
+    exchange: http_modern.Exchange = undefined,
+    /// The attempt in flight; on a 2025 session, the request's one id.
+    id: ?request.Id = null,
+    arena: std.heap.ArenaAllocator,
+    name: []const u8 = "",
+    arguments: ?[]const u8 = null,
+    timed_out: bool = false,
+    /// The server's answer could not be read: an HTTP body fx refused, or the grace of a refused
+    /// line ran out. The call ends as `malformed` where it would end `cancelled` or `http_failure`.
+    malformed: bool = false,
+    /// The length of what could not be read, for a `malformed` call, and whether it was a body
+    /// (see `Event.called`).
+    refused_bytes: u32 = 0,
+    refused_body: bool = false,
+    /// Why the call was lost, set where the call is decided to be lost.
+    lost_why: ?LostWhy = null,
+    /// The HTTP status of the ending that lost the call; 0 when none.
+    lost_status: u16 = 0,
+    /// A `tools/list` that an HTTP ending answered with no usable message, and the status it carried: why fx
+    /// refuses it (`httpListRefusal`). Null when the ending is no answer, or another flow reads it.
+    list_why: ?tools.Refusal = null,
+    list_status: u16 = 0,
+    /// A line fx could not read, that names no request, came while this request could be the only one it
+    /// was about: on its own stream, or when it was the one request in flight (`markOwnLine`).
+    own_line: bool = false,
+    instance: []const u8 = "",
+    /// 2025: the stream's last event id, sent back to resume it.
+    last_event_id: ?[]const u8 = null,
+    /// 2026 calls: the chain of input_required rounds, the last round
+    /// (its slices in the arena), and the host's answers to it.
+    chain: mrtr_core.Chain = .init(.{}),
+    round: mrtr.Round = .{},
+    answers: []const []const u8 = &.{},
+    /// The chain's trace instance; each round's exchange gets its own.
+    chain_instance: []const u8 = "",
+    /// The gate gave up on it for want of a sign-in.
+    needs_auth: bool = false,
+    /// The gate gave up on it: its login couldn't be renewed.
+    unrenewed: bool = false,
+    /// A listen: its subscription and filter, its id once sent, and
+    /// whether it listens again after an abrupt end.
+    sub: u8 = 0,
+    filter: subscription.Filter = 0,
+    listen_id: request.Id = 0,
+    resend: bool = false,
+};
+
+/// A request kept until it ends, so the gate can send it again.
+const Kept = struct {
+    key: u64,
+    method: http.Method,
+    body: ?[]const u8,
+    /// The request's headers and a spare last slot for `Authorization`.
+    headers: []std.http.Header,
+    arena: std.heap.ArenaAllocator,
+};
+
+const Timer = struct {
+    kind: union(enum) { request: request.Timer, probe: u32, expiry: catalog.Generation, resume_stream: request.Id, listen, listen_wait, backoff: Handle, relisten: struct { sub: u8, generation: u32 }, initialized: u64, refresh: u64 },
+    due_ms: i64,
+};
+
+/// What a 2025 elicitation came with, in `gpa`: the request's raw id,
+/// its raw elicitationId, and its params.
+const Held = struct { id: ?[]u8 = null, eid: ?[]u8 = null, params: []u8 = &.{} };
+
+/// Keys for requests nobody waits on an answer to: notifications, replies to
+/// server requests, the listening GET, and the DELETE. Request ids stay far
+/// below this.
+const aux_base: u64 = 1 << 62;
+
+/// 2025: a call can't go on until the URL elicitations it lists complete.
+const url_elicitation_required: i64 = -32042;
+
+pub const Server = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    options: Options,
+    /// Over HTTP.
+    client: http.Client,
+    /// Over stdio.
+    proc: process.Process,
+    stdio: bool,
+    /// Stdio: the process the era was last detected for, and a start asked
+    /// for while the last process was still stopping.
+    era_generation: stdio_conn.Generation = 0,
+    /// When the current start's time runs out.
+    start_due_ms: i64 = 0,
+    /// The refresh whose deadline is armed.
+    refresh_timed: u64 = 0,
+    catalog_generation: stdio_conn.Generation = 0,
+    start_pending: bool = false,
+    table: request.Table,
+    table_slots: [64]request.Slot = undefined,
+    detector: era.Detector,
+    catalog: catalog.Catalog,
+    /// Its `check_headers` is set for each page from the session's era.
+    store: tools.Store = .{},
+    logicals: [32]Logical = undefined,
+    next_handle: Handle = 1,
+    timers: std.ArrayList(Timer) = .empty,
+    /// Room for a session's end to withdraw every elicitation.
+    events: [16 + 2 * elicit_core.max_pending]Event = undefined,
+    event_count: usize = 0,
+    /// The answer an event points into, kept until the next `next`.
+    held_answer: ?tools.Call = null,
+    /// Set while requests end lost because an answer was over the message
+    /// limit: a stdio process fx killed for an oversized line, or an HTTP
+    /// answer over `max_message`.
+    losing_oversized: bool = false,
+    /// The message of an invalid reply's answer, kept as long as the line it
+    /// came from: until the process is read again.
+    refused_reply: [512]u8 = undefined,
+    /// Why the line is unreadable, while `onRefusedLine` hands the answer it made of that line to a request. A list that
+    /// meets it was matched but not read, so it says so (`pageEvent`) and does not say the server answered with an error.
+    refused_decode: ?wire.DecodeError = null,
+    /// The length of the last refused line that named no request. A call whose grace runs out
+    /// takes it into `Logical.refused_bytes`; it is the last such line the server wrote, not
+    /// necessarily the one that gave that call its grace.
+    refused_bytes: u32 = 0,
+    /// An excerpt of the last stdout line that answered nothing, since the
+    /// server was last ready: what a failed start wrote instead.
+    stray: [excerpt_max + 3]u8 = undefined,
+    stray_len: u8 = 0,
+    /// The message of the last progress event, until the next `next`.
+    note: [note_max + 3]u8 = undefined,
+    /// What the last page added, for the warning about dropped tools.
+    last_added: tools.Added = .{},
+    /// The words of why the last page fx refused was refused, written when it was refused (`refuse`). They mean
+    /// something only while `catalog.refused` holds.
+    list_refusal_buf: [tools.text_max]u8 = undefined,
+    list_refusal_len: u8 = 0,
+
+    // A 2025 session.
+    legacy: ?http_legacy.Session = null,
+    legacy_slots: [32]http_legacy.Request = undefined,
+    /// The session id in use, and the one an initialize answer brought.
+    session_id: ?[]u8 = null,
+    incoming_session: ?[]u8 = null,
+    /// initialize's answer carried a session id the client can't echo.
+    bad_session: bool = false,
+    /// The agreed version, an index into `Config.legacy`.
+    legacy_version: u8 = 0,
+    /// What the last discover or initialize result told the client to
+    /// tell the model about the server; in `gpa`.
+    instructions: ?[]const u8 = null,
+    listen_key: ?u64 = null,
+    listen_last_event_id: ?[]u8 = null,
+    delete_key: ?u64 = null,
+    next_aux: u64 = aux_base,
+    /// The notifications/initialized POST in flight. Each request is its own
+    /// HTTP request, so until it ends the session's other sends wait, in
+    /// order: requests must not reach the server before it.
+    initialized_key: ?u64 = null,
+    held_sends: std.ArrayList(http_legacy.Effect) = .empty,
+    /// The session's first listening GET went out and hasn't opened,
+    /// been refused, or ended yet, so the session's requests wait for it.
+    first_listen: bool = true,
+    listen_pending: bool = false,
+
+    // OAuth.
+    auth: auth_client.Auth = undefined,
+    outbox: std.ArrayList(Kept) = .empty,
+    /// The failing page's request gave up for want of a sign-in.
+    page_needs_auth: bool = false,
+    /// Each detection run is its own era and session trace instance.
+    era_instance: []const u8 = "remote",
+    era_run: u32 = 1,
+    era_instance_buf: [24]u8 = undefined,
+
+    // Subscriptions.
+    subs: subscription.Table = undefined,
+
+    // Elicitations of a 2025 session, by slot.
+    elicit: elicit_core.Table = undefined,
+    elicit_held: [elicit_core.max_pending]Held = @splat(.{}),
+
+    pub fn init(r: *Server, io: std.Io, gpa: std.mem.Allocator, options: Options) Error!void {
+        r.* = .{
+            .io = io,
+            .gpa = gpa,
+            .options = options,
+            .client = undefined,
+            .proc = undefined,
+            .stdio = options.link == .stdio,
+            .table = undefined,
+            .detector = .init(options.era),
+            .catalog = .init(options.catalog),
+            .subs = undefined,
+            .elicit = .init(elicitation.declared(options.client.capabilities)),
+        };
+        var subs = options.subscription;
+        subs.stdio = r.stdio;
+        r.subs = .init(subs);
+        r.table = .init(&r.table_slots, options.timeouts);
+        for (&r.logicals) |*l| l.* = .{ .arena = .init(gpa) };
+        switch (options.link) {
+            .http => |h| {
+                try r.client.init(io, gpa, h);
+                r.auth = .init(io, gpa, &r.client, h.url, options.auth, trace.on(options.trace));
+                if (options.auth.saved) |saved| _ = try r.auth.restore(saved);
+            },
+            .stdio => |o| {
+                var po = o;
+                po.config.max_attempts = std.math.maxInt(u8);
+                po.config.backoff_ms = 0;
+                r.proc.init(io, gpa, po);
+            },
+        }
+    }
+
+    pub fn deinit(r: *Server) void {
+        if (r.instructions) |text| r.gpa.free(text);
+        if (r.stdio) r.proc.deinit() else {
+            r.client.deinit();
+            r.auth.deinit();
+        }
+        for (r.outbox.items) |*k| k.arena.deinit();
+        r.outbox.deinit(r.gpa);
+        for (&r.logicals) |*l| l.arena.deinit();
+        r.timers.deinit(r.gpa);
+        r.held_sends.deinit(r.gpa);
+        r.store.deinit(r.gpa);
+        for ([_]?[]u8{ r.session_id, r.incoming_session, r.listen_last_event_id }) |s| if (s) |v| r.gpa.free(v);
+        for (&r.elicit_held) |*h| {
+            r.forget(h);
+            r.gpa.free(h.params);
+        }
+    }
+
+    pub fn toolList(r: *const Server) *const tools.List {
+        return &r.store.current;
+    }
+
+    /// Why fx refused the last list the server answered, in the words of `tools.Refusal` (with the HTTP status
+    /// number fx read, for an HTTP refusal); null when it did not. A list that is accepted, and a new process,
+    /// clear it. An older accepted list is still `toolList`. The words stay valid until the next page is refused:
+    /// copy them.
+    pub fn listRefusal(r: *const Server) ?[]const u8 {
+        return if (r.catalog.refused and r.list_refusal_len > 0) r.list_refusal_buf[0..r.list_refusal_len] else null;
+    }
+
+    /// Records why fx refuses a page, in the words of `tools.Refusal`: `status` goes into `http_status`'s words.
+    fn refuse(r: *Server, why: tools.Refusal, status: u16) void {
+        var words_buf: [tools.text_max]u8 = undefined;
+        const words = why.text(status, &words_buf);
+        @memcpy(r.list_refusal_buf[0..words.len], words);
+        r.list_refusal_len = @intCast(words.len);
+    }
+
+    /// Starts era detection. Over HTTP the endpoint is the "process".
+    pub fn detect(r: *Server) Error!void {
+        try r.stepEra(.process_started);
+        try r.stepEra(.detect_requested);
+    }
+
+    /// Starts the server: over HTTP, detection again from the start;
+    /// over stdio, the process, which detects once it runs. A start asked
+    /// for while the last process is still stopping runs when it is down.
+    pub fn connect(r: *Server) Error!void {
+        if (!r.stdio) {
+            if (r.detector.state != .unknown) try r.reset();
+            return r.detect();
+        }
+        switch (r.proc.conn.state) {
+            .idle, .stopped => try r.proc.start(),
+            .failed => {
+                try r.proc.reconnect();
+                try r.proc.start();
+            },
+            else => {
+                r.start_pending = true;
+                return r.processUp();
+            },
+        }
+        try r.started();
+    }
+
+    /// How the server's last process ended, once it has.
+    pub fn exitStatus(r: *Server) ?process.Exit {
+        return if (r.stdio) r.proc.exitStatus() else null;
+    }
+
+    /// An excerpt of the last stdout line that answered nothing since the
+    /// server was last ready.
+    pub fn strayLine(r: *const Server) ?[]const u8 {
+        return if (r.stray_len == 0) null else r.stray[0..r.stray_len];
+    }
+
+    /// The server's last stderr lines, in `out`, while it runs over stdio.
+    pub fn stderrTail(r: *Server, out: *[process.tail_max]u8) ?[]const u8 {
+        if (!r.stdio) return null;
+        const tail = r.proc.stderrTail(out);
+        return if (tail.len == 0) null else tail;
+    }
+
+    fn keepStray(r: *Server, line: []const u8) void {
+        r.stray_len = @intCast(excerptOf(excerpt_max, &r.stray, line).len);
+    }
+
+    /// Why the last start of the process failed, if it did. The engine shows
+    /// it in the server's status.
+    pub fn spawnError(r: *const Server) ?anyerror {
+        return if (r.stdio) r.proc.spawn_error else null;
+    }
+
+    /// Drops the link and everything on it: the process stops, or the
+    /// session ends with a DELETE nobody waits for and detection starts over.
+    /// The tool list stays until the next one; a sign-in stays too.
+    pub fn reset(r: *Server) Error!void {
+        r.start_pending = false;
+        if (r.stdio) return r.proc.stop();
+        // The tool list listen ends; the next ready opens it again.
+        try r.stepSubs(.{ .cancel = 0 });
+        if (r.legacy != null) try r.stepLegacy(.close);
+        for (&r.logicals) |*l| if (l.used) {
+            if (l.id) |id| {
+                try r.stepRequest(.{ .transport_lost = id });
+                try r.closeKey(id, .forgotten);
+            }
+            // A listing on the dropped link fails, as a stdio one does when its
+            // process ends, so the next link lists again.
+            if (l.what == .list and r.catalog.pending != .none) try r.stepCatalog(.page_failed);
+            l.used = false;
+        };
+        if (r.listen_key) |key| try r.closeKey(key, .forgotten);
+        r.listen_key = null;
+        r.timers.clearRetainingCapacity();
+        r.held_sends.clearRetainingCapacity();
+        // An initialized notification still unanswered: its POST goes too.
+        if (r.initialized_key) |key| try r.closeKey(key, .forgotten);
+        r.initialized_key = null;
+        r.listen_pending = false;
+        r.legacy = null;
+        try r.endElicitations();
+        r.newEraRun();
+    }
+
+    /// The version requests carry, once detection is done.
+    pub fn protocolVersion(r: *const Server) ?[]const u8 {
+        if (!r.detector.ready()) return null;
+        return era.versionName(r.detector.config, r.detector.version);
+    }
+
+    /// A sign-out's revocation is still on its way.
+    pub fn revoking(r: *const Server) bool {
+        return !r.stdio and r.auth.revoking() != null;
+    }
+
+    /// The auth client's `revoke_answer`; null for a stdio server.
+    pub fn revocationAnswer(r: *const Server) ?u16 {
+        if (r.stdio) return null;
+        return r.auth.revocationAnswer();
+    }
+
+    /// Writes the sign-in credential for the host to keep securely,
+    /// and pass back as `auth.saved`; false when there is none to keep.
+    pub fn saveCredential(r: *const Server, w: *std.Io.Writer) std.Io.Writer.Error!bool {
+        if (r.stdio) return false;
+        return r.auth.save(w);
+    }
+
+    /// Stdio: the process is still on its way down after `close` or `reset`.
+    pub fn stopping(r: *const Server) bool {
+        if (!r.stdio) return false;
+        return switch (r.proc.conn.state) {
+            .closing, .terminating, .killing => true,
+            else => false,
+        };
+    }
+
+    /// A subscription waits to listen again: demand for a stopped process.
+    pub fn waiting(r: *const Server) bool {
+        return r.subs.waiting();
+    }
+
+    /// When the next timer is due, if any. The engine sleeps until then.
+    pub fn dueMs(r: *const Server) ?i64 {
+        var due: ?i64 = null;
+        for (r.timers.items) |t| due = @min(due orelse t.due_ms, t.due_ms);
+        return due;
+    }
+
+    /// The host needs the tool list.
+    pub fn needTools(r: *Server) Error!void {
+        try r.stepCatalog(.need);
+    }
+
+    /// Calls a tool from the current list. `arguments` is a JSON object, or
+    /// null for none. Both are copied.
+    pub fn call(r: *Server, name: []const u8, arguments: ?[]const u8) Error!Handle {
+        if (!r.detector.ready()) return error.NotReady;
+        const l = try r.newLogical(.call, .call);
+        const a = l.arena.allocator();
+        l.name = try a.dupe(u8, name);
+        l.arguments = if (arguments) |args| try a.dupe(u8, args) else null;
+        try r.start(l);
+        return l.handle;
+    }
+
+    /// Cancels a call: on 2026 its stream is closed, on 2025 a
+    /// notifications/cancelled goes out.
+    pub fn cancel(r: *Server, handle: Handle) Error!void {
+        const l = r.logicalByHandle(handle) orelse return;
+        // Between rounds no request is out: the chain ends here.
+        if (l.chain.phase == .asking or l.chain.phase == .backoff) return r.stepChain(l, .cancel);
+        if (l.id) |id| try r.stepRequest(.{ .cancel_requested = id });
+        if (!r.stdio and r.legacy == null and l.used) try r.stepExchange(l, .cancel);
+    }
+
+    /// Stops listening for tool list changes: the listen's stream closes.
+    pub fn stopListening(r: *Server) Error!void {
+        try r.stepSubs(.{ .cancel = 0 });
+    }
+
+    /// Answers a call's input requests: one raw JSON value per request,
+    /// in the order of the `input` event, all at once. They go out
+    /// under the server's own keys.
+    pub fn respond(r: *Server, handle: Handle, values: []const []const u8) Error!void {
+        const l = r.logicalByHandle(handle) orelse return error.UnknownCall;
+        if (l.chain.phase != .asking or values.len != l.round.count) return error.InvalidInputResponses;
+        // An elicitation's answer is checked before anything goes out.
+        for (l.round.slice(), values) |q, v| if (q.kind == .elicitation) {
+            var form: elicitation.Form = .{};
+            const read = elicitation.parse(q.params.?, &form) catch return error.InvalidInputResponses; // read with the round
+            _ = elicitation.readAnswer(read.mode, &form, v) catch return error.InvalidInputResponses;
+        };
+        const a = l.arena.allocator();
+        const copies = try a.alloc([]const u8, values.len);
+        for (values, copies) |v, *c| c.* = try a.dupe(u8, v);
+        l.answers = copies;
+        try r.stepChain(l, .provided);
+    }
+
+    /// Answers the 2025 elicitation `id`: accept with content for a form,
+    /// accept for a URL, decline, or cancel. One that is gone is unknown, even
+    /// when its slot holds another. Content that fails the schema is refused,
+    /// and the host still holds the elicitation.
+    pub fn answerElicitation(r: *Server, id: elicit_core.Id, answer: elicitation.Answer) Error!void {
+        const s = r.elicit.find(id) orelse return error.UnknownElicitation;
+        var form: elicitation.Form = .{};
+        _ = elicitation.parse(r.elicit_held[id.slot].params, &form) catch return error.InvalidAnswer; // read when asked
+        const valid = if (elicitation.check(s.mode, &form, answer)) true else |err| switch (err) {
+            error.InvalidAnswer => return error.InvalidAnswer,
+            error.InvalidContent => false,
+        };
+        try r.stepElicit(.{ .answered = .{ .id = id, .action = answer.action, .valid = valid } }, .{ .content = answer.content });
+        if (!valid) return error.InvalidAnswer;
+    }
+
+    /// Starts signing in. The host hears `authorize` with the URL to
+    /// open, which comes back to `redirect_uri`, a loopback or HTTPS URL; it
+    /// passes that URL to `finishSignIn`, and hears `signed_in` or
+    /// `sign_in_failed`. Then it retries what needed the sign-in.
+    pub fn signIn(r: *Server, redirect_uri: []const u8) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.signIn(redirect_uri);
+        try r.runAuth(null);
+    }
+
+    /// `callback_url` must stay valid until the sign-in ends: the code in it
+    /// is read when it is redeemed.
+    pub fn finishSignIn(r: *Server, callback_url: []const u8) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.finishSignIn(callback_url);
+        try r.runAuth(null);
+    }
+
+    pub fn cancelSignIn(r: *Server) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.cancelSignIn();
+        try r.runAuth(null);
+    }
+
+    /// Takes a credential `saveCredential` wrote, as a sign-in would: what
+    /// waits for one goes out with it (another host process signed in).
+    /// False when it can't be used, as `Auth.restore` says, and nothing
+    /// changes.
+    pub fn useCredential(r: *Server, saved: []const u8) Error!bool {
+        if (r.stdio) return error.NotReady;
+        if (!try r.auth.restore(saved)) return false;
+        try r.runAuth(null);
+        return true;
+    }
+
+    /// Sends the refresh `refresh_due` announced.
+    pub fn refresh(r: *Server) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.refreshNow();
+        try r.runAuth(null);
+    }
+
+    /// The tokens are forgotten; requests then go without one.
+    pub fn signOut(r: *Server) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.signOut();
+        try r.runAuth(null);
+    }
+
+    /// The tokens a sign-in brought are forgotten, with nothing revoked and
+    /// nothing saved: the server refused them.
+    pub fn discardLogin(r: *Server) Error!void {
+        if (r.stdio) return error.NotReady;
+        try r.auth.discardLogin();
+        try r.runAuth(null);
+    }
+
+    /// The 401 the server gave to a request that carried the login's token, when it did and the
+    /// server has accepted nothing since. A refresh the 401 started that got no usable answer
+    /// ends the request as unrenewed, but the 401 stands. Borrows `r`: copy before the next call.
+    pub fn loginRejection(r: *const Server) ?auth_client.Rejected {
+        if (r.stdio) return null;
+        return r.auth.rejection();
+    }
+
+    /// Ends a 2025 session with a DELETE, waiting at most 2 s for
+    /// it. Nothing goes out afterwards.
+    pub fn close(r: *Server) Error!void {
+        // Stdio: the process stops; `deinit` kills what is left.
+        if (r.stdio) return r.proc.stop();
+        var delete: ?u64 = null;
+        if (r.legacy != null) {
+            try r.stepLegacy(.close);
+            delete = r.delete_key;
+        }
+        // A sign-out's revocation still on its way is waited for too,
+        // within the same 2 s, or it would never leave a process that exits.
+        var revoke = r.auth.revoking();
+        const deadline = r.now() + 2000;
+        while ((delete != null or revoke != null) and r.now() < deadline) switch (try r.client.next(@intCast(@max(0, deadline - r.now())))) {
+            .ended => |e| if (delete) |k| if (k == e.key) {
+                delete = null;
+            },
+            .fetched => |f| if (revoke) |k| if (k == f.key) {
+                revoke = null;
+            },
+            .timeout => return,
+            else => {},
+        };
+    }
+
+    /// The next thing that happened, waiting at most `timeout_ms`.
+    pub fn next(r: *Server, timeout_ms: u32) Error!Event {
+        r.held_answer = null;
+        const deadline = r.now() + timeout_ms;
+        while (true) {
+            if (r.take()) |event| return event;
+            const wait: u32 = @intCast(@max(0, @min(deadline, r.dueMs() orelse deadline) - r.now()));
+            const timed_out = if (r.stdio) blk: {
+                const incoming = try r.proc.next(wait);
+                if (incoming == .timeout) break :blk true;
+                try r.onProcess(incoming);
+                break :blk false;
+            } else blk: {
+                const incoming = try r.client.next(wait);
+                if (incoming == .timeout) break :blk true;
+                try r.onHttp(incoming);
+                break :blk false;
+            };
+            if (timed_out) {
+                try r.fireTimers();
+                if (r.event_count == 0 and r.now() >= deadline) return .timeout;
+            }
+        }
+    }
+
+    /// The next thing that happened, without waiting; null for nothing. The
+    /// engine reads each server when its bell rings, or a timer is due.
+    /// Due timers come before what waits, and one call reads at most `burst`
+    /// messages, then rings the bell for the rest: a server that sends
+    /// faster than they are handled can't hold back its timers or the
+    /// other servers.
+    pub fn poll(r: *Server) Error!?Event {
+        r.held_answer = null;
+        var read: u32 = 0;
+        while (true) {
+            if (r.take()) |event| return event;
+            if (r.dueMs()) |due| if (due <= r.now()) {
+                try r.fireTimers();
+                continue;
+            };
+            if (read == burst) {
+                if (if (r.stdio) r.proc.options.bell else r.client.options.bell) |b| b.ring();
+                return null;
+            }
+            read += 1;
+            if (r.stdio) {
+                if (try r.proc.poll()) |incoming| {
+                    try r.onProcess(incoming);
+                    continue;
+                }
+            } else if (r.client.poll()) |incoming| {
+                try r.onHttp(incoming);
+                continue;
+            }
+            return null;
+        }
+    }
+
+    /// What `poll` reads at most per call: a queue's worth.
+    const burst = 64;
+
+    /// An event already queued, without reading anything. The engine
+    /// takes what one read queued together, such as a process exit's lost
+    /// calls and its `down`.
+    pub fn pending(r: *Server) ?Event {
+        return r.take();
+    }
+
+    fn take(r: *Server) ?Event {
+        if (r.event_count == 0) return null;
+        const event = r.events[0];
+        @memmove(r.events[0 .. r.event_count - 1], r.events[1..r.event_count]);
+        r.event_count -= 1;
+        return event;
+    }
+
+    fn onHttp(r: *Server, incoming: http.Incoming) Error!void {
+        switch (incoming) {
+            .message => |m| {
+                try r.onEventId(m.key, m.event_id, m.retry_ms);
+                try r.onMessage(m.key, m.status, m.message);
+            },
+            .refused => |m| {
+                try r.onEventId(m.key, m.event_id, m.retry_ms);
+                try r.onRefusedLine(m.err, m.bytes, m.key);
+            },
+            .mark => |m| try r.onEventId(m.key, m.event_id, m.retry_ms),
+            .session => |s| try r.onSession(s.key, s.id),
+            .opened => |key| if (r.legacy != null and key == r.listen_key) try r.listenSettled(),
+            .ended => |e| try r.onEnded(e.key, e.status, e.how, e.challenge, e.bytes),
+            .fetched => |f| {
+                _ = try r.auth.fetched(f.key, f.status, f.media, f.challenge, f.body);
+                try r.runAuth(null);
+            },
+            .timeout => unreachable,
+        }
+    }
+
+    // ---- stdio ----
+
+    fn onProcess(r: *Server, incoming: process.Incoming) Error!void {
+        switch (incoming) {
+            // On stdio a response names its request only by its id.
+            .message => |m| try r.onMessage(if (m.message == .response) m.message.response.id orelse 0 else 0, 200, m.message),
+            // With no sink for stderr.
+            .stderr => {},
+            .dropped => |d| try r.onRefusedLine(d.err, d.line, null),
+            .changed => |c| try r.onProcessChanged(c.state, c.lost, c.oversized),
+            .timeout => unreachable,
+        }
+    }
+
+    /// A line that names no request is about every normal request in flight (`request.Table.refusedLine`), so it is
+    /// a list's own answer only when no other such request could have written it: it came on the list's own
+    /// stream, or the list is the one normal request in flight. A listen is not one of them: it is waited on for no
+    /// reply, and a modern server always has one open. Otherwise the list's answer is only late, and when the grace
+    /// runs out the list ends with no reason, as a lost page does (`tests/tla/mcp/Catalog.tla` `PageSharedGrace`).
+    fn markOwnLine(r: *Server, stream: ?u64) void {
+        const own = if (stream) |key| r.logicalFor(key) else if (r.table.normalInFlightCount() == 1) r.soleList() else null;
+        if (own) |l| l.own_line = true;
+    }
+
+    fn soleList(r: *Server) ?*Logical {
+        for (&r.logicals) |*l| if (l.used and l.what == .list and l.id != null) return l;
+        return null;
+    }
+
+    /// A line `decode` refused that names a request in flight is that
+    /// request's answer, an invalid one: the request fails with what was
+    /// wrong and the start of the line. It names a request by the id read
+    /// before the line went wrong (`wire.responseId`), so a reply cut or
+    /// broken after its id ends at once. One that names a request not in
+    /// flight is ignored, as a late reply is, and so is one on an HTTP request's
+    /// stream that names another request (`stream` is that request's key). One that
+    /// names none gives a short deadline (`request.Timeouts.refused_ms`) to each normal
+    /// request in flight, or, on an HTTP request's stream, to that request alone
+    /// (`tests/tla/mcp/Request.tla` `RefusedNaming`, `RefusedLine`).
+    fn onRefusedLine(r: *Server, err: wire.DecodeError, line: []const u8, stream: ?u64) Error!void {
+        // Empty for a process that has gone since.
+        if (line.len == 0) return;
+        const id = wire.responseId(line) orelse {
+            r.keepStray(line);
+            r.refused_bytes = @intCast(@min(line.len, std.math.maxInt(u32)));
+            r.markOwnLine(stream);
+            return r.stepRequest(.{ .refused_line = stream });
+        };
+        if (r.logicalFor(id) == null) return r.keepStray(line);
+        // An event on a request's stream answers that request only, as a valid reply does
+        // (`onMessage`): one that names another request is a stray. Stdio has no stream.
+        if (stream) |key| if (id != key) return r.keepStray(line);
+        const why = switch (err) {
+            error.NotJsonRpc2 => "its jsonrpc isn't \"2.0\"",
+            error.Ambiguous => "it has both a result and an error, or neither",
+            error.InvalidResult => "its result isn't an object",
+            error.InvalidErrorObject => "its error isn't an error object",
+            else => "it isn't valid JSON-RPC",
+        };
+        var buf: [excerpt_max + 3]u8 = undefined;
+        var text: [192]u8 = undefined;
+        const plain = std.mem.print(&text, "invalid reply ({s}): {s}", .{ why, excerptOf(excerpt_max, &buf, line) }) catch unreachable;
+        var w: std.Io.Writer = .fixed(&r.refused_reply);
+        std.json.Stringify.value(plain, .{}, &w) catch unreachable;
+        r.refused_decode = err;
+        defer r.refused_decode = null;
+        try r.onMessage(id, 200, .{ .response = .{ .id = id, .body = .{ .failure = .{ .code = wire.code.invalid_request, .message = w.buffered(), .data = null } } } });
+    }
+
+    fn onProcessChanged(r: *Server, state: stdio_conn.State, lost: bool, oversized: bool) Error!void {
+        if (lost) {
+            // What was in flight on the process is lost. The exit ends every
+            // listen, and its elicitations are over.
+            r.losing_oversized = oversized;
+            defer r.losing_oversized = false;
+            for (r.table_slots) |slot| if (slot.used) try r.stepRequest(.{ .transport_lost = slot.id });
+            if (r.subs.up) try r.stepSubs(.transport_down);
+            try r.endElicitations();
+            var i: usize = 0;
+            while (i < r.timers.items.len) {
+                if (r.timers.items[i].kind == .probe) _ = r.timers.swapRemove(i) else i += 1;
+            }
+        }
+        // A start that failed or a process that ended on its own; a stop the
+        // host asked for ends as `stopped` instead.
+        if (state == .backoff or state == .failed) r.emit(.down);
+        if (r.start_pending and (state == .idle or state == .stopped)) {
+            r.start_pending = false;
+            try r.proc.start();
+            return r.started();
+        }
+        try r.processUp();
+    }
+
+    /// After a start: a spawn that worked runs at once, and one that failed
+    /// is in backoff at once, with no change for `next` to see either way.
+    fn started(r: *Server) Error!void {
+        if (r.proc.conn.state == .backoff or r.proc.conn.state == .failed) return r.emit(.down);
+        try r.processUp();
+    }
+
+    /// Each new process detects before anything else.
+    fn processUp(r: *Server) Error!void {
+        const generation = r.proc.conn.generation;
+        if (r.proc.conn.state != .running or generation == r.era_generation) return;
+        r.era_generation = generation;
+        try r.stepEra(.process_started);
+        try r.stepEra(.detect_requested);
+    }
+
+    /// A stdio answer: what it answers is read, then the request table ends
+    /// the request, and `stdioDelivered` the logical one.
+    fn onStdioAnswer(r: *Server, l: *Logical, id: request.Id, body: @FieldType(wire.Response, "body")) Error!void {
+        switch (l.what) {
+            .discover => {
+                try r.keepInstructions(body);
+                try r.stepEra(era.classifyDiscover(r.detector.config, body));
+            },
+            .initialize => {
+                try r.keepInstructions(body);
+                try r.stepEra(era.classifyInitialize(r.detector.config, body));
+            },
+            .list => try r.stepCatalog(try r.pageEvent(body)),
+            .call => _ = try r.callAnswer(body),
+            .listen => try r.stepSubs(.{ .final = .{ .id = id, .end = listenEnd(body) } }),
+        }
+        try r.stepRequest(.{ .response_received = .{ .id = id, .response = if (body == .result) .result else .peer_error } });
+    }
+
+    /// A complete result ends a listen gracefully. An error refuses it, and so
+    /// does a result whose `resultType` is invalid or input_required, which a
+    /// listen never is (WIRE-07).
+    fn listenEnd(body: @FieldType(wire.Response, "body")) subscription.End {
+        return if (body == .result and body.result.kind == .complete) .result else .refused;
+    }
+
+    /// A stdio request ended in the request table: its logical request ends.
+    fn stdioDelivered(r: *Server, id: request.Id, outcome: request.Outcome) Error!void {
+        const l = r.logicalFor(id) orelse return;
+        // A stdio call that ends without its answer lost its process (`onProcessChanged`).
+        if (outcome == .none or outcome == .lost or outcome == .ended) l.lost_why = .link_down;
+        const answered = outcome == .result or outcome == .peer_error;
+        if (r.legacyEra() and (l.what == .call or l.what == .list)) return r.legacyDelivered(id, switch (outcome) {
+            .result, .peer_error => .result,
+            .none, .lost, .ended => .lost,
+            .timed_out, .cancelled, .malformed => .cancelled,
+        });
+        l.id = null;
+        switch (l.what) {
+            // Answers were read on arrival; the probe timer covers silence.
+            .discover => {},
+            .initialize => if (outcome == .timed_out) try r.stepEra(.initialize_timed_out),
+            .list => if (!answered) try r.listFailed(l),
+            // The server's notifications/cancelled. A lost one waits
+            // for the process, and a listen never times out.
+            .listen => if (outcome == .ended) try r.stepSubs(.{ .final = .{ .id = id, .end = .server_cancelled } }),
+            .call => return r.roundEnded(l, switch (outcome) {
+                .result => .result,
+                .peer_error => .failure,
+                .none, .lost, .ended => .lost,
+                .timed_out, .cancelled, .malformed => .cancelled,
+            }),
+        }
+        l.used = false;
+    }
+
+    /// A 2025 session over either transport.
+    fn legacyEra(r: *const Server) bool {
+        if (!r.stdio) return r.legacy != null;
+        return r.detector.state == .legacy or r.detector.state == .initializing;
+    }
+
+    /// Answers a server's request: a POST, or a line on stdio.
+    fn reply(r: *Server, body: []const u8) Error!void {
+        if (r.stdio) return r.proc.send(.response, body) catch {};
+        try r.sendAux(.post, body, null);
+    }
+
+    inline fn tracer(r: *const Server) ?*trace.Writer {
+        return trace.on(r.options.trace);
+    }
+
+    fn now(r: *const Server) i64 {
+        return std.Io.Clock.awake.now(r.io).toMilliseconds();
+    }
+
+    fn emit(r: *Server, event: Event) void {
+        if (r.event_count == r.events.len) return; // the host stopped reading; the newest are dropped
+        r.events[r.event_count] = event;
+        r.event_count += 1;
+    }
+
+    fn auxKey(r: *Server) u64 {
+        r.next_aux += 1;
+        return r.next_aux;
+    }
+
+    fn newLogical(r: *Server, what: What, kind: http_modern.Kind) Error!*Logical {
+        const l = for (&r.logicals) |*l| {
+            if (!l.used) break l;
+        } else return error.TooManyRequests;
+        _ = l.arena.reset(.retain_capacity);
+        l.* = .{ .used = true, .handle = r.next_handle, .what = what, .exchange = .init(r.options.exchange, kind), .arena = l.arena, .chain = .init(r.options.mrtr) };
+        r.next_handle +%= 1;
+        l.instance = try l.arena.allocator().print("x{d}", .{l.handle});
+        l.chain_instance = l.instance;
+        return l;
+    }
+
+    fn logicalByHandle(r: *Server, handle: Handle) ?*Logical {
+        for (&r.logicals) |*l| if (l.used and l.handle == handle) return l;
+        return null;
+    }
+
+    fn logicalFor(r: *Server, id: request.Id) ?*Logical {
+        for (&r.logicals) |*l| if (l.used and l.id == id) return l;
+        return null;
+    }
+
+    /// Sends a list or call: as a 2026 exchange, or in the 2025 session.
+    fn start(r: *Server, l: *Logical) Error!void {
+        if (r.stdio) return if (l.what == .call and !r.legacyEra()) r.stepChain(l, .start) else r.sendAttempt(l);
+        if (r.legacy == null) return if (l.what == .call) r.stepChain(l, .start) else r.stepExchange(l, .send);
+        var out: era.Output = .{};
+        r.detector.step(.operation_sent, &out) catch return error.NotReady;
+        if (r.tracer()) |t| try era.writeTrace(t, r.era_instance, &out);
+        l.id = try r.newRequest(.normal);
+        l.own_line = false;
+        try r.stepLegacy(.{ .send = l.id.? });
+    }
+
+    /// A new id from the request table.
+    fn newRequest(r: *Server, kind: request.Kind) Error!request.Id {
+        var out: request.Output = .{};
+        r.table.step(.{ .send = kind }, &out) catch return error.TooManyRequests;
+        if (r.tracer()) |t| try request.writeTrace(t, "remote", &out);
+        var id: request.Id = 0;
+        for (out.effects()) |effect| switch (effect) {
+            .write_request => |w| id = w.id,
+            .arm_timer => |a| try r.armRequestTimer(a.timer, if (kind == .initialize and a.timer.kind == .hard) r.startLeft(a.after_ms) else a.after_ms),
+            else => {},
+        };
+        if (r.questionsHeld() > 0) try r.stepRequest(.{ .idle_paused = id });
+        return id;
+    }
+
+    /// What is left of the start's time, at most `after_ms`. An initialize
+    /// that renews a ready 2025 session isn't a start.
+    fn startLeft(r: *const Server, after_ms: u32) u32 {
+        if (r.detector.ready()) return after_ms;
+        return @intCast(std.math.clamp(r.start_due_ms - r.now(), 0, after_ms));
+    }
+
+    /// 2025 questions the host holds and hasn't answered.
+    fn questionsHeld(r: *const Server) usize {
+        var n: usize = 0;
+        for (r.elicit.slots) |slot| n += @intFromBool(slot.used);
+        return n;
+    }
+
+    /// A 2025 server asks outside the request it needs the answer for,
+    /// so while the host holds any question, no request's idle timer runs.
+    fn idleWhileAsking(r: *Server, held_before: usize) Error!void {
+        const held = r.questionsHeld();
+        if ((held_before == 0) == (held == 0)) return;
+        for (r.table.slots) |slot| if (slot.used) {
+            try r.stepRequest(if (held > 0) .{ .idle_paused = slot.id } else .{ .idle_resumed = slot.id });
+        };
+    }
+
+    fn stepExchange(r: *Server, l: *Logical, event: http_modern.Event) Error!void {
+        var out: http_modern.Output = .{};
+        l.exchange.step(event, &out);
+        if (r.tracer()) |t| try http_modern.writeTrace(t, l.instance, &out);
+        for (out.effects()) |effect| switch (effect) {
+            .post => try r.sendAttempt(l),
+            .relist => {
+                // Refresh the list, then retry with the new schema's headers.
+                try r.stepCatalog(.invalidated);
+                try r.stepCatalog(.need);
+            },
+            // After an answer, or as the cancellation.
+            .close => if (l.id) |id| {
+                l.id = null;
+                try r.closeKey(id, if (l.exchange.phase == .cancelled) .forgotten else .answered);
+            },
+            .deliver => |d| {
+                // A call's round ended: its chain decides what comes next.
+                if (l.what == .call) return r.roundEnded(l, d.outcome);
+                // A listen's answer was taken where it arrived. A stream that
+                // broke is abrupt; a status without an answer refuses it.
+                if (l.what == .listen) {
+                    l.used = false;
+                    return r.stepSubs(switch (d.outcome) {
+                        .lost => .{ .lost = l.listen_id },
+                        .http_failure => .{ .final = .{ .id = l.listen_id, .end = .refused } },
+                        else => return,
+                    });
+                }
+                // An answer was routed where it arrived; here only an exchange
+                // that ended without one.
+                if (d.outcome != .result and d.outcome != .failure and l.what == .list) try r.listFailed(l);
+                l.used = false;
+            },
+        };
+    }
+
+    /// Sends one attempt of `l` as a new request (a new id): a 2026 POST,
+    /// or a line on stdio in either era.
+    fn sendAttempt(r: *Server, l: *Logical) Error!void {
+        var version: era.Version = .none;
+        if (l.what == .discover) {
+            version = .{ .preferred = l.what.discover };
+        } else if (l.what != .initialize) {
+            var out: era.Output = .{};
+            r.detector.step(.operation_sent, &out) catch return error.NotReady;
+            if (r.tracer()) |t| try era.writeTrace(t, r.era_instance, &out);
+            version = out.meta.?;
+        }
+        const id = try r.newRequest(switch (l.what) {
+            .listen => .listen,
+            .initialize => .initialize,
+            else => .normal,
+        });
+        l.id = id;
+        l.own_line = false;
+        if (l.what == .listen) {
+            l.listen_id = id;
+            try r.stepSubs(if (l.resend) .{ .resent = .{ .sub = l.sub, .id = id } } else .{ .opened = .{ .sub = l.sub, .id = id, .filter = l.filter } });
+        }
+        var arena: std.heap.ArenaAllocator = .init(r.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var body: std.Io.Writer.Allocating = .init(a);
+        const config = r.detector.config;
+        const meta = era.meta(config, r.options.client, version, id);
+        switch (l.what) {
+            .discover => |i| try era.writeDiscover(&body.writer, config, r.options.client, i, id),
+            .initialize => try era.writeInitialize(&body.writer, config, r.options.client, id),
+            .list, .call => try r.writeOperation(&body.writer, l, meta),
+            .listen => try subscriptions.writeListen(&body.writer, id, meta, l.filter),
+        }
+        // Not written: the process isn't running, so the request is lost.
+        if (r.stdio) return r.proc.send(.request, body.written()) catch r.stepRequest(.{ .transport_lost = id });
+        var headers: std.ArrayList(http_headers.Header) = .empty;
+        const version_name = era.versionName(config, version) orelse config.legacy[0];
+        try http_headers.requestHeaders(a, version_name, switch (l.what) {
+            .discover => "server/discover",
+            .list => "tools/list",
+            .call => "tools/call",
+            .listen => "subscriptions/listen",
+            .initialize => unreachable, // only in a 2025 session
+        }, if (l.what == .call) l.name else null, &.{}, &headers);
+        if (l.what == .call) if (r.store.current.find(l.name)) |tool| try r.paramHeaders(a, tool.raw, l.arguments orelse "{}", &headers);
+        r.send(id, .post, body.written(), headers.items) catch |err| switch (err) {
+            error.TooManyInFlight, error.ConcurrencyUnavailable => try r.endAttempt(l, id, .broken, 0),
+            else => return err,
+        };
+    }
+
+    /// The body of a tools/list or tools/call.
+    fn writeOperation(r: *Server, out: *std.Io.Writer, l: *const Logical, meta: wire.Meta) Error!void {
+        const id = l.id.?;
+        switch (l.what) {
+            .list => try tools.writeList(out, id, meta, if (r.catalog.pending == .next) r.store.nextCursor() else null),
+            .call => try tools.writeCall(out, id, meta, l.name, l.arguments, if (!r.legacyEra()) retryOf(l) else .{}),
+            else => unreachable,
+        }
+    }
+
+    /// The `Mcp-Param-*` headers from the tool's `x-mcp-header`
+    /// annotations. The store already dropped tools with invalid ones.
+    fn paramHeaders(_: *Server, a: std.mem.Allocator, tool_raw: []const u8, arguments: []const u8, headers: *std.ArrayList(http_headers.Header)) Error!void {
+        var found: [1]?[]const u8 = undefined;
+        wire.objectFields(tool_raw, &.{"inputSchema"}, &found) catch return;
+        var annotations: [http_headers.max_annotations]http_headers.Annotation = undefined;
+        const n = http_headers.annotations(found[0] orelse return, &annotations) catch return;
+        http_headers.paramHeaders(a, annotations[0..n], arguments, headers) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {},
+        };
+    }
+
+    fn onMessage(r: *Server, key: u64, status: u16, message: wire.Message) Error!void {
+        switch (message) {
+            .notification => |n| {
+                // A server ends a listen with notifications/cancelled.
+                if (std.mem.eql(u8, n.method, "notifications/cancelled")) {
+                    // A 2025 server may cancel its own elicitation.
+                    if (r.legacyEra()) if (r.heldSlot(n.params, "requestId", .id)) |slot| {
+                        return r.stepElicit(.{ .server_cancelled = slot }, .{});
+                    };
+                    const id = subscriptions.cancelledId(n.params) orelse return;
+                    return r.stepRequest(.{ .server_cancel_received = id });
+                }
+                // What names a listen is the subscription's.
+                if (subscriptions.subscriptionId(n.params)) |sid| return switch (subscriptions.notice(n.method, n.params)) {
+                    .acknowledged => |f| r.stepSubs(.{ .acknowledged = .{ .id = sid, .filter = f } }),
+                    .changed => |kind| r.stepSubs(.{ .notified = .{ .id = sid, .kind = kind } }),
+                    .other => {},
+                };
+                // Only a 2025 session has completion notifications.
+                if (r.legacyEra() and std.mem.eql(u8, n.method, "notifications/elicitation/complete")) {
+                    return r.stepElicit(.{ .completed = r.heldSlot(n.params, "elicitationId", .eid) }, .{});
+                }
+                // One without a subscriptionId still refreshes the list.
+                if (std.mem.eql(u8, n.method, "notifications/tools/list_changed")) return r.stepCatalog(.invalidated);
+                if (std.mem.eql(u8, n.method, "notifications/progress")) {
+                    var found: [4]?[]const u8 = undefined;
+                    wire.objectFields(n.params orelse "{}", &.{ "progressToken", "progress", "total", "message" }, &found) catch return;
+                    const token = wire.decimal(found[0] orelse return) orelse return;
+                    const value = std.fmt.parseFloat(f64, found[1] orelse return) catch return;
+                    const before = r.table.progressCount(token);
+                    try r.stepRequest(.{ .progress_received = .{ .token = token, .value = value } });
+                    // Accepted progress on a call reaches the host.
+                    if (r.table.progressCount(token) == before) return;
+                    const l = r.logicalFor(token) orelse return;
+                    if (l.what != .call) return;
+                    var text: [1024]u8 = undefined;
+                    var fixed: std.heap.FixedBufferAllocator = .init(&text);
+                    const said = if (found[3]) |raw| wire.decodeString(fixed.allocator(), raw) catch null else null;
+                    r.emit(.{ .progress = .{
+                        .handle = l.handle,
+                        .progress = value,
+                        .total = if (found[2]) |t| std.fmt.parseFloat(f64, t) catch null else null,
+                        .message = if (said) |m| excerptOf(note_max, &r.note, m) else null,
+                    } });
+                    return;
+                }
+            },
+            // A 2026 server sends no requests; they are dropped. A 2025
+            // one gets an answer.
+            .request => |q| if (r.legacyEra()) try r.answerServerRequest(q),
+            .response => |resp| {
+                // A JSON-RPC answer in a POST's body answers that POST,
+                // even an error without an id.
+                if (resp.id) |id| if (id != key) return;
+                // On stdio an error without an id during the probe
+                // means a legacy server.
+                if (r.stdio and resp.id == null) return if (resp.body == .failure and r.detector.pending == .discover) r.stepEra(.legacy_answer);
+                const l = r.logicalFor(key) orelse return;
+                if (r.stdio) return r.onStdioAnswer(l, key, resp.body);
+                if (l.what == .initialize) return r.onInitializeAnswer(l, resp.body);
+                if (r.legacy != null and l.what != .discover) return r.onLegacyAnswer(l, key, status, resp.body);
+                if (l.exchange.phase != .posted) return;
+                try r.stepRequest(.{ .response_received = .{ .id = key, .response = if (resp.body == .result) .result else .peer_error } });
+                const answer: http_modern.Answer = switch (l.what) {
+                    .discover => blk: {
+                        try r.keepInstructions(resp.body);
+                        try r.stepEra(era.classifyDiscoverHttp(r.detector.config, status, resp.body));
+                        break :blk if (resp.body == .result) .result else .failure;
+                    },
+                    .list => blk: {
+                        try r.stepCatalog(try r.pageEvent(resp.body));
+                        break :blk if (resp.body == .result) .result else .failure;
+                    },
+                    .call => blk: {
+                        const c = try r.callAnswer(resp.body) orelse break :blk .mismatch;
+                        // input_required is a result; the chain reads it.
+                        break :blk switch (c) {
+                            .result, .input_required => .result,
+                            .failure, .invalid => .failure,
+                        };
+                    },
+                    .listen => blk: {
+                        try r.stepSubs(.{ .final = .{ .id = key, .end = listenEnd(resp.body) } });
+                        break :blk if (resp.body == .result) .result else .failure;
+                    },
+                    .initialize => unreachable,
+                };
+                // The answer's `close` lets go of the id and the stream.
+                try r.stepExchange(l, .{ .answer = answer });
+            },
+        }
+    }
+
+    /// Reads a tools/call answer: null for a -32020 header mismatch.
+    fn callAnswer(r: *Server, body: @FieldType(wire.Response, "body")) Error!?tools.Call {
+        const c = tools.classifyCall(body);
+        r.held_answer = c;
+        if (c == .failure) {
+            if (!r.stdio and r.legacy == null and c.failure.code == wire.code.header_mismatch) return null;
+            if (era.classifyOperationRejection(r.detector.config, c.failure)) |e| try r.stepEra(e);
+        }
+        if (tools.suggestsChangedList(c)) try r.stepCatalog(.invalidated);
+        return c;
+    }
+
+    /// A request ended: the gate hears first, then the machines that
+    /// wait on it.
+    fn onEnded(r: *Server, key: u64, status: u16, how: http.Ending, challenge: ?[]const u8, bytes: u32) Error!void {
+        if (r.kept(key) != null) {
+            if (how == .rejected) {
+                if (try r.auth.ended(key, .{ .rejected = .{ .status = status, .challenge = challenge orelse "" } })) return r.runAuth(null);
+                r.unkeep(key);
+                try r.runAuth(null);
+            } else {
+                r.unkeep(key);
+                // A broken stream says nothing about the token; any reply
+                // means it got past the server's check.
+                _ = try r.auth.ended(key, if (how == .broken) .forgotten else .answered);
+                try r.runAuth(null);
+            }
+        }
+        // An answer fx could not read ends the call like any other HTTP failure, but as malformed.
+        if (how == .unreadable) if (r.logicalFor(key)) |l| {
+            l.malformed = true;
+            l.refused_bytes = bytes;
+            l.refused_body = true;
+        };
+        if (r.logicalFor(key)) |l| if (l.what == .list) {
+            l.list_why = httpListRefusal(how, status, r.legacy != null);
+            l.list_status = status;
+        };
+        try r.onEndedDomain(key, status, if (how == .rejected or how == .unreadable) .http_failure else how);
+    }
+
+    /// Whether the end of an HTTP request for a `tools/list` is an answer that refuses the list. The server
+    /// answered, so this is no lost page, unless another flow reads the ending: a sign-in (401, and 403 with a
+    /// challenge), a 2025 session's end (404), or nothing that came back at all (no status, a broken stream, an
+    /// answer over the limit). Any other status, a 2xx body that is no message and a 2xx answer that is no JSON
+    /// are refusals.
+    fn httpListRefusal(how: http.Ending, status: u16, in_session: bool) ?tools.Refusal {
+        return switch (how) {
+            .rejected => null,
+            .http_failure => if (status == 0 or (status == 404 and in_session)) null else if (status / 100 == 2) .not_json else .http_status,
+            .unreadable => .unreadable,
+            .complete, .accepted, .broken, .too_large => null,
+        };
+    }
+
+    /// A `tools/list` ended with no usable answer: refused when an HTTP ending carried an answer that no other
+    /// flow reads, failed when it did not.
+    fn listFailed(r: *Server, l: *const Logical) Error!void {
+        r.page_needs_auth = l.needs_auth;
+        if (l.list_why) |why| if (!l.needs_auth and !l.unrenewed) {
+            r.refuse(why, l.list_status);
+            return r.stepCatalog(.page_refused);
+        };
+        try r.stepCatalog(.page_failed);
+    }
+
+    fn onEndedDomain(r: *Server, key: u64, status: u16, how: http.Ending) Error!void {
+        if (r.legacy != null) {
+            if (key == r.initialized_key) return r.releaseHeldSends();
+            if (key == r.listen_key) return r.onListenEnded(status, how);
+            const l = r.logicalFor(key) orelse return;
+            if (l.what == .initialize) return r.onInitializeEnded(l, key);
+            if (l.what != .discover) return r.onLegacyEnded(l, key, status, how);
+        }
+        const l = r.logicalFor(key) orelse return;
+        if (l.exchange.phase != .posted) return;
+        try r.endAttempt(l, key, how, status);
+    }
+
+    /// A 2026 attempt ended without an answer: the table forgets it, and the
+    /// exchange decides.
+    fn endAttempt(r: *Server, l: *Logical, id: request.Id, how: http.Ending, status: u16) Error!void {
+        l.id = null;
+        try r.stepRequest(.{ .transport_lost = id });
+        if (how == .http_failure) {
+            if (l.what == .discover) try r.stepEra(era.classifyDiscoverHttp(r.detector.config, status, null));
+            return r.stepExchange(l, .http_failure);
+        }
+        // Another attempt would bring the same answer again (HTTP-14).
+        if (how == .too_large) {
+            r.losing_oversized = true;
+            defer r.losing_oversized = false;
+            l.lost_why = .too_large;
+            l.lost_status = status;
+            return r.stepExchange(l, .too_large);
+        }
+        l.lost_why = if (how == .broken) .stream_broken else .stream_ended;
+        l.lost_status = status;
+        try r.stepExchange(l, .stream_broken);
+    }
+
+    fn pageEvent(r: *Server, body: @FieldType(wire.Response, "body")) Error!catalog.Event {
+        switch (body) {
+            .failure => |f| {
+                if (r.refused_decode) |err| {
+                    r.refuse(tools.refusalOf(err), 0);
+                    return .page_refused;
+                }
+                if (f.code == wire.code.invalid_params and r.catalog.pending == .next) {
+                    // The first invalid cursor only restarts the listing, which refuses nothing, so the words stay
+                    // those of the last refusal. A second one, after the restart, refuses the list.
+                    if (r.catalog.restarts != 0) r.refuse(.error_reply, 0);
+                    return .invalid_cursor;
+                }
+                r.refuse(.error_reply, 0);
+                return .page_refused;
+            },
+            .result => |res| {
+                if (res.kind != .complete) {
+                    r.refuse(.not_complete, 0);
+                    return .page_refused;
+                }
+                const page = tools.parsePage(res.raw) catch |err| {
+                    r.refuse(tools.refusalOf(err), 0);
+                    return .page_refused;
+                };
+                // `x-mcp-header` is a 2026 annotation: a 2025 server's tools
+                // keep theirs unchecked, as nothing projects them.
+                r.store.check_headers = !r.legacyEra();
+                const added = r.store.addPage(r.gpa, page) catch |err| switch (err) {
+                    // Running out of memory says nothing about what the server sent.
+                    error.OutOfMemory => return .page_failed,
+                    else => |decode| {
+                        r.refuse(tools.refusalOf(decode), 0);
+                        return .page_refused;
+                    },
+                };
+                r.last_added = added;
+                return .{ .page_received = .{ .more = page.next_cursor != null, .ttl_ms = page.ttl_ms, .now_ms = r.now() } };
+            },
+        }
+    }
+
+    // ---- input_required rounds ----
+
+    /// The fields a call's next request adds: answers when the chain sends
+    /// them, and the last round's requestState when it echoes one.
+    fn retryOf(l: *const Logical) mrtr.Retry {
+        const answering = l.chain.responded > 0;
+        return .{
+            .requests = if (answering) l.round.slice() else &.{},
+            .values = if (answering) l.answers else &.{},
+            .state = if (l.chain.sent_state != 0) l.round.state else null,
+        };
+    }
+
+    /// A round's exchange ended: an input_required answer is read into the
+    /// call's own memory and given to the chain; anything else ends it.
+    fn roundEnded(r: *Server, l: *Logical, outcome: http_modern.Outcome) Error!void {
+        const answer: mrtr_core.Answer = switch (outcome) {
+            .result => if (r.held_answer) |a| switch (a) {
+                .input_required => |raw| try r.readRound(l, raw),
+                else => .{ .ended = .result },
+            } else .{ .ended = .result },
+            .failure => .{ .ended = .failure },
+            .lost => .{ .ended = .lost },
+            .http_failure => .{ .ended = .http_failure },
+            .cancelled => return r.stepChain(l, .cancel),
+        };
+        try r.stepChain(l, .{ .answered = answer });
+    }
+
+    fn readRound(r: *Server, l: *Logical, raw: []const u8) Error!mrtr_core.Answer {
+        const bytes = try l.arena.allocator().dupe(u8, raw);
+        mrtr.parse(bytes, &l.round) catch return .malformed;
+        // An elicitation the client declared but can't show.
+        for (l.round.slice()) |q| if (q.kind == .elicitation and mrtr.supported(r.options.client.capabilities, q)) {
+            var form: elicitation.Form = .{};
+            _ = elicitation.parse(q.params orelse return .malformed, &form) catch return .malformed;
+        };
+        return .{ .input_required = .{
+            .requests = l.round.count,
+            .state = l.round.state != null,
+            .supported = mrtr.allSupported(r.options.client.capabilities, &l.round),
+        } };
+    }
+
+    fn stepChain(r: *Server, l: *Logical, event: mrtr_core.Event) Error!void {
+        var out: mrtr_core.Output = .{};
+        l.chain.step(event, &out);
+        if (r.tracer()) |t| try mrtr_core.writeTrace(t, l.chain_instance, &l.chain, &out);
+        for (out.effects()) |effect| switch (effect) {
+            .send => |s| {
+                // Each round is a new request with a new id, and its own
+                // exchange, traced under its own instance.
+                l.exchange = .init(r.options.exchange, .call);
+                l.id = null;
+                if (s.round > 1) l.instance = try l.arena.allocator().print("x{d}.{d}", .{ l.handle, s.round });
+                if (r.stdio) try r.sendAttempt(l) else try r.stepExchange(l, .send);
+            },
+            .ask_host => r.emit(.{ .input = .{ .handle = l.handle, .requests = l.round.slice() } }),
+            .arm_backoff => |ms| try r.timers.append(r.gpa, .{ .kind = .{ .backoff = l.handle }, .due_ms = r.now() + ms }),
+            .deliver => |o| {
+                r.emit(.{
+                    .called = .{
+                        .handle = l.handle,
+                        .outcome = if (l.needs_auth and o == .http_failure) .needs_auth else if (l.unrenewed and o == .http_failure) .auth_unavailable else if (l.malformed and (o == .cancelled or o == .http_failure)) .malformed else switch (o) {
+                            .none => .failure,
+                            inline else => |tag| @field(CallOutcome, @tagName(tag)),
+                        },
+                        // Only a lost stream leaves the call maybe run, and a server that
+                        // answered something fx could not read.
+                        .maybe_ran = o == .lost or l.malformed,
+                        .timed_out = l.timed_out,
+                        .answer = if (o == .result or o == .failure) r.held_answer else null,
+                        .oversized = o == .lost and r.losing_oversized,
+                        .refused_bytes = l.refused_bytes,
+                        .refused_body = l.refused_body,
+                        .lost_why = if (o == .lost) l.lost_why else null,
+                        .status = if (o == .lost) l.lost_status else 0,
+                    },
+                });
+                l.used = false;
+            },
+        };
+    }
+
+    // ---- 2025 sessions ----
+
+    /// The era core asked for initialize: over HTTP that starts a session.
+    fn startSession(r: *Server) Error!void {
+        if (r.legacy == null) r.legacy = .init(&r.legacy_slots, r.options.session);
+        try r.stepLegacy(.start);
+    }
+
+    fn stepLegacy(r: *Server, event: http_legacy.Event) Error!void {
+        const s = &(r.legacy orelse return);
+        var out: http_legacy.Output = .{};
+        s.step(event, &out) catch return;
+        if (r.tracer()) |t| try http_legacy.writeTrace(t, r.era_instance, &out);
+        for (out.effects()) |effect| try r.legacyEffect(effect);
+        s.sweep();
+    }
+
+    fn legacyEffect(r: *Server, effect: http_legacy.Effect) Error!void {
+        switch (effect) {
+            .post, .get_resume => if (r.initialized_key != null or r.listen_pending) return r.held_sends.append(r.gpa, effect),
+            .open_listen => if (r.initialized_key != null) return r.held_sends.append(r.gpa, effect),
+            else => {},
+        }
+        switch (effect) {
+            .post_initialize => {
+                // A new session; the old one's elicitations are over.
+                try r.endElicitations();
+                r.first_listen = true;
+                r.listen_pending = false;
+                try r.sendInitialize();
+            },
+            .post_initialized => {
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                try era.writeInitialized(&body.writer);
+                const key = r.auxKey();
+                r.initialized_key = key;
+                // Everything after it waits for its answer, so it gets the
+                // request timeout too.
+                try r.timers.append(r.gpa, .{ .kind = .{ .initialized = key }, .due_ms = r.now() + r.options.timeouts.idle_ms });
+                try r.sendLegacy(key, .post, body.written(), null);
+            },
+            .post => |id| {
+                // A held post for a request that was cancelled meanwhile.
+                const req = r.legacy.?.find(id) orelse return;
+                if (req.state == .posted) try r.postLegacy(id);
+            },
+            .post_cancel => |id| {
+                // The request id, as the cancellation names it.
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                var w: wire.Writer = try .notification(&body.writer, "notifications/cancelled", .{});
+                try w.field("requestId");
+                try w.int(@intCast(id));
+                try w.end();
+                try r.sendAux(.post, body.written(), null);
+            },
+            .get_resume => |id| {
+                const req = r.legacy.?.find(id) orelse return;
+                const l = r.logicalFor(id) orelse return;
+                if (req.state == .resuming) try r.sendLegacy(id, .get, null, l.last_event_id);
+            },
+            .arm_resume => |a| try r.timers.append(r.gpa, .{ .kind = .{ .resume_stream = a.id }, .due_ms = r.now() + a.after_ms }),
+            .open_listen => {
+                // Held sends run later: the session may have closed meanwhile.
+                if (r.legacy.?.listen != .open or r.legacy.?.phase != .ready) return;
+                const key = r.auxKey();
+                r.listen_key = key;
+                if (r.first_listen) {
+                    r.first_listen = false;
+                    r.listen_pending = true;
+                    try r.timers.append(r.gpa, .{ .kind = .listen_wait, .due_ms = r.now() + r.options.listen_wait_ms });
+                }
+                try r.sendLegacy(key, .get, null, r.listen_last_event_id);
+            },
+            .close_listen => if (r.listen_key) |key| {
+                try r.closeKey(key, .forgotten);
+                r.listen_key = null;
+            },
+            .arm_listen => |ms| try r.timers.append(r.gpa, .{ .kind = .listen, .due_ms = r.now() + ms }),
+            .delete => {
+                try r.endElicitations();
+                const key = r.auxKey();
+                r.delete_key = key;
+                try r.sendLegacy(key, .delete, null, null);
+            },
+            .deliver => |d| {
+                // Nothing reads its stream now, so one still open is closed,
+                // after an answer too. A disconnect cancels nothing in
+                // 2025; notifications/cancelled did.
+                if (d.outcome == .result) try r.closeKey(d.id, .answered) else {
+                    try r.stepRequest(.{ .transport_lost = d.id });
+                    try r.closeKey(d.id, .forgotten);
+                }
+                try r.legacyDelivered(d.id, d.outcome);
+            },
+        }
+    }
+
+    /// The first listening GET opened, was refused, or ended, or the
+    /// wait for it is over: the session's held requests go out.
+    fn listenSettled(r: *Server) Error!void {
+        if (!r.listen_pending) return;
+        r.listen_pending = false;
+        try r.releaseHeldSends();
+    }
+
+    /// The initialized POST ended: the sends held for it go out, in order.
+    fn releaseHeldSends(r: *Server) Error!void {
+        r.initialized_key = null;
+        var held = r.held_sends;
+        r.held_sends = .empty;
+        defer held.deinit(r.gpa);
+        for (held.items) |effect| try r.legacyEffect(effect);
+    }
+
+    /// POSTs initialize, without a session id, as a new request.
+    fn sendInitialize(r: *Server) Error!void {
+        const l = try r.newLogical(.initialize, .idempotent);
+        const id = try r.newRequest(.initialize);
+        l.id = id;
+        var body: std.Io.Writer.Allocating = .init(r.gpa);
+        defer body.deinit();
+        try era.writeInitialize(&body.writer, r.detector.config, r.options.client, id);
+        if (r.incoming_session) |v| r.gpa.free(v);
+        r.incoming_session = null;
+        r.bad_session = false;
+        var arena: std.heap.ArenaAllocator = .init(r.gpa);
+        defer arena.deinit();
+        var headers: std.ArrayList(http_headers.Header) = .empty;
+        try http_headers.sessionHeaders(arena.allocator(), false, null, null, null, &headers);
+        try r.send(id, .post, body.written(), headers.items);
+    }
+
+    /// POSTs a list or call in the current session.
+    fn postLegacy(r: *Server, id: request.Id) Error!void {
+        const l = r.logicalFor(id) orelse return;
+        l.last_event_id = null;
+        var body: std.Io.Writer.Allocating = .init(r.gpa);
+        defer body.deinit();
+        try r.writeOperation(&body.writer, l, era.meta(r.detector.config, r.options.client, .none, id));
+        try r.sendLegacy(id, .post, body.written(), null);
+    }
+
+    /// Sends with the session's headers: the agreed version, the session id,
+    /// and Last-Event-ID to resume.
+    fn sendLegacy(r: *Server, key: u64, method: http.Method, body: ?[]const u8, last_event_id: ?[]const u8) Error!void {
+        var arena: std.heap.ArenaAllocator = .init(r.gpa);
+        defer arena.deinit();
+        var headers: std.ArrayList(http_headers.Header) = .empty;
+        const version = r.detector.config.legacy[r.legacy_version];
+        try http_headers.sessionHeaders(arena.allocator(), method == .get, version, r.session_id, last_event_id, &headers);
+        r.send(key, method, body, headers.items) catch |err| switch (err) {
+            // Nothing could go out: the same as a stream that broke at once.
+            error.TooManyInFlight, error.ConcurrencyUnavailable => if (key < aux_base) {
+                // Nothing went out, so a call this ends lost is reported as a broken stream.
+                if (r.logicalFor(key)) |l| {
+                    l.lost_why = .stream_broken;
+                    l.lost_status = 0;
+                }
+                try r.stepLegacy(.{ .broke = key });
+            },
+            else => return err,
+        };
+    }
+
+    fn sendAux(r: *Server, method: http.Method, body: ?[]const u8, last_event_id: ?[]const u8) Error!void {
+        try r.sendLegacy(r.auxKey(), method, body, last_event_id);
+    }
+
+    /// A 2025 server's ping gets an empty result, and an elicitation goes
+    /// to the elicitation table; other requests get -32601, since the
+    /// client declares no capabilities that take them.
+    fn answerServerRequest(r: *Server, q: wire.ServerRequest) Error!void {
+        if (std.mem.eql(u8, q.method, "elicitation/create")) return r.askElicitation(.request, q.id, q.params orelse "{}");
+        var body: std.Io.Writer.Allocating = .init(r.gpa);
+        defer body.deinit();
+        if (std.mem.eql(u8, q.method, "ping")) {
+            var w: wire.Writer = try .result(&body.writer, q.id);
+            try w.end();
+        } else try wire.writeFailure(&body.writer, q.id, wire.code.method_not_found, "Method not found");
+        try r.reply(body.written());
+    }
+
+    fn onSession(r: *Server, key: u64, id: []const u8) Error!void {
+        const l = r.logicalFor(key) orelse return;
+        if (l.what != .initialize) return;
+        // An id the client couldn't echo safely fails the initialize.
+        if (!http_headers.validSessionId(id)) {
+            r.bad_session = true;
+            return;
+        }
+        if (r.incoming_session) |v| r.gpa.free(v);
+        r.incoming_session = try r.gpa.dupe(u8, id);
+    }
+
+    fn onEventId(r: *Server, key: u64, event_id: ?[]const u8, retry_ms: ?u32) Error!void {
+        if (r.legacy == null) return;
+        // Only ids that are safe to send back make a stream resumable.
+        const id = if (event_id) |e| if (http_headers.validEventId(e)) e else null else null;
+        if (key == r.listen_key) {
+            if (id) |e| {
+                if (r.listen_last_event_id) |v| r.gpa.free(v);
+                r.listen_last_event_id = try r.gpa.dupe(u8, e);
+            }
+            return r.stepLegacy(.listen_event);
+        }
+        const l = r.logicalFor(key) orelse return;
+        if (l.what == .initialize or l.what == .discover) return;
+        if (id) |e| l.last_event_id = try l.arena.allocator().dupe(u8, e);
+        if (id != null or retry_ms != null) try r.stepLegacy(.{ .event_seen = .{ .id = key, .has_id = id != null, .retry_ms = retry_ms } });
+    }
+
+    /// A result replaces the instructions, with none when it has none.
+    fn keepInstructions(r: *Server, body: @FieldType(wire.Response, "body")) Error!void {
+        if (body != .result) return;
+        var found: [1]?[]const u8 = .{null};
+        wire.objectFields(body.result.raw, &.{"instructions"}, &found) catch {};
+        if (r.instructions) |old| r.gpa.free(old);
+        r.instructions = null;
+        const raw = found[0] orelse return;
+        const text = (try wire.decodeString(r.gpa, raw)) orelse return;
+        // Without escapes it is the result's own bytes, which don't last.
+        r.instructions = if (wire.plainString(raw) != null) try r.gpa.dupe(u8, text) else text;
+    }
+
+    fn onInitializeAnswer(r: *Server, l: *Logical, body: @FieldType(wire.Response, "body")) Error!void {
+        const id = l.id.?;
+        try r.stepRequest(.{ .response_received = .{ .id = id, .response = if (body == .result) .result else .peer_error } });
+        l.used = false;
+        try r.keepInstructions(body);
+        const event = era.classifyInitialize(r.detector.config, body);
+        const first = r.detector.state == .initializing;
+        if (event == .initialize_result and event.initialize_result == .legacy and !r.bad_session) {
+            r.legacy_version = event.initialize_result.legacy;
+            if (r.session_id) |v| r.gpa.free(v);
+            r.session_id = r.incoming_session;
+            r.incoming_session = null;
+            if (r.listen_last_event_id) |v| r.gpa.free(v);
+            r.listen_last_event_id = null;
+            try r.stepLegacy(.{ .initialize_answered = .{ .session = r.session_id != null } });
+            // A new session may hold different tools.
+            if (!first) try r.stepCatalog(.{ .process_started = .legacy });
+        } else {
+            try r.stepLegacy(.initialize_failed);
+            if (!first) r.emit(.{ .failed = if (l.needs_auth) .needs_auth else .session });
+        }
+        if (first) try r.stepEra(if (r.bad_session) .{ .initialize_error = false } else event);
+    }
+
+    fn onInitializeEnded(r: *Server, l: *Logical, key: u64) Error!void {
+        // An answer would have freed it: initialize ended without one.
+        l.used = false;
+        try r.stepRequest(.{ .transport_lost = key });
+        try r.initializeFailed(l, .{ .initialize_error = false });
+    }
+
+    /// A 2025 initialize timed out. It can't be cancelled, so nothing else
+    /// ends it: its stream is closed, and the session fails as if the stream
+    /// had ended.
+    fn onInitializeTimedOut(r: *Server, l: *Logical, id: request.Id) Error!void {
+        l.used = false;
+        try r.closeKey(id, .forgotten);
+        try r.initializeFailed(l, .initialize_timed_out);
+    }
+
+    /// A 2025 initialized notification went unanswered for the request
+    /// timeout. Every later send waits for it, so the session can't go on:
+    /// it fails with the reason. Nothing reads its answer now, so its POST
+    /// is closed here; the teardown doesn't know of it.
+    fn onInitializedTimedOut(r: *Server) Error!void {
+        if (r.initialized_key) |key| try r.closeKey(key, .forgotten);
+        r.initialized_key = null;
+        r.emit(.{ .failed = .initialized_timed_out });
+    }
+
+    /// The session's initialize ended without an answer: a first one fails
+    /// detection with `event`, a later one fails the session.
+    fn initializeFailed(r: *Server, l: *const Logical, event: era.Event) Error!void {
+        const first = r.detector.state == .initializing;
+        try r.stepLegacy(.initialize_failed);
+        if (first) try r.stepEra(event) else r.emit(.{ .failed = if (l.needs_auth) .needs_auth else .session });
+    }
+
+    fn onLegacyAnswer(r: *Server, l: *Logical, key: u64, status: u16, body: @FieldType(wire.Response, "body")) Error!void {
+        const s = &r.legacy.?;
+        const req = s.find(key) orelse return;
+        if (req.state != .posted and req.state != .resuming) return;
+        // A 404 is the session's end even with a JSON-RPC error in its body,
+        // as the TypeScript SDK sends; a failed resume answers nothing. The
+        // end of the request decides (in a 2025 session).
+        if (status == 404 or (req.state == .resuming and status >= 300)) return;
+        try r.stepRequest(.{ .response_received = .{ .id = key, .response = if (body == .result) .result else .peer_error } });
+        switch (l.what) {
+            .list => try r.stepCatalog(try r.pageEvent(body)),
+            .call => _ = try r.callAnswer(body),
+            else => {},
+        }
+        try r.stepLegacy(.{ .answered = key });
+    }
+
+    fn onLegacyEnded(r: *Server, l: *Logical, key: u64, status: u16, how: http.Ending) Error!void {
+        const s = &r.legacy.?;
+        const req = s.find(key) orelse return;
+        if (req.state != .posted and req.state != .resuming) return;
+        const event: http_legacy.Event = if (status == 404)
+            // `expired` takes a request without a session id for a refusal.
+            .{ .expired = key }
+        else if (status >= 300)
+            .{ .refused = key }
+        else switch (how) {
+            // A stream that ended or broke before the answer, which the
+            // server may have closed to be polled.
+            .complete, .accepted, .broken => .{ .broke = key },
+            // Resuming would bring the same answer again (LHTTP-11).
+            .too_large => .{ .too_large = key },
+            .http_failure, .rejected, .unreadable => .{ .refused = key },
+        };
+        // The same branches as `event` above, so a call that this ending loses carries the reason.
+        l.lost_why = if (status == 404) .session_expired else if (status >= 300) .resume_refused else switch (how) {
+            .complete, .accepted => .stream_ended,
+            .broken => .stream_broken,
+            .too_large => .too_large,
+            .http_failure, .rejected, .unreadable => .resume_refused,
+        };
+        l.lost_status = status;
+        r.losing_oversized = event == .too_large;
+        defer r.losing_oversized = false;
+        try r.stepLegacy(event);
+    }
+
+    /// Any refusal of the listening GET but a session 404 means the
+    /// server offers no stream.
+    fn onListenEnded(r: *Server, status: u16, how: http.Ending) Error!void {
+        r.listen_key = null;
+        try r.stepLegacy(if (status == 404 and r.session_id != null)
+            .listen_expired
+        else if (status >= 300 or how == .http_failure)
+            .listen_refused
+        else
+            .{ .listen_broke = null });
+        try r.listenSettled();
+    }
+
+    /// A list or call in a 2025 session ended, over either transport: the
+    /// host hears.
+    fn legacyDelivered(r: *Server, id: request.Id, outcome: http_legacy.Outcome) Error!void {
+        const l = r.logicalFor(id) orelse return;
+        // A call's -32042 error lists URL elicitations the host gets first.
+        if (l.what == .call and outcome == .result) if (r.held_answer) |a| if (a == .failure and a.failure.code == url_elicitation_required) {
+            try r.requiredElicitations(a.failure.data);
+        };
+        if (l.what == .call) r.emit(.{
+            .called = .{
+                .handle = l.handle,
+                .outcome = switch (outcome) {
+                    // Input_required has no place in a 2025 session.
+                    .result => if (r.held_answer) |a| switch (a) {
+                        .failure => .failure,
+                        .input_required => .malformed,
+                        else => .result,
+                    } else .result,
+                    .lost => .lost,
+                    .failed, .none => if (l.needs_auth) .needs_auth else if (l.unrenewed) .auth_unavailable else if (l.malformed) .malformed else .http_failure,
+                    .cancelled => if (l.malformed) .malformed else .cancelled,
+                },
+                // Only a lost stream leaves the call maybe run, and a server that answered
+                // something fx could not read.
+                .maybe_ran = outcome == .lost or l.malformed,
+                .timed_out = l.timed_out,
+                .answer = if (outcome == .result) r.held_answer else null,
+                .oversized = outcome == .lost and r.losing_oversized,
+                .refused_bytes = l.refused_bytes,
+                .refused_body = l.refused_body,
+                .lost_why = if (outcome == .lost) l.lost_why else null,
+                .status = if (outcome == .lost) l.lost_status else 0,
+            },
+        });
+        if (l.what == .list and outcome != .result) try r.listFailed(l);
+        l.used = false;
+    }
+
+    // ---- Elicitation, 2025 sessions ----
+
+    /// A server request (`id`) or an entry of a -32042 error (no id).
+    fn askElicitation(r: *Server, origin: elicit_core.Origin, id: ?[]const u8, params: []const u8) Error!void {
+        var form: elicitation.Form = .{};
+        const read: ?elicitation.Request = elicitation.parse(params, &form) catch null;
+        const mode: elicit_core.Mode = if (read) |q| q.mode else .form;
+        const eid = if (read) |q| if (mode == .url) q.elicitation_id else null else null;
+        // A -32042 error lists URL elicitations with an id; any other
+        // entry is skipped.
+        if (origin == .required and eid == null) return;
+        try r.stepElicit(.{ .asked = .{ .origin = origin, .mode = mode, .eid = eid != null, .readable = read != null } }, .{ .id = id, .eid = eid, .params = params });
+    }
+
+    fn requiredElicitations(r: *Server, data: ?[]const u8) Error!void {
+        var found: [1]?[]const u8 = undefined;
+        wire.objectFields(data orelse return, &.{"elicitations"}, &found) catch return;
+        var list: wire.Elements = undefined;
+        list.init(found[0] orelse return) catch return;
+        while (list.next() catch return) |entry| try r.askElicitation(.required, null, entry);
+    }
+
+    fn endElicitations(r: *Server) Error!void {
+        try r.stepElicit(.session_ended, .{});
+    }
+
+    /// The slot whose held id (or elicitationId) is the token `field` of `params` names.
+    fn heldSlot(r: *const Server, params: ?[]const u8, field: []const u8, comptime which: enum { id, eid }) ?u8 {
+        var found: [1]?[]const u8 = undefined;
+        wire.objectFields(params orelse return null, &.{field}, &found) catch return null;
+        const token = found[0] orelse return null;
+        for (r.elicit_held, 0..) |h, i| {
+            const held = (if (which == .id) h.id else h.eid) orelse continue;
+            if (r.elicit.slots[i].used and std.mem.eql(u8, held, token)) return @intCast(i);
+        }
+        return null;
+    }
+
+    fn forget(r: *Server, h: *Held) void {
+        if (h.id) |v| r.gpa.free(v);
+        if (h.eid) |v| r.gpa.free(v);
+        h.id = null;
+        h.eid = null;
+    }
+
+    fn stepElicit(r: *Server, event: elicit_core.Event, with: struct { id: ?[]const u8 = null, eid: ?[]const u8 = null, params: []const u8 = "", content: ?[]const u8 = null }) Error!void {
+        var out: elicit_core.Output = .{};
+        const held_before = r.questionsHeld();
+        r.elicit.step(event, &out);
+        try r.idleWhileAsking(held_before);
+        if (r.tracer()) |t| try elicit_core.writeTrace(t, "remote", &r.elicit, event, &out);
+        for (out.effects()) |effect| switch (effect) {
+            .show => |slot| {
+                // The params stay until the slot is used again, so an
+                // `elicit` the host hasn't read yet stays valid.
+                const h = &r.elicit_held[slot];
+                const params = try r.gpa.dupe(u8, with.params);
+                r.gpa.free(h.params);
+                h.* = .{ .params = params };
+                if (with.id) |id| h.id = try r.gpa.dupe(u8, id);
+                if (with.eid) |eid| h.eid = try r.gpa.dupe(u8, eid);
+                r.emit(.{ .elicit = .{ .id = .{ .slot = slot, .n = out.n }, .params = h.params, .required = event.asked.origin == .required } });
+            },
+            .reject => |why| {
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                try switch (why) {
+                    .invalid_params => wire.writeFailure(&body.writer, with.id.?, wire.code.invalid_params, "Unsupported elicitation"),
+                    .too_many => wire.writeFailure(&body.writer, with.id.?, wire.code.internal_error, "Too many elicitations"),
+                };
+                try r.reply(body.written());
+            },
+            .send => |s| {
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                var w: wire.Writer = try .result(&body.writer, r.elicit_held[s.slot].id.?);
+                try w.field("action");
+                try w.string(@tagName(s.action));
+                if (s.content) {
+                    try w.field("content");
+                    try w.raw(with.content.?);
+                }
+                try w.end();
+                try r.reply(body.written());
+            },
+            .withdraw => |slot| r.emit(.{ .elicit_withdrawn = slot }),
+            .complete => |slot| r.emit(.{ .elicitation_complete = slot }),
+            .release => |slot| r.forget(&r.elicit_held[slot]),
+        };
+    }
+
+    // ---- OAuth ----
+
+    /// Every request goes out through here: it is kept until it ends, and the
+    /// gate puts the token on it, or holds it for a refresh. The gate's answer
+    /// for this request is posted at once, so a send that can't go out is the
+    /// caller's to handle, as before.
+    fn send(r: *Server, key: u64, method: http.Method, body: ?[]const u8, headers: []const std.http.Header) Error!void {
+        {
+            var arena: std.heap.ArenaAllocator = .init(r.gpa);
+            errdefer arena.deinit();
+            const a = arena.allocator();
+            const copies = try a.alloc(std.http.Header, headers.len + 1);
+            for (headers, copies[0..headers.len]) |h, *c| c.* = .{ .name = try a.dupe(u8, h.name), .value = try a.dupe(u8, h.value) };
+            try r.outbox.append(r.gpa, .{ .key = key, .method = method, .body = if (body) |b| try a.dupe(u8, b) else null, .headers = copies, .arena = arena });
+        }
+        // The outbox owns the copies now: `unkeep` frees them, once.
+        const sent: Error!void = blk: {
+            r.auth.beforeSend(key) catch |err| break :blk err;
+            break :blk r.runAuth(key);
+        };
+        sent catch |err| {
+            // It never went out: the gate forgets it too.
+            if (r.kept(key) != null) {
+                r.unkeep(key);
+                _ = r.auth.ended(key, .forgotten) catch {};
+            }
+            return err;
+        };
+    }
+
+    fn kept(r: *Server, key: u64) ?*Kept {
+        for (r.outbox.items) |*k| if (k.key == key) return k;
+        return null;
+    }
+
+    fn unkeep(r: *Server, key: u64) void {
+        for (r.outbox.items, 0..) |*k, i| if (k.key == key) {
+            k.arena.deinit();
+            _ = r.outbox.swapRemove(i);
+            return;
+        };
+    }
+
+    /// Closes request `key`'s stream and tells the gate how it ended:
+    /// `.answered` once its answer is in, though the server may have left the
+    /// stream open, or `.forgotten` when it is dropped unanswered.
+    fn closeKey(r: *Server, key: u64, how: auth_client.Ending) Error!void {
+        r.client.cancel(key);
+        if (r.kept(key) == null) return;
+        r.unkeep(key);
+        _ = try r.auth.ended(key, how);
+        try r.runAuth(null);
+    }
+
+    /// Carries out what the OAuth side asked for. A post of `now_key` fails
+    /// to the caller; any other that can't go out ends as a broken stream.
+    fn runAuth(r: *Server, now_key: ?u64) Error!void {
+        while (r.auth.actions.items.len > 0) {
+            const action = r.auth.actions.orderedRemove(0);
+            switch (action) {
+                .post => |p| if (now_key != null and p.key == now_key.?) {
+                    try r.dispatch(p.key, p.token);
+                } else r.dispatch(p.key, p.token) catch |err| switch (err) {
+                    error.TooManyInFlight, error.ConcurrencyUnavailable => try r.onEnded(p.key, 0, .broken, null, 0),
+                    else => return err,
+                },
+                .give_up => |g| try r.authGaveUp(g.key, g.why),
+                .needs_sign_in => |n| r.emit(.{ .auth_required = .{ .step_up = n.step_up, .refused = n.refused, .rejected = n.rejected } }),
+                .authorize => |url| r.emit(.{ .authorize = url }),
+                .signed_in => r.emit(.signed_in),
+                .sign_in_failed => |f| r.emit(.{ .sign_in_failed = .{ .why = f.why, .message = f.message } }),
+                .save => r.emit(.credential),
+                .refresh_due => r.emit(.refresh_due),
+                .refresh_ended => r.emit(.refresh_ended),
+            }
+        }
+        // A refresh that went out gets `refresh_ms` to be answered.
+        const key = r.auth.refresh_key;
+        if (key != 0 and key != r.refresh_timed) {
+            r.refresh_timed = key;
+            try r.timers.append(r.gpa, .{ .kind = .{ .refresh = key }, .due_ms = r.now() + r.options.timeouts.refresh_ms });
+        }
+    }
+
+    /// Posts a kept request with the token's `Authorization`, in
+    /// the kept headers' spare slot; `send` copies them all.
+    fn dispatch(r: *Server, key: u64, token: u32) Error!void {
+        const k = r.kept(key) orelse return;
+        var count = k.headers.len - 1;
+        if (r.auth.authorization(token)) |value| {
+            k.headers[count] = .{ .name = "authorization", .value = value };
+            count += 1;
+        }
+        try r.client.send(key, k.method, k.body, k.headers[0..count]);
+    }
+
+    /// The gate gave up on `key`. Before the era is known that stops detection.
+    /// Otherwise a request ends as the server's 401: the server never read
+    /// it, whether it waited for a sign-in or for a renewal that got no usable
+    /// answer, so a call never counts as maybe run. A listen whose renewal
+    /// got no usable answer ends as a broken stream instead, so it listens
+    /// again after its backoff rather than stopping for good, as anything
+    /// else does, such as the listening GET.
+    fn authGaveUp(r: *Server, key: u64, why: auth_core.GiveUp) Error!void {
+        r.unkeep(key);
+        if (key < aux_base) if (r.logicalFor(key)) |l| {
+            l.needs_auth = why == .needs_sign_in;
+            l.unrenewed = why == .failed;
+            if ((l.what == .discover or l.what == .initialize) and !r.detector.ready()) return r.abortDetection(why);
+            if (why == .failed and l.what == .listen) return r.onEndedDomain(key, 0, .broken);
+            return r.onEndedDomain(key, 401, .http_failure);
+        };
+        try r.onEndedDomain(key, if (why == .needs_sign_in) 401 else 0, if (why == .needs_sign_in) .http_failure else .broken);
+    }
+
+    /// A rejection says nothing about the era. Detection stops, as a new run
+    /// with its own traces: for a sign-in, the host signs in and detects
+    /// again; for a refresh that got no usable answer, the start failed and
+    /// the server starts again after its backoff, keeping its login.
+    fn abortDetection(r: *Server, why: auth_core.GiveUp) Error!void {
+        for (&r.logicals) |*l| if (l.used and (l.what == .discover or l.what == .initialize)) {
+            if (l.id) |id| {
+                try r.stepRequest(.{ .transport_lost = id });
+                try r.closeKey(id, .forgotten);
+            }
+            l.used = false;
+        };
+        var i: usize = 0;
+        while (i < r.timers.items.len) {
+            if (r.timers.items[i].kind == .probe) _ = r.timers.swapRemove(i) else i += 1;
+        }
+        r.legacy = null;
+        try r.endElicitations();
+        r.newEraRun();
+        r.emit(.{ .failed = if (why == .needs_sign_in) .needs_auth else .auth_unavailable });
+    }
+
+    /// Detection starts over as a new run, with its own era and session
+    /// trace instance.
+    fn newEraRun(r: *Server) void {
+        r.detector = .init(r.options.era);
+        r.era_run += 1;
+        r.era_instance = std.mem.print(&r.era_instance_buf, "remote.{d}", .{r.era_run}) catch "remote.n";
+    }
+
+    // ---- shared machines ----
+
+    /// Arms a request's timer. Accepted progress re-arms a request's idle timer
+    /// with a new generation, and the one it replaces could only fire to be
+    /// ignored, so it is replaced in place: one idle timer per request, however
+    /// much progress comes.
+    fn armRequestTimer(r: *Server, timer: request.Timer, after_ms: u32) Error!void {
+        const due_ms = r.now() + after_ms;
+        if (timer.kind == .idle) for (r.timers.items) |*t| {
+            if (t.kind == .request and t.kind.request.id == timer.id and t.kind.request.kind == .idle) {
+                t.* = .{ .kind = .{ .request = timer }, .due_ms = due_ms };
+                return;
+            }
+        };
+        try r.timers.append(r.gpa, .{ .kind = .{ .request = timer }, .due_ms = due_ms });
+    }
+
+    fn stepRequest(r: *Server, event: request.Event) Error!void {
+        var out: request.Output = .{};
+        r.table.step(event, &out) catch return;
+        if (r.tracer()) |t| try request.writeTrace(t, "remote", &out);
+        // A timeout comes with its cancel first: mark it before either runs. So does a grace
+        // that ran out, which ends the call as malformed.
+        for (out.effects()) |effect| if (effect == .deliver) switch (effect.deliver.outcome) {
+            .timed_out => if (r.logicalFor(effect.deliver.id)) |l| {
+                l.timed_out = true;
+            },
+            .malformed => if (r.logicalFor(effect.deliver.id)) |l| {
+                l.malformed = true;
+                l.refused_bytes = r.refused_bytes;
+                // The server wrote a line fx could not read and no id could tell whose it was. For a list, that is an
+                // answer fx could not use (`tests/tla/mcp/Catalog.tla` `PageUnreadable`) only when the line could be
+                // nobody else's (`markOwnLine`); a call's bad reply that gave the list a grace says nothing about it.
+                if (l.what == .list and l.own_line) l.list_why = .unreadable;
+            },
+            else => {},
+        };
+        for (out.effects()) |effect| switch (effect) {
+            .write_request => {},
+            // 2026: no cancel message, the exchange's close effect
+            // closes the stream. 2025: the session posts one.
+            // Stdio: notifications/cancelled, as the request names it.
+            .send_cancel => |id| if (r.stdio) {
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                var w: wire.Writer = try .notification(&body.writer, "notifications/cancelled", .{});
+                try w.field("requestId");
+                try w.int(@intCast(id));
+                try w.end();
+                r.proc.send(.notification, body.written()) catch {};
+            } else try r.stepLegacy(.{ .cancel = id }),
+            .deliver => |d| if (r.stdio) try r.stdioDelivered(d.id, d.outcome) else switch (d.outcome) {
+                // 2026: closing the stream cancels it. 2025: a call or list's
+                // cancel goes through the session, but initialize has none.
+                .timed_out, .malformed => if (r.logicalFor(d.id)) |l| {
+                    if (r.legacy == null) try r.stepExchange(l, .cancel) else if (l.what == .initialize) try r.onInitializeTimedOut(l, d.id);
+                },
+                // The server ended the listen; its stream closes.
+                .ended => if (r.logicalFor(d.id)) |l| {
+                    try r.stepSubs(.{ .final = .{ .id = d.id, .end = .server_cancelled } });
+                    try r.stepExchange(l, .cancel);
+                },
+                else => {},
+            },
+            .arm_timer => |a| try r.armRequestTimer(a.timer, a.after_ms),
+            .disarm_timers => |id| {
+                var i: usize = 0;
+                while (i < r.timers.items.len) {
+                    const t = r.timers.items[i];
+                    if (t.kind == .request and t.kind.request.id == id) _ = r.timers.swapRemove(i) else i += 1;
+                }
+            },
+            // The timer of a refused line that no request holds any more: only refused timers
+            // have this generation, and each line has one timer, so this removes at most one.
+            .disarm_refused => |epoch| {
+                var i: usize = 0;
+                while (i < r.timers.items.len) {
+                    const t = r.timers.items[i];
+                    if (t.kind == .request and t.kind.request.kind == .refused and t.kind.request.generation == epoch) _ = r.timers.swapRemove(i) else i += 1;
+                }
+            },
+        };
+    }
+
+    fn stepEra(r: *Server, event: era.Event) Error!void {
+        const was = r.detector.state;
+        var out: era.Output = .{};
+        r.detector.step(event, &out) catch return;
+        if (was == .unknown and r.detector.state != .unknown) r.start_due_ms = r.now() + r.options.timeouts.start_ms;
+        if (r.tracer()) |t| try era.writeTrace(t, r.era_instance, &out);
+        for (out.effects()) |effect| switch (effect) {
+            .send_discover => |i| {
+                // Detection went back to probing; a session started for
+                // the fallback is dropped.
+                r.legacy = null;
+                try r.endElicitations();
+                const l = try r.newLogical(.{ .discover = i }, .idempotent);
+                if (r.stdio) try r.sendAttempt(l) else try r.stepExchange(l, .send);
+            },
+            .send_initialize => if (r.stdio) try r.sendAttempt(try r.newLogical(.initialize, .idempotent)) else try r.startSession(),
+            // Over HTTP the session posts it once initialize is answered.
+            .send_initialized => if (r.stdio) {
+                var body: std.Io.Writer.Allocating = .init(r.gpa);
+                defer body.deinit();
+                try era.writeInitialized(&body.writer);
+                r.proc.send(.notification, body.written()) catch {};
+            },
+            .arm_probe_timer => |a| try r.timers.append(r.gpa, .{ .kind = .{ .probe = a.probe }, .due_ms = r.now() + r.startLeft(a.after_ms) }),
+            .ready => |v| {
+                // The catalog starts over for each new process or detection
+                // run; a new 2025 session in a run does that too.
+                const run = if (r.stdio) r.era_generation else r.era_run;
+                const first = r.catalog_generation != run;
+                r.catalog_generation = run;
+                if (r.stdio) r.proc.setEra(if (v == .legacy) .legacy else .modern) catch {};
+                r.stray_len = 0;
+                r.emit(.{ .ready = era.versionName(r.detector.config, v).? });
+                if (first) try r.stepCatalog(.{ .process_started = if (v == .legacy) .legacy else .modern });
+                // The listens a process exit ended go out again.
+                if (r.stdio and v != .legacy and !r.subs.up) try r.stepSubs(.transport_up);
+                if (first and v != .legacy and r.options.listen_tools) try r.listen(0, subscription.bit(.tools), false);
+            },
+            .failed => |f| {
+                // Stdio: a process that can't be detected is stopped, and the
+                // next start is a new one.
+                if (r.stdio) r.proc.stop() catch {};
+                r.emit(.{ .failed = .{ .era = f } });
+            },
+        };
+    }
+
+    fn stepCatalog(r: *Server, event: catalog.Event) Error!void {
+        var out: catalog.Output = .{};
+        const generation = r.catalog.generation;
+        const was_fresh = r.catalog.cache == .fresh;
+        r.catalog.step(event, &out) catch return;
+        if (r.tracer()) |t| try catalog.writeTrace(t, "remote", &out);
+        // A host has nothing to drop before the first list, unless one is
+        // being listed: what that listing brings is already old.
+        const changed = r.catalog.generation != generation and (r.catalog.cache != .none or r.catalog.listing);
+        if (changed or (was_fresh and r.catalog.cache != .fresh)) r.emit(.tools_stale);
+        for (out.effects()) |effect| switch (effect) {
+            .send_page => {
+                const l = try r.newLogical(.list, .idempotent);
+                try r.start(l);
+            },
+            .discard_pages => r.store.discard(),
+            .publish => |fresh| {
+                r.store.publish();
+                r.emit(.{ .tools = .{ .ok = true, .fresh = fresh, .dropped = r.last_added } });
+                try r.relisted(true);
+            },
+            .fail => {
+                r.store.discard();
+                r.emit(.{ .tools = .{ .ok = false, .fresh = false, .needs_auth = r.page_needs_auth } });
+                r.page_needs_auth = false;
+                try r.relisted(false);
+            },
+            // The last list goes out unless the page needs a sign-in, which
+            // every call from that list would need too.
+            .serve_last => {
+                r.store.discard();
+                r.emit(.{ .tools = .{ .ok = !r.page_needs_auth, .fresh = false, .needs_auth = r.page_needs_auth } });
+                r.page_needs_auth = false;
+                try r.relisted(false);
+                // Still stale: a host that keeps its copy asks again next
+                // time.
+                r.emit(.tools_stale);
+            },
+            .serve => r.emit(.{ .tools = .{ .ok = true, .fresh = true } }),
+            .arm_expiry => |a| try r.timers.append(r.gpa, .{ .kind = .{ .expiry = a.generation }, .due_ms = r.now() + a.after_ms }),
+        };
+    }
+
+    /// Calls waiting for a re-list after -32020 go on.
+    fn relisted(r: *Server, ok: bool) Error!void {
+        if (r.stdio or r.legacy != null) return;
+        for (&r.logicals) |*l| if (l.used and l.exchange.phase == .relisting) try r.stepExchange(l, .{ .relisted = ok });
+    }
+
+    // ---- Subscriptions ----
+
+    /// Sends a listen for `sub` as a new 2026 exchange; its id comes with
+    /// the attempt.
+    fn listen(r: *Server, sub: u8, filter: subscription.Filter, resend: bool) Error!void {
+        if (!resend and !r.subs.canOpen(sub)) return;
+        const l = try r.newLogical(.listen, .call);
+        l.sub = sub;
+        l.filter = filter;
+        l.resend = resend;
+        if (r.stdio) try r.sendAttempt(l) else try r.stepExchange(l, .send);
+    }
+
+    fn stepSubs(r: *Server, event: subscription.Event) Error!void {
+        var out: subscription.Output = .{};
+        r.subs.step(event, &out);
+        if (r.tracer()) |t| try subscription.writeTrace(t, "remote", &r.subs, event, &out);
+        for (out.effects()) |effect| switch (effect) {
+            // The tool list is refreshed when the host next needs it.
+            .deliver => |d| if (d.kind == .tools) try r.stepCatalog(.invalidated),
+            .acknowledged => |a| r.emit(.{ .listening = a.filter }),
+            .ended => |e| r.emit(.{ .listen_ended = e.end }),
+            // On 2026 HTTP the stream closes; on stdio
+            // notifications/cancelled goes out.
+            .cancel_listen => |id| if (r.logicalFor(id)) |l| {
+                try r.stepRequest(.{ .cancel_requested = id });
+                if (!r.stdio) try r.stepExchange(l, .cancel);
+            },
+            // On stdio the listens go out again when the process is back.
+            .arm_retry => |a| if (!r.stdio) try r.timers.append(r.gpa, .{ .kind = .{ .relisten = .{ .sub = a.sub, .generation = a.generation } }, .due_ms = r.now() + a.after_ms }),
+            .relisten => |sub| try r.listen(sub, r.subs.subs[sub].asked, true),
+        };
+    }
+
+    fn fireTimers(r: *Server) Error!void {
+        var i: usize = 0;
+        while (i < r.timers.items.len) {
+            const t = r.timers.items[i];
+            if (t.due_ms > r.now()) {
+                i += 1;
+                continue;
+            }
+            _ = r.timers.swapRemove(i);
+            switch (t.kind) {
+                .request => |timer| try r.stepRequest(.{ .timer_fired = timer }),
+                .probe => |probe| try r.stepEra(.{ .probe_timer_fired = probe }),
+                .expiry => |generation| try r.stepCatalog(.{ .expired = generation }),
+                .resume_stream => |id| {
+                    // A resume that finds the session changed, or not ready, ends the call lost.
+                    if (r.logicalFor(id)) |l| l.lost_why = .session_changed;
+                    try r.stepLegacy(.{ .resume_due = id });
+                },
+                .listen => try r.stepLegacy(.listen_due),
+                .listen_wait => try r.listenSettled(),
+                .backoff => |handle| if (r.logicalByHandle(handle)) |l| try r.stepChain(l, .backoff_elapsed),
+                .relisten => |x| try r.stepSubs(.{ .retry_due = .{ .sub = x.sub, .generation = x.generation } }),
+                .initialized => |key| if (r.initialized_key == key) try r.onInitializedTimedOut(),
+                // No answer in time is no answer: the refresh fails, the
+                // tokens stay, and what waits for it fails.
+                .refresh => |key| if (r.auth.refresh_key == key) {
+                    r.client.cancel(key);
+                    _ = try r.auth.fetched(key, 0, "", null, "");
+                    try r.runAuth(null);
+                },
+            }
+            i = 0;
+        }
+    }
+};
+
+test {
+    // Behavior is tested by the conformance suite and the Bun driver, which
+    // run cli/conformance.zig on this; this makes sure everything compiles.
+    std.testing.refAllDecls(Server);
+}
+
+test "a send that fails after the outbox took its copy frees the copy once" {
+    var r: Server = undefined;
+    // No request may start, so each waits for a slot and nothing reaches the network.
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .http = .{ .url = "http://127.0.0.1:1/mcp", .max_in_flight = 0 } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+    defer r.deinit();
+    const headers = [_]std.http.Header{.{ .name = "accept", .value = "application/json" }};
+    // Requests wait until every place is taken; the next fails once kept.
+    var key: u64 = 1;
+    const failed = while (key < 100) : (key += 1) {
+        r.send(key, .post, "{}", &headers) catch |err| break err;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(error.TooManyInFlight, failed);
+    try std.testing.expectEqual(@as(u64, 33), key);
+    // The one that failed keeps nothing; the others stay kept.
+    try std.testing.expect(r.kept(key) == null);
+    try std.testing.expect(r.kept(key - 1) != null);
+}
+
+fn refusedTimers(r: *const Server) usize {
+    var count: usize = 0;
+    for (r.timers.items) |t| count += @intFromBool(t.kind == .request and t.kind.request.kind == .refused);
+    return count;
+}
+
+test "a bad line and progress in turns, a thousand times, leave the server one refused timer for its one request" {
+    var r: Server = undefined;
+    // Nothing is sent: the requests are only counted, so the timers are the server's own.
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .http = .{ .url = "http://127.0.0.1:1/mcp", .max_in_flight = 4 } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+    defer r.deinit();
+    try r.stepRequest(.{ .send = .normal });
+    for (1..1001) |round| {
+        try r.stepRequest(.{ .refused_line = null });
+        try std.testing.expectEqual(@as(usize, 1), refusedTimers(&r));
+        try r.stepRequest(.{ .progress_received = .{ .token = 1, .value = @floatFromInt(round) } });
+        try std.testing.expectEqual(@as(usize, 0), refusedTimers(&r));
+    }
+    // The line then still gives the request its full deadline, and the request's end drops it.
+    try r.stepRequest(.{ .refused_line = null });
+    try std.testing.expectEqual(@as(usize, 1), refusedTimers(&r));
+    try r.stepRequest(.{ .response_received = .{ .id = 1, .response = .result } });
+    try std.testing.expectEqual(@as(usize, 0), refusedTimers(&r));
+}
+
+fn holdsGrace(r: *const Server, id: request.Id) bool {
+    for (r.table_slots) |slot| if (slot.used and slot.id == id) return slot.refused_epoch != 0;
+    return false;
+}
+
+test "a line with no readable id gives a grace to the request whose stream carried it, and to every request when it came on stdio" {
+    var r: Server = undefined;
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .http = .{ .url = "http://127.0.0.1:1/mcp", .max_in_flight = 4 } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+    defer r.deinit();
+    try r.stepRequest(.{ .send = .normal });
+    try r.stepRequest(.{ .send = .normal });
+    try r.stepRequest(.{ .send = .normal });
+
+    // An SSE event on request 2's stream: request 2 has a grace, and 1 and 3 have none.
+    try r.onRefusedLine(error.InvalidJson, "not json", 2);
+    try std.testing.expectEqual(@as(usize, 1), refusedTimers(&r));
+    try std.testing.expect(!holdsGrace(&r, 1));
+    try std.testing.expect(holdsGrace(&r, 2));
+    try std.testing.expect(!holdsGrace(&r, 3));
+    // Stdio has one stream, so its line is about every request that has no grace.
+    try r.onRefusedLine(error.InvalidJson, "not json", null);
+    try std.testing.expectEqual(@as(usize, 2), refusedTimers(&r));
+    try std.testing.expect(holdsGrace(&r, 1));
+    try std.testing.expect(holdsGrace(&r, 3));
+}
+
+test "an excerpt of a line is valid UTF-8: a byte that is no part of a sequence, and a control byte, show as ?" {
+    var buf: [20 + 3]u8 = undefined;
+    const got = excerptOf(20, &buf, "a\xffb\xc3\xa9\xe2\x82c\x1b");
+    try std.testing.expect(std.unicode.utf8ValidateSlice(got));
+    try std.testing.expectEqualStrings("a?b\xc3\xa9??c?", got);
+    // Cut at the limit, with a lead byte whose sequence would run past it.
+    var short: [4 + 3]u8 = undefined;
+    const cut = excerptOf(4, &short, "ab\xe2\x82\xac\xe2\x82\xac");
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+}
+
+fn stdioTestServer(r: *Server) !void {
+    // Nothing starts the process: only the requests and their lines are real.
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .stdio = .{ .argv = &.{"fx-test-never-started"} } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+}
+
+/// A `tools/list` waiting for its answer on a stdio server, and its request's id.
+fn listInFlight(r: *Server) !request.Id {
+    const l = try listLogical(r);
+    l.id = try r.newRequest(.normal);
+    return l.id.?;
+}
+
+fn refusalError(line: []const u8) wire.DecodeError {
+    if (wire.decode(line)) |_| unreachable else |err| return err;
+}
+
+test "a list reply that fx matched by its id but could not read ends the list at once, with the words of an unreadable list" {
+    const alloc = std.testing.allocator;
+    var deep: std.ArrayList(u8) = .empty;
+    defer deep.deinit(alloc);
+    try deep.appendSlice(alloc, "\"jsonrpc\":\"2.0\",\"result\":");
+    try deep.appendNTimes(alloc, '[', 5000);
+    try deep.appendNTimes(alloc, ']', 5000);
+    const cases = [_]struct { rest: []const u8, words: []const u8 }{
+        // Bad parts after the id: not JSON, nested past the scanner's stack, a repeated key.
+        .{ .rest = "\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[nope]}", .words = "the answer is not a readable tool list" },
+        .{ .rest = deep.items, .words = "the answer is not a readable tool list" },
+        .{ .rest = "\"jsonrpc\":\"2.0\",\"result\":{},\"result\":{}", .words = "a field is written twice" },
+        // A line that decodes but is no reply, as a server's error is not what it said.
+        .{ .rest = "\"jsonrpc\":\"1.0\",\"result\":{\"tools\":[]}", .words = "the answer is not a readable tool list" },
+    };
+    for (cases) |case| {
+        var r: Server = undefined;
+        try stdioTestServer(&r);
+        defer r.deinit();
+        const id = try listInFlight(&r);
+        const line = try alloc.print("{{\"id\":{d},{s}}}", .{ id, case.rest });
+        defer alloc.free(line);
+        try r.onRefusedLine(refusalError(line), line, null);
+        // The list ended with its refusal, and no grace is left waiting for 30 s.
+        try std.testing.expect(r.logicalFor(id) == null);
+        try std.testing.expectEqual(@as(usize, 0), refusedTimers(&r));
+        try std.testing.expect(r.catalog.refused);
+        try std.testing.expectEqualStrings(case.words, r.listRefusal() orelse return error.TestExpectedRefusal);
+    }
+}
+
+test "a refused line that names no request in flight is ignored, and gives no grace to the requests that are" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const id = try listInFlight(&r);
+    var line: [96]u8 = undefined;
+
+    // An id read before the bad part, for a request that is not in flight, is a stray like any late reply.
+    const stray = try std.mem.print(&line, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":nope}}", .{id + 1});
+    try r.onRefusedLine(error.InvalidJson, stray, null);
+    try std.testing.expectEqual(@as(usize, 0), refusedTimers(&r));
+    try std.testing.expect(!holdsGrace(&r, id));
+    try std.testing.expect(r.logicalFor(id) != null);
+
+    // Lines that name nothing, however it comes about, still give it a grace.
+    const after = try std.mem.print(&line, "{{\"jsonrpc\":\"2.0\",\"result\":nope,\"id\":{d}}}", .{id});
+    try r.onRefusedLine(error.InvalidJson, after, null);
+    try std.testing.expect(holdsGrace(&r, id));
+    try std.testing.expectEqual(@as(usize, 1), refusedTimers(&r));
+}
+
+test "two ids on a refused line name no request, and give every request in flight a grace" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const id = try listInFlight(&r);
+    var line: [96]u8 = undefined;
+    const twice = try std.mem.print(&line, "{{\"id\":{d},\"id\":{d},\"result\":nope}}", .{ id, id });
+    try r.onRefusedLine(error.InvalidJson, twice, null);
+    try std.testing.expect(holdsGrace(&r, id));
+    try std.testing.expect(r.logicalFor(id) != null);
+}
+
+/// Ends the grace of the one refused line the server holds, as the server's own loop does when its timer is due.
+fn fireRefusedTimer(r: *Server) !void {
+    for (r.timers.items, 0..) |t, at| if (t.kind == .request and t.kind.request.kind == .refused) {
+        _ = r.timers.swapRemove(at);
+        return r.stepRequest(.{ .timer_fired = t.kind.request });
+    };
+    return error.TestExpectedRefusedTimer;
+}
+
+/// An HTTP server with room for requests, so a list can be in flight on a stream.
+fn streamTestServer(r: *Server) !void {
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .http = .{ .url = "http://127.0.0.1:1/mcp", .max_in_flight = 4 } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+}
+
+test "a list whose line has its id after the part fx cannot read is refused when the grace runs out, with the words of an unreadable list" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const id = try listInFlight(&r);
+    var line: [96]u8 = undefined;
+    // The id comes after the bad part, so the line names no request: the list waits out the grace, and says nothing meanwhile.
+    const unnamed = try std.mem.print(&line, "{{\"jsonrpc\":\"2.0\",\"result\":nope,\"id\":{d}}}", .{id});
+    try r.onRefusedLine(error.InvalidJson, unnamed, null);
+    try std.testing.expect(holdsGrace(&r, id));
+    try std.testing.expect(r.logicalFor(id) != null);
+    try std.testing.expect(r.listRefusal() == null);
+
+    try fireRefusedTimer(&r);
+    try std.testing.expect(r.logicalFor(id) == null);
+    try std.testing.expect(r.catalog.refused);
+    try std.testing.expectEqualStrings("the answer is not a readable tool list", r.listRefusal() orelse return error.TestExpectedRefusal);
+}
+
+test "a list that ends with no line fx could read is not refused: a lost process says nothing about the list" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const id = try listInFlight(&r);
+    try r.stepRequest(.{ .transport_lost = id });
+    try std.testing.expect(r.logicalFor(id) == null);
+    try std.testing.expect(!r.catalog.refused);
+    try std.testing.expect(r.listRefusal() == null);
+}
+
+test "a list whose SSE event names no request is refused when its grace runs out, as a stdio line is" {
+    var r: Server = undefined;
+    try streamTestServer(&r);
+    defer r.deinit();
+    const id = try listInFlight(&r);
+    // The list's POST is out, as it is while its stream is read; nothing here sends it.
+    r.logicalFor(id).?.exchange.phase = .posted;
+    // An event on the list's own stream that is no JSON-RPC message: the stream says which request it is about.
+    try r.onRefusedLine(error.InvalidJson, "not json", id);
+    try std.testing.expect(holdsGrace(&r, id));
+    try std.testing.expect(r.listRefusal() == null);
+
+    try fireRefusedTimer(&r);
+    try std.testing.expect(r.catalog.refused);
+    try std.testing.expectEqualStrings("the answer is not a readable tool list", r.listRefusal() orelse return error.TestExpectedRefusal);
+}
+
+/// Ends every grace the server holds, as its loop does when each timer is due.
+fn fireAllRefusedTimers(r: *Server) !void {
+    while (refusedTimers(r) > 0) try fireRefusedTimer(r);
+}
+
+/// A call in flight beside the list, as a second request on the one stdio connection.
+fn callInFlight(r: *Server) !request.Id {
+    const l = try r.newLogical(.call, .call);
+    l.id = try r.newRequest(.normal);
+    return l.id.?;
+}
+
+test "a bad line that a call in flight could have written does not refuse the list that waits with it: its answer is only late" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const list = try listInFlight(&r);
+    const call = try callInFlight(&r);
+    // The call's reply is a line with no readable id: stdio gives each request in flight a grace, and the line
+    // can be the list's as little as it can be the call's.
+    try r.onRefusedLine(error.InvalidJson, "not json", null);
+    try std.testing.expect(holdsGrace(&r, list));
+    try std.testing.expect(holdsGrace(&r, call));
+
+    try fireAllRefusedTimers(&r);
+    try std.testing.expect(r.logicalFor(list) == null);
+    try std.testing.expect(r.logicalFor(call) == null);
+    try std.testing.expect(!r.catalog.refused);
+    try std.testing.expect(r.listRefusal() == null);
+}
+
+test "a later bad line, when the list is the one request left, is the list's own, though it began its grace with a call's line" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const list = try listInFlight(&r);
+    const call = try callInFlight(&r);
+    try r.onRefusedLine(error.InvalidJson, "not json", null);
+    // The call is answered; the list is the one request left, and the server writes another line fx cannot read.
+    try r.stepRequest(.{ .response_received = .{ .id = call, .response = .result } });
+    try r.onRefusedLine(error.InvalidJson, "still not json", null);
+
+    try fireAllRefusedTimers(&r);
+    try std.testing.expect(r.logicalFor(list) == null);
+    try std.testing.expect(r.catalog.refused);
+    try std.testing.expectEqualStrings("the answer is not a readable tool list", r.listRefusal() orelse return error.TestExpectedRefusal);
+}
+
+test "a list is still the one request a bad line can be about while a listen is open, because the listen gets no grace" {
+    var r: Server = undefined;
+    try stdioTestServer(&r);
+    defer r.deinit();
+    const list = try listInFlight(&r);
+    try r.stepRequest(.{ .send = .listen });
+    try r.onRefusedLine(error.InvalidJson, "not json", null);
+    try std.testing.expect(holdsGrace(&r, list));
+
+    try fireAllRefusedTimers(&r);
+    try std.testing.expect(r.logicalFor(list) == null);
+    try std.testing.expect(r.catalog.refused);
+    try std.testing.expectEqualStrings("the answer is not a readable tool list", r.listRefusal() orelse return error.TestExpectedRefusal);
+}
+
+fn pageTestServer(r: *Server) !void {
+    // No request goes out: it waits for a place, and there is none.
+    try r.init(std.testing.io, std.testing.allocator, .{
+        .link = .{ .http = .{ .url = "http://127.0.0.1:1/mcp", .max_in_flight = 0 } },
+        .client = .{ .info = .{ .name = "test", .version = "0" } },
+    });
+}
+
+fn failurePage(code: i64) @FieldType(wire.Response, "body") {
+    return .{ .failure = .{ .code = code, .message = "\"no\"", .data = null } };
+}
+
+test "the words of a refusal are those of the last answer that refused the list, not of a cursor that only restarted it" {
+    var r: Server = undefined;
+    try pageTestServer(&r);
+    defer r.deinit();
+    var out: catalog.Output = .{};
+    const c = &r.catalog;
+    try c.step(.{ .process_started = .modern }, &out);
+
+    // A list that is no list is refused, with its words.
+    try c.step(.need, &out);
+    try c.step(try r.pageEvent(.{ .result = .{ .raw = "{\"tools\":7}", .kind = .complete } }), &out);
+    try std.testing.expect(c.refused);
+    try std.testing.expectEqualStrings("\"tools\" is not a list", (r.listRefusal() orelse return error.TestExpectedRefusal));
+
+    // The next listing has a second page, and its cursor is invalid: that restarts the listing and refuses nothing,
+    // so the words are still the refusal's.
+    try c.step(.need, &out);
+    try c.step(try r.pageEvent(.{ .result = .{ .raw = "{\"tools\":[],\"nextCursor\":\"c\"}", .kind = .complete } }), &out);
+    const first = try r.pageEvent(failurePage(wire.code.invalid_params));
+    try std.testing.expectEqual(catalog.Event.invalid_cursor, first);
+    try c.step(first, &out);
+    try std.testing.expectEqual(@as(u1, 1), c.restarts);
+    try std.testing.expect(c.refused);
+    try std.testing.expectEqualStrings("\"tools\" is not a list", (r.listRefusal() orelse return error.TestExpectedRefusal));
+
+    // A second invalid cursor, after the restart, refuses the list: now the words are the error's.
+    try c.step(try r.pageEvent(.{ .result = .{ .raw = "{\"tools\":[],\"nextCursor\":\"c\"}", .kind = .complete } }), &out);
+    const second = try r.pageEvent(failurePage(wire.code.invalid_params));
+    try c.step(second, &out);
+    try std.testing.expect(c.refused);
+    try std.testing.expectEqualStrings("the server answered the list with an error", (r.listRefusal() orelse return error.TestExpectedRefusal));
+}
+
+test "a later listing's first invalid cursor only restarts it, and leaves the words of an older refusal" {
+    var r: Server = undefined;
+    try pageTestServer(&r);
+    defer r.deinit();
+    var out: catalog.Output = .{};
+    const c = &r.catalog;
+    const more: @FieldType(wire.Response, "body") = .{ .result = .{ .raw = "{\"tools\":[],\"nextCursor\":\"c\"}", .kind = .complete } };
+    const last: @FieldType(wire.Response, "body") = .{ .result = .{ .raw = "{\"tools\":[]}", .kind = .complete } };
+    try c.step(.{ .process_started = .modern }, &out);
+
+    // Listing 1 restarts once, on its first invalid cursor, and ends.
+    try c.step(.need, &out);
+    try c.step(try r.pageEvent(more), &out);
+    try c.step(try r.pageEvent(failurePage(wire.code.invalid_params)), &out);
+    try std.testing.expectEqual(@as(u1, 1), c.restarts);
+    try c.step(try r.pageEvent(last), &out);
+    try std.testing.expect(!c.refused);
+
+    // Listing 2 is refused, with its words.
+    try c.step(.invalidated, &out);
+    try c.step(.need, &out);
+    try c.step(try r.pageEvent(.{ .result = .{ .raw = "{\"tools\":7}", .kind = .complete } }), &out);
+    try std.testing.expect(c.refused);
+    try std.testing.expectEqualStrings("\"tools\" is not a list", r.listRefusal() orelse return error.TestExpectedRefusal);
+
+    // Listing 3 has its own count: its first invalid cursor restarts it, and the words are still listing 2's.
+    try c.step(.need, &out);
+    try c.step(try r.pageEvent(more), &out);
+    const first = try r.pageEvent(failurePage(wire.code.invalid_params));
+    try std.testing.expectEqual(catalog.Event.invalid_cursor, first);
+    try c.step(first, &out);
+    try std.testing.expectEqual(@as(u1, 1), c.restarts);
+    try std.testing.expect(c.refused);
+    try std.testing.expectEqualStrings("\"tools\" is not a list", r.listRefusal() orelse return error.TestExpectedRefusal);
+}
+
+test "an HTTP ending refuses a tool list, unless another flow reads it" {
+    // A status that nothing else reads, with no message in the body, is an answer that refuses the list. The number is the status.
+    for ([_]u16{ 400, 403, 404, 405, 408, 410, 429, 500, 502, 503, 504, 301 }) |status| {
+        try std.testing.expectEqual(@as(?tools.Refusal, .http_status), Server.httpListRefusal(.http_failure, status, false));
+    }
+    // A 2xx answer that is no JSON, and a 2xx body that is no message.
+    try std.testing.expectEqual(@as(?tools.Refusal, .not_json), Server.httpListRefusal(.http_failure, 200, false));
+    try std.testing.expectEqual(@as(?tools.Refusal, .not_json), Server.httpListRefusal(.http_failure, 200, true));
+    try std.testing.expectEqual(@as(?tools.Refusal, .unreadable), Server.httpListRefusal(.unreadable, 200, false));
+
+    // The sign-in reads a 401, and a 403 with a challenge.
+    try std.testing.expectEqual(@as(?tools.Refusal, null), Server.httpListRefusal(.rejected, 401, false));
+    try std.testing.expectEqual(@as(?tools.Refusal, null), Server.httpListRefusal(.rejected, 403, true));
+    // A 2025 session's 404 is the session's end; without a session it is an answer.
+    try std.testing.expectEqual(@as(?tools.Refusal, null), Server.httpListRefusal(.http_failure, 404, true));
+    try std.testing.expectEqual(@as(?tools.Refusal, .http_status), Server.httpListRefusal(.http_failure, 404, false));
+    try std.testing.expectEqual(@as(?tools.Refusal, .http_status), Server.httpListRefusal(.http_failure, 500, true));
+    // Nothing came back: no status, a broken stream, an answer over the limit, or one read in full.
+    try std.testing.expectEqual(@as(?tools.Refusal, null), Server.httpListRefusal(.http_failure, 0, false));
+    for ([_]http.Ending{ .broken, .too_large, .complete, .accepted }) |how| {
+        try std.testing.expectEqual(@as(?tools.Refusal, null), Server.httpListRefusal(how, 200, false));
+    }
+}
+
+fn listLogical(r: *Server) !*Logical {
+    var out: catalog.Output = .{};
+    try r.catalog.step(.{ .process_started = .modern }, &out);
+    try r.catalog.step(.need, &out);
+    // The request the listing would send: nothing goes out, as no session is ready.
+    return r.newLogical(.list, .idempotent);
+}
+
+test "a tool list that ends with an HTTP answer is refused with the status in its words, and a sign-in or no answer is not" {
+    {
+        var r: Server = undefined;
+        try pageTestServer(&r);
+        defer r.deinit();
+        const l = try listLogical(&r);
+        l.list_why = Server.httpListRefusal(.http_failure, 500, false);
+        l.list_status = 500;
+        try r.listFailed(l);
+        try std.testing.expect(r.catalog.refused);
+        try std.testing.expectEqualStrings("the server answered the list with HTTP 500", (r.listRefusal() orelse return error.TestExpectedRefusal));
+    }
+    {
+        var r: Server = undefined;
+        try pageTestServer(&r);
+        defer r.deinit();
+        const l = try listLogical(&r);
+        l.list_why = Server.httpListRefusal(.http_failure, 200, false);
+        l.list_status = 200;
+        try r.listFailed(l);
+        try std.testing.expectEqualStrings("the list is not valid JSON", (r.listRefusal() orelse return error.TestExpectedRefusal));
+    }
+    // A request that waits for a sign-in, and one that had no answer, refuse nothing.
+    {
+        var r: Server = undefined;
+        try pageTestServer(&r);
+        defer r.deinit();
+        const l = try listLogical(&r);
+        l.list_why = Server.httpListRefusal(.http_failure, 500, false);
+        l.list_status = 500;
+        l.needs_auth = true;
+        try r.listFailed(l);
+        try std.testing.expect(!r.catalog.refused);
+        try std.testing.expect(r.listRefusal() == null);
+    }
+    {
+        var r: Server = undefined;
+        try pageTestServer(&r);
+        defer r.deinit();
+        const l = try listLogical(&r);
+        try r.listFailed(l);
+        try std.testing.expect(!r.catalog.refused);
+        try std.testing.expect(r.listRefusal() == null);
+    }
+}

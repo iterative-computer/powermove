@@ -39,3 +39,22 @@ dc2f48e824da33710240501ba151524bc5198934:apps/desktop/src/main/env/ipc.test.ts:g
 
 # Animation/keyboard property, not a credential.
 c848300241fef98b3c369c73471d65610710f184:src/extensions/keymap-default/keymap.test.ts:generic-api-key:87
+
+# Synthetic values in upstream fx's own tests (vendored libfx core, fx 8fbe9b8,
+# apps/native/vendor/fx): sequential hex, 0011..eeff keys, a hand-built fake JWT,
+# a short gho_ sample. Reviewed 2026-11-24; pinned to their commit once it exists.
+apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2162
+apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2208
+apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:4578
+apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6167
+apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6304
+apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6400
+apps/native/vendor/fx/src/core/auth/credentials.zig:generic-api-key:1814
+apps/native/vendor/fx/src/core/mcp_host/owner_wire.zig:generic-api-key:812
+apps/native/vendor/fx/src/core/mcp_host/owner_core.zig:generic-api-key:678
+apps/native/vendor/fx/src/core/mcp_host/owner.zig:generic-api-key:1428
+apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1236
+apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1516
+apps/native/vendor/fx/src/gateway/host_stream_provider.zig:generic-api-key:862
+apps/native/vendor/fx/src/core/shared/text_utils.zig:generic-api-key:2492
+apps/native/vendor/fx/src/core/workspace/capture_store.zig:generic-api-key:5432

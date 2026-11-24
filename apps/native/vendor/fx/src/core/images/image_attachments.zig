@@ -1,0 +1,4784 @@
+const std = @import("std");
+const agents = @import("../agents/agents.zig");
+const testing_allocator = @import("../shared/testing_allocator.zig");
+const file_picker_path = @import("../input/file_picker_path.zig");
+const builtin = @import("builtin");
+const debug_trace = @import("../shared/debug_trace.zig");
+const display_width = @import("../shared/display_width.zig");
+const entity_spans = @import("../shared/entity_spans.zig");
+const file_mutation_contract = @import("../tooling/file_mutation_contract.zig");
+const image_data = @import("image_data.zig");
+const image_route = @import("image_route.zig");
+const io_mod = @import("../shared/io.zig");
+const png_downscale = @import("png_downscale.zig");
+const types = @import("../shared/types.zig");
+const pathing = @import("../workspace/pathing.zig");
+const text_utils = @import("../shared/text_utils.zig");
+
+pub const max_image_bytes: usize = 20 * 1024 * 1024;
+/// The most images, and image bytes together, one libfx prompt holds: the
+/// limits `sdk/fx-sdk.js` takes a prompt within (`maxPromptImages` and
+/// `maxPromptImagesBytes`), which the core holds a prompt to as well.
+pub const max_libfx_prompt_images: usize = 8;
+pub const max_libfx_prompt_images_bytes: usize = 6 * 1024 * 1024;
+const max_encoded_image_bytes: usize = 5 * 1024 * 1024;
+pub const image_too_large_notice = "image exceeds the 20 MiB limit";
+pub const image_preparation_failed_notice = "Unable to prepare this image for upload. Use a smaller image.";
+pub const model_image_capability_unavailable_notice = "Unable to verify image support for this model, so the image was not sent. Try again later, choose another model, or remove the image.";
+const Sha256 = std.crypto.hash.sha2.Sha256;
+const snapshot_digest_hex_len = Sha256.digest_length * 2;
+const transfer_buffer_bytes = 64 * 1024;
+
+pub fn findById(
+    attachments: []const types.ImageAttachment,
+    id: usize,
+) ?types.ImageAttachment {
+    for (attachments) |attachment| {
+        if (attachment.id == id) return attachment;
+    }
+    return null;
+}
+
+pub fn projectOffsetThroughPlaceholderRewrite(
+    source_tokens: []const entity_spans.ImageTokenSpan,
+    target_tokens: []const entity_spans.ImageTokenSpan,
+    source_len: usize,
+    raw_offset: usize,
+) ?usize {
+    if (source_tokens.len != target_tokens.len or raw_offset > source_len) return null;
+
+    var source_cursor: usize = 0;
+    var target_cursor: usize = 0;
+    for (source_tokens, target_tokens) |source, target| {
+        if (!source.span.isValid(source_len) or
+            source.span.raw_start < source_cursor or
+            target.span.raw_start < target_cursor or
+            target.span.raw_start >= target.span.raw_end)
+        {
+            return null;
+        }
+        if (raw_offset <= source.span.raw_start) {
+            return std.math.add(
+                usize,
+                target_cursor,
+                raw_offset - source_cursor,
+            ) catch null;
+        }
+        if (raw_offset < source.span.raw_end) return null;
+
+        target_cursor = std.math.add(
+            usize,
+            target_cursor,
+            source.span.raw_start - source_cursor,
+        ) catch return null;
+        target_cursor = std.math.add(
+            usize,
+            target_cursor,
+            target.span.raw_end - target.span.raw_start,
+        ) catch return null;
+        source_cursor = source.span.raw_end;
+    }
+    return std.math.add(
+        usize,
+        target_cursor,
+        raw_offset - source_cursor,
+    ) catch null;
+}
+
+test "image placeholder rewrite projects boundaries and rejects interiors" {
+    const source = [_]entity_spans.ImageTokenSpan{.{
+        .id = 8,
+        .span = .{ .raw_start = 3, .raw_end = 13 },
+    }};
+    const target = [_]entity_spans.ImageTokenSpan{.{
+        .id = 100,
+        .span = .{ .raw_start = 3, .raw_end = 15 },
+    }};
+
+    try std.testing.expectEqual(
+        @as(?usize, 3),
+        projectOffsetThroughPlaceholderRewrite(&source, &target, 20, 3),
+    );
+    try std.testing.expect(
+        projectOffsetThroughPlaceholderRewrite(&source, &target, 20, 8) == null,
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 15),
+        projectOffsetThroughPlaceholderRewrite(&source, &target, 20, 13),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 22),
+        projectOffsetThroughPlaceholderRewrite(&source, &target, 20, 20),
+    );
+}
+
+/// The source covers consumed path syntax, not its outside punctuation. Both
+/// ranges are byte offsets; later placeholder-ID changes never mutate this map.
+pub const InlineImageEdit = struct {
+    source: entity_spans.Span,
+    output: entity_spans.Span,
+    id: usize,
+};
+
+pub const ExtractedInlineImages = struct {
+    text: []u8,
+    images: []types.ImageAttachment,
+    edits: []InlineImageEdit,
+
+    pub fn deinit(self: ExtractedInlineImages, alloc: std.mem.Allocator) void {
+        alloc.free(self.text);
+        types.freeImageAttachmentSlice(alloc, self.images);
+        alloc.free(self.edits);
+    }
+
+    pub fn discard(self: ExtractedInlineImages, alloc: std.mem.Allocator) void {
+        alloc.free(self.text);
+        discardImageAttachmentSlice(alloc, self.images);
+        alloc.free(self.edits);
+    }
+};
+
+const InlineImageReplacement = struct {
+    source: entity_spans.Span,
+    id: usize,
+};
+
+/// Pure byte transformation. The caller owns both returned allocations.
+fn rewrite_inline_images(alloc: std.mem.Allocator, source: []const u8, replacements: []const InlineImageReplacement) !struct { text: []u8, edits: []InlineImageEdit } {
+    const edits = try alloc.alloc(InlineImageEdit, replacements.len);
+    errdefer alloc.free(edits);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var cursor: usize = 0;
+    for (replacements, edits) |replacement, *edit| {
+        if (!replacement.source.isValid(source.len) or replacement.source.raw_start < cursor or replacement.id == 0) return error.InvalidImageOccurrence;
+        try out.appendSlice(alloc, source[cursor..replacement.source.raw_start]);
+        const start = out.items.len;
+        var buffer: [64]u8 = undefined;
+        try out.appendSlice(alloc, try formatImagePlaceholder(&buffer, replacement.id));
+        edit.* = .{
+            .source = replacement.source,
+            .output = .{ .raw_start = start, .raw_end = out.items.len },
+            .id = replacement.id,
+        };
+        cursor = replacement.source.raw_end;
+    }
+    try out.appendSlice(alloc, source[cursor..]);
+    return .{ .text = try out.toOwnedSlice(alloc), .edits = edits };
+}
+
+/// Projects an existing entity through admitted edits. Consumed entities do not
+/// survive. Edits borrow immutable source/output coordinates from extraction.
+pub fn project_inline_image_span(source_len: usize, span: entity_spans.Span, edits: []const InlineImageEdit) ?entity_spans.Span {
+    if (!span.isValid(source_len)) return null;
+    var source_cursor: usize = 0;
+    var output_cursor: usize = 0;
+    for (edits) |edit| {
+        if (!edit.source.isValid(source_len) or edit.source.raw_start < source_cursor or edit.output.raw_end <= edit.output.raw_start or edit.id == 0) return null;
+        const start = std.math.add(usize, output_cursor, edit.source.raw_start - source_cursor) catch return null;
+        if (edit.output.raw_start != start) return null;
+        source_cursor = edit.source.raw_end;
+        output_cursor = edit.output.raw_end;
+    }
+    _ = std.math.add(usize, output_cursor, source_len - source_cursor) catch return null;
+    var projected = span;
+    var index = edits.len;
+    while (index > 0) {
+        index -= 1;
+        const edit = edits[index];
+        projected = entity_spans.afterDelete(projected, edit.source.raw_start, edit.source.raw_end) orelse return null;
+        projected = entity_spans.afterInsert(projected, edit.source.raw_start, edit.output.raw_end - edit.output.raw_start) orelse return null;
+    }
+    return projected;
+}
+
+pub fn loadImageAttachment(alloc: std.mem.Allocator, path_input: []const u8) !types.ImageAttachment {
+    const normalized_path = try normalizePathInput(alloc, path_input);
+    defer alloc.free(normalized_path);
+
+    const resolved_path = try io_mod.realpathAlloc(alloc, normalized_path);
+    return loadResolvedImageAttachment(alloc, resolved_path);
+}
+
+pub fn loadUserImageAttachment(
+    alloc: std.mem.Allocator,
+    workspace_root: []const u8,
+    path_input: []const u8,
+) !types.ImageAttachment {
+    const normalized_path = try normalizePathInput(alloc, path_input);
+    defer alloc.free(normalized_path);
+    // Preserve the raw entry's second trim at the old path-resolution boundary.
+    return load_user_image_literal(alloc, workspace_root, std.mem.trim(u8, normalized_path, " \t\r\n"));
+}
+
+/// Reads a decoded path without changing filename bytes. Caller owns the result.
+fn load_user_image_literal(
+    alloc: std.mem.Allocator,
+    workspace_root: []const u8,
+    path: []const u8,
+) !types.ImageAttachment {
+    var scratch_state = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_state.deinit();
+    const resolved_path = try pathing.resolve_workspace_or_external_literal_path(
+        scratch_state.allocator(),
+        workspace_root,
+        path,
+    );
+    const owned_path = try alloc.dupe(u8, resolved_path);
+    return loadResolvedImageAttachment(alloc, owned_path);
+}
+
+fn loadResolvedImageAttachment(
+    alloc: std.mem.Allocator,
+    resolved_path: []u8,
+) !types.ImageAttachment {
+    errdefer alloc.free(resolved_path);
+
+    var header: [64]u8 = undefined;
+    const bytes = try readImageHeaderBytes(resolved_path, &header);
+
+    const media_type = try alloc.dupe(u8, detectMediaTypeFromBytes(bytes) orelse return error.UnsupportedImageType);
+    errdefer alloc.free(media_type);
+
+    return .{
+        .path = resolved_path,
+        .media_type = media_type,
+    };
+}
+
+pub fn createTempSnapshotDir(alloc: std.mem.Allocator) ![]u8 {
+    const temp_root = try io_mod.realpathAlloc(alloc, "/tmp");
+    defer alloc.free(temp_root);
+    for (0..16) |_| {
+        var suffix: u64 = undefined;
+        io_mod.getIo().random(std.mem.asBytes(&suffix));
+        // Fixed width, so the model's note naming a snapshot here is the
+        // same length in every process.
+        const path = try alloc.print(
+            "{s}/fx-image-snapshots-{x:0>16}",
+            .{ temp_root, suffix },
+        );
+        errdefer alloc.free(path);
+        std.Io.Dir.createDirAbsolute(
+            io_mod.getIo(),
+            path,
+            std.Io.File.Permissions.fromMode(0o700),
+        ) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                alloc.free(path);
+                continue;
+            },
+            else => return err,
+        };
+        return path;
+    }
+    return error.PathAlreadyExists;
+}
+
+pub fn cleanupSnapshotDir(path: []const u8) void {
+    if (path.len == 0) return;
+    const parent_path = std.Io.Dir.path.dirname(path) orelse return;
+    const name = std.Io.Dir.path.basename(path);
+    var parent = openDirectoryNoFollow(parent_path) catch |err| {
+        debug_trace.logf(
+            "images",
+            "event=snapshot_directory_cleanup_failed err={s}",
+            .{@errorName(err)},
+        );
+        return;
+    };
+    defer parent.close(io_mod.getIo());
+    parent.deleteTree(io_mod.getIo(), name) catch |err| {
+        debug_trace.logf(
+            "images",
+            "event=snapshot_directory_cleanup_failed err={s}",
+            .{@errorName(err)},
+        );
+    };
+}
+
+pub const CaptureBudget = struct {
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    deadline: ?std.Io.Clock.Timestamp = null,
+    test_hook: if (builtin.is_test) ?TestBudgetHook else void = if (builtin.is_test) null else {},
+
+    pub fn check(self: CaptureBudget) !void {
+        if (comptime builtin.is_test) {
+            if (self.test_hook) |hook| try hook.check(hook.ctx);
+        }
+        if (self.cancel_flag) |flag| {
+            if (flag.load(.seq_cst)) return error.Cancelled;
+        }
+        if (self.deadline) |deadline| {
+            const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+            if (now.raw.nanoseconds >= deadline.raw.nanoseconds) return error.TimedOut;
+        }
+    }
+};
+
+pub const CaptureAdmissionResult = enum {
+    captured,
+    rejected,
+};
+
+fn captureRejectionNotice(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.ImageTooLarge => image_too_large_notice,
+        error.ImagePreparationFailed => image_preparation_failed_notice,
+        else => null,
+    };
+}
+
+pub fn captureImageAttachmentForAdmission(
+    comptime App: type,
+    app: *App,
+    attachment: *types.ImageAttachment,
+) !CaptureAdmissionResult {
+    App.captureImageAttachment(app, agents.screenAgentOf(app), attachment) catch |err| {
+        const notice = captureRejectionNotice(err) orelse return err;
+        if (comptime !@hasDecl(App, "writeDomainNotice")) return err;
+        try app.writeDomainNotice(.{
+            .topic = "images",
+            .tone = .@"error",
+            .body = notice,
+        }, true);
+        return .rejected;
+    };
+    return .captured;
+}
+
+pub fn captureImageAttachmentsForAdmission(
+    comptime App: type,
+    app: *App,
+    attachments: []types.ImageAttachment,
+) !CaptureAdmissionResult {
+    var captured: usize = 0;
+    errdefer {
+        discardImageSnapshots(app.alloc, attachments[0..captured]);
+    }
+    for (attachments) |*attachment| {
+        switch (try captureImageAttachmentForAdmission(App, app, attachment)) {
+            .captured => captured += 1,
+            .rejected => {
+                discardImageSnapshots(app.alloc, attachments[0..captured]);
+                captured = 0;
+                return .rejected;
+            },
+        }
+    }
+    return .captured;
+}
+
+const TestBudgetHook = struct {
+    ctx: *anyopaque,
+    check: *const fn (*anyopaque) anyerror!void,
+};
+
+pub fn captureImageSnapshot(
+    alloc: std.mem.Allocator,
+    attachment: *types.ImageAttachment,
+    snapshot_dir: []const u8,
+) !void {
+    return captureImageSnapshotWithBudget(alloc, attachment, snapshot_dir, .{});
+}
+
+pub fn captureImageSnapshotWithBudget(
+    alloc: std.mem.Allocator,
+    attachment: *types.ImageAttachment,
+    snapshot_dir: []const u8,
+    budget: CaptureBudget,
+) !void {
+    if (attachment.id == 0) return error.InvalidImageId;
+    try budget.check();
+
+    var source = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), attachment.path, .{});
+    defer source.close(io_mod.getIo());
+    const source_stat = try source.stat(io_mod.getIo());
+    return captureImageSnapshotFromOpenFileWithBudget(
+        alloc,
+        attachment,
+        snapshot_dir,
+        budget,
+        &source,
+        source_stat,
+    );
+}
+
+pub const VisionRegularFile = struct {
+    file: std.Io.File,
+    identity: file_mutation_contract.FileIdentity,
+
+    pub fn close(self: *VisionRegularFile) void {
+        self.file.close(io_mod.getIo());
+        self.* = undefined;
+    }
+};
+
+/// Opens a read-only Vision source without following the final symlink or
+/// blocking on a special file. Hard-linked regular files remain valid inputs.
+/// The caller owns the returned descriptor and must close it.
+pub fn openVisionRegularFile(canonical_path: []const u8) !VisionRegularFile {
+    if (!std.Io.Dir.path.isAbsolute(canonical_path)) return error.InvalidPath;
+
+    const cwd = std.Io.Dir.cwd();
+    const initial = cwd.statFile(io_mod.getIo(), canonical_path, .{
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.NotDir, error.SymLinkLoop => return error.NotRegularFile,
+        else => return err,
+    };
+    if (initial.kind != .file) return error.NotRegularFile;
+
+    if (comptime builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) {
+        var file = cwd.openFile(io_mod.getIo(), canonical_path, .{
+            .mode = .read_only,
+            .allow_directory = false,
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.IsDir, error.SymLinkLoop, error.NotDir => return error.NotRegularFile,
+            else => return err,
+        };
+        errdefer file.close(io_mod.getIo());
+        const stat = try file.stat(io_mod.getIo());
+        if (stat.kind != .file) return error.NotRegularFile;
+        return .{
+            .file = file,
+            .identity = pathing.fileIdentity(
+                try pathing.descriptorDevice(file.handle),
+                stat,
+            ),
+        };
+    }
+
+    var flags: std.posix.O = .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+    };
+    if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+    if (@hasField(std.posix.O, "LARGEFILE")) flags.LARGEFILE = true;
+    if (@hasField(std.posix.O, "NOCTTY")) flags.NOCTTY = true;
+
+    const fd = std.posix.openat(cwd.handle, canonical_path, flags, 0) catch |err| switch (err) {
+        error.NoDevice, error.SymLinkLoop, error.NotDir => return error.NotRegularFile,
+        else => return err,
+    };
+    var file = std.Io.File{
+        .handle = fd,
+        .flags = .{ .nonblocking = true },
+    };
+    errdefer file.close(io_mod.getIo());
+    const stat = try file.stat(io_mod.getIo());
+    if (stat.kind != .file) return error.NotRegularFile;
+    const identity = pathing.fileIdentity(
+        try pathing.descriptorDevice(file.handle),
+        stat,
+    );
+    try makeVisionRegularFileBlocking(&file);
+    return .{ .file = file, .identity = identity };
+}
+
+fn makeVisionRegularFileBlocking(file: *std.Io.File) !void {
+    const current = while (true) {
+        const rc = std.posix.system.fcntl(
+            file.handle,
+            std.posix.F.GETFL,
+            @as(usize, 0),
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break @as(usize, @intCast(rc)),
+            .INTR => continue,
+            else => return error.FileControlFailed,
+        }
+    };
+    const nonblock = @as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    while (true) {
+        const rc = std.posix.system.fcntl(
+            file.handle,
+            std.posix.F.SETFL,
+            current & ~nonblock,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.FileControlFailed,
+        }
+    }
+    file.flags.nonblocking = false;
+}
+
+pub fn captureBoundImageAttachment(
+    alloc: std.mem.Allocator,
+    canonical_path: []const u8,
+    expected_identity: file_mutation_contract.FileIdentity,
+    image_id: usize,
+    snapshot_dir: []const u8,
+    budget: CaptureBudget,
+) !types.ImageAttachment {
+    if (!std.Io.Dir.path.isAbsolute(canonical_path)) return error.InvalidPath;
+    if (image_id == 0) return error.InvalidImageId;
+    try budget.check();
+
+    var source = openVisionRegularFile(canonical_path) catch |err| switch (err) {
+        error.NotRegularFile => return error.ImageTargetChanged,
+        else => return err,
+    };
+    defer source.close();
+    if (!std.meta.eql(source.identity, expected_identity)) {
+        return error.ImageTargetChanged;
+    }
+    const source_stat = try source.file.stat(io_mod.getIo());
+
+    var attachment: types.ImageAttachment = blk: {
+        const owned_path = try alloc.dupe(u8, canonical_path);
+        errdefer alloc.free(owned_path);
+        break :blk .{
+            .id = image_id,
+            .path = owned_path,
+            .media_type = try alloc.dupe(u8, ""),
+        };
+    };
+    errdefer discardImageAttachment(alloc, attachment);
+    try captureImageSnapshotFromOpenFileWithBudget(
+        alloc,
+        &attachment,
+        snapshot_dir,
+        budget,
+        &source.file,
+        source_stat,
+    );
+    return attachment;
+}
+
+/// Captures caller-supplied image bytes into the immutable session snapshot
+/// contract. The caller owns the returned attachment and must release it with
+/// `types.freeImageAttachment` or `discardImageAttachment`.
+pub fn captureInlineImageBytes(
+    alloc: std.mem.Allocator,
+    image_id: usize,
+    declared_media_type: []const u8,
+    bytes: []const u8,
+    snapshot_dir: []const u8,
+) !types.ImageAttachment {
+    if (image_id == 0) return error.InvalidImageId;
+    if (bytes.len == 0 or declared_media_type.len == 0) return error.UnsupportedImageType;
+    if (bytes.len > max_image_bytes) return error.ImageTooLarge;
+    // The request checker, not capture, decides whether the original can be sent.
+    // Validate the declared type against the caller's bytes.
+    const detected = detectMediaTypeFromBytes(bytes) orelse return error.UnsupportedImageType;
+    if (!std.mem.eql(u8, detected, declared_media_type)) return error.ImageSnapshotMediaTypeMismatch;
+
+    var snapshot_dir_handle = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer snapshot_dir_handle.close(io_mod.getIo());
+    var random_suffix: u64 = undefined;
+    io_mod.getIo().random(std.mem.asBytes(&random_suffix));
+    const source_name = try alloc.print(
+        "image-{d}.acp-source.{x}",
+        .{ image_id, random_suffix },
+    );
+    defer alloc.free(source_name);
+    defer deleteSnapshotFile(snapshot_dir_handle, source_name, "capture_acp_source");
+
+    {
+        var source = try snapshot_dir_handle.createFile(
+            io_mod.getIo(),
+            source_name,
+            .{
+                .truncate = false,
+                .exclusive = true,
+                .permissions = std.Io.File.Permissions.fromMode(0o600),
+                .resolve_beneath = true,
+            },
+        );
+        defer source.close(io_mod.getIo());
+        try source.writeStreamingAll(io_mod.getIo(), bytes);
+        try source.sync(io_mod.getIo());
+    }
+
+    const source_path = try std.Io.Dir.path.join(alloc, &.{ snapshot_dir, source_name });
+    defer alloc.free(source_path);
+    var attachment = types.ImageAttachment{
+        .id = image_id,
+        .path = try alloc.dupe(u8, source_path),
+        .media_type = try alloc.dupe(u8, declared_media_type),
+    };
+    errdefer discardImageAttachment(alloc, attachment);
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+
+    const durable_path = try alloc.dupe(
+        u8,
+        attachment.snapshot_path orelse return error.MissingImageSnapshot,
+    );
+    alloc.free(attachment.path);
+    attachment.path = durable_path;
+    return attachment;
+}
+
+/// Captures caller-supplied image bytes for sessions without a filesystem
+/// snapshot backend (libfx kernel sessions on native and wasm). Applies the
+/// same size, media-type, and digest validation as the filesystem capture,
+/// but retains the decoded bytes on the attachment itself so request building
+/// and checkpoint serialization never touch a filesystem.
+/// The caller owns the returned attachment and must release it with
+/// `types.freeImageAttachment` or `discardImageAttachment`.
+pub fn captureInlineImageBytesInMemory(
+    alloc: std.mem.Allocator,
+    image_id: usize,
+    declared_media_type: []const u8,
+    bytes: []const u8,
+) !types.ImageAttachment {
+    if (image_id == 0) return error.InvalidImageId;
+    if (bytes.len == 0 or declared_media_type.len == 0) return error.UnsupportedImageType;
+    if (bytes.len > max_image_bytes) return error.ImageTooLarge;
+    const detected = detectMediaTypeFromBytes(bytes) orelse return error.UnsupportedImageType;
+    if (!std.mem.eql(u8, detected, declared_media_type)) return error.ImageSnapshotMediaTypeMismatch;
+
+    if (!image_data.fitsEncodedImageLimit(bytes.len)) return error.ImageTooLarge;
+    const owned_bytes = try alloc.dupe(u8, bytes);
+    errdefer alloc.free(owned_bytes);
+    const owned_path = try alloc.print(inline_image_path_prefix ++ "{d}", .{image_id});
+    errdefer alloc.free(owned_path);
+    const owned_media_type = try alloc.dupe(u8, declared_media_type);
+    errdefer alloc.free(owned_media_type);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(owned_bytes, &digest, .{});
+    const digest_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
+    errdefer alloc.free(digest_hex);
+    return .{
+        .id = image_id,
+        .path = owned_path,
+        .media_type = owned_media_type,
+        .snapshot_sha256 = digest_hex,
+        .inline_data = owned_bytes,
+    };
+}
+
+pub const inline_image_path_prefix = "inline://image-";
+
+fn captureImageSnapshotFromOpenFileWithBudget(
+    alloc: std.mem.Allocator,
+    attachment: *types.ImageAttachment,
+    snapshot_dir: []const u8,
+    budget: CaptureBudget,
+    source: *std.Io.File,
+    source_stat: std.Io.File.Stat,
+) !void {
+    if (source_stat.kind != .file) return error.NotRegularFile;
+    if (source_stat.size > max_image_bytes) return error.ImageTooLarge;
+
+    var snapshot_dir_handle = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer snapshot_dir_handle.close(io_mod.getIo());
+
+    const source_temp_name = try alloc.print(
+        "image-{d}.source.{d}",
+        .{ attachment.id, io_mod.nanoTimestamp() },
+    );
+    defer alloc.free(source_temp_name);
+    var cleanup_source_temp = true;
+    defer if (cleanup_source_temp) {
+        deleteSnapshotFile(snapshot_dir_handle, source_temp_name, "capture_source_temp");
+    };
+
+    const source_metadata = try streamSourceToFile(
+        source,
+        snapshot_dir_handle,
+        source_temp_name,
+        max_image_bytes,
+        budget,
+    );
+    try budget.check();
+
+    const metadata = source_metadata;
+
+    const media_type = try alloc.dupe(u8, metadata.media_type);
+    errdefer alloc.free(media_type);
+
+    const final_name = try alloc.print(
+        "image-{d}-{s}.bin",
+        .{ attachment.id, metadata.digest_hex[0..16] },
+    );
+    defer alloc.free(final_name);
+    const final_path = try std.Io.Dir.path.join(alloc, &.{ snapshot_dir, final_name });
+    errdefer alloc.free(final_path);
+    try budget.check();
+    try snapshot_dir_handle.rename(source_temp_name, snapshot_dir_handle, final_name, io_mod.getIo());
+    cleanup_source_temp = false;
+    var cleanup_final = true;
+    errdefer if (cleanup_final) {
+        deleteSnapshotFile(snapshot_dir_handle, final_name, "capture_final");
+    };
+
+    try syncSnapshotDirectory(snapshot_dir_handle);
+    try budget.check();
+    const digest_hex = try alloc.dupe(u8, &metadata.digest_hex);
+    errdefer alloc.free(digest_hex);
+
+    const old_snapshot_path = attachment.snapshot_path;
+    const old_snapshot_sha256 = attachment.snapshot_sha256;
+    const old_media_type = attachment.media_type;
+    attachment.media_type = media_type;
+    attachment.snapshot_path = final_path;
+    attachment.snapshot_sha256 = digest_hex;
+    cleanup_final = false;
+
+    alloc.free(old_media_type);
+    if (old_snapshot_path) |old| {
+        if (!std.mem.eql(u8, old, final_path)) deleteSnapshotPath(old, "replaced_snapshot");
+        alloc.free(old);
+    }
+    if (old_snapshot_sha256) |old| alloc.free(old);
+}
+
+fn streamSourceToFile(
+    source: *std.Io.File,
+    destination_dir: std.Io.Dir,
+    destination_name: []const u8,
+    limit: usize,
+    budget: CaptureBudget,
+) !SnapshotMetadata {
+    var destination = try destination_dir.createFile(
+        io_mod.getIo(),
+        destination_name,
+        .{
+            .truncate = false,
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+            .resolve_beneath = true,
+        },
+    );
+    defer destination.close(io_mod.getIo());
+
+    var hasher = Sha256.init(.{});
+    var header: [64]u8 = undefined;
+    var header_len: usize = 0;
+    var read_buffer: [8192]u8 = undefined;
+    var reader = source.readerStreaming(io_mod.getIo(), &read_buffer);
+    var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
+    var written: usize = 0;
+    while (true) {
+        try budget.check();
+        const n = try reader.interface.readSliceShort(&transfer_buffer);
+        if (n == 0) break;
+        if (n > limit - written) return error.ImageTooLarge;
+        const header_bytes = @min(n, header.len - header_len);
+        @memcpy(header[header_len..][0..header_bytes], transfer_buffer[0..header_bytes]);
+        header_len += header_bytes;
+        hasher.update(transfer_buffer[0..n]);
+        try destination.writeStreamingAll(io_mod.getIo(), transfer_buffer[0..n]);
+        written += n;
+    }
+    try budget.check();
+    try destination.sync(io_mod.getIo());
+
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    const media_type = detectMediaTypeFromBytes(header[0..header_len]) orelse
+        return error.UnsupportedImageType;
+    return .{
+        .digest_hex = std.fmt.bytesToHex(digest, .lower),
+        .media_type = media_type,
+        .size_bytes = written,
+    };
+}
+
+const SnapshotMetadata = struct {
+    digest_hex: [snapshot_digest_hex_len]u8,
+    media_type: []const u8,
+    size_bytes: usize,
+};
+
+/// Reads a snapshot file on demand for pixel-size checks, so a JPEG frame
+/// header behind large metadata is found without reading the whole file.
+const SnapshotFileReader = struct {
+    file: std.Io.File,
+
+    fn readAt(context: *const anyopaque, offset: u64, buffer: []u8) []const u8 {
+        const self: *const SnapshotFileReader = @ptrCast(@alignCast(context));
+        const len = self.file.readPositionalAll(io_mod.getIo(), buffer, offset) catch return buffer[0..0];
+        return buffer[0..len];
+    }
+
+    fn dimensions(self: *const SnapshotFileReader) ?image_data.Dimensions {
+        return image_data.positionalImageDimensions(.{ .context = self, .read_at = readAt });
+    }
+};
+
+/// Reports whether a snapshot file is wider or taller than the model pixel
+/// limit. Unreadable dimensions report false and keep the byte-limit path.
+/// Cached header dimensions of immutable snapshots, keyed by snapshot digest.
+/// File size is checked again on each request. Keys are owned by the allocator
+/// passed alongside the cache.
+pub const AttachmentDimensionCache = std.StringHashMapUnmanaged(?image_data.Dimensions);
+
+/// Pixel size of an attachment, or null when it cannot be read. Unreadable
+/// snapshots are reported where the request loads them.
+fn attachmentDimensions(
+    cache_alloc: std.mem.Allocator,
+    cache: *AttachmentDimensionCache,
+    attachment: types.ImageAttachment,
+) std.mem.Allocator.Error!?image_data.Dimensions {
+    if (attachment.inline_data) |bytes| return image_data.imageDimensions(bytes);
+    const source = imageFile(attachment) orelse return null;
+    const digest = attachment.snapshot_sha256 orelse return probeSnapshotDimensions(source);
+    if (cache.get(digest)) |cached| return cached;
+    const dimensions = probeSnapshotDimensions(source);
+    const key = try cache_alloc.dupe(u8, digest);
+    errdefer cache_alloc.free(key);
+    try cache.put(cache_alloc, key, dimensions);
+    return dimensions;
+}
+
+fn probeSnapshotDimensions(source: ImageFile) ?image_data.Dimensions {
+    var file = source.open() catch return null;
+    defer file.close(io_mod.getIo());
+    const reader: SnapshotFileReader = .{ .file = file };
+    return reader.dimensions();
+}
+
+fn attachmentRawBytes(attachment: types.ImageAttachment) ?usize {
+    if (attachment.inline_data) |bytes| return bytes.len;
+    const source = imageFile(attachment) orelse return null;
+    var file = source.open() catch return null;
+    defer file.close(io_mod.getIo());
+    const stat = file.stat(io_mod.getIo()) catch return null;
+    if (!source.accepts(stat)) return null;
+    return std.math.cast(usize, stat.size);
+}
+
+fn attachmentFitsEncodedLimit(attachment: types.ImageAttachment) bool {
+    const size = attachmentRawBytes(attachment) orelse return false;
+    return image_data.fitsEncodedImageLimit(size);
+}
+
+/// Base64 bytes the attachment adds to a request, or null when its size
+/// cannot be read.
+pub fn attachmentEncodedBytes(attachment: types.ImageAttachment) ?usize {
+    const size = attachmentRawBytes(attachment) orelse return null;
+    return image_data.encodedImageBytes(size);
+}
+
+/// Leaves the images the session dropped out of a request, each with a note
+/// in its place, so no later projection or provider sees an image without
+/// bytes. Returns `messages` itself when none were dropped, otherwise a copy
+/// allocated in `arena`. History is not modified.
+pub fn withholdDroppedImages(arena: std.mem.Allocator, messages: []const types.ChatMessage) ![]const types.ChatMessage {
+    var result: ?[]types.ChatMessage = null;
+    for (messages, 0..) |message, index| {
+        if (message.tool_result_memory) |memory| {
+            var dropped_tools: usize = 0;
+            for (memory.tool_images) |image| {
+                if (image.droppedFromSession()) dropped_tools += 1;
+            }
+            if (dropped_tools > 0) {
+                const projected = result orelse try arena.dupe(types.ChatMessage, messages);
+                result = projected;
+                const kept = try arena.alloc(types.ToolImage, memory.tool_images.len - dropped_tools);
+                var next: usize = 0;
+                for (memory.tool_images) |image| {
+                    if (image.droppedFromSession()) continue;
+                    kept[next] = image;
+                    next += 1;
+                }
+                var withheld = memory;
+                withheld.tool_images = kept;
+                projected[index].tool_result_memory = withheld;
+                const notice = if (dropped_tools == 1)
+                    "[1 image from this result is no longer in this session, which keeps only its newest images.]\n"
+                else
+                    try arena.print("[{d} images from this result are no longer in this session, which keeps only its newest images.]\n", .{dropped_tools});
+                projected[index].content = try std.mem.concat(arena, u8, &.{ notice, message.content orelse "" });
+            }
+        }
+        var dropped: usize = 0;
+        for (message.images) |image| {
+            if (image.droppedFromSession()) dropped += 1;
+        }
+        if (dropped == 0) continue;
+        const projected = result orelse try arena.dupe(types.ChatMessage, messages);
+        result = projected;
+        const kept = try arena.alloc(types.ImageAttachment, message.images.len - dropped);
+        var notice: std.Io.Writer.Allocating = .init(arena);
+        var next: usize = 0;
+        for (message.images) |image| {
+            if (image.droppedFromSession()) {
+                notice.writer.print("[Image #{d} is no longer in this session, which keeps only its newest images.]\n", .{image.id}) catch return error.OutOfMemory;
+            } else {
+                kept[next] = image;
+                next += 1;
+            }
+        }
+        projected[index].images = kept;
+        projected[index].content = try std.mem.concat(arena, u8, &.{ notice.written(), projected[index].content orelse "" });
+    }
+    return result orelse messages;
+}
+
+/// Leaves the user images in `messages` out of a request when the image
+/// route core withholds earlier images (`held`), each with a note in its
+/// place that says why, so the model knows an image exists that it cannot
+/// see. The core fails a request whose images attached this turn have no
+/// route, so on that route every user image left is an earlier one. Images
+/// that go inline or through the vision tool are not withheld here, and
+/// images the session dropped stay for `withholdDroppedImages` to note.
+/// Returns `messages` itself when nothing is withheld, otherwise a copy
+/// allocated in `arena`. History is not modified.
+pub fn withholdEarlierImages(
+    arena: std.mem.Allocator,
+    messages: []const types.ChatMessage,
+    held: image_route.ToolImages,
+) ![]const types.ChatMessage {
+    const reason: []const u8 = switch (held) {
+        .none, .attached, .withheld_fallback => return messages,
+        .withheld_unknown => "fx could not confirm image input support for this model (the model is not listed in the model catalog, or the catalog is unavailable). It stays in this session and can be sent again once support is confirmed; until then, ask the user to describe it if you need it.",
+        .withheld_dead_end => "this model does not accept inline images and no vision fallback is available. Ask the user to describe it or switch to a vision-capable model if you need it.",
+    };
+    var result: ?[]types.ChatMessage = null;
+    for (messages, 0..) |message, index| {
+        var withheld: usize = 0;
+        for (message.images) |image| {
+            if (!image.droppedFromSession()) withheld += 1;
+        }
+        if (withheld == 0) continue;
+        const projected = result orelse try arena.dupe(types.ChatMessage, messages);
+        result = projected;
+        const dropped = try arena.alloc(types.ImageAttachment, message.images.len - withheld);
+        var notice: std.Io.Writer.Allocating = .init(arena);
+        var next: usize = 0;
+        for (message.images) |image| {
+            if (image.droppedFromSession()) {
+                dropped[next] = image;
+                next += 1;
+                continue;
+            }
+            notice.writer.print("[Image #{d} was not sent with this request: {s}]\n", .{ image.id, reason }) catch return error.OutOfMemory;
+        }
+        projected[index].images = dropped;
+        projected[index].content = try std.mem.concat(arena, u8, &.{ notice.written(), message.content orelse "" });
+    }
+    return result orelse messages;
+}
+
+fn writeWithheldAttachmentNotice(
+    writer: *std.Io.Writer,
+    attachment: types.ImageAttachment,
+    dimensions: ?image_data.Dimensions,
+    max_dimension: u32,
+) std.Io.Writer.Error!void {
+    if (dimensions) |size| {
+        try writer.print("[Image #{d} not sent: {s} is {d}x{d} pixels. This request permits at most {d} per side and 5 MiB encoded per image. ", .{ attachment.id, attachment.media_type, size.width, size.height, max_dimension });
+    } else if (attachment.source_ref != null and attachment.inline_data == null and imageFile(attachment) == null) {
+        try writer.print("[Image #{d} not sent: only a host source reference was supplied. This request permits at most {d} per side and 5 MiB encoded per image. ", .{ attachment.id, max_dimension });
+    } else {
+        try writer.print("[Image #{d} not sent: its dimensions could not be verified. ", .{attachment.id});
+    }
+    if (attachment.source_ref) |source_ref| {
+        try image_data.writeHostImageRecoveryNotice(writer, source_ref, max_dimension);
+        return;
+    }
+    if (savedImagePath(attachment)) |path| {
+        try writer.print("The original is saved at {s}. Use an available image tool to save a smaller copy to a new file", .{path});
+        // Saved files are named .bin or by their hash, which hides the type
+        // from tools that choose a decoder by file name.
+        if (mediaTypeExtension(attachment.media_type)) |extension| {
+            try writer.print(" ending in {s}", .{extension});
+        }
+        try writer.writeAll(", then read_file the copy. If no image tool is available, ask the user before installing one.]\n");
+        return;
+    }
+    try writer.writeAll("No local image file is available; ask the user for a smaller copy.]\n");
+}
+
+fn mediaTypeExtension(media_type: []const u8) ?[]const u8 {
+    const extensions = [_]struct { []const u8, []const u8 }{
+        .{ "image/png", ".png" },
+        .{ "image/jpeg", ".jpg" },
+        .{ "image/gif", ".gif" },
+        .{ "image/webp", ".webp" },
+    };
+    for (extensions) |entry| {
+        if (std.mem.eql(u8, media_type, entry[0])) return entry[1];
+    }
+    return null;
+}
+
+pub const AttachmentProjection = struct {
+    messages: []const types.ChatMessage,
+};
+
+/// Leaves unsafe attachments out of the request and gives the model the
+/// path of each one's saved copy (`savedImagePath`) when it has one.
+/// History is not modified. `cache` and its keys use `cache_alloc` and
+/// should outlive the requests of one turn.
+pub fn withholdOversizedAttachments(
+    arena: std.mem.Allocator,
+    cache_alloc: std.mem.Allocator,
+    cache: *AttachmentDimensionCache,
+    messages: []const types.ChatMessage,
+    max_dimension: u32,
+) !AttachmentProjection {
+    var result: ?[]types.ChatMessage = null;
+    for (messages, 0..) |message, index| {
+        if (message.images.len == 0) continue;
+        var kept: ?std.ArrayList(types.ImageAttachment) = null;
+        var notice: std.Io.Writer.Allocating = .init(arena);
+        for (message.images, 0..) |image, image_index| {
+            const dimensions = try attachmentDimensions(cache_alloc, cache, image);
+            if (dimensions != null and !dimensions.?.exceeds(max_dimension) and attachmentFitsEncodedLimit(image)) {
+                if (kept) |*list| list.appendAssumeCapacity(image);
+                continue;
+            }
+            if (kept == null) {
+                kept = try .initCapacity(arena, message.images.len);
+                kept.?.appendSliceAssumeCapacity(message.images[0..image_index]);
+            }
+            debug_trace.logf("images", "event=attachment_withheld image_id={d} max_dimension={d} dimensions_known={s}", .{ image.id, max_dimension, if (dimensions != null) "true" else "false" });
+            writeWithheldAttachmentNotice(&notice.writer, image, dimensions, max_dimension) catch return error.OutOfMemory;
+        }
+        const kept_images = kept orelse continue;
+
+        const projected = result orelse try arena.dupe(types.ChatMessage, messages);
+        result = projected;
+        projected[index].images = kept_images.items;
+        projected[index].content = try std.mem.concat(arena, u8, &.{ notice.written(), message.content orelse "" });
+    }
+    return .{ .messages = result orelse messages };
+}
+
+/// The file the model may open for `image`, or null: a session's blob
+/// (D89), otherwise the snapshot of an image not held inline. Inline bytes
+/// without a blob own the image, and a snapshot beside them lasts only as
+/// long as the process.
+pub fn savedImagePath(image: types.ImageAttachment) ?[]const u8 {
+    if (image.blob_path) |path| return path;
+    if (image.inline_data != null) return null;
+    return image.snapshot_path;
+}
+
+/// Names the saved file behind each image a request sends, so the model can
+/// open the image it sees with tools instead of searching the disk for it.
+/// Only the session's own copy is named, never the path the user attached
+/// from: that file can change after it was attached, and the copy holds
+/// the bytes the model sees (`savedImagePath`). Returns `messages` itself
+/// when no image has a saved file, otherwise a copy allocated in `arena`.
+/// History is not modified.
+pub fn noteAttachmentLocations(arena: std.mem.Allocator, messages: []const types.ChatMessage) ![]const types.ChatMessage {
+    var result: ?[]types.ChatMessage = null;
+    for (messages, 0..) |message, index| {
+        var notes: std.Io.Writer.Allocating = .init(arena);
+        for (message.images) |image| {
+            const path = savedImagePath(image) orelse continue;
+            // Quoted, because a home folder can hold spaces or brackets.
+            notes.writer.print("[Image #{d} ({s}) is saved at ", .{ image.id, image.media_type }) catch return error.OutOfMemory;
+            std.json.Stringify.value(path, .{}, &notes.writer) catch return error.OutOfMemory;
+            notes.writer.writeAll(".]\n") catch return error.OutOfMemory;
+        }
+        if (notes.written().len == 0) continue;
+        const projected = result orelse try arena.dupe(types.ChatMessage, messages);
+        result = projected;
+        projected[index].content = try std.mem.concat(arena, u8, &.{ notes.written(), message.content orelse "" });
+    }
+    return result orelse messages;
+}
+
+fn syncSnapshotDirectory(snapshot_dir: std.Io.Dir) !void {
+    io_mod.syncVerifiedDir(snapshot_dir) catch |err| switch (err) {
+        error.OperationUnsupported => {},
+        else => return err,
+    };
+}
+
+fn deleteSnapshotFile(dir: std.Io.Dir, name: []const u8, reason: []const u8) void {
+    dir.deleteFile(io_mod.getIo(), name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => debug_trace.logf(
+            "images",
+            "event=snapshot_cleanup_failed reason={s} err={s}",
+            .{ reason, @errorName(err) },
+        ),
+    };
+}
+
+fn deleteSnapshotPath(path: []const u8, reason: []const u8) void {
+    const parent_path = std.Io.Dir.path.dirname(path) orelse {
+        debug_trace.logf(
+            "images",
+            "event=snapshot_cleanup_failed reason={s} err=ImageSnapshotPathUnsafe",
+            .{reason},
+        );
+        return;
+    };
+    const name = std.Io.Dir.path.basename(path);
+    var parent = openDirectoryNoFollow(parent_path) catch |err| {
+        debug_trace.logf(
+            "images",
+            "event=snapshot_cleanup_failed reason={s} err={s}",
+            .{ reason, @errorName(err) },
+        );
+        return;
+    };
+    defer parent.close(io_mod.getIo());
+    deleteSnapshotFile(parent, name, reason);
+}
+
+pub const VerifiedSnapshot = struct {
+    bytes: []u8,
+    media_type: []const u8,
+
+    pub fn deinit(self: *VerifiedSnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+fn unsafeSnapshotPathError(err: anyerror) anyerror {
+    return switch (err) {
+        error.SymLinkLoop, error.NotDir, error.IsDir => error.ImageSnapshotPathUnsafe,
+        else => err,
+    };
+}
+
+fn validateSnapshotPathComponent(component: []const u8) !void {
+    if (component.len == 0 or
+        std.mem.eql(u8, component, ".") or
+        std.mem.eql(u8, component, "..") or
+        std.mem.findAny(u8, component, "/\\") != null)
+    {
+        return error.ImageSnapshotPathUnsafe;
+    }
+}
+
+fn openDirectoryNoFollow(path: []const u8) !std.Io.Dir {
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.ImageSnapshotPathUnsafe;
+
+    var components = std.Io.Dir.path.componentIterator(path);
+    const root = components.root() orelse return error.ImageSnapshotPathUnsafe;
+    var dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), root, .{
+        .follow_symlinks = false,
+    }) catch |err| return unsafeSnapshotPathError(err);
+    errdefer dir.close(io_mod.getIo());
+
+    while (components.next()) |component| {
+        try validateSnapshotPathComponent(component.name);
+        const next = dir.openDir(io_mod.getIo(), component.name, .{
+            .follow_symlinks = false,
+        }) catch |err| return unsafeSnapshotPathError(err);
+        dir.close(io_mod.getIo());
+        dir = next;
+    }
+    return dir;
+}
+
+/// Iteration is requested so the handle is a real descriptor. Linux returns an `O_PATH`
+/// descriptor otherwise, which serves `openat` and `renameat` but rejects the `fsync`
+/// this directory needs after the snapshot rename.
+const snapshot_dir_open_options: std.Io.Dir.OpenOptions = .{
+    .iterate = true,
+    .follow_symlinks = false,
+};
+
+fn openOrCreateSnapshotDirectoryNoFollow(path: []const u8) !std.Io.Dir {
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.ImageSnapshotPathUnsafe;
+    const parent_path = std.Io.Dir.path.dirname(path) orelse return error.ImageSnapshotPathUnsafe;
+    const name = std.Io.Dir.path.basename(path);
+    try validateSnapshotPathComponent(name);
+
+    var parent = try openDirectoryNoFollow(parent_path);
+    defer parent.close(io_mod.getIo());
+    return parent.openDir(
+        io_mod.getIo(),
+        name,
+        snapshot_dir_open_options,
+    ) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            parent.createDir(
+                io_mod.getIo(),
+                name,
+                std.Io.File.Permissions.fromMode(0o700),
+            ) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => {},
+                else => return unsafeSnapshotPathError(create_err),
+            };
+            break :blk parent.openDir(
+                io_mod.getIo(),
+                name,
+                snapshot_dir_open_options,
+            ) catch |open_err| return unsafeSnapshotPathError(open_err);
+        },
+        else => return unsafeSnapshotPathError(err),
+    };
+}
+
+/// The file that holds an image's bytes when they are not inline: the blob
+/// its session saved it as (D89), or else its captured snapshot. Readers
+/// check the bytes against the image's digest either way.
+const ImageFile = struct {
+    path: []const u8,
+    /// A fork hard-links its source's blobs (D44), so a blob may have more
+    /// than one link. A snapshot in the shared temporary folder must have
+    /// only its own.
+    blob: bool,
+
+    /// Whether `stat` is a file this source may be read from.
+    fn accepts(source: ImageFile, stat: std.Io.File.Stat) bool {
+        return stat.kind == .file and (source.blob or stat.nlink == 1);
+    }
+
+    /// A blob is in fx's own private store, so the folders on its path are
+    /// opened as the path names them, symlinks and all. A snapshot in the
+    /// shared temporary folder has no symlink anywhere on its path. Neither
+    /// file may itself be a symlink.
+    fn open(source: ImageFile) !std.Io.File {
+        if (!source.blob) return openSnapshotFileNoFollow(source.path);
+        if (!std.Io.Dir.path.isAbsolute(source.path)) return error.ImageSnapshotPathUnsafe;
+        return std.Io.Dir.openFileAbsolute(io_mod.getIo(), source.path, .{
+            .allow_directory = false,
+            .follow_symlinks = false,
+        }) catch |err| return unsafeSnapshotPathError(err);
+    }
+};
+
+fn imageFile(attachment: types.ImageAttachment) ?ImageFile {
+    if (attachment.blob_path) |path| return .{ .path = path, .blob = true };
+    if (attachment.snapshot_path) |path| return .{ .path = path, .blob = false };
+    return null;
+}
+
+fn openSnapshotFileNoFollow(path: []const u8) !std.Io.File {
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.ImageSnapshotPathUnsafe;
+    const parent_path = std.Io.Dir.path.dirname(path) orelse return error.ImageSnapshotPathUnsafe;
+    const name = std.Io.Dir.path.basename(path);
+    try validateSnapshotPathComponent(name);
+
+    var parent = try openDirectoryNoFollow(parent_path);
+    defer parent.close(io_mod.getIo());
+    return parent.openFile(io_mod.getIo(), name, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch |err| return unsafeSnapshotPathError(err);
+}
+
+pub fn loadVerifiedSnapshot(
+    alloc: std.mem.Allocator,
+    attachment: types.ImageAttachment,
+    budget: CaptureBudget,
+) !VerifiedSnapshot {
+    if (attachment.inline_data) |inline_bytes| {
+        const expected_inline = attachment.snapshot_sha256 orelse return error.MissingImageSnapshot;
+        if (expected_inline.len != snapshot_digest_hex_len) return error.InvalidImageSnapshotDigest;
+        try budget.check();
+        if (inline_bytes.len > max_image_bytes) return error.ImageTooLarge;
+        var actual: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(inline_bytes, &actual, .{});
+        const actual_hex = std.fmt.bytesToHex(actual, .lower);
+        if (!std.mem.eql(u8, actual_hex[0..], expected_inline)) return error.ImageSnapshotCorrupt;
+        const detected = detectMediaTypeFromBytes(inline_bytes) orelse
+            return error.UnsupportedImageType;
+        if (!std.mem.eql(u8, detected, attachment.media_type)) return error.ImageSnapshotMediaTypeMismatch;
+        return .{
+            .bytes = try alloc.dupe(u8, inline_bytes),
+            .media_type = detected,
+        };
+    }
+    const source = imageFile(attachment) orelse return error.MissingImageSnapshot;
+    const expected = attachment.snapshot_sha256 orelse return error.MissingImageSnapshot;
+    if (expected.len != snapshot_digest_hex_len) return error.InvalidImageSnapshotDigest;
+    try budget.check();
+
+    var file = try source.open();
+    defer file.close(io_mod.getIo());
+    const stat = try file.stat(io_mod.getIo());
+    if (!source.accepts(stat)) return error.NotRegularFile;
+    const size = std.math.cast(usize, stat.size) orelse return error.ImageTooLarge;
+    if (size > max_image_bytes) return error.ImageTooLarge;
+
+    var hasher = Sha256.init(.{});
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(alloc);
+    try bytes.ensureTotalCapacity(alloc, size);
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.readerStreaming(io_mod.getIo(), &read_buf);
+    var transfer_buf: [transfer_buffer_bytes]u8 = undefined;
+    while (true) {
+        try budget.check();
+        const n = try reader.interface.readSliceShort(&transfer_buf);
+        if (n == 0) break;
+        if (n > max_image_bytes - bytes.items.len) return error.ImageTooLarge;
+        try bytes.appendSlice(alloc, transfer_buf[0..n]);
+        hasher.update(transfer_buf[0..n]);
+    }
+    var actual: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&actual);
+    const actual_hex = std.fmt.bytesToHex(actual, .lower);
+    if (!std.mem.eql(u8, actual_hex[0..], expected)) return error.ImageSnapshotCorrupt;
+
+    const detected = detectMediaTypeFromBytes(bytes.items) orelse
+        return error.UnsupportedImageType;
+    if (!std.mem.eql(u8, detected, attachment.media_type)) return error.ImageSnapshotMediaTypeMismatch;
+    return .{
+        .bytes = try bytes.toOwnedSlice(alloc),
+        .media_type = detected,
+    };
+}
+
+/// Keeps a captured snapshot's verified bytes on the attachment itself, as
+/// an in-memory capture does, so durable serializers save them with the
+/// turn: a v2 session, which is not on disk at capture (D44), saves them as
+/// its own blob when the turn starts, or inside the user's item when it
+/// cannot (D89). The capture still went through the platform resizer; its
+/// temporary snapshot file stays until the process's snapshot folder is
+/// removed.
+pub fn inlineCapturedSnapshot(alloc: std.mem.Allocator, attachment: *types.ImageAttachment) !void {
+    if (attachment.inline_data != null) return;
+    const verified = try loadVerifiedSnapshot(alloc, attachment.*, .{});
+    attachment.inline_data = verified.bytes;
+}
+
+/// `inlineCapturedSnapshot` for each attachment.
+pub fn inlineCapturedSnapshots(alloc: std.mem.Allocator, attachments: []types.ImageAttachment) !void {
+    for (attachments) |*attachment| try inlineCapturedSnapshot(alloc, attachment);
+}
+
+/// Returns a new attachment with independently owned snapshot bytes for `new_id`.
+/// The source snapshot remains owned by the caller. An image whose bytes are
+/// inline or in its session's blob is those bytes (D84), so its clone
+/// carries them inline and writes no file: a saved session then saves it as
+/// a blob as it does any prompt image, where a copy in the process's
+/// temporary folder would be gone once fx exits (D89).
+pub fn cloneVerifiedImageAttachment(
+    alloc: std.mem.Allocator,
+    attachment: types.ImageAttachment,
+    new_id: usize,
+) !types.ImageAttachment {
+    if (new_id == 0) return error.InvalidImageId;
+    if (attachment.inline_data != null or attachment.blob_path != null) {
+        const digest = attachment.snapshot_sha256 orelse return error.MissingImageSnapshot;
+        var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+        errdefer verified.deinit(alloc);
+        const path = try alloc.dupe(u8, attachment.path);
+        errdefer alloc.free(path);
+        const media_type = try alloc.dupe(u8, verified.media_type);
+        errdefer alloc.free(media_type);
+        return .{
+            .id = new_id,
+            .path = path,
+            .media_type = media_type,
+            .snapshot_sha256 = try alloc.dupe(u8, digest),
+            .inline_data = verified.bytes,
+        };
+    }
+    const source_snapshot_path = attachment.snapshot_path orelse
+        return error.MissingImageSnapshot;
+    const snapshot_dir = std.Io.Dir.path.dirname(source_snapshot_path) orelse
+        return error.ImageSnapshotPathUnsafe;
+    return copyVerifiedImageAttachmentToDir(
+        alloc,
+        attachment,
+        new_id,
+        snapshot_dir,
+    );
+}
+
+fn copyVerifiedImageAttachmentToDir(
+    alloc: std.mem.Allocator,
+    attachment: types.ImageAttachment,
+    new_id: usize,
+    snapshot_dir: []const u8,
+) !types.ImageAttachment {
+    if (new_id == 0) return error.InvalidImageId;
+    const source_digest = attachment.snapshot_sha256 orelse
+        return error.MissingImageSnapshot;
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+
+    const path = try alloc.dupe(u8, attachment.path);
+    errdefer alloc.free(path);
+    const media_type = try alloc.dupe(u8, verified.media_type);
+    errdefer alloc.free(media_type);
+    const digest = try alloc.dupe(u8, source_digest);
+    errdefer alloc.free(digest);
+
+    const final_name = try alloc.print(
+        "image-{d}-{s}.bin",
+        .{ new_id, source_digest[0..16] },
+    );
+    defer alloc.free(final_name);
+    const final_path = try std.Io.Dir.path.join(alloc, &.{ snapshot_dir, final_name });
+    errdefer alloc.free(final_path);
+
+    const temp_name = try alloc.print(
+        "image-{d}.clone.{d}",
+        .{ new_id, io_mod.nanoTimestamp() },
+    );
+    defer alloc.free(temp_name);
+
+    var snapshot_dir_handle = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer snapshot_dir_handle.close(io_mod.getIo());
+    var cleanup_temp = true;
+    defer if (cleanup_temp) {
+        deleteSnapshotFile(snapshot_dir_handle, temp_name, "clone_snapshot_temp");
+    };
+
+    var destination = try snapshot_dir_handle.createFile(
+        io_mod.getIo(),
+        temp_name,
+        .{
+            .truncate = false,
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+            .resolve_beneath = true,
+        },
+    );
+    defer destination.close(io_mod.getIo());
+    try destination.writeStreamingAll(io_mod.getIo(), verified.bytes);
+    try destination.sync(io_mod.getIo());
+    try snapshot_dir_handle.rename(
+        temp_name,
+        snapshot_dir_handle,
+        final_name,
+        io_mod.getIo(),
+    );
+    cleanup_temp = false;
+    var cleanup_final = true;
+    errdefer if (cleanup_final) {
+        deleteSnapshotFile(snapshot_dir_handle, final_name, "clone_snapshot_final");
+    };
+    try syncSnapshotDirectory(snapshot_dir_handle);
+
+    cleanup_final = false;
+    return .{
+        .id = new_id,
+        .path = path,
+        .media_type = media_type,
+        .snapshot_path = final_path,
+        .snapshot_sha256 = digest,
+    };
+}
+
+pub fn captureImageSnapshots(
+    alloc: std.mem.Allocator,
+    attachments: []types.ImageAttachment,
+    snapshot_dir: []const u8,
+    budget: CaptureBudget,
+) !void {
+    var captured: usize = 0;
+    errdefer {
+        for (attachments[0..captured]) |*attachment| discardImageSnapshot(alloc, attachment);
+    }
+    for (attachments) |*attachment| {
+        try captureImageSnapshotWithBudget(alloc, attachment, snapshot_dir, budget);
+        captured += 1;
+    }
+}
+
+pub fn discardImageSnapshot(alloc: std.mem.Allocator, attachment: *types.ImageAttachment) void {
+    if (attachment.snapshot_path) |path| {
+        deleteSnapshotPath(path, "discard_snapshot");
+        alloc.free(path);
+        attachment.snapshot_path = null;
+    }
+    if (attachment.snapshot_sha256) |digest| {
+        alloc.free(digest);
+        attachment.snapshot_sha256 = null;
+    }
+}
+
+pub fn discardImageSnapshots(alloc: std.mem.Allocator, attachments: []types.ImageAttachment) void {
+    for (attachments, 0..) |*attachment, index| {
+        if (attachment.snapshot_path) |path| {
+            var duplicate = false;
+            for (attachments[0..index]) |previous| {
+                if (previous.snapshot_path) |previous_path| {
+                    if (std.mem.eql(u8, path, previous_path)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+            if (!duplicate) deleteSnapshotPath(path, "discard_snapshot_slice");
+        }
+        if (attachment.snapshot_path) |owned| alloc.free(owned);
+        if (attachment.snapshot_sha256) |owned| alloc.free(owned);
+        attachment.snapshot_path = null;
+        attachment.snapshot_sha256 = null;
+    }
+}
+
+pub fn deleteUnreferencedImageSnapshots(
+    candidates: []const types.ImageAttachment,
+    retained: []const types.ImageAttachment,
+) void {
+    for (candidates, 0..) |candidate, index| {
+        const path = candidate.snapshot_path orelse continue;
+        var duplicate = false;
+        for (candidates[0..index]) |previous| {
+            if (previous.snapshot_path) |previous_path| {
+                if (std.mem.eql(u8, path, previous_path)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+        }
+        if (duplicate) continue;
+
+        for (retained) |attachment| {
+            if (attachment.snapshot_path) |retained_path| {
+                if (std.mem.eql(u8, path, retained_path)) break;
+            }
+        } else {
+            deleteSnapshotPath(path, "discard_unreferenced_snapshot");
+        }
+    }
+}
+
+pub fn discardImageAttachment(alloc: std.mem.Allocator, attachment: types.ImageAttachment) void {
+    var owned = attachment;
+    discardImageSnapshot(alloc, &owned);
+    types.freeImageAttachment(alloc, owned);
+}
+
+pub fn discardImageAttachmentSlice(alloc: std.mem.Allocator, attachments: []types.ImageAttachment) void {
+    discardImageSnapshots(alloc, attachments);
+    types.freeImageAttachmentSlice(alloc, attachments);
+}
+
+pub fn writeImageBadge(writer: *std.Io.Writer, image_id: usize, abs_path: []const u8) !void {
+    try writer.writeAll("\x1b]8;;file://");
+    try writePercentEncodedPath(writer, abs_path);
+    try writer.print("\x1b\\[Image {d}]\x1b]8;;\x1b\\", .{image_id});
+}
+
+pub fn writeImageBadgeClipped(writer: *std.Io.Writer, image_id: usize, abs_path: []const u8, max_cells: usize) !void {
+    if (max_cells == 0) return;
+
+    var label_buf: [64]u8 = undefined;
+    const label = try std.mem.print(&label_buf, "[Image {d}]", .{image_id});
+    const clipped_label = display_width.prefixByWidth(label, max_cells);
+
+    try writer.writeAll("\x1b]8;;file://");
+    try writePercentEncodedPath(writer, abs_path);
+    try writer.writeAll("\x1b\\");
+    try writer.writeAll(clipped_label);
+    try writer.writeAll("\x1b]8;;\x1b\\");
+}
+
+pub fn imageBadgeVisibleWidth(image_id: usize) usize {
+    var digits: usize = 1;
+    var n = image_id;
+    while (n >= 10) {
+        digits += 1;
+        n /= 10;
+    }
+    return "[Image ".len + digits + "]".len;
+}
+
+pub fn allocateImageId(counter: *usize) usize {
+    const id = counter.*;
+    counter.* += 1;
+    return id;
+}
+
+pub const ImagePlaceholderSpan = struct { start: usize, end: usize, id: usize };
+
+const ImagePlaceholderMatch = struct { id: usize, length: usize };
+
+const image_placeholder_prefix = "[Image #";
+
+pub fn writeImagePlaceholder(writer: *std.Io.Writer, id: usize) std.Io.Writer.Error!void {
+    return writer.print("{s}{d}]", .{ image_placeholder_prefix, id });
+}
+
+pub fn formatImagePlaceholder(buf: []u8, id: usize) error{NoSpaceLeft}![]const u8 {
+    var writer: std.Io.Writer = .fixed(buf);
+    writeImagePlaceholder(&writer, id) catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+pub fn matchImagePlaceholder(text: []const u8, start: usize) ?ImagePlaceholderMatch {
+    if (start > text.len or text.len - start < image_placeholder_prefix.len) return null;
+    if (!std.mem.eql(u8, text[start .. start + image_placeholder_prefix.len], image_placeholder_prefix)) return null;
+
+    var i = start + image_placeholder_prefix.len;
+    var id: usize = 0;
+    var digits: usize = 0;
+    while (i < text.len and text[i] >= '0' and text[i] <= '9') : (i += 1) {
+        id = std.math.mul(usize, id, 10) catch return null;
+        id = std.math.add(usize, id, text[i] - '0') catch return null;
+        digits += 1;
+    }
+    if (digits == 0) return null;
+    if (i >= text.len or text[i] != ']') return null;
+    return .{ .id = id, .length = i + 1 - start };
+}
+
+pub fn imageAttachmentsSortedById(images: []const types.ImageAttachment) bool {
+    var previous: ?usize = null;
+    for (images) |image| {
+        if (previous) |id| {
+            if (image.id <= id) return false;
+        }
+        previous = image.id;
+    }
+    return true;
+}
+
+pub fn findImageIndexByIdSorted(images: []const types.ImageAttachment, id: usize) ?usize {
+    var left: usize = 0;
+    var right: usize = images.len;
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        const mid_id = images[mid].id;
+        if (mid_id == id) return mid;
+        if (mid_id < id) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+    return null;
+}
+
+pub fn findImageIndexById(images: []const types.ImageAttachment, id: usize) ?usize {
+    for (images, 0..) |image, index| {
+        if (image.id == id) return index;
+    }
+    return null;
+}
+
+pub const ImageIdBounds = struct {
+    maximum_id: ?usize,
+    next_id: usize,
+};
+
+pub fn validate_image_ids(image_ids: []const usize) error{ EmptyImageIds, InvalidImageId, DuplicateImageId }!void {
+    if (image_ids.len == 0) return error.EmptyImageIds;
+    for (image_ids, 0..) |image_id, index| {
+        if (image_id == 0) return error.InvalidImageId;
+        for (image_ids[0..index]) |previous_id| {
+            if (image_id == previous_id) return error.DuplicateImageId;
+        }
+    }
+}
+
+/// Returns a caller-owned slice of pointers borrowed from `catalog`. The
+/// caller frees only the returned slice with `alloc`.
+pub fn resolve_authorized_images(
+    alloc: std.mem.Allocator,
+    catalog: []const types.ImageAttachment,
+    requested_ids: []const usize,
+) (std.mem.Allocator.Error || error{
+    EmptyImageIds,
+    InvalidImageId,
+    DuplicateImageId,
+    InvalidImageCatalog,
+    UnauthorizedImageId,
+})![]const *const types.ImageAttachment {
+    try validate_image_ids(requested_ids);
+    if (!imageAttachmentsSortedById(catalog)) return error.InvalidImageCatalog;
+
+    const resolved = try alloc.alloc(*const types.ImageAttachment, requested_ids.len);
+    errdefer alloc.free(resolved);
+    for (requested_ids, 0..) |image_id, index| {
+        const catalog_index = findImageIndexByIdSorted(catalog, image_id) orelse
+            return error.UnauthorizedImageId;
+        resolved[index] = &catalog[catalog_index];
+    }
+    return resolved;
+}
+
+pub fn calculate_next_image_id(
+    images: []const types.ImageAttachment,
+) error{ InvalidImageId, ImageIdOverflow }!ImageIdBounds {
+    var maximum_id: ?usize = null;
+    for (images) |image| {
+        if (image.id == 0) return error.InvalidImageId;
+        if (maximum_id == null or image.id > maximum_id.?) maximum_id = image.id;
+    }
+    if (maximum_id) |value| {
+        return .{
+            .maximum_id = value,
+            .next_id = std.math.add(usize, value, 1) catch return error.ImageIdOverflow,
+        };
+    }
+    return .{ .maximum_id = null, .next_id = 1 };
+}
+
+/// Returns the placeholder span at `cursor` — either enclosing the cursor or
+/// with its closing `]` at `cursor - 1`. Used by backspace to delete the whole
+/// `[Image #N]` token atomically.
+pub fn findEnclosingImagePlaceholder(text: []const u8, cursor: usize) ?ImagePlaceholderSpan {
+    var scan = cursor;
+    while (scan > 0) {
+        scan -= 1;
+        if (text[scan] != '[') continue;
+        const match = matchImagePlaceholder(text, scan) orelse continue;
+        const end = scan + match.length;
+        if (cursor > end) return null;
+        return .{ .start = scan, .end = end, .id = match.id };
+    }
+    return null;
+}
+
+/// Returns the placeholder span starting at `byte_offset`, or null if no
+/// placeholder begins there. Used by cursor-right to skip the whole token.
+pub fn imagePlaceholderSpanStartingAt(text: []const u8, byte_offset: usize) ?ImagePlaceholderSpan {
+    if (byte_offset >= text.len or text[byte_offset] != '[') return null;
+    const match = matchImagePlaceholder(text, byte_offset) orelse return null;
+    return .{ .start = byte_offset, .end = byte_offset + match.length, .id = match.id };
+}
+
+/// Returns the placeholder span ending exactly at `byte_offset`, or null if no
+/// placeholder ends there. Used by cursor-left to skip the whole token.
+pub fn imagePlaceholderSpanEndingAt(text: []const u8, byte_offset: usize) ?ImagePlaceholderSpan {
+    if (byte_offset == 0 or byte_offset > text.len) return null;
+    if (text[byte_offset - 1] != ']') return null;
+    var scan = byte_offset;
+    while (scan > 0) {
+        scan -= 1;
+        if (text[scan] != '[') continue;
+        const match = matchImagePlaceholder(text, scan) orelse continue;
+        if (scan + match.length == byte_offset) {
+            return .{ .start = scan, .end = byte_offset, .id = match.id };
+        }
+        return null;
+    }
+    return null;
+}
+
+pub const ExpandWithBadgesResult = struct { cursor_out: ?usize, expanded_any: bool };
+
+/// Replaces known image placeholders with path-free badges keyed by attachment ID.
+/// Unknown placeholders pass through; `cursor_out` maps `cursor_in` to output bytes.
+pub fn expandPlaceholdersWithBadges(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    text: []const u8,
+    images: []const types.ImageAttachment,
+    cursor_in: ?usize,
+) !ExpandWithBadgesResult {
+    return expandPlaceholdersWithBadgeMode(
+        alloc,
+        writer,
+        text,
+        images,
+        cursor_in,
+        false,
+    );
+}
+
+pub fn expandPlaceholdersWithLinkedBadges(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    text: []const u8,
+    images: []const types.ImageAttachment,
+    cursor_in: ?usize,
+) !ExpandWithBadgesResult {
+    return expandPlaceholdersWithBadgeMode(
+        alloc,
+        writer,
+        text,
+        images,
+        cursor_in,
+        true,
+    );
+}
+
+fn expandPlaceholdersWithBadgeMode(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    text: []const u8,
+    images: []const types.ImageAttachment,
+    cursor_in: ?usize,
+    linked: bool,
+) !ExpandWithBadgesResult {
+    var cursor_out: ?usize = null;
+    var written: usize = 0;
+    var expanded_any = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (cursor_in) |c| {
+            if (cursor_out == null and i >= c) cursor_out = written;
+        }
+        if (text[i] == '[') {
+            if (matchImagePlaceholder(text, i)) |match| {
+                if (findImageById(images, match.id)) |img| {
+                    expanded_any = true;
+                    var badge_buf: std.Io.Writer.Allocating = .init(alloc);
+                    defer badge_buf.deinit();
+                    if (linked) {
+                        try writeImageBadge(&badge_buf.writer, img.id, img.path);
+                    } else {
+                        try badge_buf.writer.print("[Image {d}]", .{img.id});
+                    }
+                    const badge_bytes = badge_buf.written();
+                    try writer.writeAll(badge_bytes);
+                    written += badge_bytes.len;
+                } else {
+                    try writer.writeAll(text[i .. i + match.length]);
+                    written += match.length;
+                }
+                i += match.length;
+                continue;
+            }
+        }
+        try writer.writeByte(text[i]);
+        written += 1;
+        i += 1;
+    }
+    if (cursor_in) |c| {
+        if (cursor_out == null and c >= text.len) cursor_out = written;
+    }
+    return .{ .cursor_out = cursor_out, .expanded_any = expanded_any };
+}
+
+fn findImageById(images: []const types.ImageAttachment, id: usize) ?types.ImageAttachment {
+    for (images) |img| {
+        if (img.id == id) return img;
+    }
+    return null;
+}
+
+fn writePercentEncodedPath(writer: *std.Io.Writer, path: []const u8) !void {
+    for (path) |byte| {
+        if (isUriPathSafe(byte)) {
+            try writer.writeByte(byte);
+        } else {
+            try writer.print("%{X:0>2}", .{byte});
+        }
+    }
+}
+
+fn isUriPathSafe(byte: u8) bool {
+    return (byte >= 'A' and byte <= 'Z') or
+        (byte >= 'a' and byte <= 'z') or
+        (byte >= '0' and byte <= '9') or
+        byte == '-' or
+        byte == '.' or
+        byte == '_' or
+        byte == '~' or
+        byte == '/';
+}
+
+pub fn writeImageFilePartJson(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    attachment: types.ImageAttachment,
+) !void {
+    return writeImageFilePartJsonWithBudget(alloc, writer, attachment, .{});
+}
+
+pub fn writeImageFilePartJsonWithBudget(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    attachment: types.ImageAttachment,
+    budget: CaptureBudget,
+) !void {
+    var snapshot = try loadVerifiedSnapshot(alloc, attachment, budget);
+    defer snapshot.deinit(alloc);
+    try writeVerifiedImageFilePartJsonWithBudget(writer, snapshot, budget);
+}
+
+pub fn writeReviewImageFilePartJson(
+    alloc: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    attachment: types.ImageAttachment,
+    deadline: std.Io.Clock.Timestamp,
+    cancel_flag: *std.atomic.Value(bool),
+) !void {
+    return writeImageFilePartJsonWithBudget(alloc, writer, attachment, .{
+        .deadline = deadline,
+        .cancel_flag = cancel_flag,
+    });
+}
+
+pub fn writeVerifiedImageFilePartJsonWithBudget(
+    writer: *std.Io.Writer,
+    snapshot: VerifiedSnapshot,
+    budget: CaptureBudget,
+) !void {
+    try budget.check();
+
+    try writer.writeAll("{\"type\":\"file\",\"mediaType\":\"");
+    try writer.writeAll(snapshot.media_type);
+    try writer.writeAll("\",\"data\":{\"type\":\"data\",\"data\":\"");
+
+    var offset: usize = 0;
+    while (offset < snapshot.bytes.len) {
+        try budget.check();
+        const end = @min(offset + 3 * 1024, snapshot.bytes.len);
+        try std.base64.standard.Encoder.encodeWriter(writer, snapshot.bytes[offset..end]);
+        offset = end;
+    }
+
+    try writer.writeAll("\"}}");
+    try budget.check();
+}
+
+pub fn extractInlineImageAttachments(
+    alloc: std.mem.Allocator,
+    workspace_root: []const u8,
+    text: []const u8,
+    first_image_id: usize,
+) !ExtractedInlineImages {
+    var images: std.ArrayList(types.ImageAttachment) = .empty;
+    errdefer {
+        for (images.items) |image| types.freeImageAttachment(alloc, image);
+        images.deinit(alloc);
+    }
+    var replacements: std.ArrayList(InlineImageReplacement) = .empty;
+    defer replacements.deinit(alloc);
+
+    var index: usize = 0;
+    while (true) {
+        while (index < text.len and isWhitespace(text[index])) : (index += 1) {}
+        if (index == text.len) break;
+        const start = index;
+        index = nextShellTokenEnd(text, start);
+        const token = splitImagePathToken(text[start..index]) orelse continue;
+        var image = load_inline_image_attachment(alloc, workspace_root, token) catch |err| switch (err) {
+            error.FileNotFound,
+            error.HomeNotSet,
+            error.InvalidPath,
+            error.NotRegularFile,
+            error.UnsupportedImageType,
+            => {
+                debug_trace.logf("images", "event=inline_image_promotion_skipped reason={s}", .{@errorName(err)});
+                continue;
+            },
+            else => return err,
+        };
+        var owns_image = true;
+        errdefer if (owns_image) types.freeImageAttachment(alloc, image);
+        image.id = std.math.add(usize, first_image_id, images.items.len) catch return error.ImageIdOverflow;
+        if (image.id == 0) return error.InvalidImageId;
+        _ = std.math.add(usize, image.id, 1) catch return error.ImageIdOverflow;
+        try images.ensureUnusedCapacity(alloc, 1);
+        try replacements.append(alloc, .{
+            .source = .{ .raw_start = start, .raw_end = index - token.suffix.len },
+            .id = image.id,
+        });
+        images.appendAssumeCapacity(image);
+        owns_image = false;
+    }
+
+    const owned_images = try images.toOwnedSlice(alloc);
+    errdefer types.freeImageAttachmentSlice(alloc, owned_images);
+    const rewritten = try rewrite_inline_images(alloc, text, replacements.items);
+    return .{ .text = rewritten.text, .images = owned_images, .edits = rewritten.edits };
+}
+
+pub const ClipboardImageAttachment = struct {
+    attachment: ?types.ImageAttachment,
+    source_dir: []u8,
+
+    pub fn takeAttachment(self: *ClipboardImageAttachment) types.ImageAttachment {
+        const attachment = self.attachment orelse unreachable;
+        self.attachment = null;
+        return attachment;
+    }
+
+    pub fn deinit(self: *ClipboardImageAttachment, alloc: std.mem.Allocator) void {
+        if (self.attachment) |attachment| types.freeImageAttachment(alloc, attachment);
+        cleanupSnapshotDir(self.source_dir);
+        alloc.free(self.source_dir);
+        self.* = undefined;
+    }
+};
+
+pub fn loadClipboardImageAttachment(alloc: std.mem.Allocator) !ClipboardImageAttachment {
+    if (builtin.target.os.tag != .macos) return error.Unsupported;
+
+    const source_dir = try createTempSnapshotDir(alloc);
+    errdefer {
+        cleanupSnapshotDir(source_dir);
+        alloc.free(source_dir);
+    }
+    const temp_path = try std.Io.Dir.path.join(alloc, &.{ source_dir, "clipboard.png" });
+    defer alloc.free(temp_path);
+
+    const write_script = try alloc.print(
+        "set outFile to POSIX file \"{s}\"\n" ++
+            "set pngData to the clipboard as «class PNGf»\n" ++
+            "set fileRef to open for access outFile with write permission\n" ++
+            "set eof fileRef to 0\n" ++
+            "write pngData to fileRef\n" ++
+            "close access fileRef\n",
+        .{temp_path},
+    );
+    defer alloc.free(write_script);
+
+    const argv = [_][]const u8{ "osascript", "-e", write_script };
+    const result = try std.process.run(alloc, io_mod.getIo(), .{
+        .argv = &argv,
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(4096),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            const attachment = try loadImageAttachment(alloc, temp_path);
+            return .{
+                .attachment = attachment,
+                .source_dir = source_dir,
+            };
+        },
+        else => {},
+    }
+
+    return error.NoClipboardImage;
+}
+
+fn readImageHeaderBytes(path: []const u8, out: []u8) ![]const u8 {
+    const zio = io_mod.getIo();
+    var file = try std.Io.Dir.openFileAbsolute(zio, path, .{});
+    defer file.close(zio);
+
+    const stat = try file.stat(zio);
+    if (stat.kind != .file) return error.NotRegularFile;
+    if (stat.size > max_image_bytes) return error.ImageTooLarge;
+    return readImageHeaderFromFile(&file, @intCast(stat.size), out);
+}
+
+fn readImageHeaderFromFile(
+    file: *std.Io.File,
+    expected_size: usize,
+    out: []u8,
+) ![]const u8 {
+    const zio = io_mod.getIo();
+    const header_len = @min(expected_size, out.len);
+
+    var read_buf: [4096]u8 = undefined;
+    var r = file.reader(zio, &read_buf);
+    const n = try r.interface.readSliceShort(out[0..header_len]);
+    return out[0..n];
+}
+
+fn normalizePathInput(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    const slice = stripBalancedOuterQuotes(trimmed);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    while (i < slice.len) : (i += 1) {
+        if (slice[i] == '\\' and i + 1 < slice.len) {
+            i += 1;
+            try out.writer.writeByte(slice[i]);
+            continue;
+        }
+        try out.writer.writeByte(slice[i]);
+    }
+
+    return out.toOwnedSlice();
+}
+
+const detectMediaTypeFromBytes = @import("image_data.zig").detectMediaTypeFromBytes;
+
+pub const ImagePathToken = struct {
+    path: []const u8,
+    suffix: []const u8,
+    /// Canonical @ payload without quotes; decode once before literal loading.
+    literal_payload: bool = false,
+};
+
+/// Loads one parsed image token. Caller owns the returned attachment.
+pub fn load_inline_image_attachment(alloc: std.mem.Allocator, workspace_root: []const u8, token: ImagePathToken) !types.ImageAttachment {
+    if (!token.literal_payload) return loadUserImageAttachment(alloc, workspace_root, token.path);
+    const path = try file_picker_path.decode_alloc(alloc, token.path);
+    defer alloc.free(path);
+    return load_user_image_literal(alloc, workspace_root, path);
+}
+
+pub fn splitImagePathToken(raw: []const u8) ?ImagePathToken {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "@\"")) {
+        const token = file_picker_path.parse_at(trimmed, 0) orelse return null;
+        if (token.status != .complete or token.end != trimmed.len) return null;
+        if (token.canonical_escapes) {
+            const payload = trimmed[token.path_start..token.path_end];
+            var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const decoded = file_picker_path.decode_into(payload, &storage) catch return null;
+            const dot = std.mem.findScalarLast(u8, decoded, '.') orelse return null;
+            if (!supported_path_extension(decoded[dot..])) return null;
+            return .{ .path = payload, .suffix = trimmed[token.quote_end.?..], .literal_payload = true };
+        }
+        // Noncanonical escapes keep legacy eligibility (notably backslash-dot).
+    }
+    const path_start: usize = if (std.mem.startsWith(u8, trimmed, "@")) 1 else 0;
+    if (path_start == 1 and std.mem.startsWith(u8, trimmed[path_start..], "@")) return null;
+    const suffix_start = trailingSentencePunctuationStart(trimmed);
+    if (path_start >= suffix_start) return null;
+    const path = trimmed[path_start..suffix_start];
+    const ext = extensionIgnoringEscapes(stripBalancedOuterQuotes(path));
+    if (!supported_path_extension(ext)) return null;
+    return .{ .path = path, .suffix = trimmed[suffix_start..] };
+}
+
+fn supported_path_extension(ext: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(ext, ".png") or
+        std.ascii.eqlIgnoreCase(ext, ".jpg") or
+        std.ascii.eqlIgnoreCase(ext, ".jpeg") or
+        std.ascii.eqlIgnoreCase(ext, ".gif") or
+        std.ascii.eqlIgnoreCase(ext, ".webp");
+}
+
+pub fn looksLikeImagePathToken(raw: []const u8) bool {
+    return splitImagePathToken(raw) != null;
+}
+
+fn trailingSentencePunctuationStart(bytes: []const u8) usize {
+    var suffix_start = bytes.len;
+    var quote: ?u8 = null;
+    var escaped = false;
+    for (bytes, 0..) |byte, index| {
+        if (escaped) {
+            suffix_start = index + 1;
+            escaped = false;
+            continue;
+        }
+        if (byte == '\\') {
+            suffix_start = index + 1;
+            escaped = true;
+            continue;
+        }
+        if (quote) |active| {
+            suffix_start = index + 1;
+            if (byte == active) quote = null;
+            continue;
+        }
+        if (byte == '"' or byte == '\'') {
+            suffix_start = index + 1;
+            quote = byte;
+            continue;
+        }
+        if (!isSentencePunctuation(byte)) suffix_start = index + 1;
+    }
+    return suffix_start;
+}
+
+fn isSentencePunctuation(byte: u8) bool {
+    return byte == ',' or byte == '.' or byte == ';' or
+        byte == ':' or byte == '!' or byte == '?';
+}
+
+fn stripBalancedOuterQuotes(bytes: []const u8) []const u8 {
+    if (bytes.len < 2) return bytes;
+    if ((bytes[0] == '"' and bytes[bytes.len - 1] == '"') or
+        (bytes[0] == '\'' and bytes[bytes.len - 1] == '\''))
+    {
+        return bytes[1 .. bytes.len - 1];
+    }
+    return bytes;
+}
+
+pub fn hasImagePathToken(bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        while (i < bytes.len and isWhitespace(bytes[i])) : (i += 1) {}
+        if (i >= bytes.len) break;
+        const start = i;
+        i = nextShellTokenEnd(bytes, start);
+        if (looksLikeImagePathToken(bytes[start..i])) return true;
+    }
+    return false;
+}
+
+fn extensionIgnoringEscapes(raw: []const u8) []const u8 {
+    var dot_index: ?usize = null;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '\\' and i + 1 < raw.len) {
+            i += 1;
+            continue;
+        }
+        if (raw[i] == '.') dot_index = i;
+    }
+    return if (dot_index) |idx| raw[idx..] else "";
+}
+
+pub const nextShellTokenEnd = file_picker_path.token_end;
+
+pub fn isWhitespace(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r';
+}
+
+test "writeImageBadge emits OSC 8 hyperlink wrapping the badge" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadge(&out.writer, 2, "/tmp/pic.png");
+
+    try std.testing.expectEqualStrings(
+        "\x1b]8;;file:///tmp/pic.png\x1b\\[Image 2]\x1b]8;;\x1b\\",
+        out.written(),
+    );
+}
+
+test "writeImageBadge percent-encodes spaces in path" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadge(&out.writer, 1, "/Users/me/CleanShot 2026.png");
+
+    try std.testing.expectEqualStrings(
+        "\x1b]8;;file:///Users/me/CleanShot%202026.png\x1b\\[Image 1]\x1b]8;;\x1b\\",
+        out.written(),
+    );
+}
+
+test "writeImageBadge percent-encodes URI-reserved characters" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadge(&out.writer, 1, "/tmp/a#b?c%d.png");
+
+    try std.testing.expectEqualStrings(
+        "\x1b]8;;file:///tmp/a%23b%3Fc%25d.png\x1b\\[Image 1]\x1b]8;;\x1b\\",
+        out.written(),
+    );
+}
+
+test "imageBadgeVisibleWidth uses the rendered visual ordinal" {
+    try std.testing.expectEqual(@as(usize, "[Image 1]".len), imageBadgeVisibleWidth(1));
+    try std.testing.expectEqual(@as(usize, "[Image 10]".len), imageBadgeVisibleWidth(10));
+    try std.testing.expectEqual(@as(usize, "[Image 100]".len), imageBadgeVisibleWidth(100));
+}
+
+test "writeImageBadgeClipped emits balanced OSC 8 for clipped visible labels" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadgeClipped(&out.writer, 10, "/tmp/a.png", 8);
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "\x1b]8;;file:///tmp/a.png\x1b\\") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "[Image 1") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "\x1b]8;;\x1b\\"));
+}
+
+test "writeImageBadgeClipped emits nothing for zero cell budget" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadgeClipped(&out.writer, 1, "/tmp/a.png", 0);
+
+    try std.testing.expectEqualStrings("", out.written());
+}
+
+test "writeImageBadgeClipped one cell budget closes the hyperlink" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadgeClipped(&out.writer, 1, "/tmp/a.png", 1);
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "\x1b]8;;file:///tmp/a.png\x1b\\[") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "\x1b]8;;\x1b\\"));
+}
+
+test "writeImageBadgeClipped percent-encodes paths" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeImageBadgeClipped(&out.writer, 1, "/tmp/a b#c.png", 4);
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "file:///tmp/a%20b%23c.png") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "\x1b]8;;\x1b\\"));
+}
+
+test "formatImagePlaceholder emits canonical placeholder text" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("[Image #1]", try formatImagePlaceholder(&buf, 1));
+    try std.testing.expectEqualStrings("[Image #42]", try formatImagePlaceholder(&buf, 42));
+    var too_small: [1]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, formatImagePlaceholder(&too_small, 1));
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeImagePlaceholder(&out.writer, 42);
+    try std.testing.expectEqualStrings("[Image #42]", out.written());
+}
+
+test "matchImagePlaceholder accepts well-formed and rejects malformed" {
+    const m1 = matchImagePlaceholder("[Image #7]", 0).?;
+    try std.testing.expectEqual(@as(usize, 7), m1.id);
+    try std.testing.expectEqual(@as(usize, 10), m1.length);
+
+    const m2 = matchImagePlaceholder("prefix [Image #3] suffix", 7).?;
+    try std.testing.expectEqual(@as(usize, 3), m2.id);
+    try std.testing.expectEqual(@as(usize, 10), m2.length);
+
+    try std.testing.expect(matchImagePlaceholder("[Image #]", 0) == null);
+    try std.testing.expect(matchImagePlaceholder("[Image 1]", 0) == null);
+    try std.testing.expect(matchImagePlaceholder("[image #1]", 0) == null);
+    try std.testing.expect(matchImagePlaceholder("[Image #1", 0) == null);
+}
+
+test "matchImagePlaceholder rejects out of range and overflowing ids without trapping" {
+    try std.testing.expect(matchImagePlaceholder("[Image #1]", std.math.maxInt(usize)) == null);
+    try std.testing.expect(matchImagePlaceholder("[Image #1]", "[Image #1]".len - 2) == null);
+    try std.testing.expect(matchImagePlaceholder("[Image #999999999999999999999999999999999999999999999999999]", 0) == null);
+    try std.testing.expect(matchImagePlaceholder("[Image #999999999999999999999999999999999999999999999999999] after", 0) == null);
+}
+
+test "matchImagePlaceholder rejects unrepresentable ids and accepts max usize" {
+    const oversized = "[Image #999999999999999999999999999999999999999999]";
+    try std.testing.expect(matchImagePlaceholder(oversized, 0) == null);
+
+    var buf: [64]u8 = undefined;
+    const maximum = try formatImagePlaceholder(&buf, std.math.maxInt(usize));
+    try std.testing.expectEqual(std.math.maxInt(usize), matchImagePlaceholder(maximum, 0).?.id);
+}
+
+test "sorted image attachment helpers find ids and validate uniqueness" {
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("/tmp/one.png"), .media_type = @constCast("image/png") },
+        .{ .id = 4, .path = @constCast("/tmp/four.png"), .media_type = @constCast("image/png") },
+        .{ .id = 9, .path = @constCast("/tmp/nine.png"), .media_type = @constCast("image/png") },
+    };
+
+    try std.testing.expect(imageAttachmentsSortedById(&images));
+    try std.testing.expectEqual(@as(?usize, 0), findImageIndexByIdSorted(&images, 1));
+    try std.testing.expectEqual(@as(?usize, 1), findImageIndexByIdSorted(&images, 4));
+    try std.testing.expectEqual(@as(?usize, 2), findImageIndexByIdSorted(&images, 9));
+    try std.testing.expectEqual(@as(?usize, null), findImageIndexByIdSorted(&images, 5));
+
+    const descending = [_]types.ImageAttachment{
+        .{ .id = 2, .path = @constCast("/tmp/two.png"), .media_type = @constCast("image/png") },
+        .{ .id = 1, .path = @constCast("/tmp/one.png"), .media_type = @constCast("image/png") },
+    };
+    const duplicate = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("/tmp/a.png"), .media_type = @constCast("image/png") },
+        .{ .id = 1, .path = @constCast("/tmp/b.png"), .media_type = @constCast("image/png") },
+    };
+    try std.testing.expect(!imageAttachmentsSortedById(&descending));
+    try std.testing.expect(!imageAttachmentsSortedById(&duplicate));
+}
+
+test "image attachment linear lookup preserves slice ordering" {
+    const images = [_]types.ImageAttachment{
+        .{ .id = 2, .path = @constCast("/tmp/two.png"), .media_type = @constCast("image/png") },
+        .{ .id = 1, .path = @constCast("/tmp/one.png"), .media_type = @constCast("image/png") },
+    };
+
+    try std.testing.expectEqual(@as(?usize, 0), findImageIndexById(&images, 2));
+    try std.testing.expectEqual(@as(?usize, 1), findImageIndexById(&images, 1));
+    try std.testing.expectEqual(@as(?usize, null), findImageIndexById(&images, 3));
+}
+
+test "sorted image attachment lookup handles large ascending slices" {
+    const alloc = std.testing.allocator;
+    const images = try alloc.alloc(types.ImageAttachment, 512);
+    defer alloc.free(images);
+    for (images, 0..) |*image, idx| {
+        image.* = .{
+            .id = idx * 2 + 1,
+            .path = @constCast("/tmp/image.png"),
+            .media_type = @constCast("image/png"),
+        };
+    }
+
+    try std.testing.expect(imageAttachmentsSortedById(images));
+    try std.testing.expectEqual(@as(?usize, 0), findImageIndexByIdSorted(images, 1));
+    try std.testing.expectEqual(@as(?usize, 255), findImageIndexByIdSorted(images, 511));
+    try std.testing.expectEqual(@as(?usize, 511), findImageIndexByIdSorted(images, 1023));
+    try std.testing.expectEqual(@as(?usize, null), findImageIndexByIdSorted(images, 1024));
+}
+
+test "authorized image lookup preserves requested order and rejects invalid ids" {
+    const catalog = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("/tmp/one.png"), .media_type = @constCast("image/png") },
+        .{ .id = 4, .path = @constCast("/tmp/four.png"), .media_type = @constCast("image/png") },
+        .{ .id = 9, .path = @constCast("/tmp/nine.png"), .media_type = @constCast("image/png") },
+    };
+
+    const resolved = try resolve_authorized_images(std.testing.allocator, &catalog, &.{ 9, 1 });
+    defer std.testing.allocator.free(resolved);
+    try std.testing.expectEqual(@as(usize, 9), resolved[0].id);
+    try std.testing.expectEqual(@as(usize, 1), resolved[1].id);
+
+    try std.testing.expectError(
+        error.DuplicateImageId,
+        resolve_authorized_images(std.testing.allocator, &catalog, &.{ 1, 1 }),
+    );
+    try std.testing.expectError(
+        error.InvalidImageId,
+        resolve_authorized_images(std.testing.allocator, &catalog, &.{0}),
+    );
+    try std.testing.expectError(
+        error.UnauthorizedImageId,
+        resolve_authorized_images(std.testing.allocator, &catalog, &.{7}),
+    );
+}
+
+test "next image counter reports maximum next value and overflow" {
+    const empty = try calculate_next_image_id(&.{});
+    try std.testing.expectEqual(@as(?usize, null), empty.maximum_id);
+    try std.testing.expectEqual(@as(usize, 1), empty.next_id);
+
+    const catalog = [_]types.ImageAttachment{
+        .{ .id = 41, .path = @constCast("/tmp/forty-one.png"), .media_type = @constCast("image/png") },
+        .{ .id = 7, .path = @constCast("/tmp/seven.png"), .media_type = @constCast("image/png") },
+    };
+    const restored = try calculate_next_image_id(&catalog);
+    try std.testing.expectEqual(@as(?usize, 41), restored.maximum_id);
+    try std.testing.expectEqual(@as(usize, 42), restored.next_id);
+
+    const overflow = [_]types.ImageAttachment{.{
+        .id = std.math.maxInt(usize),
+        .path = @constCast("/tmp/maximum.png"),
+        .media_type = @constCast("image/png"),
+    }};
+    try std.testing.expectError(error.ImageIdOverflow, calculate_next_image_id(&overflow));
+}
+
+test "authorized image lookup cleans up allocation failure" {
+    const catalog = [_]types.ImageAttachment{.{
+        .id = 1,
+        .path = @constCast("/tmp/one.png"),
+        .media_type = @constCast("image/png"),
+    }};
+    var failing = std.testing.FailingAllocator.init(
+        testing_allocator.no_resize,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        resolve_authorized_images(failing.allocator(), &catalog, &.{1}),
+    );
+}
+
+test "findEnclosingImagePlaceholder spans the token at and after the cursor" {
+    const text = "a [Image #5] b";
+    // cursor right after the closing ]
+    const span_after = findEnclosingImagePlaceholder(text, 12).?;
+    try std.testing.expectEqual(@as(usize, 2), span_after.start);
+    try std.testing.expectEqual(@as(usize, 12), span_after.end);
+    try std.testing.expectEqual(@as(usize, 5), span_after.id);
+
+    // cursor inside the token
+    const span_inside = findEnclosingImagePlaceholder(text, 8).?;
+    try std.testing.expectEqual(@as(usize, 5), span_inside.id);
+
+    // cursor far away
+    try std.testing.expect(findEnclosingImagePlaceholder(text, 1) == null);
+    try std.testing.expect(findEnclosingImagePlaceholder(text, 14) == null);
+}
+
+test "imagePlaceholderSpanStartingAt only matches at exact start" {
+    const text = "x [Image #2] y";
+    try std.testing.expect(imagePlaceholderSpanStartingAt(text, 2) != null);
+    try std.testing.expect(imagePlaceholderSpanStartingAt(text, 3) == null);
+    try std.testing.expect(imagePlaceholderSpanStartingAt(text, 0) == null);
+}
+
+test "imagePlaceholderSpanEndingAt only matches at exact end" {
+    const text = "x [Image #2] y";
+    try std.testing.expect(imagePlaceholderSpanEndingAt(text, 12) != null);
+    try std.testing.expect(imagePlaceholderSpanEndingAt(text, 11) == null);
+    try std.testing.expect(imagePlaceholderSpanEndingAt(text, 13) == null);
+}
+
+test "expandPlaceholdersWithBadges replaces tokens with path-free badges carrying their ids" {
+    const alloc = std.testing.allocator;
+    const images = [_]types.ImageAttachment{
+        .{ .id = 7, .path = @constCast("/tmp/seven.png"), .media_type = @constCast("image/png") },
+        .{ .id = 3, .path = @constCast("/tmp/three.png"), .media_type = @constCast("image/png") },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    _ = try expandPlaceholdersWithBadges(alloc, &out.writer, "hola [Image #7] mira [Image #3] fin", &images, null);
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "hola [Image 7]") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), " mira [Image 3]") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), " fin") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "file://") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "/tmp/seven.png") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "/tmp/three.png") == null);
+}
+
+test "expandPlaceholdersWithBadges labels a later-turn image with its own id" {
+    const alloc = std.testing.allocator;
+    const images = [_]types.ImageAttachment{
+        .{ .id = 2, .path = @constCast("/tmp/two.png"), .media_type = @constCast("image/png") },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    _ = try expandPlaceholdersWithBadges(alloc, &out.writer, "[Image #2] second turn", &images, null);
+
+    try std.testing.expectEqualStrings("[Image 2] second turn", out.written());
+}
+
+test "expandPlaceholdersWithLinkedBadges labels a later-turn image with its own id" {
+    const alloc = std.testing.allocator;
+    const images = [_]types.ImageAttachment{
+        .{ .id = 2, .path = @constCast("/tmp/two.png"), .media_type = @constCast("image/png") },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    _ = try expandPlaceholdersWithLinkedBadges(alloc, &out.writer, "[Image #2] second turn", &images, null);
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "[Image 2]") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "[Image 1]") == null);
+}
+
+test "expandPlaceholdersWithBadges keeps ids stable regardless of appearance order" {
+    const alloc = std.testing.allocator;
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("/tmp/one.png"), .media_type = @constCast("image/png") },
+        .{ .id = 2, .path = @constCast("/tmp/two.png"), .media_type = @constCast("image/png") },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    _ = try expandPlaceholdersWithBadges(alloc, &out.writer, "[Image #2] before [Image #1]", &images, null);
+
+    try std.testing.expectEqualStrings("[Image 2] before [Image 1]", out.written());
+}
+
+test "expandPlaceholdersWithBadges keeps unknown ids verbatim" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    _ = try expandPlaceholdersWithBadges(alloc, &out.writer, "before [Image #9] after", &.{}, null);
+    try std.testing.expectEqualStrings("before [Image #9] after", out.written());
+}
+
+test "expandPlaceholdersWithBadges maps cursor through badge expansion" {
+    const alloc = std.testing.allocator;
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("/tmp/a.png"), .media_type = @constCast("image/png") },
+    };
+
+    // cursor at byte 0 maps to byte 0
+    {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        const r = try expandPlaceholdersWithBadges(alloc, &out.writer, "[Image #1]X", &images, 0);
+        try std.testing.expectEqual(@as(?usize, 0), r.cursor_out);
+    }
+
+    // cursor right after the placeholder lands right after the rendered badge
+    {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        const r = try expandPlaceholdersWithBadges(alloc, &out.writer, "[Image #1]X", &images, 10);
+        try std.testing.expect(r.cursor_out != null);
+        try std.testing.expectEqual(out.written().len - 1, r.cursor_out.?);
+    }
+
+    // cursor at end maps to end of expanded text
+    {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        const r = try expandPlaceholdersWithBadges(alloc, &out.writer, "[Image #1]X", &images, 11);
+        try std.testing.expectEqual(@as(?usize, out.written().len), r.cursor_out);
+    }
+}
+
+test "detect media type from supported magic bytes" {
+    try std.testing.expectEqualStrings("image/png", detectMediaTypeFromBytes("\x89PNG\r\n\x1a\nrest").?);
+    try std.testing.expectEqualStrings("image/jpeg", detectMediaTypeFromBytes("\xff\xd8\xffrest").?);
+    try std.testing.expectEqualStrings("image/gif", detectMediaTypeFromBytes("GIF89arest").?);
+    try std.testing.expectEqualStrings("image/webp", detectMediaTypeFromBytes("RIFFxxxxWEBPrest").?);
+}
+
+test "loadImageAttachment accepts files larger than header length" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "large.png", .{});
+        defer file.close(io_mod.getIo());
+        try file.writeStreamingAll(io_mod.getIo(), "\x89PNG\r\n\x1a\n");
+        var padding: [256]u8 = undefined;
+        @memset(padding[0..], 'a');
+        try file.writeStreamingAll(io_mod.getIo(), padding[0..]);
+    }
+
+    const path = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "large.png");
+    defer std.testing.allocator.free(path);
+
+    const attachment = try loadImageAttachment(std.testing.allocator, path);
+    defer types.freeImageAttachment(std.testing.allocator, attachment);
+
+    try std.testing.expectEqualStrings("image/png", attachment.media_type);
+}
+
+test "loadUserImageAttachment resolves paths from the workspace" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "workspace/photo.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nrest");
+    }
+
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+    const expected = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace/photo.png");
+    defer alloc.free(expected);
+
+    const attachment = try loadUserImageAttachment(alloc, workspace, "photo.png");
+    defer types.freeImageAttachment(alloc, attachment);
+
+    try std.testing.expectEqualStrings(expected, attachment.path);
+    try std.testing.expectEqualStrings("image/png", attachment.media_type);
+}
+
+test "extractInlineImageAttachments promotes workspace relative mentions" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "workspace/photo.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nrest");
+    }
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+
+    const result = try extractInlineImageAttachments(
+        alloc,
+        workspace,
+        "inspect @photo.png now",
+        1,
+    );
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqualStrings("inspect [Image #1] now", result.text);
+    try std.testing.expectEqual(@as(usize, 1), result.images.len);
+    try std.testing.expectEqualStrings("image/png", result.images[0].media_type);
+}
+
+test "normalizePathInput unescapes finder style spaces" {
+    const normalized = try normalizePathInput(std.testing.allocator, "/Users/me/CleanShot\\ 2026-04-08\\ at\\ 12.16.27.png");
+    defer std.testing.allocator.free(normalized);
+    try std.testing.expectEqualStrings("/Users/me/CleanShot 2026-04-08 at 12.16.27.png", normalized);
+}
+
+test "extractInlineImageAttachments replaces supported paths with matching placeholders" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file_name = "CleanShot 2026-04-08 at 12.16.27.png";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, file_name, .{});
+        defer file.close(io_mod.getIo());
+        try file.writeStreamingAll(io_mod.getIo(), "\x89PNG\r\n\x1a\nrest");
+    }
+    const path = try io_mod.dirRealpathAlloc(arena, tmp.dir, file_name);
+    const escaped = try std.mem.replaceOwned(u8, arena, path, " ", "\\ ");
+
+    const inputs = [_][]const u8{
+        try arena.print("look this {s} now", .{escaped}),
+        try arena.print("look this \"{s}\" now", .{path}),
+        try arena.print("look this '{s}' now", .{path}),
+    };
+    for (inputs) |input| {
+        const result = try extractInlineImageAttachments(arena, "/", input, 1);
+        defer result.deinit(arena);
+
+        try std.testing.expectEqualStrings("look this [Image #1] now", result.text);
+        try std.testing.expectEqual(@as(usize, 1), result.images.len);
+        try std.testing.expectEqual(@as(usize, 1), result.images[0].id);
+        try std.testing.expectEqualStrings(path, result.images[0].path);
+        try std.testing.expectEqualStrings("image/png", result.images[0].media_type);
+    }
+}
+
+test "extractInlineImageAttachments preserves missing and unsupported tokens" {
+    const alloc = std.testing.allocator;
+    const input = "look /tmp/fx-definitely-missing-image.png and notes.txt";
+    const result = try extractInlineImageAttachments(alloc, "/", input, 1);
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqualStrings(input, result.text);
+    try std.testing.expectEqual(@as(usize, 0), result.images.len);
+}
+
+test "extractInlineImageAttachments preserves unsupported tilde user paths" {
+    const alloc = std.testing.allocator;
+    const inputs = [_][]const u8{
+        "look at ~other/test.png and explain it",
+        "look at @~other/test.png and explain it",
+    };
+    for (inputs) |input| {
+        const result = try extractInlineImageAttachments(alloc, "/", input, 1);
+        defer result.deinit(alloc);
+
+        try std.testing.expectEqualStrings(input, result.text);
+        try std.testing.expectEqual(@as(usize, 0), result.images.len);
+    }
+}
+
+test "extractInlineImageAttachments preserves image-looking directories" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(
+        std.testing.io,
+        "photos.png",
+        std.Io.File.Permissions.fromMode(0o700),
+    );
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(workspace);
+
+    const input = "look at @photos.png and explain it";
+    const result = try extractInlineImageAttachments(alloc, workspace, input, 1);
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqualStrings(input, result.text);
+    try std.testing.expectEqual(@as(usize, 0), result.images.len);
+}
+
+test "hasImagePathToken detects image-looking shell tokens without filesystem access" {
+    try std.testing.expect(hasImagePathToken("hello /tmp/CleanShot\\ 2026.png"));
+    try std.testing.expect(hasImagePathToken("/tmp/photo.JPG"));
+    try std.testing.expect(hasImagePathToken("/tmp/photo.JPG,"));
+    try std.testing.expect(hasImagePathToken("\"/tmp/quoted image.webp\""));
+    try std.testing.expect(hasImagePathToken("\"/tmp/quoted image.webp\"!"));
+    try std.testing.expect(hasImagePathToken("'/tmp/quoted image.gif'"));
+    try std.testing.expect(!hasImagePathToken("hello /tmp/not-image.txt"));
+}
+
+test "inline image edits preserve outer multiline whitespace and stable digit boundaries" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "first.png", "second.png" }) |path| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "\x89PNG\r\n\x1a\nfixture" });
+    }
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const source = " \tExplain\n  block @./first.png,\n$review @./second.png  \r\n";
+    const result = try extractInlineImageAttachments(alloc, root, source, 9);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings(" \tExplain\n  block [Image #9],\n$review [Image #10]  \r\n", result.text);
+    try std.testing.expectEqual(@as(usize, 2), result.images.len);
+    try std.testing.expectEqual(@as(usize, 9), result.images[0].id);
+    try std.testing.expectEqual(@as(usize, 10), result.images[1].id);
+    try std.testing.expectEqual(@as(usize, 2), result.edits.len);
+    for (result.edits, [_][]const u8{ "@./first.png", "@./second.png" }, [_][]const u8{ "[Image #9]", "[Image #10]" }) |edit, raw, placeholder| {
+        try std.testing.expectEqualStrings(raw, source[edit.source.raw_start..edit.source.raw_end]);
+        try std.testing.expectEqualStrings(placeholder, result.text[edit.output.raw_start..edit.output.raw_end]);
+    }
+    const skill_start = std.mem.find(u8, source, "$review").?;
+    const skill = project_inline_image_span(source.len, .{ .raw_start = skill_start, .raw_end = skill_start + "$review".len }, result.edits).?;
+    try std.testing.expectEqualStrings("$review", result.text[skill.raw_start..skill.raw_end]);
+    try std.testing.expectError(error.ImageIdOverflow, extractInlineImageAttachments(alloc, root, "@./first.png", std.math.maxInt(usize)));
+    try std.testing.expectError(error.InvalidImageId, extractInlineImageAttachments(alloc, root, "@./first.png", 0));
+}
+
+test "inline image edits are pure lossless replacements with half open maps" {
+    const alloc = std.testing.allocator;
+    const source = "aXbYYc";
+    const replacements = [_]InlineImageReplacement{
+        .{ .source = .{ .raw_start = 1, .raw_end = 2 }, .id = 9 },
+        .{ .source = .{ .raw_start = 3, .raw_end = 5 }, .id = 10 },
+    };
+    const result = try rewrite_inline_images(alloc, source, &replacements);
+    defer alloc.free(result.text);
+    defer alloc.free(result.edits);
+    try std.testing.expectEqualStrings("a[Image #9]b[Image #10]c", result.text);
+    for ([_]usize{ 0, 2, 5 }, [_][]const u8{ "a", "b", "c" }) |start, expected| {
+        const projected = project_inline_image_span(source.len, .{ .raw_start = start, .raw_end = start + 1 }, result.edits).?;
+        try std.testing.expectEqualStrings(expected, result.text[projected.raw_start..projected.raw_end]);
+    }
+    try std.testing.expect(project_inline_image_span(source.len, replacements[0].source, result.edits) == null);
+    try std.testing.expect(project_inline_image_span(source.len, .{ .raw_start = 0, .raw_end = 2 }, result.edits) == null);
+    var bad = result.edits[0];
+    bad.output.raw_start += 1;
+    try std.testing.expect(project_inline_image_span(source.len, .{ .raw_start = 0, .raw_end = 1 }, &.{bad}) == null);
+    const unchanged = try rewrite_inline_images(alloc, " \t\r\n[Image #9] \n", &.{});
+    defer alloc.free(unchanged.text);
+    defer alloc.free(unchanged.edits);
+    try std.testing.expectEqualStrings(" \t\r\n[Image #9] \n", unchanged.text);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.edits.len);
+    try std.testing.expectError(error.InvalidImageOccurrence, rewrite_inline_images(alloc, source, &.{ replacements[1], replacements[0] }));
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, struct {
+        fn check(a: std.mem.Allocator, text: []const u8, edits: []const InlineImageReplacement) !void {
+            const rewritten = try rewrite_inline_images(a, text, edits);
+            defer a.free(rewritten.text);
+            defer a.free(rewritten.edits);
+        }
+    }.check, .{ source, @as([]const InlineImageReplacement, &replacements) });
+}
+
+test "canonical at images load exact filenames and preserve legacy eligibility" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "photo.png", ".png", "a\\b.png", "a\"b.png", " leading.png" };
+    for (names) |name| try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "\x89PNG\r\n\x1a\nfixture" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ab.png", .data = "alternate is not an image" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "photo.png,", .data = "selected is plain text" });
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    for (names) |name| {
+        const encoded = try file_picker_path.encode(alloc, name, .{ .quoted = true });
+        defer alloc.free(encoded);
+        const token = splitImagePathToken(encoded).?;
+        try std.testing.expect(token.literal_payload);
+        const image = try load_inline_image_attachment(alloc, root, token);
+        defer types.freeImageAttachment(alloc, image);
+        const expected = try std.Io.Dir.path.join(alloc, &.{ root, name });
+        defer alloc.free(expected);
+        try std.testing.expectEqualStrings(expected, image.path);
+    }
+    const selected = try file_picker_path.encode(alloc, "photo.png,", .{});
+    defer alloc.free(selected);
+    try std.testing.expect(splitImagePathToken(selected) == null);
+    const unchanged = try extractInlineImageAttachments(alloc, root, selected, 1);
+    defer unchanged.deinit(alloc);
+    try std.testing.expectEqualStrings(selected, unchanged.text);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.images.len);
+    for ([_][]const u8{ "@\"photo.png\"other.png", "@\"photo.png", "@\"photo\\.png\"", "(@\"photo.png\")" }) |invalid| {
+        try std.testing.expect(splitImagePathToken(invalid) == null);
+    }
+    const legacy = splitImagePathToken("@photo.png,").?;
+    try std.testing.expect(!legacy.literal_payload);
+    try std.testing.expectEqualStrings("photo.png", legacy.path);
+    try std.testing.expectEqualStrings(",", legacy.suffix);
+}
+
+test "splitImagePathToken preserves only unquoted sentence punctuation" {
+    const comma = splitImagePathToken("/tmp/photo.png,").?;
+    try std.testing.expectEqualStrings("/tmp/photo.png", comma.path);
+    try std.testing.expectEqualStrings(",", comma.suffix);
+
+    const mention = splitImagePathToken("@~/Desktop/test.png").?;
+    try std.testing.expectEqualStrings("~/Desktop/test.png", mention.path);
+    try std.testing.expectEqualStrings("", mention.suffix);
+
+    const quoted_mention = splitImagePathToken("@\"/tmp/quoted image.webp\"?!").?;
+    try std.testing.expectEqualStrings("/tmp/quoted image.webp", quoted_mention.path);
+    try std.testing.expect(quoted_mention.literal_payload);
+    try std.testing.expectEqualStrings("?!", quoted_mention.suffix);
+
+    const quoted = splitImagePathToken("\"/tmp/quoted image.webp\"?!").?;
+    try std.testing.expectEqualStrings("\"/tmp/quoted image.webp\"", quoted.path);
+    try std.testing.expectEqualStrings("?!", quoted.suffix);
+
+    try std.testing.expect(splitImagePathToken("@@/tmp/photo.png") == null);
+    try std.testing.expect(splitImagePathToken("\"/tmp/photo.png,\"") == null);
+    try std.testing.expect(splitImagePathToken("/tmp/photo.png\\,") == null);
+    try std.testing.expect(splitImagePathToken("/tmp/photo.txt,") == null);
+}
+
+test "extractInlineImageAttachments preserves punctuation after attached paths" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "punctuated.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nrest");
+    }
+    const path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "punctuated.png");
+    defer alloc.free(path);
+    const input = try alloc.print("inspect {s}, then", .{path});
+    defer alloc.free(input);
+
+    const result = try extractInlineImageAttachments(alloc, "/", input, 1);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("inspect [Image #1], then", result.text);
+    try std.testing.expectEqual(@as(usize, 1), result.images.len);
+    try std.testing.expectEqualStrings(path, result.images[0].path);
+}
+
+fn testSnapshotDir(alloc: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    return std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
+}
+
+fn testCapturedAttachment(
+    alloc: std.mem.Allocator,
+    tmp: *std.testing.TmpDir,
+    image_path: []const u8,
+    id: usize,
+    media_type: []const u8,
+) !types.ImageAttachment {
+    const source = [_]types.ImageAttachment{.{
+        .id = id,
+        .path = @constCast(image_path),
+        .media_type = @constCast(media_type),
+    }};
+    const owned = try types.dupeImageAttachmentSlice(alloc, &source);
+    defer alloc.free(owned);
+
+    var attachment = owned[0];
+    errdefer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, tmp);
+    defer alloc.free(snapshot_dir);
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+    return attachment;
+}
+
+const SnapshotMutatingWriter = struct {
+    snapshot_path: []const u8,
+    replacement: []const u8,
+    output: [4096]u8 = undefined,
+    output_len: usize = 0,
+    buffer: [1]u8 = undefined,
+    interface: std.Io.Writer = undefined,
+    mutated: bool = false,
+    mutation_failed: bool = false,
+
+    fn init(self: *SnapshotMutatingWriter, snapshot_path: []const u8, replacement: []const u8) void {
+        self.* = .{
+            .snapshot_path = snapshot_path,
+            .replacement = replacement,
+        };
+        self.interface = .{
+            .vtable = &.{ .drain = drain },
+            .buffer = &self.buffer,
+            .end = 0,
+        };
+    }
+
+    fn drain(
+        writer: *std.Io.Writer,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.Writer.Error!usize {
+        const self: *SnapshotMutatingWriter = @alignCast(@fieldParentPtr("interface", writer));
+        if (!self.mutated) {
+            self.mutated = true;
+            var file = std.Io.Dir.createFileAbsolute(
+                std.testing.io,
+                self.snapshot_path,
+                .{ .truncate = true },
+            ) catch {
+                self.mutation_failed = true;
+                return error.WriteFailed;
+            };
+            defer file.close(std.testing.io);
+            file.writeStreamingAll(std.testing.io, self.replacement) catch {
+                self.mutation_failed = true;
+                return error.WriteFailed;
+            };
+        }
+
+        const buffered = writer.buffered();
+        if (self.output.len - self.output_len < buffered.len) return error.WriteFailed;
+        @memcpy(self.output[self.output_len..][0..buffered.len], buffered);
+        self.output_len += buffered.len;
+        writer.end = 0;
+
+        var consumed: usize = 0;
+        for (data, 0..) |part, index| {
+            const repeat = if (index == data.len - 1) splat else 1;
+            for (0..repeat) |_| {
+                if (self.output.len - self.output_len < part.len) return error.WriteFailed;
+                @memcpy(self.output[self.output_len..][0..part.len], part);
+                self.output_len += part.len;
+                consumed += part.len;
+            }
+        }
+        return consumed;
+    }
+
+    fn written(self: *const SnapshotMutatingWriter) []const u8 {
+        return self.output[0..self.output_len];
+    }
+};
+
+const SnapshotReplacementHook = struct {
+    snapshot_path: []const u8,
+    replacement_path: []const u8,
+    checks: usize = 0,
+
+    fn check(raw: *anyopaque) !void {
+        const self: *SnapshotReplacementHook = @ptrCast(@alignCast(raw));
+        self.checks += 1;
+        if (self.checks != 2) return;
+        try std.Io.Dir.renameAbsolute(
+            self.replacement_path,
+            self.snapshot_path,
+            std.testing.io,
+        );
+    }
+};
+
+fn countSnapshotFiles(snapshot_dir: []const u8) !usize {
+    var dir = std.Io.Dir.openDirAbsolute(std.testing.io, snapshot_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (entry.kind == .file or entry.kind == .sym_link) count += 1;
+    }
+    return count;
+}
+
+fn testSha256Hex(bytes: []const u8) [snapshot_digest_hex_len]u8 {
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "snapshot directory handle syncs after create and after reopen" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    var created = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer created.close(std.testing.io);
+    try syncSnapshotDirectory(created);
+
+    var reopened = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer reopened.close(std.testing.io);
+    try syncSnapshotDirectory(reopened);
+}
+
+test "encoded image limit uses exact padded base64 length" {
+    const largest_fitting_raw_image = (max_encoded_image_bytes / 4) * 3;
+
+    try std.testing.expect(image_data.fitsEncodedImageLimit(largest_fitting_raw_image));
+    try std.testing.expect(!image_data.fitsEncodedImageLimit(largest_fitting_raw_image + 1));
+}
+
+test "capture rejection distinguishes source size from preparation failure" {
+    try std.testing.expectEqualStrings(
+        image_too_large_notice,
+        captureRejectionNotice(error.ImageTooLarge).?,
+    );
+    try std.testing.expectEqualStrings(
+        image_preparation_failed_notice,
+        captureRejectionNotice(error.ImagePreparationFailed).?,
+    );
+    try std.testing.expect(captureRejectionNotice(error.Cancelled) == null);
+    try std.testing.expect(captureRejectionNotice(error.TimedOut) == null);
+}
+
+test "capture rejects source limit plus one without snapshot residue" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "too-large.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n");
+        try file.setLength(std.testing.io, max_image_bytes + 1);
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "too-large.png");
+    defer alloc.free(image_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast(image_path),
+        .media_type = @constCast("image/png"),
+    };
+
+    try std.testing.expectError(
+        error.ImageTooLarge,
+        captureImageSnapshot(alloc, &attachment, snapshot_dir),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+}
+
+test "attachment admission rejects source limit plus one" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "too-large.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n");
+        try file.setLength(std.testing.io, max_image_bytes + 1);
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "too-large.png");
+    defer alloc.free(image_path);
+
+    try std.testing.expectError(
+        error.ImageTooLarge,
+        loadImageAttachment(alloc, image_path),
+    );
+}
+
+test "bound capture rejects replacement of the approved file identity" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "approved.png", "replacement.png" }) |name| {
+        var file = try tmp.dir.createFile(std.testing.io, name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n" ++ name);
+    }
+    const approved_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "approved.png");
+    defer alloc.free(approved_path);
+    const replacement_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "replacement.png");
+    defer alloc.free(replacement_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    var approved = try std.Io.Dir.openFileAbsolute(std.testing.io, approved_path, .{
+        .follow_symlinks = false,
+    });
+    const approved_stat = try approved.stat(std.testing.io);
+    const approved_identity = pathing.fileIdentity(
+        try pathing.descriptorDevice(approved.handle),
+        approved_stat,
+    );
+    approved.close(std.testing.io);
+
+    try std.Io.Dir.renameAbsolute(replacement_path, approved_path, std.testing.io);
+    try std.testing.expectError(
+        error.ImageTargetChanged,
+        captureBoundImageAttachment(
+            alloc,
+            approved_path,
+            approved_identity,
+            1,
+            snapshot_dir,
+            .{},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+}
+
+test "cancelled capture removes every partial artifact" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "cancel.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\ncancel");
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "cancel.png");
+    defer alloc.free(image_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast(image_path),
+        .media_type = @constCast("image/png"),
+    };
+    const CancelState = struct {
+        checks: usize = 0,
+
+        fn check(raw: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.checks += 1;
+            if (self.checks == 3) return error.Cancelled;
+        }
+    };
+    var state = CancelState{};
+
+    try std.testing.expectError(
+        error.Cancelled,
+        captureImageSnapshotWithBudget(
+            alloc,
+            &attachment,
+            snapshot_dir,
+            .{ .test_hook = .{ .ctx = &state, .check = CancelState.check } },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), state.checks);
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+    try std.testing.expect(attachment.snapshot_path == null);
+}
+
+test "capture preserves a source at the exact encoded byte limit" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const largest_fitting_raw_image = (max_encoded_image_bytes / 4) * 3;
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "exact.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n");
+        try file.setLength(std.testing.io, largest_fitting_raw_image);
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "exact.png");
+    defer alloc.free(image_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = try alloc.dupe(u8, image_path),
+        .media_type = try alloc.dupe(u8, "image/png"),
+    };
+    defer types.freeImageAttachment(alloc, attachment);
+
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+
+    var snapshot = try std.Io.Dir.openFileAbsolute(
+        std.testing.io,
+        attachment.snapshot_path.?,
+        .{},
+    );
+    defer snapshot.close(std.testing.io);
+    try std.testing.expectEqual(
+        @as(u64, largest_fitting_raw_image),
+        (try snapshot.stat(std.testing.io)).size,
+    );
+}
+
+test "capture keeps a byte-oversized original for request recovery" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const jpeg_header = image_data.testJpeg(3420, 2224);
+    const source = try alloc.alloc(u8, max_encoded_image_bytes / 4 * 3 + 1);
+    defer alloc.free(source);
+    @memset(source, 0);
+    @memcpy(source[0..jpeg_header.len], &jpeg_header);
+    try std.testing.expect(!image_data.fitsEncodedImageLimit(source.len));
+    var attachment = try testCaptureFile(alloc, &tmp, "large.jpg", source, "image/jpeg");
+    defer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualStrings("image/jpeg", attachment.media_type);
+    try std.testing.expectEqualSlices(u8, source, verified.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(snapshot_dir));
+}
+
+test "requests leave out images the session dropped, each with a note" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const digest = text_utils.repeat("a", 64);
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("inline://image-1"), .media_type = @constCast("image/png"), .snapshot_sha256 = @constCast(digest) },
+        .{ .id = 2, .path = @constCast("inline://image-2"), .media_type = @constCast("image/png"), .snapshot_sha256 = @constCast(digest), .inline_data = @constCast("png") },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "[Image #1] [Image #2]", .images = &images },
+        .{ .role = .assistant, .content = "ok" },
+    };
+    const projected = try withholdDroppedImages(arena, &messages);
+    try std.testing.expectEqual(@as(usize, 1), projected[0].images.len);
+    try std.testing.expectEqual(@as(usize, 2), projected[0].images[0].id);
+    try std.testing.expectEqualStrings("[Image #1 is no longer in this session, which keeps only its newest images.]\n[Image #1] [Image #2]", projected[0].content.?);
+    // A request without dropped images passes through untouched.
+    const kept = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #2]", .images = images[1..] }};
+    try std.testing.expect((try withholdDroppedImages(arena, &kept)).ptr == (&kept).ptr);
+}
+
+test "requests leave out earlier images the route cannot carry, each with a note" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const digest = text_utils.repeat("a", 64);
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("inline://image-1"), .media_type = @constCast("image/png"), .snapshot_sha256 = @constCast(digest), .inline_data = @constCast("png") },
+        .{ .id = 2, .path = @constCast("inline://image-2"), .media_type = @constCast("image/png"), .snapshot_sha256 = @constCast(digest) },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Look at [Image #1] [Image #2]", .images = &images },
+        .{ .role = .assistant, .content = "It shows a logo." },
+        .{ .role = .user, .content = "Testing" },
+    };
+    const unknown = try withholdEarlierImages(arena, &messages, .withheld_unknown);
+    // Image 1 leaves as a note; image 2, which the session dropped, stays for
+    // withholdDroppedImages.
+    try std.testing.expectEqual(@as(usize, 1), unknown[0].images.len);
+    try std.testing.expectEqual(@as(usize, 2), unknown[0].images[0].id);
+    try std.testing.expect(std.mem.startsWith(u8, unknown[0].content.?, "[Image #1 was not sent with this request: fx could not confirm image input support for this model"));
+    try std.testing.expect(std.mem.endsWith(u8, unknown[0].content.?, "]\nLook at [Image #1] [Image #2]"));
+    try std.testing.expect(unknown[2].content.?.ptr == messages[2].content.?.ptr);
+    try std.testing.expectEqual(@as(usize, 2), messages[0].images.len);
+
+    const dead_end = try withholdEarlierImages(arena, &messages, .withheld_dead_end);
+    try std.testing.expect(std.mem.find(u8, dead_end[0].content.?, "no vision fallback is available") != null);
+
+    for ([_]image_route.ToolImages{ .none, .attached, .withheld_fallback }) |held| {
+        try std.testing.expect((try withholdEarlierImages(arena, &messages, held)).ptr == (&messages).ptr);
+    }
+}
+
+/// Draws for `driveWithholdEarlierImages` from a fuzzer, with one hash per
+/// draw site so the fuzzer tells the draws apart.
+const EarlierImageFuzzDraws = struct {
+    smith: *std.testing.Smith,
+
+    fn below(self: EarlierImageFuzzDraws, n: usize, site: u32) usize {
+        return self.smith.indexWithHash(n, site);
+    }
+
+    fn flag(self: EarlierImageFuzzDraws, site: u32) bool {
+        return self.smith.valueWithHash(bool, site);
+    }
+};
+
+/// Draws for `driveWithholdEarlierImages` from a seeded generator.
+const EarlierImageSeededDraws = struct {
+    random: std.Random,
+
+    fn below(self: EarlierImageSeededDraws, n: usize, _: u32) usize {
+        return self.random.uintLessThan(usize, n);
+    }
+
+    fn flag(self: EarlierImageSeededDraws, _: u32) bool {
+        return self.random.boolean();
+    }
+};
+
+/// Builds a history that `draws` chooses, with images the session holds and
+/// images it dropped, projects it under one held-images value, and checks
+/// what every projection must keep.
+fn driveWithholdEarlierImages(draws: anytype) !void {
+    const max_messages = 6;
+    const max_images = 3;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const digest = text_utils.repeat("a", 64);
+    const roles = [_]types.ChatRole{ .user, .assistant, .tool };
+    var images: [max_messages][max_images]types.ImageAttachment = undefined;
+    var image_counts: [max_messages]usize = undefined;
+    var messages: [max_messages]types.ChatMessage = undefined;
+    const count = draws.below(max_messages + 1, 1);
+    for (messages[0..count], 0..) |*message, index| {
+        image_counts[index] = draws.below(max_images + 1, 2);
+        for (images[index][0..image_counts[index]]) |*image| {
+            image.* = .{
+                .id = 1 + draws.below(9, 3),
+                .path = @constCast("inline://image"),
+                .media_type = @constCast("image/png"),
+                .snapshot_sha256 = @constCast(digest),
+                // Without bytes and with a digest, the session dropped it.
+                .inline_data = if (draws.flag(4)) null else @constCast("png"),
+            };
+        }
+        message.* = .{
+            .role = roles[draws.below(roles.len, 5)],
+            .content = if (draws.flag(6)) null else "text",
+            .images = images[index][0..image_counts[index]],
+        };
+    }
+    const kinds = [_]image_route.ToolImages{ .none, .attached, .withheld_fallback, .withheld_dead_end, .withheld_unknown };
+    const held = kinds[draws.below(kinds.len, 7)];
+    const source = messages[0..count];
+    const projected = try withholdEarlierImages(arena, source, held);
+
+    try std.testing.expectEqual(count, projected.len);
+    const withholds = held == .withheld_unknown or held == .withheld_dead_end;
+    var withheld_any = false;
+    for (source, projected, 0..) |before, after, index| {
+        // History is not modified.
+        try std.testing.expectEqual(image_counts[index], before.images.len);
+        var held_here: usize = 0;
+        for (before.images) |image| {
+            if (!image.droppedFromSession()) held_here += 1;
+        }
+        if (!withholds or held_here == 0) {
+            try std.testing.expect(after.images.ptr == before.images.ptr and after.images.len == before.images.len);
+            try std.testing.expectEqual(before.content, after.content);
+            continue;
+        }
+        withheld_any = true;
+        // No image the session holds reaches the request; dropped ones stay.
+        try std.testing.expectEqual(before.images.len - held_here, after.images.len);
+        for (after.images) |image| try std.testing.expect(image.droppedFromSession());
+        // One note per withheld image, ahead of the unchanged text.
+        const content = after.content orelse return error.TestUnexpectedResult;
+        try std.testing.expect(std.mem.endsWith(u8, content, before.content orelse ""));
+        try std.testing.expectEqual(held_here, std.mem.count(u8, content, " was not sent with this request: "));
+        for (before.images) |image| {
+            if (image.droppedFromSession()) continue;
+            var buffer: [64]u8 = undefined;
+            const note = try std.mem.print(&buffer, "[Image #{d} was not sent with this request: ", .{image.id});
+            try std.testing.expect(std.mem.find(u8, content, note) != null);
+        }
+    }
+    if (!withheld_any) try std.testing.expect(projected.ptr == source.ptr);
+}
+
+fn fuzzWithholdEarlierImages(_: void, smith: *std.testing.Smith) !void {
+    try driveWithholdEarlierImages(EarlierImageFuzzDraws{ .smith = smith });
+}
+
+test "earlier images withheld from a request always leave a note" {
+    try std.testing.fuzz({}, fuzzWithholdEarlierImages, .{
+        // Empty input draws the smallest values: a request with no messages.
+        .corpus = &(.{""} ++ @import("fuzz_corpus").earlier_image_notes.*),
+    });
+}
+
+test "earlier images withheld from seeded random histories always leave a note" {
+    var prng: std.Random.DefaultPrng = .init(20261022);
+    for (0..2000) |_| try driveWithholdEarlierImages(EarlierImageSeededDraws{ .random = prng.random() });
+}
+
+test "requests name the saved file of each attached image, never its source" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Clean Shot.png", .data = &image_data.testPngHeader(10, 10) });
+    const source_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "Clean Shot.png");
+    defer alloc.free(source_path);
+    const attached = try testCapturedAttachment(alloc, &tmp, source_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attached);
+    // A pasted image shows its own snapshot.
+    var pasted = attached;
+    pasted.id = 2;
+    pasted.path = attached.snapshot_path.?;
+    // Recalling a prompt saves another snapshot of the same bytes.
+    const recalled_file = try cloneVerifiedImageAttachment(alloc, attached, 3);
+    defer discardImageAttachment(alloc, recalled_file);
+    const recalled_paste = try cloneVerifiedImageAttachment(alloc, pasted, 4);
+    defer discardImageAttachment(alloc, recalled_paste);
+    // Inline bytes own the image, and any snapshot beside them is temporary.
+    var inline_bytes = attached;
+    inline_bytes.id = 5;
+    inline_bytes.inline_data = @constCast("png");
+    const in_memory: types.ImageAttachment = .{ .id = 6, .path = @constCast("inline://image-6"), .media_type = @constCast("image/png"), .snapshot_sha256 = attached.snapshot_sha256, .inline_data = @constCast("png") };
+    // A v2 session's image keeps its bytes inline and is saved as its blob
+    // (D89); the note names the blob, never the temporary snapshot.
+    var in_blob = inline_bytes;
+    in_blob.id = 7;
+    in_blob.blob_path = @constCast("/Users/example/.fx/sessions/v2/s/blobs/0123abcd");
+
+    const images = [_]types.ImageAttachment{ attached, pasted, recalled_file, recalled_paste, inline_bytes, in_memory, in_blob };
+    const prompt = "[Image #1] [Image #2] [Image #3] [Image #4] [Image #5] [Image #6] [Image #7]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = prompt, .images = &images },
+        .{ .role = .assistant, .content = "ok" },
+    };
+    const projected = try noteAttachmentLocations(arena, &messages);
+
+    const expected = try arena.print(
+        "[Image #1 (image/png) is saved at \"{s}\".]\n" ++
+            "[Image #2 (image/png) is saved at \"{s}\".]\n" ++
+            "[Image #3 (image/png) is saved at \"{s}\".]\n" ++
+            "[Image #4 (image/png) is saved at \"{s}\".]\n" ++
+            "[Image #7 (image/png) is saved at \"{s}\".]\n" ++
+            prompt,
+        .{ attached.snapshot_path.?, attached.snapshot_path.?, recalled_file.snapshot_path.?, recalled_paste.snapshot_path.?, in_blob.blob_path.? },
+    );
+    try std.testing.expectEqualStrings(expected, projected[0].content.?);
+    try std.testing.expect(std.mem.find(u8, projected[0].content.?, source_path) == null);
+    try std.testing.expectEqual(@as(usize, 7), projected[0].images.len);
+    try std.testing.expectEqualStrings("ok", projected[1].content.?);
+    try std.testing.expectEqualStrings(prompt, messages[0].content.?);
+    // A request whose images have no saved file passes through untouched.
+    const unsaved = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #5] [Image #6]", .images = images[4..6] }};
+    try std.testing.expect((try noteAttachmentLocations(arena, &unsaved)).ptr == (&unsaved).ptr);
+}
+
+test "temporary snapshot folders have names of one length" {
+    const alloc = std.testing.allocator;
+    for (0..8) |_| {
+        const path = try createTempSnapshotDir(alloc);
+        defer alloc.free(path);
+        defer cleanupSnapshotDir(path);
+        try std.testing.expectEqual(@as(usize, "fx-image-snapshots-".len + 16), std.Io.Dir.path.basename(path).len);
+    }
+}
+
+test "image location notes quote the saved path" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const images = [_]types.ImageAttachment{.{
+        .id = 7,
+        .path = @constCast("/Users/example/Shots/shot.png"),
+        .media_type = @constCast("image/jpeg"),
+        .snapshot_path = @constCast("/Users/example/fx \"home\"]\n/sessions/s/images/image-7-0123456789abcdef.bin"),
+    }};
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #7]", .images = &images }};
+    const projected = try noteAttachmentLocations(arena, &messages);
+    try std.testing.expectEqualStrings(
+        "[Image #7 (image/jpeg) is saved at \"/Users/example/fx \\\"home\\\"]\\n/sessions/s/images/image-7-0123456789abcdef.bin\".]\n[Image #7]",
+        projected[0].content.?,
+    );
+}
+
+test "requests leave out tool images the session dropped, with one note per result" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const name = text_utils.repeat("b", 64)[0..64].*;
+    const tool_images = [_]types.ToolImage{
+        .{ .data = @constCast(&[_]u8{}), .mime_type = @constCast("image/png"), .name = name },
+        .{ .data = @constCast("aGVsbG8="), .mime_type = @constCast("image/png"), .name = name },
+        .{ .data = @constCast(&[_]u8{}), .mime_type = @constCast("image/png"), .name = name },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .tool, .content = "took it", .tool_call_id = "call-1", .tool_name = "screenshot", .tool_result_memory = .{ .tool_images = &tool_images } },
+    };
+    const projected = try withholdDroppedImages(arena, &messages);
+    const memory = projected[0].tool_result_memory.?;
+    try std.testing.expectEqual(@as(usize, 1), memory.tool_images.len);
+    try std.testing.expectEqualStrings("aGVsbG8=", memory.tool_images[0].data);
+    try std.testing.expectEqualStrings("[2 images from this result are no longer in this session, which keeps only its newest images.]\ntook it", projected[0].content.?);
+    // The session's own messages keep their images.
+    try std.testing.expectEqual(@as(usize, 3), messages[0].tool_result_memory.?.tool_images.len);
+}
+
+test "requests leave out attachments over the model pixel limit and name their saved file" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const wide = image_data.testJpeg(3420, 2224);
+    const small = image_data.testPngHeader(10, 10);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-1-0000000000000001.bin", .data = &wide });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-2-0000000000000002.bin", .data = &small });
+    const wide_path = try io_mod.dirRealpathAlloc(arena, tmp.dir, "image-1-0000000000000001.bin");
+    const small_path = try io_mod.dirRealpathAlloc(arena, tmp.dir, "image-2-0000000000000002.bin");
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("photo.jpg"), .media_type = @constCast("image/jpeg"), .snapshot_path = wide_path },
+        .{ .id = 2, .path = @constCast("icon.png"), .media_type = @constCast("image/png"), .snapshot_path = small_path },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "compare [Image #1] and [Image #2]", .images = &images },
+        .{ .role = .assistant, .content = "ok" },
+    };
+    var cache: AttachmentDimensionCache = .empty;
+
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+    const projected = projection.messages;
+
+    try std.testing.expectEqual(@as(usize, 1), projected[0].images.len);
+    try std.testing.expectEqual(@as(usize, 2), projected[0].images[0].id);
+    const expected = try arena.print(
+        "[Image #1 not sent: image/jpeg is 3420x2224 pixels. This request permits at most 2000 per side and 5 MiB encoded per image. The original is saved at {s}. Use an available image tool to save a smaller copy to a new file ending in .jpg, then read_file the copy. If no image tool is available, ask the user before installing one.]\ncompare [Image #1] and [Image #2]",
+        .{wide_path},
+    );
+    try std.testing.expectEqualStrings(expected, projected[0].content.?);
+    try std.testing.expectEqualStrings("ok", projected[1].content.?);
+    try std.testing.expectEqual(@as(usize, 2), messages[0].images.len);
+    try std.testing.expectEqualStrings("compare [Image #1] and [Image #2]", messages[0].content.?);
+}
+
+test "request cache still withholds a snapshot deleted after dimension lookup" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const wide = image_data.testJpeg(3420, 2224);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-1-0000000000000001.bin", .data = &wide });
+    const wide_path = try io_mod.dirRealpathAlloc(arena, tmp.dir, "image-1-0000000000000001.bin");
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("photo.jpg"), .media_type = @constCast("image/jpeg"), .snapshot_path = wide_path, .snapshot_sha256 = @constCast(text_utils.repeat("a", 64)) },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "[Image #1]", .images = &images },
+        .{ .role = .assistant, .content = "ok" },
+        .{ .role = .user, .content = "and now?" },
+    };
+    var cache: AttachmentDimensionCache = .empty;
+
+    const first = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+    try tmp.dir.deleteFile(std.testing.io, "image-1-0000000000000001.bin");
+    const second = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+
+    try std.testing.expectEqual(@as(usize, 0), first.messages[0].images.len);
+    try std.testing.expectEqual(@as(usize, 0), second.messages[0].images.len);
+    try std.testing.expectEqualStrings(first.messages[0].content.?, second.messages[0].content.?);
+}
+
+test "requests ask for a smaller copy of an oversized in-memory attachment" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var wide = image_data.testJpeg(2400, 10);
+    const images = [_]types.ImageAttachment{
+        .{ .id = 3, .path = @constCast("inline://image-3"), .media_type = @constCast("image/jpeg"), .inline_data = &wide },
+    };
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #3]", .images = &images }};
+    var cache: AttachmentDimensionCache = .empty;
+
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+
+    try std.testing.expectEqual(@as(usize, 0), projection.messages[0].images.len);
+    try std.testing.expectEqualStrings(
+        "[Image #3 not sent: image/jpeg is 2400x10 pixels. This request permits at most 2000 per side and 5 MiB encoded per image. No local image file is available; ask the user for a smaller copy.]\n[Image #3]",
+        projection.messages[0].content.?,
+    );
+}
+
+test "requests keep verified attachments within the pixel limit unchanged" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var edge = image_data.testPngHeader(image_data.max_image_dimension, image_data.max_image_dimension);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-2-0000000000000002.bin", .data = &edge });
+    const snapshot_path = try io_mod.dirRealpathAlloc(arena, tmp.dir, "image-2-0000000000000002.bin");
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("inline://image-1"), .media_type = @constCast("image/png"), .inline_data = &edge },
+        .{ .id = 2, .path = @constCast("edge.png"), .media_type = @constCast("image/png"), .snapshot_path = snapshot_path },
+    };
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #1] [Image #2]", .images = &images }};
+    var cache: AttachmentDimensionCache = .empty;
+
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+
+    try std.testing.expectEqual(@as([*]const types.ChatMessage, &messages), projection.messages.ptr);
+}
+
+test "a withheld prompt image's notice names the blob the note names (D89)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const wide = image_data.testPngHeader(9000, 10);
+    var saved = try captureInlineImageBytesInMemory(arena, 1, "image/png", &wide);
+    saved.snapshot_path = @constCast("/tmp/fx-image-snapshots-0123456789abcdef/image-1.bin");
+    saved.blob_path = @constCast("/Users/example/.fx/sessions/v2/s/blobs/0123abcd");
+    var cache: AttachmentDimensionCache = .empty;
+    const in_blob = [_]types.ChatMessage{.{ .role = .user, .content = "look", .images = &.{saved} }};
+    const named = try withholdOversizedAttachments(arena, arena, &cache, &in_blob, 8000);
+    try std.testing.expectEqual(@as(usize, 0), named.messages[0].images.len);
+    try std.testing.expect(std.mem.find(u8, named.messages[0].content.?, "The original is saved at /Users/example/.fx/sessions/v2/s/blobs/0123abcd. ") != null);
+    // Inline bytes without a blob have no saved file, and the temporary
+    // snapshot beside them is never named.
+    var unsaved = saved;
+    unsaved.blob_path = null;
+    const inline_only = [_]types.ChatMessage{.{ .role = .user, .content = "look", .images = &.{unsaved} }};
+    const unnamed = try withholdOversizedAttachments(arena, arena, &cache, &inline_only, 8000);
+    try std.testing.expect(std.mem.find(u8, unnamed.messages[0].content.?, "No local image file is available") != null);
+    try std.testing.expect(std.mem.find(u8, unnamed.messages[0].content.?, "fx-image-snapshots") == null);
+}
+
+test "reference-only attachments get host recovery guidance without attempting file access" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const images = [_]types.ImageAttachment{.{
+        .id = 1,
+        .path = @constCast("inline://image-1"),
+        .media_type = @constCast("image/png"),
+        .source_ref = @constCast("host:original"),
+    }};
+    const messages = [_]types.ChatMessage{.{ .role = .user, .images = &images }};
+    var cache: AttachmentDimensionCache = .empty;
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, 8000);
+    try std.testing.expectEqual(@as(usize, 0), projection.messages[0].images.len);
+    const notice = projection.messages[0].content.?;
+    try std.testing.expect(std.mem.find(u8, notice, "only a host source reference was supplied") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "host:original") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "host-provided tool") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "read_file") == null);
+    try std.testing.expectEqual(@as(usize, 1), messages[0].images.len);
+}
+
+test "requests withhold snapshots whose dimensions cannot be verified" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const images = [_]types.ImageAttachment{.{
+        .id = 2,
+        .path = @constCast("missing.png"),
+        .media_type = @constCast("image/png"),
+        .snapshot_path = @constCast("/nonexistent/image-2.bin"),
+    }};
+    const messages = [_]types.ChatMessage{.{ .role = .user, .images = &images }};
+    var cache: AttachmentDimensionCache = .empty;
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_single_image_dimension);
+    try std.testing.expectEqual(@as(usize, 0), projection.messages[0].images.len);
+    try std.testing.expect(std.mem.find(u8, projection.messages[0].content.?, "dimensions could not be verified") != null);
+    try std.testing.expectEqual(@as(usize, 1), messages[0].images.len);
+}
+
+fn testCaptureFile(alloc: std.mem.Allocator, tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8, media_type: []const u8) !types.ImageAttachment {
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    const path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, name);
+    errdefer alloc.free(path);
+    return .{ .id = 1, .path = path, .media_type = try alloc.dupe(u8, media_type) };
+}
+
+test "capture keeps the original PNG even above the absolute pixel limit" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png = try png_downscale.testSolidGrayPng(alloc, 16385, 40, 128);
+    defer alloc.free(png);
+    var attachment = try testCaptureFile(alloc, &tmp, "wide.png", png, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, png, verified.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(snapshot_dir));
+}
+
+test "capture never rejects an image that is only over the pixel limit" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // No image converter runs during capture.
+    const png = try png_downscale.testSolidGrayPng(alloc, 16385, 2, 128);
+    defer alloc.free(png);
+    var attachment = try testCaptureFile(alloc, &tmp, "thin.png", png, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, png, verified.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(snapshot_dir));
+}
+
+test "capture keeps the original when a PNG conversion would grow" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png = try png_downscale.testRandomPalettePng(alloc, 2001, 1300);
+    defer alloc.free(png);
+    var attachment = try testCaptureFile(alloc, &tmp, "scattered.png", png, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, png, verified.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(snapshot_dir));
+}
+
+test "in-memory capture keeps the original of a palette PNG over 2000 pixels" {
+    const alloc = std.testing.allocator;
+    const png = try png_downscale.testRandomPalettePng(alloc, 2001, 1300);
+    defer alloc.free(png);
+    try std.testing.expect(image_data.fitsEncodedImageLimit(png.len));
+
+    const attachment = try captureInlineImageBytesInMemory(alloc, 1, "image/png", png);
+    defer types.freeImageAttachment(alloc, attachment);
+    try std.testing.expectEqualSlices(u8, png, attachment.inline_data.?);
+}
+
+test "inline filesystem capture keeps byte-oversized PNG sources" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    const small = try png_downscale.testSolidGrayPng(alloc, 64, 8, 128);
+    defer alloc.free(small);
+    const padded = try png_downscale.testPaddedPng(alloc, small, max_encoded_image_bytes);
+    defer alloc.free(padded);
+    try std.testing.expect(!image_data.fitsEncodedImageLimit(padded.len));
+    const attachment = try captureInlineImageBytes(alloc, 1, "image/png", padded, snapshot_dir);
+    defer types.freeImageAttachment(alloc, attachment);
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, padded, verified.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(snapshot_dir));
+}
+
+test "requests find a JPEG frame header behind large metadata" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const jpeg = try image_data.testJpegBehindMetadata(arena, 4032, 3024);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-1-0000000000000001.bin", .data = jpeg });
+    const path = try io_mod.dirRealpathAlloc(arena, tmp.dir, "image-1-0000000000000001.bin");
+    const images = [_]types.ImageAttachment{
+        .{ .id = 1, .path = @constCast("portrait.jpg"), .media_type = @constCast("image/jpeg"), .snapshot_path = path },
+    };
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "[Image #1]", .images = &images }};
+    var cache: AttachmentDimensionCache = .empty;
+
+    const projection = try withholdOversizedAttachments(arena, arena, &cache, &messages, image_data.max_image_dimension);
+
+    try std.testing.expect(std.mem.startsWith(u8, projection.messages[0].content.?, "[Image #1 not sent: image/jpeg is 4032x3024 pixels"));
+}
+
+test "in-memory capture preserves PNG and JPEG originals without resizing" {
+    const alloc = std.testing.allocator;
+    const png = try png_downscale.testSolidGrayPng(alloc, 2400, 8, 128);
+    defer alloc.free(png);
+    const original = try captureInlineImageBytesInMemory(alloc, 1, "image/png", png);
+    defer types.freeImageAttachment(alloc, original);
+    try std.testing.expectEqualSlices(u8, png, original.inline_data.?);
+    var verified = try loadVerifiedSnapshot(alloc, original, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, png, verified.bytes);
+
+    const jpeg = image_data.testJpeg(3420, 2224);
+    const kept = try captureInlineImageBytesInMemory(alloc, 2, "image/jpeg", &jpeg);
+    defer types.freeImageAttachment(alloc, kept);
+    try std.testing.expectEqualSlices(u8, &jpeg, kept.inline_data.?);
+}
+
+test "inline capture rejects a declared type that contradicts the bytes before directory effects" {
+    try std.testing.expectError(
+        error.ImageSnapshotMediaTypeMismatch,
+        captureInlineImageBytes(
+            std.testing.allocator,
+            1,
+            "image/jpeg",
+            "\x89PNG\r\n\x1a\nnot-a-jpeg",
+            "/path/that/does/not/exist",
+        ),
+    );
+}
+
+test "capture rejects a file that grows past the source limit while streaming" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "growing.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n");
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "growing.png");
+    defer alloc.free(image_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast(image_path),
+        .media_type = @constCast("image/png"),
+    };
+    const GrowState = struct {
+        path: []const u8,
+        checks: usize = 0,
+
+        fn check(raw: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.checks += 1;
+            if (self.checks != 2) return;
+            var file = try std.Io.Dir.openFileAbsolute(
+                std.testing.io,
+                self.path,
+                .{ .mode = .read_write },
+            );
+            defer file.close(std.testing.io);
+            try file.setLength(std.testing.io, max_image_bytes + 1);
+        }
+    };
+    var state = GrowState{ .path = image_path };
+
+    try std.testing.expectError(
+        error.ImageTooLarge,
+        captureImageSnapshotWithBudget(
+            alloc,
+            &attachment,
+            snapshot_dir,
+            .{ .test_hook = .{ .ctx = &state, .check = GrowState.check } },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+}
+
+test "partial multi-image capture rolls back earlier snapshots" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "first.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nfirst");
+    }
+    const first_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "first.png");
+    defer alloc.free(first_path);
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const missing_path = try std.Io.Dir.path.join(alloc, &.{ root, "missing.png" });
+    defer alloc.free(missing_path);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    const attachment_values = [_]types.ImageAttachment{
+        .{
+            .id = 1,
+            .path = @constCast(first_path),
+            .media_type = @constCast("image/png"),
+        },
+        .{
+            .id = 2,
+            .path = @constCast(missing_path),
+            .media_type = @constCast("image/png"),
+        },
+    };
+    const attachments = try types.dupeImageAttachmentSlice(alloc, &attachment_values);
+    defer types.freeImageAttachmentSlice(alloc, attachments);
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        captureImageSnapshots(alloc, attachments, snapshot_dir, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+    for (attachments) |attachment| {
+        try std.testing.expect(attachment.snapshot_path == null);
+        try std.testing.expect(attachment.snapshot_sha256 == null);
+    }
+}
+
+test "twenty image capture retains one immutable snapshot per image" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var attachments: [20]types.ImageAttachment = undefined;
+    var initialized: usize = 0;
+    defer {
+        for (attachments[0..initialized]) |attachment| {
+            if (attachment.snapshot_path) |path| alloc.free(path);
+            if (attachment.snapshot_sha256) |sha256| alloc.free(sha256);
+            alloc.free(attachment.path);
+            alloc.free(attachment.media_type);
+        }
+    }
+    for (&attachments, 0..) |*attachment, index| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.mem.print(&name_buf, "image-{d}.png", .{index + 1});
+        {
+            var file = try tmp.dir.createFile(std.testing.io, name, .{});
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nmany");
+        }
+        attachment.* = .{
+            .id = index + 1,
+            .path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, name),
+            .media_type = try alloc.dupe(u8, "image/png"),
+        };
+        initialized += 1;
+    }
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+
+    try captureImageSnapshots(alloc, &attachments, snapshot_dir, .{});
+
+    try std.testing.expectEqual(attachments.len, try countSnapshotFiles(snapshot_dir));
+}
+
+test "snapshot capture rejects a symlinked destination directory" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "session", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "outside", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "outside/sentinel",
+        .data = "unchanged",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.png",
+        .data = "\x89PNG\r\n\x1a\nsource",
+    });
+
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const outside_path = try std.Io.Dir.path.join(alloc, &.{ root, "outside" });
+    defer alloc.free(outside_path);
+    var session_dir = try tmp.dir.openDir(std.testing.io, "session", .{});
+    defer session_dir.close(std.testing.io);
+    session_dir.symLink(std.testing.io, outside_path, "images", .{
+        .is_directory = true,
+    }) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+
+    const source_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "source.png");
+    defer alloc.free(source_path);
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "session", "images" });
+    defer alloc.free(snapshot_dir);
+    var attachment = try loadImageAttachment(alloc, source_path);
+    defer types.freeImageAttachment(alloc, attachment);
+    attachment.id = 1;
+
+    try std.testing.expectError(
+        error.ImageSnapshotPathUnsafe,
+        captureImageSnapshot(alloc, &attachment, snapshot_dir),
+    );
+    try std.testing.expect(attachment.snapshot_path == null);
+    try std.testing.expect(attachment.snapshot_sha256 == null);
+    try std.testing.expectEqual(@as(usize, 1), try countSnapshotFiles(outside_path));
+}
+
+test "snapshot discard does not follow a replaced destination directory" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "session", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "outside", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.png",
+        .data = "\x89PNG\r\n\x1a\nsource",
+    });
+
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const source_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "source.png");
+    defer alloc.free(source_path);
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "session", "images" });
+    defer alloc.free(snapshot_dir);
+    var attachment = try loadImageAttachment(alloc, source_path);
+    defer types.freeImageAttachment(alloc, attachment);
+    attachment.id = 1;
+    try captureImageSnapshot(alloc, &attachment, snapshot_dir);
+
+    const leaf = try alloc.dupe(u8, std.Io.Dir.path.basename(attachment.snapshot_path.?));
+    defer alloc.free(leaf);
+    var session_dir = try tmp.dir.openDir(std.testing.io, "session", .{});
+    defer session_dir.close(std.testing.io);
+    try session_dir.rename("images", session_dir, "images-owned", std.testing.io);
+    var outside_dir = try tmp.dir.openDir(std.testing.io, "outside", .{});
+    defer outside_dir.close(std.testing.io);
+    try outside_dir.writeFile(std.testing.io, .{
+        .sub_path = leaf,
+        .data = "outside-sentinel",
+    });
+    const outside_path = try std.Io.Dir.path.join(alloc, &.{ root, "outside" });
+    defer alloc.free(outside_path);
+    session_dir.symLink(std.testing.io, outside_path, "images", .{
+        .is_directory = true,
+    }) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+
+    discardImageSnapshot(alloc, &attachment);
+    var sentinel = try outside_dir.openFile(std.testing.io, leaf, .{});
+    defer sentinel.close(std.testing.io);
+    const bytes = try io_mod.readFileToEnd(alloc, &sentinel, 64);
+    defer alloc.free(bytes);
+    try std.testing.expectEqualStrings("outside-sentinel", bytes);
+}
+
+test "verified snapshot loading rejects a symlink before and after retargeting" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "\x89PNG\r\n\x1a\nsymlink-a";
+    const replacement = "\x89PNG\r\n\x1a\nsymlink-b";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "a.bin", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, original);
+    }
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "b.bin", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, replacement);
+    }
+    const path_a = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "a.bin");
+    defer alloc.free(path_a);
+    const path_b = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "b.bin");
+    defer alloc.free(path_b);
+    tmp.dir.symLink(std.testing.io, path_a, "snapshot-link.bin", .{ .is_directory = false }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const link_path = try std.Io.Dir.path.join(alloc, &.{ root, "snapshot-link.bin" });
+    defer alloc.free(link_path);
+    const digest = testSha256Hex(original);
+    const attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast("/tmp/original.png"),
+        .media_type = @constCast("image/png"),
+        .snapshot_path = @constCast(link_path),
+        .snapshot_sha256 = @constCast(digest[0..]),
+    };
+
+    try std.testing.expectError(
+        error.ImageSnapshotPathUnsafe,
+        loadVerifiedSnapshot(alloc, attachment, .{}),
+    );
+    try tmp.dir.deleteFile(std.testing.io, "snapshot-link.bin");
+    try tmp.dir.symLink(std.testing.io, path_b, "snapshot-link.bin", .{ .is_directory = false });
+    try std.testing.expectError(
+        error.ImageSnapshotPathUnsafe,
+        loadVerifiedSnapshot(alloc, attachment, .{}),
+    );
+}
+
+test "image header short reads return only initialized stack bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "short.bin",
+        .data = "short",
+    });
+    var file = try tmp.dir.openFile(std.testing.io, "short.bin", .{});
+    defer file.close(std.testing.io);
+    var header: [64]u8 = undefined;
+
+    const bytes = try readImageHeaderFromFile(&file, 64, &header);
+
+    try std.testing.expectEqualStrings("short", bytes);
+}
+
+test "image attachment rejects directories before header reads" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+
+    try std.testing.expectError(
+        error.NotRegularFile,
+        loadImageAttachment(alloc, root),
+    );
+}
+
+test "verified snapshot loading rejects a symlinked directory" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "\x89PNG\r\n\x1a\nsymlink-directory";
+    try tmp.dir.createDir(
+        std.testing.io,
+        "owned",
+        std.Io.File.Permissions.fromMode(0o700),
+    );
+    {
+        var owned = try tmp.dir.openDir(std.testing.io, "owned", .{});
+        defer owned.close(std.testing.io);
+        var file = try owned.createFile(std.testing.io, "snapshot.bin", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, original);
+    }
+    const owned_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "owned");
+    defer alloc.free(owned_path);
+    tmp.dir.symLink(std.testing.io, owned_path, "images-link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const snapshot_path = try std.Io.Dir.path.join(alloc, &.{ root, "images-link", "snapshot.bin" });
+    defer alloc.free(snapshot_path);
+    const digest = testSha256Hex(original);
+    const attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast("/tmp/original.png"),
+        .media_type = @constCast("image/png"),
+        .snapshot_path = @constCast(snapshot_path),
+        .snapshot_sha256 = @constCast(digest[0..]),
+    };
+
+    try std.testing.expectError(
+        error.ImageSnapshotPathUnsafe,
+        loadVerifiedSnapshot(alloc, attachment, .{}),
+    );
+}
+
+test "verified snapshot loading reads the opened handle after path replacement" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "\x89PNG\r\n\x1a\nopened-handle";
+    const replacement = "\x89PNG\r\n\x1a\nreplacement";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "snapshot.bin", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, original);
+    }
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "replacement.bin", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, replacement);
+    }
+    const snapshot_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "snapshot.bin");
+    defer alloc.free(snapshot_path);
+    const replacement_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "replacement.bin");
+    defer alloc.free(replacement_path);
+    const digest = testSha256Hex(original);
+    const attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast("/tmp/original.png"),
+        .media_type = @constCast("image/png"),
+        .snapshot_path = @constCast(snapshot_path),
+        .snapshot_sha256 = @constCast(digest[0..]),
+    };
+    var hook = SnapshotReplacementHook{
+        .snapshot_path = snapshot_path,
+        .replacement_path = replacement_path,
+    };
+
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{
+        .test_hook = .{ .ctx = &hook, .check = SnapshotReplacementHook.check },
+    });
+    defer verified.deinit(alloc);
+
+    try std.testing.expectEqualStrings(original, verified.bytes);
+    const current = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "snapshot.bin",
+        alloc,
+        .limited(1024),
+    );
+    defer alloc.free(current);
+    try std.testing.expectEqualStrings(replacement, current);
+}
+
+test "native serialization keeps verified bytes after same-inode mutation" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const original = "\x89PNG\r\n\x1a\nverified-native";
+    const replacement = "\x89PNG\r\n\x1a\nreplaced-native";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "native.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, original);
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "native.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+
+    var writer = SnapshotMutatingWriter{
+        .snapshot_path = attachment.snapshot_path.?,
+        .replacement = replacement,
+    };
+    writer.init(attachment.snapshot_path.?, replacement);
+    try writeImageFilePartJson(alloc, &writer.interface, attachment);
+    try writer.interface.flush();
+
+    var expected_buf: [128]u8 = undefined;
+    const expected = std.base64.standard.Encoder.encode(&expected_buf, original);
+    var unexpected_buf: [128]u8 = undefined;
+    const unexpected = std.base64.standard.Encoder.encode(&unexpected_buf, replacement);
+    try std.testing.expect(writer.mutated);
+    try std.testing.expect(!writer.mutation_failed);
+    try std.testing.expect(std.mem.find(u8, writer.written(), expected) != null);
+    try std.testing.expect(std.mem.find(u8, writer.written(), unexpected) == null);
+}
+
+test "capture derives media type from captured bytes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "mislabeled.jpg", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\xff\xd8\xfforiginal-jpeg");
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "mislabeled.jpg");
+    defer alloc.free(image_path);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = try alloc.dupe(u8, image_path),
+        .media_type = try alloc.dupe(u8, "image/jpeg"),
+    };
+    defer types.freeImageAttachment(alloc, attachment);
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    const MutationState = struct {
+        path: []const u8,
+        checks: usize = 0,
+
+        fn check(raw: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.checks += 1;
+            if (self.checks != 2) return;
+            var file = try std.Io.Dir.createFileAbsolute(
+                std.testing.io,
+                self.path,
+                .{ .truncate = true },
+            );
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\ncaptured");
+        }
+    };
+    var state = MutationState{ .path = image_path };
+
+    try captureImageSnapshotWithBudget(
+        alloc,
+        &attachment,
+        snapshot_dir,
+        .{ .test_hook = .{ .ctx = &state, .check = MutationState.check } },
+    );
+
+    try std.testing.expectEqualStrings("image/png", attachment.media_type);
+}
+
+test "capture removes final snapshot when digest allocation fails after rename" {
+    const base_alloc = testing_allocator.no_resize;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "oom.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\noom");
+    }
+    const image_path = try io_mod.dirRealpathAlloc(base_alloc, tmp.dir, "oom.png");
+    defer base_alloc.free(image_path);
+    const snapshot_dir = try testSnapshotDir(base_alloc, &tmp);
+    defer base_alloc.free(snapshot_dir);
+    var attachment = types.ImageAttachment{
+        .id = 1,
+        .path = @constCast(image_path),
+        .media_type = @constCast("image/png"),
+    };
+    var failing = std.testing.FailingAllocator.init(base_alloc, .{ .fail_index = 3 });
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        captureImageSnapshot(failing.allocator(), &attachment, snapshot_dir),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countSnapshotFiles(snapshot_dir));
+    try std.testing.expect(attachment.snapshot_path == null);
+    try std.testing.expect(attachment.snapshot_sha256 == null);
+}
+
+test "writeImageFilePartJson preserves attached bytes after source replacement" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_a = "\x89PNG\r\n\x1a\nimage-a";
+    const png_b = "\x89PNG\r\n\x1a\nimage-b";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "image.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, png_a);
+    }
+
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "image.png", .{ .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, png_b);
+    }
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeImageFilePartJson(alloc, &out.writer, attachment);
+
+    var expected_buf: [128]u8 = undefined;
+    const expected = std.base64.standard.Encoder.encode(&expected_buf, png_a);
+    try std.testing.expect(std.mem.find(u8, out.written(), expected) != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "aW1hZ2UtYg==") == null);
+}
+
+test "image file part serialization obeys the caller allocator" {
+    const alloc = testing_allocator.no_resize;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "image.png",
+        .data = "\x89PNG\r\n\x1a\nimage",
+    });
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeImageFilePartJson(failing.allocator(), &out.writer, attachment),
+    );
+}
+
+test "image file part serialization releases scratch bytes between images" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var image_bytes: [32 * 1024]u8 = undefined;
+    @memset(&image_bytes, 'x');
+    @memcpy(image_bytes[0..8], "\x89PNG\r\n\x1a\n");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "image.png",
+        .data = &image_bytes,
+    });
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    var scratch_bytes: [96 * 1024]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&scratch_bytes);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try writeImageFilePartJson(scratch.allocator(), &out.writer, attachment);
+    try std.testing.expectEqual(@as(usize, 0), scratch.end_index);
+    try writeImageFilePartJson(scratch.allocator(), &out.writer, attachment);
+    try std.testing.expectEqual(@as(usize, 0), scratch.end_index);
+}
+
+test "writeImageFilePartJson preserves attached bytes after source deletion" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png = "\x89PNG\r\n\x1a\nimage-a";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "image.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, png);
+    }
+
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+
+    try tmp.dir.deleteFile(std.testing.io, "image.png");
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeImageFilePartJson(alloc, &out.writer, attachment);
+
+    var expected_buf: [128]u8 = undefined;
+    const expected = std.base64.standard.Encoder.encode(&expected_buf, png);
+    try std.testing.expect(std.mem.find(u8, out.written(), expected) != null);
+}
+
+test "writeImageFilePartJson rejects missing captured snapshot without source fallback" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png = "\x89PNG\r\n\x1a\nimage-a";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "image.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, png);
+    }
+
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    try std.Io.Dir.deleteFileAbsolute(std.testing.io, attachment.snapshot_path.?);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try std.testing.expectError(error.FileNotFound, writeImageFilePartJson(alloc, &out.writer, attachment));
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "writeImageFilePartJson rejects modified captured snapshot digest" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png = "\x89PNG\r\n\x1a\nimage-a";
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "image.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, png);
+    }
+
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "image.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    {
+        var file = try std.Io.Dir.createFileAbsolute(
+            std.testing.io,
+            attachment.snapshot_path.?,
+            .{ .truncate = true },
+        );
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nimage-b");
+    }
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try std.testing.expectError(error.ImageSnapshotCorrupt, writeImageFilePartJson(alloc, &out.writer, attachment));
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "review image replay rejects oversized source before writing" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "oversized.png", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\nsmall");
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "oversized.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+    {
+        var snapshot = try std.Io.Dir.openFileAbsolute(
+            std.testing.io,
+            attachment.snapshot_path.?,
+            .{ .mode = .read_write },
+        );
+        defer snapshot.close(std.testing.io);
+        try snapshot.setLength(std.testing.io, max_image_bytes + 1);
+    }
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(error.ImageTooLarge, writeReviewImageFilePartJson(
+        alloc,
+        &out.writer,
+        attachment,
+        deadline,
+        &cancel_flag,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "review image replay observes cancellation between base64 chunks" {
+    const CancelWriter = struct {
+        cancel_flag: *std.atomic.Value(bool),
+        total_written: usize = 0,
+        buffer: [64]u8 = undefined,
+        interface: std.Io.Writer = undefined,
+
+        fn init(self: *@This(), cancel_flag: *std.atomic.Value(bool)) void {
+            self.* = .{ .cancel_flag = cancel_flag };
+            self.interface = .{
+                .vtable = &.{ .drain = drain },
+                .buffer = &self.buffer,
+                .end = 0,
+            };
+        }
+
+        fn drain(
+            writer: *std.Io.Writer,
+            data: []const []const u8,
+            splat: usize,
+        ) std.Io.Writer.Error!usize {
+            const self: *@This() = @alignCast(@fieldParentPtr("interface", writer));
+            self.total_written += writer.end;
+            writer.end = 0;
+
+            var consumed: usize = 0;
+            for (data, 0..) |part, index| {
+                const repeat = if (index == data.len - 1) splat else 1;
+                consumed += part.len * repeat;
+            }
+            self.total_written += consumed;
+            if (self.total_written > 5 * 1024) self.cancel_flag.store(true, .seq_cst);
+            return consumed;
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile(std.testing.io, "multi-chunk.png", .{});
+        defer file.close(std.testing.io);
+        var bytes: [12 * 1024]u8 = undefined;
+        @memset(&bytes, 'x');
+        @memcpy(bytes[0..8], "\x89PNG\r\n\x1a\n");
+        try file.writeStreamingAll(std.testing.io, &bytes);
+    }
+    const image_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "multi-chunk.png");
+    defer alloc.free(image_path);
+    const attachment = try testCapturedAttachment(alloc, &tmp, image_path, 1, "image/png");
+    defer types.freeImageAttachment(alloc, attachment);
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var writer = CancelWriter{ .cancel_flag = &cancel_flag };
+    writer.init(&cancel_flag);
+    const deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
+
+    try std.testing.expectError(error.Cancelled, writeReviewImageFilePartJson(
+        alloc,
+        &writer.interface,
+        attachment,
+        deadline,
+        &cancel_flag,
+    ));
+    try std.testing.expect(writer.total_written > 3 * 1024);
+    try std.testing.expect(writer.total_written < 16 * 1024);
+}
+
+test "in-memory inline capture validates and retains image bytes without a filesystem" {
+    const alloc = std.testing.allocator;
+    const png = "\x89PNG\r\n\x1a\ninline-payload";
+    const attachment = try captureInlineImageBytesInMemory(alloc, 3, "image/png", png);
+    defer types.freeImageAttachment(alloc, attachment);
+
+    try std.testing.expectEqual(@as(usize, 3), attachment.id);
+    try std.testing.expectEqualStrings("image/png", attachment.media_type);
+    try std.testing.expectEqualStrings("inline://image-3", attachment.path);
+    try std.testing.expectEqual(@as(?[]const u8, null), attachment.snapshot_path);
+    try std.testing.expectEqualStrings(png, attachment.inline_data.?);
+    try std.testing.expectEqual(@as(usize, snapshot_digest_hex_len), attachment.snapshot_sha256.?.len);
+
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualStrings(png, verified.bytes);
+    try std.testing.expectEqualStrings("image/png", verified.media_type);
+}
+
+test "in-memory inline capture rejects invalid input before retaining bytes" {
+    const alloc = std.testing.allocator;
+    const png = "\x89PNG\r\n\x1a\ninline-payload";
+
+    try std.testing.expectError(error.InvalidImageId, captureInlineImageBytesInMemory(alloc, 0, "image/png", png));
+    try std.testing.expectError(error.UnsupportedImageType, captureInlineImageBytesInMemory(alloc, 1, "image/png", ""));
+    try std.testing.expectError(error.UnsupportedImageType, captureInlineImageBytesInMemory(alloc, 1, "", png));
+    try std.testing.expectError(error.UnsupportedImageType, captureInlineImageBytesInMemory(alloc, 1, "image/png", "not an image"));
+    try std.testing.expectError(
+        error.ImageSnapshotMediaTypeMismatch,
+        captureInlineImageBytesInMemory(alloc, 1, "image/jpeg", png),
+    );
+    const oversized = try alloc.alloc(u8, max_image_bytes + 1);
+    defer alloc.free(oversized);
+    @memset(oversized, 'x');
+    @memcpy(oversized[0..8], "\x89PNG\r\n\x1a\n");
+    try std.testing.expectError(error.ImageTooLarge, captureInlineImageBytesInMemory(alloc, 1, "image/png", oversized));
+}
+
+test "inline snapshot verification rejects corrupted retained bytes" {
+    const alloc = std.testing.allocator;
+    const png = "\x89PNG\r\n\x1a\ninline-payload";
+    const attachment = try captureInlineImageBytesInMemory(alloc, 1, "image/png", png);
+    defer types.freeImageAttachment(alloc, attachment);
+
+    var corrupted = attachment;
+    corrupted.inline_data = try alloc.dupe(u8, attachment.inline_data.?);
+    defer alloc.free(corrupted.inline_data.?);
+    corrupted.inline_data.?[9] ^= 1;
+    try std.testing.expectError(error.ImageSnapshotCorrupt, loadVerifiedSnapshot(alloc, corrupted, .{}));
+
+    var wrong_type = attachment;
+    wrong_type.media_type = @constCast("image/jpeg");
+    try std.testing.expectError(error.ImageSnapshotMediaTypeMismatch, loadVerifiedSnapshot(alloc, wrong_type, .{}));
+
+    var missing_digest = attachment;
+    missing_digest.snapshot_sha256 = null;
+    try std.testing.expectError(error.MissingImageSnapshot, loadVerifiedSnapshot(alloc, missing_digest, .{}));
+}
+
+test "a recalled image whose bytes are inline keeps them inline and writes no file (D84, D89)" {
+    const alloc = std.testing.allocator;
+    const png = image_data.testPngHeader(10, 10);
+    const attachment = try captureInlineImageBytesInMemory(alloc, 1, "image/png", &png);
+    defer types.freeImageAttachment(alloc, attachment);
+
+    const recalled = try cloneVerifiedImageAttachment(alloc, attachment, 2);
+    defer discardImageAttachment(alloc, recalled);
+    try std.testing.expectEqual(@as(usize, 2), recalled.id);
+    try std.testing.expectEqualSlices(u8, &png, recalled.inline_data.?);
+    try std.testing.expect(recalled.inline_data.?.ptr != attachment.inline_data.?.ptr);
+    try std.testing.expectEqualStrings(attachment.snapshot_sha256.?, recalled.snapshot_sha256.?);
+    try std.testing.expectEqual(@as(?[]u8, null), recalled.snapshot_path);
+
+    // Bytes that no longer match their digest are refused, as a file is.
+    var corrupted = attachment;
+    corrupted.inline_data = try alloc.dupe(u8, attachment.inline_data.?);
+    defer alloc.free(corrupted.inline_data.?);
+    corrupted.inline_data.?[9] ^= 1;
+    try std.testing.expectError(error.ImageSnapshotCorrupt, cloneVerifiedImageAttachment(alloc, corrupted, 3));
+}
+
+test "an image saved as a blob is only its handle, and readers load the blob, even one a fork hard-linked (D89)" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png = image_data.testPngHeader(4, 3);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(&png, &digest, .{});
+    var hex = std.fmt.bytesToHex(digest, .lower);
+    try tmp.dir.writeFile(io_mod.getIo(), .{ .sub_path = &hex, .data = &png });
+    // A fork hard-links its source's blobs, so this one has two links.
+    try std.Io.Dir.hardLink(tmp.dir, &hex, tmp.dir, "forked", io_mod.getIo(), .{ .follow_symlinks = false });
+    const blob = try io_mod.dirRealpathAlloc(alloc, tmp.dir, &hex);
+    defer alloc.free(blob);
+    const handle: types.ImageAttachment = .{
+        .id = 1,
+        .path = @constCast("/Users/example/shot.png"),
+        .media_type = @constCast("image/png"),
+        .snapshot_sha256 = &hex,
+        .blob_path = blob,
+    };
+    try std.testing.expect(!handle.droppedFromSession());
+    var read = try loadVerifiedSnapshot(alloc, handle, .{});
+    defer read.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, &png, read.bytes);
+    try std.testing.expectEqual(@as(?usize, png.len), attachmentRawBytes(handle));
+    var cache_arena = std.heap.ArenaAllocator.init(alloc);
+    defer cache_arena.deinit();
+    var cache: AttachmentDimensionCache = .empty;
+    const dimensions = (try attachmentDimensions(cache_arena.allocator(), &cache, handle)).?;
+    try std.testing.expectEqual(@as(u32, 4), dimensions.width);
+
+    // A blob's folders may be reached through a symlink, as a home under
+    // macOS's /var is; a snapshot's may not.
+    try tmp.dir.symLink(io_mod.getIo(), ".", "linked", .{ .is_directory = true });
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const through_link = try std.Io.Dir.path.join(alloc, &.{ root, "linked", &hex });
+    defer alloc.free(through_link);
+    var linked = handle;
+    linked.blob_path = through_link;
+    var linked_read = try loadVerifiedSnapshot(alloc, linked, .{});
+    defer linked_read.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, &png, linked_read.bytes);
+    var linked_snapshot = handle;
+    linked_snapshot.blob_path = null;
+    linked_snapshot.snapshot_path = through_link;
+    try std.testing.expectError(error.ImageSnapshotPathUnsafe, loadVerifiedSnapshot(alloc, linked_snapshot, .{}));
+
+    // A recall carries the bytes inline and writes no file.
+    const recalled = try cloneVerifiedImageAttachment(alloc, handle, 2);
+    defer discardImageAttachment(alloc, recalled);
+    try std.testing.expectEqualSlices(u8, &png, recalled.inline_data.?);
+    try std.testing.expectEqual(@as(?[]u8, null), recalled.blob_path);
+
+    // Only a blob may have another link; a snapshot in the shared
+    // temporary folder may not.
+    var snapshot = handle;
+    snapshot.blob_path = null;
+    snapshot.snapshot_path = blob;
+    try std.testing.expectError(error.NotRegularFile, loadVerifiedSnapshot(alloc, snapshot, .{}));
+
+    // A damaged blob fails its digest wherever it is read.
+    try tmp.dir.writeFile(io_mod.getIo(), .{ .sub_path = &hex, .data = "damaged" });
+    try std.testing.expectError(error.ImageSnapshotCorrupt, loadVerifiedSnapshot(alloc, handle, .{}));
+}

@@ -1,0 +1,2657 @@
+const std = @import("std");
+const agents = @import("../agents/agents.zig");
+const testing_allocator = @import("../shared/testing_allocator.zig");
+const paste_blocks = @import("../input/pasted_blocks.zig");
+const registered_entities = @import("../input/registered_entities.zig");
+const image_attachments = @import("../images/image_attachments.zig");
+const command_specs = @import("../slash_commands/command_specs.zig");
+const io_mod = @import("../shared/io.zig");
+const debug_trace = @import("../shared/debug_trace.zig");
+const entity_spans = @import("../shared/entity_spans.zig");
+const types = @import("../shared/types.zig");
+const worker_runtime = @import("../agent/worker_runtime.zig");
+const compaction_activity = @import("../output/compaction_activity.zig");
+const input_completion_runtime = @import("input_completion_runtime.zig");
+const input_limit_feedback = @import("input_limit_feedback.zig");
+
+const submission_state = @import("submission_state.zig");
+pub const PendingPhase = submission_state.PendingPhase;
+const PendingPhaseError = submission_state.PendingPhaseError;
+pub const PendingPromptDraft = submission_state.PendingPromptDraft;
+pub const PendingSubmission = submission_state.PendingSubmission;
+pub const PendingSkillRefresh = submission_state.PendingSkillRefresh;
+pub const State = submission_state.State;
+
+fn buildPendingPromptDraft(
+    alloc: std.mem.Allocator,
+    turn_id: u64,
+    prompt_source: []const u8,
+    image_source: []const types.ImageAttachment,
+    skill_tokens: []const registered_entities.SkillTokenSpan,
+) !PendingPromptDraft {
+    if (turn_id == 0) return error.InvalidTurnId;
+
+    const prompt = try alloc.dupe(u8, prompt_source);
+    errdefer alloc.free(prompt);
+    const images = try types.dupeImageAttachmentSlice(alloc, image_source);
+    errdefer types.freeImageAttachmentSlice(alloc, images);
+
+    const spans: []worker_runtime.SkillDisplaySpan = if (skill_tokens.len == 0)
+        @constCast(&.{})
+    else
+        try alloc.alloc(worker_runtime.SkillDisplaySpan, skill_tokens.len);
+    var span_count: usize = 0;
+    errdefer {
+        for (spans[0..span_count]) |span| {
+            alloc.free(span.name);
+            alloc.free(span.path);
+        }
+        if (spans.len > 0) alloc.free(spans);
+    }
+    while (span_count < skill_tokens.len) : (span_count += 1) {
+        const token = skill_tokens[span_count];
+        const name = try alloc.dupe(u8, token.name);
+        errdefer alloc.free(name);
+        spans[span_count] = .{
+            .raw_start = token.raw_start,
+            .raw_end = token.raw_end,
+            .name = name,
+            .path = try alloc.dupe(u8, token.path),
+            .display_source = token.display_source,
+            .owns_trailing_separator = token.owns_trailing_separator,
+        };
+    }
+
+    return .{
+        .turn_id = turn_id,
+        .prompt = prompt,
+        .images = images,
+        .skill_display_spans = spans,
+    };
+}
+
+pub fn SubmitRuntime(comptime App: type) type {
+    return struct {
+        const AppAgent = if (@hasField(App, "main_agent")) @FieldType(App, "main_agent") else struct {};
+        pub fn request_context_compaction(app: *App, agent: *AppAgent) !void {
+            if (agent.submission.compaction_pending) return;
+            const observed = agent.worker.compactionActivitySnapshot();
+            if (observed.operation) |op| if (op.active()) return;
+            defer app.shell.render_requests.request(.footer);
+            if (!app.hasContextToCompact(agent)) {
+                agent.worker.rejectCompactionActivity(.no_op);
+                return;
+            }
+            if (agent.submission.pending != null or agent.worker.isProcessing() or
+                agent.worker.queuedPromptCount() > 0 or agent.worker.contextCompactionStatus() != .idle)
+            {
+                agent.worker.rejectCompactionActivity(.busy);
+                return;
+            }
+            agent.submission.compaction_operation = agent.worker.beginCompactionActivity(.manual, null);
+            agent.submission.compaction_pending = true;
+            collect_context_compaction(app, agent);
+            if (agent.submission.compaction_pending) {
+                debug_trace.logf("input", "manual_compaction_auth_pending", .{});
+            }
+        }
+
+        fn collect_context_compaction(app: *App, agent: *AppAgent) void {
+            if (comptime !@hasDecl(App, "enqueueContextCompaction")) return;
+            if (!agent.submission.compaction_pending) return;
+            admit_context_compaction(app, agent) catch |err| {
+                settle_pending_compaction(agent, if (err == error.WorkerBusy) .{ .outcome = .busy } else compaction_activity.failure(err, .preparation, false));
+                clear_context_compaction(app, agent, "admission_failed");
+                agent.submission.retry_after_auth = false;
+                debug_trace.logf("input", "manual compaction admission failed err={s}", .{@errorName(err)});
+                app.shell.render_requests.request(.footer);
+            };
+        }
+
+        fn admit_context_compaction(app: *App, agent: *AppAgent) !void {
+            switch (try App.collectPendingPromptCredential(app, agent)) {
+                .pending => return,
+                .rejected => {
+                    settle_pending_compaction(agent, compaction_activity.failure(error.CompactionAuthenticationRejected, .preparation, false));
+                    clear_context_compaction(app, agent, "auth_rejected");
+                    agent.submission.retry_after_auth = false;
+                    return;
+                },
+                .current => {},
+            }
+            const queued = try app.enqueueContextCompaction(agent, agent.submission.compaction_operation.?);
+            if (!queued) settle_pending_compaction(agent, .{ .outcome = .busy });
+            agent.submission.compaction_pending = false;
+            agent.submission.compaction_operation = null;
+            app.shell.render_requests.request(.footer);
+        }
+
+        fn settle_pending_compaction(agent: *AppAgent, feedback: compaction_activity.Feedback) void {
+            if (comptime !@hasDecl(@TypeOf(agent.worker), "settleCompactionActivity")) return;
+            const id = agent.submission.compaction_operation orelse return;
+            agent.worker.settleCompactionActivity(id, feedback);
+        }
+
+        fn clear_context_compaction(app: *App, agent: *AppAgent, reason: []const u8) void {
+            if (!agent.submission.compaction_pending) return;
+            settle_pending_compaction(agent, .{ .outcome = .cancelled });
+            agent.submission.compaction_pending = false;
+            agent.submission.compaction_operation = null;
+            debug_trace.logf("input", "manual compaction intent cleared reason={s}", .{reason});
+            if (comptime @hasField(App, "auth")) {
+                if (comptime @hasDecl(@TypeOf(app.auth), "cancelPromptCredentialRefresh")) app.auth.cancelPromptCredentialRefresh();
+            }
+        }
+
+        pub fn requestPromptRetryAfterAuth(agent: *AppAgent) void {
+            agent.submission.retry_after_auth = true;
+        }
+
+        pub fn cancelPromptRetryAfterAuth(app: *App, agent: *AppAgent) void {
+            agent.submission.retry_after_auth = false;
+            const pending = agent.submission.pending orelse return;
+            if (pending.phase != .awaiting_auth) return;
+            clearPendingSubmission(app, agent, "auth_retry_cancelled");
+            app.shell.render_requests.request(.transcript);
+            app.shell.render_requests.request(.footer);
+        }
+
+        fn takePromptRetryAfterAuth(agent: *AppAgent) bool {
+            const pending = agent.submission.retry_after_auth;
+            agent.submission.retry_after_auth = false;
+            return pending;
+        }
+
+        fn resumePendingPromptAfterAuth(app: *App, agent: *AppAgent, trigger: []const u8) bool {
+            const pending = if (agent.submission.pending) |*value| value else return false;
+            if (pending.phase != .awaiting_auth) return false;
+            pending.phase = .adopted;
+            agent.submission.retry_after_auth = false;
+            app.shell.render_requests.request(.footer);
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_auth_resumed",
+                .{ .turn_id = pending.draft.turn_id },
+                "trigger={s}",
+                .{trigger},
+            );
+            return true;
+        }
+
+        pub fn resumePromptAfterAuth(app: *App, agent: *AppAgent, max_prompt_history: usize) !void {
+            if (!takePromptRetryAfterAuth(agent)) return;
+            if (resumePendingPromptAfterAuth(app, agent, "auth_completion")) return;
+            try submit(app, max_prompt_history);
+        }
+        const completion_rt = input_completion_runtime.CompletionRuntime(App);
+
+        const PromptAdmission = enum {
+            rejected,
+            pending,
+            enqueued,
+        };
+
+        const PendingInstall = enum {
+            unavailable,
+            installed,
+        };
+
+        const PendingSnapshotCleanup = enum {
+            discard,
+            preserve,
+        };
+
+        const ComposerHistoryProjection = struct {
+            input: []const u8,
+            pasted_blocks: std.ArrayList(paste_blocks.PastedBlock) = .empty,
+            image_tokens: std.ArrayList(entity_spans.ImageTokenSpan) = .empty,
+            skill_tokens: std.ArrayList(registered_entities.SkillTokenSpan) = .empty,
+
+            fn deinit(self: *ComposerHistoryProjection, alloc: std.mem.Allocator) void {
+                self.pasted_blocks.deinit(alloc);
+                self.image_tokens.deinit(alloc);
+                self.skill_tokens.deinit(alloc);
+                self.* = undefined;
+            }
+        };
+
+        fn composerHistoryEnabled(app: *const App) bool {
+            if (comptime @hasField(App, "prompt_history")) {
+                return app.prompt_history.enabled;
+            }
+            return true;
+        }
+
+        pub fn noteCommittedFrame(app: *App, agent: *AppAgent) void {
+            if (comptime !agents.hasAgentField(App, "submission")) return;
+            const pending = if (agent.submission.pending) |*value| value else return;
+            if (!pending.markFrameCommitted()) return;
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_frame_committed",
+                .{ .turn_id = pending.draft.turn_id },
+                "",
+                .{},
+            );
+            adoptPendingSubmission(app, agent) catch |err| {
+                debug_trace.eventf(
+                    "input",
+                    "pending_prompt_adoption_retry",
+                    .{ .turn_id = pending.draft.turn_id },
+                    "err={s}",
+                    .{@errorName(err)},
+                );
+            };
+        }
+
+        /// Sends the `fx "<prompt>"` prompt once the first frame is on screen,
+        /// through the same path as typing it and pressing Enter. The prompt
+        /// belongs to the first instance, so it waits while another is shown.
+        pub fn collectLaunchPromptFacts(app: *App, max_prompt_history: usize) !void {
+            if (comptime !agents.hasAgentField(App, "submission")) return;
+            const agent = agents.screenAgentOf(app);
+            const prompt = agent.submission.launch_prompt orelse return;
+            if (app.shell.render_requests.hasReason(.first_frame)) return;
+            // Typed input waits out a live session switch; so does this.
+            if (comptime agents.hasAgentField(App, "session_persistence")) {
+                if (agent.session_persistence.pending_live_session_policy != null) return;
+            }
+            agent.submission.launch_prompt = null;
+            defer app.alloc.free(prompt);
+            if (app.input_runtime.edit_state.input.items.len != 0) {
+                debug_trace.logf(
+                    "input",
+                    "event=launch_prompt_dropped reason=composer_not_empty prompt_bytes={d}",
+                    .{prompt.len},
+                );
+                return;
+            }
+            debug_trace.logf("input", "event=launch_prompt_submit prompt_bytes={d}", .{prompt.len});
+            try app.input_runtime.edit_state.setText(app.alloc, prompt);
+            try submit(app, max_prompt_history);
+        }
+
+        /// Frees a launch prompt that was never sent, such as when fx exits
+        /// before its first frame.
+        pub fn discardLaunchPrompt(app: *App, reason: []const u8) void {
+            if (comptime !agents.hasAgentField(App, "submission")) return;
+            const agent = &app.main_agent;
+            const prompt = agent.submission.launch_prompt orelse return;
+            agent.submission.launch_prompt = null;
+            debug_trace.logf(
+                "input",
+                "event=launch_prompt_dropped reason={s} prompt_bytes={d}",
+                .{ reason, prompt.len },
+            );
+            app.alloc.free(prompt);
+        }
+
+        pub fn collectPendingSubmissionFacts(app: *App, agent: *AppAgent) void {
+            if (comptime !agents.hasAgentField(App, "submission")) return;
+            collect_context_compaction(app, agent);
+            var pending = if (agent.submission.pending) |*value| value else return;
+            if (pending.phase == .awaiting_adoption) {
+                adoptPendingSubmission(app, agent) catch |err| {
+                    debug_trace.eventf(
+                        "input",
+                        "pending_prompt_adoption_retry",
+                        .{ .turn_id = pending.draft.turn_id },
+                        "err={s}",
+                        .{@errorName(err)},
+                    );
+                    return;
+                };
+                pending = &agent.submission.pending.?;
+            }
+            if (pending.phase != .adopted) return;
+
+            if (!pending.credential_admitted) {
+                if (comptime @hasDecl(App, "collectPendingPromptCredential")) {
+                    const readiness = App.collectPendingPromptCredential(app, agent) catch |err| {
+                        finishPendingSubmissionFailure(app, agent, err);
+                        return;
+                    };
+                    switch (readiness) {
+                        .pending => return,
+                        .current => {},
+                        .rejected => {
+                            pending = &agent.submission.pending.?;
+                            pending.phase = .awaiting_auth;
+                            requestPromptRetryAfterAuth(agent);
+                            debug_trace.eventf(
+                                "input",
+                                "pending_prompt_awaiting_auth",
+                                .{ .turn_id = pending.draft.turn_id },
+                                "",
+                                .{},
+                            );
+                            return;
+                        },
+                    }
+                } else if (comptime @hasDecl(App, "ensurePromptCredential")) {
+                    const admitted = preflightPrompt(app, agent) catch |err| {
+                        finishPendingSubmissionFailure(app, agent, err);
+                        return;
+                    };
+                    pending = &agent.submission.pending.?;
+                    if (!admitted) {
+                        pending.phase = .awaiting_auth;
+                        requestPromptRetryAfterAuth(agent);
+                        debug_trace.eventf(
+                            "input",
+                            "pending_prompt_awaiting_auth",
+                            .{ .turn_id = pending.draft.turn_id },
+                            "",
+                            .{},
+                        );
+                        return;
+                    }
+                }
+                agent.submission.pending.?.credential_admitted = true;
+                pending = &agent.submission.pending.?;
+            }
+
+            if (comptime @hasDecl(App, "collectPendingTokenPass")) {
+                if (App.collectPendingTokenPass(app, agent) == .pending) return;
+            }
+
+            if (comptime @hasDecl(App, "collectPendingSkillRefresh")) {
+                const readiness = App.collectPendingSkillRefresh(app, pending) catch |err| {
+                    finishPendingSubmissionFailure(app, agent, err);
+                    return;
+                };
+                if (readiness == .pending) return;
+            }
+
+            if (pending.draft.prompt.len > 0 and pending.draft.images.len == 0) {
+                recordAcceptedInput(app, pending.draft.prompt);
+            }
+            if (comptime !@hasDecl(App, "finalizePendingSubmission")) {
+                finishPendingSubmissionFailure(app, agent, error.PendingFinalizationUnsupported);
+                return;
+            }
+            App.finalizePendingSubmission(app, agent, &pending.draft) catch |err| {
+                finishPendingSubmissionFailure(app, agent, err);
+                return;
+            };
+            if (!pending.markQueued()) {
+                debug_trace.eventf(
+                    "input",
+                    "pending_prompt_queue_phase_invalid",
+                    .{ .turn_id = pending.draft.turn_id },
+                    "phase={s}",
+                    .{@tagName(pending.phase)},
+                );
+                return;
+            }
+            agent.worker.releaseTurnStartHold();
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_queued",
+                .{ .turn_id = pending.draft.turn_id },
+                "",
+                .{},
+            );
+        }
+
+        pub fn acceptPresentedPrompt(app: *App, agent: *AppAgent, turn_id: u64) !void {
+            if (comptime !agents.hasAgentField(App, "submission")) {
+                return error.PendingSubmissionUnsupported;
+            }
+            const pending = agent.submission.pending orelse return error.MissingPendingSubmission;
+            if (pending.phase != .queued) return error.InvalidPendingPhase;
+            if (pending.draft.turn_id != turn_id) return error.PendingTurnIdMismatch;
+            clearPendingSubmissionWithSnapshots(
+                app,
+                agent,
+                "worker_begin_presented",
+                .preserve,
+            );
+        }
+
+        pub fn cancelPendingSubmission(app: *App, agent: *AppAgent) bool {
+            if (comptime !agents.hasAgentField(App, "submission")) return false;
+            if (agent.submission.compaction_pending) {
+                clear_context_compaction(app, agent, "cancelled");
+                app.shell.render_requests.request(.footer);
+                return true;
+            }
+            const pending = agent.submission.pending orelse return false;
+            if (pending.phase == .queued) {
+                if (comptime !@hasDecl(@TypeOf(agent.worker), "removeQueuedPrompt")) {
+                    return false;
+                }
+                const carried_stale_note = if (comptime @hasDecl(@TypeOf(agent.worker), "queuedPromptCarriesStaleShellHandles"))
+                    agent.worker.queuedPromptCarriesStaleShellHandles(pending.draft.turn_id)
+                else
+                    false;
+                if (!agent.worker.removeQueuedPrompt(
+                    std.heap.c_allocator,
+                    pending.draft.turn_id,
+                    pending.draft.images,
+                )) {
+                    if (comptime @hasDecl(@TypeOf(agent.worker), "activeTurnId") and
+                        @hasDecl(@TypeOf(agent.worker), "requestCancel"))
+                    {
+                        if (agent.worker.activeTurnId() == pending.draft.turn_id) {
+                            agent.worker.requestCancel();
+                            debug_trace.eventf(
+                                "input",
+                                "pending_prompt_active_cancel_requested",
+                                .{ .turn_id = pending.draft.turn_id },
+                                "",
+                                .{},
+                            );
+                            app.shell.render_requests.request(.footer);
+                            return true;
+                        }
+                    }
+                    debug_trace.eventf(
+                        "input",
+                        "pending_prompt_cancel_missed",
+                        .{ .turn_id = pending.draft.turn_id },
+                        "phase={s}",
+                        .{@tagName(pending.phase)},
+                    );
+                    return false;
+                }
+                // The removed prompt never ran, so the next one tells the
+                // model its earlier shell handles are gone.
+                if (carried_stale_note) {
+                    if (comptime agents.hasAgentField(App, "session") and @hasDecl(@TypeOf(agent.session), "returnStaleShellHandles")) {
+                        agent.session.returnStaleShellHandles(pending.draft.turn_id);
+                    }
+                }
+            }
+            clearPendingSubmission(app, agent, "ctrl_c_pending_submission");
+            app.shell.render_requests.request(.transcript);
+            app.shell.render_requests.request(.footer);
+            return true;
+        }
+
+        pub fn clearPendingSubmission(app: *App, agent: *AppAgent, reason: []const u8) void {
+            if (comptime agents.hasAgentField(App, "submission")) clear_context_compaction(app, agent, reason);
+            const snapshot_cleanup: PendingSnapshotCleanup = if (transferPendingImageSnapshotsToComposerHistory(app, agent))
+                .preserve
+            else
+                .discard;
+            clearPendingSubmissionWithSnapshots(app, agent, reason, snapshot_cleanup);
+        }
+
+        pub fn clearPendingSubmissionForSessionTransition(app: *App, agent: *AppAgent) void {
+            if (comptime agents.hasAgentField(App, "submission")) clear_context_compaction(app, agent, "session_transition");
+            if (comptime @hasField(App, "auth")) {
+                if (comptime @hasDecl(@TypeOf(app.auth), "cancelProviderPreparation")) _ = app.auth.cancelProviderPreparation();
+            }
+            if (comptime !agents.hasAgentField(App, "submission")) {
+                agent.worker.clearQueuedPrompts(std.heap.c_allocator, &.{});
+                return;
+            }
+            const pending = agent.submission.pending orelse {
+                agent.worker.clearQueuedPrompts(std.heap.c_allocator, &.{});
+                return;
+            };
+            const history_owns_snapshots =
+                transferPendingImageSnapshotsToComposerHistory(app, agent);
+            if (pending.phase == .queued) {
+                const retained_images = if (history_owns_snapshots)
+                    pending.draft.images
+                else
+                    &.{};
+                if (comptime @hasDecl(
+                    @TypeOf(agent.worker),
+                    "clearQueuedPromptsForSessionTransition",
+                )) {
+                    agent.worker.clearQueuedPromptsForSessionTransition(
+                        std.heap.c_allocator,
+                        pending.draft.turn_id,
+                        retained_images,
+                    );
+                } else {
+                    agent.worker.clearQueuedPrompts(
+                        std.heap.c_allocator,
+                        retained_images,
+                    );
+                }
+                clearPendingSubmissionWithSnapshots(
+                    app,
+                    agent,
+                    "session_transition",
+                    .preserve,
+                );
+                return;
+            }
+
+            agent.worker.clearQueuedPrompts(std.heap.c_allocator, &.{});
+            clearPendingSubmissionWithSnapshots(
+                app,
+                agent,
+                "session_transition",
+                if (history_owns_snapshots) .preserve else .discard,
+            );
+        }
+
+        fn clearPendingSubmissionWithSnapshots(
+            app: *App,
+            agent: *AppAgent,
+            reason: []const u8,
+            snapshot_cleanup: PendingSnapshotCleanup,
+        ) void {
+            if (comptime !agents.hasAgentField(App, "submission")) return;
+            var pending = agent.submission.pending orelse return;
+            agent.submission.pending = null;
+            if (pending.ownsTurnStartHold()) agent.worker.releaseTurnStartHold();
+            if (snapshot_cleanup == .discard) {
+                image_attachments.discardImageSnapshots(app.alloc, pending.draft.images);
+            }
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_cleared",
+                .{ .turn_id = pending.draft.turn_id },
+                "reason={s} phase={s}",
+                .{ reason, @tagName(pending.phase) },
+            );
+            pending.deinit(app.alloc);
+        }
+
+        fn adoptPendingSubmission(app: *App, agent: *AppAgent) !void {
+            const pending = &agent.submission.pending.?;
+            if (pending.phase != .awaiting_adoption) return error.InvalidPendingPhase;
+            if (comptime !@hasDecl(App, "adoptPendingUserPrompt")) {
+                return error.PendingAdoptionUnsupported;
+            }
+            try App.adoptPendingUserPrompt(app, agent, &pending.draft);
+            try pending.markAdopted();
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_adopted",
+                .{ .turn_id = pending.draft.turn_id },
+                "",
+                .{},
+            );
+        }
+
+        fn finishPendingSubmissionFailure(app: *App, agent: *AppAgent, err: anyerror) void {
+            const turn_id = agent.submission.pending.?.draft.turn_id;
+            const body = app.alloc.print(
+                "failed to submit prompt after presentation ({s})",
+                .{@errorName(err)},
+            ) catch |notice_err| {
+                debug_trace.logf(
+                    "input",
+                    "pending prompt failure notice allocation failed err={s}",
+                    .{@errorName(notice_err)},
+                );
+                clearPendingSubmission(app, agent, "finalization_failure");
+                return;
+            };
+            defer app.alloc.free(body);
+            app.writeDomainNotice(.{
+                .topic = "prompt",
+                .tone = .@"error",
+                .body = body,
+            }, true) catch |notice_err| {
+                debug_trace.logf(
+                    "input",
+                    "pending prompt failure notice output failed err={s}",
+                    .{@errorName(notice_err)},
+                );
+            };
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_finalization_failed",
+                .{ .turn_id = turn_id },
+                "err={s}",
+                .{@errorName(err)},
+            );
+            clearPendingSubmission(app, agent, "finalization_failure");
+        }
+
+        fn transferPendingImageSnapshotsToComposerHistory(app: *App, agent: *AppAgent) bool {
+            if (comptime !@hasField(App, "input_runtime")) return false;
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "composer_history")) {
+                return false;
+            }
+            const pending = agent.submission.pending orelse return false;
+            return app.input_runtime.composer_history.claimLatestImageSnapshots(
+                pending.draft.images,
+            );
+        }
+
+        pub fn submitInput(app: *App, max_prompt_history: usize) !void {
+            try submit(app, max_prompt_history);
+        }
+
+        pub fn submit(app: *App, max_prompt_history: usize) !void {
+            if (comptime agents.hasAgentField(App, "worker")) {
+                if (comptime @hasDecl(@TypeOf(agents.screenAgentOf(app).worker), "compactionActivitySnapshot")) {
+                    const observed = agents.screenAgentOf(app).worker.compactionActivitySnapshot();
+                    if (observed.operation) |op| {
+                        if (agents.screenAgentOf(app).worker.dismissCompactionActivity(op.id, observed.revision)) app.shell.render_requests.request(.footer);
+                    }
+                }
+            }
+            if (comptime agents.hasAgentField(App, "submission")) {
+                if (agents.screenAgentOf(app).submission.compaction_pending and !pendingAuthRoutesLocalCommand(app, agents.screenAgentOf(app))) return;
+                if (agents.screenAgentOf(app).submission.pending) |pending| {
+                    const route_local_command = pending.phase == .awaiting_auth and
+                        pendingAuthRoutesLocalCommand(app, agents.screenAgentOf(app));
+                    if (!route_local_command and
+                        pending.phase == .awaiting_auth and
+                        app.input_runtime.edit_state.input.items.len == 0)
+                    {
+                        if (comptime @hasDecl(App, "retryPendingPromptCredential")) {
+                            switch (try App.retryPendingPromptCredential(app, agents.screenAgentOf(app))) {
+                                .pending => {
+                                    agents.screenAgentOf(app).submission.retry_after_auth = false;
+                                    agents.screenAgentOf(app).submission.pending.?.phase = .adopted;
+                                    app.shell.render_requests.request(.footer);
+                                },
+                                .current => {
+                                    const resumed = resumePendingPromptAfterAuth(app, agents.screenAgentOf(app), "submit");
+                                    std.debug.assert(resumed);
+                                },
+                                .rejected => {},
+                            }
+                        } else if (try preflightPrompt(app, agents.screenAgentOf(app))) {
+                            const resumed = resumePendingPromptAfterAuth(app, agents.screenAgentOf(app), "submit");
+                            std.debug.assert(resumed);
+                        }
+                        return;
+                    }
+                    if (route_local_command) {
+                        debug_trace.eventf(
+                            "input",
+                            "pending_prompt_auth_command_routed",
+                            .{ .turn_id = pending.draft.turn_id },
+                            "",
+                            .{},
+                        );
+                    } else {
+                        debug_trace.eventf(
+                            "input",
+                            "prompt_submit_deferred_for_pending",
+                            .{ .turn_id = pending.draft.turn_id },
+                            "phase={s}",
+                            .{@tagName(pending.phase)},
+                        );
+                        return;
+                    }
+                }
+            }
+            const expanded_len = paste_blocks.expandedLen(
+                app.input_runtime.edit_state.input.items,
+                app.input_runtime.entities.pasted_blocks.items,
+            ) orelse std.math.maxInt(usize);
+            const max_input_len = if (comptime @hasDecl(App, "input_limits"))
+                App.input_limits.composer_bytes
+            else if (comptime @hasDecl(App, "input_byte_limit"))
+                App.input_byte_limit
+            else
+                std.math.maxInt(usize);
+            if (expanded_len > max_input_len) {
+                try input_limit_feedback.report(
+                    App,
+                    app,
+                    .composer,
+                    expanded_len,
+                );
+                return;
+            }
+
+            const expanded = try paste_blocks.expand(app.alloc, app.input_runtime.edit_state.input.items, app.input_runtime.entities.pasted_blocks.items);
+            defer if (expanded.owned) app.alloc.free(expanded.text);
+
+            const left_trimmed = std.mem.trimStart(u8, expanded.text, " \t\r\n");
+            const resolved_slash_submission = resolvedSlashSubmission(app, agents.screenAgentOf(app), left_trimmed);
+            if (knownSlashCommand(app, resolved_slash_submission)) |command| {
+                if (try refuseSessionCommandOnSubagentScreen(app, command)) return;
+                if (requiresPromptCredential(command, resolved_slash_submission) and !try preflightQueuedPrompt(app, agents.screenAgentOf(app))) return;
+                try submitSlashCommand(app, agents.screenAgentOf(app), left_trimmed, null, max_prompt_history);
+                return;
+            }
+            if (shouldRouteUnknownSlashCommand(app, resolved_slash_submission)) {
+                try submitSlashCommand(app, agents.screenAgentOf(app), left_trimmed, null, max_prompt_history);
+                return;
+            }
+            if (pendingImagesPrefixEnd(
+                app.input_runtime.edit_state.input.items,
+                expanded.text,
+                app.input_runtime.entities.pasted_blocks.items,
+                app.input_runtime.entities.image_tokens.items,
+                agents.screenAgentOf(app).pending_images.items,
+            )) |command_start| {
+                const command_text = expanded.text[command_start..];
+                if (knownSlashCommand(app, command_text)) |command| {
+                    if (requiresPromptCredential(command, command_text) and !try preflightQueuedPrompt(app, agents.screenAgentOf(app))) return;
+                    try submitSlashCommand(
+                        app,
+                        agents.screenAgentOf(app),
+                        command_text,
+                        expanded.text[0..command_start],
+                        max_prompt_history,
+                    );
+                    return;
+                }
+            }
+
+            const trimmed = std.mem.trim(u8, expanded.text, " \t\r\n");
+
+            // Nothing to send: no turn is readied for it.
+            if (trimmed.len == 0 and agents.screenAgentOf(app).pending_images.items.len == 0) {
+                app.input_runtime.inputResetState().clearCurrent(app.alloc);
+                app.shell.render_requests.request(.footer);
+                return;
+            }
+
+            // On a subagent's screen the text is that subagent's own turn, as
+            // on main, readied first so its profile limits it. Its work opens
+            // only once the text is queued.
+            const own_turn = if (comptime @hasDecl(App, "prepareSubagentOnScreen"))
+                app.prepareSubagentOnScreen(agents.screenAgentOf(app)) catch |err| {
+                    debug_trace.logf("host", "own turn refused agent={s} reason={s}", .{ app.screenAgentId(), @errorName(err) });
+                    var name_buf: [32]u8 = undefined;
+                    var body_buf: [160]u8 = undefined;
+                    const home = homeHint(app, &name_buf);
+                    try app.writeDomainNotice(.{
+                        .topic = "subagent",
+                        .tone = .@"error",
+                        .body = if (err == error.OneOffChild)
+                            std.mem.print(&body_buf, "This subagent ran a single task and can't take messages. Press {s} and pick {s} to go back.", .{ home.key, home.name }) catch
+                                "This subagent ran a single task and can't take messages."
+                        else
+                            "This subagent can't take a message right now, so your message wasn't sent.",
+                    }, true);
+                    return;
+                }
+            else
+                false;
+
+            if (trimmed.len == 0) {
+                const admission = try enqueuePromptForSubmit(app, agents.screenAgentOf(app), "", &.{});
+                if (admission == .rejected) return;
+                if (own_turn) app.openSubagentTurnWork();
+                releasePendingImages(app, agents.screenAgentOf(app));
+                app.input_runtime.inputResetState().clearCurrent(app.alloc);
+                if (acceptedPromptNeedsImmediateFooter(app, agents.screenAgentOf(app))) {
+                    app.shell.render_requests.request(.footer);
+                }
+                return;
+            }
+
+            const first_image_id = if (comptime @hasDecl(App, "peekNextImageId"))
+                app.peekNextImageId(agents.screenAgentOf(app))
+            else
+                try firstAvailableImageId(agents.screenAgentOf(app).pending_images.items);
+            var extracted = image_attachments.extractInlineImageAttachments(
+                app.alloc,
+                app.workspace_root,
+                expanded.text,
+                first_image_id,
+            ) catch |err| {
+                const message = switch (err) {
+                    error.InvalidImageId, error.ImageIdOverflow => return err,
+                    error.UnsupportedImageType => try app.alloc.dupe(u8, "unsupported image type"),
+                    error.FileNotFound => try app.alloc.dupe(u8, "image file not found"),
+                    error.ImageTooLarge => try app.alloc.dupe(u8, image_attachments.image_too_large_notice),
+                    else => try app.alloc.print("failed to attach image: {s}", .{@errorName(err)}),
+                };
+                defer app.alloc.free(message);
+                try app.writeDomainNotice(.{
+                    .topic = "images",
+                    .tone = .@"error",
+                    .body = message,
+                }, true);
+                app.shell.render_requests.request(.footer);
+                return;
+            };
+            var discard_extracted = true;
+            defer if (discard_extracted)
+                extracted.discard(app.alloc)
+            else
+                extracted.deinit(app.alloc);
+            for (extracted.images) |image| {
+                if (image_attachments.findImageIndexById(agents.screenAgentOf(app).pending_images.items, image.id) != null) return error.DuplicateImageId;
+            }
+            if (try captureExtractedImages(app, extracted.images) == .rejected) {
+                app.shell.render_requests.request(.footer);
+                return;
+            }
+
+            const has_inline_images = extracted.images.len > 0;
+            const effective_text = extracted.text;
+
+            var staged_images = if (agents.screenAgentOf(app).pending_images.items.len > 0 or extracted.images.len > 0)
+                try stagePendingImages(app.alloc, agents.screenAgentOf(app).pending_images.items, extracted.images)
+            else
+                null;
+            defer if (staged_images) |*images| deinitOwnedImageList(app.alloc, images);
+
+            var image_occurrences = try projectImageOccurrencesForSubmit(
+                app.alloc,
+                app.input_runtime.edit_state.input.items,
+                expanded.text,
+                effective_text,
+                app.input_runtime.entities.pasted_blocks.items,
+                app.input_runtime.entities.image_tokens.items,
+                agents.screenAgentOf(app).pending_images.items,
+                extracted.edits,
+                extracted.images,
+            );
+            defer image_occurrences.deinit(app.alloc);
+
+            // One mapping owns both placeholder IDs and attachment order.
+            const visual_text = if (staged_images) |*images|
+                try mapSubmittedImages(
+                    app.alloc,
+                    effective_text,
+                    images,
+                    image_occurrences.items,
+                    firstRemappedImageId(app, agents.screenAgentOf(app)),
+                )
+            else
+                VisualText{ .text = effective_text, .owned = false };
+            defer if (visual_text.owned) app.alloc.free(visual_text.text);
+            const display_skill_tokens = try projectSkillTokensForSubmit(
+                app.alloc,
+                app.input_runtime.edit_state.input.items,
+                expanded.text,
+                effective_text,
+                visual_text.text,
+                app.input_runtime.entities.pasted_blocks.items,
+                app.input_runtime.entities.skill_tokens.items,
+                extracted.edits,
+                image_occurrences.items,
+            );
+            defer if (display_skill_tokens.len > 0) app.alloc.free(display_skill_tokens);
+            var history_projection: ?ComposerHistoryProjection = if (composerHistoryEnabled(app))
+                try prepareComposerHistoryProjection(
+                    app,
+                    expanded.text,
+                    visual_text.text,
+                    display_skill_tokens,
+                    image_occurrences.items,
+                    has_inline_images,
+                )
+            else
+                null;
+            defer if (history_projection) |*projection| projection.deinit(app.alloc);
+            const has_images_for_submit = if (staged_images) |*images|
+                images.items.len > 0
+            else
+                agents.screenAgentOf(app).pending_images.items.len > 0;
+
+            const admission = if (staged_images) |*images|
+                try enqueuePromptWithStagedImages(
+                    app,
+                    agents.screenAgentOf(app),
+                    visual_text.text,
+                    display_skill_tokens,
+                    images,
+                )
+            else
+                try enqueuePromptForSubmit(
+                    app,
+                    agents.screenAgentOf(app),
+                    visual_text.text,
+                    display_skill_tokens,
+                );
+            if (admission == .rejected) return;
+            if (own_turn) app.openSubagentTurnWork();
+            commitStableExtractedImageIds(app, agents.screenAgentOf(app), extracted.images);
+            commitRemappedImageIds(app, agents.screenAgentOf(app), visual_text.next_image_id);
+            if (visual_text.text.len > 0) {
+                if (history_projection) |*projection| {
+                    recordAcceptedPromptComposerHistory(
+                        app,
+                        agents.screenAgentOf(app),
+                        max_prompt_history,
+                        projection,
+                    );
+                }
+            }
+            if (admission == .enqueued and !has_images_for_submit and visual_text.text.len > 0) {
+                recordAcceptedInput(app, visual_text.text);
+            }
+            discard_extracted = false;
+            releasePendingImages(app, agents.screenAgentOf(app));
+            app.input_runtime.inputResetState().clearCurrent(app.alloc);
+            paste_blocks.clearBlocks(app.alloc, &app.input_runtime.entities.pasted_blocks);
+            if (acceptedPromptNeedsImmediateFooter(app, agents.screenAgentOf(app))) {
+                app.shell.render_requests.request(.footer);
+            }
+        }
+
+        /// The instance a notice on a subagent's screen sends the user back
+        /// to, and the key that opens the agent list to pick it; `main` and
+        /// ↓ for an app without instances.
+        fn homeHint(app: *App, name_buf: []u8) struct { name: []const u8, key: []const u8 } {
+            if (comptime @hasDecl(App, "subagentHome")) {
+                if (app.subagentHome(name_buf)) |home| return .{ .name = home.name, .key = home.key };
+            }
+            return .{ .name = "main", .key = "↓" };
+        }
+
+        /// `/resume`, `/new`, `/fork`, `/clear`, and `/reset` replace main's
+        /// session, so they don't run on a subagent's screen. On a
+        /// subagent they would swap its saved conversation for a fresh one
+        /// that is never saved. Returns true when it refused.
+        fn refuseSessionCommandOnSubagentScreen(app: *App, command: *const command_specs.SlashSpec) !bool {
+            if (comptime !@hasDecl(App, "subagentOnScreen")) return false;
+            if (!app.subagentOnScreen()) return false;
+            switch (command.kind) {
+                .new_session, .resume_session, .fork_session, .clear_screen, .reset_session => {},
+                else => return false,
+            }
+            var name_buf: [32]u8 = undefined;
+            var body_buf: [192]u8 = undefined;
+            const home = homeHint(app, &name_buf);
+            const body = std.mem.print(&body_buf, "{s} works on {s}'s screen. Press {s} and pick {s} to go back.", .{ command.command, home.name, home.key, home.name }) catch
+                "This command works on an fx instance's screen, not a subagent's.";
+            try app.writeDomainNotice(.{ .topic = "subagent", .tone = .neutral, .body = body }, true);
+            app.input_runtime.inputResetState().clearCurrent(app.alloc);
+            app.shell.render_requests.request(.footer);
+            return true;
+        }
+
+        fn acceptedPromptNeedsImmediateFooter(_: *const App, agent: *const AppAgent) bool {
+            if (comptime agents.hasAgentField(App, "stream")) return agent.stream.active;
+            return true;
+        }
+
+        fn preflightPrompt(app: *App, agent: *AppAgent) !bool {
+            if (comptime @hasDecl(App, "ensurePromptCredential")) {
+                return App.ensurePromptCredential(app, agent);
+            }
+            return true;
+        }
+
+        /// A prompt that queues behind active work, or a command that needs a
+        /// credential, must not wait on a credential refresh: the input loop
+        /// would freeze until the network answers. The turn's worker, or the
+        /// command's own background lookup, renews a due token.
+        fn preflightQueuedPrompt(app: *App, agent: *AppAgent) !bool {
+            if (comptime @hasDecl(App, "admitQueuedPromptCredential")) {
+                return App.admitQueuedPromptCredential(app, agent);
+            }
+            return preflightPrompt(app, agent);
+        }
+
+        fn pendingAuthRoutesLocalCommand(app: *App, agent: *AppAgent) bool {
+            const input = std.mem.trimStart(
+                u8,
+                app.input_runtime.edit_state.input.items,
+                " \t\r\n",
+            );
+            const submission = resolvedSlashSubmission(app, agent, input);
+            const command = knownSlashCommand(app, submission) orelse return false;
+            return !requiresPromptCredential(command, submission);
+        }
+
+        fn knownSlashCommand(app: *const App, text: []const u8) ?*const command_specs.SlashSpec {
+            if (text.len == 0 or text[0] != '/') return null;
+            var command_end: usize = 1;
+            while (command_end < text.len and !std.ascii.isWhitespace(text[command_end])) : (command_end += 1) {}
+            return app.slashRegistry().lookup(text[0..command_end]);
+        }
+
+        fn shouldRouteUnknownSlashCommand(app: *App, text: []const u8) bool {
+            if (text.len == 0 or text[0] != '/') return false;
+            const command_end = std.mem.findAny(u8, text, " \t\r\n") orelse text.len;
+            if (command_end != text.len) return false;
+            if (std.mem.findScalar(u8, text[1..command_end], '/') != null) return false;
+            if (app.input_runtime.picker.isInlinePickerDismissed(.slash)) return false;
+            if (app.input_runtime.picker.inlinePickerTriggerKind(&app.input_runtime.edit_state) != .slash) return false;
+            return completion_rt.slashCompletionCandidateCount(app) == 0;
+        }
+
+        fn requiresPromptCredential(command: *const command_specs.SlashSpec, submission: []const u8) bool {
+            if (!command.requires_prompt_credential) return false;
+            if (command.kind != .model) return true;
+
+            var command_end: usize = 1;
+            while (command_end < submission.len and !std.ascii.isWhitespace(submission[command_end])) : (command_end += 1) {}
+            return std.mem.trim(u8, submission[command_end..], " \t\r\n").len > 0;
+        }
+
+        fn pendingImagesPrefixEnd(
+            raw_input: []const u8,
+            expanded_text: []const u8,
+            pasted_blocks: []const paste_blocks.PastedBlock,
+            image_tokens: []const entity_spans.ImageTokenSpan,
+            images: []const types.ImageAttachment,
+        ) ?usize {
+            var index: usize = 0;
+            while (index < expanded_text.len and std.ascii.isWhitespace(expanded_text[index])) : (index += 1) {}
+
+            var saw_placeholder = false;
+            while (projectedImageTokenAt(
+                raw_input,
+                pasted_blocks,
+                image_tokens,
+                images,
+                index,
+            )) |projected| {
+                saw_placeholder = true;
+                index = projected.end;
+                while (index < expanded_text.len and std.ascii.isWhitespace(expanded_text[index])) : (index += 1) {}
+            }
+            if (!saw_placeholder) return null;
+            return index;
+        }
+
+        fn projectedImageTokenAt(
+            raw_input: []const u8,
+            pasted_blocks: []const paste_blocks.PastedBlock,
+            image_tokens: []const entity_spans.ImageTokenSpan,
+            images: []const types.ImageAttachment,
+            expanded_start: usize,
+        ) ?Span {
+            for (image_tokens) |token| {
+                if (!validRawImageToken(raw_input, token)) continue;
+                if (image_attachments.findImageIndexById(images, token.id) == null) continue;
+                const start = paste_blocks.projectOffsetThroughExpansion(
+                    raw_input,
+                    pasted_blocks,
+                    token.span.raw_start,
+                ) orelse continue;
+                if (start < expanded_start) continue;
+                if (start > expanded_start) return null;
+                const end = paste_blocks.projectOffsetThroughExpansion(
+                    raw_input,
+                    pasted_blocks,
+                    token.span.raw_end,
+                ) orelse return null;
+                return .{ .start = start, .end = end };
+            }
+            return null;
+        }
+
+        fn submitSlashCommand(
+            app: *App,
+            agent: *AppAgent,
+            text: []const u8,
+            retained_prefix: ?[]const u8,
+            max_prompt_history: usize,
+        ) !void {
+            const command_text = resolvedSlashSubmission(app, agent, text);
+            const command_copy = try app.alloc.dupe(u8, command_text);
+            defer app.alloc.free(command_copy);
+            const prefix_copy: ?[]u8 = if (retained_prefix) |prefix|
+                try app.alloc.dupe(u8, prefix)
+            else
+                null;
+            defer if (prefix_copy) |prefix| app.alloc.free(prefix);
+            var retained_image_tokens = if (prefix_copy) |prefix|
+                try projectRetainedImageTokens(app, agent, prefix.len)
+            else
+                std.ArrayList(entity_spans.ImageTokenSpan).empty;
+            defer retained_image_tokens.deinit(app.alloc);
+            if (prefix_copy) |prefix| {
+                try app.input_runtime.edit_state.input.ensureTotalCapacity(app.alloc, prefix.len);
+                try app.input_runtime.entities.image_tokens.ensureTotalCapacity(
+                    app.alloc,
+                    retained_image_tokens.items.len,
+                );
+            }
+
+            app.input_runtime.inputResetState().clearCurrent(app.alloc);
+            if (prefix_copy) |prefix| {
+                app.input_runtime.edit_state.insertSliceAssumeCapacity(prefix);
+                app.input_runtime.entities.image_tokens.appendSliceAssumeCapacity(
+                    retained_image_tokens.items,
+                );
+            }
+            paste_blocks.clearBlocks(app.alloc, &app.input_runtime.entities.pasted_blocks);
+            if (retained_prefix == null and agent.pending_images.items.len > 0) {
+                debug_trace.logf(
+                    "input",
+                    "draft images dropped count={d} reason=local_command",
+                    .{agent.pending_images.items.len},
+                );
+                app.clearPendingImages(agent);
+            }
+            app.shell.render_requests.request(.footer);
+            defer if (retained_prefix != null) {
+                if (agent.pending_images.items.len == 0) {
+                    app.input_runtime.inputResetState().clearCurrent(app.alloc);
+                }
+                app.shell.render_requests.request(.footer);
+            };
+            recordAcceptedSlashCommandHistory(
+                app,
+                max_prompt_history,
+                command_copy,
+            );
+            try App.handleCommand(app, command_copy);
+        }
+
+        fn projectRetainedImageTokens(
+            app: *App,
+            agent: *AppAgent,
+            expanded_prefix_len: usize,
+        ) !std.ArrayList(entity_spans.ImageTokenSpan) {
+            var projected: std.ArrayList(entity_spans.ImageTokenSpan) = .empty;
+            errdefer projected.deinit(app.alloc);
+            for (app.input_runtime.entities.image_tokens.items) |token| {
+                if (!validRawImageToken(app.input_runtime.edit_state.input.items, token)) continue;
+                if (image_attachments.findImageIndexById(
+                    agent.pending_images.items,
+                    token.id,
+                ) == null) continue;
+                const start = paste_blocks.projectOffsetThroughExpansion(
+                    app.input_runtime.edit_state.input.items,
+                    app.input_runtime.entities.pasted_blocks.items,
+                    token.span.raw_start,
+                ) orelse continue;
+                const end = paste_blocks.projectOffsetThroughExpansion(
+                    app.input_runtime.edit_state.input.items,
+                    app.input_runtime.entities.pasted_blocks.items,
+                    token.span.raw_end,
+                ) orelse continue;
+                if (end > expanded_prefix_len) continue;
+                try projected.append(app.alloc, .{
+                    .id = token.id,
+                    .span = .{ .raw_start = start, .raw_end = end },
+                });
+            }
+            return projected;
+        }
+
+        fn resolvedSlashSubmission(app: *App, agent: *AppAgent, text: []const u8) []const u8 {
+            if (completion_rt.visibleSlashCompletionCount(app, agent) == 0) return text;
+            return resolveSlashSubmission(app.slashRegistry(), text, app.input_runtime.picker.slash_completion_index);
+        }
+
+        fn enqueuePromptForSubmit(
+            app: *App,
+            agent: *AppAgent,
+            prompt: []const u8,
+            skill_tokens: []const registered_entities.SkillTokenSpan,
+        ) !PromptAdmission {
+            // Sending a prompt loads an MCP config changed outside this
+            // session, then clears the MCP notices the user has seen. What a
+            // load just brought, such as a server that needs a login, hasn't
+            // been seen yet, so it stays on the status line.
+            const mcp_loaded = if (comptime @hasDecl(App, "refreshMcpHostForPrompt")) app.refreshMcpHostForPrompt(agent) else false;
+            if (comptime @hasField(App, "mcp") and @hasDecl(@FieldType(App, "mcp"), "dismissHostStatus")) {
+                if (!mcp_loaded) app.mcp.dismissHostStatus();
+            }
+            switch (try installPendingSubmission(app, agent, prompt, skill_tokens)) {
+                .installed => return .pending,
+                .unavailable => {},
+            }
+            if (!try preflightQueuedPrompt(app, agent)) return .rejected;
+            const accepted = if (comptime @hasDecl(App, "enqueuePromptWithSkillBindings"))
+                try App.enqueuePromptWithSkillBindings(app, agent, prompt, skill_tokens)
+            else
+                try App.enqueuePrompt(app, prompt);
+            if (!accepted) return .rejected;
+            return .enqueued;
+        }
+
+        fn installPendingSubmission(
+            app: *App,
+            agent: *AppAgent,
+            prompt: []const u8,
+            skill_tokens: []const registered_entities.SkillTokenSpan,
+        ) !PendingInstall {
+            if (comptime !agents.hasAgentField(App, "submission") or
+                !agents.hasAgentField(App, "worker") or
+                !@hasDecl(@TypeOf(agent.worker), "tryHoldTurnStart") or
+                !@hasDecl(@TypeOf(agent.worker), "releaseTurnStartHold"))
+            {
+                return .unavailable;
+            }
+            if (comptime agents.hasAgentField(App, "stream")) {
+                if (agent.stream.active) return .unavailable;
+            }
+            if (comptime @hasField(App, "pacer") and
+                @hasDecl(@TypeOf(app.pacer), "hasPending"))
+            {
+                if (app.pacer.hasPending()) return .unavailable;
+            }
+            if (comptime @hasField(App, "shell") and
+                @hasDecl(@TypeOf(app.shell), "fullTranscriptActive"))
+            {
+                if (app.shell.fullTranscriptActive()) return .unavailable;
+            }
+            std.debug.assert(agent.submission.pending == null);
+            if (!agent.worker.tryHoldTurnStart()) return .unavailable;
+            errdefer agent.worker.releaseTurnStartHold();
+
+            const draft = try buildPendingPromptDraft(
+                app.alloc,
+                debug_trace.nextTurnId(),
+                prompt,
+                agent.pending_images.items,
+                skill_tokens,
+            );
+            agent.submission.pending = PendingSubmission.init(draft);
+            app.shell.render_requests.request(.transcript);
+            app.shell.render_requests.request(.footer);
+            debug_trace.eventf(
+                "input",
+                "pending_prompt_installed",
+                .{ .turn_id = draft.turn_id },
+                "prompt_bytes={d} images={d} skill_spans={d}",
+                .{ draft.prompt.len, draft.images.len, draft.skill_display_spans.len },
+            );
+            return .installed;
+        }
+
+        fn enqueuePromptWithStagedImages(
+            app: *App,
+            agent: *AppAgent,
+            prompt: []const u8,
+            skill_tokens: []const registered_entities.SkillTokenSpan,
+            staged_images: *std.ArrayList(types.ImageAttachment),
+        ) !PromptAdmission {
+            const original_images = agent.pending_images;
+            agent.pending_images = staged_images.*;
+            staged_images.* = .empty;
+            errdefer {
+                deinitOwnedImageList(app.alloc, &agent.pending_images);
+                agent.pending_images = original_images;
+            }
+
+            const admission = try enqueuePromptForSubmit(
+                app,
+                agent,
+                prompt,
+                skill_tokens,
+            );
+            if (admission == .rejected) {
+                staged_images.* = agent.pending_images;
+                agent.pending_images = original_images;
+                return admission;
+            }
+
+            var committed_images = original_images;
+            deinitOwnedImageList(app.alloc, &committed_images);
+            return admission;
+        }
+
+        fn firstAvailableImageId(images: []const types.ImageAttachment) !usize {
+            var highest_id: usize = 0;
+            for (images) |image| highest_id = @max(highest_id, image.id);
+            return std.math.add(usize, highest_id, 1);
+        }
+
+        fn commitStableExtractedImageIds(
+            app: *App,
+            agent: *AppAgent,
+            images: []const types.ImageAttachment,
+        ) void {
+            if (comptime !@hasDecl(App, "nextImageId")) return;
+            for (images) |image| {
+                const committed_id = app.nextImageId(agent);
+                std.debug.assert(committed_id == image.id);
+            }
+        }
+
+        fn captureExtractedImages(
+            app: *App,
+            images: []types.ImageAttachment,
+        ) !image_attachments.CaptureAdmissionResult {
+            return image_attachments.captureImageAttachmentsForAdmission(App, app, images);
+        }
+
+        fn stagePendingImages(
+            alloc: std.mem.Allocator,
+            pending: []const types.ImageAttachment,
+            extracted: []const types.ImageAttachment,
+        ) !std.ArrayList(types.ImageAttachment) {
+            const pending_copy = try types.dupeImageAttachmentSlice(alloc, pending);
+            var staged = std.ArrayList(types.ImageAttachment).fromOwnedSlice(pending_copy);
+            errdefer deinitOwnedImageList(alloc, &staged);
+
+            const extracted_copy = try types.dupeImageAttachmentSlice(alloc, extracted);
+            errdefer types.freeImageAttachmentSlice(alloc, extracted_copy);
+            if (extracted_copy.len > 0) {
+                try staged.ensureUnusedCapacity(alloc, extracted_copy.len);
+                staged.appendSliceAssumeCapacity(extracted_copy);
+                alloc.free(extracted_copy);
+            }
+            return staged;
+        }
+
+        fn deinitOwnedImageList(alloc: std.mem.Allocator, images: *std.ArrayList(types.ImageAttachment)) void {
+            for (images.items) |image| types.freeImageAttachment(alloc, image);
+            images.deinit(alloc);
+            images.* = .empty;
+        }
+
+        fn releasePendingImages(app: *App, agent: *AppAgent) void {
+            if (comptime @hasDecl(App, "releasePendingImages")) {
+                App.releasePendingImages(app, agent);
+            } else {
+                app.clearPendingImages(agent);
+            }
+        }
+
+        fn recordAcceptedInput(app: *App, text: []const u8) void {
+            if (comptime !@hasField(App, "prompt_history")) return;
+            const outcome = app.prompt_history.recordAccepted(
+                app.alloc,
+                io_mod.milliTimestamp(),
+                app.workspace_root,
+                text,
+            );
+            if (outcome != .warning) return;
+            const err = app.prompt_history.lastAppendError() orelse
+                error.PromptHistoryWriteFailed;
+            const notice = app.alloc.print(
+                "failed to save input history ({s}); submission continued",
+                .{@errorName(err)},
+            ) catch |notice_err| {
+                debug_trace.logf(
+                    "prompt_history",
+                    "warning allocation failed err={s}",
+                    .{@errorName(notice_err)},
+                );
+                return;
+            };
+            defer app.alloc.free(notice);
+            app.writeDomainNotice(.{
+                .topic = "history",
+                .tone = .warning,
+                .body = notice,
+            }, true) catch |notice_err| {
+                debug_trace.logf(
+                    "prompt_history",
+                    "warning output failed err={s}",
+                    .{@errorName(notice_err)},
+                );
+            };
+        }
+
+        fn recordAcceptedPromptComposerHistory(
+            app: *App,
+            agent: *AppAgent,
+            max_prompt_history: usize,
+            projection: *const ComposerHistoryProjection,
+        ) void {
+            recordComposerHistory(
+                app,
+                max_prompt_history,
+                projection.input,
+                projection.pasted_blocks.items,
+                agent.pending_images.items,
+                projection.image_tokens.items,
+                projection.skill_tokens.items,
+            );
+        }
+
+        fn recordAcceptedSlashCommandHistory(
+            app: *App,
+            max_prompt_history: usize,
+            command: []const u8,
+        ) void {
+            recordComposerHistory(
+                app,
+                max_prompt_history,
+                command,
+                &.{},
+                &.{},
+                &.{},
+                &.{},
+            );
+            recordAcceptedInput(app, command);
+        }
+
+        fn recordComposerHistory(
+            app: *App,
+            max_prompt_history: usize,
+            text: []const u8,
+            pasted: []const paste_blocks.PastedBlock,
+            images: []const types.ImageAttachment,
+            image_tokens: []const entity_spans.ImageTokenSpan,
+            skill_tokens: []const registered_entities.SkillTokenSpan,
+        ) void {
+            if (comptime @hasField(App, "prompt_history")) {
+                if (!app.prompt_history.enabled) return;
+            }
+            app.input_runtime.composer_history.record(
+                app.alloc,
+                max_prompt_history,
+                text,
+                pasted,
+                images,
+                image_tokens,
+                skill_tokens,
+            ) catch |err| {
+                debug_trace.logf(
+                    "input",
+                    "composer history record skipped err={s}",
+                    .{@errorName(err)},
+                );
+            };
+        }
+
+        fn prepareComposerHistoryProjection(
+            app: *App,
+            expanded_text: []const u8,
+            visual_text: []const u8,
+            display_skill_tokens: []const registered_entities.SkillTokenSpan,
+            image_occurrences: []const ImageOccurrence,
+            has_extracted_images: bool,
+        ) !ComposerHistoryProjection {
+            var submitted_image_tokens: std.ArrayList(entity_spans.ImageTokenSpan) = .empty;
+            defer submitted_image_tokens.deinit(app.alloc);
+            try submitted_image_tokens.ensureTotalCapacity(
+                app.alloc,
+                image_occurrences.len,
+            );
+            for (image_occurrences) |occurrence| {
+                if (occurrence.submitted_id == 0) continue;
+                const span = occurrence.submitted_span orelse return error.InvalidImageOccurrence;
+                submitted_image_tokens.appendAssumeCapacity(.{
+                    .id = occurrence.submitted_id,
+                    .span = .{
+                        .raw_start = span.start,
+                        .raw_end = span.end,
+                    },
+                });
+            }
+
+            if (app.input_runtime.entities.pasted_blocks.items.len > 0 and
+                !has_extracted_images)
+            {
+                if (try prepareCompactComposerHistoryProjection(
+                    app,
+                    expanded_text,
+                    visual_text,
+                    display_skill_tokens,
+                    submitted_image_tokens.items,
+                )) |compact| return compact;
+                debug_trace.logf(
+                    "input",
+                    "accepted draft paste provenance unavailable after projection blocks={d}",
+                    .{app.input_runtime.entities.pasted_blocks.items.len},
+                );
+            }
+            if (app.input_runtime.entities.pasted_blocks.items.len > 0 and
+                has_extracted_images)
+            {
+                debug_trace.logf(
+                    "input",
+                    "accepted draft paste provenance unavailable after inline image extraction blocks={d}",
+                    .{app.input_runtime.entities.pasted_blocks.items.len},
+                );
+            }
+
+            var fallback = ComposerHistoryProjection{ .input = visual_text };
+            errdefer fallback.deinit(app.alloc);
+            try fallback.image_tokens.appendSlice(
+                app.alloc,
+                submitted_image_tokens.items,
+            );
+            try fallback.skill_tokens.appendSlice(
+                app.alloc,
+                display_skill_tokens,
+            );
+            return fallback;
+        }
+
+        fn prepareCompactComposerHistoryProjection(
+            app: *App,
+            expanded_text: []const u8,
+            visual_text: []const u8,
+            display_skill_tokens: []const registered_entities.SkillTokenSpan,
+            submitted_image_tokens: []const entity_spans.ImageTokenSpan,
+        ) !?ComposerHistoryProjection {
+            const raw_input = app.input_runtime.edit_state.input.items;
+            if (!std.mem.eql(u8, expanded_text, visual_text)) return null;
+            const raw_start: usize = 0;
+            const raw_end = raw_input.len;
+
+            var compact = ComposerHistoryProjection{
+                .input = raw_input[raw_start..raw_end],
+            };
+            var transferred = false;
+            defer if (!transferred) compact.deinit(app.alloc);
+            for (app.input_runtime.entities.pasted_blocks.items) |block| {
+                if (block.span.raw_end <= raw_start or block.span.raw_start >= raw_end) {
+                    continue;
+                }
+                if (block.span.raw_start < raw_start or block.span.raw_end > raw_end) {
+                    return null;
+                }
+                try compact.pasted_blocks.append(app.alloc, .{
+                    .id = block.id,
+                    .text = block.text,
+                    .line_count = block.line_count,
+                    .span = .{
+                        .raw_start = block.span.raw_start - raw_start,
+                        .raw_end = block.span.raw_end - raw_start,
+                    },
+                });
+            }
+
+            const expanded_compact = try paste_blocks.expand(
+                app.alloc,
+                compact.input,
+                compact.pasted_blocks.items,
+            );
+            defer if (expanded_compact.owned) app.alloc.free(expanded_compact.text);
+            if (!std.mem.eql(u8, expanded_compact.text, visual_text)) return null;
+
+            for (app.input_runtime.entities.image_tokens.items) |token| {
+                if (token.span.raw_end <= raw_start or token.span.raw_start >= raw_end) {
+                    continue;
+                }
+                if (token.span.raw_start < raw_start or token.span.raw_end > raw_end) {
+                    return null;
+                }
+                try compact.image_tokens.append(app.alloc, .{
+                    .id = token.id,
+                    .span = .{
+                        .raw_start = token.span.raw_start - raw_start,
+                        .raw_end = token.span.raw_end - raw_start,
+                    },
+                });
+            }
+            if (!sameImageTokenIds(
+                compact.image_tokens.items,
+                submitted_image_tokens,
+            )) {
+                return null;
+            }
+
+            for (app.input_runtime.entities.skill_tokens.items) |token| {
+                if (token.raw_end <= raw_start or token.raw_start >= raw_end) continue;
+                if (token.raw_start < raw_start or token.raw_end > raw_end) return null;
+                try compact.skill_tokens.append(app.alloc, .{
+                    .raw_start = token.raw_start - raw_start,
+                    .raw_end = token.raw_end - raw_start,
+                    .name = token.name,
+                    .path = token.path,
+                    .display_source = token.display_source,
+                    .owns_trailing_separator = token.owns_trailing_separator,
+                });
+            }
+            if (!sameSkillSources(
+                compact.skill_tokens.items,
+                display_skill_tokens,
+            )) {
+                return null;
+            }
+
+            transferred = true;
+            return compact;
+        }
+
+        fn sameImageTokenIds(
+            raw_tokens: []const entity_spans.ImageTokenSpan,
+            submitted_tokens: []const entity_spans.ImageTokenSpan,
+        ) bool {
+            if (raw_tokens.len != submitted_tokens.len) return false;
+            for (raw_tokens, submitted_tokens) |raw, submitted| {
+                if (raw.id != submitted.id) return false;
+            }
+            return true;
+        }
+
+        fn sameSkillSources(
+            raw_tokens: []const registered_entities.SkillTokenSpan,
+            submitted_tokens: []const registered_entities.SkillTokenSpan,
+        ) bool {
+            if (raw_tokens.len != submitted_tokens.len) return false;
+            for (raw_tokens, submitted_tokens) |raw, submitted| {
+                if (!std.mem.eql(u8, raw.name, submitted.name) or
+                    !std.mem.eql(u8, raw.path, submitted.path) or
+                    raw.display_source != submitted.display_source or
+                    raw.owns_trailing_separator != submitted.owns_trailing_separator)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        const VisualText = struct {
+            text: []const u8,
+            owned: bool,
+            next_image_id: ?usize = null,
+        };
+
+        const ImageOccurrence = struct {
+            /// Coordinates before collision-driven ID rewriting.
+            span: Span,
+            attachment_index: usize,
+            source_id: usize,
+            submitted_id: usize = 0,
+            submitted_span: ?Span = null,
+        };
+
+        fn projectImageOccurrencesForSubmit(
+            alloc: std.mem.Allocator,
+            raw_input: []const u8,
+            expanded_text: []const u8,
+            effective_text: []const u8,
+            pasted_blocks: []const paste_blocks.PastedBlock,
+            image_tokens: []const entity_spans.ImageTokenSpan,
+            pending_images: []const types.ImageAttachment,
+            edits: []const image_attachments.InlineImageEdit,
+            extracted_images: []const types.ImageAttachment,
+        ) !std.ArrayList(ImageOccurrence) {
+            var occurrences: std.ArrayList(ImageOccurrence) = .empty;
+            errdefer occurrences.deinit(alloc);
+            for (image_tokens) |token| {
+                if (!validRawImageToken(raw_input, token)) continue;
+                const attachment_index = image_attachments.findImageIndexById(pending_images, token.id) orelse continue;
+                const expanded = projectSpanThroughPasteExpansion(raw_input, pasted_blocks, .{
+                    .start = token.span.raw_start,
+                    .end = token.span.raw_end,
+                }) orelse continue;
+                const span = project_inline_span(expanded_text.len, expanded, edits) orelse continue;
+                try appendImageOccurrenceSorted(alloc, &occurrences, .{
+                    .span = span,
+                    .attachment_index = attachment_index,
+                    .source_id = token.id,
+                });
+            }
+
+            if (edits.len != extracted_images.len) return error.InvalidImageOccurrence;
+            for (edits, extracted_images, 0..) |edit, image, index| {
+                if (edit.id != image.id or !edit.output.isValid(effective_text.len)) return error.InvalidImageOccurrence;
+                const match = image_attachments.matchImagePlaceholder(effective_text, edit.output.raw_start) orelse return error.InvalidImageOccurrence;
+                if (match.id != edit.id or edit.output.raw_start + match.length != edit.output.raw_end) return error.InvalidImageOccurrence;
+                try appendImageOccurrenceSorted(alloc, &occurrences, .{
+                    .span = .{ .start = edit.output.raw_start, .end = edit.output.raw_end },
+                    .attachment_index = pending_images.len + index,
+                    .source_id = edit.id,
+                });
+            }
+            return occurrences;
+        }
+
+        fn appendImageOccurrenceSorted(
+            alloc: std.mem.Allocator,
+            occurrences: *std.ArrayList(ImageOccurrence),
+            occurrence: ImageOccurrence,
+        ) !void {
+            try occurrences.append(alloc, occurrence);
+            var index = occurrences.items.len - 1;
+            while (index > 0 and
+                occurrences.items[index].span.start < occurrences.items[index - 1].span.start)
+            {
+                std.mem.swap(
+                    ImageOccurrence,
+                    &occurrences.items[index],
+                    &occurrences.items[index - 1],
+                );
+                index -= 1;
+            }
+        }
+
+        fn validRawImageToken(
+            raw_input: []const u8,
+            token: entity_spans.ImageTokenSpan,
+        ) bool {
+            if (!token.span.isValid(raw_input.len)) return false;
+            const match = image_attachments.matchImagePlaceholder(
+                raw_input,
+                token.span.raw_start,
+            ) orelse return false;
+            return match.id == token.id and
+                token.span.raw_start + match.length == token.span.raw_end;
+        }
+
+        fn mapSubmittedImages(
+            alloc: std.mem.Allocator,
+            text: []const u8,
+            images: *std.ArrayList(types.ImageAttachment),
+            occurrences: []ImageOccurrence,
+            first_remapped_id: usize,
+        ) !VisualText {
+            if (images.items.len == 0) return .{ .text = text, .owned = false };
+
+            const used = try alloc.alloc(bool, images.items.len);
+            defer alloc.free(used);
+            @memset(used, false);
+
+            var ordered: std.ArrayList(types.ImageAttachment) = .empty;
+            defer ordered.deinit(alloc);
+            try ordered.ensureTotalCapacity(alloc, images.items.len);
+
+            var remapped_id = first_remapped_id;
+            var ids_changed = false;
+            for (occurrences) |*occurrence| {
+                if (occurrence.attachment_index >= images.items.len or
+                    used[occurrence.attachment_index])
+                {
+                    return error.InvalidImageOccurrence;
+                }
+                var image = images.items[occurrence.attachment_index];
+                if (image.id != occurrence.source_id) return error.InvalidImageOccurrence;
+                if (literalImageIdUsed(text, occurrences, image.id)) {
+                    remapped_id = try nextRemappedImageId(
+                        text,
+                        occurrences,
+                        images.items,
+                        remapped_id,
+                    );
+                    image.id = remapped_id;
+                    remapped_id = try std.math.add(usize, remapped_id, 1);
+                    ids_changed = true;
+                }
+                occurrence.submitted_id = image.id;
+                occurrence.submitted_span = occurrence.span;
+                ordered.appendAssumeCapacity(image);
+                used[occurrence.attachment_index] = true;
+            }
+
+            for (images.items, used) |image, retained| {
+                if (!retained) types.freeImageAttachment(alloc, image);
+            }
+            @memcpy(images.items[0..ordered.items.len], ordered.items);
+            images.items.len = ordered.items.len;
+
+            if (!ids_changed) {
+                return .{ .text = text, .owned = false };
+            }
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(alloc);
+            var cursor: usize = 0;
+            for (occurrences) |*occurrence| {
+                if (occurrence.span.start < cursor or occurrence.span.end > text.len) {
+                    return error.InvalidImageOccurrence;
+                }
+                try out.appendSlice(alloc, text[cursor..occurrence.span.start]);
+                const start = out.items.len;
+                var placeholder_buf: [64]u8 = undefined;
+                const placeholder = try image_attachments.formatImagePlaceholder(
+                    &placeholder_buf,
+                    occurrence.submitted_id,
+                );
+                try out.appendSlice(alloc, placeholder);
+                occurrence.submitted_span = .{ .start = start, .end = out.items.len };
+                cursor = occurrence.span.end;
+            }
+            try out.appendSlice(alloc, text[cursor..]);
+            return .{
+                .text = try out.toOwnedSlice(alloc),
+                .owned = true,
+                .next_image_id = if (ids_changed) remapped_id else null,
+            };
+        }
+
+        fn firstRemappedImageId(app: *const App, agent: *const AppAgent) usize {
+            if (comptime @hasDecl(App, "peekNextImageId")) {
+                return app.peekNextImageId(agent);
+            }
+            return 1;
+        }
+
+        fn commitRemappedImageIds(app: *App, agent: *AppAgent, next_image_id: ?usize) void {
+            const next = next_image_id orelse return;
+            if (comptime @hasDecl(App, "peekNextImageId") and
+                @hasDecl(App, "nextImageId"))
+            {
+                while (app.peekNextImageId(agent) < next) {
+                    const committed_id = app.nextImageId(agent);
+                    std.debug.assert(committed_id < next);
+                }
+            }
+        }
+
+        fn nextRemappedImageId(
+            text: []const u8,
+            occurrences: []const ImageOccurrence,
+            images: []const types.ImageAttachment,
+            first_candidate: usize,
+        ) !usize {
+            var candidate = first_candidate;
+            while (literalImageIdUsed(text, occurrences, candidate) or image_attachments.findImageIndexById(images, candidate) != null) {
+                candidate = try std.math.add(usize, candidate, 1);
+            }
+            return candidate;
+        }
+
+        fn literalImageIdUsed(
+            text: []const u8,
+            occurrences: []const ImageOccurrence,
+            id: usize,
+        ) bool {
+            var index: usize = 0;
+            while (index < text.len) {
+                const match = image_attachments.matchImagePlaceholder(text, index) orelse {
+                    index += 1;
+                    continue;
+                };
+                const end = index + match.length;
+                var registered = false;
+                for (occurrences) |occurrence| {
+                    if (occurrence.span.start == index and
+                        occurrence.span.end == end and
+                        occurrence.source_id == match.id)
+                    {
+                        registered = true;
+                        break;
+                    }
+                }
+                if (!registered and match.id == id) return true;
+                index = end;
+            }
+            return false;
+        }
+
+        fn projectSpanThroughSubmittedImages(
+            text: []const u8,
+            occurrences: []const ImageOccurrence,
+            span: Span,
+        ) ?Span {
+            if (span.start > span.end or span.end > text.len) return null;
+            const start = projectOffsetThroughSubmittedImages(
+                text,
+                occurrences,
+                span.start,
+            ) orelse return null;
+            const end = projectOffsetThroughSubmittedImages(
+                text,
+                occurrences,
+                span.end,
+            ) orelse return null;
+            if (end < start) return null;
+            return .{ .start = start, .end = end };
+        }
+
+        fn projectOffsetThroughSubmittedImages(
+            text: []const u8,
+            occurrences: []const ImageOccurrence,
+            source_offset: usize,
+        ) ?usize {
+            if (source_offset > text.len) return null;
+
+            var source_cursor: usize = 0;
+            var output_cursor: usize = 0;
+            for (occurrences) |occurrence| {
+                const output = occurrence.submitted_span orelse return null;
+                if (occurrence.span.start < source_cursor or
+                    occurrence.span.end <= occurrence.span.start or
+                    occurrence.span.end > text.len or
+                    occurrence.submitted_id == 0 or output.end <= output.start)
+                {
+                    return null;
+                }
+                const start = std.math.add(usize, output_cursor, occurrence.span.start - source_cursor) catch return null;
+                if (output.start != start) return null;
+                if (source_offset < occurrence.span.start) {
+                    return std.math.add(usize, output_cursor, source_offset - source_cursor) catch null;
+                }
+                if (source_offset < occurrence.span.end) {
+                    return if (source_offset == occurrence.span.start) output.start else null;
+                }
+                output_cursor = output.end;
+                source_cursor = occurrence.span.end;
+            }
+            return std.math.add(usize, output_cursor, source_offset - source_cursor) catch null;
+        }
+
+        fn resolveSlashSubmission(registry: command_specs.SlashRegistry, text: []const u8, selected_index: usize) []const u8 {
+            const count = command_specs.slashCompletionCount(registry, text);
+            if (count == 0) return text;
+            const idx = selected_index % count;
+            return command_specs.nthSlashCompletion(registry, text, idx) orelse text;
+        }
+
+        const Span = struct {
+            start: usize,
+            end: usize,
+        };
+
+        fn projectSkillTokensForSubmit(
+            alloc: std.mem.Allocator,
+            raw_input: []const u8,
+            expanded_text: []const u8,
+            effective_text: []const u8,
+            final_text: []const u8,
+            pasted_blocks: []const paste_blocks.PastedBlock,
+            skill_tokens: []const registered_entities.SkillTokenSpan,
+            edits: []const image_attachments.InlineImageEdit,
+            image_occurrences: []const ImageOccurrence,
+        ) ![]registered_entities.SkillTokenSpan {
+            if (skill_tokens.len == 0) return &.{};
+
+            var projected: std.ArrayList(registered_entities.SkillTokenSpan) = .empty;
+            errdefer projected.deinit(alloc);
+
+            for (skill_tokens) |token| {
+                if (token.name.len == 0 or token.path.len == 0) continue;
+                const expanded = projectSpanThroughPasteExpansion(raw_input, pasted_blocks, .{
+                    .start = token.raw_start,
+                    .end = token.raw_end,
+                }) orelse continue;
+                const span = project_inline_span(expanded_text.len, expanded, edits) orelse continue;
+
+                const final_span = projectSpanThroughSubmittedImages(
+                    effective_text,
+                    image_occurrences,
+                    span,
+                ) orelse continue;
+                const marker = skillMarkerAt(
+                    final_text,
+                    final_span.start,
+                    token.name,
+                ) orelse continue;
+                if (marker.end != final_span.end) continue;
+                try projected.append(alloc, .{
+                    .raw_start = final_span.start,
+                    .raw_end = final_span.end,
+                    .name = token.name,
+                    .path = token.path,
+                    .display_source = token.display_source,
+                    .owns_trailing_separator = token.owns_trailing_separator,
+                });
+            }
+
+            if (projected.items.len == 0) {
+                projected.deinit(alloc);
+                return &.{};
+            }
+            return try projected.toOwnedSlice(alloc);
+        }
+
+        fn projectSpanThroughPasteExpansion(
+            raw_input: []const u8,
+            pasted_blocks: []const paste_blocks.PastedBlock,
+            span: Span,
+        ) ?Span {
+            if (span.start > span.end or span.end > raw_input.len) return null;
+            const start = paste_blocks.projectOffsetThroughExpansion(raw_input, pasted_blocks, span.start) orelse return null;
+            const end = paste_blocks.projectOffsetThroughExpansion(raw_input, pasted_blocks, span.end) orelse return null;
+            if (end < start) return null;
+            return .{ .start = start, .end = end };
+        }
+
+        fn project_inline_span(source_len: usize, span: Span, edits: []const image_attachments.InlineImageEdit) ?Span {
+            const projected = image_attachments.project_inline_image_span(source_len, .{
+                .raw_start = span.start,
+                .raw_end = span.end,
+            }, edits) orelse return null;
+            return .{ .start = projected.raw_start, .end = projected.raw_end };
+        }
+
+        fn skillMarkerAt(text: []const u8, start: usize, name: []const u8) ?Span {
+            if (start >= text.len or text[start] != '$') return null;
+            const end = start + 1 + name.len;
+            if (end > text.len) return null;
+            if (!std.mem.eql(u8, text[start + 1 .. end], name)) return null;
+            if (end < text.len and isSkillNameByte(text[end])) return null;
+            return .{ .start = start, .end = end };
+        }
+
+        fn isSkillNameByte(byte: u8) bool {
+            return (byte >= 'A' and byte <= 'Z') or
+                (byte >= 'a' and byte <= 'z') or
+                (byte >= '0' and byte <= '9') or
+                byte == '_' or
+                byte == '-';
+        }
+    };
+}
+
+test "inline image collision map keeps reserved stable IDs and final coordinates distinct" {
+    const alloc = std.testing.allocator;
+    const Rt = SubmitRuntime(struct {});
+    const text = "literal [Image #9]\n[Image #9] $review [Image #10]";
+    const first = "literal [Image #9]\n".len;
+    const second = text.len - "[Image #10]".len;
+    var occurrences = [_]Rt.ImageOccurrence{
+        .{ .span = .{ .start = first, .end = first + "[Image #9]".len }, .attachment_index = 0, .source_id = 9 },
+        .{ .span = .{ .start = second, .end = text.len }, .attachment_index = 1, .source_id = 10 },
+    };
+    const original_first = occurrences[0].span;
+    const original_second = occurrences[1].span;
+    var images = std.ArrayList(types.ImageAttachment).fromOwnedSlice(try types.dupeImageAttachmentSlice(alloc, &.{
+        .{ .id = 9, .path = @constCast("first.png"), .media_type = @constCast("image/png") },
+        .{ .id = 10, .path = @constCast("second.png"), .media_type = @constCast("image/png") },
+    }));
+    defer Rt.deinitOwnedImageList(alloc, &images);
+    const result = try Rt.mapSubmittedImages(alloc, text, &images, &occurrences, 9);
+    defer if (result.owned) alloc.free(result.text);
+    try std.testing.expectEqualStrings("literal [Image #9]\n[Image #11] $review [Image #10]", result.text);
+    try std.testing.expectEqual(@as(usize, 11), images.items[0].id);
+    try std.testing.expectEqual(@as(usize, 10), images.items[1].id);
+    try std.testing.expectEqualDeep(original_first, occurrences[0].span);
+    try std.testing.expectEqualDeep(original_second, occurrences[1].span);
+    for (occurrences, [_][]const u8{ "[Image #11]", "[Image #10]" }) |occurrence, expected| {
+        const span = occurrence.submitted_span.?;
+        try std.testing.expectEqualStrings(expected, result.text[span.start..span.end]);
+    }
+    const skill_start = std.mem.find(u8, text, "$review").?;
+    const skill = Rt.projectSpanThroughSubmittedImages(text, &occurrences, .{ .start = skill_start, .end = skill_start + "$review".len }).?;
+    try std.testing.expectEqualStrings("$review", result.text[skill.start..skill.end]);
+}
+
+test "pending submission phase methods keep hold ownership explicit" {
+    const alloc = std.testing.allocator;
+    var pending = PendingSubmission.init(try buildPendingPromptDraft(
+        alloc,
+        41,
+        "use $review",
+        &.{},
+        &.{.{
+            .raw_start = 4,
+            .raw_end = 11,
+            .name = "review",
+            .path = "/tmp/review/SKILL.md",
+        }},
+    ));
+    defer pending.deinit(alloc);
+
+    try std.testing.expectEqual(PendingPhase.awaiting_frame, pending.phase);
+    try std.testing.expect(pending.ownsTurnStartHold());
+    try std.testing.expectError(error.InvalidPendingPhase, pending.markAdopted());
+
+    try std.testing.expect(pending.markFrameCommitted());
+    try std.testing.expectEqual(PendingPhase.awaiting_adoption, pending.phase);
+    try std.testing.expect(pending.ownsTurnStartHold());
+    try std.testing.expect(!pending.markFrameCommitted());
+
+    try pending.markAdopted();
+    try std.testing.expectEqual(PendingPhase.adopted, pending.phase);
+    try std.testing.expect(pending.ownsTurnStartHold());
+    try std.testing.expectError(error.InvalidPendingPhase, pending.markAdopted());
+
+    try std.testing.expect(pending.markQueued());
+    try std.testing.expectEqual(PendingPhase.queued, pending.phase);
+    try std.testing.expect(!pending.ownsTurnStartHold());
+    try std.testing.expect(!pending.markQueued());
+    try std.testing.expectEqual(@as(u64, 41), pending.draft.turn_id);
+    try std.testing.expectEqualStrings("use $review", pending.draft.prompt);
+    try std.testing.expectEqual(@as(usize, 1), pending.draft.skill_display_spans.len);
+}
+
+fn checkPendingDraftConstructionAllocationFailure(alloc: std.mem.Allocator) !void {
+    const draft = try buildPendingPromptDraft(
+        alloc,
+        77,
+        "hello $review",
+        &.{.{
+            .id = 5,
+            .path = @constCast("/tmp/image.png"),
+            .media_type = @constCast("image/png"),
+        }},
+        &.{.{
+            .raw_start = 6,
+            .raw_end = 13,
+            .name = "review",
+            .path = "/tmp/review/SKILL.md",
+        }},
+    );
+    defer draft.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 77), draft.turn_id);
+    try std.testing.expectEqualStrings("hello $review", draft.prompt);
+    try std.testing.expectEqual(@as(usize, 1), draft.images.len);
+    try std.testing.expectEqual(@as(usize, 1), draft.skill_display_spans.len);
+}
+
+test "pending draft construction frees every partial allocation" {
+    try std.testing.checkAllAllocationFailures(
+        testing_allocator.no_resize,
+        checkPendingDraftConstructionAllocationFailure,
+        .{},
+    );
+}
+
+const CompactionAdmissionFake = struct {
+    alloc: std.mem.Allocator = std.testing.allocator,
+    main_agent: struct {
+        submission: State = .{},
+        worker: struct {
+            busy: bool = false,
+            queued: usize = 0,
+            status: worker_runtime.ContextCompactionStatus = .idle,
+            activity: compaction_activity.State = .{},
+            released_holds: usize = 0,
+
+            pub fn compactionActivitySnapshot(self: *@This()) compaction_activity.Snapshot {
+                return self.activity.snapshot;
+            }
+            pub fn beginCompactionActivity(self: *@This(), origin: compaction_activity.Origin, turn_id: ?u64) compaction_activity.OperationId {
+                return self.activity.begin(origin, turn_id, 0);
+            }
+            pub fn settleCompactionActivity(self: *@This(), id: compaction_activity.OperationId, feedback: compaction_activity.Feedback) void {
+                self.activity.settle(id, feedback, 0);
+            }
+            pub fn rejectCompactionActivity(self: *@This(), outcome: compaction_activity.Outcome) void {
+                const id = self.activity.begin(.manual, null, 0);
+                self.activity.settle(id, .{ .outcome = outcome }, 0);
+            }
+            pub fn isProcessing(self: *@This()) bool {
+                return self.busy;
+            }
+            pub fn queuedPromptCount(self: *@This()) usize {
+                return self.queued;
+            }
+            pub fn contextCompactionStatus(self: *@This()) worker_runtime.ContextCompactionStatus {
+                return self.status;
+            }
+            pub fn releaseTurnStartHold(self: *@This()) void {
+                self.released_holds += 1;
+            }
+            pub fn clearQueuedPrompts(self: *@This(), _: std.mem.Allocator, _: []const types.ImageAttachment) void {
+                self.queued = 0;
+            }
+        } = .{},
+    } = .{},
+    has_context: bool = true,
+    readiness: enum { pending, current, rejected } = .pending,
+    readiness_error: ?anyerror = null,
+    enqueue_error: ?anyerror = null,
+    credential_checks: usize = 0,
+    enqueue_count: usize = 0,
+    notice_error: bool = false,
+    notice_count: usize = 0,
+    notices: std.ArrayList(u8) = .empty,
+    auth: struct {
+        cancelled: usize = 0,
+        pub fn cancelPromptCredentialRefresh(self: *@This()) void {
+            self.cancelled += 1;
+        }
+    } = .{},
+    shell: struct { render_requests: @import("../../ui/render_request.zig").RenderRequestState = .{} } = .{},
+
+    fn deinit(self: *CompactionAdmissionFake) void {
+        SubmitRuntime(CompactionAdmissionFake).clear_context_compaction(self, self.agent(), "test_cleanup");
+        self.notices.deinit(self.alloc);
+    }
+    pub fn hasContextToCompact(self: *CompactionAdmissionFake, _: anytype) bool {
+        return self.has_context;
+    }
+    pub fn collectPendingPromptCredential(self: *CompactionAdmissionFake, _: anytype) !@TypeOf(self.readiness) {
+        self.credential_checks += 1;
+        if (self.readiness_error) |err| return err;
+        return self.readiness;
+    }
+    pub fn enqueueContextCompaction(self: *CompactionAdmissionFake, _: anytype, id: compaction_activity.OperationId) !bool {
+        if (self.enqueue_error) |err| return err;
+        std.debug.assert(id == self.agent().submission.compaction_operation.?);
+        self.agent().worker.activity.queued(id, 1, 10);
+        self.enqueue_count += 1;
+        return true;
+    }
+    pub fn writeDomainNotice(self: *CompactionAdmissionFake, notice: types.SemanticNotice, _: bool) !void {
+        self.notice_count += 1;
+        if (self.notice_error) return error.OutOfMemory;
+        try self.notices.appendSlice(self.alloc, notice.body);
+    }
+
+    pub fn agent(self: anytype) @TypeOf(&self.main_agent) {
+        return &self.main_agent;
+    }
+};
+
+test "manual compaction admission waits for authentication and enqueues once" {
+    var app: CompactionAdmissionFake = .{};
+    defer app.deinit();
+    const Runtime = SubmitRuntime(CompactionAdmissionFake);
+    try Runtime.request_context_compaction(&app, (&app).agent());
+    const accepted = app.agent().worker.activity.snapshot;
+    try Runtime.request_context_compaction(&app, (&app).agent());
+    try std.testing.expectEqualDeep(accepted, app.agent().worker.activity.snapshot);
+    try std.testing.expect(accepted.operation.?.phase == .preparing);
+    try std.testing.expect(app.agent().submission.compaction_pending);
+    try std.testing.expectEqual(@as(usize, 1), app.credential_checks);
+    try std.testing.expectEqual(@as(usize, 0), app.enqueue_count);
+    app.readiness = .current;
+    Runtime.collect_context_compaction(&app, (&app).agent());
+    Runtime.collect_context_compaction(&app, (&app).agent());
+    try std.testing.expect(!app.agent().submission.compaction_pending);
+    try std.testing.expectEqual(@as(usize, 1), app.enqueue_count);
+    try std.testing.expectEqual(@as(usize, 0), app.auth.cancelled);
+    try std.testing.expectEqual(accepted.operation.?.id, app.agent().worker.activity.snapshot.operation.?.id);
+    try std.testing.expectEqual(@as(i64, 10), app.agent().worker.activity.snapshot.operation.?.started_at_ms);
+    try std.testing.expectEqual(@as(?u64, 1), app.agent().worker.activity.snapshot.operation.?.turn_id);
+}
+
+test "manual compaction empty and busy admission does not prepare authentication" {
+    for (0..4) |case| {
+        var app: CompactionAdmissionFake = .{};
+        defer app.deinit();
+        switch (case) {
+            0 => app.has_context = false,
+            1 => app.agent().worker.busy = true,
+            2 => app.agent().worker.queued = 1,
+            3 => app.agent().worker.status = .queued,
+            else => unreachable,
+        }
+        try SubmitRuntime(CompactionAdmissionFake).request_context_compaction(&app, (&app).agent());
+        try std.testing.expect(!app.agent().submission.compaction_pending);
+        try std.testing.expectEqual(@as(usize, 0), app.credential_checks);
+        try std.testing.expectEqual(@as(usize, 0), app.enqueue_count);
+        const feedback = app.agent().worker.activity.snapshot.operation.?.phase.terminal;
+        try std.testing.expectEqual(if (case == 0) compaction_activity.Outcome.no_op else .busy, feedback.outcome);
+    }
+}
+
+test "manual compaction rejected authentication cannot submit a draft later" {
+    var app: CompactionAdmissionFake = .{ .readiness = .rejected };
+    defer app.deinit();
+    app.agent().submission.retry_after_auth = true;
+    try SubmitRuntime(CompactionAdmissionFake).request_context_compaction(&app, (&app).agent());
+    try std.testing.expect(!app.agent().submission.compaction_pending);
+    try std.testing.expect(!app.agent().submission.retry_after_auth);
+    app.readiness = .current;
+    SubmitRuntime(CompactionAdmissionFake).collect_context_compaction(&app, (&app).agent());
+    try std.testing.expectEqual(@as(usize, 0), app.enqueue_count);
+}
+
+test "manual compaction admission errors stay local and release pending ownership" {
+    for ([_]bool{ false, true }) |after_readiness| {
+        var app: CompactionAdmissionFake = .{ .readiness = .current };
+        defer app.deinit();
+        if (after_readiness) app.enqueue_error = error.MissingApiKey else app.readiness_error = error.OutOfMemory;
+        try SubmitRuntime(CompactionAdmissionFake).request_context_compaction(&app, (&app).agent());
+        try std.testing.expect(!app.agent().submission.compaction_pending);
+        try std.testing.expectEqual(@as(usize, 0), app.enqueue_count);
+        try std.testing.expectEqual(@as(usize, 0), app.notices.items.len);
+        const feedback = app.agent().worker.activity.snapshot.operation.?.phase.terminal;
+        try std.testing.expectEqual(compaction_activity.Outcome.failed, feedback.outcome);
+        try std.testing.expectEqual(if (after_readiness) @as(anyerror, error.MissingApiKey) else error.OutOfMemory, feedback.err.?);
+    }
+}
+
+test "manual compaction queued work never produces a transcript notice" {
+    var app: CompactionAdmissionFake = .{ .readiness = .current, .notice_error = true };
+    defer app.deinit();
+    try SubmitRuntime(CompactionAdmissionFake).request_context_compaction(&app, (&app).agent());
+    try std.testing.expectEqual(@as(usize, 1), app.enqueue_count);
+    try std.testing.expectEqual(@as(usize, 0), app.notice_count);
+    try std.testing.expect(!app.agent().submission.compaction_pending);
+    const accepted = app.agent().worker.activity.snapshot;
+    try SubmitRuntime(CompactionAdmissionFake).request_context_compaction(&app, (&app).agent());
+    try std.testing.expectEqualDeep(accepted, app.agent().worker.activity.snapshot);
+    try std.testing.expectEqual(@as(usize, 1), app.enqueue_count);
+}
+
+test "manual compaction cancellation and transition clearing prevent late enqueue" {
+    for (0..3) |boundary| {
+        var app: CompactionAdmissionFake = .{};
+        defer app.deinit();
+        const Runtime = SubmitRuntime(CompactionAdmissionFake);
+        try Runtime.request_context_compaction(&app, (&app).agent());
+        switch (boundary) {
+            0 => try std.testing.expect(Runtime.cancelPendingSubmission(&app, (&app).agent())),
+            1 => Runtime.clearPendingSubmissionForSessionTransition(&app, (&app).agent()),
+            2 => Runtime.clearPendingSubmission(&app, (&app).agent(), "shutdown"),
+            else => unreachable,
+        }
+        Runtime.clearPendingSubmission(&app, (&app).agent(), "repeated_cleanup");
+        app.readiness = .current;
+        Runtime.collect_context_compaction(&app, (&app).agent());
+        try std.testing.expectEqual(@as(usize, 1), app.auth.cancelled);
+        try std.testing.expectEqual(@as(usize, 0), app.enqueue_count);
+        try std.testing.expectEqual(@as(usize, 0), app.agent().worker.released_holds);
+        try std.testing.expectEqual(compaction_activity.Outcome.cancelled, app.agent().worker.activity.snapshot.operation.?.phase.terminal.outcome);
+    }
+}
+
+const PendingLifecycleFake = struct {
+    const CredentialReadiness = enum { pending, current, rejected };
+
+    alloc: std.mem.Allocator,
+    main_agent: struct {
+        submission: State = .{},
+        worker: struct {
+            held: bool = true,
+            release_count: usize = 0,
+            queued_turn_id: ?u64 = null,
+            queued_stale_shell_handles: bool = false,
+            active_turn_id: u64 = 0,
+            delete_count: usize = 0,
+            cancel_count: usize = 0,
+
+            pub fn releaseTurnStartHold(self: *@This()) void {
+                if (!self.held) return;
+                self.held = false;
+                self.release_count += 1;
+            }
+
+            pub fn queuedPromptCarriesStaleShellHandles(self: *@This(), turn_id: u64) bool {
+                return self.queued_turn_id == turn_id and self.queued_stale_shell_handles;
+            }
+
+            pub fn removeQueuedPrompt(
+                self: *@This(),
+                _: std.mem.Allocator,
+                turn_id: u64,
+                _: []const types.ImageAttachment,
+            ) bool {
+                if (self.queued_turn_id == null or self.queued_turn_id.? != turn_id) return false;
+                self.queued_turn_id = null;
+                self.delete_count += 1;
+                return true;
+            }
+
+            pub fn activeTurnId(self: *@This()) u64 {
+                return self.active_turn_id;
+            }
+
+            pub fn requestCancel(self: *@This()) void {
+                self.cancel_count += 1;
+            }
+        } = .{},
+        session: struct {
+            returned_stale_note_turn: ?u64 = null,
+
+            pub fn returnStaleShellHandles(self: *@This(), turn_id: u64) void {
+                self.returned_stale_note_turn = turn_id;
+            }
+        } = .{},
+    } = .{},
+    shell: struct {
+        render_requests: @import("../../ui/render_request.zig").RenderRequestState = .{},
+    } = .{},
+    adoption_failures_remaining: usize = 0,
+    adoption_count: usize = 0,
+    finalization_count: usize = 0,
+    finalization_error: bool = false,
+    notice_count: usize = 0,
+    credential_checks: usize = 0,
+    skill_refresh: enum { pending, current, failed } = .current,
+    skill_refresh_checks: usize = 0,
+
+    fn deinit(self: *PendingLifecycleFake) void {
+        SubmitRuntime(PendingLifecycleFake).clearPendingSubmission(self, self.agent(), "test_deinit");
+    }
+
+    pub fn adoptPendingUserPrompt(
+        self: *PendingLifecycleFake,
+        _: anytype,
+        _: *const PendingPromptDraft,
+    ) !void {
+        if (self.adoption_failures_remaining > 0) {
+            self.adoption_failures_remaining -= 1;
+            return error.InjectedAdoptionFailure;
+        }
+        self.adoption_count += 1;
+    }
+
+    pub fn finalizePendingSubmission(
+        self: *PendingLifecycleFake,
+        _: anytype,
+        draft: *const PendingPromptDraft,
+    ) !void {
+        self.finalization_count += 1;
+        if (self.finalization_error) return error.InjectedFinalizationFailure;
+        self.agent().worker.queued_turn_id = draft.turn_id;
+    }
+
+    pub fn collectPendingPromptCredential(
+        self: *PendingLifecycleFake,
+        _: anytype,
+    ) !CredentialReadiness {
+        self.credential_checks += 1;
+        return .current;
+    }
+
+    pub fn collectPendingSkillRefresh(
+        self: *PendingLifecycleFake,
+        pending: *PendingSubmission,
+    ) !PendingSkillRefresh {
+        self.skill_refresh_checks += 1;
+        if (pending.skill_refresh_generation == null) {
+            pending.skill_refresh_generation = 1;
+        }
+        return switch (self.skill_refresh) {
+            .pending => .pending,
+            .current => .current,
+            .failed => error.InjectedSkillRefreshFailure,
+        };
+    }
+
+    pub fn writeDomainNotice(
+        self: *PendingLifecycleFake,
+        _: types.SemanticNotice,
+        _: bool,
+    ) !void {
+        self.notice_count += 1;
+    }
+
+    pub fn agent(self: anytype) @TypeOf(&self.main_agent) {
+        return &self.main_agent;
+    }
+};
+
+fn pendingLifecycleFake(alloc: std.mem.Allocator, turn_id: u64) !PendingLifecycleFake {
+    return .{
+        .alloc = alloc,
+        .main_agent = .{ .submission = .{ .pending = PendingSubmission.init(try buildPendingPromptDraft(
+            alloc,
+            turn_id,
+            "visible prompt",
+            &.{},
+            &.{},
+        )) } },
+    };
+}
+
+fn pendingLifecycleFakeWithSnapshot(
+    alloc: std.mem.Allocator,
+    turn_id: u64,
+    snapshot_path: []const u8,
+) !PendingLifecycleFake {
+    return .{
+        .alloc = alloc,
+        .main_agent = .{ .submission = .{ .pending = PendingSubmission.init(try buildPendingPromptDraft(
+            alloc,
+            turn_id,
+            "visible image prompt",
+            &.{.{
+                .id = 1,
+                .path = @constCast("/tmp/original.png"),
+                .media_type = @constCast("image/png"),
+                .snapshot_path = @constCast(snapshot_path),
+            }},
+            &.{},
+        )) } },
+    };
+}
+
+fn writePendingSnapshotFixture(tmp: *std.testing.TmpDir, name: []const u8) ![]u8 {
+    var file = try tmp.dir.createFile(std.testing.io, name, .{});
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, "snapshot");
+    return io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, name);
+}
+
+fn expectPendingSnapshotMissing(path: []const u8) !void {
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.openFileAbsolute(std.testing.io, path, .{}),
+    );
+}
+
+test "post-commit adoption failure keeps one retryable owner and hold" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    var app = try pendingLifecycleFake(std.testing.allocator, 501);
+    defer app.deinit();
+    app.adoption_failures_remaining = 1;
+
+    Runtime.noteCommittedFrame(&app, (&app).agent());
+    try std.testing.expectEqual(PendingPhase.awaiting_adoption, app.agent().submission.pending.?.phase);
+    try std.testing.expect(app.agent().worker.held);
+    try std.testing.expectEqual(@as(usize, 0), app.adoption_count);
+    try std.testing.expectEqual(@as(usize, 0), app.finalization_count);
+
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+    try std.testing.expectEqual(PendingPhase.queued, app.agent().submission.pending.?.phase);
+    try std.testing.expect(!app.agent().worker.held);
+    try std.testing.expectEqual(@as(usize, 1), app.agent().worker.release_count);
+    try std.testing.expectEqual(@as(usize, 1), app.adoption_count);
+    try std.testing.expectEqual(@as(usize, 1), app.finalization_count);
+
+    try std.testing.expectError(
+        error.PendingTurnIdMismatch,
+        Runtime.acceptPresentedPrompt(&app, (&app).agent(), 999),
+    );
+    try std.testing.expect(app.agent().submission.pending != null);
+    try Runtime.acceptPresentedPrompt(&app, (&app).agent(), 501);
+    try std.testing.expect(app.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(usize, 1), app.agent().worker.release_count);
+}
+
+test "pending submission waits for its skill catalog generation before queueing" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    var app = try pendingLifecycleFake(std.testing.allocator, 502);
+    defer app.deinit();
+    app.skill_refresh = .pending;
+
+    Runtime.noteCommittedFrame(&app, (&app).agent());
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+    try std.testing.expectEqual(PendingPhase.adopted, app.agent().submission.pending.?.phase);
+    try std.testing.expect(app.agent().worker.held);
+    try std.testing.expectEqual(@as(usize, 1), app.credential_checks);
+    try std.testing.expectEqual(@as(usize, 0), app.finalization_count);
+    try std.testing.expectEqual(@as(?u64, 1), app.agent().submission.pending.?.skill_refresh_generation);
+
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+    try std.testing.expectEqual(@as(usize, 1), app.credential_checks);
+
+    app.skill_refresh = .current;
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+    try std.testing.expectEqual(PendingPhase.queued, app.agent().submission.pending.?.phase);
+    try std.testing.expect(!app.agent().worker.held);
+    try std.testing.expectEqual(@as(usize, 1), app.credential_checks);
+    try std.testing.expectEqual(@as(usize, 1), app.finalization_count);
+}
+
+test "post-ack finalization failure leaves notice and consumes pending owner" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    var app = try pendingLifecycleFake(std.testing.allocator, 777);
+    defer app.deinit();
+    app.finalization_error = true;
+
+    Runtime.noteCommittedFrame(&app, (&app).agent());
+    try std.testing.expectEqual(PendingPhase.adopted, app.agent().submission.pending.?.phase);
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+
+    try std.testing.expect(app.agent().submission.pending == null);
+    try std.testing.expect(!app.agent().worker.held);
+    try std.testing.expectEqual(@as(usize, 1), app.agent().worker.release_count);
+    try std.testing.expectEqual(@as(usize, 1), app.adoption_count);
+    try std.testing.expectEqual(@as(usize, 1), app.finalization_count);
+    try std.testing.expectEqual(@as(usize, 1), app.notice_count);
+}
+
+test "Ctrl+C cancels pending ownership from every pre-worker phase" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+
+    var awaiting_frame = try pendingLifecycleFake(std.testing.allocator, 801);
+    defer awaiting_frame.deinit();
+    try std.testing.expect(Runtime.cancelPendingSubmission(&awaiting_frame, (&awaiting_frame).agent()));
+    try std.testing.expect(awaiting_frame.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(usize, 1), awaiting_frame.agent().worker.release_count);
+
+    var awaiting_adoption = try pendingLifecycleFake(std.testing.allocator, 802);
+    defer awaiting_adoption.deinit();
+    awaiting_adoption.adoption_failures_remaining = 1;
+    Runtime.noteCommittedFrame(&awaiting_adoption, (&awaiting_adoption).agent());
+    try std.testing.expectEqual(PendingPhase.awaiting_adoption, awaiting_adoption.agent().submission.pending.?.phase);
+    try std.testing.expect(Runtime.cancelPendingSubmission(&awaiting_adoption, (&awaiting_adoption).agent()));
+    try std.testing.expect(awaiting_adoption.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(usize, 1), awaiting_adoption.agent().worker.release_count);
+    try std.testing.expect(awaiting_adoption.shell.render_requests.hasReason(.transcript));
+    try std.testing.expect(awaiting_adoption.shell.render_requests.hasReason(.footer));
+
+    var adopted = try pendingLifecycleFake(std.testing.allocator, 803);
+    defer adopted.deinit();
+    Runtime.noteCommittedFrame(&adopted, (&adopted).agent());
+    try std.testing.expectEqual(PendingPhase.adopted, adopted.agent().submission.pending.?.phase);
+    try std.testing.expect(Runtime.cancelPendingSubmission(&adopted, (&adopted).agent()));
+    try std.testing.expect(adopted.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(usize, 1), adopted.agent().worker.release_count);
+
+    var queued = try pendingLifecycleFake(std.testing.allocator, 804);
+    defer queued.deinit();
+    Runtime.noteCommittedFrame(&queued, (&queued).agent());
+    Runtime.collectPendingSubmissionFacts(&queued, (&queued).agent());
+    try std.testing.expectEqual(PendingPhase.queued, queued.agent().submission.pending.?.phase);
+    try std.testing.expectEqual(@as(?u64, 804), queued.agent().worker.queued_turn_id);
+    try std.testing.expect(Runtime.cancelPendingSubmission(&queued, (&queued).agent()));
+    try std.testing.expect(queued.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(?u64, null), queued.agent().worker.queued_turn_id);
+    try std.testing.expectEqual(@as(usize, 1), queued.agent().worker.delete_count);
+    try std.testing.expectEqual(@as(usize, 1), queued.agent().worker.release_count);
+}
+
+test "Ctrl+C on a queued prompt gives back the stale shell handles note it carried (D93)" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    for ([_]bool{ true, false }) |carried| {
+        var app = try pendingLifecycleFake(std.testing.allocator, 806);
+        defer app.deinit();
+        Runtime.noteCommittedFrame(&app, (&app).agent());
+        Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+        app.agent().worker.queued_stale_shell_handles = carried;
+        try std.testing.expect(Runtime.cancelPendingSubmission(&app, (&app).agent()));
+        try std.testing.expectEqual(@as(?u64, null), app.agent().worker.queued_turn_id);
+        try std.testing.expectEqual(if (carried) @as(?u64, 806) else null, app.agent().session.returned_stale_note_turn);
+    }
+}
+
+test "Ctrl+C requests cancellation after the pending turn leaves the queue" {
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    var app = try pendingLifecycleFake(std.testing.allocator, 805);
+    defer app.deinit();
+    Runtime.noteCommittedFrame(&app, (&app).agent());
+    Runtime.collectPendingSubmissionFacts(&app, (&app).agent());
+    app.agent().worker.queued_turn_id = null;
+    app.agent().worker.active_turn_id = 805;
+
+    try std.testing.expect(Runtime.cancelPendingSubmission(&app, (&app).agent()));
+    try std.testing.expectEqual(@as(usize, 1), app.agent().worker.cancel_count);
+    try std.testing.expect(app.agent().submission.pending != null);
+    try Runtime.acceptPresentedPrompt(&app, (&app).agent(), 805);
+    try std.testing.expect(app.agent().submission.pending == null);
+    try std.testing.expectEqual(@as(usize, 1), app.agent().worker.release_count);
+}
+
+test "pending terminal cleanup deletes snapshots until a worker claims the turn" {
+    const alloc = std.testing.allocator;
+    const Runtime = SubmitRuntime(PendingLifecycleFake);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const awaiting_path = try writePendingSnapshotFixture(&tmp, "awaiting.bin");
+    defer alloc.free(awaiting_path);
+    var awaiting = try pendingLifecycleFakeWithSnapshot(alloc, 901, awaiting_path);
+    defer awaiting.deinit();
+    try std.testing.expect(Runtime.cancelPendingSubmission(&awaiting, (&awaiting).agent()));
+    try expectPendingSnapshotMissing(awaiting_path);
+
+    const failed_path = try writePendingSnapshotFixture(&tmp, "failed.bin");
+    defer alloc.free(failed_path);
+    var failed = try pendingLifecycleFakeWithSnapshot(alloc, 902, failed_path);
+    defer failed.deinit();
+    failed.finalization_error = true;
+    Runtime.noteCommittedFrame(&failed, (&failed).agent());
+    Runtime.collectPendingSubmissionFacts(&failed, (&failed).agent());
+    try std.testing.expect(failed.agent().submission.pending == null);
+    try expectPendingSnapshotMissing(failed_path);
+
+    const queued_path = try writePendingSnapshotFixture(&tmp, "queued.bin");
+    defer alloc.free(queued_path);
+    var queued = try pendingLifecycleFakeWithSnapshot(alloc, 903, queued_path);
+    defer queued.deinit();
+    Runtime.noteCommittedFrame(&queued, (&queued).agent());
+    Runtime.collectPendingSubmissionFacts(&queued, (&queued).agent());
+    try std.testing.expect(Runtime.cancelPendingSubmission(&queued, (&queued).agent()));
+    try expectPendingSnapshotMissing(queued_path);
+
+    const claimed_path = try writePendingSnapshotFixture(&tmp, "claimed.bin");
+    defer alloc.free(claimed_path);
+    var claimed = try pendingLifecycleFakeWithSnapshot(alloc, 904, claimed_path);
+    defer claimed.deinit();
+    Runtime.noteCommittedFrame(&claimed, (&claimed).agent());
+    Runtime.collectPendingSubmissionFacts(&claimed, (&claimed).agent());
+    claimed.agent().worker.queued_turn_id = null;
+    claimed.agent().worker.active_turn_id = 904;
+    try std.testing.expect(Runtime.cancelPendingSubmission(&claimed, (&claimed).agent()));
+    try Runtime.acceptPresentedPrompt(&claimed, (&claimed).agent(), 904);
+    var retained = try std.Io.Dir.openFileAbsolute(std.testing.io, claimed_path, .{});
+    retained.close(std.testing.io);
+}

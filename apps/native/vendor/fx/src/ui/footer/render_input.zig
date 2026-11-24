@@ -1,0 +1,1470 @@
+const std = @import("std");
+const question_prompt = @import("../../core/agent/question_prompt.zig");
+const approval_prompt = @import("../../core/permissions/approval_prompt.zig");
+const auth_runtime = @import("../../core/auth/auth_runtime.zig");
+const activity_status = @import("../../core/output/activity_status.zig");
+const model_cache_runtime = @import("../../core/app/model_cache_runtime.zig");
+const app_mcp_runtime = @import("../../core/app/app_mcp_runtime.zig");
+const mcp_host_menu_presentation = @import("mcp_host_menu_presentation.zig");
+const picker_state = @import("../../core/input/picker_state.zig");
+const session_adapter = @import("../../core/session/session_adapter.zig");
+const session_catalog = @import("../../core/session/session_catalog.zig");
+const session_store = @import("../../core/session/session_store.zig");
+const info_panel_presentation = @import("info_panel_presentation.zig");
+const usage_presentation = @import("usage_presentation.zig");
+const command_specs = @import("../../core/slash_commands/command_specs.zig");
+const settings_catalog = @import("../../core/config/settings_catalog.zig");
+const skill_runtime = @import("../../core/skills/skill_runtime.zig");
+const display_width = @import("../../core/shared/display_width.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
+const types = @import("../../core/shared/types.zig");
+const workspace_access = @import("../../core/workspace/workspace_access.zig");
+const file_index = @import("../../core/workspace/file_index.zig");
+const workspace_menu = @import("../../core/workspace/workspace_menu.zig");
+const activity_runtime = @import("../../core/output/activity_runtime.zig");
+const transcript_presentation = @import("../../core/output/transcript_presentation.zig");
+const effort_menu = @import("../../core/input/effort_menu.zig");
+const info_panel = @import("../../core/input/info_panel.zig");
+const usage_menu = @import("../../core/session/usage_menu.zig");
+const core_input_runtime = @import("../../core/input/runtime.zig");
+const ui_render = @import("../render.zig");
+const render_engine = @import("../render_engine.zig");
+const render_request = @import("../render_request.zig");
+const transcript_runtime = @import("../transcript/runtime.zig");
+const interaction_state = @import("interaction_state.zig");
+
+const activity_overlay = render_engine.activity_overlay;
+const StreamState = types.StreamState;
+const ActivityProjection = activity_runtime.ActivityProjection;
+const InputRuntime = core_input_runtime.Runtime;
+const TranscriptRuntime = transcript_runtime.TranscriptRuntime;
+
+pub const SkillsMenuProjection = struct {
+    active: bool = false,
+    items: []const skill_runtime.Skill = &.{},
+    actual_indices: []const u32 = &.{},
+    index_ready: bool = false,
+    source_filter: skill_runtime.SkillMenuSourceFilter = .all,
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    query: []const u8 = "",
+
+    pub fn itemCount(self: SkillsMenuProjection) usize {
+        if (self.index_ready) return self.actual_indices.len;
+        return skill_runtime.skillMenuFilterQueryCount(
+            self.items,
+            self.source_filter,
+            self.query,
+        );
+    }
+
+    pub fn itemAt(
+        self: SkillsMenuProjection,
+        display_index: usize,
+    ) ?*const skill_runtime.Skill {
+        if (!self.index_ready) {
+            const actual_index = skill_runtime.skillMenuActualIndexAtQuery(
+                self.items,
+                self.source_filter,
+                self.query,
+                display_index,
+            ) orelse return null;
+            return &self.items[actual_index];
+        }
+        if (display_index >= self.actual_indices.len) return null;
+        const actual_index: usize = self.actual_indices[display_index];
+        if (actual_index >= self.items.len) return null;
+        return &self.items[actual_index];
+    }
+};
+
+pub const ModelMenuProjection = struct {
+    active: bool = false,
+    load_state: model_cache_runtime.ModelMenuLoadState = .loading,
+    catalog_state: model_cache_runtime.ModelMenuCatalogState = .{},
+    items: []const model_cache_runtime.ModelMenuItem = &.{},
+    provider_index: usize = 0,
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    query: []const u8 = "",
+    /// Whether the team has Token Pass. Only then does the menu name Token
+    /// Pass and lead with its models.
+    token_pass: bool = false,
+
+    pub fn providerFilter(self: ModelMenuProjection) model_cache_runtime.ModelProviderFilter {
+        return @fromBackingInt(@intCast(@min(self.provider_index, model_cache_runtime.model_provider_filter_count - 1)));
+    }
+
+    pub fn filteredItemCount(self: ModelMenuProjection) usize {
+        return model_cache_runtime.modelMenuFilteredItemCount(self.items, self.providerFilter(), self.query);
+    }
+
+    pub fn itemAt(self: ModelMenuProjection, display_index: usize) ?*const model_cache_runtime.ModelMenuItem {
+        return model_cache_runtime.modelMenuItemAt(self.items, self.providerFilter(), self.query, display_index);
+    }
+};
+
+pub const SessionMenuProjection = struct {
+    active: bool = false,
+    load_state: session_catalog.LoadState = .loading,
+    summaries: []const session_store.SessionSummary = &.{},
+    has_more: bool = false,
+    loading_more: bool = false,
+    scope: session_catalog.Scope = .current_workspace,
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    query: []const u8 = "",
+    now_ms: i64 = 0,
+    selection_failure: ?session_catalog.ResumeFailure = null,
+
+    pub fn filteredItemCount(self: SessionMenuProjection) usize {
+        return session_catalog.filteredCount(self.summaries, self.query);
+    }
+
+    pub fn navigationItemCount(self: SessionMenuProjection) usize {
+        return self.filteredItemCount() + @intFromBool(self.has_more);
+    }
+
+    pub fn isLoadMoreIndex(self: SessionMenuProjection, display_index: usize) bool {
+        return self.has_more and display_index == self.filteredItemCount();
+    }
+
+    pub fn itemAt(self: SessionMenuProjection, display_index: usize) ?*const session_store.SessionSummary {
+        return session_catalog.summaryAt(self.summaries, self.query, display_index);
+    }
+};
+
+pub const ForkMenuProjection = struct {
+    /// The session's prompts, oldest first.
+    points: []const session_adapter.Session.ForkPoint = &.{},
+    selected: usize = 0,
+    window_start: usize = 0,
+    /// While the menu asks whether the fork takes copies of the session's
+    /// subagents: how many it can copy (D97).
+    question: ?usize = null,
+
+    pub fn active(self: ForkMenuProjection) bool {
+        return self.points.len > 0;
+    }
+};
+
+/// What the `/effort` menu shows: the current model's reasoning effort
+/// levels, the one in use, and the one highlighted.
+pub const EffortMenuProjection = struct {
+    active: bool = false,
+    model: []const u8 = "",
+    /// `default`, then the model's levels.
+    levels: []const types.ReasoningEffort = &.{},
+    current: usize = 0,
+    selected: usize = 0,
+    window_start: usize = 0,
+};
+
+pub fn effortMenuProjection(menu: *const effort_menu.State) EffortMenuProjection {
+    if (!menu.active) return .{};
+    return .{
+        .active = true,
+        .model = menu.model.items,
+        .levels = menu.levels(),
+        .current = menu.current,
+        .selected = menu.selected,
+        .window_start = menu.window_start,
+    };
+}
+
+/// How much an agent's state asks of the user, which decides how bright the
+/// agent list draws it.
+pub const AgentStateTone = enum {
+    /// Nothing is going on.
+    idle,
+    /// It is working, or finished since the user last looked.
+    active,
+    /// It waits for the user: an approval, a question, or a request only
+    /// the user can continue.
+    needs_user,
+};
+
+/// One row of the agent list: an open instance or one of its subagents, and
+/// how it is doing.
+pub const AgentsMenuRow = struct {
+    /// How fx names it: "main", "fx 3" while several instances are open, or
+    /// a subagent's own name, such as "reviewer".
+    name: []const u8,
+    /// A subagent, drawn on its instance's branch.
+    subagent: bool = false,
+    /// A subagent's own subagent, drawn on its parent's branch.
+    nested: bool = false,
+    /// Its session's title, or empty before it has one.
+    title: []const u8,
+    /// What a subagent is for, the one line its parent started it with, which
+    /// the row shows while it has no title; empty for an instance and for a
+    /// subagent with none.
+    purpose: []const u8 = "",
+    /// The agent profile it runs in, or empty for the main one, which the
+    /// list leaves unnamed.
+    profile: []const u8 = "",
+    /// What it is doing, such as "needs approval", or "working 12s" while a
+    /// subagent is in a tool call, for as long as that call has run.
+    state: []const u8,
+    state_tone: AgentStateTone = .idle,
+    /// The model its turns use, as the agent's settings name it, such as
+    /// "anthropic/claude-opus-4-7"; empty when unknown.
+    model: []const u8 = "",
+    /// Its reasoning effort, such as "high", when the model takes one and
+    /// it is not the default; else empty.
+    effort: []const u8 = "",
+};
+
+/// The agent list ↓ and Ctrl+X open: every open agent in switch order, each
+/// instance followed by its own subagents.
+pub const AgentsMenuProjection = struct {
+    rows: []const AgentsMenuRow = &.{},
+    selected: usize = 0,
+    window_start: usize = 0,
+    /// Delete closes the selected row: a subagent's, or an instance's while
+    /// another stays open.
+    selected_closable: bool = false,
+    /// The selected row is an instance's, not a subagent's.
+    selected_instance: bool = false,
+    /// The first Delete armed the selected row's close.
+    close_armed: bool = false,
+    /// What the user typed in the composer to search the list; `rows` holds
+    /// the agents that match it.
+    search: []const u8 = "",
+
+    /// A search that matches nothing still shows the list, with no rows.
+    pub fn active(self: AgentsMenuProjection) bool {
+        return self.rows.len > 0 or self.search.len > 0;
+    }
+};
+
+pub const HelpMenuProjection = struct {
+    active: bool = false,
+    category: ?command_specs.SlashPresentationCategory = null,
+    registry: command_specs.SlashRegistry = .{},
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    query: []const u8 = "",
+
+    pub fn filteredItemCount(self: HelpMenuProjection) usize {
+        return command_specs.helpCatalogCountForCategory(self.registry, self.category, self.query);
+    }
+
+    pub fn itemAt(self: HelpMenuProjection, display_index: usize) ?*const command_specs.SlashSpec {
+        return command_specs.helpCatalogSpecAtForCategory(self.registry, self.category, self.query, display_index);
+    }
+};
+
+pub const SettingsMenuProjection = struct {
+    active: bool = false,
+    category: settings_catalog.Category = .all,
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    snapshot: settings_catalog.Snapshot = .{},
+    query: []const u8 = "",
+    models: ModelMenuProjection = .{},
+
+    pub fn filteredItemCount(self: SettingsMenuProjection) usize {
+        return settings_catalog.filteredCount(self.snapshot, self.category, self.query);
+    }
+
+    pub fn itemAt(self: SettingsMenuProjection, display_index: usize) ?settings_catalog.Item {
+        return settings_catalog.itemAt(self.snapshot, self.category, self.query, display_index);
+    }
+};
+
+pub const StatuslineMenuProjection = struct {
+    active: bool = false,
+    selected_index: usize = 0,
+    snapshot: settings_catalog.Snapshot = .{},
+};
+
+pub fn statuslineMenuProjection(
+    menu: *const settings_catalog.StatuslineMenu,
+    snapshot: settings_catalog.Snapshot,
+) StatuslineMenuProjection {
+    return .{
+        .active = menu.active,
+        .selected_index = menu.selected_index,
+        .snapshot = snapshot,
+    };
+}
+
+pub const UsageMenuProjection = usage_presentation.Projection;
+pub const usageShowsTables = usage_presentation.showsTables;
+pub const usageIsPlan = usage_presentation.isPlan;
+pub const usageCodexHasPeriods = usage_presentation.codexHasPeriods;
+
+pub fn usageMenuProjection(
+    menu: *const usage_menu.State,
+) UsageMenuProjection {
+    return .{
+        .active = menu.active,
+        .period = menu.period,
+        .selected_model = menu.selected_model,
+        .model_window_start = menu.model_window_start,
+        .detail = menu.detail,
+        .snapshot = if (menu.snapshot) |*snapshot| snapshot else null,
+    };
+}
+
+pub const WorkspaceMenuProjection = struct {
+    active: bool = false,
+    selected_row: usize = 0,
+    primary_directory: []const u8 = "",
+    saved_suppressed: bool = false,
+    entries: []const workspace_access.Entry = &.{},
+};
+
+pub fn workspaceMenuProjection(
+    menu: *const workspace_menu.State,
+    primary_directory: []const u8,
+    access: *const workspace_access.WorkspaceAccess,
+) WorkspaceMenuProjection {
+    return .{
+        .active = menu.active,
+        .selected_row = menu.selectedRow(access.entries) orelse 0,
+        .primary_directory = primary_directory,
+        .saved_suppressed = access.saved_suppressed,
+        .entries = access.entries,
+    };
+}
+
+/// A read-only panel such as `/status` opens: its title, its rows, how far
+/// they are scrolled, and whether they do not all fit, so its hint offers ↑↓.
+pub const InfoPanelProjection = struct {
+    active: bool = false,
+    title: []const u8 = "",
+    rows: []const info_panel.Row = &.{},
+    scroll: usize = 0,
+    overflows: bool = false,
+};
+
+pub fn infoPanelProjection(panel: *const info_panel.State, cols: u16, terminal_rows: u16) InfoPanelProjection {
+    var projection: InfoPanelProjection = .{
+        .active = panel.active,
+        .title = panel.title(),
+        .rows = panel.rows(),
+        .scroll = panel.scroll,
+    };
+    projection.overflows = info_panel_presentation.overflows(projection, cols, terminal_rows);
+    return projection;
+}
+
+pub const CompactCommandMenuProjection = union(enum) {
+    statusline: StatuslineMenuProjection,
+    info_panel: InfoPanelProjection,
+    usage: UsageMenuProjection,
+    workspace: WorkspaceMenuProjection,
+};
+
+pub fn settingsMenuProjection(
+    menu: *const settings_catalog.Menu,
+    snapshot: settings_catalog.Snapshot,
+    query: []const u8,
+) SettingsMenuProjection {
+    return .{
+        .active = menu.active,
+        .category = menu.category,
+        .selected_index = menu.selected_index,
+        .window_start = menu.window_start,
+        .snapshot = snapshot,
+        .query = query,
+    };
+}
+
+pub fn helpMenuProjection(
+    menu: *const command_specs.HelpMenu,
+    registry: command_specs.SlashRegistry,
+    query: []const u8,
+) HelpMenuProjection {
+    return .{
+        .active = menu.active,
+        .category = menu.category,
+        .registry = registry,
+        .selected_index = menu.selected_index,
+        .window_start = menu.window_start,
+        .query = query,
+    };
+}
+
+pub fn skillsMenuProjection(skills: *const skill_runtime.Runtime) SkillsMenuProjection {
+    return .{
+        .active = skills.menuVisible(),
+        .items = skills.items,
+        .actual_indices = skills.menu_index.actual_indices.items,
+        .index_ready = skills.menu_index_ready,
+        .source_filter = skills.menu.source_filter,
+        .selected_index = skills.menu.selected_index,
+        .window_start = skills.menu.window_start,
+        .query = skills.menu.query(),
+    };
+}
+
+pub fn modelMenuProjection(cache: *const model_cache_runtime.Runtime) ModelMenuProjection {
+    return .{
+        .active = cache.menu.active,
+        .load_state = cache.menu.load_state,
+        .catalog_state = cache.menu.catalog_state,
+        .items = cache.menu.items.items,
+        .provider_index = cache.menu.provider_index,
+        .selected_index = cache.menu.selected_index,
+        .window_start = cache.menu.window_start,
+        .query = cache.menu.query(),
+        .token_pass = cache.tokenPassStatus() == .active,
+    };
+}
+
+const max_static_status_activity_rows: u16 = 3;
+
+pub const RenderContext = struct {
+    slash_registry: command_specs.SlashRegistry = .{},
+    stream: StreamState,
+    compaction: @import("../../core/output/compaction_activity.zig").Snapshot = .{},
+    pending_prompt_activity: bool = false,
+    completed_assistant_presentation_tail: bool = false,
+    // Pacer emitting visible text, including the post-finish tail drain.
+    writing_response: bool = false,
+    has_api_key: bool,
+    model: []const u8,
+    pending_images: []const types.ImageAttachment = &.{},
+    composer_visible: bool = true,
+    permission_mode: types.PermissionMode = .ask,
+    steering_messages: []const []const u8 = &.{},
+    steering_waits_for_boundary: bool = false,
+    fast_indicator_active: bool = false,
+    effort: types.ReasoningEffort = .auto,
+    model_supports_effort: bool = false,
+    ctrl_c_pending: bool = false,
+    shimmer_pos: i16 = -render_request.animation_padding,
+    now_ms: i64 = 0,
+    model_query_active: bool = false,
+    model_picker_stage: picker_state.ModelPickerStage = .model,
+    model_completions_loading: bool = false,
+    model_completions_failed: bool = false,
+    model_completions: []const []const u8 = &.{},
+    model_completion_index: usize = 0,
+    model_completion_window_start: usize = 0,
+    model_completion_anchor: usize = 0,
+    provider_query_active: bool = false,
+    provider_picker_stage: picker_state.ProviderPickerStage = .provider,
+    provider_picker_completions: []const []const u8 = &.{},
+    /// Parallel to `provider_picker_completions`; an empty entry renders no annotation.
+    provider_picker_annotations: []const []const u8 = &.{},
+    provider_picker_completion_index: usize = 0,
+    provider_picker_completion_window_start: usize = 0,
+    provider_picker_completion_anchor: usize = 0,
+    file_query_active: bool = false,
+    file_completions: []const file_index.SearchResult = &.{},
+    file_completion_index: usize = 0,
+    file_completion_has_selection: bool = true,
+    file_completion_status: ?[]const u8 = null,
+    file_completion_window_start: usize = 0,
+    file_completion_anchor: usize = 0,
+    file_completions_loading: bool = false,
+    file_completions_failed: bool = false,
+    inline_completion_suffix: []const u8 = "",
+    /// A request waits for the sign-in fx opened for it, so the auth picker
+    /// shows while the turn is active.
+    auth_picker_during_turn: bool = false,
+    auth_picker: auth_runtime.PickerView = .{
+        .active = false,
+        .available_sources = .empty,
+        .selected_choice = null,
+        .active_source = null,
+        .include_skip = false,
+    },
+    skills_menu: SkillsMenuProjection = .{},
+    mcp_host_menu: mcp_host_menu_presentation.Projection = .{},
+    help_menu: HelpMenuProjection = .{},
+    settings_menu: SettingsMenuProjection = .{},
+    model_menu: ModelMenuProjection = .{},
+    session_menu: SessionMenuProjection = .{},
+    fork_menu: ForkMenuProjection = .{},
+    effort_menu: EffortMenuProjection = .{},
+    agents_menu: AgentsMenuProjection = .{},
+    statusline_menu: StatuslineMenuProjection = .{},
+    info_panel: InfoPanelProjection = .{},
+    usage_menu: UsageMenuProjection = .{},
+    workspace_menu: WorkspaceMenuProjection = .{},
+    upgrade_status: []const u8 = "",
+    /// The agent indicator on the footer's right, such as "fx 2/3 ↓": the
+    /// agent on screen and the key that opens the agent list. Empty with a
+    /// single agent.
+    agent_label: []const u8 = "",
+    /// A hidden agent waiting on an answer, shown on the right.
+    waiting_note: []const u8 = "",
+    /// What MCP has to say, after the notes above on the right.
+    mcp_status: []const u8 = "",
+    /// Hidden subagents working, such as "1 subagent working", shown on the
+    /// right only when nothing else is.
+    working_note: []const u8 = "",
+    /// The activity row while the agent on screen is idle and its own
+    /// subagents still work, such as "• waiting on 3 subagents · ↓ to view".
+    subagent_wait: []const u8 = "",
+    /// When `subagent_wait`'s clock started, 0 without one; its bullet blinks
+    /// in step with that clock's seconds.
+    subagent_wait_since_ms: i64 = 0,
+    danger_status: []const u8 = "",
+    danger_status_compact: []const u8 = "",
+    esc_clear_armed: bool = false,
+    esc_interrupt_armed: bool = false,
+    question: ?question_prompt.Projection = null,
+    statusline: ui_render.StatuslineItems = .{},
+    activity: ActivityProjection = .none,
+    transcript_depth: transcript_presentation.Depth = .inline_mode,
+    input: *const InputRuntime,
+};
+
+pub fn activeCompactCommandMenu(ctx: RenderContext) ?CompactCommandMenuProjection {
+    if (ctx.statusline_menu.active) return .{ .statusline = ctx.statusline_menu };
+    if (ctx.info_panel.active) return .{ .info_panel = ctx.info_panel };
+    if (ctx.usage_menu.active) return .{ .usage = ctx.usage_menu };
+    if (ctx.workspace_menu.active) return .{ .workspace = ctx.workspace_menu };
+    return null;
+}
+
+pub const steering_composer_gap_rows: u16 = 1;
+pub const max_steering_message_rows: u16 = 2;
+/// Rows a message layout holds: steering previews show two, fork menu
+/// prompts three.
+pub const max_message_layout_rows: u16 = 3;
+
+pub const SteeringMessageLayout = struct {
+    rows: [max_message_layout_rows][]const u8 = @splat(""),
+    row_count: u16 = 0,
+    content_width: u16,
+    truncated: bool = false,
+};
+
+fn steering_unit_width(raw: []const u8) usize {
+    var width: usize = 0;
+    var safe_start: usize = 0;
+    var index: usize = 0;
+    while (index < raw.len) {
+        const rune = display_width.decodeNextRune(raw, index);
+        const end = index + rune.len;
+        if (!text_utils.isTerminalSafe(raw[index..end])) {
+            width += display_width.visibleWidth(raw[safe_start..index]);
+            width += text_utils.terminalSafeVisibleWidth(raw[index..end]);
+            safe_start = end;
+        }
+        index = end;
+    }
+    return width + display_width.visibleWidth(raw[safe_start..]);
+}
+
+/// Borrows at most two visible row slices; measurement and painting share this layout.
+pub fn steering_message_layout(
+    message: []const u8,
+    width: u16,
+    waits_for_boundary: bool,
+    row_limit: u16,
+) SteeringMessageLayout {
+    var layout: SteeringMessageLayout = .{
+        .content_width = if (waits_for_boundary) width -| 2 else width,
+    };
+    const limit = @min(row_limit, max_message_layout_rows);
+    var offset: usize = 0;
+    while (layout.row_count < limit) {
+        const start = offset;
+        var cells: usize = 0;
+        var ellipsis_end = start;
+        var last_space: ?usize = null;
+        while (offset < message.len and message[offset] != '\n' and message[offset] != '\r') {
+            const unit = display_width.displayUnitAt(message, offset);
+            const raw = message[offset .. offset + unit.byte_len];
+            const unit_width = if (message[offset] == '\t')
+                1
+            else if (text_utils.isTerminalSafe(raw))
+                unit.cell_width
+            else
+                steering_unit_width(raw);
+            if (unit_width > layout.content_width - cells) break;
+            if (message[offset] == ' ' or message[offset] == '\t') last_space = offset;
+            cells += unit_width;
+            offset += unit.byte_len;
+            if (cells < layout.content_width) ellipsis_end = offset;
+        }
+        var end = offset;
+        const soft_separator = offset < message.len and (message[offset] == ' ' or message[offset] == '\t');
+        if (soft_separator) {
+            while (offset < message.len and (message[offset] == ' ' or message[offset] == '\t')) offset += 1;
+        }
+        const hard_break = offset < message.len and (message[offset] == '\n' or message[offset] == '\r');
+        if (hard_break) {
+            const cr = message[offset] == '\r';
+            offset += 1;
+            if (cr and offset < message.len and message[offset] == '\n') offset += 1;
+        } else if (!soft_separator and offset < message.len) {
+            if (last_space) |space| {
+                if (space > start) {
+                    end = space;
+                    offset = space + 1;
+                }
+            }
+        }
+        layout.rows[layout.row_count] = message[start..end];
+        layout.row_count += 1;
+        if (offset == message.len) break;
+        if (layout.row_count == limit or (!hard_break and end == start)) {
+            layout.rows[layout.row_count - 1] = message[start..@min(end, ellipsis_end)];
+            layout.truncated = true;
+            break;
+        }
+    }
+    return layout;
+}
+
+pub fn steeringBannerRowsForMessages(
+    messages: []const []const u8,
+    waits_for_boundary: bool,
+    width: u16,
+) u16 {
+    if (messages.len == 0 or !waits_for_boundary) return 0;
+    var rows: u16 = 0;
+    for (messages) |message| {
+        rows +|= steering_message_layout(message, width, waits_for_boundary, max_steering_message_rows).row_count;
+    }
+    return rows +| steering_composer_gap_rows;
+}
+
+pub fn steeringBannerRows(ctx: RenderContext, width: u16) u16 {
+    return steeringBannerRowsForMessages(
+        ctx.steering_messages,
+        ctx.steering_waits_for_boundary,
+        width,
+    );
+}
+
+test "steering banner reserves message rows and one composer gap" {
+    for ([_]bool{ false, true }) |waiting| {
+        try std.testing.expectEqual(@as(u16, if (waiting) 3 else 0), steeringBannerRowsForMessages(&.{"first\nsecond\nthird"}, waiting, 80));
+    }
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        steeringBannerRowsForMessages(&.{}, true, 80),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        steeringBannerRowsForMessages(&.{ "first", "second" }, false, 80),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 5),
+        steeringBannerRowsForMessages(&.{ "first steering message", "second steering message" }, true, 12),
+    );
+}
+
+test "steering preview layout retains prefix slices at row boundaries" {
+    const cases = [_]struct { text: []const u8, width: u16, first: []const u8, second: []const u8, truncated: bool }{
+        .{ .text = "first\r\nsecond\nthird", .width = 20, .first = "first", .second = "second", .truncated = true },
+        .{ .text = "abcdefghij", .width = 4, .first = "abcd", .second = "efg", .truncated = true },
+        .{ .text = "abcd\nefgh", .width = 4, .first = "abcd", .second = "efgh", .truncated = false },
+        .{ .text = "one two three", .width = 7, .first = "one two", .second = "three", .truncated = false },
+        .{ .text = "abc \ndef", .width = 3, .first = "abc", .second = "def", .truncated = false },
+        .{ .text = "界海語", .width = 3, .first = "界", .second = "海", .truncated = true },
+        .{ .text = "first\n\nthird", .width = 20, .first = "first", .second = "", .truncated = true },
+    };
+    for (cases) |case| {
+        const layout = steering_message_layout(case.text, case.width, false, 2);
+        try std.testing.expectEqual(@as(u16, 2), layout.row_count);
+        try std.testing.expectEqualStrings(case.first, layout.rows[0]);
+        try std.testing.expectEqualStrings(case.second, layout.rows[1]);
+        try std.testing.expectEqual(case.truncated, layout.truncated);
+    }
+}
+
+pub fn transientActivityGapRows(shell: *const TranscriptRuntime, tool_before_activity: bool) u16 {
+    if (tool_before_activity) return 0;
+    return shell.transientAssistantGapRows();
+}
+
+pub fn activityOverlayInput(
+    shell: *TranscriptRuntime,
+    projection: ActivityProjection,
+    place_mid_line_active: bool,
+    cursor_row: u16,
+    cursor_col: u16,
+    footer_top_for_extra: u16,
+) activity_overlay.Input {
+    const entry_bound_active = switch (projection) {
+        .tool_slot => true,
+        .none, .turn_thinking => false,
+    };
+    const active_label_present = switch (projection) {
+        .turn_thinking => true,
+        .tool_slot => |slot| slot.thinking_label != null,
+        .none => false,
+    };
+    const tool_before_activity = switch (projection) {
+        .tool_slot => |slot| slot.thinking_label != null,
+        .none, .turn_thinking => false,
+    };
+    const stream_active = switch (projection) {
+        .tool_slot => |slot| slot.active,
+        .none, .turn_thinking => false,
+    };
+    const placement_cursor_col = if (entry_bound_active and stream_active and cursor_col == 1)
+        2
+    else
+        cursor_col;
+    return .{
+        .active_label_present = active_label_present,
+        .activity_rows = activityProjectionRows(projection, shell.layout.cols),
+        .tool_before_activity = tool_before_activity,
+        .cursor_row = cursor_row,
+        .cursor_col = placement_cursor_col,
+        .transient_gap_rows = transientActivityGapRows(shell, tool_before_activity),
+        .place_mid_line_active = place_mid_line_active,
+        .entry_bound_active = entry_bound_active,
+        .stream_active = stream_active,
+        .footer_top_for_extra = footer_top_for_extra,
+        .footer_clearance_rows = if (active_label_present)
+            render_engine.transcript_blocks.footerBoundaryGapRowsForTail(.turn_summary)
+        else
+            0,
+    };
+}
+
+pub fn activityProjectionRows(projection: ActivityProjection, cols: u16) u16 {
+    return switch (projection) {
+        .turn_thinking => |thinking| if (thinking.tone == .thinking)
+            1
+        else
+            wrappedStatusRowCount(thinking.label, cols, max_static_status_activity_rows),
+        .none, .tool_slot => 1,
+    };
+}
+
+pub fn frameOwnedActivityProjection(
+    buf: []u8,
+    shell: *TranscriptRuntime,
+    ctx: RenderContext,
+    approval: ?approval_prompt.Projection,
+) ActivityProjection {
+    if (approval != null or ctx.question != null) return .none;
+    const compaction = activity_status.compactionProjection(buf, ctx.compaction, ctx.now_ms);
+    if (compaction == .none and !ctx.stream.active and ctx.pending_prompt_activity) {
+        return .{ .turn_thinking = .{ .label = "• Thinking" } };
+    }
+    switch (ctx.activity) {
+        .tool_slot => {},
+        .turn_thinking => |thinking| {
+            if (thinking.tone != .thinking) return fitStatusLabel(thinking, shell.layout.cols);
+        },
+        .none => {},
+    }
+    if (compaction != .none) return compaction;
+    const turn = turnActivityProjection(buf, shell, ctx);
+    if (turn == .none and ctx.subagent_wait.len > 0) {
+        // Narrow rows drop the key hint rather than wrap onto a second row.
+        const short = if (std.mem.find(u8, ctx.subagent_wait, " · ")) |end| ctx.subagent_wait[0..end] else null;
+        return fitStatusLabel(.{ .label = ctx.subagent_wait, .short_label = short, .tone = .live }, shell.layout.cols);
+    }
+    return turn;
+}
+
+/// A status with a short form shows it when the full label is wider than the
+/// row, so the action at the end of a "needs you" line is never clipped.
+fn fitStatusLabel(thinking: ActivityProjection.TurnThinking, cols: u16) ActivityProjection {
+    const short = thinking.short_label orelse return .{ .turn_thinking = thinking };
+    if (cols == 0 or display_width.visibleWidthIgnoringAnsi(thinking.label) <= cols) {
+        return .{ .turn_thinking = thinking };
+    }
+    return .{ .turn_thinking = .{ .label = short, .tone = thinking.tone } };
+}
+
+test "a status shows its short form only when the row is narrower than its text" {
+    const thinking: ActivityProjection.TurnThinking = .{
+        .label = "⚠ Blocked by the content filter · press Esc and rephrase",
+        .short_label = "⚠ Blocked by content filter · Esc, then rephrase",
+        .tone = .danger,
+    };
+    try std.testing.expectEqualStrings(thinking.label, fitStatusLabel(thinking, 80).turn_thinking.label);
+    const width: u16 = @intCast(display_width.visibleWidthIgnoringAnsi(thinking.label));
+    try std.testing.expectEqualStrings(thinking.label, fitStatusLabel(thinking, width).turn_thinking.label);
+    const narrow = fitStatusLabel(thinking, width - 1).turn_thinking;
+    try std.testing.expectEqualStrings(thinking.short_label.?, narrow.label);
+    try std.testing.expectEqual(ActivityProjection.Tone.danger, narrow.tone);
+
+    var no_short = thinking;
+    no_short.short_label = null;
+    try std.testing.expectEqualStrings(thinking.label, fitStatusLabel(no_short, 20).turn_thinking.label);
+}
+
+pub fn frameActivityBlink(ctx: RenderContext) ?bool {
+    if (ctx.compaction.operation) |op| {
+        if (op.active() and op.visible(ctx.now_ms)) {
+            return activity_status.activityBlinkVisible(activity_status.compactionClock(op), ctx.now_ms);
+        }
+    }
+    if (subagentWaitShown(ctx)) {
+        // No turn clock while idle: blink on the wait's own clock, so each
+        // displayed second is one on/off period.
+        return activity_status.activityBlinkVisible(.{ .turn_started_ms = ctx.subagent_wait_since_ms }, ctx.now_ms);
+    }
+    return activity_status.activityBlinkVisible(ctx.stream, ctx.now_ms);
+}
+
+/// Whether the activity row is the "waiting on N subagents" one: nothing of
+/// the agent's own turn is going on or still being written out.
+fn subagentWaitShown(ctx: RenderContext) bool {
+    return ctx.subagent_wait.len > 0 and !ctx.stream.active and !ctx.pending_prompt_activity and
+        !ctx.writing_response and !ctx.completed_assistant_presentation_tail;
+}
+
+fn turnActivityProjection(
+    buf: []u8,
+    shell: *TranscriptRuntime,
+    ctx: RenderContext,
+) ActivityProjection {
+    _ = shell;
+    if (!ctx.stream.active) {
+        if (!ctx.writing_response and !ctx.completed_assistant_presentation_tail) return .none;
+        return .{ .turn_thinking = .{
+            .label = activity_status.buildCompletedTurnLabel(buf, ctx.stream),
+            .tone = .neutral,
+        } };
+    }
+
+    var visible_stream = ctx.stream;
+    visible_stream.last_activity_kind = null;
+    if (activity_status.buildTurnLabel(buf, visible_stream, ctx.now_ms)) |label| {
+        return .{ .turn_thinking = .{ .label = label } };
+    }
+    return .{ .turn_thinking = .{
+        .label = "• Thinking",
+    } };
+}
+
+fn toolSlotLabelWithTokens(buf: []u8, label: []const u8, stream: StreamState) []const u8 {
+    var out: std.Io.Writer = .fixed(buf);
+    out.writeAll(label) catch return label;
+    activity_status.appendTurnTokenSuffix(&out, stream) catch return out.buffered();
+    return out.buffered();
+}
+
+fn appendConnectedToolLabel(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    label: []const u8,
+    cols: u16,
+) !void {
+    var marker_start: usize = 0;
+    while (marker_start < label.len and label[marker_start] == 0x1b) {
+        const ansi_end = display_width.ansiSequenceEnd(label, marker_start);
+        if (ansi_end <= marker_start) break;
+        marker_start = ansi_end;
+    }
+    const marker = display_width.decodeNextRune(label, marker_start);
+    if (marker.len == 0) return;
+    const marker_end = @min(marker_start + marker.len, label.len);
+    const marker_bytes = label[marker_start..marker_end];
+    const line_end = std.mem.findScalar(u8, label[marker_end..], '\n') orelse label[marker_end..].len;
+
+    // The live label arrives with the formatter's bold styling; the connected
+    // row belongs to the dimmed group block, so restyle it plain gray.
+    var connected: std.ArrayList(u8) = .empty;
+    defer connected.deinit(alloc);
+    try connected.appendSlice(alloc, ui_render.statusline_style);
+    // `■` is the cancelled marker older sessions recorded before `▪`.
+    if (std.mem.eql(u8, marker_bytes, "●") or std.mem.eql(u8, marker_bytes, "▪") or std.mem.eql(u8, marker_bytes, "■")) {
+        try connected.appendSlice(alloc, "└");
+        try appendWithoutAnsi(alloc, &connected, label[marker_end .. marker_end + line_end]);
+    } else {
+        try appendWithoutAnsi(alloc, &connected, label[0 .. marker_end + line_end]);
+    }
+
+    const clipped = try render_engine.transcript_blocks.formatCompactCommandStatus(
+        alloc,
+        connected.items,
+        cols,
+    );
+    defer alloc.free(clipped);
+    try out.appendSlice(alloc, clipped);
+    try out.appendSlice(alloc, ui_render.reset_style);
+}
+
+fn appendWithoutAnsi(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    text: []const u8,
+) !void {
+    var index: usize = 0;
+    while (index < text.len) {
+        if (text[index] == 0x1b) {
+            const ansi_end = display_width.ansiSequenceEnd(text, index);
+            if (ansi_end > index) {
+                index = ansi_end;
+                continue;
+            }
+        }
+        try out.append(alloc, text[index]);
+        index += 1;
+    }
+}
+
+pub fn activityProjectionLabel(projection: ActivityProjection) ?[]const u8 {
+    return switch (projection) {
+        .none => null,
+        .turn_thinking => |thinking| thinking.label,
+        .tool_slot => |slot| slot.thinking_label orelse slot.fallback_label,
+    };
+}
+
+test "skillsMenuProjection mirrors runtime menu state" {
+    var skills = [_]skill_runtime.Skill{
+        .{ .name = "managed", .description = "managed desc", .path = "/tmp/managed/SKILL.md", .source = .global_fx },
+        .{ .name = "workspace", .description = "workspace desc", .path = "/tmp/workspace/SKILL.md", .source = .workspace_shared },
+    };
+    var runtime: skill_runtime.Runtime = .{ .items = &skills };
+    runtime.menu.active = true;
+    runtime.menu.source_filter = .workspace;
+    runtime.menu.selected_index = 1;
+    runtime.menu.window_start = 1;
+    runtime.menu.setQuery("work");
+
+    const projection = skillsMenuProjection(&runtime);
+
+    try std.testing.expect(projection.active);
+    try std.testing.expectEqual(@as(usize, skills.len), projection.items.len);
+    try std.testing.expectEqual(skill_runtime.SkillMenuSourceFilter.workspace, projection.source_filter);
+    try std.testing.expectEqual(@as(usize, 1), projection.selected_index);
+    try std.testing.expectEqual(@as(usize, 1), projection.window_start);
+    try std.testing.expectEqualStrings("work", projection.query);
+}
+
+test "skillsMenuProjection hides zero-result mentions and preserves command menus" {
+    var skills = [_]skill_runtime.Skill{
+        .{ .name = "managed", .description = "managed desc", .path = "/tmp/managed/SKILL.md", .source = .global_fx },
+    };
+    var runtime: skill_runtime.Runtime = .{ .items = &skills };
+
+    runtime.openMenuWithQuery(.dollar, .{ .start = 0, .end = "$missing".len }, "missing");
+    try std.testing.expect(!skillsMenuProjection(&runtime).active);
+
+    runtime.menu.setQuery("man");
+    try std.testing.expect(skillsMenuProjection(&runtime).active);
+
+    runtime.openMenuWithQuery(.command, null, "missing");
+    try std.testing.expect(skillsMenuProjection(&runtime).active);
+}
+
+test "modelMenuProjection mirrors cache-owned catalog state" {
+    var cache = model_cache_runtime.Runtime.init(std.testing.allocator, "/v1/models");
+    defer cache.deinit();
+    cache.menu.load_state = .failed;
+    cache.menu.catalog_state = .{
+        .access_level = .public_only,
+        .public_only_reason = .credential_refresh_failed,
+        .private_models_hidden = true,
+        .failure = .{ .category = .transport, .retryable = true },
+    };
+
+    const projection = modelMenuProjection(&cache);
+
+    try std.testing.expectEqual(cache.menu.load_state, projection.load_state);
+    try std.testing.expectEqual(cache.menu.catalog_state, projection.catalog_state);
+}
+
+fn wrappedStatusRowCount(label: []const u8, cols: u16, max_rows: u16) u16 {
+    if (max_rows <= 1 or cols == 0) return 1;
+    if (display_width.visibleWidthIgnoringAnsi(label) <= cols) return 1;
+
+    const safe_cols = @max(@as(usize, cols), 1);
+    const prefix_end = display_width.statusPrefixEnd(label);
+    const prefix_width = display_width.visibleWidthIgnoringAnsi(label[0..prefix_end]);
+    var remaining = label[prefix_end..];
+    var row_count: u16 = 0;
+    var first = true;
+    while (remaining.len > 0 and row_count < max_rows) {
+        const indent_width = if (first) prefix_width else @max(prefix_width, 1);
+        const available = if (safe_cols > indent_width) safe_cols - indent_width else 1;
+        var chunk = display_width.wrapCutIgnoringAnsi(remaining, available);
+        if (chunk.len == 0) {
+            const unit = display_width.displayUnitAt(remaining, 0);
+            chunk = remaining[0..unit.byte_len];
+        }
+        remaining = display_width.trimBreakWhitespace(remaining[chunk.len..]);
+        row_count += 1;
+        first = false;
+    }
+    return @max(row_count, 1);
+}
+
+pub fn activityFallbackLabel(buf: []u8, projection: ActivityProjection, ctx: RenderContext) []const u8 {
+    return switch (projection) {
+        .none => "",
+        .turn_thinking => |thinking| thinking.label,
+        .tool_slot => |slot| slot.thinking_label orelse toolSlotLabelWithTokens(buf, slot.fallback_label, ctx.stream),
+    };
+}
+
+pub fn appendActivityToolLabel(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    projection: ActivityProjection,
+    cols: u16,
+) !void {
+    switch (projection) {
+        .tool_slot => |slot| if (slot.thinking_label != null) {
+            try appendConnectedToolLabel(alloc, out, slot.fallback_label, cols);
+        },
+        .none, .turn_thinking => {},
+    }
+}
+
+test "frame-owned thinking activity projects the thinking label" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{ .active = true },
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .shimmer_pos = 0,
+        .input = &input,
+    };
+
+    var dot_buf: [128]u8 = undefined;
+    switch (frameOwnedActivityProjection(&dot_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking", thinking.label),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "frame compaction overrides idle and tool activity but not blocking feedback or questions" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    var state: @import("../../core/output/compaction_activity.zig").State = .{};
+    const id = state.begin(.manual, null, 1_000);
+    state.running(id, .summary);
+    var ctx: RenderContext = .{
+        .stream = .{},
+        .compaction = state.snapshot,
+        .now_ms = 2_500,
+        .has_api_key = true,
+        .model = "test",
+        .input = &input,
+    };
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("• Compacting 0% (1s)", frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.label);
+    try std.testing.expectEqual(@as(?bool, false), frameActivityBlink(ctx));
+    try std.testing.expect(!ctx.stream.active);
+    ctx.activity = .{ .tool_slot = .{ .entry_id = 1, .fallback_label = "reading", .active = true, .kind = .read } };
+    try std.testing.expectEqualStrings("• Compacting 0% (1s)", frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.label);
+    ctx.activity = .{ .turn_thinking = .{ .label = "Blocking status", .tone = .danger } };
+    try std.testing.expectEqualStrings("Blocking status", frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.label);
+    ctx.question = .{ .current_entry = null, .current_index = 0, .entry_count = 0 };
+    try std.testing.expect(frameOwnedActivityProjection(&buf, &shell, ctx, null) == .none);
+    ctx.question = null;
+    state.settle(id, .{ .outcome = .cancelled }, 2_500);
+    ctx.compaction = state.snapshot;
+    ctx.activity = .none;
+    try std.testing.expectEqual(ActivityProjection.Tone.neutral, frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.tone);
+    try std.testing.expect(state.dismiss(id, state.snapshot.revision));
+    ctx.compaction = state.snapshot;
+    try std.testing.expect(frameOwnedActivityProjection(&buf, &shell, ctx, null) == .none);
+}
+
+test "an idle agent waiting on its subagents shows a live row that a turn or question replaces" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    var ctx: RenderContext = .{
+        .stream = .{},
+        .has_api_key = true,
+        .model = "test",
+        .input = &input,
+    };
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(frameOwnedActivityProjection(&buf, &shell, ctx, null) == .none);
+
+    ctx.subagent_wait = "• waiting on 3 subagents · ↓ to view";
+    const waiting = frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking;
+    try std.testing.expectEqualStrings("• waiting on 3 subagents · ↓ to view", waiting.label);
+    try std.testing.expectEqual(ActivityProjection.Tone.live, waiting.tone);
+    // A row narrower than the label drops the key hint instead of wrapping.
+    shell.layout.cols = 30;
+    try std.testing.expectEqualStrings("• waiting on 3 subagents", frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.label);
+    shell.layout.cols = 0;
+    // Without a clock, the frame phase drives the blink.
+    ctx.now_ms = 10_000;
+    try std.testing.expectEqual(@as(?bool, null), frameActivityBlink(ctx));
+    // With a clock, each of its seconds starts with the bullet on.
+    ctx.subagent_wait_since_ms = 10_300;
+    ctx.now_ms = 10_500;
+    try std.testing.expectEqual(@as(?bool, true), frameActivityBlink(ctx));
+    ctx.now_ms = 10_900;
+    try std.testing.expectEqual(@as(?bool, false), frameActivityBlink(ctx));
+    ctx.now_ms = 11_300;
+    try std.testing.expectEqual(@as(?bool, true), frameActivityBlink(ctx));
+    ctx.subagent_wait_since_ms = 0;
+
+    ctx.pending_prompt_activity = true;
+    try std.testing.expectEqualStrings("• Thinking", frameOwnedActivityProjection(&buf, &shell, ctx, null).turn_thinking.label);
+    ctx.pending_prompt_activity = false;
+
+    ctx.question = .{ .current_entry = null, .current_index = 0, .entry_count = 0 };
+    try std.testing.expect(frameOwnedActivityProjection(&buf, &shell, ctx, null) == .none);
+}
+
+test "pending prompt projects thinking before the worker stream starts" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{},
+        .pending_prompt_activity = true,
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .input = &input,
+    };
+
+    var label_buf: [128]u8 = undefined;
+    switch (frameOwnedActivityProjection(&label_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking", thinking.label),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    var retry_ctx = ctx;
+    retry_ctx.activity = .{ .turn_thinking = .{
+        .label = "Previous request failed",
+        .tone = .danger,
+    } };
+    switch (frameOwnedActivityProjection(&label_buf, &shell, retry_ctx, null)) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking", thinking.label),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "frame-owned activity renders the thinking elapsed counter from the frame clock" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{ .active = true, .turn_started_ms = 1_000 },
+        .now_ms = 4_200,
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .input = &input,
+    };
+
+    var counter_buf: [128]u8 = undefined;
+    switch (frameOwnedActivityProjection(&counter_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking (3s)", thinking.label),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "frame-owned activity keeps active tools out of the turn status row" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+
+    var shell = TranscriptRuntime{
+        .last_visible_transcript_tail_kind = .tool_status,
+    };
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{ .active = true, .last_activity_kind = .read, .read_count = 1 },
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .activity = .{ .tool_slot = .{
+            .entry_id = 123,
+            .fallback_label = "reading src/main.zig",
+            .active = true,
+            .kind = .read,
+        } },
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+            try std.testing.expectEqualStrings("• Thinking", thinking.label);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "current frame-owned activity leaves the focused tool in the transcript" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{
+            .active = true,
+            .phase = .running,
+            .turn_started_ms = 1_000,
+            .command_count = 1,
+            .last_activity_kind = .command,
+            .token_progress = .{
+                .input_tokens = 50_000,
+                .output_tokens = 1_250,
+                .input_exact = false,
+                .output_exact = false,
+            },
+        },
+        .has_api_key = true,
+        .model = "test-model",
+        .activity = .{ .tool_slot = .{
+            .entry_id = 123,
+            .fallback_label = "● Running\x1b[0m \x1b[38;5;245mzig build test\x1b[0m\n",
+            .active = true,
+            .kind = .command,
+        } },
+        .now_ms = 13_000,
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    const projection = frameOwnedActivityProjection(&active_buf, &shell, ctx, null);
+    switch (projection) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings(
+            "• Running (12s) (↑50k ↓1.2k)",
+            thinking.label,
+        ),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    var streaming_buf: [256]u8 = undefined;
+    var streaming_ctx = ctx;
+    streaming_ctx.stream.phase = .generating;
+    streaming_ctx.writing_response = true;
+    switch (frameOwnedActivityProjection(&streaming_buf, &shell, streaming_ctx, null)) {
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings(
+            "• Generating (12s) (↑50k ↓1.2k)",
+            thinking.label,
+        ),
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "minimal connected tool label clips with an ellipsis" {
+    const alloc = std.testing.allocator;
+    const projection: ActivityProjection = .{ .tool_slot = .{
+        .entry_id = 123,
+        .fallback_label = "● Running\x1b[0m \x1b[38;5;245mzig build test with a deliberately long target\x1b[0m\n",
+        .thinking_label = "• Thinking",
+        .active = true,
+        .kind = .command,
+    } };
+
+    var label: std.ArrayList(u8) = .empty;
+    defer label.deinit(alloc);
+    try appendActivityToolLabel(alloc, &label, projection, 24);
+
+    try std.testing.expect(std.mem.startsWith(u8, label.items, "\x1b[38;5;245m└ Running"));
+    try std.testing.expect(std.mem.find(u8, label.items, "\x1b[1m") == null);
+    try std.testing.expect(std.mem.find(u8, label.items, "…") != null);
+    try std.testing.expect(std.mem.findScalar(u8, label.items, '\n') == null);
+    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(label.items) <= 24);
+}
+
+test "frame-owned activity keeps a live retrying status in place of the thinking row" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{ .active = true },
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .activity = .{ .turn_thinking = .{
+            .label = "• Gateway error · retrying · attempt 4 · 1m 20s",
+            .tone = .live,
+        } },
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqual(ActivityProjection.Tone.live, thinking.tone);
+            try std.testing.expectEqualStrings("• Gateway error · retrying · attempt 4 · 1m 20s", thinking.label);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "frame-owned activity preserves route recovery status tone" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{},
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .activity = .{ .turn_thinking = .{
+            .label = "⚠ API error · attempt 1/3 failed · retrying",
+            .tone = .warning,
+        } },
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqual(ActivityProjection.Tone.warning, thinking.tone);
+            try std.testing.expectEqualStrings("⚠ API error · attempt 1/3 failed · retrying", thinking.label);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    var question_ctx = ctx;
+    question_ctx.question = .{
+        .current_entry = null,
+        .current_index = 0,
+        .entry_count = 0,
+    };
+    try std.testing.expect(frameOwnedActivityProjection(&active_buf, &shell, question_ctx, null) == .none);
+}
+
+test "frame-owned activity shows live streaming token progress" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{
+            .active = true,
+            .phase = .generating,
+            .turn_started_ms = 1_000,
+            .token_progress = .{
+                .input_tokens = 50_000,
+                .output_tokens = 1_250,
+                .input_exact = false,
+                .output_exact = false,
+            },
+        },
+        .writing_response = true,
+        .has_api_key = true,
+        .model = "test-model",
+        .activity = .none,
+        .now_ms = 13_000,
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("• Generating (12s) (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    // Pacer caught up mid-response and is waiting on the next chunk: the
+    // Generating phase holds instead of flipping inside every gap.
+    var drained_ctx = ctx;
+    drained_ctx.writing_response = false;
+    var drained_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&drained_buf, &shell, drained_ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("• Generating (12s) (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    // The model moved on to a tool payload that prints nothing: only the phase
+    // word changes while the marker, turn clock, and token totals remain.
+    var composing_ctx = drained_ctx;
+    composing_ctx.stream.phase = .running;
+    composing_ctx.stream.turn_started_ms = 1_000;
+    composing_ctx.now_ms = 13_000;
+    var stalled_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&stalled_buf, &shell, composing_ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("• Running (12s) (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+
+    var tail_ctx = ctx;
+    tail_ctx.stream.active = false;
+    tail_ctx.completed_assistant_presentation_tail = true;
+    var tail_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&tail_buf, &shell, tail_ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("  (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.neutral, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
+
+test "static turn status reserves wrapped activity rows" {
+    const label = "⚠ API access denied · HTTP 403 · Provider: wafer · Your team has restricted access to this provider. Contact the owner of the account.";
+    const projection: ActivityProjection = .{ .turn_thinking = .{
+        .label = label,
+        .tone = .danger,
+    } };
+    const normal_thinking: ActivityProjection = .{ .turn_thinking = .{
+        .label = label,
+        .tone = .thinking,
+    } };
+
+    try std.testing.expectEqual(@as(u16, 1), activityProjectionRows(normal_thinking, 42));
+    try std.testing.expect(activityProjectionRows(projection, 42) > 1);
+    try std.testing.expectEqual(@as(u16, 1), activityProjectionRows(projection, 160));
+}
+
+test "static turn status wraps at word boundaries" {
+    const label = "⚠ aaaaaaaa bbbbbbbbbbb";
+    const projection: ActivityProjection = .{ .turn_thinking = .{
+        .label = label,
+        .tone = .danger,
+    } };
+
+    try std.testing.expectEqual(@as(u16, 3), activityProjectionRows(projection, 12));
+    try std.testing.expectEqual(@as(u16, 1), activityProjectionRows(projection, 30));
+}
+
+test "frame-owned activity uses clipped command activity label" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+
+    var shell = TranscriptRuntime{
+        .last_visible_transcript_tail_kind = .assistant_turn,
+    };
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{
+            .active = true,
+            .command_count = 1,
+            .last_activity_kind = .command,
+            .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
+        },
+        .has_api_key = true,
+        .model = "gpt-5.1",
+        .activity = .{ .tool_slot = .{
+            .entry_id = 123,
+            .fallback_label = "running read-only tools",
+            .active = true,
+            .kind = .command,
+        } },
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+            try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", thinking.label);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+}
