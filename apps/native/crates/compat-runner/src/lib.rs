@@ -1137,13 +1137,18 @@ mod tests {
                     request.content.is_some(),
                     request.geometry_only
                 ]));
+                let height = if request.layer == "resized" && !request.geometry_only {
+                    3
+                } else {
+                    2
+                };
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
-                    height: 2,
+                    height,
                     straight_rgba: if request.geometry_only {
                         Vec::new()
                     } else {
-                        [255, 0, 0, 255].repeat(4)
+                        [255, 0, 0, 255].repeat(2 * height as usize)
                     },
                     size: (2., 2.),
                     anchor: (1., 1.),
@@ -1401,6 +1406,39 @@ mod tests {
             "only the canvas returned by the override needs pixels"
         );
     }
+    #[test]
+    fn raster_replies_refuse_pixels_after_a_deferred_canvas_changes_size() {
+        let (runner, painted, answered, _) = raster_runner();
+        let manifest = json!({"id":"resize","name":"Resize","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api) { const base = api.services.get('raster');
+                 api.services.register('raster', (l,s,t) => {const r=base(l,s,t); void r.cv; return r;}); }",
+            )
+            .unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'resized',type:'text',name:'Title',d:{}});
+                   __compat.answerRasters(1,[{composition:'synthetic-comp',layer:'resized',seconds:0,scale:1,
+                                               crop:{x:0,y:0,width:1,height:1}}]);")
+            .unwrap();
+        assert_eq!(
+            *painted.lock().unwrap(),
+            [
+                json!(["resized", "synthetic-comp", false, true]),
+                json!(["resized", "synthetic-comp", false, false])
+            ]
+        );
+        let answered = answered.lock().unwrap();
+        assert_eq!(answered[0][1], "unavailable");
+        assert!(
+            answered[0][2]
+                .as_str()
+                .unwrap()
+                .contains("base raster changed")
+        );
+    }
+
     /// A runner whose 2 × 2 base rasters record the revision of the document
     /// they were painted from.
     fn revision_runner() -> (CompatRunner, Log<Value>, Log<Value>) {

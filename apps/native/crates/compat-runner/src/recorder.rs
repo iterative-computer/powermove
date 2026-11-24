@@ -11,6 +11,12 @@ use std::{
 };
 
 
+#[derive(Clone)]
+struct PendingBase {
+    request: crate::BaseRasterRequest,
+    size: (u32, u32),
+}
+
 #[derive(Default)]
 struct State {
     next: u64,
@@ -18,7 +24,7 @@ struct State {
     surfaces: BTreeMap<String, Canvas>,
     /// A base's first read already pinned its source document. Its pixels are
     /// painted only when something actually uses the canvas.
-    pending_bases: BTreeMap<String, crate::BaseRasterRequest>,
+    pending_bases: BTreeMap<String, PendingBase>,
     pins: BTreeMap<(String, u64), (Source, usize)>,
     missing: BTreeSet<String>,
     dom: Vec<Value>,
@@ -286,14 +292,17 @@ impl NativeHost {
     }
 
     fn materialize_base(&self, id: &str) -> Result<()> {
-        let request = self.state.lock().unwrap().pending_bases.get(id).cloned();
-        let Some(request) = request else {
+        let pending = self.state.lock().unwrap().pending_bases.get(id).cloned();
+        let Some(PendingBase { request, size }) = pending else {
             return Ok(());
         };
         let hooks = self.raster_hooks()?;
         let reply = (hooks.base)(request)
             .map_err(Error::Host)?
             .ok_or(Error::Invalid("base raster disappeared"))?;
+        if (reply.width, reply.height) != size {
+            return Err(Error::Invalid("base raster changed"));
+        }
         let number = id
             .parse()
             .map_err(|_| Error::Invalid("base raster surface"))?;
@@ -321,7 +330,13 @@ impl NativeHost {
             let mut state = self.state.lock().unwrap();
             state.next += 1;
             let surface = state.next.to_string();
-            state.pending_bases.insert(surface.clone(), request);
+            state.pending_bases.insert(
+                surface.clone(),
+                PendingBase {
+                    request,
+                    size: (reply.width, reply.height),
+                },
+            );
             surface
         } else {
             self.canvas_of(reply.width, reply.height, reply.straight_rgba)?
@@ -652,7 +667,13 @@ impl NativeHost {
     }
     pub fn diagnostics(&self) -> Value {
         let state = self.state.lock().unwrap();
-        json!({"missing":state.missing,"surfaces":state.surfaces.len() + state.pending_bases.len(),"pins":state.pins.len(),"dom_pending":state.dom.len()})
+        json!({
+            "missing":state.missing,
+            "surfaces":state.surfaces.len(),
+            "pending_bases":state.pending_bases.len(),
+            "pins":state.pins.len(),
+            "dom_pending":state.dom.len(),
+        })
     }
     /// Messages from the page for the realm. Whether the realm must be asked
     /// to take them: once until it has (`dom.takeMessages`), however many
