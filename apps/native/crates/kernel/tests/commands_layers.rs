@@ -2256,3 +2256,24 @@ fn duplicate_group_and_explicit_child_preserves_caller_ids_without_double_copy()
         .count();
     assert_eq!(children_of_copy, 2);
 }
+
+/// A composition without a `threeD` layer answers that no layer is 3D
+/// without the engine; marking one (or unmarking it) is seen at once.
+#[test]
+fn a_layer_is_3d_once_its_composition_marks_it() {
+    let mut s = store();
+    assert!(!s.queries().is_3d_layer(None, "box", 0.).unwrap());
+    let three_d = |on| LayerPatch {
+        three_d: Some(on),
+        ..Default::default()
+    };
+    run(&mut s, patch("box", three_d(true)));
+    assert!(s.queries().is_3d_layer(None, "box", 0.).unwrap());
+    assert!(
+        !s.queries().is_3d_layer(None, "top", 0.).unwrap(),
+        "a layer beside it stays 2D"
+    );
+    run(&mut s, patch("box", three_d(false)));
+    assert!(!s.queries().is_3d_layer(None, "box", 0.).unwrap());
+    assert!(s.queries().is_3d_layer(None, "nobody", 0.).is_err());
+}
