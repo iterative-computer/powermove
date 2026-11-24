@@ -24,6 +24,7 @@ fn main() {
     macos::present_modes();
     macos::leaving_a_region(mtm);
     macos::editing_across_regions(mtm);
+    macos::scrolled_out(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -46,6 +47,74 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: a field scrolled wholly out of its region's view
+    /// (the container clips it) hides, so it takes no keys (the shell's
+    /// stray-responder check hands the keyboard back to GPUI) and is not read
+    /// out; partly out, it stays shown and edited; scrolled back, it shows.
+    pub fn scrolled_out(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        use objc2_app_kit::NSTextField;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0., 0., 120., 22.));
+        let slot = NativeControlSlot::new(&gpui, field.clone().into_super().into_super());
+        let open = rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6);
+        // Region at (0, 50), 200 x 100; the field at content y 40.
+        let at = |offset: f32| {
+            regions::set(
+                &gpui,
+                &[SlotRegionGeometry {
+                    id: 1,
+                    parent: None,
+                    frame: Bounds::new(point(px(0.), px(50.)), size(px(200.), px(100.))),
+                    origin: point(px(0.), px(offset)),
+                    fade: [px(0.), px(0.)],
+                }],
+            );
+            slot.keep();
+            probe::painted(&gpui);
+            probe::place(&gpui);
+        };
+        slot.stage_in_region(1, rect(10., 40., 120., 22.), open);
+        at(0.);
+        assert!(window.makeFirstResponder(Some(&field)));
+        let held = || {
+            window
+                .firstResponder()
+                .and_then(|r| r.downcast::<NSView>().ok())
+                .is_some_and(|r| r.isDescendantOf(slot.wrapper()))
+        };
+        assert!(held(), "edited");
+        // Partly out (the field spans 40..62 of the content; the view shows 50..150).
+        at(-50.);
+        assert!(!slot.wrapper().isHiddenOrHasHiddenAncestor(), "partly shown: shown");
+        assert!(held(), "still edited");
+        // Wholly out above the view.
+        at(-70.);
+        assert!(slot.wrapper().isHiddenOrHasHiddenAncestor(), "scrolled away: hidden, not read out");
+        let stray = !held() || field.isHiddenOrHasHiddenAncestor();
+        assert!(stray, "no keys go to it");
+        // Back in view.
+        at(0.);
+        assert!(!slot.wrapper().isHiddenOrHasHiddenAncestor(), "back: shown");
+        drop(slot);
+        window.close();
+    }
 
     /// PM-696 review: a field being edited keeps its edit (field editor,
     /// selection, first responder) while its row moves into a scrolling

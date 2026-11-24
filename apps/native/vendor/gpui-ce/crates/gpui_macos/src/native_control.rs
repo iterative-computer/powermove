@@ -24,12 +24,12 @@ struct State {
     /// A region's slot as the last present left it: its placement, its
     /// container's content view and alpha. A frame that stages the same
     /// touches no AppKit view of it (a scroll moves only the container).
-    settled: Cell<Option<(crate::slot_region::Placement, u64, f64)>>,
+    settled: Cell<Option<(crate::slot_region::Placement, u64, f64, bool)>>,
 }
 impl State {
     /// The region slot's settled key for this present, when its placement is
     /// a region's (`apply` places the container to find its content view).
-    fn region_key(&self, apply: bool) -> Option<(crate::slot_region::Placement, u64, f64)> {
+    fn region_key(&self, apply: bool) -> Option<(crate::slot_region::Placement, u64, f64, bool)> {
         let placement = self.placed()?;
         let region = placement.region?;
         crate::slot_region::content_view(&self.gpui, region, apply)?;
@@ -40,7 +40,9 @@ impl State {
             .get()
             .filter(|(paint, _)| Some(*paint) == last)
             .map_or(self.staged_alpha.get(), |(_, a)| a);
-        Some((placement, serial, alpha))
+        let visible = Self::visible_rect(placement.bounds, placement.clip);
+        let shows = crate::slot_region::shows(&self.gpui, region, visible);
+        Some((placement, serial, alpha, shows))
     }
     fn key(&self) -> usize {
         Retained::as_ptr(&self.gpui) as usize
@@ -104,10 +106,16 @@ impl State {
         let visible = Self::visible_rect(bounds, clip);
         let x = visible.origin.x;
         let y = visible.origin.y;
-        let (frame, parent) = match placement.region {
-            None => (crate::composition::hosted_rect(&self.gpui, visible), None),
-            // Top-down content coordinates.
-            Some(region) => (visible, Some(crate::slot_region::content_view(&self.gpui, region, apply)?)),
+        let (frame, parent, outside) = match placement.region {
+            None => (crate::composition::hosted_rect(&self.gpui, visible), None, false),
+            // Top-down content coordinates; hidden while its region's view
+            // (cut by the regions around it) shows none of it, so it takes no
+            // keys and is not read out while scrolled away (PM-696 review).
+            Some(region) => (
+                visible,
+                Some(crate::slot_region::content_view(&self.gpui, region, apply)?),
+                !crate::slot_region::shows(&self.gpui, region, visible),
+            ),
         };
         let visible = visible.size;
         let local = NSRect::new(
@@ -117,7 +125,7 @@ impl State {
             ),
             bounds.size,
         );
-        Some((frame, local, visible.width <= 0. || visible.height <= 0., parent))
+        Some((frame, local, outside || visible.width <= 0. || visible.height <= 0., parent))
     }
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}
@@ -325,7 +333,9 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         // edit is placed again by the frames after the edit ends.
         let home = !crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
             && !crate::slot_region::holds_first_responder(&state.wrapper);
-        if settled.is_some() && !hidden && home {
+        // Shown or hidden alike: whether its region's view shows it is part
+        // of the key.
+        if settled.is_some() && home {
             state.settled.set(settled);
         }
     }

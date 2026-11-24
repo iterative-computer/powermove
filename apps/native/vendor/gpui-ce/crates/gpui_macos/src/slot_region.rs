@@ -67,6 +67,46 @@ pub(crate) struct Placement {
     pub region: Option<usize>,
 }
 
+/// What shows of region `region` as the last draw placed it, in its own
+/// content coordinates: its clip, cut by every region around it (each at its
+/// own offset). `None` when the last draw made no such region.
+pub(crate) fn viewport(gpui: &NSView, region: usize) -> Option<NSRect> {
+    let view = gpui as *const NSView as usize;
+    HOSTS.with_borrow(|hosts| viewport_in(&hosts.get(&view)?.targets, region))
+}
+fn viewport_in(targets: &HashMap<usize, SlotRegionGeometry>, id: usize) -> Option<NSRect> {
+    let t = targets.get(&id)?;
+    let a = applied(t);
+    let own = NSRect::new(NSPoint::new(-a.origin.x, -a.origin.y), a.frame.size);
+    let Some(parent) = t.parent else {
+        return Some(own);
+    };
+    // The parent's view, moved into this region's content coordinates.
+    let p = viewport_in(targets, parent)?;
+    let p = NSRect::new(
+        NSPoint::new(
+            p.origin.x - a.frame.origin.x - a.origin.x,
+            p.origin.y - a.frame.origin.y - a.origin.y,
+        ),
+        p.size,
+    );
+    Some(intersect(own, p))
+}
+pub(crate) fn intersect(a: NSRect, b: NSRect) -> NSRect {
+    let x = a.origin.x.max(b.origin.x);
+    let y = a.origin.y.max(b.origin.y);
+    let w = (a.origin.x + a.size.width).min(b.origin.x + b.size.width) - x;
+    let h = (a.origin.y + a.size.height).min(b.origin.y + b.size.height) - y;
+    NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(0.), h.max(0.)))
+}
+/// Whether `rect` (content coordinates of `region`) shows any of itself.
+pub(crate) fn shows(gpui: &NSView, region: usize, rect: NSRect) -> bool {
+    viewport(gpui, region).is_some_and(|v| {
+        let r = intersect(v, rect);
+        r.size.width > 0. && r.size.height > 0.
+    })
+}
+
 /// The content view of region `region` for a slot: placed by this present
 /// (`apply`), or only as it stands (`None` when not made yet).
 pub(crate) fn content_view(gpui: &NSView, region: usize, apply: bool) -> Option<Retained<NSView>> {

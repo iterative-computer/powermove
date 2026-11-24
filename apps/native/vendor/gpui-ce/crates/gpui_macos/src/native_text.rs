@@ -1365,7 +1365,11 @@ fn place(key: usize, apply: bool) -> bool {
         }
         // From GPUI's frame in its parent (P-EMBED).
         let visible = intersection(bounds, clip);
-        let hidden = visible.size.width <= 0.
+        // In a region, hidden while its region's view shows none of it: no
+        // keys, not read out (PM-696 review).
+        let outside = region.is_some_and(|r| !crate::slot_region::shows(&state.gpui, r, visible));
+        let hidden = outside
+            || visible.size.width <= 0.
             || visible.size.height <= 0.
             || (state.kind.dense() && !state.editing.get());
         // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
