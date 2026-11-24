@@ -76,6 +76,75 @@ pub(crate) struct ScrollLayer {
     /// (a panel that redraws while it scrolls) only pays for recording.
     pub recorded_at: u64,
     pub idle_records: u32,
+    /// The scroll indicator its div draws, placed at each offset shown.
+    pub indicator: Option<Indicator>,
+}
+
+/// A scrolling div's indicator, as a layer redraws it at an offset.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Indicator {
+    /// The div's bounds: the indicator runs along its trailing edge.
+    pub track: Bounds<Pixels>,
+    /// How far the content scrolls.
+    pub max_y: Pixels,
+    pub spec: crate::ScrollIndicator,
+}
+impl Indicator {
+    /// Where it stands at `offset` (zero or negative), or `None` when the
+    /// content does not scroll.
+    pub fn bounds(&self, offset: Pixels) -> Option<Bounds<Pixels>> {
+        let s = &self.spec;
+        let height = self.track.size.height;
+        let max = self.max_y;
+        if max <= crate::px(0.5) || height <= crate::px(0.) {
+            return None;
+        }
+        let content = height + max;
+        let length = (height * (height / content)).max(s.min_length);
+        let scrolled = (-offset).clamp(crate::px(0.), max);
+        let top = (height - length) * (scrolled / max);
+        Some(Bounds::new(
+            crate::point(
+                self.track.right() - s.trailing - s.thickness,
+                self.track.top() + top + s.inset,
+            ),
+            crate::size(s.thickness, (length - s.inset * 2.).max(s.thickness)),
+        ))
+    }
+    pub fn paint_quad(&self, offset: Pixels) -> Option<crate::PaintQuad> {
+        let bounds = self.bounds(offset)?;
+        Some(crate::fill(bounds, self.spec.color).corner_radii(self.spec.thickness / 2.))
+    }
+    /// The indicator's quad at `offset`, in device pixels, clipped to `clip`.
+    pub fn quad(
+        &self,
+        offset: Pixels,
+        scale_factor: f32,
+        clip: &ContentMask<Pixels>,
+    ) -> Option<PaintOperation> {
+        let bounds = self.bounds(offset)?.scale(scale_factor);
+        let round = |b: Bounds<ScaledPixels>| {
+            Bounds::from_corners(
+                crate::point(ScaledPixels(b.left().0.round()), ScaledPixels(b.top().0.round())),
+                crate::point(ScaledPixels(b.right().0.round()), ScaledPixels(b.bottom().0.round())),
+            )
+        };
+        let radius = ScaledPixels(f32::from(self.spec.thickness) / 2. * scale_factor);
+        Some(PaintOperation::Primitive(Primitive::Quad(crate::scene::Quad {
+            order: 0,
+            bounds: round(bounds),
+            content_mask: clip.scale(scale_factor),
+            background: crate::Background::from(self.spec.color).into(),
+            border_color: crate::Background::from(crate::transparent_black()).into(),
+            corner_radii: crate::Corners::all(radius),
+            border_widths: Edges::default(),
+            border_style: Default::default(),
+            border_dashed_length: 0.,
+            border_dashed_gap: 0.,
+            corner_smoothing: 0.,
+            padding: 0,
+        })))
+    }
 }
 
 impl ScrollLayer {

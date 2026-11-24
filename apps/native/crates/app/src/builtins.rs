@@ -108,41 +108,18 @@ const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
 const SCROLL_BAR: f32 = 9.;
 const SCROLL_THUMB_INSET: f32 = 2.;
-/// A panel body's overlay scroll thumb (the original app's thin one: 9 pt,
-/// inset 2 pt, text ink at `translucency.faint`), when its content is taller
-/// than its slot of `width` × `height`.
-fn scroll_thumb(
-    handle: &ScrollHandle,
-    width: f32,
-    height: f32,
-    t: &pm_design::Tokens,
-) -> Option<AnyElement> {
-    let max = f32::from(handle.max_offset().y);
-    if max <= 0.5 || height <= 0. {
-        return None;
+/// A panel body's overlay scroll indicator (the original app's thin one: 9 pt,
+/// inset 2 pt, text ink at `translucency.faint`), drawn by the body's
+/// scroller itself: a replayed wheel step moves it with no render (PM-696).
+fn scroll_indicator(t: &pm_design::Tokens, visible: bool) -> gpui::ScrollIndicator {
+    gpui::ScrollIndicator {
+        visible,
+        color: pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8),
+        thickness: px(SCROLL_BAR - SCROLL_THUMB_INSET * 2.),
+        inset: px(SCROLL_THUMB_INSET),
+        trailing: px(SCROLL_THUMB_INSET + t.metrics.border * 2.),
+        min_length: px(t.metrics.hit),
     }
-    let content = height + max;
-    let length = (height * height / content).max(t.metrics.hit);
-    let offset = (-f32::from(handle.offset().y)).clamp(0., max);
-    let top = (height - length) * offset / max;
-    let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
-    Some(
-        div()
-            .absolute()
-            .top(px(top + SCROLL_THUMB_INSET))
-            .left(px(width
-                - thick
-                - SCROLL_THUMB_INSET
-                - t.metrics.border * 2.))
-            .w(px(thick))
-            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
-            .rounded(px(thick / 2.))
-            .bg(pm_shell::kit::ink(
-                t.colors.text,
-                t.translucency.faint * 0.8,
-            ))
-            .into_any_element(),
-    )
 }
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
@@ -205,7 +182,6 @@ pub struct Host {
     /// Each side panel's body, a cached view: a wheel step on it only
     /// replays its drawing at the new offset (PM-311).
     bodies: BTreeMap<String, Entity<PanelBody>>,
-    scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     pub(crate) requests: VecDeque<PlatformRequest>,
@@ -1875,31 +1851,7 @@ impl Controller {
             );
         }
         let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
-        let shown = self
-            .builtins
-            .scrolled_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = (shown || !cx.should_auto_hide_scrollbars())
-            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
-            .flatten();
-        let panel = id.to_owned();
         view.update(cx, |v, _| v.scrolls_in(&handle));
-        let on_wheel = {
-            let panel = panel.clone();
-            cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
-                v.builtins
-                    .scrolled_at
-                    .insert(panel.clone(), std::time::Instant::now());
-                // The thumb goes once the scrolling has stopped.
-                cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
-                    let _ = this.update(cx, |_, cx| cx.notify());
-                })
-                .detach();
-                cx.notify();
-            })
-        };
         // Every panel body is a view of its own and a scroll layer (PM-311):
         // a wheel step inside what it recorded replays it shifted, with no
         // render or layout of the panel; its AppKit controls sit in the
@@ -1916,14 +1868,18 @@ impl Controller {
                     view: view.clone(),
                     handle: handle.clone(),
                     height,
+                    tokens: t.clone(),
+                    wheeled: None,
+                    wheels: 0,
                 })
             })
             .clone();
         panel_body.update(cx, |b, cx| {
             // Half a point: the content's height is measured again every frame.
-            if (b.height - height).abs() > 0.5 || b.view != view {
+            if (b.height - height).abs() > 0.5 || b.view != view || b.tokens != t {
                 b.height = height;
                 b.view = view.clone();
+                b.tokens = t.clone();
                 cx.notify();
             }
         });
@@ -1932,10 +1888,8 @@ impl Controller {
                 .relative()
                 .w_full()
                 .h(px(body))
-                .on_scroll_wheel(on_wheel)
                 .child(panel_body.cached(StyleRefinement::default().size_full()))
                 .child(keep)
-                .children(thumb)
                 .into_any_element(),
         )
     }
@@ -5000,18 +4954,45 @@ pub(crate) struct PanelBody {
     handle: ScrollHandle,
     /// The panel's height: its content, at least the slot.
     height: f32,
+    tokens: pm_design::Tokens,
+    /// The last wheel step over the body: its indicator shows until it has
+    /// rested `SCROLL_THUMB_HOLD` (`wheels` counts the steps, so only the
+    /// last one's rest hides it).
+    wheeled: Option<std::time::Instant>,
+    wheels: u64,
 }
 impl Render for PanelBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The Project body replays its drawing between edge-mask changes.
         // Native surfaces retain their own frame callbacks.
         let native = self.view.read(cx).has_native();
+        let shown = self.wheeled.is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD)
+            || !cx.should_auto_hide_scrollbars();
+        // A step notes itself and nothing else: the body's scroll layer
+        // replays it (its indicator too); the indicator goes once the steps
+        // have rested, with one draw of the body.
+        let wheeled = cx.listener(|body, _: &ScrollWheelEvent, window, cx| {
+            body.wheeled = Some(std::time::Instant::now());
+            body.wheels += 1;
+            let at = body.wheels;
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                let _ = this.update(cx, |body, cx| {
+                    if body.wheels == at {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        });
         div()
             .id(self.id.clone())
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.handle)
             .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
+            .scroll_indicator(scroll_indicator(&self.tokens, shown))
+            .on_scroll_wheel(wheeled)
             .when(!native, |d| d.scroll_layer())
             .child(
                 self.view

@@ -4191,6 +4191,7 @@ impl Window {
                 generation: 0,
                 recorded_at: 0,
                 idle_records: 0,
+                indicator: None,
             });
         layer.view = view;
         layer.offset = offset.clone();
@@ -4201,6 +4202,7 @@ impl Window {
         layer.hitbox_range = start..start;
         layer.frame = frame;
         layer.recorded_at = layer.generation;
+        layer.indicator = None;
         // A layer recorded inside another's recording: the outer replays its
         // content as recorded (its markers are dropped there), so its own
         // offset-only steps would show nothing; they draw the view again.
@@ -4282,7 +4284,23 @@ impl Window {
         for op in layer.shifted_ops(scale_factor) {
             scene.insert_operation(op);
         }
+        if let Some(indicator) = layer.indicator.filter(|i| i.spec.visible)
+            && let Some(quad) = indicator.quad(layer.current().y, scale_factor, &layer.clip)
+        {
+            scene.insert_operation(quad);
+        }
         scene.insert_operation(crate::scene::PaintOperation::ScrollLayerEnd);
+    }
+
+    /// The indicator a scroll layer's div draws (set as the div paints).
+    pub(crate) fn set_scroll_layer_indicator(
+        &mut self,
+        key: crate::scroll_layer::ScrollLayerKey,
+        indicator: Option<crate::scroll_layer::Indicator>,
+    ) {
+        if let Some(layer) = self.scroll_layers.get_mut(&key) {
+            layer.indicator = indicator;
+        }
     }
 
     /// A step its owner makes on a driven scroll layer
@@ -4437,9 +4455,18 @@ impl Window {
                 layer.frame = frame;
                 // One that can't shift keeps what the last frame drew (its
                 // offset hasn't moved: its steps draw the view again).
-                layer
-                    .shiftable
-                    .then(|| layer.shifted_ops(scale_factor).collect())
+                layer.shiftable.then(|| {
+                    let mut ops: Vec<_> = layer.shifted_ops(scale_factor).collect();
+                    // Its indicator at the offset shown: always while the
+                    // steps move it, as recorded otherwise.
+                    let stepped = layer.generation != layer.recorded_at;
+                    if let Some(indicator) = layer.indicator.filter(|i| stepped || i.spec.visible)
+                        && let Some(quad) = indicator.quad(layer.current().y, scale_factor, &layer.clip)
+                    {
+                        ops.push(quad);
+                    }
+                    ops
+                })
             },
         );
     }

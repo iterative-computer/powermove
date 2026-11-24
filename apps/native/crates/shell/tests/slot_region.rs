@@ -464,3 +464,91 @@ fn a_region_the_frame_no_longer_draws_is_not_published(cx: &mut TestAppContext) 
     vcx.run_until_parked();
     assert_eq!(published(&mut vcx), 1, "back once");
 }
+
+/// PM-696: a scroll layer draws its scroller's indicator at the offset each
+/// replayed step shows, with no render of its view (the shell's thumb drew
+/// with the whole workspace on every step); at rest it shows only when asked.
+struct Indicated {
+    handle: ScrollHandle,
+    renders: Rc<RefCell<usize>>,
+}
+const THICK: f32 = 5.;
+impl Render for Indicated {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        *self.renders.borrow_mut() += 1;
+        div()
+            .id("indicated")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .scroll_layer()
+            .scroll_indicator(gpui::ScrollIndicator {
+                visible: false,
+                color: gpui::rgba(0xffffff80),
+                thickness: px(THICK),
+                inset: px(2.),
+                trailing: px(3.),
+                min_length: px(20.),
+            })
+            .children(rows(30))
+    }
+}
+
+/// The window's root, holding the scroller's view cached (as the shell's
+/// panel bodies are).
+struct Holder(Entity<Indicated>);
+impl Render for Holder {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(self.0.clone().cached(StyleRefinement::default().w(px(100.)).h(px(200.))))
+    }
+}
+
+#[gpui::test]
+fn a_replayed_step_draws_the_indicator_at_its_offset(cx: &mut TestAppContext) {
+    let renders = Rc::new(RefCell::new(0));
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        Holder(cx.new(|_| Indicated {
+            handle: handle.clone(),
+            renders: renders.clone(),
+        }))
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    let indicator = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, _| {
+            let scale = window.scale_factor();
+            let found: Vec<_> = window
+                .painted_quads()
+                .into_iter()
+                .filter(|q| (q.bounds.size.width.0 / scale - THICK).abs() < 0.6)
+                .map(|q| q.bounds.origin.y.0 / scale)
+                .collect();
+            found
+        })
+    };
+    assert!(indicator(&mut vcx).is_empty(), "at rest and not asked for: none");
+    let before = *renders.borrow();
+    // Content 1200 in 200: the indicator is 200 * 200 / 1200 long, and moves
+    // (200 - length) / 1000 per point scrolled.
+    let length = 200. * 200. / 1200.;
+    // Steps inside the recording (one view's height each way).
+    for (dy, offset) in [(-30., 30.), (-100., 130.), (50., 80.)] {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+        assert_eq!(*renders.borrow(), before, "replayed: the view did not render");
+        let top = 2. + (200. - length) * offset / 1000.;
+        let found = indicator(&mut vcx);
+        assert_eq!(found.len(), 1, "one indicator while the steps move it");
+        assert!((found[0] - top).abs() < 1., "at {offset}: {} for {top}", found[0]);
+    }
+}

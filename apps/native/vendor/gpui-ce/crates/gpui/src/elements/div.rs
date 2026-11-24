@@ -1867,6 +1867,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Draws `indicator` over the content of this vertically scrolling
+    /// element (tracked with [`Self::track_scroll`]), placed for its offset:
+    /// on a scroll layer's replayed steps too, with no render of its view.
+    fn scroll_indicator(mut self, indicator: crate::ScrollIndicator) -> Self {
+        self.interactivity().scroll_indicator = Some(indicator);
+        self
+    }
+
     /// A [`Self::scroll_layer`] whose offset its owner moves (a panel that
     /// scrolls itself and draws parts of it elsewhere): it handles no wheel
     /// of its own, the owner sets the offset on the tracked handle and steps
@@ -2763,6 +2771,8 @@ impl Element for Div {
         window.with_image_cache(image_cache, |window| {
             let layer_cell = self.interactivity.scroll_layer_cell();
             let region_cell = self.interactivity.scroll_offset.clone();
+            let indicator = self.interactivity.scroll_indicator;
+            let indicator_handle = self.interactivity.tracked_scroll_handle.clone();
             self.interactivity.paint(
                 global_id,
                 inspector_id,
@@ -2798,6 +2808,26 @@ impl Element for Div {
 
                     if let Some(inline) = request_layout.standalone_inline() {
                         inline.paint_paragraphs(window, cx);
+                    }
+
+                    // The indicator: a layer keeps it to draw at each offset it
+                    // shows; otherwise it is painted here, over the children.
+                    let indicator = indicator.zip(indicator_handle.as_ref()).map(|(spec, handle)| {
+                        crate::scroll_layer::Indicator {
+                            track: bounds,
+                            max_y: handle.max_offset().y,
+                            spec,
+                        }
+                    });
+                    match (&layer, indicator) {
+                        (Some((key, _)), indicator) => window.set_scroll_layer_indicator(*key, indicator),
+                        (None, Some(indicator)) if indicator.spec.visible => {
+                            let offset = indicator_handle.as_ref().map_or(px(0.), |h| h.offset().y);
+                            if let Some(quad) = indicator.paint_quad(offset) {
+                                window.paint_quad(quad);
+                            }
+                        }
+                        _ => {}
                     }
 
                     if let Some((key, outer)) = layer {
@@ -2907,6 +2937,9 @@ pub struct Interactivity {
     /// offset, so a step that only moves it replays the recorded content
     /// shifted (`crate::scroll_layer`).
     pub(crate) scroll_layer: bool,
+    /// Powermove: the scroll indicator this scrolling element draws over its
+    /// content (a scroll layer draws it at each replayed offset).
+    pub(crate) scroll_indicator: Option<crate::ScrollIndicator>,
     /// Its owner moves the offset (`scroll_layer_driven`).
     pub(crate) scroll_layer_driven: bool,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,

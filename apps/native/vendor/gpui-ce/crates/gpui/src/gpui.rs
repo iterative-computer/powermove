@@ -53,6 +53,23 @@ mod resize;
 mod scene;
 mod scroll_layer;
 mod slot_region;
+/// A scroll indicator a scrolling element draws over its content
+/// ([`StatefulInteractiveElement::scroll_indicator`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollIndicator {
+    /// Shown now (a scroll layer shows it on its replayed steps regardless).
+    pub visible: bool,
+    /// Its fill.
+    pub color: Rgba,
+    /// Its width.
+    pub thickness: Pixels,
+    /// Its distance from the track's ends.
+    pub inset: Pixels,
+    /// Its distance from the element's trailing edge.
+    pub trailing: Pixels,
+    /// Its least length.
+    pub min_length: Pixels,
+}
 pub use slot_region::{SlotRegion, SlotRegionGeometry};
 mod shared_uri;
 mod spring;
