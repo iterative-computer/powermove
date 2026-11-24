@@ -657,6 +657,79 @@ fn copied_groups_keep_stack_order_and_import_nested_sources_in_one_step() {
     assert_eq!(target.document(), doc);
 }
 
+/// An imported 3D model pasted into another project brings its model and its
+/// archive original, under new ids where the target already uses them, and
+/// both survive a save and reopen.
+#[test]
+fn a_pasted_3d_model_brings_its_model_and_original_across_projects() {
+    use crate::layer_commands::copy_layers;
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let archive_dir = tempfile::tempdir().unwrap();
+    let archive = Archive::open(archive_dir.path()).unwrap();
+    let stl = b"solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n";
+    let prepared = import::prepare(
+        vec![ImportFile { name: "part.stl".into(), mime: "model/stl".into(), bytes: stl.to_vec() }],
+        None,
+    )
+    .unwrap();
+    let model_bytes = prepared.bytes.clone();
+    let receipt = Arc::new(archive.admit(prepared).unwrap());
+    let empty = |id: &str, assets: serde_json::Value| {
+        json!({"id":id,"compId":"main","name":id,"w":32,"h":18,"fps":30,"dur":8,"assets":assets,"layers":[],"comps":{}})
+    };
+    let source = Desk::new(empty("source", json!({})));
+    let import = pm_kernel::Scene3dCommand::Import {
+        comp: None,
+        asset_id: "model".into(),
+        layer_id: "part".into(),
+        receipt,
+        time: 0.,
+        setup_studio: false,
+    };
+    source.call(pm_kernel::Call::Transact {
+        label: Some("Import".into()),
+        body: pm_kernel::WriteBody::Commands(vec![import.into()]),
+        expected_revision: None,
+    });
+    let sources = |p: &Published, asset: &str| -> Vec<String> {
+        let assets = p.snapshot.root().unwrap().get("assets").unwrap().to_value();
+        assets.get(asset).unwrap().get("native3dSources").unwrap().as_array().unwrap().iter()
+            .map(|s| s.get("id").and_then(Value::as_str).unwrap().to_owned()).collect()
+    };
+    assert_eq!(sources(&source.published(), "model"), ["model-source-0"]);
+    source.select(&["part"]);
+    let (copied, _) = copy_layers(&source.published(), None, false, &Default::default()).unwrap();
+
+    // The target already has different assets under both ids.
+    let target = Desk::new(empty("target", json!({
+        "model":{"id":"model","kind":"image","name":"Other"},
+        "model-source-0":{"id":"model-source-0","kind":"image","name":"Other original"}
+    })));
+    let p = target.published();
+    let plan = copied.paste(&p, 0.).unwrap();
+    target.call(transaction(&plan, Some(p.revision())).unwrap());
+    let pasted = plan.select.unwrap();
+    let check = |p: &Published| {
+        let layer = layer_of(p, &pasted[0]);
+        let asset = layer.get("d").unwrap().get("data").unwrap().get("object").unwrap()
+            .get("source").unwrap().get("assetId").and_then(Value::as_str).unwrap().to_owned();
+        assert_ne!(asset, "model");
+        let originals = sources(p, &asset);
+        assert_eq!(originals.len(), 1);
+        assert_ne!(originals[0], "model-source-0");
+        let assets = p.snapshot.root().unwrap().get("assets").unwrap().to_value();
+        assert_eq!(assets.get("model").unwrap().get("name").and_then(Value::as_str), Some("Other"));
+        let dir = tempfile::tempdir().unwrap();
+        for (id, bytes) in [(asset.as_str(), &model_bytes[..]), (originals[0].as_str(), &stl[..])] {
+            let out = dir.path().join(format!("{id}.bin"));
+            p.media.get(id).unwrap_or_else(|| panic!("no media for {id}")).copy_to(&out).unwrap();
+            assert_eq!(std::fs::read(&out).unwrap(), bytes, "{id}");
+        }
+    };
+    check(&target.published());
+    check(&target.reopened().published);
+}
+
 #[test]
 fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each() {
     let desk = Desk::new(menu_project());

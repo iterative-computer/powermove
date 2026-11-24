@@ -229,19 +229,90 @@ pub fn can_paste() -> bool {
 pub struct CopiedLayers {
     document: u64,
     pub layers: Vec<Value>,
-    assets: BTreeMap<String, (Value, Option<CopiedMedia>)>,
+    assets: BTreeMap<String, CopiedAsset>,
     comps: BTreeMap<String, Value>,
 }
 
-const ASSET_REFS: &[&str] = &["assetId", "asset"];
-const COMP_REFS: &[&str] = &["compId", "comp"];
+#[derive(Debug)]
+struct CopiedAsset {
+    record: Value,
+    media: Option<CopiedMedia>,
+    /// Archive originals by their source ids; the primary's own id when an
+    /// original is the model itself.
+    originals: Vec<(String, CopiedMedia)>,
+}
 
-fn references<'a>(layer: &'a Value, fields: &[&str]) -> Vec<&'a str> {
-    [Some(layer), layer.get("d")]
-        .into_iter()
-        .flatten()
-        .flat_map(|node| fields.iter().filter_map(|key| node.get(key).and_then(Value::as_str)))
-        .collect()
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Asset,
+    Comp,
+}
+
+/// Every asset and composition a layer draws from, mutably: its media
+/// (`asset`/`assetId`, `comp`/`compId` on the layer and under `d`) and,
+/// anywhere under `d`, a 3D model source (`assetId`), Studio and extrusion
+/// map sources (an asset id, or `{compositionId}`), and world and terrain
+/// sources.
+fn visit_sources(layer: &mut Value, visit: &mut dyn FnMut(Source, &mut Value)) {
+    let Some(fields) = layer.as_object_mut() else { return };
+    for (key, value) in fields.iter_mut() {
+        match key.as_str() {
+            Some("asset" | "assetId") => visit(Source::Asset, value),
+            Some("comp" | "compId") => visit(Source::Comp, value),
+            Some("d") => visit_data(value, None, visit),
+            _ => {}
+        }
+    }
+}
+
+fn visit_data(node: &mut Value, parent: Option<&str>, visit: &mut dyn FnMut(Source, &mut Value)) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                visit_data(item, parent, visit);
+            }
+        }
+        Value::Object(fields) => {
+            let top = parent.is_none();
+            for (key, value) in fields.iter_mut() {
+                let key = key.as_str().unwrap_or("");
+                let text = value.as_str().is_some();
+                match key {
+                    "assetId" => visit(Source::Asset, value),
+                    "asset" if top => visit(Source::Asset, value),
+                    "comp" | "compId" if top => visit(Source::Comp, value),
+                    "compositionId" => visit(Source::Comp, value),
+                    "heightSource" if text => visit(Source::Asset, value),
+                    "source" if text && parent == Some("world") => visit(Source::Asset, value),
+                    "maps" => {
+                        if let Some(maps) = value.as_object_mut() {
+                            for (_, map) in maps.iter_mut() {
+                                if map.as_str().is_some() {
+                                    visit(Source::Asset, map);
+                                } else {
+                                    visit_data(map, Some("maps"), visit);
+                                }
+                            }
+                        }
+                    }
+                    _ => visit_data(value, Some(key), visit),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn references(layer: &Value, kind: Source) -> Vec<String> {
+    let mut ids = Vec::new();
+    visit_sources(&mut layer.clone(), &mut |found, value| {
+        if found == kind
+            && let Some(id) = value.as_str()
+        {
+            ids.push(id.to_owned());
+        }
+    });
+    ids
 }
 
 fn remap_fields(node: &mut Value, fields: &[&str], ids: &HashMap<String, String>) {
@@ -256,12 +327,23 @@ fn remap_fields(node: &mut Value, fields: &[&str], ids: &HashMap<String, String>
 }
 
 fn remap_sources(layer: &mut Value, assets: &HashMap<String, String>, comps: &HashMap<String, String>) {
-    remap_fields(layer, ASSET_REFS, assets);
-    remap_fields(layer, COMP_REFS, comps);
-    if let Some(data) = layer.as_object_mut().and_then(|layer| layer.get_mut("d")) {
-        remap_fields(data, ASSET_REFS, assets);
-        remap_fields(data, COMP_REFS, comps);
-    }
+    visit_sources(layer, &mut |kind, value| {
+        let ids = if kind == Source::Asset { assets } else { comps };
+        if let Some(id) = value.as_str().and_then(|id| ids.get(id)) {
+            *value = Value::from(id.as_str());
+        }
+    });
+}
+
+/// The archive originals an imported 3D model lists (`native3dSources`).
+fn original_ids(asset: &Value) -> Vec<String> {
+    asset
+        .get("native3dSources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| source.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect()
 }
 
 fn copied_asset(
@@ -269,7 +351,7 @@ fn copied_asset(
     id: &str,
     mut asset: Value,
     resolved: Option<&Path>,
-) -> Option<(Value, Option<CopiedMedia>)> {
+) -> Option<CopiedAsset> {
     let fields = asset.as_object_mut()?;
     let media = published.media.get(id).filter(|entry| {
         !published.media.is_linked(&entry.id) && !published.media.is_proxy_only(id)
@@ -289,7 +371,19 @@ fn copied_asset(
             fields.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
         }
     }
-    Some((asset, media.cloned().map(|entry| CopiedMedia(Arc::new(entry)))))
+    let originals = original_ids(&asset)
+        .into_iter()
+        .filter(|source| source != id)
+        .filter_map(|source| {
+            let entry = published.media.get(&source)?;
+            Some((source, CopiedMedia(Arc::new(entry.clone()))))
+        })
+        .collect();
+    Some(CopiedAsset {
+        record: asset,
+        media: media.cloned().map(|entry| CopiedMedia(Arc::new(entry))),
+        originals,
+    })
 }
 
 /// Capture the selected block in stack order and walk the referenced precomps once.
@@ -324,8 +418,8 @@ pub fn copy_layers(
     let mut assets = BTreeSet::new();
     let mut scan = |layers: &[Value], pending: &mut Vec<String>| {
         for layer in layers {
-            assets.extend(references(layer, ASSET_REFS).into_iter().map(str::to_owned));
-            pending.extend(references(layer, COMP_REFS).into_iter().map(str::to_owned));
+            assets.extend(references(layer, Source::Asset));
+            pending.extend(references(layer, Source::Comp));
         }
     };
     scan(&clipboard.layers, &mut pending);
@@ -372,12 +466,47 @@ impl CopiedLayers {
                 || root.get("id").and_then(crate::node_string) == Some(id);
             (id.clone(), if taken { new_id("C") } else { id.clone() })
         }).collect::<HashMap<_, _>>();
+        let taken = |id: &str| {
+            root.get("assets").is_some_and(|assets| assets.get(id).is_some())
+                || target.media.get(id).is_some()
+        };
         let mut commands = Vec::new();
-        for (id, (asset, media)) in &self.assets {
+        for (id, copied) in &self.assets {
+            let asset_id = asset_ids[id].clone();
+            // An original keeps its id unless the target has it, or it was
+            // the model's own id and the model moved.
+            let source_ids: HashMap<String, String> = original_ids(&copied.record)
+                .into_iter()
+                .map(|source| {
+                    let next = if source == *id {
+                        asset_id.clone()
+                    } else if taken(&source) || asset_ids.values().any(|new| *new == source) {
+                        new_id("A")
+                    } else {
+                        source.clone()
+                    };
+                    (source, next)
+                })
+                .collect();
+            let mut record = copied.record.clone();
+            if let Some(sources) = record
+                .as_object_mut()
+                .and_then(|record| record.get_mut("native3dSources"))
+                .and_then(Value::as_array_mut)
+            {
+                for source in sources {
+                    remap_fields(source, &["id"], &source_ids);
+                }
+            }
             commands.push(MediaCommand::AddCopy {
-                asset_id: asset_ids[id].clone(),
-                asset: asset.clone(),
-                media: media.clone(),
+                asset_id,
+                asset: record,
+                media: copied.media.clone(),
+                originals: copied
+                    .originals
+                    .iter()
+                    .map(|(source, media)| (source_ids[source].clone(), media.clone()))
+                    .collect(),
             }.into());
         }
         let mut layer_ids = HashMap::new();

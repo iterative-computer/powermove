@@ -575,6 +575,7 @@ fn pasted_embedded_media_is_admitted_atomically_with_the_layer() {
             revision: "source-revision".into(),
             source: MediaSource::Memory(Arc::from(&b"synthetic image bytes"[..])),
         }))),
+        originals: vec![],
     };
     let mut clipboard = layer(&s, "clip");
     clipboard.as_object_mut().unwrap().get_mut("d").unwrap().as_object_mut().unwrap()
