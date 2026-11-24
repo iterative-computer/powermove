@@ -1092,7 +1092,7 @@ impl Engine {
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {
         let gpu = Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?;
-        let mut next = Self::with_shader_cache(gpu, self.shader_cache.clone())?;
+        let mut next = Self::without_definitions(gpu, self.shader_cache.clone())?;
         next.set_waker(self.waker.lock().unwrap().clone());
         next.resources = self.resources.clone();
         next.mastering = self.mastering;
