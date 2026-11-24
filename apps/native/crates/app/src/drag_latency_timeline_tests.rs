@@ -32,6 +32,18 @@ fn painted_start(s: &Stage, layer: &str) -> f64 {
         .unwrap()
 }
 
+// Edge trims preview the same way (b8d3aa36d): the painted Out edge.
+fn painted_out(s: &Stage, layer: &str) -> f64 {
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let clip = &frame
+        .ops
+        .iter()
+        .find(|op| op.id == format!("clip:{layer}"))
+        .unwrap()
+        .detail;
+    clip["from"].as_f64().unwrap() + clip["duration"].as_f64().unwrap()
+}
+
 #[gpui::test]
 fn drag_latency_app_strip_move(cx: &mut TestAppContext) {
     let mut s = stage(cx, 3);
@@ -146,7 +158,7 @@ fn drag_latency_app_precomp_trim(cx: &mut TestAppContext) {
             event,
             started,
             before + f64::from(dx) / pps,
-            s.out_of("l0"),
+            painted_out(&s, "l0"),
             1. / 30. + 0.001,
         );
     }
@@ -173,7 +185,7 @@ fn drag_latency_app_precomp_trim(cx: &mut TestAppContext) {
         7,
         started,
         before - 6. / pps,
-        s.out_of("l0"),
+        painted_out(&s, "l0"),
         1. / 30. + 0.001,
     );
     s.vcx.simulate_mouse_up(
@@ -184,6 +196,10 @@ fn drag_latency_app_precomp_trim(cx: &mut TestAppContext) {
     s.idle(cx);
     s.vcx
         .simulate_events_in_frame(std::iter::empty::<gpui::MouseMoveEvent>());
+    assert!(
+        (s.out_of("l0") - (before - 6. / pps)).abs() <= 1. / 30. + 0.001,
+        "the released trim must commit its final preview"
+    );
 }
 
 #[gpui::test]
