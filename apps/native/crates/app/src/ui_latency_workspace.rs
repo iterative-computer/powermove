@@ -349,6 +349,19 @@ fn workspace(cx: &mut TestAppContext) -> Result<Workspace, String> {
         ws.settle(&mut warm, None);
         draw(&mut ws.vcx, &mut warm);
     }
+    // Cached views reuse their paint and record no debug bounds, and a
+    // panel whose height changed draws again on its own, not the whole
+    // window (PM-696): once those frames settle, one full paint records the
+    // timeline's rows, read before any frame draws from the caches again.
+    for _ in 0..8 {
+        let callbacks = ws.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        ws.vcx.run_until_parked();
+        if callbacks == 0 {
+            break;
+        }
+    }
+    ws.vcx.update(|window, _| window.refresh());
+    ws.vcx.run_until_parked();
     for i in 0..layer_count() {
         let id = format!("l{i}");
         let selector = Box::leak(format!(r#"timeline:row:["layer","{id}"]"#).into_boxed_str());
