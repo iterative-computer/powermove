@@ -6714,6 +6714,7 @@ impl Render for SurfaceView {
                 .priority(3)
             }))
             .children(self.cull.outer_mark())
+            .children(self.body_rest_on_move(cx))
             .on_scroll_wheel(cx.listener(|v, _: &ScrollWheelEvent, _, cx| v.body_wheeled(cx)))
     }
 }

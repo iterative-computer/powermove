@@ -3735,4 +3735,10 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     view.update(&mut vcx, |_, cx| cx.notify());
     vcx.run_until_parked();
     assert!(!layered(&vcx));
+    // Scrolling again, then the pointer moves on: at rest at once.
+    wheel(&mut vcx, 20.);
+    assert!(layered(&vcx));
+    vcx.simulate_mouse_move(point(px(60.), px(40.)), None, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!layered(&vcx), "a pointer move ends the scroll");
 }

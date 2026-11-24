@@ -407,6 +407,29 @@ impl SurfaceView {
         })
         .detach();
     }
+    /// While its body is being scrolled: the pointer moving anywhere in the
+    /// window ends the scroll for the panel (a person scrolls, then moves on),
+    /// so the next draw (that hover's, a resize's) keeps only the rows near
+    /// the view, without waiting for the rest.
+    pub(super) fn body_rest_on_move(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        self.cull.wheeling?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let view = view.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            let _ = view.update(cx, |v, _| v.cull.wheeling = None);
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .into_any_element(),
+        )
+    }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.
     pub(crate) fn culls(&self) -> bool {
