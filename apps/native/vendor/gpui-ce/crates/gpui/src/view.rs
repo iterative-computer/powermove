@@ -393,6 +393,15 @@ struct ViewElementState {
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+    /// The draw frame (`window.scroll_layer_frame`) when `prepaint_range` was
+    /// recorded directly into `next_frame`. An enclosing cached view's
+    /// `reuse_prepaint` carries descendant states forward without rewriting
+    /// their inner ranges, so a descendant can only reuse ranges recorded on
+    /// the immediately preceding frame.
+    prepaint_frame: u64,
+    /// Font generation when `prepaint_range` was recorded; a font load clears
+    /// `LineLayoutCache` and invalidates prior layout indices.
+    font_generation: u64,
 }
 
 #[derive(Default)]
@@ -548,8 +557,12 @@ impl<V: View> Element for ViewElement<V> {
                         // Powermove P-A11Y-CACHE: reused prepaint replays the view's
                         // accessibility nodes from the last frame's tree; a frame
                         // without one (just activated) renders every cached view.
+                        let frame = window.scroll_layer_frame;
+                        let font_generation = window.text_system().font_generation();
                         if request_layout.element.is_none()
                             && let Some(mut element_state) = element_state
+                            && element_state.prepaint_frame.checked_add(1) == Some(frame)
+                            && element_state.font_generation == font_generation
                             && element_state.cache_key == cache_key
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
@@ -562,12 +575,14 @@ impl<V: View> Element for ViewElement<V> {
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
                             element_state.prepaint_range = prepaint_start..prepaint_end;
+                            element_state.prepaint_frame = frame;
 
                             return (None, element_state);
                         }
 
                         let refreshing = mem::replace(&mut window.refreshing, true);
                         let prepaint_start = window.prepaint_index();
+                        let start_font_generation = window.text_system().font_generation();
                         let mut accessed_entities =
                             mem::take(&mut request_layout.accessed_entities);
                         let (element, additional_entities) = cx.detect_accessed_entities(|cx| {
@@ -599,6 +614,7 @@ impl<V: View> Element for ViewElement<V> {
                         }
 
                         let prepaint_end = window.prepaint_index();
+                        let end_font_generation = window.text_system().font_generation();
                         window.refreshing = refreshing;
 
                         (
@@ -608,6 +624,14 @@ impl<V: View> Element for ViewElement<V> {
                                 prepaint_range: prepaint_start..prepaint_end,
                                 paint_range: PaintIndex::default()..PaintIndex::default(),
                                 cache_key,
+                                // If fonts changed mid-prepaint, `LineLayoutCache::clear`
+                                // invalidated `prepaint_start`, so do not reuse next frame.
+                                prepaint_frame: if start_font_generation == end_font_generation {
+                                    frame
+                                } else {
+                                    0
+                                },
+                                font_generation: end_font_generation,
                             },
                         )
                     },
