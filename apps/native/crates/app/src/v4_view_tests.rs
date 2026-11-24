@@ -3497,3 +3497,60 @@ fn a_selection_change_publishes_only_the_panels_it_changes() {
         }
     }
 }
+
+/// PM-698 review: a retheme while a newer tree is still compiling compiles
+/// that tree, not the one shown; a later identical commit is not published
+/// again, so nothing else would bring it.
+#[gpui::test]
+fn a_retheme_while_a_tree_compiles_shows_that_tree(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 2);
+    let select = |layer: &str| {
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Layers {
+                        ids: vec![layer.into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        rig.runtime
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "inspector")
+            .unwrap()
+    };
+    let a = select("l0");
+    let (view, mut vcx) = window(cx, &rig, a, Default::default());
+    vcx.run_until_parked();
+    let b = select("l1");
+    let shown = b.surface.revision();
+    view.update(&mut vcx, |v, cx| {
+        v.publish(b, cx);
+        v.retheme(
+            pm_design::Tokens::new(pm_design::Scheme::Light, Default::default()),
+            cx,
+        );
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until && view.read_with(&vcx, |v, _| v.compiling()) {
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.publication.surface.revision()),
+        shown,
+        "the newer tree, in the new theme"
+    );
+}

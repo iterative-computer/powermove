@@ -562,6 +562,10 @@ pub struct SurfaceView {
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
     parked: Option<Compiled>,
+    /// The newest publication this view was handed (shown, compiling,
+    /// parked or waiting for the timeline's rows): what a retheme compiles,
+    /// so it never puts an older tree back over one still on its way.
+    received: Option<Publication>,
     outline_waiting: Option<Compiled>,
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
@@ -752,6 +756,7 @@ impl SurfaceView {
             handling: 0,
             wake_idle: false,
             parked: None,
+            received: None,
             outline_waiting: None,
             focus_text: None,
             focus_requested: None,
@@ -989,16 +994,18 @@ impl SurfaceView {
                 "revision": publication.surface.revision(), "host": gpui_macos::feel::now()}),
             );
         }
+        self.received = Some(publication.clone());
         self.compile(publication, self.table.clone(), cx);
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
         let table = Arc::new(TokenTable::new(tokens));
+        // The newest tree handed over, wherever it is: its compile is
+        // superseded by this one (only the newest ticket installs), and a
+        // later commit equal to it is not published again (PM-698 review).
         let publication = self
-            .outline_waiting
-            .as_ref()
-            .filter(|c| c.ticket == self.latest)
-            .map_or(&self.publication, |c| &c.publication)
-            .clone();
+            .received
+            .clone()
+            .unwrap_or_else(|| self.publication.clone());
         self.compile(publication, table, cx);
     }
     fn compile(
