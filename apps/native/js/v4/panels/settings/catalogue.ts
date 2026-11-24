@@ -159,7 +159,7 @@ export function generalRows(multiWindow: boolean): Row[] {
       group: "Windows",
       label: "Open Projects In",
       control: "choice",
-      value: "windows",
+      value: "tabs",
       profileKey: "openProjectsIn",
       options: choices([
         ["tabs", "Tabs"],
