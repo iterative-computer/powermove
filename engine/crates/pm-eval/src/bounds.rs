@@ -197,7 +197,7 @@ impl<'d> Scope<'_, 'd> {
                 ));
             }
             for (k, prop) in node::entries(p) {
-                let v = match self.static_value(prop.node()) {
+                let v = match self.static_value(layer, prop.node()) {
                     Some(v) => v,
                     None => {
                         *fixed = false;
@@ -219,7 +219,7 @@ impl<'d> Scope<'_, 'd> {
             let mut out = Vec::new();
             if let Some(vp) = node::member(Some(v), "p") {
                 for (k, prop) in node::entries(vp) {
-                    let value = match self.static_value(prop.node()) {
+                    let value = match self.static_value(layer, prop.node()) {
                         Some(value) => value,
                         None => {
                             *fixed = false;

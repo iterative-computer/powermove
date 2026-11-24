@@ -22,6 +22,10 @@ impl WindowTextSystem {
         }
     }
 
+    pub(crate) fn font_generation(&self) -> u64 {
+        self.line_layout_cache.font_generation()
+    }
+
     pub(crate) fn layout_index(&self) -> LineLayoutIndex {
         self.line_layout_cache.layout_index()
     }

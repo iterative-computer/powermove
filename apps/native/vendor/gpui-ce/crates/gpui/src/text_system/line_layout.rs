@@ -1066,6 +1066,10 @@ impl LineLayoutCache {
         }
     }
 
+    pub fn font_generation(&self) -> u64 {
+        self.platform_text_system.font_generation()
+    }
+
     pub fn layout_index(&self) -> LineLayoutIndex {
         let frame = self.current_frame.read();
         LineLayoutIndex {

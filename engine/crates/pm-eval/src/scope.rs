@@ -230,9 +230,9 @@ impl<'a, 'd> Scope<'a, 'd> {
 
     /// What [`Self::evaluated`] answers for `value` at any time and key, when
     /// that needs neither (see [`crate::Evaluator::static_channel`]).
-    pub fn static_value(&self, value: Option<&'d Node>) -> Option<JsValue> {
+    pub fn static_value(&self, layer: &'d Node, value: Option<&'d Node>) -> Option<JsValue> {
         if node::is_property(value) {
-            self.ev.static_channel(value)
+            self.ev.static_channel(self.comp, layer, value)
         } else {
             Some(node::js_value_opt(value))
         }

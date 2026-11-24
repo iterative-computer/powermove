@@ -72,3 +72,118 @@ fn unchanged_subtree_is_reused_and_notification_invalidates_it() {
         );
     });
 }
+
+struct TextHeader(Rc<Cell<usize>>);
+impl Render for TextHeader {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0.set(self.0.get() + 1);
+        div().size_full().child("Threads")
+    }
+}
+
+struct WorkspaceHost {
+    header: Entity<TextHeader>,
+}
+impl Render for WorkspaceHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut style = StyleRefinement::default();
+        style.size.width = Some(px(120.).into());
+        style.size.height = Some(px(28.).into());
+        div()
+            .size_full()
+            .child("Workspace")
+            .child(self.header.clone().cached(style))
+    }
+}
+
+struct DragShell {
+    workspace: Entity<WorkspaceHost>,
+    dragging: bool,
+    chip: &'static str,
+}
+impl Render for DragShell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let workspace = if self.dragging {
+            self.workspace
+                .clone()
+                .cached(div().size_full().style().clone())
+                .into_any_element()
+        } else {
+            self.workspace.clone().into_any_element()
+        };
+        div()
+            .size_full()
+            .child(self.chip)
+            .child(workspace)
+    }
+}
+
+#[test]
+fn un_caching_an_outer_view_does_not_reuse_stale_inner_line_layouts() {
+    objc2::rc::autoreleasepool(|_| {
+        let header_renders = Rc::new(Cell::new(0));
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(
+                gpui_parley::SystemFonts::Load,
+            )),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window = cx
+            .open_window(size(px(200.), px(120.)), |_, cx| {
+                let header = cx.new(|_| TextHeader(header_renders.clone()));
+                let workspace = cx.new(|_| WorkspaceHost { header });
+                cx.new(|_| DragShell {
+                    workspace,
+                    dragging: false,
+                    chip: "Idle",
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let _ = cx.capture_screenshot(window.into()).unwrap();
+
+        // Start drag: outer view becomes cached and renders once with extra text ahead of it.
+        window
+            .update(&mut cx, |shell, _, cx| {
+                shell.dragging = true;
+                shell.chip = "Dragging Threads panel";
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let _ = cx.capture_screenshot(window.into()).unwrap();
+
+        // Continue drag: outer view hits its cache, keeping inner ViewElementState alive
+        // while shifting LineLayoutCache indices.
+        window
+            .update(&mut cx, |shell, _, cx| {
+                shell.chip = "Move";
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let _ = cx.capture_screenshot(window.into()).unwrap();
+
+        // Drop panel: outer view stops caching and re-renders directly.
+        // Previously this panicked in LineLayoutCache::reuse_layouts with slice_index_fail.
+        let before_drop = header_renders.get();
+        window
+            .update(&mut cx, |shell, _, cx| {
+                shell.dragging = false;
+                shell.chip = "";
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let _ = cx.capture_screenshot(window.into()).unwrap();
+        assert!(
+            header_renders.get() > before_drop,
+            "inner cached view must refresh after an enclosing cached ancestor reused its state"
+        );
+    });
+}

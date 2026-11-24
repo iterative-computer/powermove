@@ -340,6 +340,8 @@ impl ViewerDecode {
             self.stats.lock().unwrap().cached += 1;
             super::diag::bump(&super::diag::FETCH_CACHED, 1);
             st.moved_to(n);
+            st.playing = matches!(want, Want::Playback(_));
+            st.frame_bytes = st.frame_bytes.max(frame.bytes());
             st.present(n, want, n, &frame);
             // A drag that moves through cached frames keeps the look-ahead
             // ahead of it.
@@ -362,6 +364,28 @@ impl ViewerDecode {
         if let Some(e) = st.failed.remove(&n) {
             self.stats.lock().unwrap().errors += 1;
             return Some(Err(MediaError::decode(e)));
+        }
+        // A frame can have left the shared cache while the viewer or
+        // worker still owns it. It is an exact answer to the same index.
+        if st.playing
+            && let Some((_, frame)) = st
+                .latest
+                .as_ref()
+                .filter(|(shown, _)| *shown == n)
+                .or_else(|| st.presented.as_ref().filter(|(shown, _)| *shown == n))
+                .cloned()
+        {
+            self.stats.lock().unwrap().cached += 1;
+            super::diag::bump(&super::diag::FETCH_CACHED, 1);
+            st.present(n, want, n, &frame);
+            st.ahead_from = Some(n);
+            drop(st);
+            shared.wake.notify_one();
+            return Some(Ok(Some(Fetched {
+                frame,
+                shown: n,
+                exact: true,
+            })));
         }
         if want == Want::Scrub {
             if st.scrub.is_some_and(|old| old != n) {
@@ -668,7 +692,7 @@ impl Shared {
                 let mut guard = self
                     .service
                     .session(&self.source, self.instance, self.purpose)?;
-                let (keep, stride, forward) = {
+                let (keep, stride, forward, playing) = {
                     let st = self.state.lock().unwrap();
                     // Holding over needs a frame to hold: a worker that
                     // has handed a playing viewer nothing yet (a fresh one
@@ -682,11 +706,13 @@ impl Shared {
                             self.reverse_reach(&st),
                             st.stride.unsigned_abs() as usize,
                             forward,
+                            st.playing,
                         )
                     } else {
-                        (0, 1, forward)
+                        (0, 1, forward, st.playing)
                     }
                 };
+                guard.keep_playback_reorder(playing && self.purpose == DecodePurpose::Display);
                 guard.set_window(DEFAULT_WINDOW.max(keep + 1));
                 guard.set_keep_before(keep, stride);
                 // A frame the decoder's run has passed (decoded ahead, then
@@ -832,7 +858,10 @@ impl Shared {
         } else if stride < 0 {
             (self.reverse_reach(st) as i64 / -stride).max(1) as usize
         } else {
-            AHEAD.min(self.cache_frames(st))
+            // The playing viewer already pins its last shown frame. One
+            // frame ahead can use the worker's existing latest slot when
+            // the cache share cannot keep both the shown and next frames.
+            AHEAD.min(self.cache_frames(st).max(usize::from(st.playing)))
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
@@ -855,7 +884,9 @@ impl Shared {
             }) {
                 break;
             }
-            if !cache.contains(&self.key(m)) {
+            if !st.latest.as_ref().is_some_and(|(shown, _)| *shown == m)
+                && !cache.contains(&self.key(m))
+            {
                 return Some(m);
             }
         }

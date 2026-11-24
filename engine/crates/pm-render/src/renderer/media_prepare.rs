@@ -163,6 +163,7 @@ impl Renderer {
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
+        self.open_channel_memo(document);
         let (plan, _) = plan::build_reusing(
             &mut self.evaluator,
             &comp,

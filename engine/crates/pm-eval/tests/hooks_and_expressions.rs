@@ -134,6 +134,40 @@ fn expression_errors_and_context() {
     );
 }
 
+#[test]
+fn static_channel_shortcut_only_waits_for_errors_on_its_own_layer() {
+    let doc = Document::new(Some(parse(DOC).unwrap()), 1);
+    let cx = Comp::resolve(&doc, "C").unwrap();
+    let nested = Comp::resolve(&doc, "N").unwrap();
+    let broken = layer(&cx);
+    let data = pm_eval::node::member(Some(broken), "d");
+    let value = pm_eval::node::member(data, "w");
+    let mut ev = Evaluator::new().with_expressions(Arc::new(Engine));
+
+    for key in ["opacity", "rotation", "rotation"] {
+        ev.ev_key(&cx, Some(broken), key, 2.).unwrap();
+    }
+    assert_eq!(ev.static_channel(&cx, broken, value), None);
+    assert_eq!(
+        ev.static_channel(&nested, layer(&nested), value),
+        Some(JsValue::Number(10.))
+    );
+
+    ev.ev_p(&cx, Some(broken), value, 2., &"opacity".into())
+        .unwrap();
+    assert_eq!(ev.expression_error("C", "A", "opacity"), None);
+    assert!(ev.expression_error("C", "A", "rotation").is_some());
+    assert_eq!(ev.static_channel(&cx, broken, value), None);
+
+    ev.ev_p(&cx, Some(broken), value, 2., &"rotation".into())
+        .unwrap();
+    assert_eq!(ev.expression_errors().count(), 0);
+    assert_eq!(
+        ev.static_channel(&cx, broken, value),
+        Some(JsValue::Number(10.))
+    );
+}
+
 struct Hooks;
 
 impl EvalHooks for Hooks {

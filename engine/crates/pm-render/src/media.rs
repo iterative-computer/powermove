@@ -2074,6 +2074,7 @@ impl MediaCache {
         sequence: bool,
         source_exact: bool,
     ) -> Result<Option<Target>, MediaFailure> {
+        let first_use = self.frame_seen.get(path).copied() != Some(self.frame_epoch);
         let src = self.source(path)?;
         if !export && !source_exact {
             self.service.note_display(src.id, instance);
@@ -2253,12 +2254,14 @@ impl MediaCache {
         // submitted) is overwritten instead of allocating another.
         let native = (frame.format.width as u32, frame.format.height as u32);
         let (w, h) = preview_size(native, preview_edge);
-        let reuse = self
+        let mut reuse = self
             .free_frames
             .iter()
             .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let importer = self.importer()?;
+        let importer = self.importer.as_ref().ok_or_else(|| {
+            MediaFailure::Failed("the device cannot import decoded frames".into())
+        })?;
         let import = |f: &pm_media::frame::DecodedFrame| {
             importer
                 .import(f)
@@ -2313,6 +2316,29 @@ impl MediaCache {
                 .normalize_luma_as(queue, encoder, &imported, range)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
+        if reuse.is_none()
+            && first_use
+            && self.playback.is_some()
+            && !export
+            && Geometry::of(&reading, (w, h)).is_identity()
+        {
+            // The previous render's reads have been submitted, and this
+            // render has not used the source yet. Overwrite the last
+            // picture on the same queue without retaining a second UHD
+            // texture. A second read in this render needs distinct storage.
+            let replaced = self.frames.iter().find_map(|(old, (target, _))| {
+                (old.path == key.path
+                    && old.precision == key.precision
+                    && old.export == key.export
+                    && old.linear == key.linear
+                    && old.hdr_light == key.hdr_light
+                    && target.width() == w
+                    && target.height() == h
+                    && target.format() == format)
+                    .then(|| old.clone())
+            });
+            reuse = replaced.and_then(|old| self.frames.remove(&old).map(|(target, _)| target));
+        }
         let converted = convert_format_scaled(
             device,
             queue,
