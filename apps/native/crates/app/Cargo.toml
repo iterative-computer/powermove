@@ -117,6 +117,10 @@ version = "0.4"
 path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
+[dev-dependencies.pm-glsl]
+path = "../../../../engine/crates/pm-glsl"
+features = ["test-admission"]
 # Tests stop a project with an injected kernel panic (never in the app).
 [dev-dependencies.pm-kernel]
 path = "../kernel"

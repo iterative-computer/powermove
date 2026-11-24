@@ -2144,7 +2144,11 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     // Once the steps stop: the layers' render (each layer's settle, one
     // frame on screen) and the written view's publication.
     settle(&mut s);
-    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    let after = renders(&s);
+    assert!(
+        (rendered + 1..=rendered + 4).contains(&after),
+        "{after} renders once the steps stopped, from {rendered}"
+    );
     // Past the tracks' width drawn: drawn again at once.
     let rendered = renders(&s);
     wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
