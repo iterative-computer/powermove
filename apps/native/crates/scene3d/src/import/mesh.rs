@@ -1,8 +1,11 @@
 //! Shared GLB output for the mesh importers.
-use super::{MAX_BYTES, MAX_TRIANGLES};
+use super::{MAX_BYTES, MAX_TRIANGLES, texture};
 use crate::{Error, Result, fail};
+use image::RgbaImage;
 use pm_geom3d::{gltf::math::Mat4, model_import::glb::GlbWriter};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub const MAX_VERTICES: usize = MAX_TRIANGLES * 3;
 pub const MAX_NODES: usize = 65_536;
@@ -14,6 +17,16 @@ pub struct Scene {
     meshes: Vec<Value>,
     nodes: Vec<Value>,
     materials: Vec<Value>,
+    material_keys: HashMap<String, usize>,
+    images: Vec<Value>,
+    image_keys: HashMap<[u8; 32], usize>,
+    // Cache input pixels too, so formats that repeat a decoded map across
+    // material objects do not repeatedly compress it.
+    texture_keys: HashMap<([u8; 32], bool, Sampler), usize>,
+    textures: Vec<Value>,
+    texture_slots: HashMap<(usize, usize), usize>,
+    samplers: Vec<Value>,
+    sampler_keys: HashMap<Sampler, usize>,
     vertices: usize,
     triangles: usize,
     bytes: usize,
@@ -29,15 +42,249 @@ pub struct Mesh {
     pub material: Option<usize>,
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct Sampler {
+    pub wrap_s: u32,
+    pub wrap_t: u32,
+    pub mag_filter: u32,
+    pub min_filter: u32,
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            wrap_s: 10497,
+            wrap_t: 10497,
+            mag_filter: 9729,
+            min_filter: 9987,
+        }
+    }
+}
+
+#[derive(Default)]
+pub enum Alpha {
+    #[default]
+    Opaque,
+    Blend,
+    Mask(f32),
+}
+
+pub struct Material {
+    pub base_color: [f32; 4],
+    pub base_map: Option<usize>,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub metallic_roughness_map: Option<usize>,
+    pub normal_map: Option<usize>,
+    pub occlusion_map: Option<usize>,
+    pub occlusion_strength: f32,
+    pub emissive: [f32; 3],
+    pub emissive_map: Option<usize>,
+    pub alpha: Alpha,
+    pub double_sided: bool,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            base_color: [1.; 4],
+            base_map: None,
+            metallic: 0.,
+            roughness: 1.,
+            metallic_roughness_map: None,
+            normal_map: None,
+            occlusion_map: None,
+            occlusion_strength: 1.,
+            emissive: [0.; 3],
+            emissive_map: None,
+            alpha: Alpha::Opaque,
+            double_sided: false,
+        }
+    }
+}
+
+pub struct Part {
+    pub indices: Vec<u32>,
+    pub material: Option<usize>,
+}
+
 impl Scene {
     pub fn material(&mut self, name: &str, rgba: [f32; 4]) -> usize {
-        let index = self.materials.len();
-        self.materials.push(json!({
+        self.pbr_material(
+            name,
+            Material {
+                base_color: rgba,
+                alpha: if rgba[3] < 1. {
+                    Alpha::Blend
+                } else {
+                    Alpha::Opaque
+                },
+                ..Material::default()
+            },
+        )
+    }
+
+    pub fn pbr_material(&mut self, name: &str, m: Material) -> usize {
+        let mode = match m.alpha {
+            Alpha::Opaque => "OPAQUE",
+            Alpha::Blend => "BLEND",
+            Alpha::Mask(_) => "MASK",
+        };
+        let mut material = json!({
             "name": name,
-            "pbrMetallicRoughness": {"baseColorFactor": rgba, "metallicFactor": 0},
-            "alphaMode": if rgba[3] < 1. { "BLEND" } else { "OPAQUE" },
-        }));
-        index
+            "pbrMetallicRoughness": {
+                "baseColorFactor": m.base_color,
+                "metallicFactor": m.metallic,
+                "roughnessFactor": m.roughness,
+            },
+            "emissiveFactor": m.emissive,
+            "alphaMode": mode,
+            "doubleSided": m.double_sided,
+        });
+        if let Alpha::Mask(cutoff) = m.alpha {
+            material["alphaCutoff"] = json!(cutoff);
+        }
+        let pbr = &mut material["pbrMetallicRoughness"];
+        for (key, map) in [
+            ("baseColorTexture", m.base_map),
+            ("metallicRoughnessTexture", m.metallic_roughness_map),
+        ] {
+            if let Some(index) = map {
+                pbr[key] = json!({"index": index});
+            }
+        }
+        for (key, map) in [
+            ("normalTexture", m.normal_map),
+            ("emissiveTexture", m.emissive_map),
+        ] {
+            if let Some(index) = map {
+                material[key] = json!({"index": index});
+            }
+        }
+        if let Some(index) = m.occlusion_map {
+            material["occlusionTexture"] =
+                json!({"index": index, "strength": m.occlusion_strength});
+        }
+        let key = material.to_string();
+        *self.material_keys.entry(key).or_insert_with(|| {
+            let index = self.materials.len();
+            self.materials.push(material);
+            index
+        })
+    }
+
+    pub fn texture(&mut self, image: RgbaImage, color: bool, sampler: Sampler) -> Result<usize> {
+        let image = texture::capped(image);
+        let mut hash = Sha256::new();
+        hash.update(image.width().to_le_bytes());
+        hash.update(image.height().to_le_bytes());
+        hash.update(image.as_raw());
+        let key = (hash.finalize().into(), color, sampler);
+        if let Some(&index) = self.texture_keys.get(&key) {
+            return Ok(index);
+        }
+        let (mime, bytes) = texture::encode(image, color)?;
+        let hash = Sha256::digest(&bytes).into();
+        let source = if let Some(&index) = self.image_keys.get(&hash) {
+            index
+        } else {
+            self.bytes += bytes.len();
+            if self.bytes > MAX_BYTES {
+                return fail("Model textures exceed import limits");
+            }
+            let index = self.images.len();
+            let view = self.writer.view(&bytes, None);
+            self.images
+                .push(json!({"bufferView": view, "mimeType": mime}));
+            self.image_keys.insert(hash, index);
+            index
+        };
+        let sampler = *self.sampler_keys.entry(sampler).or_insert_with(|| {
+            let index = self.samplers.len();
+            self.samplers
+                .push(json!({"wrapS": sampler.wrap_s, "wrapT": sampler.wrap_t,
+                "magFilter": sampler.mag_filter, "minFilter": sampler.min_filter}));
+            index
+        });
+        let index = *self
+            .texture_slots
+            .entry((source, sampler))
+            .or_insert_with(|| {
+                let index = self.textures.len();
+                self.textures
+                    .push(json!({"source": source, "sampler": sampler}));
+                index
+            });
+        self.texture_keys.insert(key, index);
+        Ok(index)
+    }
+
+    /// Compact each material's vertex stream. The renderer decodes a vertex
+    /// stream per primitive, so sharing an untrimmed accessor in the file
+    /// would still copy and upload all parent vertices for every material.
+    pub fn partitioned_mesh(
+        &mut self,
+        name: &str,
+        vertices: Mesh,
+        parts: Vec<Part>,
+    ) -> Result<usize> {
+        let count = vertices.positions.len();
+        if [
+            &vertices.normals.len(),
+            &vertices.colors.len(),
+            &vertices.uv.len(),
+        ]
+        .into_iter()
+        .any(|&len| len != 0 && len != count)
+        {
+            return fail("Invalid mesh vertex attributes");
+        }
+        let mut groups = Vec::<Part>::new();
+        let mut slots = HashMap::new();
+        for part in parts {
+            if !part.indices.len().is_multiple_of(3) {
+                return fail("Invalid mesh triangle indices");
+            }
+            let slot = *slots.entry(part.material).or_insert_with(|| {
+                groups.push(Part {
+                    material: part.material,
+                    indices: Vec::new(),
+                });
+                groups.len() - 1
+            });
+            groups[slot].indices.extend(part.indices);
+        }
+        let mut parts = Vec::with_capacity(groups.len());
+        for Part { material, indices } in groups {
+            let mut part = Mesh {
+                material,
+                ..Mesh::default()
+            };
+            let mut remap = HashMap::new();
+            for index in indices {
+                let i = index as usize;
+                if i >= count {
+                    return fail("Invalid mesh triangle index");
+                }
+                let local = *remap.entry(index).or_insert_with(|| {
+                    let local = part.positions.len() as u32;
+                    part.positions.push(vertices.positions[i]);
+                    if !vertices.normals.is_empty() {
+                        part.normals.push(vertices.normals[i]);
+                    }
+                    if !vertices.colors.is_empty() {
+                        part.colors.push(vertices.colors[i]);
+                    }
+                    if !vertices.uv.is_empty() {
+                        part.uv.push(vertices.uv[i]);
+                    }
+                    local
+                });
+                part.indices.push(local);
+            }
+            parts.push(part);
+        }
+        self.mesh(name, parts)
     }
 
     pub fn mesh(&mut self, name: &str, parts: impl IntoIterator<Item = Mesh>) -> Result<usize> {
@@ -152,6 +399,9 @@ impl Scene {
                 "nodes": self.nodes,
                 "meshes": self.meshes,
                 "materials": self.materials,
+                "textures": self.textures,
+                "images": self.images,
+                "samplers": self.samplers,
             })
             .as_object()
             .unwrap()

@@ -323,9 +323,13 @@ pub(super) fn prepare_zip(
         return fail("Model ZIP must contain one model");
     };
     let extension = ext(name);
-    let mut model = zip.read_named(name, MAX_BYTES)?;
-    let (directory, leaf) = name.rsplit_once('/').unwrap_or(("", name));
-    let mut total = model.len();
+    let model = ImportFile {
+        name: name.rsplit('/').next().unwrap_or(name).into(),
+        mime: path::mime(&extension).into(),
+        bytes: zip.read_named(name, MAX_BYTES)?,
+    };
+    let directory = name.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let mut total = model.bytes.len();
     let mut read = |uri: &str| {
         let uri = path::relative_reference(uri)?;
         let name = if directory.is_empty() {
@@ -337,19 +341,15 @@ pub(super) fn prepare_zip(
         total += bytes.len();
         Ok(bytes)
     };
-    let mut companions = Vec::new();
-    if extension == "gltf" || (extension == "vrm" && !model.starts_with(b"glTF")) {
-        model = path::embed_gltf(&model, &mut read)?;
-    } else if extension == "obj" {
-        companions = path::obj_companions(&model, &mut read)?;
+    let mut files = vec![model];
+    if extension == "obj" {
+        files.extend(path::obj_companions(&files[0].bytes, &mut read)?);
     }
-    companions.insert(
-        0,
-        ImportFile {
-            name: leaf.into(),
-            mime: path::mime(&extension).into(),
-            bytes: model,
-        },
-    );
-    super::prepare(companions, cad)
+    let (name, bytes) =
+        super::prepare_model(&files[0], &files, cad, &mut |uri| read(uri).map(Some))?;
+    Ok(Prepared {
+        name,
+        bytes,
+        original: files,
+    })
 }

@@ -8,15 +8,16 @@
 //! `OBJLoader` group after the app's material conversion: Phong materials
 //! become standard ones (double-sided, metalness 0, roughness
 //! `clamp(√(2 / (Ns + 2)), 0.02, 1)`, unnamed), a bump map without a normal
-//! map becomes a normal map, line and point materials keep their copied
-//! basic parameters, images are flipped for glTF's top-left origin and
-//! stored as PNG, and multi-material objects get per-group indices.
+//! map becomes a normal map, images are flipped for glTF's top-left origin,
+//! and each material group emits only its own vertices.
 
+use super::super::texture;
 use super::js;
 use super::loader::{self, Kind, Phong, TextureParams};
 use pm_geom3d::model_import::glb::GlbWriter;
 use pm_geom3d::model_import::{Error, Result};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 /// A selected file: its name, MIME type (`File.type`, may be empty), and bytes.
@@ -38,8 +39,6 @@ pub enum Prepared {
 
 const MAX_FILES: usize = 128;
 const MAX_TOTAL: usize = 512 * 1024 * 1024;
-/// `bumpNormals` draws the bump image at most this size.
-const MAX_BUMP: u32 = 2048;
 
 fn err<T>(m: impl Into<String>) -> Result<T> {
     Err(Error(m.into()))
@@ -72,16 +71,23 @@ fn is_image(f: &ImportFile) -> bool {
 /// applies it).
 fn decode(bytes: &[u8]) -> Option<image::RgbaImage> {
     use image::ImageDecoder;
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits.clone());
     let mut decoder = reader.into_decoder().ok()?;
+    decoder.set_limits(limits).ok()?;
     let orientation = decoder.orientation().ok()?;
     let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
     img.apply_orientation(orientation);
-    Some(img.to_rgba8())
+    Some(texture::capped(img.into_rgba8()))
 }
 
+#[cfg(test)]
 fn png(img: &image::RgbaImage) -> Vec<u8> {
     let mut out = vec![];
     img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
@@ -92,12 +98,8 @@ fn png(img: &image::RgbaImage) -> Vec<u8> {
 /// `bumpNormals(texture, strength)`: scalar bump to a tangent-space normal
 /// map, central differences with wrap-around, on the image as drawn.
 pub fn bump_normals(img: &image::RgbaImage, strength: f64) -> image::RgbaImage {
-    let (w, h) = (img.width().min(MAX_BUMP), img.height().min(MAX_BUMP));
-    let src = if (w, h) == img.dimensions() {
-        img.clone()
-    } else {
-        image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle)
-    };
+    let src = texture::capped(img.clone());
+    let (w, h) = src.dimensions();
     let (wi, hi) = (i64::from(w), i64::from(h));
     let sample = |x: i64, y: i64| -> f64 {
         let p = src.get_pixel(
@@ -148,7 +150,8 @@ enum TexSource {
     File(usize),
     /// `bumpNormals` of a file with its strength (`f64` bits); each
     /// material conversion draws its own canvas.
-    Bump(usize, u64, usize),
+    Bump(usize, u64),
+    Opacity(Option<usize>, usize),
 }
 
 /// The converted material of one primitive.
@@ -175,7 +178,11 @@ struct Exporter<'a> {
     w: GlbWriter,
     decoded: &'a HashMap<usize, image::RgbaImage>,
     images: Vec<Value>,
-    image_cache: HashMap<TexSource, usize>,
+    image_cache: HashMap<(TexSource, bool), usize>,
+    image_content: HashMap<[u8; 32], usize>,
+    texture_cache: HashMap<(usize, usize), usize>,
+    sampler_cache: HashMap<u32, usize>,
+    material_cache: HashMap<String, usize>,
     textures: Vec<Value>,
     samplers: Vec<Value>,
     materials: Vec<Value>,
@@ -183,38 +190,57 @@ struct Exporter<'a> {
 }
 
 impl Exporter<'_> {
-    fn image(&mut self, source: &TexSource) -> usize {
-        if let Some(&i) = self.image_cache.get(source) {
-            return i;
+    fn image(&mut self, source: &TexSource, color: bool) -> Result<usize> {
+        let key = (source.clone(), color);
+        if let Some(&i) = self.image_cache.get(&key) {
+            return Ok(i);
         }
-        let (TexSource::File(f) | TexSource::Bump(f, _, _)) = *source;
-        let decoded = &self.decoded[&f];
-        let drawn = match source {
-            TexSource::File(_) => decoded.clone(),
-            TexSource::Bump(_, strength, _) => bump_normals(decoded, f64::from_bits(*strength)),
+        let drawn = match *source {
+            TexSource::File(index) => self.decoded[&index].clone(),
+            TexSource::Bump(index, strength) => {
+                bump_normals(&self.decoded[&index], f64::from_bits(strength))
+            }
+            TexSource::Opacity(base, index) => {
+                let mut opacity = self.decoded[&index].clone();
+                for pixel in opacity.pixels_mut() {
+                    // OBJ's alphaMap uses green as the linear scalar.
+                    pixel[0] = pixel[1];
+                }
+                texture::with_opacity(base.map(|index| self.decoded[&index].clone()), opacity)
+            }
         };
-        // flipY: drawn bottom-up into the export canvas.
         let flipped = image::imageops::flip_vertical(&drawn);
-        let view = self.w.view(&png(&flipped), None);
-        let image = json!({ "mimeType": "image/png", "bufferView": view });
-        self.images.push(image);
-        self.image_cache
-            .insert(source.clone(), self.images.len() - 1);
-        self.images.len() - 1
+        let (mime, bytes) = texture::encode(flipped, color).map_err(|e| Error(e.to_string()))?;
+        let hash = Sha256::digest(&bytes).into();
+        let index = *self.image_content.entry(hash).or_insert_with(|| {
+            let view = self.w.view(&bytes, None);
+            self.images
+                .push(json!({ "mimeType": mime, "bufferView": view }));
+            self.images.len() - 1
+        });
+        self.image_cache.insert(key, index);
+        Ok(index)
     }
 
-    fn texture(&mut self, t: &Tex) -> Value {
-        let source = self.image(&t.source);
-        self.samplers.push(json!({
-            "magFilter": LINEAR,
-            "minFilter": LINEAR_MIPMAP_LINEAR,
-            "wrapS": t.wrap,
-            "wrapT": t.wrap,
-        }));
-        self.textures
-            .push(json!({ "sampler": self.samplers.len() - 1, "source": source }));
+    fn texture(&mut self, t: &Tex, color: bool) -> Result<Value> {
+        let source = self.image(&t.source, color)?;
+        let sampler = *self.sampler_cache.entry(t.wrap).or_insert_with(|| {
+            self.samplers.push(json!({
+                "magFilter": LINEAR, "minFilter": LINEAR_MIPMAP_LINEAR,
+                "wrapS": t.wrap, "wrapT": t.wrap,
+            }));
+            self.samplers.len() - 1
+        });
+        let index = *self
+            .texture_cache
+            .entry((source, sampler))
+            .or_insert_with(|| {
+                self.textures
+                    .push(json!({ "sampler": sampler, "source": source }));
+                self.textures.len() - 1
+            });
         let mut def = Map::new();
-        def.insert("index".into(), json!(self.textures.len() - 1));
+        def.insert("index".into(), json!(index));
         def.insert("texCoord".into(), json!(0));
         // applyTextureTransform.
         let mut transform = Map::new();
@@ -231,10 +257,10 @@ impl Exporter<'_> {
             );
             self.transform_used = true;
         }
-        Value::Object(def)
+        Ok(Value::Object(def))
     }
 
-    fn material(&mut self, m: &Mat) -> usize {
+    fn material(&mut self, m: &Mat) -> Result<usize> {
         let mut pbr = Map::new();
         let color = [m.color[0], m.color[1], m.color[2], m.opacity];
         if color != [1.0; 4] {
@@ -248,7 +274,7 @@ impl Exporter<'_> {
             pbr.insert("roughnessFactor".into(), json!(1));
         }
         if let Some(t) = &m.map {
-            let t = self.texture(t);
+            let t = self.texture(t, true)?;
             pbr.insert("baseColorTexture".into(), t);
         }
         let mut def = Map::new();
@@ -258,11 +284,11 @@ impl Exporter<'_> {
                 def.insert("emissiveFactor".into(), json!(m.emissive));
             }
             if let Some(t) = &m.emissive_map {
-                let t = self.texture(t);
+                let t = self.texture(t, true)?;
                 def.insert("emissiveTexture".into(), t);
             }
             if let Some(t) = &m.normal_map {
-                let t = self.texture(t);
+                let t = self.texture(t, false)?;
                 def.insert("normalTexture".into(), t);
             }
         }
@@ -275,8 +301,14 @@ impl Exporter<'_> {
         if !m.name.is_empty() {
             def.insert("name".into(), json!(m.name));
         }
-        self.materials.push(Value::Object(def));
-        self.materials.len() - 1
+        let material = Value::Object(def);
+        Ok(*self
+            .material_cache
+            .entry(material.to_string())
+            .or_insert_with(|| {
+                self.materials.push(material);
+                self.materials.len() - 1
+            }))
     }
 }
 
@@ -392,6 +424,10 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
         decoded: &decoded,
         images: vec![],
         image_cache: HashMap::new(),
+        image_content: HashMap::new(),
+        texture_cache: HashMap::new(),
+        sampler_cache: HashMap::new(),
+        material_cache: HashMap::new(),
         textures: vec![],
         samplers: vec![],
         materials: vec![],
@@ -399,7 +435,6 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
     };
     let mut meshes = vec![];
     let mut nodes = vec![json!({})];
-    let mut conversions = 0usize;
     for o in &objects {
         let multi = o.materials.len() > 1;
         let mut mats = vec![];
@@ -407,7 +442,6 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
             let p = create(&u.name);
             let map_of = |slot: &str| p.maps.iter().find(|(s, _)| *s == slot).map(|(_, t)| tex(t));
             let mat = if o.kind == Kind::Mesh {
-                conversions += 1;
                 let mut normal_map = map_of("normalMap");
                 if normal_map.is_none()
                     && let Some(b) = map_of("bumpMap")
@@ -416,11 +450,26 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
                         unreachable!()
                     };
                     normal_map = Some(Tex {
-                        source: TexSource::Bump(f, p.bump_scale.to_bits(), conversions),
+                        source: TexSource::Bump(f, p.bump_scale.to_bits()),
                         wrap: CLAMP,
                         repeat: [1.0, 1.0],
                         offset: [0.0, 0.0],
                     });
+                }
+                let mut base_map = map_of("map");
+                if let Some(mut opacity) = map_of("alphaMap") {
+                    let TexSource::File(alpha) = opacity.source else {
+                        unreachable!()
+                    };
+                    if let Some(base) = &mut base_map {
+                        let TexSource::File(color) = base.source else {
+                            unreachable!()
+                        };
+                        base.source = TexSource::Opacity(Some(color), alpha);
+                    } else {
+                        opacity.source = TexSource::Opacity(None, alpha);
+                        base_map = Some(opacity);
+                    }
                 }
                 let roughness = js::max(0.02, js::min(1.0, (2.0 / (p.shininess + 2.0)).sqrt()));
                 Mat {
@@ -432,7 +481,7 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
                     double_sided: true,
                     roughness,
                     emissive: p.emissive,
-                    map: map_of("map"),
+                    map: base_map,
                     emissive_map: map_of("emissiveMap"),
                     normal_map,
                 }
@@ -457,49 +506,46 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
             };
             mats.push(mat);
         }
-        let mut attributes = Map::new();
         let positions = items::<3>(&o.vertices);
         let count = positions.len();
-        attributes.insert("POSITION".into(), json!(ex.w.floats(&positions, true)));
-        if !o.normals.is_empty() {
-            let n = export_normals(items::<3>(&o.normals));
-            attributes.insert("NORMAL".into(), json!(ex.w.floats(&n, false)));
-        }
-        if !o.colors.is_empty() {
-            attributes.insert(
-                "COLOR_0".into(),
-                json!(ex.w.floats(&items::<3>(&o.colors), false)),
-            );
-        }
-        if o.has_uv_indices {
-            attributes.insert(
-                "TEXCOORD_0".into(),
-                json!(ex.w.floats(&items::<2>(&o.uvs), false)),
-            );
-        }
+        let normals = export_normals(items::<3>(&o.normals));
+        let colors = items::<3>(&o.colors);
+        let uv = items::<2>(&o.uvs);
         let mode = match o.kind {
             Kind::Mesh => 4,
             Kind::Line => 1,
             Kind::Points => 0,
         };
         let mut primitives = vec![];
-        if multi {
-            let wide = count > 65535;
-            for (mi, u) in o.materials.iter().enumerate() {
-                let start = u.group_start.max(0) as usize;
-                let n = (u.group_count.max(0) as usize).min(count.saturating_sub(start));
-                let mut prim = json!({ "mode": mode, "attributes": attributes.clone() });
-                if n > 0 {
-                    let idx: Vec<u32> = (start..start + n).map(|i| i as u32).collect();
-                    prim["indices"] = json!(ex.w.indices_as(&idx, wide));
-                }
-                prim["material"] = json!(ex.material(&mats[mi]));
-                primitives.push(prim);
+        for (mi, group) in o.materials.iter().enumerate() {
+            let start = if multi {
+                group.group_start.max(0) as usize
+            } else {
+                0
+            };
+            let n = if multi {
+                (group.group_count.max(0) as usize).min(count.saturating_sub(start))
+            } else {
+                count
+            };
+            if n == 0 {
+                continue;
             }
-        } else {
-            let mut prim = json!({ "mode": mode, "attributes": attributes });
-            prim["material"] = json!(ex.material(&mats[0]));
-            primitives.push(prim);
+            let range = start..start + n;
+            let mut attributes = json!({"POSITION": ex.w.floats(&positions[range.clone()], true)});
+            if !normals.is_empty() {
+                attributes["NORMAL"] = json!(ex.w.floats(&normals[range.clone()], false));
+            }
+            if !colors.is_empty() {
+                attributes["COLOR_0"] = json!(ex.w.floats(&colors[range.clone()], false));
+            }
+            if o.has_uv_indices {
+                attributes["TEXCOORD_0"] = json!(ex.w.floats(&uv[range], false));
+            }
+            primitives.push(json!({"mode": mode, "attributes": attributes, "material": ex.material(&mats[mi])?}));
+        }
+        if primitives.is_empty() {
+            continue;
         }
         meshes.push(json!({ "primitives": primitives }));
         let mut node = Map::new();
@@ -543,6 +589,9 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
         );
     }
     let bytes = ex.w.finish(doc);
+    if bytes.len() > MAX_TOTAL {
+        return err("Converted OBJ exceeds 512 MB");
+    }
     let name = files[model].name.clone();
     let stem = &name[..name.len() - 4];
     Ok(Prepared::Glb {
@@ -685,8 +734,8 @@ mod tests {
         let img = image::load_from_memory(&model.images[0].bytes)
             .unwrap()
             .to_rgba8();
-        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 255, 255]);
-        assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
+        assert!(img.get_pixel(0, 0)[2] > 245 && img.get_pixel(0, 0)[0] < 10);
+        assert!(img.get_pixel(0, 1)[0] > 245 && img.get_pixel(0, 1)[2] < 10);
     }
 
     #[test]

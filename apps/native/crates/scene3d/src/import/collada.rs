@@ -1,5 +1,7 @@
 use super::{
-    mesh::{self, MAX_FACE_VERTICES, MAX_VERTICES, Mesh, Scene, number},
+    ResolveCompanion,
+    mesh::{self, Alpha, MAX_FACE_VERTICES, MAX_VERTICES, Material, Mesh, Sampler, Scene, number},
+    texture,
     xml::{self, child, children, reference},
 };
 use crate::{Error, Result, fail};
@@ -9,7 +11,7 @@ use std::collections::HashMap;
 
 type Nodes<'a, 'input> = HashMap<&'a str, Node<'a, 'input>>;
 
-pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
+pub fn convert(bytes: &[u8], resolve: &mut ResolveCompanion<'_>) -> Result<Vec<u8>> {
     let doc = xml::parse(bytes)?;
     let root = doc.root_element();
     if !root.has_tag_name("COLLADA") {
@@ -44,6 +46,7 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
         .collect();
     let mut importer = Importer {
         ids,
+        resolve,
         scene: Scene::default(),
         meshes: HashMap::new(),
         materials: HashMap::new(),
@@ -83,14 +86,15 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
 
 type Bindings<'input> = Vec<(&'input str, &'input str)>;
 
-struct Importer<'a, 'input> {
+struct Importer<'a, 'input, 'files, 'resolver> {
+    resolve: &'files mut ResolveCompanion<'resolver>,
     scene: Scene,
     ids: Nodes<'a, 'input>,
     meshes: HashMap<(&'a str, Bindings<'a>), usize>,
     materials: HashMap<&'a str, usize>,
 }
 
-impl<'a, 'input> Importer<'a, 'input> {
+impl<'a, 'input> Importer<'a, 'input, '_, '_> {
     fn find(&self, url: Option<&str>, tag: &str) -> Result<Node<'a, 'input>> {
         self.ids
             .get(reference(url)?)
@@ -185,32 +189,161 @@ impl<'a, 'input> Importer<'a, 'input> {
         if let Some(&material) = self.materials.get(key) {
             return Ok(material);
         }
-        let mut color = [1.; 4];
+        let mut pbr = Material::default();
         let mut name = symbol;
         if let Some(target) = target {
             let material = self.find(Some(target), "material")?;
             name = material.attribute("name").unwrap_or(symbol);
             if let Some(effect) = children(material, "instance_effect").next() {
                 let effect = self.find(effect.attribute("url"), "effect")?;
-                if let Some(diffuse) = effect
-                    .descendants()
-                    .find(|n| n.has_tag_name("diffuse"))
-                    .and_then(|n| children(n, "color").next())
+                if let Some(profile) = children(effect, "profile_COMMON").next()
+                    && let Some(shader) = profile.descendants().find(|node| {
+                        matches!(
+                            node.tag_name().name(),
+                            "lambert" | "phong" | "blinn" | "constant"
+                        )
+                    })
                 {
-                    let mut words = diffuse.text().unwrap_or("").split_whitespace();
-                    for channel in &mut color {
-                        let value: f32 = number(words.next())?;
-                        if !value.is_finite() {
-                            return fail("Invalid COLLADA diffuse color");
-                        }
-                        *channel = value.clamp(0., 1.);
+                    let input = |name| children(shader, name).next();
+                    if let Some(diffuse) = input("diffuse") {
+                        parse_color(diffuse, &mut pbr.base_color)?;
                     }
+                    let mut base = self.map(profile, input("diffuse"))?;
+                    if let Some(emission) = input("emission") {
+                        parse_color(emission, &mut pbr.emissive)?;
+                        if let Some(image) = self.map(profile, Some(emission))? {
+                            if children(emission, "color").next().is_none() {
+                                pbr.emissive = [1.; 3];
+                            }
+                            pbr.emissive_map =
+                                Some(self.scene.texture(image, true, Sampler::default())?);
+                        }
+                    }
+                    if let Some(gloss) = input("shininess")
+                        .and_then(|node| children(node, "float").next()?.text())
+                        .and_then(|value| value.trim().parse::<f32>().ok())
+                        .filter(|value| value.is_finite() && *value >= 0.)
+                    {
+                        pbr.roughness = (2. / (gloss + 2.)).sqrt().clamp(0.02, 1.);
+                    }
+                    if let Some(mut image) = self.map(profile, input("specular"))? {
+                        for pixel in image.pixels_mut() {
+                            // Approximate a legacy gloss/specular map as roughness.
+                            pixel[0] = 255 - pixel[0];
+                        }
+                        let image = texture::metallic_roughness(Some(image), None).unwrap();
+                        pbr.metallic_roughness_map =
+                            Some(self.scene.texture(image, false, Sampler::default())?);
+                    }
+                    if let Some(normal) = profile.descendants().find(|node| {
+                        matches!(node.tag_name().name(), "normal" | "bump")
+                            && children(*node, "texture").next().is_some()
+                    }) && let Some(image) = self.map(profile, Some(normal))?
+                    {
+                        let image = if normal.has_tag_name("bump") {
+                            super::obj::bump_normals(&image, 1.)
+                        } else {
+                            image
+                        };
+                        pbr.normal_map =
+                            Some(self.scene.texture(image, false, Sampler::default())?);
+                    }
+                    if let Some(transparent) = input("transparent") {
+                        let factor = input("transparency")
+                            .and_then(|node| children(node, "float").next()?.text())
+                            .and_then(|value| value.trim().parse::<f32>().ok())
+                            .filter(|value| value.is_finite())
+                            .unwrap_or(1.)
+                            .clamp(0., 1.);
+                        let mode = transparent.attribute("opaque").unwrap_or("A_ONE");
+                        let opacity = |rgba: [f32; 4]| {
+                            let value = if mode.starts_with("RGB") {
+                                0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
+                            } else {
+                                rgba[3]
+                            };
+                            if mode.ends_with("ZERO") {
+                                1. - value * factor
+                            } else {
+                                value * factor
+                            }
+                        };
+                        if let Some(mut image) = self.map(profile, Some(transparent))? {
+                            for pixel in image.pixels_mut() {
+                                pixel[0] =
+                                    (opacity(pixel.0.map(|channel| f32::from(channel) / 255.))
+                                        * 255.)
+                                        .round() as u8;
+                            }
+                            base = Some(texture::with_opacity(base, image));
+                        } else {
+                            let mut color = [1.; 4];
+                            parse_color(transparent, &mut color)?;
+                            pbr.base_color[3] *= opacity(color);
+                        }
+                    }
+                    if let Some(image) = base {
+                        if image.pixels().any(|p| p[3] < 255) {
+                            pbr.alpha = Alpha::Blend;
+                        }
+                        pbr.base_map = Some(self.scene.texture(image, true, Sampler::default())?);
+                    }
+                    pbr.double_sided = effect.descendants().any(|node| {
+                        node.has_tag_name("double_sided")
+                            && node
+                                .text()
+                                .is_some_and(|v| matches!(v.trim(), "1" | "true"))
+                    });
                 }
             }
         }
-        let index = self.scene.material(name, color);
+        if pbr.base_color[3] < 1. {
+            pbr.alpha = Alpha::Blend;
+        }
+        let index = self.scene.pbr_material(name, pbr);
         self.materials.insert(key, index);
         Ok(index)
+    }
+
+    fn map(
+        &mut self,
+        profile: Node<'a, 'input>,
+        input: Option<Node<'a, 'input>>,
+    ) -> Result<Option<image::RgbaImage>> {
+        let Some(id) =
+            input.and_then(|node| children(node, "texture").next()?.attribute("texture"))
+        else {
+            return Ok(None);
+        };
+        let param = |sid| children(profile, "newparam").find(|n| n.attribute("sid") == Some(sid));
+        let id = param(id)
+            .and_then(|sampler| {
+                let source = sampler
+                    .descendants()
+                    .find(|node| node.has_tag_name("source"))?
+                    .text()?
+                    .trim();
+                children(param(source)?, "surface")
+                    .next()
+                    .and_then(|surface| children(surface, "init_from").next()?.text())
+                    .map(str::trim)
+            })
+            .unwrap_or(id);
+        let Some(uri) = self
+            .ids
+            .get(id.strip_prefix('#').unwrap_or(id))
+            .filter(|node| node.has_tag_name("image"))
+            .and_then(|image| children(*image, "init_from").next())
+            .and_then(|node| {
+                children(node, "ref")
+                    .next()
+                    .and_then(|n| n.text())
+                    .or_else(|| node.text())
+            })
+        else {
+            return Ok(None);
+        };
+        texture::resolve(uri.trim(), self.resolve)
     }
 
     fn primitive(
@@ -349,7 +482,7 @@ struct Source {
     count: usize,
 }
 impl Source {
-    fn read(node: Node<'_, '_>, importer: &Importer<'_, '_>) -> Result<Self> {
+    fn read(node: Node<'_, '_>, importer: &Importer<'_, '_, '_, '_>) -> Result<Self> {
         let accessor = child(child(node, "technique_common")?, "accessor")?;
         let array = importer.find(accessor.attribute("source"), "float_array")?;
         let data = array
@@ -427,4 +560,18 @@ fn transform(node: Node<'_, '_>) -> Result<Mat4> {
         return fail("Invalid COLLADA transform");
     }
     Ok(matrix)
+}
+
+fn parse_color<const N: usize>(node: Node<'_, '_>, channels: &mut [f32; N]) -> Result<()> {
+    if let Some(color) = children(node, "color").next() {
+        let mut words = color.text().unwrap_or("").split_whitespace();
+        for channel in channels {
+            let value: f32 = number(words.next())?;
+            if !value.is_finite() {
+                return fail("Invalid COLLADA material color");
+            }
+            *channel = value.clamp(0., 1.);
+        }
+    }
+    Ok(())
 }
