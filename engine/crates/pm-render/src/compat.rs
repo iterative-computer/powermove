@@ -81,6 +81,9 @@ pub enum CompatAnswer {
     Failed(String),
 }
 
+mod lookahead;
+pub use lookahead::{AheadNeed, Lookahead, Step};
+
 /// The compatibility rasters of one session (the interactive engine's
 /// store, the job engine's host answers).
 pub trait CompatRasters: Send + Sync {
@@ -99,6 +102,28 @@ pub trait CompatRasters: Send + Sync {
         source: CompatSource,
         crop: Option<pm_protocol::common::PixelRect>,
     ) -> CompatAnswer;
+    /// [`Self::answer`] while a frame ahead is probed
+    /// (`Renderer::compat_missing`): what the producer already answered,
+    /// `Missing` otherwise. A producer that waits for its answers records
+    /// the need for [`Self::ask_ahead`] instead of asking.
+    fn answer_probed(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: CompatSource,
+        crop: Option<pm_protocol::common::PixelRect>,
+    ) -> CompatAnswer {
+        self.answer(composition, layer, time, scale, source, crop)
+    }
+    /// The probe met a layer whose answer can change what the frame asks
+    /// next (a track matte's consumer): that frame must be asked serially.
+    fn probe_unsafe(&self) {}
+    /// Asks the producer, in one batch and without waiting, for what the
+    /// probe since the last call recorded ([`Lookahead`]): the frame then
+    /// finds its answers in `answer`.
+    fn ask_ahead(&self) {}
 }
 
 /// The protocol's time of a composition time in seconds (1/705,600,000 s;

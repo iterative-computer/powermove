@@ -2246,6 +2246,14 @@ impl Renderer {
         Ok(build.compat_missing)
     }
 
+    /// Asks the session's producers for what [`Self::compat_missing`] probed
+    /// since the last call, without waiting (`CompatRasters::ask_ahead`).
+    pub fn compat_ask_ahead(&self) {
+        if let Some(compat) = &self.compat {
+            compat.ask_ahead();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_into_once(
         &mut self,

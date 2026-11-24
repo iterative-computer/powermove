@@ -342,6 +342,10 @@ pub struct Build<'r> {
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     pub compat_missing: Vec<crate::compat::CompatNeed>,
     compat_probe_only: bool,
+    /// The whole build is a probe (`compat_probe_only` as asked, which a
+    /// matte's visit turns off for a moment): answers come from
+    /// `CompatRasters::answer_probed`.
+    compat_probing: bool,
     /// See [`BuildOptions::offline_cards`].
     offline_cards: bool,
     /// [`BuildOptions::preview`].
@@ -633,6 +637,7 @@ pub(crate) fn build_reusing<'r>(
         compat,
         compat_missing: Vec::new(),
         compat_probe_only: options.compat_probe_only,
+        compat_probing: options.compat_probe_only,
         preview: options.preview,
         offline_cards: options.offline_cards,
         reuse,
@@ -1101,6 +1106,14 @@ fn draw_layer<'d>(
     all: &[&'d Node],
     mut text_run: Option<&mut TextDrawRun>,
 ) -> JsResult<Option<Vec<Draw>>> {
+    // A matte is planned from its consumer, after layers its consumer's
+    // answer decides on: a frame with one is asked serially.
+    if b.compat_probing
+        && js::flag(layer, "matteSource")
+        && let Some(compat) = b.compat
+    {
+        compat.probe_unsafe();
+    }
     // Whether the matte is visited depends on its consumer producing
     // content, including an empty boundary group's elision.
     if b.compat_probe_only && js::flag(layer, "matteSource") {
@@ -2589,14 +2602,26 @@ fn compat_quad<'d>(
     };
     let comp_id = scope.comp.id().to_string_lossy();
     let id = js::layer_id(layer);
-    match compat.answer(
-        &comp_id,
-        &id,
-        time,
-        raster_scale,
-        CompatSource::RasterOverride,
-        crop,
-    ) {
+    let answer = if b.compat_probing {
+        compat.answer_probed(
+            &comp_id,
+            &id,
+            time,
+            raster_scale,
+            CompatSource::RasterOverride,
+            crop,
+        )
+    } else {
+        compat.answer(
+            &comp_id,
+            &id,
+            time,
+            raster_scale,
+            CompatSource::RasterOverride,
+            crop,
+        )
+    };
+    match answer {
         CompatAnswer::Native => {
             *measured = text;
             Ok(None)
