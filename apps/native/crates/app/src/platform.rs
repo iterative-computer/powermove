@@ -430,13 +430,31 @@ pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
 
 /// Whether Paste can handle the system clipboard without reading image bytes.
 pub fn has_pasteboard_content() -> bool {
+    // Asked for the menus on every frame the window draws. The answer
+    // resolves type conformance through LaunchServices; it changes only
+    // when the pasteboard does, which bumps its change count.
+    thread_local! {
+        static KNOWN: std::cell::RefCell<Option<(Retained<NSPasteboard>, isize, bool)>> =
+            const { std::cell::RefCell::new(None) };
+    }
     let board = paste_board();
+    let count = board.changeCount();
+    if let Some(known) = KNOWN.with(|k| {
+        k.borrow()
+            .as_ref()
+            .filter(|(b, c, _)| Retained::as_ptr(b) == Retained::as_ptr(&board) && *c == count)
+            .map(|(_, _, has)| *has)
+    }) {
+        return known;
+    }
     let types = objc2_foundation::NSArray::from_slice(&unsafe {
         [NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF]
     });
-    board.availableTypeFromArray(&types).is_some()
+    let has = board.availableTypeFromArray(&types).is_some()
         || board.stringForType(unsafe { NSPasteboardTypeHTML })
-            .is_some_and(|html| html.to_string().contains("(figma)"))
+            .is_some_and(|html| html.to_string().contains("(figma)"));
+    KNOWN.with(|k| *k.borrow_mut() = Some((board, count, has)));
+    has
 }
 
 /// The pasteboard's HTML and PNG, for Figma paste. Main thread: the
