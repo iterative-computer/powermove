@@ -343,21 +343,10 @@ struct Broker {
     parked: Mutex<std::collections::BTreeSet<String>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
     overlays_cleared: Mutex<Vec<String>>,
-    /// Each panel's backend, reachable without its entry: a panel's worker
-    /// holds the entry for a whole host call, and main never waits on it.
-    backends: Mutex<BTreeMap<String, Arc<Mutex<Backend>>>>,
-    /// The Project panel's selection and drag as of its latest host call:
-    /// what main reads, never the live backend its worker holds.
-    project_view: Mutex<ProjectView>,
-    /// The Export sheet's checks, drained by main on every wake.
+    /// The Export sheet's checks, drained by main on every wake without the
+    /// panel's entry or backend, which its V8 worker holds for whole host
+    /// calls (PM-699).
     export_probe: Mutex<Option<Arc<Mutex<models::Probe>>>>,
-}
-/// What main reads of the Project panel (`Broker::project_view`).
-#[derive(Default)]
-struct ProjectView {
-    selected_assets: Vec<String>,
-    selected_item: Option<pm_panel_media::ItemId>,
-    drag: Option<pm_panel_media::Drag>,
 }
 /// v1's inspector-service effect clipboard for one window: `copy` takes the
 /// effects selected in its Effect Controls, `paste` adds the clipboard's
@@ -1187,24 +1176,33 @@ impl Builtins {
     }
     /// The Project panel's selected assets, in its order.
     pub fn project_selection(&self) -> Vec<String> {
-        self.broker.project_view.shared().selected_assets.clone()
+        self.backend(PROJECT_PANEL)
+            .ok()
+            .map(|b| b.shared().native.project.panel.selected_assets().to_vec())
+            .unwrap_or_default()
     }
     /// Selected Project items for the explicit timeline commands.
     pub fn project_timeline_items(&self, compositions: bool) -> (Vec<String>, Vec<String>) {
-        let view = self.broker.project_view.shared();
+        let Ok(backend) = self.backend(PROJECT_PANEL) else {
+            return Default::default();
+        };
+        let backend = backend.shared();
+        let panel = &backend.native.project.panel;
         if compositions {
-            match &view.selected_item {
+            match panel.selected_item() {
                 Some(pm_panel_media::ItemId::Composition(id)) => (vec![], vec![id.clone()]),
                 _ => Default::default(),
             }
         } else {
-            (view.selected_assets.clone(), vec![])
+            (panel.selected_assets().to_vec(), vec![])
         }
     }
     /// What the Project panel is dragging (its `dragstart`): the items the
     /// timeline or the viewer places when it is dropped there.
     pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {
-        self.broker.project_view.shared().drag.clone()
+        let backend = self.backend(PROJECT_PANEL).ok()?;
+        let backend = backend.shared();
+        backend.native.project.panel.drag.clone()
     }
     pub fn project_id(&self) -> &str {
         &self.broker.project
@@ -1435,8 +1433,6 @@ impl Builtins {
             commands: Default::default(),
             themes: Default::default(),
             overlays_cleared: Default::default(),
-            backends: Default::default(),
-            project_view: Default::default(),
             export_probe: Default::default(),
             parked: Default::default(),
             theme_request: Default::default(),
@@ -1612,7 +1608,9 @@ impl Builtins {
         }
         self.broker.forget_effects(panel);
         self.broker.entries.shared().remove(panel);
-        self.broker.backends.shared().remove(panel);
+        if panel == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
         self.broker.publications.shared().remove(panel);
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
@@ -1720,7 +1718,9 @@ impl Builtins {
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.forget_effects(id);
         self.broker.entries.shared().remove(id);
-        self.broker.backends.shared().remove(id);
+        if id == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
@@ -2626,10 +2626,8 @@ impl Builtins {
     }
     fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
         self.broker
-            .backends
-            .shared()
-            .get(panel)
-            .cloned()
+            .entry(panel)
+            .map(|e| e.shared().backend.clone())
             .ok_or(Error::Closed)
     }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
@@ -2732,8 +2730,19 @@ impl Broker {
         (self.wake)();
     }
 }
-impl Broker {
-    fn host_call(
+impl EngineProxy for Broker {
+    /// Request queues and surface staging are bounded here (256 host,
+    /// 128 platform, and the existing surface byte limit), so a
+    /// built-in panel awaiting one reply per property row stays within its
+    /// task quota. Extensions mounted through this broker stay metered.
+    fn metered(&self, generation: &Generation, operation: &str) -> bool {
+        let queue = matches!(
+            operation,
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll" | "surface.chunk"
+        );
+        !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
+    }
+    fn call(
         &self,
         generation: &Generation,
         operation: &str,
@@ -2782,7 +2791,6 @@ impl Broker {
                     .map_err(Error::Host)?,
             )
             .map_err(Error::Host)?;
-            self.backends.shared().insert(panel.into(), backend.clone());
             if panel == "export" {
                 *self.export_probe.shared() = Some(backend.shared().native.export_probe.clone());
             }
@@ -3292,51 +3300,6 @@ impl Broker {
             }
             _ => Err(Error::Invalid("unknown built-in host operation")),
         }
-    }
-    /// After each host call of the Project panel, on its worker: what main
-    /// reads of its selection and drag (`project_selection`, `project_drag`).
-    fn refresh_project_view(&self) {
-        let Some(backend) = self.backends.shared().get(PROJECT_PANEL).cloned() else {
-            return;
-        };
-        let backend = backend.shared();
-        let panel = &backend.native.project.panel;
-        let view = ProjectView {
-            selected_assets: panel.selected_assets().to_vec(),
-            selected_item: panel.selected_item().cloned(),
-            drag: panel.drag.clone(),
-        };
-        drop(backend);
-        *self.project_view.shared() = view;
-    }
-}
-impl EngineProxy for Broker {
-    /// Request queues and surface staging are bounded here (256 host,
-    /// 128 platform, and the existing surface byte limit), so a
-    /// built-in panel awaiting one reply per property row stays within its
-    /// task quota. Extensions mounted through this broker stay metered.
-    fn metered(&self, generation: &Generation, operation: &str) -> bool {
-        let queue = matches!(
-            operation,
-            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll" | "surface.chunk"
-        );
-        !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
-    }
-    fn call(
-        &self,
-        generation: &Generation,
-        operation: &str,
-        input: &Value,
-        budget: HostBudget,
-    ) -> Result<Value> {
-        let out = self.host_call(generation, operation, input, budget);
-        if self
-            .panel(generation)
-            .is_ok_and(|panel| panel == PROJECT_PANEL)
-        {
-            self.refresh_project_view();
-        }
-        out
     }
 }
 /// Normalize owned panel requests to the existing asynchronous AppKit routes.
