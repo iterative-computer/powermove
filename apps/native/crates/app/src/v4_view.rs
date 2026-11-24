@@ -5971,7 +5971,7 @@ impl SurfaceView {
                 let side = px(t.metrics.field - 2. * t.space.xs);
                 let mut chip = div()
                     .size(side)
-                    .rounded(px(t.radius.xs))
+                    .rounded(px((t.metrics.inner_radius - t.space.xs).max(t.space.hair)))
                     .shadow(vec![BoxShadow {
                         color: pm_shell::kit::ink(*keyline, 1.).into(),
                         offset: point(px(0.), px(0.)),
@@ -6143,13 +6143,15 @@ impl SurfaceView {
             .as_ref()
             .and_then(|key| crate::media_thumbs::resolve(key))
         {
-            element = element.child(img(path).absolute().inset_0().size_full().object_fit(
+            let mut picture = img(path).absolute().inset_0().size_full().object_fit(
                 if node.contain {
                     ObjectFit::Contain
                 } else {
                     ObjectFit::Cover
                 },
-            ));
+            );
+            picture.style().corner_radii = node.style.corner_radii.clone();
+            element = element.child(picture);
         }
         if let Some(text) = &node.text {
             if node.component == Some(Component::PopUpButton) {

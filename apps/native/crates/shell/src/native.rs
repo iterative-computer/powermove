@@ -7717,7 +7717,7 @@ fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
     if surface == Surface::Palette {
         PopupShape {
             radius: spotlight::RADIUS,
-            inset: 8.,
+            inset: spotlight::ROW_INSET,
             row: 34.,
             heading: 28.,
         }
@@ -7730,6 +7730,16 @@ fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
         }
     }
 }
+#[test]
+fn palette_rows_are_concentric_with_the_palette() {
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let shape = popup_shape(&t, Surface::Palette);
+    assert_eq!(
+        spotlight::ROW_RADIUS,
+        t.radius.nested(shape.radius, shape.inset)
+    );
+}
+
 fn rounded_popup_layer(view: &NSView, radius: f64) -> Retained<objc2_quartz_core::CALayer> {
     view.setWantsLayer(true);
     let layer = view.layer().expect("layer-backed popup view");
@@ -8145,7 +8155,7 @@ impl Popup {
         glider.setBorderWidth(0.);
         let shape = popup_shape(t, surface);
         glider.setCornerRadius(if surface == Surface::Palette {
-            spotlight::ROW_RADIUS
+            f64::from(spotlight::ROW_RADIUS)
         } else {
             t.radius.nested(shape.radius, shape.inset) as f64
         });

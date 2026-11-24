@@ -1556,26 +1556,79 @@ mod admission_tests {
 #[cfg(test)]
 mod scoped_tests {
     use super::*;
-    use crate::composer::Attachment;
+    use crate::{composer::Attachment, model::EffectKind};
     use pm_agents::persistence::Store;
     use std::{collections::BTreeMap, io};
     #[derive(Default)]
-    struct Memory(BTreeMap<String, Value>);
+    struct Memory {
+        records: BTreeMap<String, Value>,
+        lazy_history: bool,
+    }
     impl Store for Memory {
         fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
-            Ok(self.0.get(key).cloned())
+            Ok(self.records.get(key).cloned())
         }
         fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
-            self.0.insert(key.into(), value.clone());
+            self.records.insert(key.into(), value.clone());
             Ok(())
         }
+        fn lazy_history_attachments(&self) -> bool {
+            self.lazy_history
+        }
     }
+    #[test]
+    fn region_picks_open_in_the_draft_sent_history_and_restored_history() {
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let capture = json!({
+            "id":"region","name":"Viewer · 0:03.43","type":"image/png","screenPick":true,
+            "dataUrl":"data:image/png;base64,iVBORw0KGgo=",
+        });
+        panel
+            .add_attachments(
+                "t",
+                vec![Attachment::from_record(capture.clone()).unwrap()],
+                0,
+            )
+            .unwrap();
+
+        let open = |panel: &mut Panel| {
+            let EffectKind::OpenAttachment {
+                attachment,
+                preview: true,
+                restore_focus,
+            } = panel.open_attachment("t", "region").unwrap().kind
+            else {
+                panic!("expected a region preview");
+            };
+            assert_eq!(restore_focus, "region");
+            attachment
+        };
+        assert_eq!(open(&mut panel), capture);
+        panel.submit("t", "run", "request", 1).unwrap();
+        assert!(
+            panel.session("t").unwrap().draft.attachment("region").is_none()
+        );
+        let sent = open(&mut panel);
+        assert_eq!(sent["dataUrl"], capture["dataUrl"]);
+        assert_eq!(sent["screenPick"], true);
+
+        panel.save(&mut store, 2).unwrap();
+        store.lazy_history = true;
+        let mut restored = Panel::load(&mut store, "p", "unused", 3).unwrap();
+        let mut archived = open(&mut restored);
+        assert_eq!(archived["payloadStored"], true);
+        assert!(archived.get("dataUrl").is_none());
+        pm_agents::persistence::hydrate_attachment(&mut store, &mut archived).unwrap();
+        assert_eq!(archived["dataUrl"], capture["dataUrl"]);
+    }
+
     #[test]
     fn scoped_archive_disclosures_are_independent_and_ambiguous_effect_targets_are_refused() {
         let mut store = Memory::default();
         let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
         panel.save(&mut store, 0).unwrap();
-        store.0.get_mut("agentThreads.p").unwrap()["threads"][0]["conversation"] = json!([{"role":"trace","steps":[{"id":"duplicate","kind":"tool"},{"id":"duplicate","kind":"tool"}]}]);
+        store.records.get_mut("agentThreads.p").unwrap()["threads"][0]["conversation"] = json!([{"role":"trace","steps":[{"id":"duplicate","kind":"tool"},{"id":"duplicate","kind":"tool"}]}]);
         let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
         let window = Window::new(&panel, "t").unwrap();
         let before = window.snapshot(&panel, 0..2, 0).unwrap();

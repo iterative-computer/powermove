@@ -326,7 +326,9 @@ impl Recipe {
                 NumberField | TextField | SecureField | SegmentedControl | PopUpButton
                 | ColourWell => Some(t.metrics.control_radius),
                 // Selection shape of a row (panels/README.md §3 Selected).
-                ListItem | TreeItem => Some(t.metrics.control_radius),
+                ListItem | TreeItem => {
+                    Some(t.radius.nested(t.metrics.panel_radius, t.metrics.gap))
+                }
                 _ => None,
             },
             track_padding: (kind == SegmentedControl)

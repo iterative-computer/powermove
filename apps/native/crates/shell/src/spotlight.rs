@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 pub(super) const WIDTH: f32 = 540.;
 pub(super) const RADIUS: f32 = 20.;
-pub(super) const ROW_RADIUS: f64 = 10.;
+pub(super) const ROW_INSET: f32 = 8.;
+pub(super) const ROW_RADIUS: f32 = RADIUS - ROW_INSET;
 pub(super) const HEADER: f64 = 52.;
 pub(super) const FOOTER: f64 = 32.;
 pub(super) const QUICK_PICKS: usize = 9;
@@ -564,7 +565,7 @@ impl Badge {
         label.setAlignment(NSTextAlignment::Center);
         // A layer on the row translates with the digit and has the same hit target as the row.
         label.setWantsLayer(true);
-        label.layer().unwrap().setCornerRadius(6.);
+        label.layer().unwrap().setCornerRadius(t.radius.sm.into());
         label.setHidden(true);
         list.addSubview_positioned_relativeTo(&label, NSWindowOrderingMode::Below, Some(below));
         Self { label, lit: None }

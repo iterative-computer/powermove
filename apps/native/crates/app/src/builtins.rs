@@ -2981,7 +2981,7 @@ impl Controller {
                             .spawn(async move { crate::media::attachment_preview_path(&record) })
                             .await;
                         let _ = this.update(cx, |v, cx| match file {
-                            Ok(path) => crate::quick_look::toggle(vec![(path, name)]),
+                            Ok(path) => crate::quick_look::show(vec![(path, name)]),
                             Err(message) => {
                                 v.errors.borrow_mut().tell("Agent", &message);
                                 cx.notify();

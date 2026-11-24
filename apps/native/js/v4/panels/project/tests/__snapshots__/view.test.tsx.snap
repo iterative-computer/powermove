@@ -1189,7 +1189,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.media_small_radius",
+                                  "token": "radius.xs",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -2504,7 +2504,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.media_small_radius",
+                                  "token": "radius.xs",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -3819,7 +3819,7 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.media_small_radius",
+                                  "token": "radius.xs",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -9332,6 +9332,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                                           "data-pm-component": "toolbar-item",
                                           "label": "Show in Finder",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -9360,6 +9363,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                                           "data-pm-component": "toolbar-item",
                                           "label": "Add Layer from Asset",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -9388,6 +9394,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                                           "data-pm-component": "toolbar-item",
                                           "label": "Delete Media",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -11522,6 +11531,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Add Composition to Timeline",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.muted",
                                             },
@@ -11551,6 +11563,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Delete Composition…",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.muted",
                                             },
@@ -15292,6 +15307,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Show in Finder",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -15321,6 +15339,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Add Layer from Asset",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -15350,6 +15371,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Delete Media",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -17702,6 +17726,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                                           "disabled": true,
                                           "label": "Download from Cloud",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.muted",
                                             },
@@ -17730,6 +17757,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                                           "data-pm-component": "toolbar-item",
                                           "label": "Delete Media",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -27201,6 +27231,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                                           "data-pm-component": "toolbar-item",
                                           "label": "Show in Finder",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -27229,6 +27262,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                                           "data-pm-component": "toolbar-item",
                                           "label": "Add Layer from Asset",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },
@@ -27257,6 +27293,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                                           "data-pm-component": "toolbar-item",
                                           "label": "Delete Media",
                                           "style": {
+                                            "borderRadius": {
+                                              "token": "radius.xs",
+                                            },
                                             "color": {
                                               "token": "colors.selected_text",
                                             },

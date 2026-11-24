@@ -753,7 +753,7 @@ fn compile(
                 .sheet
                 .flex_1()
                 .px(px(t.metrics.gap))
-                .rounded(px(t.metrics.inner_radius))
+                .rounded(px((t.metrics.inner_radius - inset).max(t.radius.xs)))
         } else {
             compiled
                 .sheet

@@ -969,7 +969,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -1043,7 +1043,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -1227,7 +1227,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -1354,7 +1354,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -1575,7 +1575,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -1712,7 +1712,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -2086,7 +2086,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -2637,7 +2637,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -2711,7 +2711,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -2895,7 +2895,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -3025,7 +3025,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -3297,7 +3297,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -3434,7 +3434,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -3808,7 +3808,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -4359,7 +4359,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -4433,7 +4433,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -4617,7 +4617,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -4747,7 +4747,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
             "token": "colors.hover",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -5019,7 +5019,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -5156,7 +5156,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -5530,7 +5530,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -6081,7 +6081,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -6155,7 +6155,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -6339,7 +6339,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -6466,7 +6466,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -6738,7 +6738,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -6875,7 +6875,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -7249,7 +7249,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -7797,7 +7797,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -7871,7 +7871,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -8055,7 +8055,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -8185,7 +8185,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -8457,7 +8457,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -8594,7 +8594,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -8968,7 +8968,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -9376,7 +9376,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -9558,7 +9558,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -9679,7 +9679,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -10119,7 +10119,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -10657,7 +10657,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -10731,7 +10731,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -10915,7 +10915,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -11042,7 +11042,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -11263,7 +11263,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -11400,7 +11400,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -11774,7 +11774,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -12312,7 +12312,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -12386,7 +12386,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -12570,7 +12570,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -12697,7 +12697,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -12918,7 +12918,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -13055,7 +13055,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -13429,7 +13429,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -13980,7 +13980,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -14054,7 +14054,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -14238,7 +14238,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -14365,7 +14365,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -14586,7 +14586,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -14726,7 +14726,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -15151,7 +15151,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -15461,7 +15461,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -15535,7 +15535,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -15906,7 +15906,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -16239,7 +16239,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -16313,7 +16313,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -16390,7 +16390,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -16760,7 +16760,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -17157,7 +17157,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -17231,7 +17231,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -17434,7 +17434,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -17874,7 +17874,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -18370,7 +18370,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -18444,7 +18444,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -18518,7 +18518,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -18722,7 +18722,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -18965,7 +18965,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -19348,7 +19348,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -19803,7 +19803,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -19877,7 +19877,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -20060,7 +20060,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -20165,7 +20165,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -20327,7 +20327,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -20711,7 +20711,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -21119,7 +21119,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -21301,7 +21301,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "role": "treeitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -21429,7 +21429,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -21877,7 +21877,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -22656,7 +22656,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "role": "listitem",
         "style": {
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.secondary",
@@ -22864,7 +22864,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -23107,7 +23107,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -23325,7 +23325,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -23533,7 +23533,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -23771,7 +23771,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -24067,7 +24067,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "style": {
           "alignItems": "center",
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",
@@ -24321,7 +24321,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
             "token": "colors.selected_fill",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.text",

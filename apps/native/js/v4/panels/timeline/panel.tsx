@@ -256,7 +256,7 @@ function CompositionTab({
             paddingRight: t("metrics.border"),
             symbolSize: t("metrics.symbol_inline"),
             color: t("colors.muted"),
-            borderRadius: t("metrics.inner_radius"),
+            borderRadius: t("radius.xs"),
           }}
           onPointerDown={(event) => {
             event.stopPropagation();

@@ -1473,6 +1473,8 @@ impl StoreWindow {
         let Face { seed, name, line } = face;
         let (from, to) = art(seed);
         let anchors = self.art_anchors.clone();
+        let tile_radius = t.radius.md + t.space.hair;
+        let art_inset = (TILE - ART) / 2.;
         let art_id = id.to_owned();
         // v1's 75 ms interaction response, on a critically damped spring.
         let interaction = SpringConfig::new(14_400., 240., 1.);
@@ -1498,12 +1500,12 @@ impl StoreWindow {
                 .flex()
                 .items_center()
                 .justify_center()
-                .corner(t, t.radius.md + t.space.hair)
+                .corner(t, tile_radius)
                 .bg(rgb(c.floating))
                 .child(
                     div()
                         .size(px(ART))
-                        .corner(t, t.radius.md)
+                        .corner(t, (tile_radius - art_inset).max(t.space.hair))
                         .bg(linear_gradient(
                             135.,
                             linear_color_stop(rgb(from), 0.),

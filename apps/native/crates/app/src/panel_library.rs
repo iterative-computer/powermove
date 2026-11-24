@@ -686,8 +686,8 @@ impl PanelLibrary {
             .child(
                 div()
                     .absolute()
-                    .top(px(8.))
-                    .right(px(8.))
+                    .top(px(t.space.md))
+                    .right(px(t.space.md))
                     .opacity(hover)
                     .flex()
                     .gap(px(4.))
@@ -697,6 +697,7 @@ impl PanelLibrary {
                             "trash",
                             format!("Delete {}", card.title),
                         )
+                        .rounded(px((t.radius.lg - t.space.md).max(t.radius.xs)))
                         .bg(rgb(c.floating))
                         .on_click(cx.listener(move |v, _, _, cx| {
                             cx.stop_propagation();
@@ -797,7 +798,8 @@ impl PanelLibrary {
             })
             .or_else(|| workspace::preset(&card.id).as_ref().map(workspace::layout));
         let names = pm_shell::layout::Panels::new(Vec::new());
-        let mut map = div().size_full().flex().gap(px(4.)).p(px(6.));
+        let map_inset = t.metrics.gap;
+        let mut map = div().size_full().flex().gap(px(t.space.xs)).p(px(map_inset));
         if let Some(layout) = layout {
             for dock in &layout.docks {
                 let mut col = div().h_full().flex().flex_col().gap(px(4.));
@@ -817,7 +819,7 @@ impl PanelLibrary {
                             .items_center()
                             .justify_center()
                             .gap(px(4.))
-                            .rounded(px((t.radius.lg - 6.).max(0.)))
+                            .rounded(px(t.radius.nested(t.radius.lg, map_inset)))
                             .bg(kit::ink(c.text, t.translucency.hover))
                             .child(kit.symbol(
                                 pm_shell::symbol::panel_symbol(id),
@@ -896,8 +898,8 @@ impl PanelLibrary {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(8.))
-                        .right(px(8.))
+                        .top(px(t.space.md))
+                        .right(px(t.space.md))
                         .opacity(if self.focused.as_deref() == Some(&card.id) {
                             1.
                         } else {
@@ -909,6 +911,7 @@ impl PanelLibrary {
                                 "trash",
                                 format!("Delete {}", card.name),
                             )
+                            .rounded(px((t.radius.lg - t.space.md).max(t.radius.xs)))
                             .bg(rgb(c.floating))
                             .on_click(cx.listener(
                                 move |v, _, _, cx| {

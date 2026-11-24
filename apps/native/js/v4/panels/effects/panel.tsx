@@ -126,6 +126,7 @@ export function EffectsPanel({
           <text>Deleted “{model.deletedPresetName}”</text>
           <PushButton
             label="Undo delete preset"
+            style={{ borderRadius: token("radius.xs") }}
             onClick={() => void model.presetAction?.("preset:", "undo")}
           >
             Undo
@@ -195,7 +196,7 @@ export function EffectsPanel({
                     ...hitStyle,
                     height: token("metrics.row"),
                     paddingLeft: token("metrics.gap"),
-                    borderRadius: token("metrics.control_radius"),
+                    borderRadius: token("metrics.inner_radius"),
                     fontSize: token("typography.body"),
                     color: token(on ? "colors.text" : "colors.secondary"),
                     ...(on
@@ -273,7 +274,7 @@ export function EffectsPanel({
                 const focused = focus(row);
                 const style = {
                   ...textStyle,
-                  borderRadius: token("metrics.control_radius"),
+                  borderRadius: token("metrics.inner_radius"),
                   ...(selected
                     ? { background: token("colors.selected_fill") }
                     : hovered

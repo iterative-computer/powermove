@@ -24000,7 +24000,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "style": {
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "radius.xs",
                           },
                           "color": {
                             "token": "colors.muted",
@@ -24120,7 +24120,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "style": {
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "radius.xs",
                           },
                           "color": {
                             "token": "colors.muted",

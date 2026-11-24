@@ -744,21 +744,60 @@ pub fn attachment_preview_path(record: &serde_json::Value) -> Result<std::path::
     if cache.is_none() {
         *cache = Some(tempfile::tempdir().map_err(|_| read_error())?);
     }
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+    let data_url_type = record["dataUrl"]
+        .as_str()
+        .and_then(|url| url.strip_prefix("data:"))
+        .and_then(|url| url.split_once(','))
+        .map(|(header, _)| header);
+    let ext = [record["type"].as_str(), data_url_type]
+        .into_iter()
+        .flatten()
+        .find_map(preview_mime_extension)
+        .or_else(|| {
+            std::path::Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .filter(|ext| {
+                    ext.bytes().all(|c| c.is_ascii_alphanumeric())
+                        && ext.bytes().any(|c| c.is_ascii_alphabetic())
+                })
+        })
+        .or_else(|| image_signature_extension(&bytes))
         .unwrap_or("bin");
-    let path =
-        cache
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("{}.{}", blake3::hash(&bytes).to_hex(), ext));
+    let directory = cache.as_ref().unwrap().path();
+    let path = directory.join(format!("{}.{}", blake3::hash(&bytes).to_hex(), ext));
     if !path.is_file() {
-        std::fs::write(&path, bytes).map_err(|_| read_error())?;
+        use std::io::Write;
+        let mut staged = tempfile::NamedTempFile::new_in(directory).map_err(|_| read_error())?;
+        staged.write_all(&bytes).map_err(|_| read_error())?;
+        staged.persist(&path).map_err(|_| read_error())?;
     }
     Ok(path)
+}
+
+fn preview_mime_extension(mime: &str) -> Option<&'static str> {
+    let mime = mime.split(';').next()?.trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "image/tiff" => Some("tiff"),
+        "image/bmp" => Some("bmp"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "application/json" => Some("json"),
+        other => {
+            let extension = mime_extension(other);
+            (extension != "bin").then_some(extension)
+        }
+    }
+}
+
+fn image_signature_extension(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xff, 0xd8, 0xff, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        _ => None,
+    }
 }
 
 /// The Agent panel's attachment records for chosen files, as main keeps them:
@@ -913,6 +952,57 @@ mod attachment_tests {
             .is_err()
         );
     }
+    #[test]
+    fn attachment_preview_path_uses_media_types_and_signatures() {
+        use base64::Engine;
+        use serde_json::json;
+
+        let png = b"\x89PNG\r\n\x1a\n";
+        let jpeg = b"\xff\xd8\xff\xe0";
+        let base64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for (record, extension, bytes) in [
+            (
+                json!({"name":"Powermove","screenPick":true,"type":"image/png","dataBase64":base64(png)}),
+                "png",
+                png.as_slice(),
+            ),
+            (
+                json!({"name":"Viewer · 0:03.43","screenPick":true,"dataUrl":format!("data:image/png;base64,{}", base64(png))}),
+                "png",
+                png.as_slice(),
+            ),
+            (
+                json!({"name":"Pasted image","type":"application/octet-stream","dataBase64":base64(png)}),
+                "png",
+                png.as_slice(),
+            ),
+            (
+                json!({"name":"Photo.png","type":"image/jpeg","dataBase64":base64(jpeg)}),
+                "jpg",
+                jpeg.as_slice(),
+            ),
+            (
+                json!({"name":"Photo","dataBase64":base64(jpeg)}),
+                "jpg",
+                jpeg.as_slice(),
+            ),
+            (
+                json!({"name":"Output.PDF","type":"application/octet-stream","dataBase64":base64(b"%PDF")}),
+                "PDF",
+                b"%PDF".as_slice(),
+            ),
+            (
+                json!({"name":"Unknown · 0:03.43","dataBase64":base64(b"unknown")}),
+                "bin",
+                b"unknown".as_slice(),
+            ),
+        ] {
+            let path = super::attachment_preview_path(&record).unwrap();
+            assert_eq!(path.extension().unwrap(), extension, "{}", record["name"]);
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
     #[test]
     fn agent_paste_paths_claim_only_whole_existing_supported_files() {
         let dir = tempfile::tempdir().unwrap();

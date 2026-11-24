@@ -964,7 +964,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   ...detail,
                   paddingLeft: token("space.xs"),
                   paddingRight: token("space.xs"),
-                  borderRadius: token("metrics.pill_radius"),
+                  borderRadius: token("radius.xs"),
                   background: token("colors.fill"),
                   fontVariantNumeric: "tabular-nums",
                 }}
