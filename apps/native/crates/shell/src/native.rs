@@ -7730,6 +7730,38 @@ fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
         }
     }
 }
+fn rounded_popup_layer(view: &NSView, radius: f64) -> Retained<objc2_quartz_core::CALayer> {
+    view.setWantsLayer(true);
+    let layer = view.layer().expect("layer-backed popup view");
+    layer.setCornerRadius(radius);
+    layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+    layer.setMasksToBounds(true);
+    layer
+}
+
+fn popup_content_view(
+    mtm: MainThreadMarker,
+    size: NSSize,
+    t: &Tokens,
+    surface: Surface,
+    opacity: f32,
+) -> (Retained<NSView>, Retained<NSView>) {
+    let frame = NSRect::new(NSPoint::ZERO, size);
+    let container = NSView::initWithFrame(NSView::alloc(mtm), frame);
+    let radius = f64::from(popup_shape(t, surface).radius);
+    let layer = rounded_popup_layer(&container, radius);
+    layer.setBackgroundColor(None);
+    layer.setOpacity(opacity);
+
+    // The window clips and fades this container, including the glass backdrop.
+    let material = popup_material(mtm, frame, t, surface);
+    material.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    container.addSubview(&material);
+    (container, contents(&material))
+}
+
 /// The surface of a palette or menu, in the menu's own corner: glass where
 /// the system has it, with the floating colour laid under the rows
 /// (`translucency.glass_menu`). Glass alone takes its value from what is
@@ -7743,12 +7775,22 @@ fn popup_material(
 ) -> Retained<NSView> {
     let view = material(mtm, frame, t, surface);
     let radius = popup_shape(t, surface).radius as f64;
-    if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
+    if let Some(effect) = view.downcast_ref::<NSVisualEffectView>() {
+        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        rounded_popup_layer(effect, radius);
+    } else if let Some(solid) = view.downcast_ref::<NSBox>() {
+        if surface == Surface::Palette {
+            solid.setCornerRadius(0.);
+            solid.setBorderWidth(0.);
+        } else {
+            solid.setCornerRadius(radius);
+        }
+    } else if let Some(glass) = view.downcast_ref::<NSGlassEffectView>() {
         glass.setCornerRadius(radius);
         let under = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::new(NSPoint::ZERO, frame.size));
         under.setBoxType(NSBoxType::Custom);
         under.setBorderWidth(0.);
-        under.setCornerRadius(radius);
+        under.setCornerRadius(0.);
         under.setFillColor(
             &native_color(t.colors.floating)
                 .colorWithAlphaComponent(t.translucency.glass_menu as f64),
@@ -7758,11 +7800,6 @@ fn popup_material(
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         contents(&view).addSubview(&under);
-    } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
-        solid.setCornerRadius(radius);
-        if surface == Surface::Palette {
-            solid.setBorderWidth(0.);
-        }
     }
     view
 }
@@ -8086,13 +8123,8 @@ impl Popup {
         window.setHasShadow(true);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         appearance(&window, t);
-        let mat = popup_material(mtm, frame, t, surface);
-        let body = contents(&mat);
-        window.setContentView(Some(&mat));
-        mat.setWantsLayer(true);
-        if let Some(layer) = mat.layer() {
-            layer.setOpacity(0.);
-        }
+        let (container, body) = popup_content_view(mtm, frame.size, t, surface, 0.);
+        window.setContentView(Some(&container));
         let (search, scroll, list) = popup_controls(
             mtm,
             &body,
@@ -8106,6 +8138,7 @@ impl Popup {
         );
         let chrome = (surface == Surface::Palette)
             .then(|| spotlight::Chrome::new(mtm, &body, t, window.backingScaleFactor().recip()));
+        window.invalidateShadow();
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
         glider.setFillColor(&popup_highlight(t));
@@ -8253,9 +8286,9 @@ impl Popup {
         let t = &self.tokens.clone();
         let surface = self.surface;
         appearance(&self.window, t);
-        let frame = NSRect::new(NSPoint::ZERO, self.window.frame().size);
-        let mat = popup_material(MainThreadMarker::new().unwrap(), frame, t, surface);
-        let body = contents(&mat);
+        let opacity = if self.model.open { 1. } else { 0. };
+        let (container, body) =
+            popup_content_view(self.window.mtm(), self.window.frame().size, t, surface, opacity);
         self.search.removeFromSuperview();
         self.scroll.removeFromSuperview();
         body.addSubview(&self.search);
@@ -8277,7 +8310,8 @@ impl Popup {
             self.color_search_caret();
         }
         self.glider.setFillColor(&popup_highlight(t));
-        self.window.setContentView(Some(&mat));
+        self.window.setContentView(Some(&container));
+        self.window.invalidateShadow();
         self.body = body;
         self.refresh();
     }
@@ -8410,7 +8444,13 @@ impl Popup {
                 NSAnimationContext::beginGrouping();
                 let context = NSAnimationContext::currentContext();
                 context.setDuration(0.15);
-                let ease_out = CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseOut });
+                let window = self.window.clone();
+                context.setCompletionHandler(Some(&block2::RcBlock::new(move || {
+                    window.invalidateShadow();
+                })));
+                let ease_out = CAMediaTimingFunction::functionWithName(unsafe {
+                    kCAMediaTimingFunctionEaseOut
+                });
                 context.setTimingFunction(Some(&ease_out));
                 unsafe {
                     let window: Retained<NSWindow> = msg_send![&*self.window, animator];
@@ -8423,9 +8463,143 @@ impl Popup {
                 NSAnimationContext::endGrouping();
             } else {
                 self.window.setFrame_display(frame, self.model.open);
+                self.window.invalidateShadow();
             }
         }
         self.light(false);
+    }
+}
+
+#[cfg(test)]
+mod popup_corner_tests {
+    use super::*;
+    use objc2_quartz_core::{CALayer, kCACornerCurveContinuous};
+
+    const OFFSCREEN_CHILD: &str = "PM_SHELL_TEST_POPUP_CORNERS";
+
+    #[test]
+    fn popup_corners_are_clipped_offscreen() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(OFFSCREEN_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "offscreen popup check exited with {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // libtest runs tests on worker threads. The child runs the AppKit
+    // assertions on its main thread before libtest starts.
+    #[used]
+    #[unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")]
+    static OFFSCREEN_ENTRY: extern "C" fn() = {
+        extern "C" fn run() {
+            if std::env::var_os(OFFSCREEN_CHILD).is_some() {
+                let outcome = std::panic::catch_unwind(|| objc2::rc::autoreleasepool(|_| check()));
+                std::process::exit(i32::from(outcome.is_err()));
+            }
+        }
+        run
+    };
+
+    fn assert_rounded(layer: &CALayer, radius: f64) {
+        assert_eq!(layer.cornerRadius(), radius);
+        assert!(layer.masksToBounds());
+        assert_eq!(&*layer.cornerCurve(), unsafe { kCACornerCurveContinuous });
+    }
+
+    fn check() {
+        let mtm = MainThreadMarker::new().unwrap();
+        let _app = NSApplication::sharedApplication(mtm);
+        let parent = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, NSSize::new(800., 600.)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { parent.setReleasedWhenClosed(false) };
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let solid = Tokens::new(
+            Scheme::Dark,
+            Accessibility {
+                reduce_transparency: true,
+                ..Accessibility::default()
+            },
+        );
+
+        for (surface, radius) in [
+            (Surface::Palette, f64::from(spotlight::RADIUS)),
+            (Surface::Menu, f64::from(tokens.radius.lg)),
+        ] {
+            let popup = Popup::new(
+                &parent,
+                &tokens,
+                surface,
+                vec![],
+                async_channel::unbounded().0,
+            );
+            let mut popup = popup.borrow_mut();
+            let root = popup.window.contentView().unwrap();
+            assert_eq!(root.class(), NSView::class());
+            assert_rounded(&root.layer().unwrap(), radius);
+            assert_eq!(root.layer().unwrap().opacity(), 0.);
+            let material = root.subviews().firstObject().unwrap();
+            assert_eq!(material.frame(), root.bounds());
+            popup.refresh();
+            root.layoutSubtreeIfNeeded();
+            assert_eq!(material.frame(), root.bounds());
+            assert_eq!(popup.body.frame(), material.bounds());
+            if let Some(effect) = material.downcast_ref::<NSVisualEffectView>() {
+                assert_eq!(
+                    effect.blendingMode(),
+                    NSVisualEffectBlendingMode::BehindWindow,
+                );
+                assert_rounded(&effect.layer().unwrap(), radius);
+            } else {
+                let glass = material.downcast_ref::<NSGlassEffectView>().unwrap();
+                assert_eq!(glass.cornerRadius(), radius);
+                let fill = popup.body.subviews().firstObject().unwrap();
+                assert_eq!(fill.frame(), popup.body.bounds());
+                assert_eq!(fill.downcast_ref::<NSBox>().unwrap().cornerRadius(), 0.);
+            }
+            if surface == Surface::Palette {
+                assert_rounded(&popup.body.layer().unwrap(), radius);
+            }
+
+            popup.tokens = solid.clone();
+            // Exercise restyling at full opacity while the panel stays hidden.
+            popup.model.open = true;
+            popup.restyle();
+            let root = popup.window.contentView().unwrap();
+            assert_eq!(root.class(), NSView::class());
+            assert_rounded(&root.layer().unwrap(), radius);
+            assert_eq!(root.layer().unwrap().opacity(), 1.);
+            assert_eq!(popup.body.frame(), root.bounds());
+            assert!(!popup.window.isVisible());
+            assert!(!popup.window.isOpaque());
+            assert_eq!(popup.window.backgroundColor().alphaComponent(), 0.);
+            assert!(popup.window.hasShadow());
+            if surface == Surface::Palette {
+                assert_rounded(&popup.body.layer().unwrap(), radius);
+                let bounds = root.bounds();
+                let bitmap = root
+                    .bitmapImageRepForCachingDisplayInRect(bounds)
+                    .unwrap();
+                root.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+                let (w, h) = (bitmap.pixelsWide(), bitmap.pixelsHigh());
+                let alpha = |x, y| bitmap.colorAtX_y(x, y).unwrap().alphaComponent();
+                assert_eq!(alpha(w / 2, h / 2), 1.);
+                for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                    assert_eq!(alpha(x, y), 0., "corner pixel ({x}, {y})");
+                }
+            }
+        }
     }
 }
 
@@ -10016,6 +10190,7 @@ impl Popup {
         gpui_macos::child_window::show(&self.window, true);
         self.focus_search();
         animate_as(&self.window, true, true, &self.tokens, &mut self.spring);
+        self.window.invalidateShadow();
         // Development builds: what an open costs (`PM_NATIVE_PALETTE_TRACE`).
         if cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some() {
             eprintln!(

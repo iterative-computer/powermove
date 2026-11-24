@@ -1,5 +1,5 @@
 //! Command palette chrome and reusable result decorations.
-use super::{native_color, popup_label, symbol};
+use super::{native_color, popup_label, rounded_popup_layer, symbol};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, rc::Retained, runtime::AnyObject, sel};
 use objc2_app_kit::*;
 use objc2_foundation::{
@@ -136,19 +136,15 @@ impl Chrome {
             body.addSubview(view);
         }
         // Resize with the material. Its inner border leaves the content flush.
-        body.setWantsLayer(true);
-        if let Some(layer) = body.layer() {
-            layer.setCornerRadius(f64::from(RADIUS));
-            layer.setMasksToBounds(true);
-            layer.setBorderWidth(pixel);
-            let rim = if t.scheme == Scheme::Light {
-                t.colors.separator
-            } else {
-                0xffffff
-            };
-            let rim = native_color(rim).colorWithAlphaComponent(0.16);
-            layer.setBorderColor(Some(&rim.CGColor()));
-        }
+        let layer = rounded_popup_layer(body, f64::from(RADIUS));
+        layer.setBorderWidth(pixel);
+        let rim = if t.scheme == Scheme::Light {
+            t.colors.separator
+        } else {
+            0xffffff
+        };
+        let rim = native_color(rim).colorWithAlphaComponent(0.16);
+        layer.setBorderColor(Some(&rim.CGColor()));
         Self {
             magnifier,
             clear,
