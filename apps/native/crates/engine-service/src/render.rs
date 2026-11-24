@@ -612,8 +612,6 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
-    /// Built-in definitions still to load on the service thread.
-    pub(crate) builtins_pending: bool,
     /// The translated-shader folder, kept for a rebuilt engine.
     pub(crate) shader_cache: Option<std::path::PathBuf>,
     /// Effects the document uses that no installed provider defines; the
@@ -1149,16 +1147,13 @@ impl Engine {
         engine.load_builtin_definitions()?;
         Ok(engine)
     }
-    /// Every built-in effect's definition. On a profile whose shader cache is
-    /// cold this translates each of them (about a second), so the service
-    /// does it on its own thread, never while the app waits to open a window.
+    /// Installs the full built-in catalog for eager engine construction.
     pub fn load_builtin_definitions(&mut self) -> Result<()> {
         self.renderer
             .set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(())
     }
-    /// An engine whose built-in definitions are loaded later
-    /// ([`Self::load_builtin_definitions`]).
+    /// An engine whose first scene supplies its pinned definitions.
     pub(crate) fn without_definitions(
         gpu: Gpu,
         shader_cache: Option<std::path::PathBuf>,
@@ -1300,7 +1295,6 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
-            builtins_pending: false,
             shader_cache: shader_cache.clone(),
             missing_effects: Vec::new(),
             compat: None,
@@ -2117,6 +2111,7 @@ impl Engine {
                 let cpu_start = crate::trace::thread_cpu_ms();
                 let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
                 pm_render::media::note_reads();
+                pm_perf::stall::stall(pm_perf::stall::Stage::Render);
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
