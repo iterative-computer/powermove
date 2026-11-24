@@ -135,6 +135,12 @@ pub struct ChromaPolicy {
 }
 
 impl ChromaPolicy {
+    /// Whether a frame's decimation may plan other frames of the composition
+    /// (an untouched source's run, looked along as the frame is delivered):
+    /// a subsampled Rec.709 output that keeps the source's colour.
+    pub fn scans(&self) -> bool {
+        self.inverse.is_some()
+    }
     /// `grid`: the composition's frames on the export's frame grid (it
     /// holds the export's own `0..frames`); `None` when they are not known,
     /// and every frame is filtered.

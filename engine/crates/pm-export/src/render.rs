@@ -1807,12 +1807,34 @@ where
         // The frame submitted whole whose pixels are still on their way
         // back (`GpuGate::overlaps`), and the readback slots it uses.
         let mut flight: Option<(u64, InFlight<'_>)> = None;
-        // A `frame:rendered` pass or a raster override may carry state from
-        // one frame into the next (an extension's handler, its canvas): such
-        // exports render each frame only after the one before is finished,
-        // as serial frames do.
-        let overlap =
-            gate.overlaps() && frame_post.is_none() && job.settings.delivery.compat.is_empty();
+        // A `frame:rendered` pass may carry state from one frame into the
+        // next (an extension's handler, its canvas, which a raster override
+        // may draw): such exports render each frame only after the one before
+        // is finished, as serial frames do. With raster overrides, frames
+        // overlap only while delivering a frame asks the producer nothing
+        // (the chroma policy plans other frames as it delivers one, asking
+        // their layers): otherwise the next frame would ask its layers first.
+        let overriding = !job.settings.delivery.compat.is_empty();
+        let overlap = gate.overlaps() && frame_post.is_none() && !(overriding && policy.scans());
+        // Raster override layers are asked of the producer a frame ahead, in
+        // one batch, once the frame before has asked for all of its own: the
+        // extensions draw frame n+1 while frame n runs on the GPU and is read
+        // back. What the producer is asked, and in which order, is what
+        // serial frames ask (`pm_render::compat::Lookahead`).
+        let ahead = overlap && overriding;
+        let ask_ahead = |renderer: &mut Renderer, n: u64| {
+            if ahead && n < frames {
+                let _ = renderer.compat_missing(
+                    &document,
+                    &job.composition,
+                    timeline.tick(n),
+                    &request,
+                    &*job.media,
+                );
+                renderer.compat_ask_ahead();
+            }
+        };
+        ask_ahead(renderer, 0);
         let mut ring = pm_gpu::readback::ReadbackRing::default();
         let mut sent = 0u64;
         // Three frames' pixels circulate.
@@ -1940,6 +1962,7 @@ where
                         units,
                         &mut ring,
                     )?;
+                    ask_ahead(renderer, n + 1);
                     return match flight.replace((n, next)) {
                         Some((m, prev)) => {
                             let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
@@ -1970,6 +1993,7 @@ where
                     pixels(sent),
                     Some(units),
                 );
+                ask_ahead(renderer, n + 1);
                 deliver(renderer, n, read).map(Some)
             })();
             render_ns += frame_started.elapsed().as_nanos();
