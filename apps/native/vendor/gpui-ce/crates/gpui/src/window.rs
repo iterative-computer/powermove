@@ -1151,6 +1151,9 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     cursor_styles: Vec<CursorStyleRequest>,
+    /// P-SLOT-REGION: the scrolling regions this frame draws (painted, or in
+    /// a reused view's paint, a replayed scroll layer's included).
+    pub(crate) slot_regions: Vec<usize>,
     #[cfg(any(test, feature = "headless-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1180,6 +1183,7 @@ pub(crate) struct PaintIndex {
     pointer_observers_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
+    slot_regions_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
@@ -1202,6 +1206,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            slot_regions: Vec::new(),
 
             #[cfg(any(test, feature = "headless-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1225,6 +1230,7 @@ impl Frame {
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
+        self.slot_regions.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -4372,6 +4378,7 @@ impl Window {
             pointer_observers_index: self.next_frame.pointer_observers.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
+            slot_regions_index: self.next_frame.slot_regions.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
@@ -4384,6 +4391,10 @@ impl Window {
                 [range.start.pointer_observers_index..range.end.pointer_observers_index]
                 .iter()
                 .cloned(),
+        );
+        self.next_frame.slot_regions.extend_from_slice(
+            &self.rendered_frame.slot_regions
+                [range.start.slot_regions_index..range.end.slot_regions_index],
         );
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles

@@ -406,3 +406,61 @@ fn a_nested_region_keeps_the_clip_of_a_view_between_it_and_its_parent(cx: &mut T
     vcx.run_until_parked();
     assert_eq!(shows(&mut vcx).0, true, "scrolled into the card: shown");
 }
+
+/// PM-696 review: a region exists for a frame only while the frame draws it.
+/// A panel taken out of the window keeps its scroll handle (and its slot's
+/// staging) alive, but its region is no longer published, so a kept slot
+/// cannot show there; put back, the region returns, once, in the window that
+/// draws it.
+struct Shelf {
+    shown: bool,
+    panel: Entity<Panel>,
+}
+impl Render for Shelf {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let shelf = div().size_full();
+        if self.shown {
+            shelf.child(self.panel.clone())
+        } else {
+            shelf
+        }
+    }
+}
+
+#[gpui::test]
+fn a_region_the_frame_no_longer_draws_is_not_published(cx: &mut TestAppContext) {
+    let staged = Rc::new(RefCell::new(Staged::default()));
+    let outer = ScrollHandle::new();
+    let (shelf, vcx) = cx.add_window_view(|_, cx| {
+        let marker = cx.new(|_| Marker(staged.clone()));
+        let panel = cx.new(|_| Panel {
+            shape: Shape::Layer,
+            outer: outer.clone(),
+            inner: ScrollHandle::new(),
+            staged: staged.clone(),
+            marker,
+        });
+        Shelf { shown: true, panel }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    let region = staged.borrow().at.and_then(|(r, _)| r).expect("in a region").id;
+    let published = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, _| window.slot_region_geometry().iter().filter(|r| r.id == region).count())
+    };
+    assert_eq!(published(&mut vcx), 1);
+    // Taken out; the handle and the staging stay alive.
+    shelf.update(&mut vcx, |s, cx| {
+        s.shown = false;
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(published(&mut vcx), 0, "a region no frame draws is not published");
+    // Put back.
+    shelf.update(&mut vcx, |s, cx| {
+        s.shown = true;
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(published(&mut vcx), 1, "back once");
+}

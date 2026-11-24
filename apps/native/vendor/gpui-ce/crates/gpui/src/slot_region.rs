@@ -106,6 +106,7 @@ impl Window {
                 painted: self.scroll_layer_frame,
             },
         );
+        self.next_frame.slot_regions.push(id);
         self.slot_regions_open.push(OpenRegion {
             id,
             content_origin: bounds.origin + offset,
@@ -132,8 +133,12 @@ impl Window {
     pub(crate) fn finish_slot_regions(&mut self) {
         let frame = self.scroll_layer_frame;
         let layers = &self.scroll_layers;
+        // Only the regions this frame draws: a retained scroll handle keeps a
+        // region's state alive, not its place on screen (PM-696 review).
+        let drawn: std::collections::HashSet<usize> =
+            self.next_frame.slot_regions.iter().copied().collect();
         self.slot_regions.retain(|key, record| {
-            if record.cell.strong_count() == 0 {
+            if record.cell.strong_count() == 0 || !drawn.contains(key) {
                 return false;
             }
             if record.painted != frame

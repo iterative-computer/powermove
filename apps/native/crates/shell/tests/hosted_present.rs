@@ -26,6 +26,7 @@ fn main() {
     macos::editing_across_regions(mtm);
     macos::scrolled_out(mtm);
     macos::lazy_in_regions(mtm);
+    macos::vanished_region(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -48,6 +49,60 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: a slot kept for a region the last draw no longer made
+    /// (its panel closed while its handles live on) hides, and the region's
+    /// container leaves the window in the same present.
+    pub fn vanished_region(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let button: Retained<NSView> = unsafe {
+            let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+            let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+            Retained::from_raw(raw).expect("a button")
+        };
+        let slot = NativeControlSlot::new(&gpui, button);
+        regions::set(
+            &gpui,
+            &[SlotRegionGeometry {
+                id: 1,
+                parent: None,
+                frame: Bounds::new(point(px(0.), px(50.)), size(px(200.), px(300.))),
+                origin: point(px(0.), px(0.)),
+                fade: [px(0.), px(0.)],
+            }],
+        );
+        slot.stage_in_region(1, rect(10., 10., 80., 20.), rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6));
+        probe::painted(&gpui);
+        probe::place(&gpui);
+        let clip = regions::clip(&gpui, 1).expect("its container");
+        assert!(clip.window().is_some() && !slot.wrapper().isHiddenOrHasHiddenAncestor());
+        // The next draw makes no such region; the slot is kept as painted.
+        regions::set(&gpui, &[]);
+        slot.keep();
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui));
+        assert!(slot.wrapper().isHiddenOrHasHiddenAncestor(), "the kept slot does not show");
+        assert!(clip.window().is_none(), "the container left the window");
+        assert!(regions::clip(&gpui, 1).is_none(), "and is gone");
+        drop(slot);
+        window.close();
+    }
 
     /// P-SLOT-LAZY in a scrolling region (PM-696 review): a long panel staged
     /// at rest puts in the window only the controls its region's view shows
