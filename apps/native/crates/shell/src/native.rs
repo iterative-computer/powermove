@@ -6696,14 +6696,6 @@ impl Host {
                 .contains(menu::split_palette_command(&c.command).0)
         });
         choices.push(Choice::new("Render Pending", "renderPending").within("Export"));
-        choices.extend(state.palette_layers.iter().map(|(id, name)| {
-            Choice::new(
-                name.clone(),
-                menu::palette_command("palette.selectLayer", &[serde_json::json!(id)]),
-            )
-            .within("Layer")
-            .on_search()
-        }));
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
             if open && !crate::layout::closable(id) {
@@ -6730,6 +6722,14 @@ impl Host {
                 menu::palette_command("palette.addEffect", &[serde_json::json!(id)]),
             )
             .within("Effect")
+            .on_search()
+        }));
+        choices.extend(state.palette_layers.iter().map(|(id, name)| {
+            Choice::new(
+                name.clone(),
+                menu::palette_command("palette.selectLayer", &[serde_json::json!(id)]),
+            )
+            .within("Layer")
             .on_search()
         }));
         for (id, name, _) in &state.workspaces {

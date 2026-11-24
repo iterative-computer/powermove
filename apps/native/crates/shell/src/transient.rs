@@ -208,15 +208,8 @@ fn rank_lowercase(text: &str, q: &str) -> Option<u32> {
         return Some(0);
     }
     let t = lowercase(text);
-    if t.starts_with(q) {
-        return Some(0);
-    }
-    if let Some(i) = t.find(q) {
-        let word = t[..i]
-            .chars()
-            .next_back()
-            .is_some_and(|c| !c.is_alphanumeric());
-        return Some(if word { 1 } else { 2 });
+    if let Some(rank) = rank_contiguous(&t, q) {
+        return Some(rank);
     }
     let mut chars = t.chars();
     q.chars()
@@ -224,6 +217,35 @@ fn rank_lowercase(text: &str, q: &str) -> Option<u32> {
         .all(|qc| chars.any(|tc| tc == qc))
         .then_some(3)
 }
+
+fn rank_contiguous(text: &str, q: &str) -> Option<u32> {
+    if text.starts_with(q) {
+        return Some(0);
+    }
+    let i = text.find(q)?;
+    let word = text[..i]
+        .chars()
+        .next_back()
+        .is_some_and(|c| !c.is_alphanumeric());
+    Some(if word { 1 } else { 2 })
+}
+
+fn rank_content_name(name: &str, query: &str) -> Option<u32> {
+    if name == query {
+        return Some(0);
+    }
+    let rank = rank_contiguous(name, query)?;
+    // An earlier substring can precede a better word-start match.
+    if rank == 2
+        && name
+            .char_indices()
+            .any(|(i, c)| !c.is_alphanumeric() && name[i + c.len_utf8()..].starts_with(query))
+    {
+        return Some(2);
+    }
+    Some(rank + 1)
+}
+
 impl Picker {
     pub fn open_providers(&mut self, saved: BTreeMap<String, bool>) {
         self.provider_choices = saved;
@@ -369,9 +391,8 @@ impl Picker {
     pub fn lit_row(&self) -> Option<PickerRow> {
         self.lit().and_then(|place| self.rows().get(place).copied())
     }
-    /// Matching choice indices. Sections stay whole: a section stands where
-    /// its best match does, and its rows run best match first; ties keep
-    /// their original order.
+    /// Matching choice indices. Within each search priority, sections stand
+    /// where their best match does and their rows run best match first.
     pub fn filtered(&self) -> Vec<usize> {
         self.filtered_and_unlisted().0
     }
@@ -410,7 +431,8 @@ impl Picker {
             Some(lowercase(&self.query))
         };
         let query_lower = query_lower.as_deref().unwrap_or(&trimmed_lower);
-        let mut ranked: Vec<(u32, usize)> = self
+        // Sort by command or content priority, then by content match quality and length.
+        let mut ranked: Vec<_> = self
             .choices
             .iter()
             .enumerate()
@@ -419,19 +441,23 @@ impl Picker {
                     return None;
                 }
                 if c.search_only {
-                    let name = if c.category == "Effect" {
+                    if trimmed.is_empty() {
+                        return self.recents.contains(&c.command).then_some(((2, 0, 0), i));
+                    }
+                    let is_effect = c.category == "Effect";
+                    let name = if is_effect {
                         c.label.strip_prefix("Effect · ").unwrap_or(&c.label)
                     } else {
                         &c.label
                     };
-                    return ((trimmed.is_empty() && self.recents.contains(&c.command))
-                        || (!trimmed.is_empty()
-                            && lowercase(name).contains(trimmed_lower.as_ref())))
-                    .then_some((2, i));
+                    let name = lowercase(name);
+                    let quality = rank_content_name(&name, &trimmed_lower)?;
+                    let priority = if is_effect { 3 } else { 4 };
+                    return Some(((priority, quality, name.len()), i));
                 }
                 let label = rank_lowercase(&c.label, &trimmed_lower);
-                if label.is_some_and(|rank| rank <= 2) {
-                    return label.map(|rank| (rank, i));
+                if let Some(rank) = label.filter(|&rank| rank <= 2) {
+                    return Some(((rank, 0, 0), i));
                 }
                 // Command ids only match literally; subsequences of ids are noise.
                 if lowercase(&c.command).contains(query_lower)
@@ -439,21 +465,33 @@ impl Picker {
                         .iter()
                         .any(|term| lowercase(term).contains(trimmed_lower.as_ref()))
                 {
-                    return Some((2, i));
+                    return Some(((2, 0, 0), i));
                 }
-                label.map(|rank| (rank, i))
+                label.map(|_| ((5, 0, 0), i))
             })
             .collect();
-        let section = |i: usize| {
+        let has_content_matches =
+            !trimmed.is_empty() && ranked.iter().any(|&(_, i)| self.choices[i].search_only);
+        let section = |priority: u32, i: usize| {
             let choice = &self.choices[i];
-            (choice.provider.is_some(), choice.provider.as_deref().unwrap_or(&choice.category))
+            // Keep literal command matches together ahead of content matches.
+            let priority = if has_content_matches {
+                priority.max(2)
+            } else {
+                0
+            };
+            (
+                priority,
+                choice.provider.is_some(),
+                choice.provider.as_deref().unwrap_or(&choice.category),
+            )
         };
         let mut best = std::collections::HashMap::new();
         for &(r, i) in &ranked {
-            let at = best.entry(section(i)).or_insert((r, i));
+            let at = best.entry(section(r.0, i)).or_insert((r, i));
             *at = (*at).min((r, i));
         }
-        ranked.sort_by_key(|&(r, i)| (best[&section(i)], r, i));
+        ranked.sort_by_key(|&(r, i)| (best[&section(r.0, i)], r, i));
         let mut indices: Vec<_> = ranked.into_iter().map(|(_, i)| i).collect();
         if trimmed.is_empty() {
             indices.sort_by_key(|&i| {
@@ -699,6 +737,56 @@ mod palette_effect_tests {
         );
         picker.search("Effect".into());
         assert!(picker.filtered().is_empty());
+    }
+
+    #[test]
+    fn effects_precede_layers_and_closer_name_matches_come_first() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Deep Glow Gradient 1", "layer:gradient")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Deep Glow 1", "layer:glow")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Effect · Deep Glow Gradient", "effect:gradient")
+                    .within("Effect")
+                    .on_search(),
+                Choice::new("Effect · Deep Glow", "effect:glow")
+                    .within("Effect")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
+        picker.search("deep glow".into());
+        assert_eq!(picker.filtered(), vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn effect_substrings_precede_other_search_only_prefixes() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Glowing Borders", "preset:borders")
+                    .within("Preset")
+                    .on_search(),
+                Choice::new("Glow 1", "layer:glow")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Effect · Afterglow", "effect:afterglow")
+                    .within("Effect")
+                    .on_search(),
+                Choice::new("Lowglow Settings", "settings"),
+                Choice::new("Grid Layout Overview", "overview"),
+                Choice::new("Glow Settings", "glowSettings"),
+                Choice::new("Adjust Glow", "adjustGlow"),
+                Choice::new("Effect · Afterglow · Glow", "effect:word-start")
+                    .within("Effect")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
+        picker.search("glow".into());
+        assert_eq!(picker.filtered(), vec![5, 6, 3, 7, 2, 1, 0, 4]);
     }
 }
 
