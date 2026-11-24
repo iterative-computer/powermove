@@ -2,9 +2,10 @@
 //! kernel. AppKit slots are absent in the test window; every other path is live.
 use crate::v4_view::{Natives, SurfaceView};
 use gpui::{
-    AppContext, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement, PinchEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
+    AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, PinchEvent, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use pm_builtins::{Builtins, Publication};
 use pm_kernel::{KernelActor, KernelConfig, KernelHandle, OpenSource};
@@ -1022,6 +1023,78 @@ fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
     let after = rig.kernel.published(PROJECT).unwrap();
     assert_eq!(after.snapshot.root().unwrap().to_value(), before);
     assert!(!after.history.can_undo);
+}
+/// PM-698 review: Escape during a horizontal wheel scrub, before any step
+/// reached the view, shows the number it started from. The rollback's tree
+/// is the one already shown (not published again), so nothing else would.
+#[gpui::test]
+fn a_cancelled_wheel_scrub_shows_the_number_it_started_from(cx: &mut TestAppContext) {
+    let rig = rig_project("inspector", &project_json(1));
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.update(|window, _| window.activate());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.number_containing("opacity"))
+        .unwrap();
+    let start = view.read_with(&vcx, |v, _| v.shown_number(&name));
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Moved] {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(24.), px(0.))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+    }
+    let preview = view.read_with(&vcx, |v, _| v.wheel_reading()).unwrap();
+    assert_ne!(preview, start);
+    // Escape before the panel's tree for any step reached the view.
+    let _ = rig.runtime.take_publications();
+    view.update(&mut vcx, |v, cx| assert!(v.cancel_gesture(cx)));
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().snapshot.root().unwrap().to_value() == before
+    });
+    // The view takes what the panel publishes from here (as the app does).
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        for p in rig.runtime.take_publications() {
+            view.update(&mut vcx, |v, cx| v.publish(p, cx));
+        }
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(view.read_with(&vcx, |v, _| v.shown_number(&name)), start);
+    assert!(!rig.kernel.published(PROJECT).unwrap().history.can_undo);
 }
 /// Timeline's expanded rows mount exactly the same field, with a real lease.
 #[gpui::test]
@@ -3440,4 +3513,226 @@ fn a_panel_whose_height_changes_draws_no_other_panel_again(cx: &mut TestAppConte
     }
     assert!(a.read_with(&vcx, |v, _| v.natural_body_height()) >= 300., "the panel measured its new height");
     assert_eq!(b.read_with(&vcx, |v, _| v.renders), before, "the other panel kept its drawing");
+}
+
+/// PM-698: a selection change re-renders the Effects browser and the
+/// viewer's chrome to the same trees; those commits are acknowledged, not
+/// published, so the views draw nothing again. Properties, which shows the
+/// selected layer, still publishes.
+#[::core::prelude::v1::test]
+fn a_selection_change_publishes_only_the_panels_it_changes() {
+    for (panel, publishes) in [("fxbrowser", false), ("viewer", false), ("inspector", true)] {
+        let rig = rig(panel, 3);
+        let _ = publication(&rig);
+        // From one selected layer to another (the first selection changes
+        // the viewer's chrome for real).
+        for (layer, measured) in [("l0", false), ("l1", true), ("l2", true)] {
+            rig.kernel
+                .call(
+                    PROJECT,
+                    pm_kernel::Request::new(
+                        pm_kernel::Caller::native(),
+                        pm_kernel::SelectionCall::Layers {
+                            ids: vec![layer.into()],
+                            add: false,
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            for (_, ticket) in rig.runtime.publish() {
+                let ticket = ticket.unwrap();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while ticket.try_take().is_none() {
+                    assert!(Instant::now() < deadline, "{panel} did not settle");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let published = rig
+                .runtime
+                .take_publications()
+                .iter()
+                .any(|p| p.panel == panel);
+            if measured {
+                assert_eq!(published, publishes, "{panel} on selecting {layer}");
+            }
+        }
+    }
+}
+
+/// PM-698 review: a retheme while a newer tree is still compiling compiles
+/// that tree, not the one shown; a later identical commit is not published
+/// again, so nothing else would bring it.
+#[gpui::test]
+fn a_retheme_while_a_tree_compiles_shows_that_tree(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 2);
+    let select = |layer: &str| {
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Layers {
+                        ids: vec![layer.into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        rig.runtime
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "inspector")
+            .unwrap()
+    };
+    let a = select("l0");
+    let (view, mut vcx) = window(cx, &rig, a, Default::default());
+    vcx.run_until_parked();
+    let b = select("l1");
+    let shown = b.surface.revision();
+    view.update(&mut vcx, |v, cx| {
+        v.publish(b, cx);
+        v.retheme(
+            pm_design::Tokens::new(pm_design::Scheme::Light, Default::default()),
+            cx,
+        );
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until && view.read_with(&vcx, |v, _| v.compiling()) {
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.publication.surface.revision()),
+        shown,
+        "the newer tree, in the new theme"
+    );
+}
+/// A panel in a body that scrolls around it, a scroll layer, as a dock gives
+/// a side panel (`builtins::PanelBody`).
+struct Body {
+    child: Entity<SurfaceView>,
+    handle: gpui::ScrollHandle,
+}
+impl Render for Body {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = self.handle.clone();
+        self.child.update(cx, |v, _| v.scrolls_in(&handle));
+        div().size_full().child(
+            div()
+                .id("body")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.handle)
+                .scroll_layer()
+                .child(
+                    self.child
+                        .clone()
+                        .cached(StyleRefinement::default().w(px(100.)).h(px(400.))),
+                ),
+        )
+    }
+}
+/// The window's root, which draws every frame: the body is a view of its
+/// own under it, as the dock's are.
+struct BodyHolder {
+    body: Entity<Body>,
+}
+impl Render for BodyHolder {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(100.)).child(
+            self.body
+                .clone()
+                .cached(StyleRefinement::default().size(px(100.))),
+        )
+    }
+}
+/// PM-696: a panel in a scrolling body keeps rows a viewport past each edge
+/// (what the body's layer records) only while the body is being scrolled. At
+/// rest it keeps its rows near the view, so a hover or a resize draws no
+/// more than they; the first wheel step draws it once with the rows past
+/// each edge, the steps after replay, and it is back to rest once they stop.
+#[gpui::test]
+fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":100}}), &[]);
+    for i in 0..20u64 {
+        ops.extend(node_ops(
+            2 + i,
+            1,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    let layered = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.layered());
+    let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
+    assert!(!layered(&vcx), "at rest, rows are kept near the view only");
+    let at = point(px(50.), px(50.));
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    let rendered = renders(&vcx);
+    wheel(&mut vcx, -20.);
+    assert!(layered(&vcx));
+    assert_eq!(
+        renders(&vcx),
+        rendered + 1,
+        "the first step draws past each edge"
+    );
+    // The rows it brought in are measured over the next frames.
+    for _ in 0..4 {
+        vcx.simulate_frame();
+    }
+    let rendered = renders(&vcx);
+    wheel(&mut vcx, -20.);
+    vcx.simulate_frame();
+    assert_eq!(renders(&vcx), rendered, "the steps after replay");
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(!layered(&vcx), "back to rest once the steps stop");
+    assert_eq!(
+        renders(&vcx),
+        rendered + 1,
+        "the layer's settle draws it once, at rest"
+    );
+    // A hover draws only the rows near the view.
+    view.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    assert!(!layered(&vcx));
 }

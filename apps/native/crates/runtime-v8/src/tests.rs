@@ -2302,3 +2302,38 @@ fn finalization_callbacks_run_during_a_session() {
     assert!(finalized > 0, "no finalizer ran while the realm lived");
     close(&r);
 }
+
+/// A realm collects when memory pressure rises, again while it lasts once
+/// the last collection ran and five seconds passed, never at every
+/// rebalance, and a request the full mailbox refused is asked again.
+#[test]
+fn pressure_trims_follow_rises_and_lasting_pressure() {
+    use pm_memory::Pressure::{Critical, Normal, Warning};
+    let mut trims = crate::runtime::PressureTrims::default();
+    let t0 = std::time::Instant::now();
+    let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+    assert!(!trims.wanted(Normal, at(0)));
+    assert!(trims.wanted(Warning, at(0)), "the level rose");
+    // Refused by a full mailbox: not remembered.
+    assert!(trims.wanted(Warning, at(0)), "asked again after a refusal");
+    trims.asked(Warning, at(0));
+    assert!(
+        !trims.wanted(Warning, at(1)),
+        "a rebalance under the same level"
+    );
+    assert!(
+        !trims.wanted(Warning, at(6)),
+        "the last one has not run yet"
+    );
+    trims.serviced();
+    assert!(!trims.wanted(Warning, at(3)), "within five seconds");
+    assert!(
+        trims.wanted(Warning, at(6)),
+        "lasting pressure collects again"
+    );
+    trims.asked(Warning, at(6));
+    assert!(trims.wanted(Critical, at(7)), "a rise is never held back");
+    trims.asked(Critical, at(7));
+    assert!(!trims.wanted(Normal, at(8)));
+    assert!(trims.wanted(Warning, at(8)), "a new rise after Normal");
+}

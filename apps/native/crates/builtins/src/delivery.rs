@@ -45,7 +45,37 @@ pub fn studio_estimate(
     width: f64,
     height: f64,
 ) -> Option<String> {
-    let comp = crate::data::wire(&comp.to_value());
+    // Only the 3D layers' roles and the saved quality are read: the whole
+    // composition as JSON (a real project's media included) took seconds of
+    // every export's start.
+    let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
+    else {
+        return None;
+    };
+    let roles: Vec<Value> = layers
+        .iter()
+        .filter_map(|layer| match layer.get("d")?.get("definition")?.kind() {
+            pm_model::NodeKind::String(s) => s.as_str().map(str::to_owned),
+            _ => None,
+        })
+        .filter(|d| {
+            [
+                pm_scene3d::schema::OBJECT,
+                pm_scene3d::schema::LIGHT,
+                pm_scene3d::schema::CAMERA,
+            ]
+            .contains(&d.as_str())
+        })
+        .map(|definition| json!({"d": {"definition": definition}}))
+        .collect();
+    if roles.is_empty() {
+        return None;
+    }
+    let mut summary = json!({ "layers": roles });
+    if let Some(quality) = comp.get("studioQuality") {
+        summary["studioQuality"] = crate::data::wire(&quality.to_value());
+    }
+    let comp = summary;
     let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
     let (policy, label) = pm_panel_studio3d::properties::export_quality(&comp, choice)?;
     let scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
@@ -1258,6 +1288,48 @@ mod capability_tests {
 mod estimate_tests {
     use super::measured_estimate;
     use serde_json::json;
+    /// The rough 3D estimate reads only the 3D layers' roles and the saved
+    /// quality: what it said from the whole composition, without it.
+    #[test]
+    fn the_3d_estimate_says_what_the_whole_composition_said() {
+        let options: pm_promedia::export_panel::Options = serde_json::from_value(json!({"format":"mp4","scale":1,"width":640,"height":360,"fps":30,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"})).unwrap();
+        let whole = |comp: &serde_json::Value| {
+            let (policy, label) = pm_panel_studio3d::properties::export_quality(comp, None)?;
+            let per =
+                pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, 640., 360.);
+            Some(format!(
+                "3D {label}, {}",
+                pm_panel_studio3d::properties::about(per * 90.)
+            ))
+        };
+        for comp in [
+            json!({"layers":[{"type":"text","d":{"text":"Title"}},{"type":"solid","d":{"definition":"powermove.3d.object"}}],"studioQuality":"draft"}),
+            json!({"layers":[{"type":"solid","d":{"definition":"powermove.3d.camera"}}]}),
+            json!({"layers":[{"type":"text","d":{"text":"no 3D"}}],"studioQuality":"final"}),
+            json!({"layers":[]}),
+        ] {
+            let quality = comp.get("studioQuality").cloned();
+            let mut expected = comp.clone();
+            if let Some(name) = quality.as_ref().and_then(|q| q.as_str()) {
+                expected["studioQuality"] = pm_scene3d::quality::preset(name).unwrap();
+            }
+            let mut stored = comp.clone();
+            if let Some(q) = &quality {
+                stored["studioQuality"] =
+                    expected.get("studioQuality").cloned().unwrap_or(q.clone());
+            }
+            let document = pm_model::Document::new(
+                Some(pm_model::json::parse(&stored.to_string()).unwrap()),
+                1,
+            );
+            let node = document.root().unwrap();
+            assert_eq!(
+                super::studio_estimate(node, &options, 90, 640., 360.),
+                whole(&stored),
+                "{comp}"
+            );
+        }
+    }
     fn ready(min: f64, max: f64) -> serde_json::Value {
         json!({"status":"ready","estimate":{"width":1920,"height":1080,"frames":120,
             "presets":[{"preset":"production","totalMs":{"min":min,"max":max}}]}})

@@ -14,7 +14,7 @@ use pm_surface::{
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -452,6 +452,17 @@ struct Compiled {
 }
 pub struct SurfaceView {
     panel_build: Option<crate::generated_panel::panel_build::State>,
+    /// The `metadata.hoverGroup` nodes (rows) the pointer is over, as this
+    /// render found them: each group painted in the last frame whose hitbox
+    /// the pointer is in now. The host draws their hover (`hoverStyle`,
+    /// `hoverOnly`, `hoverHide`), so a row's hover is no publication of the
+    /// panel. Derived every render, never kept across one: a group that left
+    /// the frame (scrolled out of the rendered rows, deleted, another
+    /// generation) is hovered by nothing.
+    hovered_groups: BTreeSet<Id>,
+    /// The hover groups the last frame painted, with their hitboxes; filled
+    /// while painting, taken by the next render.
+    painted_groups: Rc<RefCell<HashMap<Id, gpui::HitboxId>>>,
     build_painted: Cell<u64>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
@@ -506,7 +517,9 @@ pub struct SurfaceView {
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     gain_scrub: Option<GainScrub>,
-    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool)>,
+    /// A horizontal wheel scrub: its node, its scrub, whether it writes a
+    /// binding, and the number it started from (a cancel shows it again).
+    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool, f64)>,
     wheel_tick: u64,
     wheel_lifted: bool,
     scrub_ops: VecDeque<ScrubOp>,
@@ -546,6 +559,10 @@ pub struct SurfaceView {
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
     parked: Option<Compiled>,
+    /// The newest publication this view was handed (shown, compiling,
+    /// parked or waiting for the timeline's rows): what a retheme compiles,
+    /// so it never puts an older tree back over one still on its way.
+    received: Option<Publication>,
     outline_waiting: Option<Compiled>,
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
@@ -673,6 +690,8 @@ impl SurfaceView {
         .detach();
         let mut this = Self {
             panel_build: None,
+            hovered_groups: BTreeSet::new(),
+            painted_groups: Rc::default(),
             build_painted: Cell::new(u64::MAX),
             runtime,
             publication,
@@ -733,6 +752,7 @@ impl SurfaceView {
             handling: 0,
             wake_idle: false,
             parked: None,
+            received: None,
             outline_waiting: None,
             focus_text: None,
             focus_requested: None,
@@ -785,6 +805,12 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         let state = state.filter(|s| s.resolve(s.now()) < 1.);
+        // No build now and none before: every control and field already
+        // shows none (they start without one, and the call that ended the
+        // last build cleared them). The panel asks on every frame it draws.
+        if state.is_none() && self.panel_build.is_none() {
+            return;
+        }
         if let Some(ready) = state
             .as_ref()
             .filter(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
@@ -904,6 +930,7 @@ impl SurfaceView {
         let handle = window.window_handle();
         if handle != self.window {
             self.keyboard_focused_user_message = None;
+            self.painted_groups.borrow_mut().clear();
         }
         if handle != self.window && (!self.controls.is_empty() || !self.fields.is_empty()) {
             // AppKit controls and editors live in the window they were
@@ -963,16 +990,18 @@ impl SurfaceView {
                 "revision": publication.surface.revision(), "host": gpui_macos::feel::now()}),
             );
         }
+        self.received = Some(publication.clone());
         self.compile(publication, self.table.clone(), cx);
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
         let table = Arc::new(TokenTable::new(tokens));
+        // The newest tree handed over, wherever it is: its compile is
+        // superseded by this one (only the newest ticket installs), and a
+        // later commit equal to it is not published again (PM-698 review).
         let publication = self
-            .outline_waiting
-            .as_ref()
-            .filter(|c| c.ticket == self.latest)
-            .map_or(&self.publication, |c| &c.publication)
-            .clone();
+            .received
+            .clone()
+            .unwrap_or_else(|| self.publication.clone());
         self.compile(publication, table, cx);
     }
     fn compile(
@@ -1060,6 +1089,8 @@ impl SurfaceView {
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
+            // Another realm's tree: its node ids are not the last frame's.
+            self.painted_groups.borrow_mut().clear();
             self.wheel_finish(false, cx);
             self.restart(cx);
         }
@@ -2280,6 +2311,14 @@ impl SurfaceView {
     pub fn wheel_reading(&self) -> Option<f64> {
         self.scrub_shown.map(|(_, value)| value)
     }
+    /// The number a numeric field shows now: a scrub's readout, else its
+    /// tree's value (tests).
+    #[cfg(test)]
+    pub fn shown_number(&self, semantic: &str) -> f64 {
+        let id = self.prepared.semantics[semantic];
+        self.scrub_readout(id)
+            .unwrap_or_else(|| self.prepared.node(id).unwrap().number.unwrap().value)
+    }
     #[cfg(test)]
     pub fn number_edit_requested(&self, semantic: &str) -> bool {
         self.number_edit_request == Some(self.prepared.semantics[semantic])
@@ -3138,11 +3177,37 @@ impl SurfaceView {
         self.pointer(id, "pointerdown", detail, cx);
     }
     fn wheel_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if let Some((id, _, bound)) = self.wheel_scrub.take() {
-            if !self.finish_gain_scrub(id, commit, cx) && bound {
-                self.scrub_ops.push_back(ScrubOp::Finish(commit));
-                self.scrub_pump(cx);
+        let Some((id, _, bound, start)) = self.wheel_scrub.take() else {
+            return;
+        };
+        if self.finish_gain_scrub(id, commit, cx) {
+            return;
+        }
+        if !commit {
+            // As a cancelled pointer scrub: the number it started from, shown
+            // and in the field now, kept through the rollback's completion
+            // (the rollback's tree may be the one already shown, which is not
+            // published again), and no queued preview after it.
+            if let Some(number) = self.prepared.node(id).and_then(|n| n.number) {
+                if let Some(field) = self.fields.get(&id) {
+                    let text = number.text(start);
+                    field.update(cx, |f, cx| f.set_value(&text, cx));
+                }
             }
+            if bound {
+                while matches!(self.scrub_ops.back(), Some(ScrubOp::Value(..))) {
+                    self.scrub_ops.pop_back();
+                }
+                self.scrub_shown = Some((id, start));
+            } else {
+                self.scrub_shown = None;
+                self.change(id, json!(start), cx);
+            }
+            cx.notify();
+        }
+        if bound {
+            self.scrub_ops.push_back(ScrubOp::Finish(commit));
+            self.scrub_pump(cx);
         }
     }
     fn begin_gain_scrub(
@@ -3354,10 +3419,10 @@ impl SurfaceView {
         let active = self
             .wheel_scrub
             .as_ref()
-            .filter(|(target, _, _)| *target == id);
+            .filter(|(target, _, _, _)| *target == id);
         if !active.map_or_else(
             || HorizontalScrub::new(n.value).accepts(delta.0, delta.1, event.modifiers.control),
-            |(_, w, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
+            |(_, w, _, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
         ) {
             return;
         }
@@ -3365,7 +3430,12 @@ impl SurfaceView {
         cx.stop_propagation();
         if active.is_none() {
             self.wheel_finish(true, cx);
-            self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
+            self.wheel_scrub = Some((
+                id,
+                HorizontalScrub::new(n.value),
+                binding.is_some(),
+                n.value,
+            ));
             let name = self.undo_name(id);
             if !self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()) && binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Begin(name));
@@ -4176,6 +4246,9 @@ impl SurfaceView {
                     .is_some_and(|id| rows.contains(id))
             })
         }) {
+            if !self.hover_shown(*child) {
+                continue;
+            }
             if let Some(stand_in) = self.cull.stand_in(*child) {
                 children.push(stand_in);
                 continue;
@@ -4201,7 +4274,70 @@ impl SurfaceView {
                 _ => children.push(self.element(*child, window, cx, skip)),
             }
         }
+        if node.hover_group {
+            children.push(self.hover_probe(id, cx));
+        }
         self.element_close(id, element, children, window, cx)
+    }
+    /// A hover group's hitbox, recorded as it paints for the next render to
+    /// test against the pointer. A layout that moved the group under a still
+    /// pointer (rows scrolled, a row added above) changes what it covers:
+    /// then the view draws once more with the groups the pointer is over.
+    fn hover_probe(&self, id: Id, cx: &mut Context<Self>) -> AnyElement {
+        let (painted, view) = (self.painted_groups.clone(), cx.entity().downgrade());
+        let rendered = self.hovered_groups.contains(&id);
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, window, cx| {
+                painted.borrow_mut().insert(id, hitbox.id);
+                if hitbox.is_hovered(window) != rendered {
+                    let view = view.clone();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+    /// The hover group the pointer is over, by its semantic id (tests).
+    #[cfg(test)]
+    pub(crate) fn hovered_row_for_test(&self) -> Option<String> {
+        let id = *self.hovered_groups.iter().next()?;
+        self.prepared
+            .node(id)?
+            .semantic
+            .as_ref()
+            .map(|s| s.to_string())
+    }
+    /// How far the panel's own scrollers have moved, all summed (tests: a
+    /// scroll case proves it moved something).
+    #[cfg(test)]
+    pub(crate) fn scroll_offsets(&self) -> f32 {
+        self.scrolls
+            .values()
+            .map(|h| f32::from(h.offset().x).abs() + f32::from(h.offset().y).abs())
+            .sum()
+    }
+    /// A `hoverOnly` node shows while the hover group holding it is hovered,
+    /// a `hoverHide` one until then; every other node always.
+    fn hover_shown(&self, id: Id) -> bool {
+        let Some(shows) = self.prepared.node(id).and_then(|n| n.hover_shows) else {
+            return true;
+        };
+        let mut at = self.prepared.node(id).and_then(|n| n.parent);
+        while let Some(parent) = at {
+            let Some(node) = self.prepared.node(parent) else {
+                break;
+            };
+            if node.hover_group {
+                return self.hovered_groups.contains(&parent) == shows;
+            }
+            at = node.parent;
+        }
+        !shows
     }
     /// Draw the published search field and kit switch when no AppKit slot exists.
     fn offscreen_control(
@@ -4370,6 +4506,12 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if node.hover_group
+            && self.hovered_groups.contains(&id)
+            && let Some(background) = &node.hover_background
+        {
+            element.style().background = Some(background.clone());
+        }
         if self.publication.surface.node(id).and_then(|node| node.props.get("metadata"))
             .is_some_and(|m| m["wordEllipsis"] == true)
         {
@@ -5714,8 +5856,15 @@ impl SurfaceView {
                     }),
                 );
         }
-        if wash || events.hover {
+        let group = node.hover_group;
+        if wash || events.hover || group {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                // The pointer crossed a group: draw again, which finds the
+                // groups under it (`hovered_groups`).
+                if group {
+                    let _ = hovered;
+                    cx.notify();
+                }
                 if wash {
                     let tokens = v.table.tokens.clone();
                     v.motion.hovers.hover(id, *hovered, &tokens);
@@ -6416,6 +6565,12 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let painted = std::mem::take(&mut *self.painted_groups.borrow_mut());
+        self.hovered_groups = painted
+            .into_iter()
+            .filter(|(_, hitbox)| hitbox.is_hovered(window))
+            .map(|(id, _)| id)
+            .collect();
         if self.focus_requested.is_some() && pm_shell::typing::expecting() {
             self.typing_ready(cx);
         }
@@ -6559,6 +6714,7 @@ impl Render for SurfaceView {
                 .priority(3)
             }))
             .children(self.cull.outer_mark())
+            .on_scroll_wheel(cx.listener(|v, _: &ScrollWheelEvent, _, cx| v.body_wheeled(cx)))
     }
 }
 pub(crate) struct Tooltip {
@@ -6865,6 +7021,10 @@ impl SurfaceView {
     /// and a tooltip would stand over the open menu).
     pub(crate) fn tooltip_title(&self, id: Id) -> Option<SharedString> {
         let node = self.prepared.node(id)?;
+        // Every answer below is the node's own title or none: most nodes
+        // have none, and the words they show (a walk and a join) are asked
+        // of every control on every render.
+        node.title.as_ref()?;
         let shown = self.shown_text(id, 3);
         let props = self.publication.surface.node(id).map(|n| &n.props);
         if props.is_some_and(|p| p.get("metadata").is_some_and(|m| m["menuAnchor"] == true)) {
