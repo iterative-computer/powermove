@@ -1636,10 +1636,19 @@ fn worker(
     let notifier = Arc::downgrade(&mailbox);
     let _watchdog = WatchdogThread::new(&control, &config);
     let pressure_sender = notifier.clone();
+    // The governor tells every client its share at each rebalance (another
+    // client came or went) with the level as it stands: a full collection
+    // only when the level rises. Collecting at every rebalance under a lasting
+    // warning cost an export's realm a fifth of its time.
+    let notified = std::sync::Mutex::new(pm_memory::Pressure::Normal);
     let memory = pm_memory::Registration::new(1, move |_, level| {
-        if level != pm_memory::Pressure::Normal
-            && let Some(tx) = pressure_sender.upgrade()
-        {
+        let rose = {
+            let mut notified = notified.lock().unwrap_or_else(|e| e.into_inner());
+            let rose = severity(level) > severity(*notified);
+            *notified = level;
+            rose
+        };
+        if rose && let Some(tx) = pressure_sender.upgrade() {
             let _ = tx.send(Command::MemoryPressure, Delivery::Immediate);
         }
     });
@@ -1997,6 +2006,14 @@ fn worker(
 }
 /// How long an isolate that grew waits without work before it trims.
 const IDLE_TRIM: Duration = Duration::from_secs(5);
+/// Orders memory pressure levels (`pm_memory::Pressure` has no order).
+fn severity(level: pm_memory::Pressure) -> u8 {
+    match level {
+        pm_memory::Pressure::Normal => 0,
+        pm_memory::Pressure::Warning => 1,
+        pm_memory::Pressure::Critical => 2,
+    }
+}
 fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
