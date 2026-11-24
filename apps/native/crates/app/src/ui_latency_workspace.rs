@@ -161,6 +161,8 @@ impl pm_shell::integration::Integration for Dock {
 // -------------------------------------------------------- the workspace
 
 struct Workspace {
+    /// Publications that reached each view since the last case.
+    published: std::collections::BTreeMap<String, usize>,
     /// Timeline row bounds as first painted (a cached body replays its
     /// drawing and leaves no debug bounds).
     rows: HashMap<String, Bounds<Pixels>>,
@@ -331,6 +333,7 @@ fn workspace(cx: &mut TestAppContext) -> Result<Workspace, String> {
     vcx.update(|window, _| window.activate());
     vcx.simulate_resize(size(px(1728.), px(1080.)));
     let mut ws = Workspace {
+        published: Default::default(),
         rows: HashMap::new(),
         rig,
         dock,
@@ -392,6 +395,7 @@ impl Workspace {
     fn drain(&mut self, probe: &mut Probe) -> usize {
         let mut n = 0;
         for p in probe.run(|| self.rig.runtime.take_publications()) {
+            *self.published.entry(p.panel.clone()).or_default() += 1;
             let view = self.dock.views.borrow().get(&p.panel).cloned();
             match view {
                 Some(view) => {
@@ -969,14 +973,22 @@ const SCROLLS: [(&str, &str, &str, bool); 7] = [
     ("W7", "Timeline, horizontal", "timeline", true),
 ];
 
+/// `PM_UI_LATENCY_CASES=K1,K1p` runs only those workspace cases (profiling).
+fn wanted(id: &str) -> bool {
+    std::env::var("PM_UI_LATENCY_CASES")
+        .map(|ids| ids.split(',').any(|i| i.trim() == id))
+        .unwrap_or(true)
+}
+
 fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Case>) {
     let tag = if playback.is_some() { "p" } else { "" };
     let when = if playback.is_some() { ", playing" } else { "" };
-    let mut push = |case: Case, playback: &mut Option<Playback>| {
+    let mut push = |case: Case, ws: &mut Workspace, playback: &mut Option<Playback>| {
         let mut case = case;
         if let Some(p) = playback.as_mut() {
             p.note(&mut case);
         }
+        case.note("publications", json!(std::mem::take(&mut ws.published)));
         out.push(case);
     };
     for (id, what, panel, horizontal) in SCROLLS {
@@ -987,16 +999,21 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
             } else {
                 ("Wheel", "w")
             };
+            let id = format!("{id}{suffix}{tag}");
+            if !wanted(&id) {
+                continue;
+            }
+            ws.published.clear();
             let case = scroll_case(
                 ws,
                 playback,
-                &format!("{id}{suffix}{tag}"),
+                &id,
                 &format!("{kind}: {what}{when}"),
                 panel,
                 horizontal,
                 momentum,
             );
-            push(case, playback);
+            push(case, ws, playback);
         }
     }
     for (id, what, panel) in [
@@ -1006,44 +1023,61 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
         ("H4", "Project panel", "assets"),
         ("H5", "timeline", "timeline"),
     ] {
+        let id = format!("{id}{tag}");
+        if !wanted(&id) {
+            continue;
+        }
         ws.show_tab(panel);
+        ws.published.clear();
         let case = hover_case(
             ws,
             playback,
-            &format!("{id}{tag}"),
+            &id,
             &format!("Hover across {what} rows{when}"),
             panel,
         );
-        push(case, playback);
+        push(case, ws, playback);
     }
-    let case = select_case(
-        ws,
-        playback,
-        &format!("K1{tag}"),
-        &format!("Select a layer with every panel open{when}"),
-    );
-    push(case, playback);
-    let case = tabs_case(
-        ws,
-        playback,
-        &format!("K2{tag}"),
-        &format!("Switch tabs (Project / Effect Controls){when}"),
-    );
-    push(case, playback);
-    let case = toggle_case(
-        ws,
-        playback,
-        &format!("K3{tag}"),
-        &format!("Close / open a panel (Effects){when}"),
-    );
-    push(case, playback);
-    let case = resize_case(
-        ws,
-        playback,
-        &format!("K4{tag}"),
-        &format!("Resize the right dock (per move){when}"),
-    );
-    push(case, playback);
+    if wanted(&format!("K1{tag}")) {
+        ws.published.clear();
+        let case = select_case(
+            ws,
+            playback,
+            &format!("K1{tag}"),
+            &format!("Select a layer with every panel open{when}"),
+        );
+        push(case, ws, playback);
+    }
+    if wanted(&format!("K2{tag}")) {
+        ws.published.clear();
+        let case = tabs_case(
+            ws,
+            playback,
+            &format!("K2{tag}"),
+            &format!("Switch tabs (Project / Effect Controls){when}"),
+        );
+        push(case, ws, playback);
+    }
+    if wanted(&format!("K3{tag}")) {
+        ws.published.clear();
+        let case = toggle_case(
+            ws,
+            playback,
+            &format!("K3{tag}"),
+            &format!("Close / open a panel (Effects){when}"),
+        );
+        push(case, ws, playback);
+    }
+    if wanted(&format!("K4{tag}")) {
+        ws.published.clear();
+        let case = resize_case(
+            ws,
+            playback,
+            &format!("K4{tag}"),
+            &format!("Resize the right dock (per move){when}"),
+        );
+        push(case, ws, playback);
+    }
 }
 
 pub(super) fn workspace_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
@@ -1055,6 +1089,9 @@ pub(super) fn workspace_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
         }
     };
     run_all(&mut ws, &mut None, out);
+    if std::env::var("PM_UI_LATENCY_CASES").is_ok_and(|ids| !ids.contains('p')) {
+        return;
+    }
     let mut playback = match Playback::start(&ws) {
         Ok(p) => Some(p),
         Err(why) => {

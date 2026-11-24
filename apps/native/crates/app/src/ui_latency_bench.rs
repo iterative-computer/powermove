@@ -49,6 +49,11 @@ const FRAME_MS: f64 = 1000. / 120.;
 const P95_MS: f64 = 50.;
 /// A hitch: longer than 1.5 display intervals at 120 Hz (12.5 ms).
 const HITCH_MS: f64 = 1.5 * FRAME_MS;
+/// A hitch in work, independent of the machine's load: the instructions
+/// a performance core of the test Mac retires in `HITCH_MS` on this code
+/// (PM-698: about 12 million a millisecond on its quiet steps, release).
+const HITCH_MINSTR: f64 = 12.5 * MINSTR_PER_MS;
+const MINSTR_PER_MS: f64 = 12.;
 /// Never more than this at p99: a result lands at worst one vsync late.
 const P99_MS: f64 = 2. * FRAME_MS;
 /// One contiguous main-thread run longer than this is flagged.
@@ -87,6 +92,14 @@ fn layer_count() -> usize {
 struct Sample {
     input_to_frame_ms: f64,
     main_ms: f64,
+    /// CPU time the test thread itself spent in `main_ms`: what the main
+    /// thread costs, unmoved by other processes taking the cores (wall
+    /// times on a shared machine swing 2-3x with its load).
+    main_cpu_ms: f64,
+    /// Instructions the test thread retired in `main_ms`, millions: the
+    /// work itself, the same on a busy machine and an idle one, on a
+    /// performance core and an efficiency core (the gate's measure).
+    main_minstr: f64,
     /// The result never showed within `WAIT`.
     missed: bool,
     /// The runs inside `main_ms` were timed one by one (`Probe`). A direct
@@ -123,6 +136,8 @@ impl Sample {
 struct Probe {
     start: Instant,
     main: Duration,
+    cpu: Duration,
+    instructions: u64,
     max_slice: Duration,
     slices_over: u32,
     frame: Duration,
@@ -133,15 +148,19 @@ impl Probe {
         Self {
             start: Instant::now(),
             main: Duration::ZERO,
+            cpu: Duration::ZERO,
+            instructions: 0,
             max_slice: Duration::ZERO,
             slices_over: 0,
             frame: Duration::ZERO,
         }
     }
     fn run<R>(&mut self, f: impl FnOnce() -> R) -> R {
-        let at = Instant::now();
+        let (at, cpu, instructions) = (Instant::now(), thread_cpu(), thread_instructions());
         let out = f();
         let slice = at.elapsed();
+        self.cpu += thread_cpu().saturating_sub(cpu);
+        self.instructions += thread_instructions().saturating_sub(instructions);
         self.main += slice;
         self.max_slice = self.max_slice.max(slice);
         self.slices_over += u32::from(slice.as_secs_f64() * 1e3 > MAIN_SLICE_MS);
@@ -154,6 +173,8 @@ impl Probe {
         Sample {
             input_to_frame_ms: self.elapsed_ms(),
             main_ms: self.main.as_secs_f64() * 1e3,
+            main_cpu_ms: self.cpu.as_secs_f64() * 1e3,
+            main_minstr: self.instructions as f64 / 1e6,
             missed,
             sliced: true,
             max_slice_ms: self.max_slice.as_secs_f64() * 1e3,
@@ -161,6 +182,30 @@ impl Probe {
             frame_ms: self.frame.as_secs_f64() * 1e3,
         }
     }
+}
+
+/// This thread's CPU time.
+fn thread_cpu() -> Duration {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `t` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+unsafe extern "C" {
+    /// xnu: this thread's fixed counters (type 1: instructions, cycles).
+    fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+}
+
+/// Instructions this thread has retired (0 where the counters are off).
+fn thread_instructions() -> u64 {
+    let mut counts = [0u64; 2];
+    // SAFETY: `counts` is two u64s, the size passed.
+    let ok = unsafe { thread_selfcounts(1, counts.as_mut_ptr(), std::mem::size_of_val(&counts)) };
+    if ok == 0 { counts[0] } else { 0 }
 }
 
 /// Lets GPUI tasks and the kernel/V8 threads run until `done` holds.
@@ -253,6 +298,18 @@ impl Case {
                 json!({"p50": p50, "p95": p95, "p99": percentile(v, 0.99), "max": max})
             }
         };
+        let cpu: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| s.sliced)
+            .map(|s| s.main_cpu_ms)
+            .collect();
+        let instr: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| s.sliced)
+            .map(|s| s.main_minstr)
+            .collect();
         let slices: Vec<f64> = self.samples.iter().map(Sample::max_slice).collect();
         let frames: Vec<f64> = self
             .samples
@@ -270,6 +327,9 @@ impl Case {
             "skipped": self.skipped,
             "input_to_frame_ms": summary(&frame),
             "main_ms": summary(&main),
+            "main_cpu_ms": summary(&cpu),
+            "main_minstr": summary(&instr),
+            "instr_hitches": instr.iter().filter(|m| **m > HITCH_MINSTR).count(),
             "within_budget": self.within_budget(),
             "hitches": self.hitches(),
             "main_over_4ms": self.main_over(),
@@ -1848,6 +1908,13 @@ fn print(cases: &[Case]) {
 #[gpui::test]
 fn ui_latency_catalogue(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
+    // The app's main thread runs at user-interactive QoS (performance
+    // cores); a test thread at the default QoS lands on efficiency cores
+    // when the machine is busy, and every timing doubles.
+    // SAFETY: sets this thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
     let mut cases = vec![];
     // Priority first: the tester's "moving and resizing shapes lags".
     guarded(&mut cases, "viewer", |out| viewer_cases(cx, out));
