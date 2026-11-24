@@ -431,9 +431,11 @@ pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
 /// Whether Paste can handle the system clipboard without reading image bytes.
 /// Live: a menu that offers Paste asks as it opens.
 pub fn has_pasteboard_content() -> bool {
-    let board = paste_board();
-    let (files_or_images, html) = advertised(&board);
-    files_or_images || html && figma_html(&board)
+    content_on(&paste_board())
+}
+fn content_on(board: &NSPasteboard) -> bool {
+    let (files_or_images, html) = advertised(board);
+    files_or_images || html && figma_html(board)
 }
 
 /// The same answer for the menus' state, which is asked on every frame the
@@ -442,11 +444,13 @@ pub fn has_pasteboard_content() -> bool {
 /// read every time it decides, since a writer can replace it without the
 /// count moving (PM-698 review).
 pub fn has_pasteboard_content_per_frame() -> bool {
+    content_per_frame_on(paste_board())
+}
+fn content_per_frame_on(board: Retained<NSPasteboard>) -> bool {
     thread_local! {
         static KNOWN: std::cell::RefCell<Option<(Retained<NSPasteboard>, isize, (bool, bool))>> =
             const { std::cell::RefCell::new(None) };
     }
-    let board = paste_board();
     let count = board.changeCount();
     let known = KNOWN.with(|k| {
         k.borrow()
@@ -1036,36 +1040,34 @@ mod paste_tests {
     #[test]
     fn paste_follows_html_replaced_without_a_new_change_count() {
         let html = board("figma-html");
-        super::review_pasteboard(Some(html.name().to_string()));
         let kind = unsafe { NSPasteboardTypeHTML };
         html.setString_forType(&NSString::from_str("<p>words</p>"), kind);
-        assert!(!super::has_pasteboard_content());
-        assert!(!super::has_pasteboard_content_per_frame());
+        assert!(!super::content_on(&html));
+        assert!(!super::content_per_frame_on(html.clone()));
         let count = html.changeCount();
         // The same owner puts Figma's HTML there.
         html.setString_forType(&NSString::from_str("<!--(figma)meta--><p>frame</p>"), kind);
         // The case the review found: same owner, same count, other HTML.
         assert_eq!(html.changeCount(), count);
-        assert!(super::has_pasteboard_content());
+        assert!(super::content_on(&html));
         assert!(
-            super::has_pasteboard_content_per_frame(),
+            super::content_per_frame_on(html.clone()),
             "count {count} -> {}",
             html.changeCount()
         );
         // And back to plain HTML.
         html.setString_forType(&NSString::from_str("<p>words again</p>"), kind);
-        assert!(!super::has_pasteboard_content_per_frame());
-        assert!(!super::has_pasteboard_content());
+        assert!(!super::content_per_frame_on(html.clone()));
+        assert!(!super::content_on(&html));
         // A picture decides without reading the HTML.
         html.clearContents();
         let png = crate::mcp_services::png(&[10, 20, 30, 255], 1, 1).unwrap();
         html.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
             NSPasteboardTypePNG
         });
-        assert!(super::has_pasteboard_content_per_frame());
+        assert!(super::content_per_frame_on(html.clone()));
         html.clearContents();
-        assert!(!super::has_pasteboard_content_per_frame());
-        super::review_pasteboard(None);
+        assert!(!super::content_per_frame_on(html.clone()));
     }
     #[test]
     fn paste_reads_copied_files_then_a_copied_picture_and_nothing_from_text() {
