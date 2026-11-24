@@ -104,6 +104,14 @@ pub struct Choice {
     /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
+    /// Optional 0xRRGGBB color swatch dot drawn before the label (e.g. 3D material).
+    pub swatch: Option<u32>,
+    /// Optional tree indentation level (in steps) for hierarchical pickers.
+    pub indent: u8,
+    /// Optional accent indicator dot on the trailing edge (e.g. modified/keyed part).
+    pub modified: bool,
+    /// Optional command emitted when this row becomes hovered/lit (and cleared on leave/dismiss).
+    pub hover_command: Option<String>,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -164,6 +172,26 @@ impl Choice {
     }
     pub fn in_font(mut self, family: impl Into<String>) -> Self {
         self.font = Some(family.into());
+        self
+    }
+    pub fn with_swatch(mut self, rgb: u32) -> Self {
+        self.swatch = Some(rgb);
+        self
+    }
+    pub fn with_indent(mut self, indent: u8) -> Self {
+        self.indent = indent;
+        self
+    }
+    pub fn with_modified(mut self, modified: bool) -> Self {
+        self.modified = modified;
+        self
+    }
+    pub fn with_hover(mut self, command: impl Into<String>) -> Self {
+        self.hover_command = Some(command.into());
+        self
+    }
+    pub fn with_aliases(mut self, aliases: Vec<String>) -> Self {
+        self.aliases = aliases;
         self
     }
 }

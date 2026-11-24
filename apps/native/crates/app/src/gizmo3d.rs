@@ -200,6 +200,13 @@ pub struct State {
     /// The 3D layers in the selection.
     pub selected: Vec<String>,
     pub(super) part: Option<pm_scene3d::geometry::PartPlacement>,
+    /// Model part highlighted live while hovering rows in the part picker or
+    /// sweeping the cursor in Viewport Pick Mode.
+    pub(super) hovered_part: Option<pm_scene3d::geometry::PartPlacement>,
+    pub(super) hovered_part_seq: u64,
+    /// When `Some(layer_id)`, single-clicking in the 3D viewport picks a part
+    /// of that model and hovers highlight parts under the cursor.
+    pub(super) part_pick: Option<String>,
     pub tool: Tool,
     /// Looking through Free View rather than the shot (UI state `studioLook`).
     pub free_look: bool,
@@ -1317,6 +1324,48 @@ impl GizmoSurface {
                 }
             }
         }
+        // Live hover preview for a part hovered in the searchable part picker
+        // or under the crosshair in Viewport Pick Mode.
+        if drag.is_none()
+            && let Some(hovered) = &self.studio.hovered_part
+            && let Some(b) = hovered.bounds
+        {
+            let hcorner = |n: usize| -> Vec3 {
+                std::array::from_fn(|i| {
+                    if n & (1 << i) == 0 {
+                        b.min[i]
+                    } else {
+                        b.max[i]
+                    }
+                })
+            };
+            for (a, c) in [
+                (0, 1),
+                (2, 3),
+                (4, 5),
+                (6, 7),
+                (0, 2),
+                (1, 3),
+                (4, 6),
+                (5, 7),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
+            ] {
+                if let (Some((pa, _)), Some((pb, _))) =
+                    (eye.project(hcorner(a)), eye.project(hcorner(c)))
+                {
+                    push(pa, pb, accent);
+                    marks.push(stroke(pa, pb, keyline, 1.5 + 2. * m.gizmo_keyline, true));
+                }
+            }
+            for n in 0..8 {
+                if let Some((p, _)) = eye.project(hcorner(n)) {
+                    marks.push(tip(Shape::Square, p, accent));
+                }
+            }
+        }
         let items = self.studio.movable();
         let Some(pivot) = State::pivot(&items) else {
             return (lines, marks);
@@ -1648,6 +1697,15 @@ impl GizmoSurface {
         let Some(eye) = self.studio.eye() else {
             return false;
         };
+        if let Some(layer) = self.studio.part_pick.take() {
+            self.studio.hovered_part = None;
+            self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+            self.cursor = CursorStyle::Arrow;
+            self.studio_part(layer, eye, at, cx);
+            self.draw(cx);
+            cx.notify();
+            return true;
+        }
         if self.studio.tool == Tool::Light && self.studio.light_aim == "orbit" {
             // Orbit: drag the selected light around what it lights.
             let light = self.studio.scene.as_ref().and_then(|s| {
@@ -2125,6 +2183,16 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return self.studio.drag.is_some();
         };
+        if self.studio.drag.is_none()
+            && let Some(layer) = self.studio.part_pick.clone()
+            && let Some(eye) = self.studio.eye()
+        {
+            let at = self.to_comp(event.position, frame);
+            self.studio_hover_pick(layer, eye, at, cx);
+            self.cursor = CursorStyle::Crosshair;
+            cx.notify();
+            return true;
+        }
         let Some(drag) = self.studio.drag.as_mut() else {
             return false;
         };
@@ -2645,10 +2713,119 @@ impl GizmoSurface {
         self.studio.hover = next;
         changed
     }
+    /// Highlight a specific model part in the 3D viewport while browsing the
+    /// searchable part picker, or clear the preview with `None`.
+    pub fn set_hovered_part(
+        &mut self,
+        target: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+        let seq = self.studio.hovered_part_seq;
+        let Some((layer, key)) = target else {
+            if self.studio.hovered_part.take().is_some() {
+                self.draw(cx);
+                cx.notify();
+            }
+            return;
+        };
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let assets = self.host.scene3d_assets(cx);
+        let time = self.host.time(cx);
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let assets = assets?;
+                    pm_panel_studio3d::viewport::model_part(
+                        &p.snapshot,
+                        time,
+                        &layer,
+                        Some(&key),
+                        None,
+                        &*assets,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                if s.studio.hovered_part_seq != seq {
+                    return;
+                }
+                s.studio.hovered_part = found;
+                s.draw(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// Live hover raycast while Viewport Part Pick Mode is active.
+    fn studio_hover_pick(&mut self, layer: String, eye: Eye, at: [f64; 2], cx: &mut Context<Self>) {
+        self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+        let seq = self.studio.hovered_part_seq;
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let assets = self.host.scene3d_assets(cx);
+        let time = self.host.time(cx);
+        let ray = eye.ray(at);
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let assets = assets?;
+                    pm_panel_studio3d::viewport::model_part(
+                        &p.snapshot,
+                        time,
+                        &layer,
+                        None,
+                        Some(&ray),
+                        &*assets,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                if s.studio.hovered_part_seq != seq || s.studio.part_pick.is_none() {
+                    return;
+                }
+                if s.studio.hovered_part.as_ref().map(|p| &p.part.key)
+                    != found.as_ref().map(|p| &p.part.key)
+                {
+                    s.studio.hovered_part = found;
+                    s.draw(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+    /// Toggles Viewport Part Pick Mode for `layer`. Returns `true` when active.
+    pub fn toggle_part_pick(&mut self, layer: String, cx: &mut Context<Self>) -> bool {
+        self.studio.hovered_part = None;
+        self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+        let active = if self.studio.part_pick.as_deref() == Some(layer.as_str()) {
+            self.studio.part_pick = None;
+            self.cursor = CursorStyle::Arrow;
+            false
+        } else {
+            self.studio.part_pick = Some(layer);
+            self.cursor = CursorStyle::Crosshair;
+            true
+        };
+        self.draw(cx);
+        cx.notify();
+        active
+    }
     /// The cursor promises what a press does over the 3D view.
     pub(super) fn studio_cursor(&self, at: [f64; 2], frame: ViewFrame) -> Option<CursorStyle> {
         if !self.studio.active() {
             return None;
+        }
+        if self.studio.part_pick.is_some() {
+            return Some(CursorStyle::Crosshair);
         }
         Some(match self.studio.tool {
             Tool::Orbit | Tool::Pan => CursorStyle::OpenHand,

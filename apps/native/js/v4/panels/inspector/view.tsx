@@ -379,6 +379,94 @@ function Field({
         />
       );
     case "choice":
+      if (control.picker === "model-part" && control.layer && control.parts) {
+        const layer = control.layer;
+        const parts = control.parts;
+        const currentKey =
+          typeof control.value === "string" ? control.value : null;
+        const currentPart = currentKey
+          ? parts.find((p) => p.v === currentKey)
+          : undefined;
+        const label = currentPart ? currentPart.label : "Whole Model";
+        const parentKey = control.parent ?? null;
+        const canStepUp = !!control.hasSelectedPart;
+        return (
+          <div style={{ ...horizontal, flexGrow: 1, gap: token("metrics.border") }}>
+            <Action
+              {...common}
+              disabled={bound.disabled}
+              style={{ ...menuWell, flexGrow: 1 }}
+              menu
+              children={[
+                ...(control.swatch
+                  ? [
+                      <div
+                        key="swatch"
+                        role="presentation"
+                        style={{
+                          width: token("metrics.gap"),
+                          height: token("metrics.gap"),
+                          borderRadius: token("metrics.inner_radius"),
+                          background: control.swatch,
+                          flexShrink: 0,
+                        }}
+                      />,
+                    ]
+                  : []),
+                ...menuValue(label),
+              ]}
+              onActivate={(event) =>
+                session.nativeRequest({
+                  type: "part-menu",
+                  row: row.id,
+                  layer,
+                  anchor: event.currentTarget,
+                  current: currentKey,
+                  parts,
+                })
+              }
+            />
+            <Action
+              id={`part-up:${row.id}`}
+              label="Select Parent Part"
+              tooltip="Select parent part"
+              symbol="arrow.up"
+              disabled={bound.disabled || !canStepUp}
+              style={{
+                ...well,
+                color: token(canStepUp ? "colors.text" : "colors.muted"),
+                symbolSize: token("metrics.symbol_inline"),
+              }}
+              onActivate={() =>
+                session.send({
+                  type: "set-value",
+                  row: row.id,
+                  value: parentKey,
+                })
+              }
+            />
+            <Action
+              id={`part-pick:${row.id}`}
+              label="Pick Part from Viewport"
+              tooltip="Pick part from 3D viewport (or double-click model)"
+              symbol="scope"
+              disabled={bound.disabled}
+              style={{
+                ...well,
+                color: token("colors.text"),
+                symbolSize: token("metrics.symbol_inline"),
+              }}
+              onActivate={() =>
+                session.nativeRequest({
+                  type: "part-pick",
+                  row: row.id,
+                  layer,
+                })
+              }
+            />
+          </div>
+        );
+      }
       return (
         <PopUpButton
           {...bound}
@@ -493,6 +581,61 @@ function Property({
         if (event.button === 2) requestMenu(event);
       }}
     >
+      {row.control.kind === "choice" &&
+      row.control.picker === "model-part" &&
+      row.control.hasSelectedPart &&
+      row.control.breadcrumbs &&
+      row.control.breadcrumbs.length > 1 ? (
+        <div
+          style={{
+            ...horizontal,
+            gap: token("metrics.border"),
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            paddingBottom: token("metrics.border"),
+            flexWrap: "wrap",
+          }}
+        >
+          {row.control.breadcrumbs.flatMap((crumb, index, all) => {
+            const isLast = index === all.length - 1;
+            const sep =
+              index > 0
+                ? [
+                    <text
+                      key={`sep:${index}`}
+                      style={{
+                        color: token("colors.muted"),
+                        fontSize: token("typography.minimum"),
+                      }}
+                    >
+                      ›
+                    </text>,
+                  ]
+                : [];
+            return [
+              ...sep,
+              <Action
+                key={`crumb:${crumb.v ?? "whole"}`}
+                id={`crumb:${row.id}:${crumb.v ?? "whole"}`}
+                label={`Select ${crumb.label}`}
+                disabled={disabled || isLast}
+                style={{
+                  color: token(isLast ? "colors.text" : "colors.muted"),
+                  fontSize: token("typography.minimum"),
+                }}
+                children={crumb.label}
+                onActivate={() =>
+                  session.send({
+                    type: "set-value",
+                    row: row.id,
+                    value: crumb.v,
+                  })
+                }
+              />,
+            ];
+          })}
+        </div>
+      ) : null}
       <InspectorRow
         label={row.label}
         // The label is its own tooltip when it is cut; the row says only

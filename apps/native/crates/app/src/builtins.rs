@@ -146,11 +146,176 @@ fn scroll_thumb(
 }
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
+/// Rows the 3D model part picker lists at once; typing narrows the rest.
+const PART_PAGE: usize = 120;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PartMenuView {
+    #[default]
+    Tree,
+    ByMaterial,
+    Modified,
+}
+pub struct PartMenuState {
+    pub runtime: Arc<Builtins>,
+    pub request_id: u64,
+    pub layer: String,
+    pub current: Option<String>,
+    pub parts: Vec<Value>,
+    pub view: PartMenuView,
+    pub show_raw: bool,
+}
+
+fn parse_hex_rgb(hex: &str) -> Option<u32> {
+    let hex = hex.strip_prefix('#')?;
+    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
+}
+
+fn build_part_choices(state: &PartMenuState) -> Vec<pm_shell::transient::Choice> {
+    use pm_shell::transient::Choice;
+    let mut choices = Vec::new();
+    let modified_count = state
+        .parts
+        .iter()
+        .filter(|p| p["modified"] == true)
+        .count();
+    let distinct_materials: std::collections::BTreeSet<&str> = state
+        .parts
+        .iter()
+        .filter_map(|p| p["material"].as_str())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let has_trimmed = state
+        .parts
+        .iter()
+        .any(|p| p["label"].as_str() != p["rawName"].as_str());
+
+    // Whole Model sits at the very top with checkmark when no sub-part is active.
+    choices.push(
+        Choice::new("Whole Model", "partPick:__whole__")
+            .checked(state.current.is_none())
+            .with_hover("partHover:"),
+    );
+
+    // Compact in-place filter/view toggles (keep the menu open via `stays(true)`).
+    if modified_count > 0 || distinct_materials.len() >= 2 || has_trimmed {
+        if state.view != PartMenuView::Tree {
+            choices.push(
+                Choice::new("Show All Parts (Tree)", "partFilter:tree")
+                    .within("View")
+                    .stays(true),
+            );
+        }
+        if distinct_materials.len() >= 2 && state.view != PartMenuView::ByMaterial {
+            choices.push(
+                Choice::new("Group by Material", "partFilter:material")
+                    .within("View")
+                    .stays(true),
+            );
+        }
+        if modified_count > 0 && state.view != PartMenuView::Modified {
+            choices.push(
+                Choice::new(
+                    format!("Modified Only ({modified_count})"),
+                    "partFilter:modified",
+                )
+                .within("View")
+                .with_modified(true)
+                .stays(true),
+            );
+        }
+        if has_trimmed {
+            choices.push(
+                Choice::new(
+                    if state.show_raw {
+                        "Use Clean Names"
+                    } else {
+                        "Show Raw Node Names"
+                    },
+                    "partFilter:raw",
+                )
+                .within("View")
+                .stays(true),
+            );
+        }
+    }
+
+    let make_row = |part: &Value, category: &str, indent: u8| -> Option<Choice> {
+        let key = part["v"].as_str()?;
+        let clean = part["label"].as_str().unwrap_or("Part");
+        let raw = part["rawName"].as_str().unwrap_or(clean);
+        let material = part["material"].as_str();
+        let label = if state.show_raw { raw } else { clean };
+        let mut aliases = Vec::new();
+        if raw != label {
+            aliases.push(raw.to_owned());
+        }
+        if clean != label {
+            aliases.push(clean.to_owned());
+        }
+        if let Some(mat) = material
+            && !mat.is_empty()
+            && mat != label
+        {
+            aliases.push(mat.to_owned());
+        }
+        let mut choice = Choice::new(label, format!("partPick:{key}"))
+            .checked(state.current.as_deref() == Some(key))
+            .within(category)
+            .with_indent(indent)
+            .with_modified(part["modified"] == true)
+            .with_hover(format!("partHover:{}:{key}", state.layer))
+            .with_aliases(aliases);
+        if let Some(rgb) = part["swatch"].as_str().and_then(parse_hex_rgb) {
+            choice = choice.with_swatch(rgb);
+        }
+        Some(choice)
+    };
+
+    match state.view {
+        PartMenuView::Tree => {
+            for part in &state.parts {
+                let depth = part["depth"].as_u64().unwrap_or(0).min(6) as u8;
+                if let Some(choice) = make_row(part, "Parts", depth) {
+                    choices.push(choice);
+                }
+            }
+        }
+        PartMenuView::ByMaterial => {
+            let mut grouped: std::collections::BTreeMap<String, Vec<&Value>> = Default::default();
+            for part in &state.parts {
+                let group = part["material"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Structure / Groups")
+                    .to_owned();
+                grouped.entry(group).or_default().push(part);
+            }
+            for (group, items) in grouped {
+                let header = format!("{group} ({})", items.len());
+                for part in items {
+                    if let Some(choice) = make_row(part, &header, 0) {
+                        choices.push(choice);
+                    }
+                }
+            }
+        }
+        PartMenuView::Modified => {
+            for part in state.parts.iter().filter(|p| p["modified"] == true) {
+                if let Some(choice) = make_row(part, "Modified", 0) {
+                    choices.push(choice);
+                }
+            }
+        }
+    }
+    choices
+}
 #[derive(Default)]
 pub struct Host {
     /// The font picker's open request: the panel's runtime and the request
     /// it answers when a face is chosen (or nothing).
     pub font_pick: Option<(Arc<Builtins>, u64)>,
+    /// The 3D model part picker's open request and in-place filter state.
+    pub part_pick: Option<PartMenuState>,
     /// The Agent panel's open menu: its runtime, the request it answers,
     /// and the values of its rows.
     agent_pick: Option<(Arc<Builtins>, u64, Vec<Value>, Option<pm_shell::transient::ComposerPicker>)>,
@@ -1006,6 +1171,117 @@ impl Controller {
             "Search fonts",
             None,
         );
+    }
+    /// Searchable 3D Model Part picker: clean prefix-stripped hierarchy,
+    /// material swatches, modified indicators, in-place view switches, and
+    /// live 3D viewport hover highlighting.
+    fn part_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(prev) = self.builtins.part_pick.take() {
+            prev.runtime.platform_reply(prev.request_id, Ok(Value::Null));
+        }
+        let layer = request.input["layer"].as_str().unwrap_or("").to_owned();
+        let current = request.input["current"].as_str().map(str::to_owned);
+        let parts = request.input["parts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let state = PartMenuState {
+            runtime: runtime.clone(),
+            request_id: request.id,
+            layer,
+            current,
+            parts,
+            view: PartMenuView::Tree,
+            show_raw: false,
+        };
+        let choices = build_part_choices(&state);
+        self.builtins.part_pick = Some(state);
+        self.host.borrow_mut().open_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            Some(PART_PAGE),
+            Some(format!("dismissPartPicker:{}", request.id)),
+            "Search parts or materials",
+            None,
+        );
+    }
+    pub fn dismiss_part_picker(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self
+            .builtins
+            .part_pick
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == id)
+        {
+            self.part_picked("", cx);
+        }
+    }
+    pub fn part_picked(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.part_hovered("", cx);
+        if let Some(pending) = self.builtins.part_pick.take() {
+            let value = if key.is_empty() {
+                Value::Null
+            } else {
+                json!(key)
+            };
+            pending.runtime.platform_reply(pending.request_id, Ok(value));
+        }
+    }
+    pub fn part_filter(&mut self, action: &str) {
+        let Some(state) = self.builtins.part_pick.as_mut() else {
+            return;
+        };
+        match action {
+            "tree" => state.view = PartMenuView::Tree,
+            "material" => state.view = PartMenuView::ByMaterial,
+            "modified" => state.view = PartMenuView::Modified,
+            "raw" => state.show_raw = !state.show_raw,
+            _ => return,
+        }
+        let choices = build_part_choices(state);
+        let dismiss = Some(format!("dismissPartPicker:{}", state.request_id));
+        self.host.borrow_mut().update_menu(choices, None, dismiss);
+    }
+    pub fn part_hovered(&mut self, spec: &str, cx: &mut Context<Self>) {
+        let target = if spec.is_empty() {
+            None
+        } else {
+            spec.split_once(':')
+                .filter(|(l, k)| !l.is_empty() && !k.is_empty())
+                .map(|(l, k)| (l.to_owned(), k.to_owned()))
+        };
+        if let Some(gizmos) = self.builtins.gizmos.clone() {
+            gizmos.update(cx, |g, cx| g.set_hovered_part(target, cx));
+        }
+    }
+    fn part_pick_mode(&mut self, layer: String, cx: &mut Context<Self>) {
+        if let Some(gizmos) = self.builtins.gizmos.clone() {
+            let active = gizmos.update(cx, |g, cx| g.toggle_part_pick(layer, cx));
+            self.note(
+                if active {
+                    "Pick Model Part — Click a part in the 3D viewport (Esc to cancel)".into()
+                } else {
+                    String::new()
+                },
+                cx,
+            );
+        }
     }
     /// The Agent panel's pop-up menus (threads, model, access, slash): the
     /// field menu under the control that asked, standing above the popover
@@ -3322,6 +3598,17 @@ impl Controller {
                 }
                 "fontMenu" => {
                     self.font_menu(&runtime, &request, window, cx);
+                    continue;
+                }
+                "partMenu" => {
+                    self.part_menu(&runtime, &request, cx);
+                    continue;
+                }
+                "partPick" => {
+                    if let Some(layer) = request.input["layer"].as_str() {
+                        self.part_pick_mode(layer.to_owned(), cx);
+                    }
+                    runtime.platform_reply(request.id, Ok(Value::Null));
                     continue;
                 }
                 "agentMenu" => {

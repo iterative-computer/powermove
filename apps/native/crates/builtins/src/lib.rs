@@ -3337,6 +3337,8 @@ fn inspector_platform<'a>(panel: &str, request: &'a Value) -> Result<(&'a str, V
         match input["type"].as_str() {
             Some("add-effect-menu") => return Ok(("effectMenu", input.clone())),
             Some("font-menu") => return Ok(("fontMenu", input.clone())),
+            Some("part-menu") => return Ok(("partMenu", input.clone())),
+            Some("part-pick") => return Ok(("partPick", input.clone())),
             Some("animator-menu") => return Ok(("contextMenu", input["items"].clone())),
             Some("row-menu") => {
                 let items = input["items"]

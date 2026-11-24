@@ -2203,11 +2203,20 @@ impl GizmoSurface {
         self.pen_drag.is_some()
             || self.marquee.is_some()
             || self.studio.busy()
+            || self.studio.part_pick.is_some()
             || self.drag.is_some()
             || self.sketch.is_some()
             || self.text_sketch.is_some()
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.studio.part_pick.take().is_some() {
+            self.studio.hovered_part = None;
+            self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+            self.cursor = CursorStyle::Arrow;
+            self.draw(cx);
+            cx.notify();
+            return true;
+        }
         if self.effect_colour.is_some() {
             self.effects_finish_colour(false, cx); return true;
         }

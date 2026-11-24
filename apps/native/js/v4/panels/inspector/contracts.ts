@@ -46,6 +46,20 @@ export interface NumberAxis extends Field<number> {
   min?: number;
   max?: number;
 }
+export interface ModelPartItem {
+  v: string;
+  label: string;
+  rawName: string;
+  parent: string | null;
+  depth: number;
+  material: string | null;
+  swatch: string | null;
+  modified: boolean;
+}
+export interface ModelPartCrumb {
+  v: string | null;
+  label: string;
+}
 export type Control =
   | { kind: "number" | "point"; axes: NumberAxis[] }
   | ({ kind: "text"; multiline?: boolean } & Field<string>)
@@ -54,6 +68,14 @@ export type Control =
       options: (string | Option)[];
       /** Filled by the host when the menu opens (Parent, Track Matte). */
       rows?: HostRows;
+      /** Rich searchable 3D model part picker metadata (3d.part.select). */
+      picker?: "model-part";
+      layer?: string;
+      swatch?: string | null;
+      parent?: string | null;
+      hasSelectedPart?: boolean;
+      breadcrumbs?: ModelPartCrumb[];
+      parts?: ModelPartItem[];
     } & Field<Json>)
   | ({ kind: "toggle" } & Field<boolean>)
   | ({ kind: "colour"; hexBinding?: Binding; hex?: string } & Field<string>)
@@ -193,6 +215,19 @@ export type NativeRequest =
       row: string;
       /** The family shown, checked and in view when the picker opens. */
       current?: string;
+    }
+  | {
+      type: "part-menu";
+      anchor: number;
+      row: string;
+      layer: string;
+      current: string | null;
+      parts: ModelPartItem[];
+    }
+  | {
+      type: "part-pick";
+      row: string;
+      layer: string;
     }
   | { type: "fill-popover"; anchor: number; row: string }
   | { type: "point-pad"; anchor: number; row: string }

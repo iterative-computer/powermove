@@ -255,9 +255,27 @@ export class InspectorSession {
     void this.native
       .request(request)
       .then(async (choice) => {
-        if (!this.alive || typeof choice !== "string") return;
+        if (!this.alive) return;
         const current = this.snapshot.target;
         if (!("key" in current) || current.key !== key) return;
+        if (request.type === "part-menu") {
+          // "__whole__" selects Whole Model (null); null/undefined means dismissed.
+          if (choice === "__whole__") {
+            await this.dispatch({
+              type: "set-value",
+              row: request.row,
+              value: null,
+            });
+          } else if (typeof choice === "string" && choice.length > 0) {
+            await this.dispatch({
+              type: "set-value",
+              row: request.row,
+              value: choice,
+            });
+          }
+          return;
+        }
+        if (typeof choice !== "string") return;
         if (request.type === "add-effect-menu" && current.kind === "layers") {
           await this.dispatch({
             type: "drop-effect",

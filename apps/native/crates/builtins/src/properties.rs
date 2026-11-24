@@ -1258,10 +1258,16 @@ impl Properties {
         if let Some(saved) = object["parts"].as_object() {
             for (key, part) in saved {
                 if !parts.iter().any(|entry| &entry.key == key) {
+                    let raw = part["name"].as_str().unwrap_or("Part").to_owned();
                     parts.push(pm_scene3d::geometry::ModelPart {
                         key: key.clone(),
-                        name: part["name"].as_str().unwrap_or("Part").into(),
+                        name: raw.clone(),
+                        raw_name: raw,
+                        parent: None,
+                        depth: 0,
                         material: None,
+                        material_name: None,
+                        swatch: None,
                     });
                 }
             }
@@ -1278,11 +1284,69 @@ impl Properties {
                 .iter()
                 .map(|part| json!({"v":part.key,"label":part.name})),
         );
+        let saved_parts = object["parts"].as_object();
+        let saved_mat_props = object["sourceMaterialProperties"].as_object();
+        let saved_mats = object["sourceMaterials"].as_object();
+        let rich_parts: Vec<Value> = parts
+            .iter()
+            .map(|part| {
+                let transform_modified = saved_parts
+                    .and_then(|map| map.get(&part.key))
+                    .is_some_and(|v| v.is_object() && !v.as_object().unwrap().is_empty());
+                let material_modified = part.material.is_some_and(|slot| {
+                    let k = slot.to_string();
+                    saved_mat_props.is_some_and(|m| m.contains_key(&k))
+                        || saved_mats.is_some_and(|m| m.contains_key(&k))
+                });
+                json!({
+                    "v": part.key,
+                    "label": part.name,
+                    "rawName": part.raw_name,
+                    "parent": part.parent,
+                    "depth": part.depth,
+                    "material": part.material_name,
+                    "swatch": part.swatch,
+                    "modified": transform_modified || material_modified,
+                })
+            })
+            .collect();
+        let mut breadcrumbs = vec![json!({"v": null, "label": "Whole Model"})];
+        if let Some(sel) = selected {
+            let mut chain = Vec::new();
+            let mut cursor = Some(sel);
+            let mut guard = 0;
+            while let Some(part) = cursor
+                && guard < 16
+            {
+                chain.push(json!({"v": part.key, "label": part.name}));
+                cursor = part
+                    .parent
+                    .as_deref()
+                    .and_then(|pkey| parts.iter().find(|p| p.key == pkey));
+                guard += 1;
+            }
+            chain.reverse();
+            breadcrumbs.extend(chain);
+        }
         let id = "3d.part.select";
         let lease = self.control_lease(id);
-        let mut rows = vec![
-            json!({"id":id,"label":"Edit","control":{"kind":"choice","binding":lease,"value":selected.map(|p| &p.key),"options":options}}),
-        ];
+        let mut rows = vec![json!({
+            "id": id,
+            "label": "Edit",
+            "control": {
+                "kind": "choice",
+                "picker": "model-part",
+                "layer": layer,
+                "binding": lease,
+                "value": selected.map(|p| &p.key),
+                "swatch": selected.and_then(|p| p.swatch.as_deref()),
+                "parent": selected.and_then(|p| p.parent.as_deref()),
+                "hasSelectedPart": selected.is_some(),
+                "breadcrumbs": breadcrumbs,
+                "parts": rich_parts,
+                "options": options,
+            }
+        })];
         if let Some(part) = selected {
             rows.extend(self.part_transform_rows(model, record, layer, &part.key, time)?);
         }

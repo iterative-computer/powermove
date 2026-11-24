@@ -4250,6 +4250,26 @@ impl Controller {
             self.font_picked(family);
             return true;
         }
+        if let Some(key) = cmd.name.strip_prefix("partPick:") {
+            self.part_picked(key, cx);
+            return true;
+        }
+        if let Some(action) = cmd.name.strip_prefix("partFilter:") {
+            self.part_filter(action);
+            return true;
+        }
+        if let Some(spec) = cmd.name.strip_prefix("partHover:") {
+            self.part_hovered(spec, cx);
+            return true;
+        }
+        if let Some(id) = cmd
+            .name
+            .strip_prefix("dismissPartPicker:")
+            .and_then(|id| id.parse().ok())
+        {
+            self.dismiss_part_picker(id, cx);
+            return true;
+        }
         if let Some(id) = cmd.name.strip_prefix("dismissAgentPicker:").and_then(|id| id.parse().ok()) {
             self.dismiss_agent_picker(id);
             return true;

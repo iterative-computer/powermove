@@ -8201,6 +8201,9 @@ pub struct Popup {
     /// What the rows were last built from: an open over the same rows
     /// reuses them (building 160 palette rows took a frame or more).
     built: Option<u64>,
+    /// Last hover command dispatched from a hovered/keyed menu row so leaving
+    /// or dismissing the menu can clear the preview (e.g. `partHover:`).
+    last_hover_command: Option<String>,
 }
 impl Popup {
     fn new(
@@ -8304,6 +8307,7 @@ impl Popup {
             dismiss: None,
             picked: false,
             built: None,
+            last_hover_command: None,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -8466,6 +8470,9 @@ impl Popup {
                 c.checked,
                 &c.font,
                 &c.provider,
+                c.swatch,
+                c.indent,
+                c.modified,
                 self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
@@ -9424,6 +9431,23 @@ impl PopupLayout<'_> {
                 centred(&hint, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.md as f64;
             }
+            if !is_palette && disclosure.is_none() && c.modified {
+                let dot = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(trailing - 6., y + ((row_h - 6.) / 2.).floor()),
+                        NSSize::new(6., 6.),
+                    ),
+                );
+                dot.setBoxType(NSBoxType::Custom);
+                dot.setBorderWidth(0.);
+                dot.setCornerRadius(3.);
+                dot.setFillColor(&native_color(t.colors.accent));
+                dot.setAccessibilityElement(false);
+                self.list.addSubview(&dot);
+                self.parts.push(Retained::into_super(dot));
+                trailing -= 6. + t.space.sm as f64;
+            }
             if !is_palette && disclosure.is_none() && c.checked == Some(true) {
                 let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
                 mark.setSymbolConfiguration(Some(
@@ -9511,11 +9535,31 @@ impl PopupLayout<'_> {
                         body_h,
                     )
                 };
-                let title_lead = if disclosure.is_some() {
+                let mut title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
                 } else {
-                    lead
+                    lead + f64::from(c.indent.min(6)) * 12.
                 };
+                if disclosure.is_none()
+                    && let Some(rgb) = c.swatch
+                {
+                    let swatch = NSBox::initWithFrame(
+                        NSBox::alloc(mtm),
+                        NSRect::new(
+                            NSPoint::new(title_lead, y + ((row_h - 8.) / 2.).floor()),
+                            NSSize::new(8., 8.),
+                        ),
+                    );
+                    swatch.setBoxType(NSBoxType::Custom);
+                    swatch.setBorderWidth(1.);
+                    swatch.setBorderColor(&native_color(t.colors.separator));
+                    swatch.setCornerRadius(4.);
+                    swatch.setFillColor(&native_color(rgb));
+                    swatch.setAccessibilityElement(false);
+                    self.list.addSubview(&swatch);
+                    self.parts.push(Retained::into_super(swatch));
+                    title_lead += 8. + t.space.sm as f64;
+                }
                 centred(
                     &title,
                     title_lead,
@@ -10015,6 +10059,31 @@ impl Popup {
             }
         }
         self.lit_row_place = lit;
+        let next_hover = lit
+            .and_then(|place| self.rows.get(place))
+            .and_then(|row| match row.kind {
+                PickerRow::Choice(idx) => self.model.choices.get(idx),
+                PickerRow::Provider(_) => None,
+            })
+            .and_then(|choice| choice.hover_command.clone());
+        if self.last_hover_command != next_hover {
+            if let Some(cmd) = &next_hover {
+                let _ = self.sender.try_send(Command {
+                    name: cmd.clone(),
+                    args: Vec::new(),
+                    token: None,
+                });
+            } else if let Some(prev) = &self.last_hover_command
+                && let Some((prefix, _)) = prev.split_once(':')
+            {
+                let _ = self.sender.try_send(Command {
+                    name: format!("{prefix}:"),
+                    args: Vec::new(),
+                    token: None,
+                });
+            }
+            self.last_hover_command = next_hover;
+        }
     }
 
     /// Puts the highlight on the lit row. It appears where it lands when
@@ -10338,6 +10407,15 @@ impl Popup {
         self.model.open = false;
         self.set_cmd_held(false);
         self.window.setIgnoresMouseEvents(true);
+        if let Some(prev) = self.last_hover_command.take()
+            && let Some((prefix, _)) = prev.split_once(':')
+        {
+            let _ = self.sender.try_send(Command {
+                name: format!("{prefix}:"),
+                args: Vec::new(),
+                token: None,
+            });
+        }
         // Closed with nothing chosen: the one who asked hears so.
         if !std::mem::take(&mut self.picked)
             && let Some(name) = self.dismiss.take()
