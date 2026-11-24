@@ -7223,3 +7223,75 @@ fn a_finished_export_check_is_taken_while_the_worker_is_busy() {
     panels.close();
     actor.shutdown();
 }
+
+/// PM-699: starting a Properties gain drag never waits on the inspector's
+/// worker. While it holds the panel (a host call, a slow tick) the start
+/// answers at once without a request, and the drag scrubs the ordinary way.
+#[test]
+fn a_gain_drag_starts_without_waiting_on_a_busy_inspector() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Gain","compId":"c","w":640,"h":360,"fps":30,"dur":8,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"audio","name":"Music","type":"audio","from":0,"dur":8,"on":true,"d":{"gain":1,"fadeIn":0,"fadeOut":0},"p":{},"fx":[]}]}"##).unwrap();
+    let kernel = actor.handle();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["audio".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let entry = panels.broker.entry("inspector").unwrap();
+    let backend = entry.lock().unwrap().backend.clone();
+    let handle = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| n.props.get("binding").and_then(Value::as_str))
+        .find(|h| backend.lock().unwrap().native.properties.is_gain_handle(h))
+        .expect("the audio layer's gain row")
+        .to_owned();
+    assert!(
+        panels
+            .try_gain_scrub_request("inspector", &handle, 0.5)
+            .is_some(),
+        "a free inspector resolves the gain lease"
+    );
+    let (held, is_held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let worker = thread::spawn(move || {
+        let _entry = entry.lock().unwrap();
+        let _backend = backend.lock().unwrap();
+        held.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(10));
+    });
+    is_held.recv().unwrap();
+    let at = Instant::now();
+    let busy = panels.try_gain_scrub_request("inspector", &handle, 0.5);
+    let took = at.elapsed();
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    assert!(
+        took < Duration::from_micros(8_333),
+        "the drag start waited {took:?} on the busy inspector"
+    );
+    assert!(
+        busy.is_none(),
+        "a busy inspector sends the drag the ordinary way"
+    );
+    panels.close();
+    actor.shutdown();
+}

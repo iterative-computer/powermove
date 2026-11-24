@@ -2513,6 +2513,31 @@ impl Builtins {
         }
         let backend = self.backend(panel).ok()?;
         let mut backend = backend.shared();
+        Self::gain_request(&mut backend, handle, value)
+    }
+    /// `gain_scrub_request` for the start of a drag, on the main thread:
+    /// `None` while the inspector's worker holds its panel (a host call, a
+    /// slow tick), and the drag takes the ordinary scrub path instead of
+    /// waiting (PM-699).
+    pub fn try_gain_scrub_request(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if panel != "inspector" {
+            return None;
+        }
+        let entry = self.broker.entries.try_lock().ok()?.get(panel)?.clone();
+        let entry = entry.try_lock().ok()?;
+        let mut backend = entry.backend.try_lock().ok()?;
+        Self::gain_request(&mut backend, handle, value)
+    }
+    fn gain_request(
+        backend: &mut data::Backend,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
         if !backend.native.properties.is_gain_handle(handle) {
             return None;
         }
