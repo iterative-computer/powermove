@@ -886,6 +886,12 @@ struct MacWindowState {
     /// The scene GPUI drew was not shown yet: the next update shows it,
     /// without drawing the tree again.
     present_pending: bool,
+    /// P-SLOT-REGION: a frame that moves hosted views, rendering on the GPU;
+    /// it is published when that completes (`complete_in_flight`).
+    #[cfg(not(feature = "wgpu"))]
+    in_flight: Option<renderer::InFlightFrame>,
+    #[cfg(not(feature = "wgpu"))]
+    gate: crate::composition::CompletionGate,
     frame_requested: bool,
     idle_cleanup: Option<gpui::Task<()>>,
     /// Powermove P-IDLE-WAKE: the link is paused because the window was idle
@@ -1507,6 +1513,10 @@ impl MacWindow {
                 renderer,
                 force_render_pending: false,
                 present_pending: false,
+                #[cfg(not(feature = "wgpu"))]
+                in_flight: None,
+                #[cfg(not(feature = "wgpu"))]
+                gate: Default::default(),
                 frame_requested: false,
                 idle_cleanup: None,
                 idle: false,
@@ -2598,21 +2608,6 @@ impl PlatformWindow for MacWindow {
                 }
             }
         }
-        // P-SLOT-REGION: a frame presented outside a transaction reaches the
-        // layer when its GPU work completes. Were it still on its way, this
-        // frame's transaction could land first and the older picture then show
-        // under hosted views already moved for this one (controls a row off
-        // their labels for a frame). A frame that moves them waits for the next
-        // update instead; the main thread waits for nothing.
-        if crate::composition::waits_for_async_present(
-            forced,
-            this.renderer.async_presents_in_flight(),
-            this.renderer.async_presents_in_flight() && crate::composition::pending(view, this.painted),
-        ) {
-            this.present_pending = true;
-            drop(this);
-            return trace("wait", false, 0.);
-        }
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) and moves under a CAMetalDisplayLink
         // (`PM_GPUI_METAL_DISPLAY_LINK=1`) is found out after its views moved:
@@ -2622,7 +2617,36 @@ impl PlatformWindow for MacWindow {
         // the hosted views are published only when it will present; a frame
         // with no drawable or a failed encode leaves the picture and the views
         // on screen together and shows its scene on the next update.
+        if !this.gate.may_draw() {
+            // A moving frame is still rendering: this scene shows after it.
+            this.present_pending = true;
+            drop(this);
+            return trace("held", false, 0.);
+        }
         let prepared = this.renderer.prepare(scene);
+        // P-SLOT-REGION: a frame that moves hosted views is published when its
+        // rendering completes, views and picture in one transaction; the main
+        // thread waits for nothing meanwhile, and no other frame is drawn.
+        if let Some(frame) = prepared.as_ref().filter(|_| {
+            !forced && !this.renderer.display_link_bound() && crate::composition::pending(view, this.painted)
+        }) {
+            let _ = frame;
+            let prepared = prepared.expect("checked");
+            let serial = this.gate.begin();
+            let state = Arc::downgrade(&self.0);
+            let in_flight = this.renderer.commit_for_completion(prepared, move || {
+                let state = state.clone();
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    if let Some(state) = state.upgrade() {
+                        complete_in_flight(&state, serial);
+                    }
+                });
+            });
+            this.in_flight = Some(in_flight);
+            this.last_draw = Some(std::time::Instant::now());
+            drop(this);
+            return trace("gpu", true, 0.);
+        }
         let Some((prepared, transaction)) =
             crate::composition::publish(view, &mut this.painted, prepared)
         else {
@@ -4008,6 +4032,8 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
     // the first mouse click, causing keybindings to be non-functional.
     if selector == sel!(windowDidBecomeKey:) && is_active {
         let window_state = unsafe { get_window_state(this) };
+        #[cfg(not(feature = "wgpu"))]
+        finish_in_flight_now(&window_state);
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
@@ -4148,6 +4174,8 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
 
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
+    #[cfg(not(feature = "wgpu"))]
+    finish_in_flight_now(&window_state);
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
@@ -4225,6 +4253,12 @@ extern "C" fn step(view: *mut c_void) {
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
 
+        // A frame that moves hosted views is still rendering: no new frame
+        // until it is published (`complete_in_flight` asks for the next).
+        #[cfg(not(feature = "wgpu"))]
+        if !lock.gate.may_draw() {
+            return;
+        }
         // Dirty views and animations mark demand through frame_waker while
         // GPUI serves this frame. Keep a running animation's link uninterrupted.
         if let Some(mut callback) = lock.request_frame_callback.take() {
@@ -4269,6 +4303,46 @@ extern "C" fn step(view: *mut c_void) {
             #[cfg(not(feature = "wgpu"))]
             lock.leave_direct();
         }
+    }
+}
+
+/// P-SLOT-REGION: the GPU finished frame `serial`, which moves hosted views:
+/// they move and its picture shows in one transaction, flushed now; the next
+/// frame may then be drawn.
+#[cfg(not(feature = "wgpu"))]
+fn complete_in_flight(state: &Arc<Mutex<MacWindowState>>, serial: u64) {
+    let mut this = state.lock();
+    if !this.gate.complete(serial) {
+        return;
+    }
+    let Some(frame) = this.in_flight.take() else {
+        return;
+    };
+    let view = this.native_view.as_ptr() as usize;
+    let published = crate::composition::publish(view, &mut this.painted, Some(()));
+    this.renderer.present_completed(frame);
+    this.start_display_link();
+    // Committing runs AppKit's display cycle, which takes this lock.
+    drop(this);
+    drop(published);
+    unsafe {
+        let _: () = msg_send![class!(CATransaction), flush];
+    }
+}
+
+/// AppKit's own synchronous paint must show now: a frame still rendering is
+/// waited for and published first (the only wait, as these paints always had).
+#[cfg(not(feature = "wgpu"))]
+fn finish_in_flight_now(state: &Arc<Mutex<MacWindowState>>) {
+    let waiting = {
+        let this = state.lock();
+        this.in_flight.as_ref().map(|f| {
+            f.wait();
+        });
+        this.gate.serial_in_flight()
+    };
+    if let Some(serial) = waiting {
+        complete_in_flight(state, serial);
     }
 }
 

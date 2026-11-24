@@ -326,14 +326,42 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     }
     Some(transaction)
 }
-/// Whether a frame waits for the next update rather than present: it would
-/// move hosted views (`pending`) while an earlier frame presented outside a
-/// transaction is still on its way to the layer. Landing after this frame's
-/// transaction, that older picture would show under views already moved.
-/// AppKit's own synchronous paints never wait.
-pub fn waits_for_async_present(forced: bool, async_in_flight: bool, pending: bool) -> bool {
-    !forced && async_in_flight && pending
+/// P-SLOT-REGION: a frame that moves hosted views is published (views and
+/// picture in one transaction) only once its GPU work has completed; until
+/// then no new frame is drawn, so its staged geometry cannot be replaced.
+/// Each frame is published once, by its own completion.
+#[derive(Default, Debug)]
+pub struct CompletionGate {
+    in_flight: Option<u64>,
+    next: u64,
 }
+impl CompletionGate {
+    /// A moving frame goes to the GPU; its serial, for its completion.
+    pub fn begin(&mut self) -> u64 {
+        self.next += 1;
+        self.in_flight = Some(self.next);
+        self.next
+    }
+    /// The frame waiting for the GPU, if any.
+    pub fn serial_in_flight(&self) -> Option<u64> {
+        self.in_flight
+    }
+    /// Whether a new frame may be drawn (none is waiting for the GPU).
+    pub fn may_draw(&self) -> bool {
+        self.in_flight.is_none()
+    }
+    /// The GPU finished frame `serial`: true when it is the one waiting, which
+    /// is then published (once).
+    pub fn complete(&mut self, serial: u64) -> bool {
+        if self.in_flight == Some(serial) {
+            self.in_flight = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Publishes a frame's hosted views only once its Metal frame is prepared
 /// (drawable in hand, commands encoded): a frame that cannot present leaves
 /// `painted` and every staged geometry for the next attempt, and the views

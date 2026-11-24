@@ -295,11 +295,6 @@ pub struct MetalRenderer {
     pub acquire_seconds: f64,
     /// P-LAUNCH-TRACE: whether this window presented a drawable yet.
     presented_once: bool,
-    /// Frames presented outside a transaction whose command buffers have not
-    /// completed: their drawables reach the layer when they complete, and
-    /// one that completes after a later frame's transaction would show its
-    /// older picture under hosted views already moved for the later one.
-    async_in_flight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A link holds at most this many drawables of a previous size after a
@@ -418,6 +413,21 @@ pub struct PreparedFrame {
     drawable: metal::MetalDrawable,
     command_buffer: metal::CommandBuffer,
     from_link: bool,
+}
+
+/// A frame committed to the GPU whose drawable waits for its rendering to
+/// complete before it is presented, with the hosted views that move with it
+/// (Powermove P-SLOT-REGION: a transaction committed while the picture is
+/// still rendering showed the views' new places over the previous picture).
+pub struct InFlightFrame {
+    drawable: metal::MetalDrawable,
+    command_buffer: metal::CommandBuffer,
+}
+impl InFlightFrame {
+    /// Waits for its rendering (AppKit's own synchronous paints only).
+    pub fn wait(&self) {
+        self.command_buffer.wait_until_completed();
+    }
 }
 
 /// How a prepared frame reaches the layer.
@@ -730,7 +740,6 @@ impl MetalRenderer {
             headless_render_target: None,
             last_draw: None,
             acquire_seconds: 0.,
-            async_in_flight: Default::default(),
             presented_once: false,
         }
     }
@@ -1118,35 +1127,45 @@ impl MetalRenderer {
                 // Queuing present on the buffer defers that call until scheduling,
                 // which can miss the CPU deadline after timely encoding.
                 // Its update tracks the committed rendering; no scheduled wait is needed.
-                self.track_async(&command_buffer);
                 command_buffer.commit();
                 drawable.present();
             }
             PresentMode::Queued => {
-                self.track_async(&command_buffer);
                 command_buffer.present_drawable(&drawable);
                 command_buffer.commit();
             }
         }
     }
 
-    /// Counts a frame presented outside a transaction until its command
-    /// buffer completes ([`Self::async_presents_in_flight`]).
-    fn track_async(&self, command_buffer: &metal::CommandBufferRef) {
-        use std::sync::atomic::Ordering;
-        self.async_in_flight.fetch_add(1, Ordering::AcqRel);
-        let count = self.async_in_flight.clone();
-        let block = ConcreteBlock::new(move |_| {
-            count.fetch_sub(1, Ordering::AcqRel);
-        });
-        command_buffer.add_completed_handler(&block.copy());
+    /// Commits a prepared frame now; `completed` runs on Metal's completion
+    /// thread once its rendering is done, and then the frame is presented with
+    /// [`Self::present_completed`]. The main thread waits for nothing.
+    pub fn commit_for_completion(
+        &mut self,
+        frame: PreparedFrame,
+        completed: impl Fn() + Send + 'static,
+    ) -> InFlightFrame {
+        let PreparedFrame {
+            drawable,
+            command_buffer,
+            ..
+        } = frame;
+        let block = ConcreteBlock::new(move |_: &metal::CommandBufferRef| completed()).copy();
+        command_buffer.add_completed_handler(&block);
+        command_buffer.commit();
+        InFlightFrame {
+            drawable,
+            command_buffer,
+        }
     }
 
-    /// Whether a frame presented outside a transaction has not completed yet
-    /// (P-SLOT-REGION: a frame that moves hosted views waits for it).
-    pub fn async_presents_in_flight(&self) -> bool {
-        self.async_in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
+    /// Presents a frame whose rendering completed, inside the current
+    /// transaction (with the hosted views published there).
+    pub fn present_completed(&mut self, frame: InFlightFrame) {
+        self.set_presents_with_transaction(true);
+        frame.drawable.present();
     }
+
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing

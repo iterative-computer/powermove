@@ -454,10 +454,10 @@ mod macos {
     /// PM-696 review: hosted views are published only with a frame that
     /// presents. A frame whose Metal frame could not be prepared (no drawable,
     /// a failed encode) moves nothing and keeps its staging; the next prepared
-    /// frame moves the control. A frame that would move views waits while an
-    /// earlier frame presented outside a transaction is still in flight.
+    /// frame moves the control. A moving frame is published by its GPU
+    /// completion, once, and holds the next frame until then.
     pub fn unprepared_frames(mtm: MainThreadMarker) {
-        use gpui_macos::composition::waits_for_async_present;
+        use gpui_macos::composition::CompletionGate;
         let rect =
             |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         let window = unsafe {
@@ -497,12 +497,16 @@ mod macos {
         assert!(probe::pending(&gpui), "its staging waits for the next attempt");
         assert_eq!(probe::publish_frame(&gpui, true), Some(true));
         assert_eq!(top(&slot), 60., "the frame that presents moves it");
-        // A moving frame waits for an asynchronous present still in flight;
-        // nothing else waits, and AppKit's synchronous paints never do.
-        assert!(waits_for_async_present(false, true, true));
-        assert!(!waits_for_async_present(false, false, true));
-        assert!(!waits_for_async_present(false, true, false));
-        assert!(!waits_for_async_present(true, true, true));
+        // A moving frame goes to the GPU and is published by its own
+        // completion, once; no other frame is drawn meanwhile.
+        let mut gate = CompletionGate::default();
+        assert!(gate.may_draw());
+        let first = gate.begin();
+        assert!(!gate.may_draw(), "no new frame while one moving frame renders");
+        assert!(!gate.complete(first + 1), "another frame's completion publishes nothing");
+        assert!(gate.complete(first), "its own completion publishes it");
+        assert!(!gate.complete(first), "never twice");
+        assert!(gate.may_draw());
         drop(slot);
         window.close();
     }
