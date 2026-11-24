@@ -156,15 +156,6 @@ impl ContourEdge {
         )
     }
 
-    fn min_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
-        let (a, b) = self.endpoints(contours, elements);
-        a[1].min(b[1])
-    }
-
-    fn max_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
-        let (a, b) = self.endpoints(contours, elements);
-        a[1].max(b[1])
-    }
 }
 
 fn raw_point(elements: &[PathEl], index: u32) -> [f64; 2] {
@@ -217,13 +208,9 @@ fn certified_forward(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
 }
 
 fn certified_separate(
-    a: ContourEdge,
-    b: ContourEdge,
-    contours: &[Vec<u32>],
-    elements: &[PathEl],
+    (a_start, a_end): ([f64; 2], [f64; 2]),
+    (b_start, b_end): ([f64; 2], [f64; 2]),
 ) -> bool {
-    let (a_start, a_end) = a.endpoints(contours, elements);
-    let (b_start, b_end) = b.endpoints(contours, elements);
     let a0 = orientation_sign(a_start, a_end, b_start);
     let a1 = orientation_sign(a_start, a_end, b_end);
     if a0.is_some() && a0 == a1 {
@@ -514,10 +501,13 @@ impl NonzeroResolver {
             let edge = self.edges[index];
             self.active_edges
                 .retain(|&other| self.edges[other as usize].max_x >= edge.min_x);
+            let points = edge.endpoints(contours, elements);
+            let (min_y, max_y) = (points.0[1].min(points.1[1]), points.0[1].max(points.1[1]));
             for &other_index in &self.active_edges {
                 let other = self.edges[other_index as usize];
-                if edge.max_y(contours, elements) < other.min_y(contours, elements)
-                    || other.max_y(contours, elements) < edge.min_y(contours, elements)
+                let other_points = other.endpoints(contours, elements);
+                if max_y < other_points.0[1].min(other_points.1[1])
+                    || other_points.0[1].max(other_points.1[1]) < min_y
                 {
                     continue;
                 }
@@ -531,7 +521,7 @@ impl NonzeroResolver {
                         continue;
                     }
                 }
-                if !certified_separate(edge, other, contours, elements) {
+                if !certified_separate(points, other_points) {
                     return false;
                 }
             }
