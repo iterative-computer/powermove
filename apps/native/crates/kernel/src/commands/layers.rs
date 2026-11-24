@@ -197,13 +197,16 @@ pub enum LayerCommand {
     /// name a layer of the target composition. Inserted at `index` (the
     /// topmost selected row; default the top). With `time` (the playhead)
     /// the block keeps its relative timing and starts there (its earliest
-    /// non-group layer). Label "Paste".
+    /// non-group layer). `foreign`: the layers come from another document,
+    /// where an id outside the pasted set names unrelated content, so those
+    /// bindings are cleared instead of kept. Label "Paste".
     Paste {
         comp: Option<String>,
         layers: Vec<Value>,
         new_ids: Vec<String>,
         index: Option<usize>,
         time: Option<f64>,
+        foreign: bool,
     },
     /// Figma paste (`PM.proj.layers.unshift(...plan.layers)`): layers built
     /// like [`LayerCommand::Add`] at the top of the open composition, in
@@ -272,7 +275,8 @@ impl LayerCommand {
                 new_ids,
                 index,
                 time,
-            } => paste(cx, comp.as_deref(), layers, new_ids, *index, *time),
+                foreign,
+            } => paste(cx, comp.as_deref(), layers, new_ids, *index, *time, *foreign),
             LayerCommand::InsertBlock { layers, .. } => insert_block(cx, layers),
             LayerCommand::Reorder {
                 layer_id,
@@ -1556,7 +1560,7 @@ fn duplicate(
             new_ids[i].clone()
         })
         .collect();
-    paste(cx, comp.as_deref(), &selected, &ids, index, None)
+    paste(cx, comp.as_deref(), &selected, &ids, index, None, false)
 }
 
 /// `pasteLayers(PM, clipboard, { atPlayhead })`.
@@ -1567,6 +1571,7 @@ fn paste(
     new_ids: &[String],
     index: Option<usize>,
     time: Option<f64>,
+    foreign: bool,
 ) -> Result<(), CommandError> {
     if clipboard.is_empty() {
         return Ok(());
@@ -1620,18 +1625,20 @@ fn paste(
         let id = id?;
         id_map.iter().find(|(s, _)| s == id).map(|(_, n)| n.clone())
     };
+    // Same document: a binding outside the pasted set stays when its layer
+    // is in the target composition. From another document it names
+    // unrelated content and is cleared.
+    let kept = |id: &str| !foreign && current.contains(id);
     let mut pasted = Vec::with_capacity(clipboard.len());
     for (source, id) in clipboard.iter().zip(new_ids) {
         let mut clone = clone_layer(source, id, &layers);
         let from = values::num(source, "from").unwrap_or(0.0) + offset;
         let parent = values::text(source, "parent").filter(|p| !p.is_empty());
         let group = values::text(source, "group").filter(|g| !g.is_empty());
-        let parent =
-            mapped(parent).or_else(|| parent.filter(|p| current.contains(*p)).map(str::to_owned));
-        let group =
-            mapped(group).or_else(|| group.filter(|g| current.contains(*g)).map(str::to_owned));
+        let parent = mapped(parent).or_else(|| parent.filter(|p| kept(p)).map(str::to_owned));
+        let group = mapped(group).or_else(|| group.filter(|g| kept(g)).map(str::to_owned));
         let matte = values::text(source, "matteSource")
-            .and_then(|id| mapped(Some(id)).or_else(|| current.contains(id).then(|| id.to_owned())));
+            .and_then(|id| mapped(Some(id)).or_else(|| kept(id).then(|| id.to_owned())));
         let m = values::obj(&mut clone);
         m.insert("from", n(from));
         m.insert(
@@ -1656,8 +1663,17 @@ fn paste(
                     .and_then(Value::as_object_mut)
                 {
                     for (_, r) in inputs.iter_mut() {
-                        if let Some(target) = mapped(values::text(r, "layerId")) {
-                            values::obj(r).insert("layerId", values::s(&target));
+                        let Some(source) = values::text(r, "layerId").map(str::to_owned) else {
+                            continue;
+                        };
+                        match mapped(Some(&source)) {
+                            Some(target) => {
+                                values::obj(r).insert("layerId", values::s(&target));
+                            }
+                            None if foreign => {
+                                values::obj(r).insert("layerId", Value::Null);
+                            }
+                            None => {}
                         }
                     }
                 }

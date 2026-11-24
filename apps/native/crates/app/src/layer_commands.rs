@@ -451,8 +451,9 @@ pub fn copy_layers(
 
 impl CopiedLayers {
     pub fn paste(&self, target: &Published, time: f64) -> Option<Plan> {
-        let mut plan = paste_plan(self.layers.clone(), time);
-        if self.document == target.snapshot.doc_id {
+        let foreign = self.document != target.snapshot.doc_id;
+        let mut plan = paste_plan(self.layers.clone(), time, foreign);
+        if !foreign {
             return Some(plan);
         }
         let root = target.snapshot.root()?;
@@ -1452,7 +1453,7 @@ fn work_area(published: &Published) -> Option<(f64, f64)> {
     Some((at(0).unwrap_or(0.), at(1).or(comp.get("dur")?.as_f64())?))
 }
 /// Cmd+V layers: the block keeps its timing and starts at the playhead.
-pub fn paste_plan(layers: Vec<Value>, time: f64) -> Plan {
+pub fn paste_plan(layers: Vec<Value>, time: f64, foreign: bool) -> Plan {
     let new_ids: Vec<String> = layers.iter().map(|_| new_id("L")).collect();
     Plan {
         select: Some(new_ids.clone()),
@@ -1465,6 +1466,7 @@ pub fn paste_plan(layers: Vec<Value>, time: f64) -> Plan {
                     new_ids,
                     index: None,
                     time: Some(time),
+                    foreign,
                 }
                 .into(),
             ],

@@ -529,6 +529,7 @@ fn paste_moves_the_block_to_the_playhead_and_remaps_links() {
             new_ids: vec!["pa".into(), "pb".into()],
             index: Some(1),
             time: Some(5.0),
+            foreign: false,
         },
     );
     let order = ids(&s);
@@ -553,10 +554,68 @@ fn paste_keeps_a_matte_in_the_target_and_clears_an_absent_one() {
         let mut copied = layer(&s, "box");
         copied.as_object_mut().unwrap().insert("matteSource", Value::from(matte));
         run(&mut s, LayerCommand::Paste {
-            comp: None, layers: vec![copied], new_ids: vec![id.into()], index: None, time: None,
+            comp: None, layers: vec![copied], new_ids: vec![id.into()], index: None, time: None, foreign: false,
         });
         assert_eq!(layer(&s, id).get("matteSource").and_then(Value::as_str), expected);
     }
+}
+
+/// From another document, bindings to layers outside the pasted set name
+/// unrelated content that happens to share an id: they are cleared. Bindings
+/// inside the set follow the copies; a same-document paste keeps the target's.
+#[test]
+fn a_foreign_paste_clears_bindings_outside_the_pasted_set() {
+    // The target has a group "g" as well as the layer "top".
+    let mut s = store_with(|p| {
+        let layers = p.as_object_mut().unwrap().get_mut("layers").unwrap().as_array_mut().unwrap();
+        layers.insert(0, parse(r#"{"id":"g","type":"group","name":"G","from":0,"dur":10,"p":{}}"#).unwrap());
+    });
+    let source = layer(&s, "box");
+    let bound = |id: &str, to: &str| {
+        let mut l = source.clone();
+        let m = l.as_object_mut().unwrap();
+        m.insert("id", Value::from(id));
+        for key in ["parent", "matteSource"] {
+            m.insert(key, Value::from(to));
+        }
+        m.insert("group", Value::from(if to == "top" { "g" } else { to }));
+        m.insert(
+            "fx",
+            parse(&format!(
+                r#"[{{"id":"fx-{id}","type":"displace","on":true,"p":{{}},"inputs":{{"map":{{"kind":"layer","layerId":"{to}"}}}}}}]"#
+            ))
+            .unwrap(),
+        );
+        l
+    };
+    let input = |l: &Value| get(l, &["fx"]).as_array().unwrap()[0].get("inputs").unwrap()
+        .get("map").unwrap().get("layerId").cloned().unwrap();
+    for (foreign, id, kept) in [(true, "foreign-child", None), (false, "local-child", Some("top"))] {
+        run(&mut s, LayerCommand::Paste {
+            comp: None, layers: vec![bound("child", "top")], new_ids: vec![id.into()], index: None, time: None, foreign,
+        });
+        let pasted = layer(&s, id);
+        for key in ["parent", "matteSource"] {
+            assert_eq!(pasted.get(key).and_then(Value::as_str), kept, "{key}, foreign {foreign}");
+        }
+        assert_eq!(
+            pasted.get("group").and_then(Value::as_str),
+            kept.map(|_| "g"),
+            "group, foreign {foreign}"
+        );
+        assert_eq!(input(&pasted).as_str(), kept, "effect input, foreign {foreign}");
+    }
+    // A parent pasted with its child still binds it.
+    let mut parent = source.clone();
+    parent.as_object_mut().unwrap().insert("id", Value::from("p"));
+    run(&mut s, LayerCommand::Paste {
+        comp: None, layers: vec![parent, bound("c", "p")], new_ids: vec!["np".into(), "nc".into()],
+        index: None, time: None, foreign: true,
+    });
+    let child = layer(&s, "nc");
+    assert_eq!(child.get("parent").and_then(Value::as_str), Some("np"));
+    assert_eq!(child.get("matteSource").and_then(Value::as_str), Some("np"));
+    assert_eq!(input(&child).as_str(), Some("np"));
 }
 
 #[test]
@@ -581,7 +640,7 @@ fn pasted_embedded_media_is_admitted_atomically_with_the_layer() {
     clipboard.as_object_mut().unwrap().get_mut("d").unwrap().as_object_mut().unwrap()
         .insert("asset", Value::from("pasted-image"));
     let paste = |id: &str| LayerCommand::Paste {
-        comp: None, layers: vec![clipboard.clone()], new_ids: vec![id.into()], index: None, time: None,
+        comp: None, layers: vec![clipboard.clone()], new_ids: vec![id.into()], index: None, time: None, foreign: false,
     };
     assert!(s.transact("Paste", Origin::Interface, &[asset.clone().into(), paste("top").into()]).is_err());
     assert!(s.media().get("pasted-image").is_none());
