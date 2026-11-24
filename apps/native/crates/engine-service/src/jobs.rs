@@ -792,6 +792,27 @@ pub struct ExportHandle {
     asks: Arc<std::sync::atomic::AtomicU64>,
     /// A render cache fill's frame reports not taken yet.
     frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>>,
+    /// The override pixel files written for the child. It removes each one
+    /// it reads; what is left once it is reaped (cancelled, failed, its
+    /// requests asked ahead) is removed then.
+    written: Arc<Mutex<Vec<PathBuf>>>,
+}
+/// Removes the pixel files a job's child did not read.
+fn sweep(written: &Mutex<Vec<PathBuf>>) {
+    for file in std::mem::take(&mut *written.lock().unwrap()) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+/// The pixel files in a reply.
+fn files_of(answers: &Answers) -> Vec<PathBuf> {
+    answers
+        .iter()
+        .flatten()
+        .filter_map(|a| match a {
+            WireAnswer::Raster { file, .. } => Some(file.clone()),
+            _ => None,
+        })
+        .collect()
 }
 impl ExportHandle {
     /// Only queue callers opt into live app foreground QoS; ordinary exports
@@ -863,6 +884,8 @@ impl ExportHandle {
         let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let asked = asks.clone();
         let frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>> = Arc::default();
+        let written: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+        let reply_files = written.clone();
         let reports = frames.clone();
         let reader = std::thread::spawn(move || {
             // Dropped with the reader: the job is over, and what its
@@ -877,6 +900,66 @@ impl ExportHandle {
             // exiting: its last lines still say how it ended.
             let reply = |message: &ParentMessage| {
                 let _ = send(&mut *child_input.lock().unwrap(), message);
+            };
+            // Override asks are answered in order on a thread of their own:
+            // a frame asked ahead never holds back the grant the frame
+            // before needs, which this thread answers as it comes.
+            let asks = {
+                let (asks, asked) = std::sync::mpsc::channel::<(u64, Vec<CompatJobNeed>)>();
+                let written = reply_files;
+                let (input, interactive, cancel, idle) = (
+                    child_input.clone(),
+                    interactive.clone(),
+                    cancel.clone(),
+                    idle.clone(),
+                );
+                let job = id.clone();
+                let answering = std::thread::Builder::new()
+                    .name("pm-export-asks".into())
+                    .spawn(move || {
+                        let mut seen = interactive.epoch();
+                        let mut active_at = None;
+                        for (ask, needs) in asked {
+                            // Background work runs extensions only while
+                            // the person is away, as it renders.
+                            let held = std::time::Instant::now();
+                            if let Some(delay) = &idle {
+                                interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
+                            }
+                            let deferred_us = held.elapsed().as_micros() as u64;
+                            let answered = match &overrides {
+                                _ if cancel.load(Ordering::Acquire) => Err("cancelled".into()),
+                                Some(answer) => answer(&needs),
+                                None => Err("No window has this project's extensions open".into()),
+                            };
+                            let answers = wire_answers(job.as_str(), ask, answered);
+                            let files = files_of(&answers);
+                            {
+                                let mut written = written.lock().unwrap();
+                                // The child removes what it reads.
+                                if written.len() > 4096 {
+                                    written.retain(|f| f.exists());
+                                }
+                                written.extend(files.iter().cloned());
+                            }
+                            let sent = !cancel.load(Ordering::Acquire)
+                                && send(
+                                    &mut *input.lock().unwrap(),
+                                    &ParentMessage::Compat {
+                                        id: ask,
+                                        answers,
+                                        deferred_us,
+                                    },
+                                )
+                                .is_ok();
+                            if !sent {
+                                for file in files {
+                                    let _ = std::fs::remove_file(file);
+                                }
+                            }
+                        }
+                    });
+                answering.is_ok().then_some(asks)
             };
             let mut lines = std::io::BufReader::new(output).lines();
             let broken = loop {
@@ -905,23 +988,16 @@ impl ExportHandle {
                         reply(&ParentMessage::Faces { id: ask, agree });
                     }
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
-                        // Background work runs extensions only while the
-                        // person is away, as it renders.
-                        let held = std::time::Instant::now();
-                        if let Some(delay) = &idle {
-                            interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
+                        let sent = asks
+                            .as_ref()
+                            .is_some_and(|asks| asks.send((ask, needs)).is_ok());
+                        if !sent {
+                            reply(&ParentMessage::Compat {
+                                id: ask,
+                                answers: Err("The export's extension answers stopped".into()),
+                                deferred_us: 0,
+                            });
                         }
-                        let deferred_us = held.elapsed().as_micros() as u64;
-                        let answered = match &overrides {
-                            Some(answer) => answer(&needs),
-                            None => Err("No window has this project's extensions open".into()),
-                        };
-                        let answers = wire_answers(id.as_str(), ask, answered);
-                        reply(&ParentMessage::Compat {
-                            id: ask,
-                            answers,
-                            deferred_us,
-                        });
                     }
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
@@ -985,6 +1061,7 @@ impl ExportHandle {
             submissions,
             asks,
             frames,
+            written,
         })
     }
     /// A render cache fill's frame reports since the last call, in order.
@@ -1032,6 +1109,7 @@ impl ExportHandle {
             }
             child.wait()?;
         }
+        sweep(&self.written);
         Ok(self.status())
     }
 }
@@ -1042,6 +1120,7 @@ impl Drop for ExportHandle {
             let _ = c.kill();
             let _ = c.wait();
         }
+        sweep(&self.written);
         if let Some(r) = self.reader.take() {
             // A descendant may retain the pipe even after the child exits.
             // Detach a stuck reader rather than holding application shutdown.
@@ -2102,10 +2181,13 @@ impl Drop for Finished {
     }
 }
 /// An export's raster override layers, asked of the parent (which asks the
-/// window's extensions) as the frame reaches each one; the frame waits (an
-/// export has no per-frame deadline). A need with no answer fails the frame.
-/// Asking a frame's layers in one batch measured slower: the realm's work
-/// then runs ahead of, not between, the frame's GPU work.
+/// window's extensions); the frame waits (an export has no per-frame
+/// deadline). A need with no answer fails the frame. An export that renders
+/// a frame ahead probes the next frame and asks, in one request, exactly
+/// what serial frames would ask for it, in their order
+/// (`pm_render::compat::Lookahead`); a frame that cannot be shown safe is
+/// asked serially, and one that asks otherwise than was asked for it stops
+/// the export.
 #[derive(Default)]
 struct JobRasters {
     /// Cancellation or the parent's end: a frame waiting on an answer stops.
@@ -2114,17 +2196,18 @@ struct JobRasters {
     error: Mutex<Option<String>>,
     next: std::sync::atomic::AtomicU64,
     waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answers>>>,
-    answered: Mutex<JobAnswers>,
+    /// The serial answer cache and what was asked ahead of it.
+    ahead: Mutex<pm_render::compat::Lookahead>,
+    /// Requests asked ahead whose answers were not taken yet, oldest first,
+    /// with how many needs each holds.
+    requests: Mutex<std::collections::VecDeque<(u64, std::sync::mpsc::Receiver<Answers>, usize)>>,
     /// Microseconds the parent held answers for viewer activity, so far.
     deferred_us: AtomicU64,
+    /// Where requests go (tests); the parent through stdout otherwise.
+    #[cfg(test)]
+    sent: Mutex<Vec<(u64, Vec<CompatJobNeed>)>>,
 }
 type Answers = std::result::Result<Vec<WireAnswer>, String>;
-type JobKey = (String, String, u64, u64);
-#[derive(Default)]
-struct JobAnswers {
-    map: std::collections::HashMap<JobKey, pm_render::compat::CompatAnswer>,
-    time: u64,
-}
 impl JobRasters {
     /// The parent's answers to request `id`. One for a request whose frame
     /// stopped waiting is dropped; one for a request never made is an error.
@@ -2191,6 +2274,87 @@ impl JobRasters {
         ));
         None
     }
+    /// Asks the parent for `needs` (in this order); their answers arrive at
+    /// the receiver.
+    fn ask(&self, needs: Vec<CompatJobNeed>) -> (u64, std::sync::mpsc::Receiver<Answers>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            waiting.insert(id, tx);
+            id
+        };
+        #[cfg(test)]
+        self.sent.lock().unwrap().push((id, needs.clone()));
+        #[cfg(not(test))]
+        if send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Compat { id, needs },
+        )
+        .is_err()
+        {
+            // Never answered: the wait ends with the parent.
+            self.waiting.lock().unwrap().remove(&id);
+        }
+        (id, rx)
+    }
+    /// Request `id`'s `count` answers, waited for; a need left unanswered is
+    /// `Missing` (the frame then fails with `error`).
+    fn take(
+        &self,
+        id: u64,
+        count: usize,
+        rx: &std::sync::mpsc::Receiver<Answers>,
+    ) -> Vec<pm_render::compat::CompatAnswer> {
+        use pm_render::compat::CompatAnswer;
+        let answers = self.wait(rx);
+        self.waiting.lock().unwrap().remove(&id);
+        let items = match answers {
+            None => Vec::new(),
+            Some(Err(error)) => {
+                *self.error.lock().unwrap() = Some(error);
+                Vec::new()
+            }
+            Some(Ok(items)) if items.len() != count => {
+                *self.error.lock().unwrap() = Some(format!(
+                    "The app answered {} layers for {count}",
+                    items.len()
+                ));
+                // Their pixel files are not read: remove them.
+                for item in items {
+                    if let WireAnswer::Raster { file, .. } = item {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
+                Vec::new()
+            }
+            Some(Ok(items)) => items,
+        };
+        let mut items = items.into_iter();
+        (0..count)
+            .map(|_| match items.next().map(Self::raster) {
+                Some(Ok(answer)) => answer,
+                Some(Err(error)) => {
+                    *self.error.lock().unwrap() = Some(error);
+                    CompatAnswer::Missing
+                }
+                None => CompatAnswer::Missing,
+            })
+            .collect()
+    }
+}
+fn ahead_need(
+    composition: &str,
+    layer: &str,
+    seconds: f64,
+    scale: f64,
+) -> pm_render::compat::AheadNeed {
+    pm_render::compat::AheadNeed {
+        composition: composition.to_owned(),
+        layer: layer.to_owned(),
+        seconds,
+        scale,
+    }
 }
 impl pm_render::compat::CompatRasters for JobRasters {
     fn producing(&self, source: pm_protocol::snapshot::CompatSource) -> bool {
@@ -2205,88 +2369,86 @@ impl pm_render::compat::CompatRasters for JobRasters {
         source: pm_protocol::snapshot::CompatSource,
         _crop: Option<pm_protocol::common::PixelRect>,
     ) -> pm_render::compat::CompatAnswer {
-        use pm_render::compat::CompatAnswer;
+        use pm_render::compat::{CompatAnswer, Step};
         if source != pm_protocol::snapshot::CompatSource::RasterOverride {
             return CompatAnswer::Native;
         }
-        let key = (
-            composition.to_owned(),
-            layer.to_owned(),
-            time.to_bits(),
-            scale.to_bits(),
-        );
-        let needs = {
-            let mut answered = self.answered.lock().unwrap();
-            if let Some(answer) = answered.map.get(&key) {
-                return answer.clone();
+        let need = ahead_need(composition, layer, time, scale);
+        let step = self.ahead.lock().unwrap().answer(&need);
+        match step {
+            Step::Answer(answer) => answer,
+            Step::Diverged(why) => {
+                *self.error.lock().unwrap() = Some(why);
+                CompatAnswer::Missing
             }
-            // A new frame: only its answers are kept (an export never comes back).
-            if answered.time != key.2 {
-                answered.map.clear();
-                answered.time = key.2;
+            Step::Ask => {
+                let (id, rx) = self.ask(vec![CompatJobNeed {
+                    composition: composition.to_owned(),
+                    layer: layer.to_owned(),
+                    seconds: time,
+                    scale,
+                }]);
+                let answer = self.take(id, 1, &rx).remove(0);
+                self.ahead.lock().unwrap().store(&need, answer.clone());
+                answer
             }
-            let needs = vec![CompatJobNeed {
-                composition: composition.to_owned(),
-                layer: layer.to_owned(),
-                seconds: time,
-                scale,
-            }];
-            needs
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let id = {
-            let mut waiting = self.waiting.lock().unwrap();
-            let id = self.next.fetch_add(1, Ordering::AcqRel);
-            waiting.insert(id, tx);
-            id
-        };
-        let asked = send(
-            &mut std::io::stdout().lock(),
-            &ChildMessage::Compat {
-                id,
-                needs: needs.clone(),
-            },
-        );
-        let answers = asked.ok().and_then(|()| self.wait(&rx));
-        self.waiting.lock().unwrap().remove(&id);
-        let items = match answers {
-            None => return CompatAnswer::Missing,
-            Some(Err(error)) => {
-                *self.error.lock().unwrap() = Some(error);
-                return CompatAnswer::Missing;
-            }
-            Some(Ok(items)) if items.len() != needs.len() => {
-                *self.error.lock().unwrap() = Some(format!(
-                    "The app answered {} layers for {}",
-                    items.len(),
-                    needs.len()
-                ));
-                return CompatAnswer::Missing;
-            }
-            Some(Ok(items)) => items,
-        };
-        let mut answered = self.answered.lock().unwrap();
-        let mut mine = CompatAnswer::Missing;
-        for (need, item) in needs.iter().zip(items) {
-            let answer = match Self::raster(item) {
-                Ok(answer) => answer,
-                Err(error) => {
-                    *self.error.lock().unwrap() = Some(error);
-                    continue;
+            Step::Planned => {
+                if !self.ahead.lock().unwrap().has_ready() {
+                    let request = self.requests.lock().unwrap().pop_front();
+                    let answers = match request {
+                        Some((id, rx, count)) => self.take(id, count, &rx),
+                        None => Vec::new(),
+                    };
+                    self.ahead.lock().unwrap().arrive(answers);
                 }
-            };
-            let k = (
-                need.composition.clone(),
-                need.layer.clone(),
-                key.2,
-                need.scale.to_bits(),
-            );
-            if k == key {
-                mine = answer.clone();
+                self.ahead.lock().unwrap().take_planned(&need)
             }
-            answered.map.insert(k, answer);
         }
-        mine
+    }
+    fn answer_probed(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: pm_protocol::snapshot::CompatSource,
+        _crop: Option<pm_protocol::common::PixelRect>,
+    ) -> pm_render::compat::CompatAnswer {
+        if source == pm_protocol::snapshot::CompatSource::RasterOverride {
+            self.ahead
+                .lock()
+                .unwrap()
+                .probe(&ahead_need(composition, layer, time, scale));
+        }
+        pm_render::compat::CompatAnswer::Missing
+    }
+    fn probe_unsafe(&self) {
+        self.ahead.lock().unwrap().probe_unsafe();
+    }
+    fn ask_ahead(&self) {
+        let needs = match self.ahead.lock().unwrap().ahead() {
+            Ok(needs) => needs,
+            Err(why) => {
+                *self.error.lock().unwrap() = Some(why);
+                return;
+            }
+        };
+        if needs.is_empty() {
+            return;
+        }
+        let count = needs.len();
+        let (id, rx) = self.ask(
+            needs
+                .into_iter()
+                .map(|n| CompatJobNeed {
+                    composition: n.composition,
+                    layer: n.layer,
+                    seconds: n.seconds,
+                    scale: n.scale,
+                })
+                .collect(),
+        );
+        self.requests.lock().unwrap().push_back((id, rx, count));
     }
 }
 /// Renders `fill`'s frames as the export draws them (its request, opaque, at
@@ -3194,6 +3356,140 @@ mod tests {
         rasters.next.store(1, Ordering::Release);
         assert_eq!(rasters.reply(0, Ok(vec![])), Ok(()));
         assert!(rasters.reply(7, Ok(vec![])).is_err());
+    }
+    /// The parent, in this process: a stateful producer whose answer for a
+    /// layer is how many layers it was asked before (a 1×1 raster of that
+    /// level), answering requests as they are sent. Its trace is every
+    /// layer it was asked, in order.
+    fn parent(
+        rasters: Arc<JobRasters>,
+        dir: std::path::PathBuf,
+    ) -> (Arc<AtomicBool>, std::thread::JoinHandle<Vec<(String, u64)>>) {
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let serving = std::thread::spawn(move || {
+            let mut trace = Vec::new();
+            let mut seen = 0;
+            while !stop.load(Ordering::Acquire) {
+                let sent: Vec<(u64, Vec<CompatJobNeed>)> =
+                    rasters.sent.lock().unwrap()[seen..].to_vec();
+                seen += sent.len();
+                for (id, needs) in sent {
+                    let answers = needs
+                        .iter()
+                        .map(|need| {
+                            trace.push((need.layer.clone(), need.seconds.to_bits()));
+                            let level = (trace.len() * 37 % 256) as u8;
+                            let file = dir.join(format!("{id}-{}.rgba", trace.len()));
+                            std::fs::write(&file, [level, level, level, 255]).unwrap();
+                            WireAnswer::Raster {
+                                width: 1,
+                                height: 1,
+                                size: [1., 1.],
+                                anchor: [0., 0.],
+                                uv: [0., 0., 1., 1.],
+                                file,
+                            }
+                        })
+                        .collect();
+                    rasters.reply(id, Ok(answers)).unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            trace
+        });
+        (done, serving)
+    }
+    /// The answers a run of `frames` (each the plan's calls: layer and
+    /// composition-local time) gets, and the parent's trace; `ahead`: each
+    /// frame after the first probed and asked ahead once the frame before
+    /// asked for its own, as an overlapping export does.
+    fn run_frames(frames: &[Vec<(&str, f64)>], ahead: bool) -> (Vec<u8>, Vec<(String, u64)>) {
+        use pm_protocol::snapshot::CompatSource;
+        use pm_render::compat::{CompatAnswer, CompatRasters};
+        let dir = tempfile::tempdir().unwrap();
+        let rasters = Arc::new(JobRasters::default());
+        let (done, serving) = parent(rasters.clone(), dir.path().to_owned());
+        let probe = |frame: &Vec<(&str, f64)>| {
+            for (layer, t) in frame {
+                rasters.answer_probed("c", layer, *t, 1., CompatSource::RasterOverride, None);
+            }
+            rasters.ask_ahead();
+        };
+        let mut levels = Vec::new();
+        if ahead {
+            probe(&frames[0]);
+        }
+        for (n, frame) in frames.iter().enumerate() {
+            for (layer, t) in frame {
+                match rasters.answer("c", layer, *t, 1., CompatSource::RasterOverride, None) {
+                    CompatAnswer::Raster(r) => levels.push(r.data[0]),
+                    other => panic!("{other:?}: {:?}", rasters.error.lock().unwrap()),
+                }
+            }
+            if ahead && n + 1 < frames.len() {
+                probe(&frames[n + 1]);
+            }
+        }
+        done.store(true, Ordering::Release);
+        let trace = serving.join().unwrap();
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "every pixel file was read and removed"
+        );
+        (levels, trace)
+    }
+    /// A held precomp (its local time stays at 0 for two output frames)
+    /// under a root layer A asked first: A's new time clears the serial
+    /// cache, so the held layer B is asked again each frame. Asked ahead, B
+    /// is asked again as well, at the same place, and every answer is the
+    /// serial one.
+    #[test]
+    fn a_held_layer_is_asked_again_ahead_as_serially() {
+        let t = |n: u32| f64::from(n) / 30.;
+        let frames: Vec<Vec<(&str, f64)>> = (0..6)
+            .map(|n| vec![("A", t(n)), ("B", f64::from(n / 2) / 15.)])
+            .collect();
+        let serial = run_frames(&frames, false);
+        assert_eq!(serial.1.len(), 12, "B is asked again every frame");
+        assert_eq!(run_frames(&frames, true), serial);
+    }
+    /// A layer asked at t0, another at t1, the first again at t0: the
+    /// serial cache asks it twice (the time changed in between); in a frame
+    /// where it is asked at t0 last and the next frame first, once.
+    #[test]
+    fn a_key_back_after_another_time_is_asked_again_ahead_as_serially() {
+        let frames: Vec<Vec<(&str, f64)>> = vec![
+            vec![("C", 0.), ("D", 0.5), ("C", 0.)],
+            vec![("C", 0.), ("D", 0.5)],
+            vec![("D", 0.5), ("C", 0.), ("C", 0.)],
+        ];
+        let serial = run_frames(&frames, false);
+        let asked: Vec<&str> = serial.1.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(asked, ["C", "D", "C", "D", "C"]);
+        assert_eq!(run_frames(&frames, true), serial);
+    }
+    /// A frame whose probe met a matte consumer is asked serially; a frame
+    /// that asks otherwise than was asked ahead for it stops the export.
+    #[test]
+    fn unsafe_frames_are_asked_serially_and_a_divergence_stops() {
+        use pm_protocol::snapshot::CompatSource;
+        use pm_render::compat::{CompatAnswer, CompatRasters};
+        let rasters = JobRasters::default();
+        rasters.answer_probed("c", "C", 0., 1., CompatSource::RasterOverride, None);
+        rasters.probe_unsafe();
+        rasters.ask_ahead();
+        assert!(
+            rasters.sent.lock().unwrap().is_empty(),
+            "nothing asked ahead"
+        );
+        rasters.answer_probed("c", "A", 0., 1., CompatSource::RasterOverride, None);
+        rasters.ask_ahead();
+        assert_eq!(rasters.sent.lock().unwrap().len(), 1);
+        let answer = rasters.answer("c", "B", 0., 1., CompatSource::RasterOverride, None);
+        assert!(matches!(answer, CompatAnswer::Missing));
+        assert!(rasters.error.lock().unwrap().is_some(), "the export stops");
+        assert_eq!(rasters.sent.lock().unwrap().len(), 1, "B was not asked");
     }
     /// A layer answered with the wrong number of answers, or pixels that
     /// don't fill it, fails with the reason instead of drawing.

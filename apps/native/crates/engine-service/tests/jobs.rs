@@ -1707,3 +1707,71 @@ fn a_cancelled_3d_export_is_followed_by_a_plain_export_that_completes() {
     assert_eq!(status.state, JobState::Done, "{status:?}");
     assert_eq!(std::fs::read_dir(plain).unwrap().count(), 30);
 }
+
+/// Override pixel files this test process wrote for its jobs and that are
+/// still there.
+fn left_pixel_files() -> Vec<std::path::PathBuf> {
+    let prefix = format!("powermove-compat-{}-", std::process::id());
+    std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect()
+}
+fn red_raster() -> CompatReply {
+    CompatReply::Raster {
+        width: 8,
+        height: 8,
+        rgba: [255, 0, 0, 255].repeat(64),
+        size: [8., 8.],
+        anchor: [4., 4.],
+        uv: [0., 0., 1., 1.],
+    }
+}
+/// An export cancelled while its frames' layers are asked ahead, or failing
+/// at a frame after the next frame's layers were asked, leaves none of the
+/// pixel files written for it: the child reads and removes each it takes,
+/// and the app removes the rest once the child is gone.
+#[test]
+fn override_pixel_files_never_outlive_a_cancelled_or_failed_export() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    // Cancelled mid-export.
+    let mut session = JobSession::new(text_request(dir.path().join("cancelled")));
+    let (asking, asked) = std::sync::mpsc::channel();
+    session.answer_overrides(Box::new(move |needs| {
+        let _ = asking.send(());
+        Ok(needs.iter().map(|_| red_raster()).collect())
+    }));
+    let child =
+        ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session).unwrap();
+    for _ in 0..5 {
+        asked
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the export asked for its layers");
+    }
+    child.cancel();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Cancelled, "{status:?}");
+    assert_eq!(left_pixel_files(), Vec::<std::path::PathBuf>::new());
+    // Failing at a frame after layers were asked ahead.
+    let mut session = JobSession::new(text_request(dir.path().join("failed")));
+    let answered = AtomicUsize::new(0);
+    session.answer_overrides(Box::new(move |needs| {
+        if answered.fetch_add(1, Ordering::Relaxed) < 4 {
+            return Ok(needs.iter().map(|_| red_raster()).collect());
+        }
+        Err("The project's extensions stopped during the export".into())
+    }));
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    assert_eq!(left_pixel_files(), Vec::<std::path::PathBuf>::new());
+}
