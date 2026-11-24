@@ -3491,6 +3491,52 @@ impl Editor {
                         for (_, body) in &panels.bodies {
                             fill_rounded_off(window, *body, body_radius, [true, true], fill);
                         }
+                        // Native/compat panel clips punch holes through `ground`
+                        // so the views below show through. Paint the matching
+                        // ground gradient over any faded aperture edge so the
+                        // native mask blends into the dock ground rather than
+                        // exposing raw behind-window vibrancy as a grey band.
+                        let fade_depth = pm_design::DOCK_SCROLL_FADE.max(1.);
+                        for (id, clip) in &panels.clips {
+                            if clip.w <= 0. || clip.h <= 0. {
+                                continue;
+                            }
+                            let Some((_, [top, bottom])) =
+                                panels.fades.iter().find(|(owner, _)| owner == id)
+                            else {
+                                continue;
+                            };
+                            let top = (*top as f32).clamp(0., clip.h);
+                            let bottom = (*bottom as f32).clamp(0., clip.h);
+                            if top > 0. {
+                                let edge = ground_alpha * (top / fade_depth).clamp(0., 1.);
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        point(px(clip.x), px(clip.y)),
+                                        gpui::size(px(clip.w), px(top)),
+                                    ))
+                                    .background(linear_gradient(
+                                        180.,
+                                        linear_color_stop(tint(ground, edge), 0.),
+                                        linear_color_stop(tint(ground, 0.), 1.),
+                                    )),
+                                );
+                            }
+                            if bottom > 0. {
+                                let edge = ground_alpha * (bottom / fade_depth).clamp(0., 1.);
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        point(px(clip.x), px(clip.y + clip.h - bottom)),
+                                        gpui::size(px(clip.w), px(bottom)),
+                                    ))
+                                    .background(linear_gradient(
+                                        180.,
+                                        linear_color_stop(tint(ground, 0.), 0.),
+                                        linear_color_stop(tint(ground, edge), 1.),
+                                    )),
+                                );
+                            }
+                        }
                         if let Some(host) = &host {
                             host.borrow().stage_native_panels(panels);
                         }
