@@ -186,7 +186,10 @@ pub(crate) fn pending(view: usize, painted: bool) -> bool {
     {
         return true;
     }
-    painted && (crate::native_text::pending(view) || crate::native_control::pending(view))
+    painted
+        && (crate::slot_region::pending(view)
+            || crate::native_text::pending(view)
+            || crate::native_control::pending(view))
 }
 
 /// Where a window's frames get their drawables (P-120).
@@ -314,11 +317,11 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
         transaction.change = change.or(fresh.into());
     }
     if painted {
+        // Slots in a scrolling region place its container first (P-SLOT-REGION).
         let text = crate::native_text::present(view);
-        transaction.change = transaction
-            .change
-            .or(text)
-            .or(crate::native_control::present(view));
+        let control = crate::native_control::present(view);
+        let regions = crate::slot_region::finish(view);
+        transaction.change = transaction.change.or(text).or(control).or(regions.into());
     }
     Some(transaction)
 }

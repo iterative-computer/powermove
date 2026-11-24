@@ -124,9 +124,10 @@ struct State {
     paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     /// What a paint staged, with that paint's number: placed by the present
     /// that follows that paint, and by no later one.
-    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    /// In a scrolling region's container when `region` is set (P-SLOT-REGION).
+    geometry: Cell<Option<(u64, crate::slot_region::Placement)>>,
     scroll_fade: crate::scroll_fade::ScrollFade,
-    staged: Cell<Option<(NSRect, NSRect)>>,
+    staged: Cell<Option<crate::slot_region::Placement>>,
     build_alpha: Cell<Option<(u64, f64)>>,
     kept_alpha: Cell<f64>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
@@ -1004,9 +1005,17 @@ impl NativeTextSlot {
         self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
     }
     pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
-        self.state.stage(Some((bounds, clip)));
-        self.state.staged.set(Some((bounds, clip)));
+        let placement = crate::slot_region::Placement { bounds, clip, region: None };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
         self.state.scroll_fade.stage(fade);
+    }
+    /// P-SLOT-REGION: staged in scrolling region `region`'s container, with
+    /// bounds and clip in its content coordinates.
+    pub fn stage_in_region(&self, region: usize, bounds: NSRect, clip: NSRect) {
+        let placement = crate::slot_region::Placement { bounds, clip, region: Some(region) };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
     }
     pub fn stage_build_alpha(&self, alpha: f64) {
         let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
@@ -1019,22 +1028,8 @@ impl NativeTextSlot {
         self.state.stage(self.state.staged.get());
         self.stage_build_alpha(self.state.kept_alpha.get());
     }
-    /// P-SLOT-PICTURE: the editor as AppKit draws it now (its text, scroll
-    /// and appearance), `size` points, for a scroll to move instead of the
-    /// view. `None` for a field drawn by GPUI at rest (dense) or one being
-    /// edited: those are never pictured.
-    pub fn picture(&self, size: NSSize) -> Option<crate::native_control::SlotPicture> {
-        let state = &self.state;
-        if state.kind.dense() || state.kind == TextKind::Canvas || state.editing.get() {
-            return None;
-        }
-        match &state.scroll {
-            Some(scroll) => crate::native_control::picture_of(scroll, size),
-            None => crate::native_control::picture_of(state.editor.view(), size),
-        }
-    }
-    /// Stages nothing: the next present hides the editor (its picture stands
-    /// in the scene); [`Self::keep`] keeps it hidden.
+    /// Stages nothing: the next present hides the editor; [`Self::keep`]
+    /// keeps it hidden.
     pub fn hide(&self) {
         self.state.stage(None);
         self.state.staged.set(None);
@@ -1288,10 +1283,10 @@ impl Drop for NativeTextSlot {
     }
 }
 impl State {
-    fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
+    fn stage(&self, geometry: Option<crate::slot_region::Placement>) {
         let paint = crate::composition::open_paint(Retained::as_ptr(&self.gpui) as usize);
         self.geometry
-            .set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+            .set(geometry.map(|placement| (paint, placement)));
     }
 }
 /// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
@@ -1315,8 +1310,8 @@ fn place(key: usize, apply: bool) -> bool {
         let geometry = state
             .geometry
             .get()
-            .filter(|(paint, ..)| Some(*paint) == last)
-            .map(|(_, bounds, clip)| (bounds, clip))
+            .filter(|(paint, _)| Some(*paint) == last)
+            .map(|(_, placement)| placement)
             .or_else(|| {
                 (state.kind == TextKind::Canvas)
                     .then(|| state.staged.get())
@@ -1325,7 +1320,18 @@ fn place(key: usize, apply: bool) -> bool {
         if apply {
             state.geometry.set(None);
         }
-        let Some((bounds, clip)) = geometry else {
+        // A region's slot goes in its container's content view; a region the
+        // last draw did not make hides it.
+        let parent = geometry.and_then(|p| p.region).map(|region| {
+            crate::slot_region::content_view(&state.gpui, region, apply)
+        });
+        if !apply && matches!(parent, Some(None)) {
+            moved = true;
+            continue;
+        }
+        let geometry = geometry.filter(|_| !matches!(parent, Some(None)));
+        let parent = parent.flatten();
+        let Some(crate::slot_region::Placement { bounds, clip, region }) = geometry else {
             if !state.wrapper.isHidden() {
                 moved = true;
                 if apply {
@@ -1368,14 +1374,31 @@ fn place(key: usize, apply: bool) -> bool {
         // present: a panel of number fields made every frame of its scroll
         // one.
         let unseen = hidden && state.wrapper.isHidden();
-        let frame = crate::composition::hosted_rect(&state.gpui, &state.wrapper, visible);
+        match &parent {
+            Some(parent) if apply => {
+                moved |= crate::slot_region::reparent(&state.gpui, &state.wrapper, Some(parent));
+            }
+            Some(parent) => {
+                moved |= unsafe { state.wrapper.superview() }
+                    .is_none_or(|s| !std::ptr::eq(&*s, &**parent));
+            }
+            None if apply => {
+                moved |= crate::slot_region::reparent(&state.gpui, &state.wrapper, None);
+            }
+            None => {}
+        }
+        // Top-down content coordinates in a region.
+        let frame = match region {
+            Some(_) => visible,
+            None => crate::composition::hosted_rect(&state.gpui, &state.wrapper, visible),
+        };
         if state.wrapper.frame() != frame {
             moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
         }
-        if !hidden {
+        if !hidden && region.is_none() {
             moved |= state.scroll_fade.place(&state.wrapper, visible, clip, apply);
         }
         let local = NSRect::new(

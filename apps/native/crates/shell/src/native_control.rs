@@ -600,7 +600,7 @@ pub struct BuildSnapshot {
     /// A row filters its label and snapshot together; standalone controls filter here.
     pub filter: Option<Filter>,
 }
-/// Shared boundary for live GPUI content, build snapshots and scroll pictures.
+/// Shared boundary for live GPUI content and build snapshots.
 /// Row-owned filters remain on the ancestor when `filter` is None.
 pub(crate) fn reveal_paint(build: Option<BuildSnapshot>) -> (Vec<Filter>, f32) {
     let filters = build
@@ -751,20 +751,9 @@ pub struct NativeControl {
     /// (PM-342: a panel laid out again showed the search empty while its
     /// list stayed filtered).
     search_value: Option<Value>,
-    /// Where the slot was painted inside a scroll layer, to follow it.
-    layer: Rc<crate::layer_stage::LayerStage>,
-    /// Shown as a picture of itself while its surface's body scrolls.
-    picture: crate::picture::Picture,
-    /// What the last update set, to tell a changed value from the same one.
-    seen: Option<(Value, Vec<Value>, bool)>,
 }
 impl EventEmitter<Value> for NativeControl {}
 
-impl Drop for NativeControl {
-    fn drop(&mut self) {
-        self.picture.retire();
-    }
-}
 impl NativeControl {
     pub fn set_build_snapshot(&mut self, build: Option<BuildSnapshot>) -> bool {
         let build = build.filter(|b| b.ready.unwrap_or(0.) < 1.);
@@ -1311,20 +1300,7 @@ impl NativeControl {
             host_revision: None,
             menu_open: false,
             search_value: None,
-            layer: Rc::default(),
-            picture: Default::default(),
-            seen: None,
         }
-    }
-    /// Shares its surface's picture hold (P-SLOT-PICTURE).
-    pub fn picture_with(&mut self, hold: &crate::picture::PictureHold) {
-        self.picture.hold = hold.clone();
-    }
-    /// The surface's hold changed: a held control draws as its picture, a
-    /// released one as itself again.
-    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
-        self.picture.hold_changed();
-        cx.notify();
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
     /// one not yet in its window takes it when it is first placed.
@@ -1466,23 +1442,12 @@ impl NativeControl {
             _ => false,
         }
     }
-    /// Stages the slot again on a frame whose cached paint did not run: as
-    /// last painted, or shifted with the scroll layer it is in.
-    pub fn keep(&self, window: &Window) {
-        if self.picture.standing() {
-            // Its picture stands in the scene the frame replays.
-            self.slot.hide();
-            return;
-        }
-        match self.layer.kept(window) {
-            Some((bounds, clip)) => self.slot.stage_with_scroll_fade(
-                ns_rect(bounds),
-                ns_rect(clip.bounds),
-                crate::layer_stage::vertical_fade(clip),
-            ),
-            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
-            None => self.slot.keep(),
-        }
+    /// Stages the slot again on a frame whose cached paint did not run, as
+    /// last painted.
+    pub fn keep(&self, _window: &Window) {
+        // In a scrolling region it keeps its place in the region's content;
+        // the region's container follows the scroll (P-SLOT-REGION).
+        self.slot.keep();
     }
     /// A push button's title follows the panel (Export's action names the
     /// chosen format); its width follows the new title.
@@ -1492,8 +1457,6 @@ impl NativeControl {
     /// checkbox or switch and presses a button; the arrows step a slider.
     /// Returns whether the key was the control's.
     pub fn key(&self, key: &str) -> bool {
-        // A key for the control brings the real one back for the hold.
-        self.picture.go_live();
         let press = |view: &NSView| unsafe {
             let _: () = msg_send![view, performClick: std::ptr::null::<AnyObject>()];
         };
@@ -1573,7 +1536,6 @@ impl NativeControl {
     pub fn menu_open(&mut self, open: bool) {
         if self.menu_open != open {
             self.menu_open = open;
-            self.picture.go_live();
             if let Control::Popup(v) = &self.control {
                 v.highlight(open);
             }
@@ -1626,13 +1588,6 @@ impl NativeControl {
                 options.clone_into(&mut range);
             }
         }
-        // A value that changes while the picture stands brings the real
-        // control back for the rest of the hold.
-        let seen = (value.clone(), options.to_vec(), disabled);
-        if self.seen.as_ref().is_some_and(|s| *s != seen) {
-            self.picture.go_live();
-        }
-        self.seen = Some(seen);
         let shown = self._target.ivars().options.borrow().clone();
         let unchanged_search = matches!(self.control, Control::Search(_))
             && self.search_value.replace(value.clone()).as_ref() == Some(value);
@@ -1668,21 +1623,6 @@ impl Render for NativeControl {
         let owner = cx.entity().downgrade();
         let slot = self.slot.clone();
         let focus = self.focus.clone();
-        let layer = self.layer.clone();
-        let picture = self.picture.painter();
-        // The keyboard is in a search field: it stays the real one.
-        let pictures = !self.focused();
-        let pressed = cx.listener(|this, _: &MouseDownEvent, window, cx| {
-            // Replaying a picture's press must not activate an AppKit editor
-            // outside the reveal boundary before the panel is ready.
-            if this.build.is_some() {
-                return;
-            }
-            if this.picture.press(window) {
-                cx.stop_propagation();
-                cx.notify();
-            }
-        });
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -1710,30 +1650,24 @@ impl Render for NativeControl {
             )
             .relative()
             .h(px(self.height))
-            .on_mouse_down(MouseButton::Left, pressed)
             .filter(reveal_paint(build).0)
             .opacity(reveal_paint(build).1)
             .child(
                 canvas(
                     |_, _, _| (),
                     move |painted, _, window, cx| {
-                        let (bounds, clip) = layer.painted(painted, window.content_mask(), window);
-                        // The picture is painted inside the same filter/opacity boundary
-                        // as the build snapshot. Restore normal alpha before its early return.
+                        let bounds = painted;
                         if build.is_none() {
                             slot.stage_alpha(1.);
                         }
-                        if pictures
-                            && picture.paint(painted, || slot.picture(ns_rect(bounds).size), window)
-                        {
-                            slot.hide();
-                            return;
+                        match crate::slot_stage::place(painted, window.content_mask(), window) {
+                            crate::slot_stage::Place::Window { bounds, clip, fade } => {
+                                slot.stage_with_scroll_fade(bounds, clip, fade)
+                            }
+                            crate::slot_stage::Place::Region { id, bounds, clip } => {
+                                slot.stage_in_region(id, bounds, clip)
+                            }
                         }
-                        slot.stage_with_scroll_fade(
-                            ns_rect(bounds),
-                            ns_rect(clip.bounds),
-                            crate::layer_stage::vertical_fade(clip),
-                        );
                         if let Some(build) = build {
                             if let Some(revision) = build.revision {
                                 if pixels.borrow_mut().capture(&native, bounds, revision) {
@@ -1747,8 +1681,7 @@ impl Render for NativeControl {
                         } else {
                             slot.stage_alpha(1.);
                         }
-                        // Capture may have completed in this paint (including
-                        // the first frame after a picture hold ends).
+                        // Capture may have completed in this paint.
                         let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
                         if let Some(image) = snapshot {
                             let _ = window.paint_image(
@@ -2079,7 +2012,7 @@ mod snapshot_bridge_tests {
 mod scroll_reveal_tests {
     use super::*;
     #[::core::prelude::v1::test]
-    fn scroll_picture_uses_reveal_filter_and_alpha_until_ready() {
+    fn build_snapshot_uses_reveal_filter_and_alpha_until_ready() {
         let filter = Filter::DotMatrix {
             detail: 2.2,
             resolve: 0.,
@@ -2092,8 +2025,7 @@ mod scroll_reveal_tests {
         };
         assert_eq!(reveal_paint(Some(build)), (vec![filter], 0.));
         build.revision = Some(7);
-        // The same boundary wraps picture.paint and the snapshot fallback;
-        // starting/stopping a hold cannot change its generation or alpha.
+        // The same boundary wraps the live control and its snapshot.
         assert_eq!(reveal_paint(Some(build)), (vec![filter], 1.));
         assert_eq!(
             pm_design::dots::snapshot_visibility(true, build.ready).1,
@@ -2116,7 +2048,7 @@ mod scroll_reveal_tests {
         assert_ne!(capture_key(after, 7), capture_key(wider, 7));
     }
     #[::core::prelude::v1::test]
-    fn resolved_picture_has_integration_paint_policy() {
+    fn resolved_snapshot_has_integration_paint_policy() {
         assert_eq!(reveal_paint(None), (vec![], 1.));
         assert_eq!(
             reveal_paint(Some(BuildSnapshot {

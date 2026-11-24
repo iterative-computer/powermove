@@ -953,6 +953,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// platform that places hosted views from what a paint staged leaves
     /// them where they are.
     fn painted(&self) {}
+    /// Powermove P-SLOT-REGION: the scrolling regions the draw just made, for
+    /// hosted views placed in them (sent before `painted`).
+    fn set_slot_regions(&self, _regions: &[crate::SlotRegionGeometry]) {}
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;

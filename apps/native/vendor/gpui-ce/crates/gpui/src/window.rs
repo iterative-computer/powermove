@@ -1363,8 +1363,10 @@ pub struct Window {
     scroll_layer_pending_deferred: Vec<usize>,
     /// Layers resting, and the frame each records again.
     scroll_layer_rest: FxHashMap<crate::scroll_layer::ScrollLayerKey, u64>,
-    /// The layers being painted, innermost last.
-    scroll_layer_painting: Vec<crate::scroll_layer::ScrollLayerKey>,
+    /// Powermove P-SLOT-REGION: scrolling divs' regions (`crate::slot_region`).
+    pub(crate) slot_regions: FxHashMap<usize, crate::slot_region::RegionRecord>,
+    pub(crate) slot_regions_open: Vec<crate::slot_region::OpenRegion>,
+    pub(crate) slot_regions_sent: bool,
     /// Truncated labels, by what they were shaped from (`elements::text`).
     pub(crate) truncations: FxHashMap<u64, Vec<crate::elements::TruncationEntry>>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
@@ -2167,7 +2169,9 @@ impl Window {
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
             scroll_layer_rest: FxHashMap::default(),
-            scroll_layer_painting: Vec::new(),
+            slot_regions: FxHashMap::default(),
+            slot_regions_open: Vec::new(),
+            slot_regions_sent: false,
             truncations: FxHashMap::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
@@ -3445,6 +3449,7 @@ impl Window {
             self.draw_roots(cx);
             let frame = self.scroll_layer_frame;
             self.scroll_layers.retain(|_, layer| layer.frame == frame);
+            self.finish_slot_regions();
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -4238,7 +4243,6 @@ impl Window {
         let outer = mem::take(&mut self.next_frame.scene);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
-        self.scroll_layer_painting.push(key);
         Some((outer, self.next_frame.input_handlers.len()))
     }
 
@@ -4251,7 +4255,6 @@ impl Window {
     ) {
         self.content_mask_stack.pop();
         self.scroll_layer_depth -= 1;
-        self.scroll_layer_painting.pop();
         let mut inner = mem::replace(&mut self.next_frame.scene, outer);
         let ops = inner.take_operations();
         let scale_factor = self.scale_factor();
@@ -4274,29 +4277,6 @@ impl Window {
             scene.insert_operation(op);
         }
         scene.insert_operation(crate::scene::PaintOperation::ScrollLayerEnd);
-    }
-
-    /// The scroll layer being painted here, if any: content placed outside
-    /// the scene (an AppKit control's slot) keeps it, to follow the layer's
-    /// offset on the frames that replay it ([`Self::scroll_layer_shift`]).
-    pub fn scroll_layer(&self) -> Option<crate::ScrollLayerId> {
-        self.scroll_layer_painting
-            .last()
-            .copied()
-            .map(crate::ScrollLayerId)
-    }
-
-    /// How far a scroll layer's content has moved since it was painted, and
-    /// the area where it shows; `None` once the layer is gone.
-    pub fn scroll_layer_shift(
-        &self,
-        layer: crate::ScrollLayerId,
-    ) -> Option<(Point<Pixels>, ContentMask<Pixels>)> {
-        let layer = self.scroll_layers.get(&layer.0)?;
-        if layer.frame != self.scroll_layer_frame {
-            return None;
-        }
-        Some((layer.current() - layer.recorded, layer.clip))
     }
 
     /// A step its owner makes on a driven scroll layer

@@ -1858,6 +1858,7 @@ impl Drop for MacWindow {
             }
         }
         crate::composition::forget_paints(this.native_view.as_ptr() as usize);
+        crate::slot_region::forget(this.native_view.as_ptr() as usize);
         unsafe {
             this.native_window.setDelegate_(NIL);
         }
@@ -2484,6 +2485,11 @@ impl PlatformWindow for MacWindow {
 
     fn on_toggle_tab_bar(&self, callback: Box<dyn FnMut()>) {
         self.0.as_ref().lock().toggle_tab_bar_callback = Some(callback);
+    }
+
+    fn set_slot_regions(&self, regions: &[gpui::SlotRegionGeometry]) {
+        let view = self.0.lock().native_view.as_ptr() as usize;
+        crate::slot_region::set(view, regions);
     }
 
     fn painted(&self) {

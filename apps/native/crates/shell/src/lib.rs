@@ -35,13 +35,12 @@ pub mod menu_input;
 #[cfg(target_os = "macos")]
 pub mod motion;
 #[cfg(target_os = "macos")]
-pub mod layer_stage;
+pub mod slot_stage;
 #[cfg(target_os = "macos")]
 mod native;
 #[cfg(target_os = "macos")]
 pub mod native_control;
 #[cfg(target_os = "macos")]
-pub mod picture;
 #[cfg(target_os = "macos")]
 pub mod scopes;
 pub mod session;

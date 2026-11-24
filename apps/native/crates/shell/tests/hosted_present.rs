@@ -18,8 +18,8 @@ fn main() {
     macos::rows();
     macos::host_rows();
     macos::viewer_slot(mtm);
-    macos::pictures(mtm);
     macos::hidden_moves(mtm);
+    macos::regions(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -42,6 +42,167 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// P-SLOT-REGION: slots in a scrolling region sit in its container at
+    /// their content position; a step moves the container only (one view,
+    /// whatever the number of slots), in the slot transaction, and each slot
+    /// lands on the window position its row is drawn at. Nested regions nest
+    /// their containers. `PM_REGION_SLOTS=<n>` sets how many slots the timing
+    /// uses (default 300) and prints the per-step cost both ways.
+    pub fn regions(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let button = || -> Retained<NSView> {
+            unsafe {
+                let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+                let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+                Retained::from_raw(raw).expect("a button")
+            }
+        };
+        // Where a slot shows, in GPUI's top-down window points.
+        let shown = |slot: &NativeControlSlot| {
+            let w = slot.wrapper();
+            let r = w.convertRect_toView(w.bounds(), Some(&gpui));
+            let h = gpui.bounds().size.height;
+            (r.origin.x, h - r.origin.y - r.size.height)
+        };
+        let region = |id, parent, frame: (f32, f32, f32, f32), origin_y: f32| SlotRegionGeometry {
+            id,
+            parent,
+            frame: Bounds::new(point(px(frame.0), px(frame.1)), size(px(frame.2), px(frame.3))),
+            origin: point(px(0.), px(origin_y)),
+            fade: [px(0.), px(0.)],
+        };
+        let open = rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6);
+        let count: usize = std::env::var("PM_REGION_SLOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        let slots: Vec<_> = (0..count).map(|_| NativeControlSlot::new(&gpui, button())).collect();
+        // Region 1: a panel body at (0, 50), 200 x 300, scrolled to the top.
+        let mut offset = 0f32;
+        let stage = |slots: &[NativeControlSlot]| {
+            for (i, slot) in slots.iter().enumerate() {
+                slot.stage_in_region(1, rect(10., 40. * i as f64, 80., 20.), open);
+            }
+        };
+        regions::set(&gpui, &[region(1, None, (0., 50., 200., 300.), offset)]);
+        stage(&slots);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui), "the first frame shows them");
+        let clip = regions::clip(&gpui, 1).expect("one container for the region");
+        for (i, slot) in slots.iter().enumerate().take(12) {
+            assert_eq!(shown(slot), (10., 50. + 40. * i as f64), "slot {i} at rest");
+            let parent = unsafe { slot.wrapper().superview() }.expect("in the window");
+            assert!(parent.isDescendantOf(&clip), "slot {i} is in its region's container");
+        }
+        // Wheel steps: the slots are kept as painted; only the region moves.
+        let frames: Vec<_> = slots.iter().map(|s| s.wrapper().frame()).collect();
+        for dy in [-12f32, -30., 17., -25., -333.] {
+            offset += dy;
+            regions::set(&gpui, &[region(1, None, (0., 50., 200., 300.), offset)]);
+            for slot in &slots {
+                slot.keep();
+            }
+            probe::painted(&gpui);
+            assert!(probe::pending(&gpui), "a moving region is a move, known before");
+            assert!(probe::place(&gpui), "a moving region presents with the transaction");
+            for (i, slot) in slots.iter().enumerate().take(12) {
+                let y = 50. + 40. * i as f64 + f64::from(offset);
+                assert_eq!(shown(slot), (10., y), "slot {i} after a step of {dy}");
+            }
+            let same = slots.iter().zip(&frames).all(|(s, f)| s.wrapper().frame() == *f);
+            assert!(same, "no slot's own frame changed: the step moved one view");
+            // The next frame, at the same offset (another view drew).
+            for slot in &slots {
+                slot.keep();
+            }
+            probe::painted(&gpui);
+            assert!(!probe::pending(&gpui) && !probe::place(&gpui), "a frame that does not scroll moves nothing");
+        }
+        // Nested: region 2 sits at (0, 80) in region 1's content, 200 x 100.
+        let inner = NativeControlSlot::new(&gpui, button());
+        let (mut outer_y, mut inner_y) = (0f32, 0f32);
+        let set = |outer_y, inner_y| {
+            regions::set(
+                &gpui,
+                &[
+                    region(1, None, (0., 50., 200., 300.), outer_y),
+                    region(2, Some(1), (0., 80., 200., 100.), inner_y),
+                ],
+            )
+        };
+        for (outer_step, inner_step) in [(0., 0.), (-20., 0.), (0., -15.), (7., -9.)] {
+            outer_y += outer_step;
+            inner_y += inner_step;
+            set(outer_y, inner_y);
+            inner.stage_in_region(2, rect(10., 60., 80., 20.), open);
+            for slot in &slots {
+                slot.keep();
+            }
+            probe::painted(&gpui);
+            probe::place(&gpui);
+            let y = 50. + f64::from(outer_y) + 80. + f64::from(inner_y) + 60.;
+            assert_eq!(shown(&inner), (10., y), "nested slot after ({outer_step}, {inner_step})");
+        }
+        let inner_clip = regions::clip(&gpui, 2).expect("a container for the inner region");
+        assert!(inner_clip.isDescendantOf(&clip), "the inner container is in the outer's content");
+        // A frame that stages no slot of a region hides its container.
+        regions::set(&gpui, &[region(1, None, (0., 50., 200., 300.), outer_y)]);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui));
+        assert!(clip.isHidden(), "a region with no slot shown hides");
+        // Per-step cost with `count` slots: the region's step, against every
+        // slot moved by its own frame (the path before P-SLOT-REGION).
+        let mut region_ms = Vec::new();
+        let mut each_ms = Vec::new();
+        for step in 0..60 {
+            let y = -(step as f32) * 7.;
+            regions::set(&gpui, &[region(1, None, (0., 50., 200., 300.), y)]);
+            stage(&slots);
+            probe::painted(&gpui);
+            let at = Instant::now();
+            probe::place(&gpui);
+            region_ms.push(at.elapsed().as_secs_f64() * 1e3);
+        }
+        for step in 0..61 {
+            let y = -(step as f32) * 7.;
+            for (i, slot) in slots.iter().enumerate() {
+                slot.stage(rect(10., 50. + 40. * i as f64 + f64::from(y), 80., 20.), rect(0., 50., 200., 300.));
+            }
+            probe::painted(&gpui);
+            let at = Instant::now();
+            probe::place(&gpui);
+            // The first takes every slot out of the container.
+            if step > 0 {
+                each_ms.push(at.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        println!(
+            "slot regions: {count} slots, per step p50 {:.3} ms moving the region, {:.3} ms moving each slot",
+            median(&mut region_ms),
+            median(&mut each_ms)
+        );
+        drop(slots);
+        drop(inner);
+        window.close();
+    }
 
     /// P-HIDDEN-MOVES: a hosted view hidden before and after a frame (a
     /// dense field at rest, a control scrolled out of its clip) follows its
@@ -104,143 +265,6 @@ mod macos {
         probe::painted(&gpui);
         assert!(probe::place(&gpui), "back in");
         assert!(!slot.wrapper().isHidden());
-        window.close();
-    }
-
-    /// P-SLOT-PICTURE: a control's picture is AppKit's own drawing of it,
-    /// taken whether its slot was ever shown or not (a row that scrolls in
-    /// while the pictures stand has never been shown), and hiding a slot
-    /// leaves the next present nothing to move but the hide itself.
-    /// `PM_PICTURE_DIR=<dir>` writes each picture there (PPM over grey).
-    pub fn pictures(mtm: MainThreadMarker) {
-        use objc2::runtime::AnyClass;
-        let rect =
-            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                rect(-20000., -20000., 400., 300.),
-                NSWindowStyleMask::Borderless,
-                NSBackingStoreType::Buffered,
-                true,
-            )
-        };
-        unsafe { window.setReleasedWhenClosed(false) };
-        let dark = objc2_app_kit::NSAppearance::appearanceNamed(unsafe {
-            objc2_app_kit::NSAppearanceNameDarkAqua
-        });
-        objc2_app_kit::NSAppearanceCustomization::setAppearance(&*window, dark.as_deref());
-        let content = window.contentView().expect("a content view");
-        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
-        content.addSubview(&gpui);
-        let make = |class: &AnyClass, w: f64, h: f64| -> Retained<NSView> {
-            unsafe {
-                let raw: *mut AnyObject = msg_send![class, alloc];
-                let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., w, h)];
-                Retained::from_raw(raw).expect("a control")
-            }
-        };
-        let title = |s: &str| objc2_foundation::NSString::from_str(s);
-        let checkbox = make(objc2::class!(NSButton), 80., 20.);
-        let popup = make(objc2::class!(NSPopUpButton), 140., 24.);
-        let segmented = make(objc2::class!(NSSegmentedControl), 150., 24.);
-        let slider = make(objc2::class!(NSSlider), 140., 20.);
-        let field = make(objc2::class!(NSTextField), 90., 22.);
-        let switch = make(objc2::class!(NSSwitch), 40., 22.);
-        unsafe {
-            let _: () = msg_send![&*checkbox, setButtonType: 3usize];
-            let _: () = msg_send![&*checkbox, setTitle: &*title("Extrude")];
-            let _: () = msg_send![&*checkbox, setState: 1isize];
-            let _: () = msg_send![&*popup, addItemWithTitle: &*title("Geist Width")];
-            let _: () = msg_send![&*segmented, setSegmentCount: 3isize];
-            for (i, l) in ["Left", "Centre", "Right"].iter().enumerate() {
-                let _: () = msg_send![&*segmented, setLabel: &*title(l), forSegment: i as isize];
-            }
-            let _: () = msg_send![&*segmented, setSelectedSegment: 1isize];
-            let _: () = msg_send![&*slider, setDoubleValue: 0.4f64];
-            let _: () = msg_send![&*field, setStringValue: &*title("128 px")];
-            let _: () = msg_send![&*switch, setState: 1isize];
-        }
-        let controls = [
-            ("checkbox", checkbox),
-            ("popup", popup),
-            ("segmented", segmented),
-            ("slider", slider),
-            ("field", field),
-            ("switch", switch),
-        ];
-        let clip = rect(0., 0., 400., 300.);
-        for (i, (name, control)) in controls.into_iter().enumerate() {
-            let size = control.frame().size;
-            let slot = NativeControlSlot::new(&gpui, control);
-            let mut shown_and_hidden = vec![];
-            // Never shown: hidden and not yet in the window.
-            assert!(slot.wrapper().isHidden());
-            shown_and_hidden.push(("never-shown", slot.picture(size)));
-            // Shown by a present.
-            slot.stage(rect(10., 10. + 40. * i as f64, size.width, size.height), clip);
-            probe::painted(&gpui);
-            assert!(probe::place(&gpui));
-            assert!(!slot.wrapper().isHidden());
-            shown_and_hidden.push(("shown", slot.picture(size)));
-            // Hidden for its picture, taken again (a value changed).
-            slot.hide();
-            probe::painted(&gpui);
-            assert!(probe::place(&gpui));
-            assert!(slot.wrapper().isHidden());
-            shown_and_hidden.push(("hidden", slot.picture(size)));
-            // The same picture whether the control was ever shown or not:
-            // the window's appearance (dark here) and key state, never a
-            // detached control's.
-            let first = shown_and_hidden[0].1.as_ref().map(|p| &p.bgra);
-            for (when, p) in &shown_and_hidden[1..] {
-                assert!(p.as_ref().map(|p| &p.bgra) == first, "{name}: {when} differs from never-shown");
-            }
-            for (when, picture) in shown_and_hidden {
-                let p = picture.unwrap_or_else(|| panic!("{name} {when}: no picture"));
-                let (w, h) = (p.width as usize, p.height as usize);
-                assert_eq!(p.bgra.len(), w * h * 4);
-                // At the window's scale, the control's own size.
-                assert!(w as f64 >= size.width && h as f64 >= size.height, "{name} {when}: {w}x{h}");
-                let inked = p.bgra.chunks(4).filter(|px| px[3] > 0).count();
-                let distinct: std::collections::HashSet<&[u8]> = p.bgra.chunks(4).collect();
-                assert!(inked * 20 > w * h && distinct.len() > 4, "{name} {when}: blank ({inked} inked, {} colours)", distinct.len());
-                if let Some(dir) = std::env::var_os("PM_PICTURE_DIR") {
-                    let mut out = format!("P6 {w} {h} 255\n").into_bytes();
-                    for px in p.bgra.chunks(4) {
-                        let over = |c: u8| ((c as u16 * px[3] as u16 + 128 * (255 - px[3] as u16)) / 255) as u8;
-                        out.extend_from_slice(&[over(px[2]), over(px[1]), over(px[0])]);
-                    }
-                    std::fs::write(std::path::Path::new(&dir).join(format!("{name}-{when}.ppm")), out).unwrap();
-                }
-            }
-            // Kept hidden: nothing moves.
-            slot.keep();
-            probe::painted(&gpui);
-            assert!(!probe::pending(&gpui), "{name}: a kept hidden slot moves nothing");
-        }
-        // A multiline editor (a text layer's text in Properties) at rest is
-        // pictured with its text, shown or hidden alike; one being edited
-        // never is.
-        {
-            use gpui_macos::native_text::{NativeTextSlot, TextKind};
-            let text = NativeTextSlot::new(&gpui, TextKind::Multiline, "Text", "Made with Powermove\nline two");
-            let size = NSSize::new(220., 60.);
-            text.stage(rect(10., 200., 220., 60.), clip);
-            probe::painted(&gpui);
-            probe::place(&gpui);
-            let shown = text.picture(size).expect("a picture of the editor");
-            let inked = shown.bgra.chunks(4).filter(|px| px[3] > 0).count();
-            let distinct: std::collections::HashSet<&[u8]> = shown.bgra.chunks(4).collect();
-            assert!(inked > 0 && distinct.len() > 8, "a blank editor picture ({} colours)", distinct.len());
-            text.hide();
-            probe::painted(&gpui);
-            assert!(probe::place(&gpui), "hidden for its picture");
-            let hidden = text.picture(size).expect("a picture while hidden");
-            assert!(hidden.bgra == shown.bgra, "the hidden editor draws as shown");
-            text.begin_editing();
-            assert!(text.picture(size).is_none(), "an editor being edited is never pictured");
-        }
         window.close();
     }
 
