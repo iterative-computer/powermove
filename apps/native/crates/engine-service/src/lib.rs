@@ -1703,15 +1703,13 @@ impl EngineService {
     ) -> Result<Self> {
         let device = metal_device(&gpu);
         let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
-        // Built-in definitions load first thing on the service thread
-        // (`run`): the app's window doesn't wait for a cold shader cache.
-        // Its jobs (exports, cache fills) read the same translated shaders.
+        // The first scene installs the pinned definitions it uses. Keep the
+        // same shader cache for the viewer and its jobs (exports, cache fills).
         jobs::set_shader_cache(shader_cache.clone());
         // Its jobs' fonts are compared with the viewer's registry.
         jobs::set_font_broker(Some(fonts.broker.clone()));
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
-        engine.builtins_pending = true;
         let mut service = Self::start_engine(device, engine)?;
         service.layer_rasters = Some(layer_rasters);
         Ok(service)
@@ -2610,13 +2608,6 @@ impl Drop for LoopPool {
 }
 
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
-    if std::mem::take(&mut engine.builtins_pending)
-        && let Err(error) = engine.load_builtin_definitions()
-    {
-        // Frames still draw; effects report the failure where they're used.
-        eprintln!("Built-in effect definitions failed to load: {error:#}");
-        engine.definition_failure = Some(error.to_string());
-    }
     // A stable observer survives cached sources; its work identity changes per frame.
     let progress_work = Arc::new(Mutex::new(None::<(u64, Stamp)>));
     let progress_context = progress_work.clone();
