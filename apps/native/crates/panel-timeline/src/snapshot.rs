@@ -142,6 +142,8 @@ impl Layer {
                     | "orientation.x"
                     | "orientation.y"
                     | "orientation.z"
+                    | "dofBlur"
+                    | "dofFocus"
             )
     }
 }

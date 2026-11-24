@@ -20,10 +20,13 @@
 // backdrop: display rgb, w: its opacity (1: the void shows the backdrop; 0:
 // the void is transparent). Cameras: position (w: unused), forward, right
 // (w: tan(fov/2)·aspect), up (w: tan(fov/2)) — now and one frame ago.
+// dof: lens_radius, focus_dist, max_coc_px, enabled (>0.5);
+// iris: blades (0 or >=3), rotation (rad), roundness (0..1), aspect (anamorphic).
 struct Post {
   dims: vec4u, k: vec4f, backdrop: vec4f,
   cur_pos: vec4f, cur_fwd: vec4f, cur_right: vec4f, cur_up: vec4f,
   prev_pos: vec4f, prev_fwd: vec4f, prev_right: vec4f, prev_up: vec4f,
+  dof: vec4f, iris: vec4f,
 }
 // History: accumulated linear color (w: frames) and the surface it saw (as gbuf).
 struct Hist { c: vec4f, g: vec4f }
@@ -216,4 +219,113 @@ fn temporal(@builtin(global_invocation_id) g: vec3u) {
   }
   hist_out[i] = Hist(result, geo);
   dst[i] = select(vec4f(result.xyz, source.w), vec4f(source.xyz, result.x), catcher);
+}
+
+// Live-mode post-process Depth of Field.
+// Matches trace.wgsl's thin-lens CoC radius (pixels) using gbuf.w (first-hit
+// Euclidean distance; <0 for void/infinity), with foreground/background bleed
+// protection and iris bokeh shaping. Only dispatched when Live && lens_radius > 0.
+fn dof_coc_px(dist: f32, cos_ray: f32, scale_px: f32) -> f32 {
+  let r = Q.dof.x;
+  let f = max(Q.dof.y, 1e-4);
+  let max_r = Q.dof.z;
+  if (dist < 0.0) {
+    // Infinity: |z - F| / z -> 1.
+    return min((r / f) * scale_px, max_r);
+  }
+  let z = max(dist * max(cos_ray, 0.25), 1e-4);
+  return min((r * abs(z - f) / (z * f)) * scale_px, max_r);
+}
+
+fn dof_iris_offset(angle: f32, rad: f32) -> vec2f {
+  var r = rad;
+  let blades = Q.iris.x;
+  if (blades >= 3.0) {
+    let n = floor(blades + 0.5);
+    let sector = 6.28318530718 / n;
+    let a = ((angle - Q.iris.y) % sector + sector) % sector - 0.5 * sector;
+    let poly = cos(0.5 * sector) / max(cos(a), 1e-3);
+    r *= mix(poly, 1.0, clamp(Q.iris.z, 0.0, 1.0));
+  }
+  let aspect = clamp(Q.iris.w, 0.25, 4.0);
+  var p = vec2f(cos(angle), sin(angle)) * r;
+  p.x *= aspect;
+  let cr = cos(Q.iris.y);
+  let sr = sin(Q.iris.y);
+  return vec2f(p.x * cr - p.y * sr, p.x * sr + p.y * cr);
+}
+
+@compute @workgroup_size(8, 8)
+fn dof(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
+  let w = i32(Q.dims.x);
+  let h = i32(Q.dims.y);
+  let i = g.y * Q.dims.x + g.x;
+  let c0 = src[i];
+  if (Q.dof.w < 0.5 || Q.dof.x <= 0.0) {
+    dst[i] = c0;
+    return;
+  }
+  let dims = vec2f(Q.dims.xy);
+  let ndc = (vec2f(g.xy) + 0.5) / dims * 2.0 - 1.0;
+  let ray = normalize(Q.cur_fwd.xyz + Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w);
+  let cos_ray = max(dot(ray, Q.cur_fwd.xyz), 0.25);
+  let scale_px = 0.5 * dims.y / max(Q.cur_up.w, 1e-4);
+  let d0 = gbuf[i].w;
+  let z0 = select(1e9, d0 * cos_ray, d0 >= 0.0);
+  let coc0 = dof_coc_px(d0, cos_ray, scale_px);
+
+  // Quick foreground halo check so sharp pixels next to blurry foreground still receive blur.
+  var gather_r = coc0;
+  if (gather_r < 2.0) {
+    let probe = i32(clamp(Q.dof.z * 0.5, 4.0, 16.0));
+    for (var k = 0; k < 4; k++) {
+      let off = array<vec2i, 4>(vec2i(probe, 0), vec2i(-probe, 0), vec2i(0, probe), vec2i(0, -probe))[k];
+      let p = clamp(vec2i(g.xy) + off, vec2i(0), vec2i(w - 1, h - 1));
+      let dq = gbuf[u32(p.y * w + p.x)].w;
+      if (dq >= 0.0 && dq * cos_ray < z0) {
+        gather_r = max(gather_r, dof_coc_px(dq, cos_ray, scale_px));
+      }
+    }
+  }
+  if (gather_r < 0.35) {
+    dst[i] = c0;
+    return;
+  }
+
+  // Interleaved gradient noise rotation per pixel eliminates concentric ringing.
+  let ign = fract(52.9829189 * fract(dot(vec2f(g.xy), vec2f(0.06711056, 0.00583715))));
+  let base_angle = ign * 6.28318530718;
+  let golden = 2.39996322973;
+  let taps = select(16u, 24u, gather_r > 8.0);
+  let inv_taps = 1.0 / f32(taps);
+
+  var acc = c0;
+  var wsum = 1.0;
+  for (var t = 0u; t < taps; t++) {
+    let frac = sqrt((f32(t) + 0.5) * inv_taps);
+    let ang = base_angle + f32(t) * golden;
+    let delta = dof_iris_offset(ang, frac * gather_r);
+    let dist_px = length(delta);
+    let qpos = clamp(vec2i(round(vec2f(g.xy) + delta)), vec2i(0), vec2i(w - 1, h - 1));
+    let j = u32(qpos.y * w + qpos.x);
+    let dq = gbuf[j].w;
+    let zq = select(1e9, dq * cos_ray, dq >= 0.0);
+    let cocq = dof_coc_px(dq, cos_ray, scale_px);
+
+    // Foreground samples blur over background if their own CoC reaches us;
+    // background/coplanar samples blur into us if our CoC reaches them.
+    let in_front = zq < z0 - 0.02 * min(z0, 100.0);
+    let effective_coc = select(min(coc0, max(cocq, coc0 * 0.5)), cocq, in_front);
+    let wt = smoothstep(dist_px - 0.75, dist_px + 0.75, effective_coc);
+    if (wt > 0.0) {
+      let sample_c = src[j];
+      // Slight energy boost for bright highlights produces natural bokeh disks.
+      let lum = dot(sample_c.xyz, vec3f(0.2126, 0.7152, 0.0722));
+      let bokeh_w = wt * (1.0 + 0.15 * lum * smoothstep(2.0, 10.0, effective_coc));
+      acc += sample_c * bokeh_w;
+      wsum += bokeh_w;
+    }
+  }
+  dst[i] = acc / max(wsum, 1e-6);
 }

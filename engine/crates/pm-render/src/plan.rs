@@ -1274,9 +1274,48 @@ fn draw_layer<'d>(
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
     let blur = if mblur.truthy() { b.blur } else { None };
     let matted = js::flag(layer, "matteSource");
+    let dof = if let Some((focus_z, blur_pct)) = scope.dof_25d(layer, time)? {
+        let h = scope.plane_matrix(layer, time, false)?;
+        let (sx, sy) = scale;
+        let h_out = plane_at_origin(
+            [
+                h[0] * sx,
+                h[1] * sy,
+                h[2],
+                h[3] * sx,
+                h[4] * sy,
+                h[5],
+                h[6] * sx,
+                h[7] * sy,
+                h[8],
+            ],
+            b.origin,
+        );
+        pm_eval::space3d::inverse_plane(&h_out).map(|inv| {
+            let (cw, _) = scope.comp_size();
+            let f = cw.max(1.0) * scope.perspective_amount(layer, time).unwrap_or(50.0) / 36.0;
+            let focus_w = (1.0 + focus_z / f).max(0.05);
+            let scale_px = sx.max(sy).max(0.01);
+            let blur_px = blur_pct * 0.65 * scale_px;
+            let max_radius = (blur_px * 1.5).clamp(1.0, 48.0 * scale_px);
+            composite::Dof25d {
+                inv_w: [inv[2], inv[5], inv[8]],
+                focus_w,
+                blur_px,
+                max_radius,
+            }
+        })
+    } else {
+        None
+    };
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
-    let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
+    let slow = has_masks
+        || has_fx
+        || blend != BlendMode::Normal
+        || matted
+        || transition.is_some()
+        || dof.is_some();
     if (slow || blur.is_some())
         && let Some(run) = text_run.take()
     {
@@ -1319,6 +1358,7 @@ fn draw_layer<'d>(
                 blend,
                 alpha: composite_alpha,
                 transition: transition.clone(),
+                dof,
             },
         ))]))
     };
@@ -3708,6 +3748,7 @@ fn source_plan<'d>(
                         blend: BlendMode::Normal,
                         alpha: 1.,
                         transition: None,
+                        dof: None,
                     },
                 ))),
             }],
@@ -4016,6 +4057,7 @@ fn effect_inputs_once<'d>(
                         blend: pm_protocol::color::BlendMode::Normal,
                         alpha: 1.,
                         transition: None,
+                        dof: None,
                     },
                 ))),
             }];

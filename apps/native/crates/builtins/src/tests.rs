@@ -4592,7 +4592,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
 
     let (mut model, p) = publish(&mut presenter, "cam");
-    assert_eq!(titles(&p), ["Camera", "Environment", "Shot"]);
+    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment", "Shot"]);
     assert_eq!(
         labels(&p, "Camera"),
         [
@@ -4601,9 +4601,11 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Field of View",
             "Clip Start",
             "Clip End",
-            "f-Stop",
-            "Focus"
         ]
+    );
+    assert_eq!(
+        labels(&p, "Depth of Field"),
+        ["Depth of Field"]
     );
     assert_eq!(
         labels(&p, "Environment"),

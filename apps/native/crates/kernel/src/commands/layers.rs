@@ -337,7 +337,7 @@ fn type_color(t: &str) -> &'static str {
 }
 
 /// `CHANNELS_3D` (`legacy/core/space-3d.ts`).
-pub(crate) const CHANNELS_3D: [(&str, f64); 9] = [
+pub(crate) const CHANNELS_3D: [(&str, f64); 11] = [
     ("perspective", 50.0),
     ("position.z", 0.0),
     ("anchor.z", 0.0),
@@ -347,6 +347,8 @@ pub(crate) const CHANNELS_3D: [(&str, f64); 9] = [
     ("orientation.x", 0.0),
     ("orientation.y", 0.0),
     ("orientation.z", 0.0),
+    ("dofBlur", 0.0),
+    ("dofFocus", 0.0),
 ];
 
 const PLANAR_CHANNELS: [(&str, f64); 9] = [

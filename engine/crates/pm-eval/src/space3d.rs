@@ -25,7 +25,7 @@ pub type Mat4 = [f64; 16];
 pub type Mat3 = [f64; 9];
 
 /// The 3D transform channels and their defaults (`CHANNELS_3D`).
-pub const CHANNELS_3D: [(&str, f64); 9] = [
+pub const CHANNELS_3D: [(&str, f64); 11] = [
     ("perspective", 50.0),
     ("position.z", 0.0),
     ("anchor.z", 0.0),
@@ -35,6 +35,8 @@ pub const CHANNELS_3D: [(&str, f64); 9] = [
     ("orientation.x", 0.0),
     ("orientation.y", 0.0),
     ("orientation.z", 0.0),
+    ("dofBlur", 0.0),
+    ("dofFocus", 0.0),
 ];
 
 pub const IDENTITY4: Mat4 = [
@@ -310,6 +312,20 @@ impl<'d> Scope<'_, 'd> {
             0.001,
             self.value3d(owner, "perspective", time, 50.0)?,
         ))
+    }
+
+    /// 2.5D Depth of Field `(focus_z_px, blur_percent)` when `layer` has
+    /// `threeD: true` and `dofBlur > 0`, else `None`.
+    pub fn dof_25d(&mut self, layer: &'d Node, time: f64) -> JsResult<Option<(f64, f64)>> {
+        if !flag(layer, "threeD") {
+            return Ok(None);
+        }
+        let blur = self.value3d(layer, "dofBlur", time, 0.0)?;
+        if !(blur > 0.0) {
+            return Ok(None);
+        }
+        let focus = self.value3d(layer, "dofFocus", time, 0.0)?;
+        Ok(Some((focus, blur.clamp(0.0, 100.0))))
     }
 
     /// `planeMatrix(PM, L, T, positioning)`: layer pixels to composition

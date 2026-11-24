@@ -171,9 +171,13 @@ fn full_quad(full: (u32, u32)) -> [[f32; 4]; 3] {
     ]
 }
 
-/// No intermediate mask/effect target owns the layer image.
+/// No intermediate mask/effect/DOF target owns the layer image.
 fn unmasked(n: &LayerNode) -> bool {
-    n.masks.is_none() && n.matte.is_none() && n.effects.is_none() && n.transition.is_none()
+    n.masks.is_none()
+        && n.matte.is_none()
+        && n.effects.is_none()
+        && n.transition.is_none()
+        && n.dof.is_none()
 }
 
 /// A quad whose pixels have unit area coverage even with analytic solid
@@ -193,7 +197,7 @@ fn full_pixel_solid(matrix: [f64; 6]) -> bool {
 /// Effects and transitions retain the complete pass: their programs may generate
 /// pixels outside the input or read the backdrop at arbitrary coordinates.
 fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
-    if n.effects.is_some() || n.transition.is_some() {
+    if n.effects.is_some() || n.transition.is_some() || n.dof.is_some() {
         return Some(rect);
     }
     let Ok(bounds) = placed_bounds(n) else {
@@ -1357,6 +1361,38 @@ impl Exec<'_> {
         {
             self.release(t);
         }
+        if let Some(dof) = n.dof {
+            output_bounds = None;
+            let two_pass = dof.max_radius > 10.0;
+            let passes: &[(f32, f32)] = if two_pass {
+                &[(0.75, 0.0), (0.55, std::f32::consts::FRAC_PI_8)]
+            } else {
+                &[(1.0, 0.0)]
+            };
+            for &(scale, angle) in passes {
+                let mut u = self.op_uniform(full);
+                u.inv[0] = [
+                    dof.inv_w[0] as f32,
+                    dof.inv_w[1] as f32,
+                    dof.inv_w[2] as f32,
+                    0.0,
+                ];
+                u.inv[1] = [rect.width as f32, rect.height as f32, scale, 0.0];
+                u.f = [
+                    dof.focus_w as f32,
+                    dof.blur_px as f32,
+                    dof.max_radius as f32,
+                    angle,
+                ];
+                let out = if scoped {
+                    self.take_scoped(rect)
+                } else {
+                    self.take_rect(rect)
+                };
+                self.run_op(encoder, Op::Dof, &u, &res, None, &out, rect, full);
+                self.replace_res(&mut res, &mut owned, out, scoped);
+            }
+        }
         Some((res, depth, owned, output_bounds))
     }
 
@@ -1577,6 +1613,7 @@ mod tests {
             blend: BlendMode::Normal,
             alpha: 1.0,
             transition: None,
+            dof: None,
         }
     }
 

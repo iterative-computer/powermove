@@ -895,11 +895,11 @@ mod tests {
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        // 24 2D, 21 composite (7 ops), 6 resample draws and 3 mip writers
-        // over rgba16float, rgba32float and colordepth's rgba8unorm; path
-        // masks (with area coverage's clear, raster and scans) and 6 text
-        // outline/image/blur.
-        assert_eq!(times.len(), 73);
+        // 24 2D, 24 composite (8 ops, including 2.5D DOF), 6 resample draws
+        // and 3 mip writers over rgba16float, rgba32float and colordepth's
+        // rgba8unorm; path masks (with area coverage's clear, raster and
+        // scans) and 6 text outline/image/blur.
+        assert_eq!(times.len(), 76);
         assert_eq!(built(), times.len());
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
