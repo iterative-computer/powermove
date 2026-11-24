@@ -124,6 +124,49 @@ pub fn active(block: Option<&Block>, name: &str) -> bool {
     block.is_some_and(|b| b.members.iter().any(|m| m.name == name && m.active))
 }
 
+/// Replace only the uniform block's simple field reads in generated MSL.
+/// An unexpected writer representation keeps the original pipeline.
+fn specialize_glow_blur(source: &str) -> Option<String> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut source = source.to_owned();
+    for (field, constant) in [
+        (".u_pass", "6"),
+        (".u_highQuality", "0.0f"),
+        (".u_dispersion", "0.0f"),
+    ] {
+        let mut rewritten = String::with_capacity(source.len());
+        let mut from = 0;
+        for (at, _) in source.match_indices(field) {
+            let after = at + field.len();
+            if source[after..].starts_with(ident) {
+                continue;
+            }
+            let head = &source[from..at];
+            let (object, close) = head.strip_suffix(')').map_or((head, false), |s| (s, true));
+            let name = object.rsplit(|c: char| !ident(c)).next()?;
+            if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+                return None;
+            }
+            let start = object.len() - name.len();
+            let prefix = &head[..start];
+            let prefix = if close {
+                prefix.strip_suffix('(')?
+            } else {
+                prefix
+            };
+            rewritten.push_str(prefix);
+            rewritten.push_str(constant);
+            from = after;
+        }
+        if from == 0 {
+            return None;
+        }
+        rewritten.push_str(&source[from..]);
+        source = rewritten;
+    }
+    Some(source)
+}
+
 /// One compiled program, with pipelines per target format.
 pub struct GpuProgram {
     vertex: crate::glsl::Stage,
@@ -147,6 +190,7 @@ pub struct GpuProgram {
     pub(crate) inactive_fragment: Vec<usize>,
     pub(crate) inactive_vertex: Vec<usize>,
     pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    glow_blur: HashMap<wgpu::TextureFormat, Option<wgpu::RenderPipeline>>,
 }
 
 /// Validation, internal (translation and Metal), and out-of-memory scopes,
@@ -388,6 +432,7 @@ impl GpuProgram {
             inactive_fragment,
             inactive_vertex,
             pipelines: HashMap::new(),
+            glow_blur: HashMap::new(),
         })
     }
 
@@ -427,47 +472,99 @@ impl GpuProgram {
                 Some(half) if format == wgpu::TextureFormat::Rgba16Float => half,
                 _ => &self.fragment,
             };
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("pm legacy glsl"),
-                layout: Some(&self.layout),
-                vertex: wgpu::VertexState {
-                    module: &self.vertex.module,
-                    entry_point: Some(&self.vertex.entry_point),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                // The vertex output is flipped to keep GL row order, which
-                // reverses the winding: clockwise is GL's counter-clockwise,
-                // so `gl_FrontFacing` matches WebGL (false for the quad).
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    front_face: wgpu::FrontFace::Cw,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &fragment.module,
-                    entry_point: Some(&fragment.entry_point),
-                    compilation_options: Default::default(),
-                    // Blending off (`gl.disable(gl.BLEND)` around every
-                    // effect and transition draw).
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let pipeline = self.make_pipeline(device, format, fragment);
             if let Some(error) = pop_error(scopes) {
                 return Err(Failure::new(FailureStage::NagaValidate, error));
             }
             self.pipelines.insert(format, pipeline);
         }
         Ok(&self.pipelines[&format])
+    }
+
+    /// The pinned packed glow's final blur for a zero-dispersion,
+    /// standard-quality instance. Only the uniform loads change. The same
+    /// shader samples the same texels and accumulates them in the same order.
+    pub(super) fn glow_blur_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Option<&wgpu::RenderPipeline> {
+        if !self.glow_blur.contains_key(&format) {
+            let variant = (|| {
+                let stage = if format == wgpu::TextureFormat::Rgba16Float {
+                    self.fragment_half.as_ref().unwrap_or(&self.fragment)
+                } else {
+                    &self.fragment
+                };
+                let source = specialize_glow_blur(stage.msl.as_deref()?)?;
+                let scopes = push_scopes(device);
+                let specialized = crate::glsl::msl_stage(
+                    device,
+                    "pm packed glow blur",
+                    source,
+                    &stage.entry_point,
+                );
+                let pipeline = specialized
+                    .ok()
+                    .map(|s| self.make_pipeline(device, format, &s));
+                if pop_error(scopes).is_some() {
+                    None
+                } else {
+                    pipeline
+                }
+            })();
+            if std::env::var_os("PM_ENGINE_TRACE").is_some() {
+                eprintln!(
+                    "PM_PACKED_GLOW_VARIANT {format:?} ready={}",
+                    variant.is_some()
+                );
+            }
+            self.glow_blur.insert(format, variant);
+        }
+        self.glow_blur.get(&format)?.as_ref()
+    }
+
+    fn make_pipeline(
+        &self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        fragment: &crate::glsl::Stage,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pm legacy glsl"),
+            layout: Some(&self.layout),
+            vertex: wgpu::VertexState {
+                module: &self.vertex.module,
+                entry_point: Some(&self.vertex.entry_point),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            // The vertex output is flipped to keep GL row order, which
+            // reverses the winding: clockwise is GL's counter-clockwise,
+            // so `gl_FrontFacing` matches WebGL (false for the quad).
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fragment.module,
+                entry_point: Some(&fragment.entry_point),
+                compilation_options: Default::default(),
+                // Blending off (`gl.disable(gl.BLEND)` around every
+                // effect and transition draw).
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     /// The uniform block bytes of one draw, from the compositor's calls in
