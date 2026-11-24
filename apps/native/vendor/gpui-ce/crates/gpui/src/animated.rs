@@ -143,14 +143,24 @@ where
         self.started_at = None;
     }
 
+    /// The sample of a value at rest (no run in progress), which sampling
+    /// does not change; `None` while it runs.
+    pub fn resting_sample(&self) -> Option<AnimatedSample<T>> {
+        self.started_at.is_none().then(|| self.settled())
+    }
+
+    fn settled(&self) -> AnimatedSample<T> {
+        AnimatedSample {
+            value: self.last_value.clone(),
+            is_active: false,
+            progress: self.settled_progress.unwrap_or(Progress::END),
+        }
+    }
+
     /// Evaluates the interpolated value at the supplied time.
     pub fn sample(&mut self, now: Time) -> AnimatedSample<T> {
         let Some(started_at) = self.started_at else {
-            return AnimatedSample {
-                value: self.last_value.clone(),
-                is_active: false,
-                progress: self.settled_progress.unwrap_or(Progress::END),
-            };
+            return self.settled();
         };
 
         let sample = self.motion.sample_at(started_at, now);

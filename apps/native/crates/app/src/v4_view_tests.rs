@@ -3742,3 +3742,34 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     vcx.run_until_parked();
     assert!(!layered(&vcx), "a pointer move ends the scroll");
 }
+
+/// PM-702: evaluating a transition at rest (the workspace's corner fades)
+/// does not tell its state it changed. A mutable borrow of the state did, on
+/// every render of every fade, and the workspace that evaluated them drew
+/// again on each scroll step.
+#[gpui::test]
+fn a_transition_at_rest_evaluates_without_notifying(cx: &mut TestAppContext) {
+    let (_, vcx) = cx.add_window_view(|_, _| EmptyView);
+    let mut vcx = vcx.clone();
+    let motion = || gpui::Motion::new(Duration::from_millis(100));
+    let state = vcx.update(|_, cx| cx.new(|_| gpui::TransitionState::new(1.0_f32, motion())));
+    let told = std::rc::Rc::new(std::cell::Cell::new(0));
+    let _observing = vcx.update(|_, cx| {
+        let told = told.clone();
+        cx.observe(&state, move |_, _| told.set(told.get() + 1))
+    });
+    for _ in 0..3 {
+        vcx.update(|window, cx| {
+            let fade = gpui::Transition::new(state.clone(), motion());
+            assert_eq!(*fade.evaluate(window, cx), 1.0);
+        });
+        vcx.run_until_parked();
+    }
+    assert_eq!(told.get(), 0, "a resting transition is only read");
+}
+struct EmptyView;
+impl Render for EmptyView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
