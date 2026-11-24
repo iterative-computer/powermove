@@ -520,7 +520,9 @@ pub struct SurfaceView {
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     gain_scrub: Option<GainScrub>,
-    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool)>,
+    /// A horizontal wheel scrub: its node, its scrub, whether it writes a
+    /// binding, and the number it started from (a cancel shows it again).
+    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool, f64)>,
     wheel_tick: u64,
     wheel_lifted: bool,
     scrub_ops: VecDeque<ScrubOp>,
@@ -2314,6 +2316,14 @@ impl SurfaceView {
     pub fn wheel_reading(&self) -> Option<f64> {
         self.scrub_shown.map(|(_, value)| value)
     }
+    /// The number a numeric field shows now: a scrub's readout, else its
+    /// tree's value (tests).
+    #[cfg(test)]
+    pub fn shown_number(&self, semantic: &str) -> f64 {
+        let id = self.prepared.semantics[semantic];
+        self.scrub_readout(id)
+            .unwrap_or_else(|| self.prepared.node(id).unwrap().number.unwrap().value)
+    }
     #[cfg(test)]
     pub fn number_edit_requested(&self, semantic: &str) -> bool {
         self.number_edit_request == Some(self.prepared.semantics[semantic])
@@ -3206,11 +3216,37 @@ impl SurfaceView {
         self.pointer(id, "pointerdown", detail, cx);
     }
     fn wheel_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if let Some((id, _, bound)) = self.wheel_scrub.take() {
-            if !self.finish_gain_scrub(id, commit, cx) && bound {
-                self.scrub_ops.push_back(ScrubOp::Finish(commit));
-                self.scrub_pump(cx);
+        let Some((id, _, bound, start)) = self.wheel_scrub.take() else {
+            return;
+        };
+        if self.finish_gain_scrub(id, commit, cx) {
+            return;
+        }
+        if !commit {
+            // As a cancelled pointer scrub: the number it started from, shown
+            // and in the field now, kept through the rollback's completion
+            // (the rollback's tree may be the one already shown, which is not
+            // published again), and no queued preview after it.
+            if let Some(number) = self.prepared.node(id).and_then(|n| n.number) {
+                if let Some(field) = self.fields.get(&id) {
+                    let text = number.text(start);
+                    field.update(cx, |f, cx| f.set_value(&text, cx));
+                }
             }
+            if bound {
+                while matches!(self.scrub_ops.back(), Some(ScrubOp::Value(..))) {
+                    self.scrub_ops.pop_back();
+                }
+                self.scrub_shown = Some((id, start));
+            } else {
+                self.scrub_shown = None;
+                self.change(id, json!(start), cx);
+            }
+            cx.notify();
+        }
+        if bound {
+            self.scrub_ops.push_back(ScrubOp::Finish(commit));
+            self.scrub_pump(cx);
         }
     }
     fn begin_gain_scrub(
@@ -3422,10 +3458,10 @@ impl SurfaceView {
         let active = self
             .wheel_scrub
             .as_ref()
-            .filter(|(target, _, _)| *target == id);
+            .filter(|(target, _, _, _)| *target == id);
         if !active.map_or_else(
             || HorizontalScrub::new(n.value).accepts(delta.0, delta.1, event.modifiers.control),
-            |(_, w, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
+            |(_, w, _, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
         ) {
             return;
         }
@@ -3433,7 +3469,12 @@ impl SurfaceView {
         cx.stop_propagation();
         if active.is_none() {
             self.wheel_finish(true, cx);
-            self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
+            self.wheel_scrub = Some((
+                id,
+                HorizontalScrub::new(n.value),
+                binding.is_some(),
+                n.value,
+            ));
             let name = self.undo_name(id);
             if !self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()) && binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Begin(name));
