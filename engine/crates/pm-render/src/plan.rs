@@ -2041,6 +2041,11 @@ fn native_content_quad<'d>(
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
                 };
+                let playback = (b.read_ahead
+                    || b.sampling == crate::sampling::Sampling::Playback)
+                    && !b.final_output
+                    && b.source_raster.is_none()
+                    && b.material.is_none();
                 return local_level2(
                     scope,
                     layer,
@@ -2048,6 +2053,7 @@ fn native_content_quad<'d>(
                     scale,
                     b.origin,
                     pm_vector::render::scene::PixelRect::new(0, 0, width, height),
+                    playback,
                     &mut plan,
                 );
             }
@@ -2180,7 +2186,19 @@ fn native_content_quad<'d>(
                     )
                 };
                 if scope.is_3d_layer(layer)? {
-                    return local_level2(scope, layer, time, scale, b.origin, target, &mut plan);
+                    return local_level2(
+                        scope,
+                        layer,
+                        time,
+                        scale,
+                        b.origin,
+                        target,
+                        (b.read_ahead || playback)
+                            && !b.final_output
+                            && b.source_raster.is_none()
+                            && b.material.is_none(),
+                        &mut plan,
+                    );
                 }
                 let world = vector_world(scope, b, layer, time, scale)?;
                 return match crate::vector::svg::plan_svg(
@@ -2937,7 +2955,17 @@ fn offline_card<'d>(
         let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
             Ok(svg(world, target).ok().flatten().map(|q| *q))
         };
-        return local_level2(scope, layer, time, scale, b.origin, target, &mut plan).map(Some);
+        return local_level2(
+            scope,
+            layer,
+            time,
+            scale,
+            b.origin,
+            target,
+            (b.read_ahead || playback) && !b.final_output,
+            &mut plan,
+        )
+        .map(Some);
     }
     Ok(svg(&world, target)
         .ok()
@@ -3016,6 +3044,7 @@ type PlanVector<'p, 'd> = dyn FnMut(
 /// the plane and covered at output resolution in `target`, and anything
 /// else (a resvg raster) is planned again at the density its bounds need on
 /// the plane and drawn as a layer-space texture by the level 2 resampler.
+#[allow(clippy::too_many_arguments)]
 fn local_level2<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
@@ -3023,6 +3052,7 @@ fn local_level2<'d>(
     scale: (f64, f64),
     origin: (f64, f64),
     target: pm_vector::render::scene::PixelRect,
+    playback: bool,
     plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
     let clip = crate::space25d::local::unbounded();
@@ -3040,21 +3070,63 @@ fn local_level2<'d>(
     if let crate::vector::VectorQuad::Device {
         source: crate::vector::VectorSource::Scene { scene, .. },
         ..
-    } = &first
-        && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
-            .map(|p| plane_at_origin(p, origin))
+    } = first
     {
-        let projected = crate::space25d::local::project_scene(scene, &plane, dx.max(dy));
-        return Ok(projected.pixel_bounds(target).map(|rect| {
-            device_quad(crate::vector::VectorQuad::Device {
-                source: crate::vector::VectorSource::Scene {
-                    scene: projected,
+        // During live playback, rasterize 2.5D vector scenes once in layer
+        // space at a quarter-octave stepped density and project the cached
+        // GPU texture through the 2.5D plane, avoiding per-frame CPU curve
+        // flattening (`project_scene`) and 100% vector cache misses while a
+        // 3D group animates. Paused/settled/export frames keep exact
+        // output-space `project_scene` coverage.
+        if playback {
+            let sdx = crate::space25d::local::stepped(dx, bounds[2]);
+            let sdy = crate::space25d::local::stepped(dy, bounds[3]);
+            let scale_aff = pm_vector::kurbo::Affine::scale_non_uniform(sdx, sdy);
+            let mut local_scene = scene.clone();
+            for item in &mut local_scene.items {
+                item.transform = scale_aff * item.transform;
+            }
+            if let Some(rect) = local_scene.pixel_bounds(clip)
+                && rect.area() <= 2 * 1024 * 1024
+                && rect.width <= 4096
+                && rect.height <= 4096
+            {
+                return Ok(Some(Quad::Texture {
+                    source: Source::Vector(Box::new(crate::vector::VectorSource::Scene {
+                        scene: local_scene,
+                        rect,
+                    })),
+                    w: f64::from(rect.width) / sdx,
+                    h: f64::from(rect.height) / sdy,
+                    ax: -f64::from(rect.x) / sdx,
+                    ay: -f64::from(rect.y) / sdy,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                }));
+            }
+        }
+        if let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+            .map(|p| plane_at_origin(p, origin))
+        {
+            let projected = crate::space25d::local::project_scene(&scene, &plane, dx.max(dy));
+            return Ok(projected.pixel_bounds(target).map(|rect| {
+                device_quad(crate::vector::VectorQuad::Device {
+                    source: crate::vector::VectorSource::Scene {
+                        scene: projected,
+                        rect,
+                    },
                     rect,
-                },
-                rect,
-            })
-        }));
+                })
+            }));
+        }
     }
+    let (dx, dy) = if playback {
+        (
+            crate::space25d::local::stepped(dx, bounds[2]),
+            crate::space25d::local::stepped(dy, bounds[3]),
+        )
+    } else {
+        (dx, dy)
+    };
     let Some(second) = plan(scope, &[dx, 0.0, 0.0, dy, 0.0, 0.0], clip)? else {
         return Ok(None);
     };

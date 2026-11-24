@@ -243,7 +243,7 @@ pub fn plan_shape<'d>(
     ))
     .is_some_and(|p| !p.is_empty());
     let scene = if has_paths {
-        let (_, colors, layer_paths) = paths(scope, layer, time)?;
+        let (colors, layer_paths) = path_colors_and_layer(scope, layer, time)?;
         paths_scene(&layer_paths, &colors, world)
     } else {
         let (content, colors) = shape_content(d);
@@ -316,6 +316,36 @@ pub fn extrusion_outlines<'d>(scope:&mut Scope<'_, 'd>,layer:&'d Node,time:f64,t
     Ok(outlines)
 }
 
+fn extract_path_colors(evaluated: &[pm_eval::bounds::EvaluatedPath]) -> Vec<PathColors> {
+    evaluated
+        .iter()
+        .map(|e| {
+            let get = |k: &str| {
+                e.values
+                    .get(&pm_model::JsString::from(k))
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined)
+            };
+            PathColors {
+                fill: style_string(&get("fill")),
+                stroke: style_string(&get("stroke")),
+            }
+        })
+        .collect()
+}
+
+/// Colors and path geometry for rendering a shape layer's editable paths,
+/// without rebuilding the unused `Vec<PathNode>`.
+fn path_colors_and_layer<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+) -> JsResult<(Vec<PathColors>, PathLayer)> {
+    let (evaluated, _, layer_paths) = scope.path_geometry(layer, time)?;
+    let colors = extract_path_colors(&evaluated);
+    Ok((colors, layer_paths))
+}
+
 /// A layer's editable paths: nodes, colors, and geometry.
 pub fn paths<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -338,21 +368,7 @@ pub fn paths<'d>(
             values: e.path_values(),
         })
         .collect();
-    let colors = evaluated
-        .iter()
-        .map(|e| {
-            let get = |k: &str| {
-                e.values
-                    .get(&pm_model::JsString::from(k))
-                    .cloned()
-                    .unwrap_or(JsValue::Undefined)
-            };
-            PathColors {
-                fill: style_string(&get("fill")),
-                stroke: style_string(&get("stroke")),
-            }
-        })
-        .collect();
+    let colors = extract_path_colors(&evaluated);
     Ok((nodes, colors, layer_paths))
 }
 

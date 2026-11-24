@@ -175,7 +175,55 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         prefix: &str,
     ) -> JsResult<EvaluatedPath> {
-        self.path_values_noting(layer, path, time, prefix, &mut true)
+        self.path_values_noting(layer, path, time, Some(prefix), &mut true, false)
+    }
+
+    /// Evaluates one property value inside a path (or vertex), using the
+    /// channel memo's prepared track / static entry when `from_doc` is true
+    /// so animated paths avoid re-preparing tracks and formatting key strings.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_path_value(
+        &mut self,
+        layer: &'d Node,
+        value: Option<&'d Node>,
+        time: f64,
+        from_doc: bool,
+        may_have_error: bool,
+        fixed: &mut bool,
+        make_key: impl FnOnce() -> String,
+    ) -> JsResult<JsValue> {
+        if !node::is_property(value) {
+            return Ok(node::js_value_opt(value));
+        }
+        let mut make_key = Some(make_key);
+        let mut cached_key: Option<String> = None;
+        let has_err = if may_have_error {
+            let k = cached_key.get_or_insert_with(|| (make_key.take().unwrap())());
+            self.ev.has_channel_error(self.comp, layer, k)
+        } else {
+            false
+        };
+        if !has_err {
+            if from_doc
+                && let Some(prop) = value
+                && let Some((v, is_static)) =
+                    self.ev.memo_prop_no_error(self.comp, layer, prop, time)
+            {
+                if !is_static {
+                    *fixed = false;
+                }
+                return Ok(v);
+            }
+            if let Some(v) = self.ev.static_channel_no_error(value) {
+                return Ok(v);
+            }
+        }
+        *fixed = false;
+        let key = match cached_key {
+            Some(k) => k,
+            None => (make_key.take().unwrap())(),
+        };
+        self.channel_p(layer, value, time, &key)
     }
 
     /// [`Self::path_values`], clearing `fixed` when a channel it reads
@@ -185,9 +233,16 @@ impl<'d> Scope<'_, 'd> {
         layer: &'d Node,
         path: &'d Node,
         time: f64,
-        prefix: &str,
+        prefix: Option<&str>,
         fixed: &mut bool,
+        from_doc: bool,
     ) -> JsResult<EvaluatedPath> {
+        let mut owned_prefix: Option<String> = None;
+        let may_have_path_err = if from_doc {
+            self.ev.has_path_errors(self.comp, layer)
+        } else {
+            self.ev.has_layer_errors(self.comp, Some(layer))
+        };
         let mut values = Content::new();
         let p = node::get_checked(Some(path), b"p")?;
         if let Got::Node(p) = &p {
@@ -197,14 +252,25 @@ impl<'d> Scope<'_, 'd> {
                 ));
             }
             for (k, prop) in node::entries(p) {
-                let v = match self.static_value(layer, prop.node()) {
-                    Some(v) => v,
-                    None => {
-                        *fixed = false;
-                        let key = format!("{prefix}.{}", k.to_string_lossy());
-                        self.evaluated(layer, prop.node(), time, &key)?
-                    }
-                };
+                let v = self.eval_path_value(
+                    layer,
+                    prop.node(),
+                    time,
+                    from_doc,
+                    may_have_path_err,
+                    fixed,
+                    || {
+                        let pref = match prefix {
+                            Some(p) => p,
+                            None => owned_prefix.get_or_insert_with(|| {
+                                let id = node::to_js_string(node::member(Some(path), "id"))
+                                    .to_string_lossy();
+                                format!("g.{id}")
+                            }),
+                        };
+                        format!("{pref}.{}", k.to_string_lossy())
+                    },
+                )?;
                 values.insert(k, v);
             }
         } else {
@@ -212,26 +278,61 @@ impl<'d> Scope<'_, 'd> {
                 "Cannot convert undefined or null to object",
             ));
         }
-        let mut vertices = Vec::new();
-        let list = node::get_checked(Some(path), b"vertices")?;
-        for v in node::array(list.node()).unwrap_or(&[]) {
-            let id = || node::to_js_string(node::member(Some(v), "id")).to_string_lossy();
-            let mut out = Vec::new();
-            if let Some(vp) = node::member(Some(v), "p") {
-                for (k, prop) in node::entries(vp) {
-                    let value = match self.static_value(layer, prop.node()) {
-                        Some(value) => value,
-                        None => {
-                            *fixed = false;
-                            let key = format!("{prefix}.v.{}.{}", id(), k.to_string_lossy());
-                            self.evaluated(layer, prop.node(), time, &key)?
-                        }
-                    };
-                    out.push((k, crate::scope::or0(value.to_number())));
+        let vertices = if from_doc
+            && let Some(kept) = self.ev.kept_path_vertices(self.comp, layer, path)
+        {
+            (*kept).clone()
+        } else {
+            let may_have_vert_err = if from_doc {
+                may_have_path_err && self.ev.has_vertex_errors(self.comp, layer)
+            } else {
+                may_have_path_err
+            };
+            let mut vertices = Vec::new();
+            let mut verts_fixed = true;
+            let list = node::get_checked(Some(path), b"vertices")?;
+            for v in node::array(list.node()).unwrap_or(&[]) {
+                let mut out = Vec::new();
+                if let Some(vp) = node::member(Some(v), "p") {
+                    for (k, prop) in node::entries(vp) {
+                        let value = self.eval_path_value(
+                            layer,
+                            prop.node(),
+                            time,
+                            from_doc,
+                            may_have_vert_err,
+                            &mut verts_fixed,
+                            || {
+                                let pref = match prefix {
+                                    Some(p) => p,
+                                    None => owned_prefix.get_or_insert_with(|| {
+                                        let id = node::to_js_string(node::member(Some(path), "id"))
+                                            .to_string_lossy();
+                                        format!("g.{id}")
+                                    }),
+                                };
+                                let vid = node::to_js_string(node::member(Some(v), "id"))
+                                    .to_string_lossy();
+                                format!("{pref}.v.{vid}.{}", k.to_string_lossy())
+                            },
+                        )?;
+                        out.push((k, crate::scope::or0(value.to_number())));
+                    }
                 }
+                vertices.push(out);
             }
-            vertices.push(out);
-        }
+            if !verts_fixed {
+                *fixed = false;
+            } else if from_doc {
+                self.ev.keep_path_vertices(
+                    self.comp,
+                    layer,
+                    path,
+                    std::sync::Arc::new(vertices.clone()),
+                );
+            }
+            vertices
+        };
         Ok(EvaluatedPath {
             id: node::js_value_opt(node::member(Some(path), "id")),
             values,
@@ -286,18 +387,25 @@ impl<'d> Scope<'_, 'd> {
         let paths = d.node().and_then(|d| node::member(Some(d), "paths"));
         let mut out = Vec::new();
         for path in node::array(paths).unwrap_or(&[]) {
-            let id = node::to_js_string(node::member(Some(path), "id")).to_string_lossy();
-            out.push(self.path_values_noting(layer, path, time, &format!("g.{id}"), fixed)?);
+            out.push(self.path_values_noting(layer, path, time, None, fixed, true)?);
         }
         Ok(out)
     }
 
     /// `groupMatrix` for each path, and the `rasterPaths` bounds.
     /// Kept across the frames of an unchanged document when no path channel
-    /// depends on the time (`crate::channel_memo`).
+    /// depends on the time (`crate::channel_memo`), and within one frame's
+    /// memoized scope for animated paths.
     pub fn path_geometry(&mut self, layer: &'d Node, time: f64) -> JsResult<PathGeometry> {
         if let Some(kept) = self.ev.kept_path_geometry(self.comp, layer) {
             return Ok((*kept).clone());
+        }
+        if let Some(kept) = self
+            .local_memo
+            .as_ref()
+            .and_then(|m| m.path_geom.get(&(crate::scope::address(layer), time.to_bits())))
+        {
+            return Ok((**kept).clone());
         }
         let mut fixed = true;
         let evaluated = self.layer_paths_noting(layer, time, &mut fixed)?;
@@ -322,6 +430,11 @@ impl<'d> Scope<'_, 'd> {
         if fixed {
             self.ev
                 .keep_path_geometry(self.comp, layer, std::sync::Arc::new(geometry.clone()));
+        } else if let Some(memo) = self.local_memo.as_mut() {
+            memo.path_geom.insert(
+                (crate::scope::address(layer), time.to_bits()),
+                std::sync::Arc::new(geometry.clone()),
+            );
         }
         Ok(geometry)
     }

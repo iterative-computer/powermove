@@ -861,7 +861,17 @@ impl Shared {
             // The playing viewer already pins its last shown frame. One
             // frame ahead can use the worker's existing latest slot when
             // the cache share cannot keep both the shown and next frames.
-            AHEAD.min(self.cache_frames(st).max(usize::from(st.playing)))
+            // When the cache share only fits ~1 B-frame pyramid (e.g. 4K on
+            // a 16 GB machine), looking >1 frame ahead pulls in the next
+            // pyramid and evicts the imminent frame (from + stride) before
+            // the viewer reads it.
+            let total_frames = self.cache_share() / st.frame_bytes.max(1);
+            let max_ahead = if total_frames <= 6 {
+                1
+            } else {
+                self.cache_frames(st).max(usize::from(st.playing))
+            };
+            AHEAD.min(max_ahead)
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
@@ -885,7 +895,7 @@ impl Shared {
                 break;
             }
             if !st.latest.as_ref().is_some_and(|(shown, _)| *shown == m)
-                && !cache.contains(&self.key(m))
+                && cache.get(&self.key(m)).is_none()
             {
                 return Some(m);
             }

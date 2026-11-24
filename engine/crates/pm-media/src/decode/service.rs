@@ -429,15 +429,23 @@ impl SessionGuard<'_> {
         if f.is_ok() {
             s.replacement = false;
         }
-        // Everything the session decoded on the way is cached too.
-        for (k, fr) in s.window_frames() {
+        // Everything the session decoded on the way is cached too. Insert in
+        // descending PTS order (farthest future frame first, requested/nearest
+        // frame last) so if the LRU cache is tight (e.g. 4K B-frame pyramid),
+        // the soonest upcoming frames stay most-recently-used and survive.
+        let mut window_frames: Vec<(usize, DecodedFrame)> = s
+            .window_frames()
+            .map(|(k, fr)| (k, fr.clone()))
+            .collect();
+        window_frames.sort_by(|a, b| b.1.pts.cmp(&a.1.pts));
+        for (k, fr) in window_frames {
             let key = FrameKey {
                 source: self.source.id,
                 sample: k,
                 purpose: self.key.purpose,
             };
             if !self.service.cache.contains(&key) {
-                self.service.cache.insert(key, fr.clone());
+                self.service.cache.insert(key, fr);
             }
         }
         // Over the combined allowance, older idle state gives way before
