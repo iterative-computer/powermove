@@ -20,7 +20,16 @@
 //! continuous interaction would present on a synthetic 120 Hz clock
 //! (skipped vsyncs, superseded results; see `cadence_120`).
 //!
-//! `PM_UI_LATENCY_OUT=/path.json` writes the catalogue; `PM_UI_LATENCY_BUDGET=1`
+//! Wall times swing 2-3x with the machine's load, so each step also records
+//! the main thread's own CPU time and the instructions it retired
+//! (`main_minstr`, xnu's thread counters, about 2 % between identical runs):
+//! pm-gate holds each case to its recorded p99 of instructions (PM-698,
+//! `~/Developer/pm-durable/bin/pm-ui-latency-check`). The workspace group
+//! (`ui_latency_workspace.rs`) runs the real shell with every built-in panel,
+//! paused and with a real engine viewer playing.
+//!
+//! `PM_UI_LATENCY_GROUPS=workspace,timeline` and `PM_UI_LATENCY_CASES=K1,K1p`
+//! pick what runs (profiling). `PM_UI_LATENCY_OUT=/path.json` writes the catalogue; `PM_UI_LATENCY_BUDGET=1`
 //! turns the budgets (p50 ≤ one 120 Hz frame, p95 ≤ 50 ms; and the pacing
 //! gates p99 ≤ two frames, hitches ≤ `PM_UI_LATENCY_MAX_HITCHES` (0), runs
 //! over 4 ms ≤ `PM_UI_LATENCY_MAX_MAIN_OVER_4MS` (0)) into assertions.
