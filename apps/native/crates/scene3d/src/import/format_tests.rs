@@ -706,7 +706,7 @@ def Xform "Card" {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn usdz_prefers_authored_colors_second_uv_set_and_tiled_opacity_wrap() {
+fn usdz_prefers_authored_colors_second_uv_set_and_authored_wrap() {
     let usda = br#"#usda 1.0
 (
     defaultPrim = "Deck"
@@ -742,6 +742,38 @@ def Xform "Deck" {
         texCoord2f[] primvars:st = [(0.1, 0.1), (2.7, 0.1), (0.1, 22.2)] (interpolation = "vertex")
         uniform token subdivisionScheme = "none"
         rel material:binding = </Deck/Grille>
+    }
+    def Mesh "Panel" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(4, 0, 0), (5, 0, 0), (4, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (6, 0), (0, 6)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/Tiled>
+    }
+    def Material "Tiled" {
+        token outputs:surface.connect = </Deck/Tiled/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0, 0, 0)
+            float inputs:opacity.connect = </Deck/Tiled/Mask.outputs:r>
+            token outputs:surface
+        }
+        def Shader "Mask" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            token inputs:wrapS = "repeat"
+            token inputs:wrapT = "repeat"
+            float2 inputs:st.connect = </Deck/Tiled/UV0.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV0" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st"
+            float2 outputs:result
+        }
     }
     def Material "DarkKey" {
         token outputs:surface.connect = </Deck/DarkKey/Surface.outputs:surface>
@@ -844,20 +876,17 @@ def Xform "Deck" {
         grille_rgb[0].as_f64().unwrap() < 1e-4,
         "Grille must keep authored black diffuseColor: {grille_rgb:?}"
     );
-    let tex_index = grille["pbrMetallicRoughness"]["baseColorTexture"]["index"]
-        .as_u64()
-        .unwrap() as usize;
-    let sampler_index = doc["textures"][tex_index]["sampler"].as_u64().unwrap() as usize;
-    assert_eq!(
-        doc["samplers"][sampler_index]["wrapS"].as_u64(),
-        Some(10497),
-        "Tiled opacity mesh should promote clamp to repeat on U"
-    );
-    assert_eq!(
-        doc["samplers"][sampler_index]["wrapT"].as_u64(),
-        Some(10497),
-        "Tiled opacity mesh should promote clamp to repeat on V"
-    );
+    // Authored wrap modes stay (w83 review P0-2): the Grille's mask is
+    // clamped even though its UVs tile, and an authored repeat stays repeat.
+    let wraps = |material: &serde_json::Value| {
+        let texture = material["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+            .as_u64()
+            .unwrap() as usize;
+        let sampler = &doc["samplers"][doc["textures"][texture]["sampler"].as_u64().unwrap() as usize];
+        (sampler["wrapS"].as_u64(), sampler["wrapT"].as_u64())
+    };
+    assert_eq!(wraps(grille), (Some(33071), Some(33071)), "authored clamp across tiled UVs");
+    assert_eq!(wraps(find("Tiled")), (Some(10497), Some(10497)), "authored repeat");
 
     let model = pm_geom3d::gltf::load(&prepared.bytes).unwrap();
     assert!(
