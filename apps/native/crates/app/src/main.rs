@@ -48,6 +48,9 @@ mod extensions;
 mod figma_paste;
 mod file_coordination;
 mod first_run;
+#[cfg(debug_assertions)]
+mod stage_capture;
+mod stage_pictures;
 mod generated_panel;
 mod gizmo;
 mod gizmo_layer;
@@ -391,6 +394,15 @@ fn main() -> Result<()> {
     }
     diag::mark_start();
     gpui_macos::launch::mark("main");
+    // Development builds: the first-run stage drawn offscreen (stills, a
+    // recording and frame costs) into a folder; no window opens.
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--stage-capture") {
+        let out = args
+            .get(1)
+            .context("Usage: powermove-native --stage-capture <folder> [stills]")?;
+        return stage_capture::run(PathBuf::from(out), args.get(2).is_some_and(|a| a == "stills"));
+    }
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
         return pro_media::cold_playback_bench();
     }
@@ -828,3 +840,6 @@ mod utility_capture_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod transition_capture_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod stage_tests;
