@@ -365,11 +365,16 @@ impl TimelineClient {
         {
             return Err(ClientError::DocumentChanged);
         }
-        if preview.gain && p.revision() != preview.drag.start.revision {
+        // Gain is relative and trim targets are absolute times from the
+        // drag's start: an edit published since would be overwritten.
+        let trimmed = preview.drag.kind.is_strip_trim();
+        if (preview.gain || trimmed) && p.revision() != preview.drag.start.revision {
+            // The edit ends; the model shows the other edit.
+            self.preview = None;
+            self.sync()?;
             return Err(ClientError::ConcurrentRelativeGesture);
         }
         let commands = preview.drag.commands(sample)?;
-        let trimmed = preview.drag.kind.is_strip_trim();
         if preview.gain || trimmed {
             let root = p.snapshot.root().ok_or(ClientError::Closed)?;
             let revision = p.revision() + preview.serial + 1;
@@ -536,7 +541,8 @@ impl TimelineClient {
                     .call(Call::Transact {
                         label: Some(preview.drag.label().into()),
                         body: WriteBody::Commands(preview.commands),
-                        expected_revision: preview.gain.then_some(preview.drag.start.revision),
+                        expected_revision: (preview.gain || preview.drag.kind.is_strip_trim())
+                            .then_some(preview.drag.start.revision),
                     })
                     .await;
             }

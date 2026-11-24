@@ -2568,6 +2568,43 @@ fn graph_focus_resolution_precedes_selected_layer_and_falls_back_safely() {
     );
     assert!(graph_target(&[], None, &[], None).is_none());
 }
+/// A strip trim's targets are absolute times from the drag's start: an edit
+/// published after the last sample is kept, never overwritten at mouse-up,
+/// and a sample after it ends the trim.
+#[test]
+fn strip_trim_refuses_to_overwrite_a_foreign_edit() {
+    for publish_before_sample in [false, true] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.track_snap_disabled = true;
+        c.begin_preview_drag(DragKind::TrimOut {
+            ids: strings(&["late"]),
+        })
+        .unwrap();
+        block_on(c.drag(sample(-0.5))).unwrap();
+        let foreign = Caller::realm(777, 1, Origin::Agent);
+        let call = Call::Transact {
+            label: None,
+            body: WriteBody::Commands(vec![pm_kernel::TimingCommand::Move {
+                layer_ids: strings(&["late"]),
+                delta: 1.,
+            }
+            .into()]),
+            expected_revision: None,
+        };
+        block_on(c.kernel.call("P", Request::new(foreign, call)))
+            .unwrap()
+            .unwrap();
+        if publish_before_sample {
+            assert!(matches!(
+                block_on(c.drag(sample(-0.6))),
+                Err(ClientError::ConcurrentRelativeGesture)
+            ));
+        }
+        assert!(block_on(c.finish_drag(true)).is_err());
+        assert_eq!(trim_spans(&c, &["late"]), [(7., 2.)], "the agent's move stays");
+    }
+}
+
 #[test]
 fn relative_key_gesture_refuses_to_compound_across_a_foreign_write() {
     let (_a, mut c) = client();
