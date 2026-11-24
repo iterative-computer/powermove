@@ -10,6 +10,7 @@
 
 use kurbo::{Affine, BezPath, Cap, Join, Rect, Shape, Stroke};
 
+pub use crate::path::FillRule;
 use crate::path::PathLayer;
 use crate::render::color::{CanvasColor, StyleSlot};
 use crate::shape::{ShapeGeometry, StrokePaint};
@@ -17,13 +18,6 @@ use crate::shape::{ShapeGeometry, StrokePaint};
 /// Largest distance, in device pixels, between an item's curves and the
 /// line segments the coverage backends rasterize.
 pub const FLATTEN_TOLERANCE: f64 = 1e-4;
-
-/// Fill rule of a filled item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FillRule {
-    NonZero,
-    EvenOdd,
-}
 
 /// How an item covers pixels.
 #[derive(Debug, Clone, PartialEq)]
@@ -440,6 +434,11 @@ impl CoverageScene {
     /// Appends a layer's editable paths (`rasterPaths` order: per path and
     /// copy, fill then stroke) under `layer_to_device` (layer pixels to
     /// device pixels). `fills` and `strokes` are each path's color strings.
+    ///
+    /// When `layer.compound` is set (Figma / compound vector layers), filled
+    /// contours sharing a `fill_group` are combined into a single fill item
+    /// with the group's fill rule (`nonzero` or `evenodd`) so inner holes are
+    /// cut out instead of painted solid, followed by any strokes.
     pub fn push_paths(
         &mut self,
         layer: &PathLayer,
@@ -447,6 +446,61 @@ impl CoverageScene {
         fills: &[String],
         strokes: &[String],
     ) {
+        if layer.compound {
+            struct FillGroup {
+                key: String,
+                path: BezPath,
+                rule: FillRule,
+                color: [f32; 4],
+            }
+            let mut groups: Vec<FillGroup> = Vec::new();
+            for draw in &layer.draws {
+                let Some(alpha) = draw.fill else { continue };
+                let path = &layer.traced[draw.path];
+                if path.elements().is_empty() {
+                    continue;
+                }
+                let key = draw.fill_group.as_deref().unwrap_or("0");
+                let group = if let Some(existing) = groups.iter_mut().find(|g| g.key == key) {
+                    existing
+                } else {
+                    let mut fill = StyleSlot::default();
+                    fill.set(fills.get(draw.path).map_or("", String::as_str));
+                    groups.push(FillGroup {
+                        key: key.to_owned(),
+                        path: BezPath::new(),
+                        rule: draw.fill_rule.unwrap_or(layer.fill_rule),
+                        color: rgba(fill.0.with_alpha_scale(alpha as f32)),
+                    });
+                    groups.last_mut().unwrap()
+                };
+                for el in path.elements() {
+                    group.path.push(draw.transform * *el);
+                }
+            }
+            for group in groups {
+                self.items.push(CoverageItem {
+                    path: group.path,
+                    transform: layer_to_device,
+                    style: ItemStyle::Fill(group.rule),
+                    color: group.color,
+                });
+            }
+            for draw in &layer.draws {
+                if let Some(s) = &draw.stroke {
+                    let path = &layer.traced[draw.path];
+                    let mut stroke = StyleSlot::default();
+                    stroke.set(strokes.get(draw.path).map_or("", String::as_str));
+                    self.items.push(CoverageItem {
+                        path: path.clone(),
+                        transform: layer_to_device * draw.transform,
+                        style: ItemStyle::Stroke(s.style.clone()),
+                        color: rgba(stroke.0.with_alpha_scale(s.alpha as f32)),
+                    });
+                }
+            }
+            return;
+        }
         for draw in &layer.draws {
             let path = &layer.traced[draw.path];
             // Each copy runs between save() and restore(): the styles start
@@ -460,7 +514,7 @@ impl CoverageScene {
                 self.items.push(CoverageItem {
                     path: path.clone(),
                     transform,
-                    style: ItemStyle::Fill(FillRule::NonZero),
+                    style: ItemStyle::Fill(draw.fill_rule.unwrap_or(layer.fill_rule)),
                     color: rgba(fill.0.with_alpha_scale(alpha as f32)),
                 });
             }
@@ -844,5 +898,106 @@ mod tests {
         let layout = AtlasLayout::pack(&scene, PixelRect::new(0, 0, 50, 50), 1024);
         assert!(layout.cells.is_empty());
         assert_eq!(scene.pixel_bounds(PixelRect::new(0, 0, 50, 50)), None);
+    }
+
+    #[test]
+    fn compound_paths_combine_fill_groups_and_cut_out_holes() {
+        use crate::path::{PathNode, PathValues, Vertex};
+        use kurbo::Shape;
+
+        let rect_ccw = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Vertex::corner(x0, y0),
+                Vertex::corner(x1, y0),
+                Vertex::corner(x1, y1),
+                Vertex::corner(x0, y1),
+            ]
+        };
+        let rect_cw = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Vertex::corner(x0, y0),
+                Vertex::corner(x0, y1),
+                Vertex::corner(x1, y1),
+                Vertex::corner(x1, y0),
+            ]
+        };
+
+        // Group "0" (nonzero): 100x100 outer (CCW) minus 40x40 inner hole (CW) => area 8400.
+        // Group "1" (evenodd): 50x50 outer (CCW) minus 20x20 inner hole (CCW, same winding!) => area 2100.
+        let nodes = vec![
+            PathNode {
+                id: "p0".into(),
+                parent: None,
+                values: PathValues {
+                    closed: true,
+                    fill_enabled: true,
+                    stroke_width: 0.0,
+                    fill_group: Some("0".into()),
+                    fill_rule: Some(FillRule::NonZero),
+                    vertices: rect_ccw(0.0, 0.0, 100.0, 100.0),
+                    ..PathValues::default()
+                },
+            },
+            PathNode {
+                id: "p1".into(),
+                parent: None,
+                values: PathValues {
+                    closed: true,
+                    fill_enabled: true,
+                    stroke_width: 0.0,
+                    fill_group: Some("0".into()),
+                    fill_rule: Some(FillRule::NonZero),
+                    vertices: rect_cw(30.0, 30.0, 70.0, 70.0),
+                    ..PathValues::default()
+                },
+            },
+            PathNode {
+                id: "p2".into(),
+                parent: None,
+                values: PathValues {
+                    closed: true,
+                    fill_enabled: true,
+                    stroke_width: 0.0,
+                    fill_group: Some("1".into()),
+                    fill_rule: Some(FillRule::EvenOdd),
+                    vertices: rect_ccw(200.0, 0.0, 250.0, 50.0),
+                    ..PathValues::default()
+                },
+            },
+            PathNode {
+                id: "p3".into(),
+                parent: None,
+                values: PathValues {
+                    closed: true,
+                    fill_enabled: true,
+                    stroke_width: 0.0,
+                    fill_group: Some("1".into()),
+                    fill_rule: Some(FillRule::EvenOdd),
+                    vertices: rect_ccw(215.0, 15.0, 235.0, 35.0),
+                    ..PathValues::default()
+                },
+            },
+        ];
+
+        let layer = PathLayer::new_with_options(&nodes, true, FillRule::NonZero);
+        let fills = vec!["#54ac18".into(); 4];
+        let strokes = vec!["#000000".into(); 4];
+        let mut scene = CoverageScene::default();
+        scene.push_paths(&layer, Affine::IDENTITY, &fills, &strokes);
+
+        assert_eq!(scene.items.len(), 2, "two fill groups => two CoverageItems");
+        assert_eq!(scene.items[0].style, ItemStyle::Fill(FillRule::NonZero));
+        assert_eq!(scene.items[1].style, ItemStyle::Fill(FillRule::EvenOdd));
+
+        let area0 = scene.items[0].device_outline().area().abs();
+        let area1 = scene.items[1].device_outline().area().abs();
+        assert!(
+            (area0 - 8400.0).abs() < 1.0,
+            "nonzero compound hole should cut out: got area {area0}"
+        );
+        assert!(
+            (area1 - 2100.0).abs() < 1.0,
+            "evenodd compound hole should cut out: got area {area1}"
+        );
     }
 }

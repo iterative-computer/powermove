@@ -143,6 +143,18 @@ impl EvaluatedPath {
                 out_y: get("outY"),
             }
         };
+        let fill_group = match content_get(&self.values, "fillGroup") {
+            JsValue::Undefined | JsValue::Null => None,
+            v => Some(v.to_js_string().to_string_lossy()),
+        };
+        let fill_rule = match content_get(&self.values, "fillRule") {
+            JsValue::String(s) => match s.to_string_lossy().as_str() {
+                "evenodd" => Some(pm_vector::path::FillRule::EvenOdd),
+                "nonzero" => Some(pm_vector::path::FillRule::NonZero),
+                _ => None,
+            },
+            _ => None,
+        };
         PathValues {
             x: n("x"),
             y: n("y"),
@@ -161,6 +173,8 @@ impl EvaluatedPath {
             repeat_x: n("repeatX"),
             repeat_y: n("repeatY"),
             repeat_rotation: n("repeatRotation"),
+            fill_group,
+            fill_rule,
             vertices: self.vertices.iter().map(vertex).collect(),
         }
     }
@@ -426,7 +440,19 @@ impl<'d> Scope<'_, 'd> {
         let matrices = (0..nodes.len())
             .map(|i| pm_vector::path::group_matrix(&nodes, i).as_coeffs())
             .collect();
-        let geometry = (evaluated, matrices, PathLayer::new(&nodes));
+        let compound = node::truthy(node::member(d, "compound"));
+        let fill_rule = if node::string(node::member(d, "fillRule"))
+            .is_some_and(|s| s.to_string_lossy() == "evenodd")
+        {
+            pm_vector::path::FillRule::EvenOdd
+        } else {
+            pm_vector::path::FillRule::NonZero
+        };
+        let geometry = (
+            evaluated,
+            matrices,
+            PathLayer::new_with_options(&nodes, compound, fill_rule),
+        );
         if fixed {
             self.ev
                 .keep_path_geometry(self.comp, layer, std::sync::Arc::new(geometry.clone()));
