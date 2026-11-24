@@ -22,6 +22,8 @@
 //! (docs/engine/perfbench.md, "Overhead"); [`ENABLED`] tells a ratchet it
 //! is off.
 
+pub mod stall;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
