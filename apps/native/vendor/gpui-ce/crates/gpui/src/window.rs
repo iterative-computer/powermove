@@ -4190,8 +4190,11 @@ impl Window {
         layer.hitbox_range = start..start;
         layer.frame = frame;
         layer.recorded_at = layer.generation;
-        layer.shiftable = true;
-        layer.why = "";
+        // A layer recorded inside another's recording: the outer replays its
+        // content as recorded (its markers are dropped there), so its own
+        // offset-only steps would show nothing; they draw the view again.
+        layer.shiftable = self.scroll_layer_depth == 0;
+        layer.why = if layer.shiftable { "" } else { "nested" };
         self.scroll_layer_pending_deferred.push(deferred);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
