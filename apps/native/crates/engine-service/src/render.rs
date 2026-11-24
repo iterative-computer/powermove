@@ -2117,6 +2117,7 @@ impl Engine {
                 let cpu_start = crate::trace::thread_cpu_ms();
                 let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
                 pm_render::media::note_reads();
+                pm_perf::stall::stall(pm_perf::stall::Stage::Render);
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,

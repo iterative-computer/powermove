@@ -2858,6 +2858,9 @@ impl EngineProxy for Broker {
                             }
                         }
                     }
+                    // A panel's host work is the V8 stage a stall holds up
+                    // (`pm_perf::stall`), with its backend locked as here.
+                    pm_perf::stall::stall(pm_perf::stall::Stage::V8);
                     backend.tick().map_err(Error::Host)?;
                     self.forward_platform(&mut backend, panel, generation.number);
                 }

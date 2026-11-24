@@ -31,6 +31,7 @@ impl<P> LazyPipeline<P> {
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .expect("a lazy pipeline initializes only once");
+            pm_perf::stall::stall(pm_perf::stall::Stage::Shader);
             create()
         })
     }

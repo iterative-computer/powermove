@@ -16,6 +16,7 @@ engine = ["dep:pm-gpu", "dep:pm-protocol", "dep:pm-model", "dep:pm-eval", "dep:p
 test-sinks = []
 
 [dependencies]
+pm-perf = { path = "../pm-perf" }
 pm-color = { path = "../pm-color" }
 pm-time = { path = "../pm-time" }
 png = "0.18"
