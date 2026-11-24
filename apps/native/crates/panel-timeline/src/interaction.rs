@@ -391,6 +391,12 @@ impl TimelineModel {
                         return Err(ModelError::KernelPlan(
                             "Trim refused: the playhead must leave at least one frame in the clip.".into(),
                         ));
+                    } else {
+                        // A member that cannot keep a frame inside the new
+                        // edge would go on drawing outside its group.
+                        return Err(ModelError::KernelPlan(
+                            "Trim refused: a layer in the group would stay outside the new edge.".into(),
+                        ));
                     }
                 }
                 if layer_ids.is_empty() {
@@ -1793,6 +1799,30 @@ impl Drag {
                 } else {
                     f64::NEG_INFINITY
                 };
+                // A group's edge stops where an unlocked member would have
+                // to stay outside it: each member keeps at least a frame.
+                let mut delta = delta;
+                for id in ids {
+                    let group = self.start.layer(id).unwrap();
+                    if group.kind != "group" {
+                        continue;
+                    }
+                    let (start, duration) = self.start.strip_span(group);
+                    for member in self.start.expanded_ids(std::slice::from_ref(id)) {
+                        let Some(l) = self.start.layer(&member).filter(|l| l.id != *id) else {
+                            continue;
+                        };
+                        if l.effectively_locked {
+                            continue;
+                        }
+                        let (from, length) = self.start.strip_span(l);
+                        delta = if is_in {
+                            delta.min(from + length - min_duration - start)
+                        } else {
+                            delta.max(from + min_duration - (start + duration))
+                        };
+                    }
+                }
                 let mut legacy_groups = Vec::new();
                 let mut batch_by_time = HashMap::new();
                 let mut batches: Vec<(f64, Vec<String>)> = Vec::new();

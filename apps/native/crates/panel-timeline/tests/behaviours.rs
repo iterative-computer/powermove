@@ -3033,13 +3033,13 @@ fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
 
 fn group_trim_fixture() -> Value {
     parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"layers":[
-        {"id":"g","type":"group","from":1,"dur":8,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
-        {"id":"n","type":"group","group":"g","from":2,"dur":6,"collapsed":false,"p":{}},
-        {"id":"leaf","type":"shape","group":"n","from":3,"dur":5,"p":{}},
-        {"id":"locked","type":"shape","group":"g","from":1,"dur":8,"lock":true,"p":{}},
-        {"id":"early","type":"shape","group":"g","from":1,"dur":1,"p":{}},
-        {"id":"late","type":"shape","group":"g","from":6,"dur":2,"p":{}},
-        {"id":"empty","type":"group","from":10,"dur":2,"p":{}}
+        {"id":"g","type":"group","on":true,"from":1,"dur":8,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
+        {"id":"n","type":"group","on":true,"group":"g","from":2,"dur":6,"collapsed":false,"p":{}},
+        {"id":"leaf","type":"shape","on":true,"group":"n","from":3,"dur":5,"p":{}},
+        {"id":"locked","type":"shape","on":true,"group":"g","from":1,"dur":8,"lock":true,"p":{}},
+        {"id":"early","type":"shape","on":true,"group":"g","from":1,"dur":1,"p":{}},
+        {"id":"late","type":"shape","on":true,"group":"g","from":6,"dur":2,"p":{}},
+        {"id":"empty","type":"group","on":true,"from":10,"dur":2,"p":{}}
     ]}"#).unwrap()
 }
 
@@ -3247,12 +3247,12 @@ fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
         let (_a, mut c) = client_with(group_trim_fixture());
         c.model.mode = mode;
         select(&mut c, &["g"]);
-        command(&mut c, "trimOut", 5.);
+        command(&mut c, "trimOut", 7.);
         let frame = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.)
             .unwrap()
             .prepare(viewport, &tokens)
             .unwrap();
-        for (id, end) in [("g", 5.), ("n", 5.), ("empty", 12.)] {
+        for (id, end) in [("g", 7.), ("n", 7.), ("empty", 12.)] {
             let strip = frame
                 .ops
                 .iter()
@@ -3295,30 +3295,74 @@ fn empty_group_trim_snaps_and_updates_the_strip() {
     block_on(c.finish_drag(true)).unwrap();
 }
 
+/// Whether the evaluator draws `id` at `t` in the published document (a
+/// group with a duration always answers yes; its members draw by their own
+/// timing).
+fn drawn(a: &KernelActor, id: &str, t: f64) -> bool {
+    let p = a.handle().published("P").unwrap();
+    pm_kernel::QueryContext::new(&p.snapshot.document)
+        .active(None, id, t)
+        .unwrap()
+}
+
 #[test]
-fn keyboard_group_trim_skips_locked_and_out_of_range_descendants() {
-    let (_a, mut c) = client_with(group_trim_fixture());
+fn keyboard_group_trim_refuses_to_leave_a_member_outside_and_skips_locked() {
+    let (a, mut c) = client_with(group_trim_fixture());
     let ids = ["g", "n", "leaf", "locked", "early", "late"];
     let before = trim_spans(&c, &ids);
+    let facts = PropertyFacts::default();
     select(&mut c, &["g"]);
-    command(&mut c, "trimOut", 5.);
-    assert_eq!(
-        trim_spans(&c, &ids),
-        [(1., 4.), (2., 3.), (3., 2.), (1., 8.), (1., 4.), (6., 2.)]
-    );
+    // late starts at 6 and early ends at 2: an Out at 5 or an In at 4 would
+    // leave them drawing outside the group's edge.
+    assert!(drawn(&a, "late", 7.));
+    for (edge, time) in [("trimOut", 5.), ("trimIn", 4.)] {
+        assert!(c.model.command(edge, time, None, false, 0, &facts).is_err(), "{edge}");
+        assert_eq!(trim_spans(&c, &ids), before);
+    }
+    assert!(drawn(&a, "late", 7.));
+
+    command(&mut c, "trimOut", 7.);
+    let spans = trim_spans(&c, &ids);
+    assert_eq!((spans[0].0 + spans[0].1, spans[5].0 + spans[5].1), (7., 7.));
+    assert_eq!(spans[3], (1., 8.), "the locked member keeps its record");
+    assert!(drawn(&a, "late", 6.9));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, 7.1), "{id} past the Out edge");
+    }
     undo(&mut c);
     assert_eq!(trim_spans(&c, &ids), before);
-    command(&mut c, "trimIn", 4.);
-    assert_eq!(
-        trim_spans(&c, &ids),
-        [(4., 5.), (4., 4.), (4., 4.), (1., 8.), (1., 1.), (4., 4.)]
-    );
+
+    command(&mut c, "trimIn", 1.5);
+    assert_eq!(trim_spans(&c, &ids)[0].0, 1.5);
+    assert!(drawn(&a, "early", 1.6));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, 1.4), "{id} before the In edge");
+    }
+    undo(&mut c);
     select(&mut c, &["g", "early"]);
-    assert!(
-        c.model
-            .command("trimIn", 4., None, false, 0, &PropertyFacts::default())
-            .is_err()
-    );
+    assert!(c.model.command("trimIn", 4., None, false, 0, &facts).is_err());
+}
+
+#[test]
+fn group_trim_drag_stops_where_a_member_would_stay_outside() {
+    let (a, mut c) = client_with(group_trim_fixture());
+    c.model.track_snap_disabled = true;
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["g"]),
+    }))
+    .unwrap();
+    // Past late's start (6 s): the edge stops a frame after it.
+    block_on(c.drag(sample(-3.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let edge = 6. + 1. / 30.;
+    let spans = trim_spans(&c, &["g", "late"]);
+    for (from, duration) in spans {
+        assert!((from + duration - edge).abs() < 1e-9, "{from} + {duration}");
+    }
+    assert!(drawn(&a, "late", 6.01));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, edge + 0.05), "{id} past the Out edge");
+    }
 }
 
 #[test]
@@ -5233,12 +5277,14 @@ fn group_strips_track_live_edits_even_when_a_child_stays_put() {
                     block_on(c.finish_drag(true)).unwrap();
                     undo(&mut c);
 
+                    // Edges every unlocked member can follow (late starts at
+                    // 6, early ends at 2).
                     select(&mut c, &["g"]);
-                    command(&mut c, "trimOut", 5.);
-                    assert_eq!(span(&build(&c)), (1., 4.));
+                    command(&mut c, "trimOut", 7.);
+                    assert_eq!(span(&build(&c)), (1., 6.));
                     undo(&mut c);
-                    command(&mut c, "trimIn", 4.);
-                    assert_eq!(span(&build(&c)), (4., 5.));
+                    command(&mut c, "trimIn", 1.5);
+                    assert_eq!(span(&build(&c)), (1.5, 7.5));
                 }
             }
         }
