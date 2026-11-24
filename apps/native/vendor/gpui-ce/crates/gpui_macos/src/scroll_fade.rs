@@ -12,6 +12,15 @@ pub(crate) struct ScrollFade {
 }
 
 impl ScrollFade {
+    /// Takes its mask off `view` (it moved into a container that fades).
+    pub(crate) fn clear(&self, view: &NSView) {
+        if self.installed.take().is_some()
+            && let Some(layer) = view.layer()
+        {
+            unsafe { layer.setMask(None) };
+        }
+    }
+
     pub(crate) fn stage(&self, distances: [f64; 2]) {
         self.distances.set(distances);
     }

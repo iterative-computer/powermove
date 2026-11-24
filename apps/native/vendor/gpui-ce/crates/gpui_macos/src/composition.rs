@@ -12,8 +12,10 @@ use objc2_foundation::{NSPoint, NSRect};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Convert a paint-space rect, whose y runs down from the editor's top, to
-/// the actual AppKit parent that owns the hosted view.
-pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRect {
+/// GPUI's view's parent, where hosted views outside a scrolling region live
+/// (P-EMBED) — whatever parent the view has now: one leaving a region's
+/// container is placed there in the same present (PM-696 review).
+pub(crate) fn hosted_rect(editor: &NSView, rect: NSRect) -> NSRect {
     let bounds = editor.bounds();
     let local = NSRect::new(
         NSPoint::new(
@@ -26,8 +28,7 @@ pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRec
         ),
         rect.size,
     );
-    // Lazy control wrappers use the editor's parent on their first paint.
-    let parent = unsafe { view.superview().or_else(|| editor.superview()) };
+    let parent = unsafe { editor.superview() };
     editor.convertRect_toView(local, parent.as_deref())
 }
 

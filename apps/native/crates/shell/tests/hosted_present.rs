@@ -22,6 +22,7 @@ fn main() {
     macos::regions(mtm);
     macos::unprepared_frames(mtm);
     macos::present_modes();
+    macos::leaving_a_region(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -44,6 +45,72 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: a control that leaves a scrolling region (its row moved
+    /// out of the scroll content) is placed in GPUI's view's parent in the
+    /// same present, at its new place and hittable there, also when GPUI's
+    /// view is embedded off its parent's origin.
+    pub fn leaving_a_region(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        // Embedded: GPUI's view sits 20 points in and 40 up in its parent.
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), rect(20., 40., 360., 500.));
+        content.addSubview(&gpui);
+        let button: Retained<NSView> = unsafe {
+            let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+            let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+            Retained::from_raw(raw).expect("a button")
+        };
+        let slot = NativeControlSlot::new(&gpui, button);
+        let shown = |slot: &NativeControlSlot| {
+            let w = slot.wrapper();
+            let r = w.convertRect_toView(w.bounds(), Some(&gpui));
+            (r.origin.x, gpui.bounds().size.height - r.origin.y - r.size.height)
+        };
+        // Scrolled 100 points: content y 150 shows at 50 - 100 + 150 = 100.
+        regions::set(
+            &gpui,
+            &[SlotRegionGeometry {
+                id: 1,
+                parent: None,
+                frame: Bounds::new(point(px(0.), px(50.)), size(px(200.), px(300.))),
+                origin: point(px(0.), px(-100.)),
+                fade: [px(0.), px(0.)],
+            }],
+        );
+        let open = rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6);
+        slot.stage_in_region(1, rect(10., 150., 80., 20.), open);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui));
+        assert_eq!(shown(&slot), (10., 100.), "in its region");
+        // Its row moves out of the scroll content, to GPUI y 30.
+        slot.stage(rect(10., 30., 80., 20.), rect(0., 0., 360., 500.));
+        probe::painted(&gpui);
+        assert!(probe::pending(&gpui), "leaving the region is a move");
+        assert!(probe::place(&gpui));
+        let parent = unsafe { slot.wrapper().superview() }.expect("in the window");
+        assert!(std::ptr::eq(&*parent, &*content), "in GPUI's view's parent");
+        assert_eq!(shown(&slot), (10., 30.), "placed in its new parent's coordinates");
+        // A press at its centre (GPUI 50, 40) reaches the button.
+        let at = gpui.convertPoint_toView(NSPoint::new(50., 500. - 40.), Some(&content));
+        let hit = content.hitTest(at).expect("a hit");
+        assert!(hit.isDescendantOf(slot.wrapper()), "the press lands on the control");
+        drop(slot);
+        window.close();
+    }
 
     /// PM-696 review: a drawable the layer gave (a direct window's, taken
     /// off the main thread) is presented by its command buffer once its

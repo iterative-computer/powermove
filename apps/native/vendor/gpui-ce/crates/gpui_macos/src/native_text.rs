@@ -1374,23 +1374,22 @@ fn place(key: usize, apply: bool) -> bool {
         // present: a panel of number fields made every frame of its scroll
         // one.
         let unseen = hidden && state.wrapper.isHidden();
-        match &parent {
-            Some(parent) if apply => {
-                moved |= crate::slot_region::reparent(&state.gpui, &state.wrapper, Some(parent));
+        if apply {
+            if crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref()) {
+                moved = true;
+                // In a region its container's clip fades, not its own mask.
+                if parent.is_some() {
+                    state.scroll_fade.clear(&state.wrapper);
+                }
             }
-            Some(parent) => {
-                moved |= unsafe { state.wrapper.superview() }
-                    .is_none_or(|s| !std::ptr::eq(&*s, &**parent));
-            }
-            None if apply => {
-                moved |= crate::slot_region::reparent(&state.gpui, &state.wrapper, None);
-            }
-            None => {}
+        } else {
+            moved |= crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+                || (parent.is_some() && unsafe { state.wrapper.superview() }.is_none());
         }
         // Top-down content coordinates in a region.
         let frame = match region {
             Some(_) => visible,
-            None => crate::composition::hosted_rect(&state.gpui, &state.wrapper, visible),
+            None => crate::composition::hosted_rect(&state.gpui, visible),
         };
         if state.wrapper.frame() != frame {
             moved |= !unseen;
@@ -1458,7 +1457,7 @@ fn place(key: usize, apply: bool) -> bool {
             match state.caret_staged.get().filter(|_| focused) {
                 Some((rect, clip)) => {
                     let shown = intersection(rect, clip);
-                    let frame = crate::composition::hosted_rect(&state.gpui, host, rect);
+                    let frame = crate::composition::hosted_rect(&state.gpui, rect);
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
                     if host.frame() != frame {
                         moved = true;

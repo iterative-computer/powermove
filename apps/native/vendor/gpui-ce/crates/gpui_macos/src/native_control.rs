@@ -105,7 +105,7 @@ impl State {
         let x = visible.origin.x;
         let y = visible.origin.y;
         let (frame, parent) = match placement.region {
-            None => (crate::composition::hosted_rect(&self.gpui, &self.wrapper, visible), None),
+            None => (crate::composition::hosted_rect(&self.gpui, visible), None),
             // Top-down content coordinates.
             Some(region) => (visible, Some(crate::slot_region::content_view(&self.gpui, region, apply)?)),
         };
@@ -233,9 +233,6 @@ pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::Accessibility
             .collect()
     })
 }
-fn in_view(view: &NSView, parent: &NSView) -> bool {
-    unsafe { view.superview() }.is_some_and(|s| std::ptr::eq(&*s, parent))
-}
 /// Whether [`present`] would move a control. Nothing is touched.
 pub(crate) fn pending(key: usize) -> bool {
     let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
@@ -251,7 +248,7 @@ pub(crate) fn pending(key: usize) -> bool {
             match state.target(false) {
             None => !state.wrapper.isHidden() || state.placed().is_some_and(|p| p.region.is_some()),
             Some((frame, local, hidden, parent)) => {
-                parent.is_some_and(|p| !in_view(&state.wrapper, &p))
+                crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
                     || state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
@@ -289,6 +286,10 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         // Into its region's container, or back out of one.
         if crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref()) {
             moved = true;
+            // In a region its container's clip fades, not its own mask.
+            if parent.is_some() {
+                state.scroll_fade.clear(&state.wrapper);
+            }
         }
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);

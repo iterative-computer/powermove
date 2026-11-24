@@ -84,6 +84,18 @@ pub(crate) fn content_view(gpui: &NSView, region: usize, apply: bool) -> Option<
     })
 }
 
+/// Whether a slot's wrapper is somewhere other than where it belongs: in
+/// `parent` (a region's content view), or in GPUI's view's parent.
+pub(crate) fn misplaced(gpui: &NSView, wrapper: &NSView, parent: Option<&NSView>) -> bool {
+    let Some(current) = (unsafe { wrapper.superview() }) else {
+        return false;
+    };
+    match parent {
+        Some(parent) => !std::ptr::eq(&*current, parent),
+        None => unsafe { gpui.superview() }.is_some_and(|home| !std::ptr::eq(&*current, &*home)),
+    }
+}
+
 /// Puts a slot's wrapper in `parent` (a region's content view), or back in
 /// GPUI's view's parent when `parent` is `None` and it sits in a region's.
 /// Returns whether it moved.
@@ -243,7 +255,7 @@ fn place(host: &mut Host, gpui: &NSView, id: usize) -> Option<Retained<NSView>> 
     if container.applied != Some(next) {
         let frame = match target.parent {
             Some(_) => next.frame,
-            None => crate::composition::hosted_rect(gpui, &container.clip, next.frame),
+            None => crate::composition::hosted_rect(gpui, next.frame),
         };
         if container.clip.frame() != frame {
             container.clip.setFrame(frame);
