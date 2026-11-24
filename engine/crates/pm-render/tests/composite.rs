@@ -560,6 +560,144 @@ fn track_mattes_follow_todays_rules() {
     }
 }
 
+/// A track matte shapes only the matted layer: its source is hidden and
+/// every layer beneath keeps drawing where the matted layer is
+/// transparent (After Effects; PM-562). Viewer and export frames, each
+/// mode, and one source matting two layers.
+#[test]
+fn track_matte_keeps_the_layers_beneath() {
+    let mut r = Renderer::headless().unwrap();
+    // Bottom to top: an opaque backdrop over the whole frame, the matte
+    // source (opaque white over the left half), and the matted layer over
+    // the whole frame.
+    let doc = |mode: &str, second: bool| {
+        let backdrop = layer(
+            "bg",
+            "solid",
+            json!({ "color": "#2050C0", "w": 16, "h": 8 }),
+            0.0,
+            0.0,
+            1.0,
+        );
+        let source = layer(
+            "s",
+            "solid",
+            json!({ "color": "#FFFFFF", "w": 8, "h": 8 }),
+            0.0,
+            0.0,
+            1.0,
+        );
+        let mut layers = Vec::new();
+        if second {
+            // Two layers matted by the same source: one over the top half,
+            // one over the bottom half.
+            for (id, color, y) in [("t", "#3FCF8E", 0.0), ("u", "#E08020", 4.0)] {
+                let mut t = layer(
+                    id,
+                    "solid",
+                    json!({ "color": color, "w": 16, "h": 4 }),
+                    0.0,
+                    y,
+                    1.0,
+                );
+                t["matteSource"] = json!("s");
+                t["matteMode"] = ch(json!(mode));
+                layers.push(t);
+            }
+        } else {
+            let mut t = layer(
+                "t",
+                "solid",
+                json!({ "color": "#3FCF8E", "w": 16, "h": 8 }),
+                0.0,
+                0.0,
+                1.0,
+            );
+            t["matteSource"] = json!("s");
+            t["matteMode"] = ch(json!(mode));
+            layers.push(t);
+        }
+        layers.extend([source, backdrop]);
+        project(16, 8, 1.0, no_fill(), layers)
+    };
+    let (bg, green, orange) = (hex("#2050C0"), hex("#3FCF8E"), hex("#E08020"));
+    let frames = |r: &mut Renderer, doc: &Value| {
+        let mut out = Vec::new();
+        for export in [false, true] {
+            let mut doc = doc.clone();
+            doc["colorDepth"] = json!(32);
+            let mut request = RenderRequest::at_scale(Size::new(16, 8), 1.0, Precision::Float32);
+            request.export = export;
+            let frame = r
+                .render(
+                    &load(&doc),
+                    "Ptest-root",
+                    ticks(0.0),
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            out.push((
+                if export { "export" } else { "viewer" },
+                r.read_rgba(&frame).unwrap(),
+            ));
+        }
+        out
+    };
+    for (mode, inside) in [
+        ("alpha", true),
+        ("alpha-inverted", false),
+        ("luma", true),
+        ("luma-inverted", false),
+    ] {
+        // Where the matte is white (left) the matted layer shows for a
+        // plain matte; elsewhere the backdrop.
+        let (left, right) = if inside { (green, bg) } else { (bg, green) };
+        for (kind, rgba) in frames(&mut r, &doc(mode, false)) {
+            for y in [1, 6] {
+                assert!(
+                    close(px(&rgba, 16, 3, y), left, 1e-4),
+                    "{mode} {kind} left: {:?}",
+                    px(&rgba, 16, 3, y)
+                );
+                assert!(
+                    close(px(&rgba, 16, 12, y), right, 1e-4),
+                    "{mode} {kind} right: {:?}",
+                    px(&rgba, 16, 12, y)
+                );
+            }
+        }
+        let (top, bottom) = if inside {
+            ((green, bg), (orange, bg))
+        } else {
+            ((bg, green), (bg, orange))
+        };
+        for (kind, rgba) in frames(&mut r, &doc(mode, true)) {
+            assert!(
+                close(px(&rgba, 16, 3, 1), top.0, 1e-4),
+                "{mode} {kind} two: top left {:?}",
+                px(&rgba, 16, 3, 1)
+            );
+            assert!(
+                close(px(&rgba, 16, 12, 1), top.1, 1e-4),
+                "{mode} {kind} two: top right {:?}",
+                px(&rgba, 16, 12, 1)
+            );
+            assert!(
+                close(px(&rgba, 16, 3, 6), bottom.0, 1e-4),
+                "{mode} {kind} two: bottom left {:?}",
+                px(&rgba, 16, 3, 6)
+            );
+            assert!(
+                close(px(&rgba, 16, 12, 6), bottom.1, 1e-4),
+                "{mode} {kind} two: bottom right {:?}",
+                px(&rgba, 16, 12, 6)
+            );
+        }
+    }
+}
+
 /// A matte chain deeper than today's limit (8) stops applying mattes, and a
 /// cycle renders like today's depth-limited recursion; a group used as a
 /// matte source fails that matte (reported) and mattes with nothing.
