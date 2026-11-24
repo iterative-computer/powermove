@@ -1114,7 +1114,7 @@ impl Editor {
             return true;
         }
         if kind == "panel"
-            && matches!(verb, "close" | "toggle")
+            && matches!(verb, "close" | "toggle" | "remove")
             && let Some((dock, group, index)) = self.layout.find(rest)
         {
             let place = if self.layout.docks[dock].groups[group].tabs.len() == 1 {
@@ -1232,6 +1232,13 @@ impl Editor {
                     }
                 })
             }
+            // panel:remove:<id> — its extension went away (disabled,
+            // uninstalled, rebuilt without it): closed, and whether the
+            // person had dismissed it stays as it was, so re-enabling or
+            // reinstalling brings it back unless they had closed it.
+            ("panel", "remove") => self.layout.close_panel(rest).map(|_| {
+                self.parked.remove(rest);
+            }),
             // panel:park:<id> — closed, but a later show puts it back in place.
             ("panel", "park") => match self.layout.find(rest) {
                 Some((dock, group, index)) => {
@@ -5529,6 +5536,54 @@ mod keyboard_tests {
                 assert_eq!(v.dock_body_fade(dock, clip), expected);
                 let middle = Rect { y: 40., h: 20., ..viewport };
                 assert_eq!(v.dock_body_fade(dock, middle), [0., 0.]);
+            }
+        }).unwrap();
+    }
+
+    /// The host removing an extension's panel (disable, uninstall) is not the
+    /// person closing it: re-enabling brings back a panel they kept open, and
+    /// one they had closed stays closed (w83 P1-4).
+    #[::core::prelude::v1::test]
+    fn extension_teardown_keeps_the_persons_dismissal_choice() {
+        let mut cx = app();
+        let window = cx.open_window(size(px(1000.), px(800.)), |_, cx| {
+            cx.new(|cx| Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx))
+        }).unwrap();
+        window.update(&mut cx, |v, _, cx| {
+            let contributions = Rc::new(Contributions(vec![
+                ("ext.kept".into(), "Kept".into()),
+                ("ext.closed".into(), "Closed".into()),
+            ]));
+            v.integration = Some(contributions.clone());
+            assert!(v.shell_command("panel:restore:ext.kept", cx));
+            assert!(v.shell_command("panel:tabwith:ext.kept:ext.closed", cx));
+            assert!(v.shell_command("panel:close:ext.closed", cx));
+            // Disabled: the host removes both surfaces (the commands
+            // extensions.rs sends).
+            for id in ["ext.kept", "ext.closed"] {
+                v.shell_command(&format!("panel:remove:{id}"), cx);
+                assert!(v.layout.find(id).is_none(), "{id} removed");
+            }
+            let saved = v.record.clone();
+            assert_eq!(
+                workspace::dismissed_panels(&saved).into_iter().collect::<Vec<_>>(),
+                ["ext.closed"],
+                "only the person's close is saved"
+            );
+            // Re-enabled, in this editor and in the next one to restore.
+            for reload in [false, true] {
+                if reload {
+                    v.integration = None;
+                    v.show_record(saved.clone());
+                    v.integration = Some(contributions.clone());
+                }
+                for id in ["ext.kept", "ext.closed"] {
+                    assert!(v.shell_command(&format!("panel:registered:{id}"), cx));
+                    assert!(v.shell_command(&format!("panel:restore:{id}"), cx));
+                }
+                assert!(v.layout.find("ext.kept").is_some(), "kept panel back, reload {reload}");
+                assert!(v.layout.find("ext.closed").is_none(), "closed panel stays closed, reload {reload}");
+                v.shell_command("panel:remove:ext.kept", cx);
             }
         }).unwrap();
     }

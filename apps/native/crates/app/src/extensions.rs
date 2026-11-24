@@ -1356,7 +1356,7 @@ impl Controller {
                 runtime.unmount_extension(id);
                 self.extensions.surfaces.remove(id);
                 let shell = self.host.borrow();
-                shell.send_command(&format!("panel:close:{id}"), vec![]);
+                shell.send_command(&format!("panel:remove:{id}"), vec![]);
                 continue;
             };
             // A new version: the old one hands over `api.hot.data`, then goes.
