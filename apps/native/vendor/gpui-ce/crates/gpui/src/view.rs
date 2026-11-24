@@ -563,6 +563,10 @@ impl<V: View> Element for ViewElement<V> {
                             && let Some(mut element_state) = element_state
                             && element_state.prepaint_frame.checked_add(1) == Some(frame)
                             && element_state.font_generation == font_generation
+                            && window.can_reuse_text(
+                                &element_state.prepaint_range,
+                                &element_state.paint_range,
+                            )
                             && element_state.cache_key == cache_key
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing

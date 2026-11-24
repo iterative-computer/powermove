@@ -4023,6 +4023,20 @@ impl Window {
         }
     }
 
+    /// Whether the text layouts a view recorded last frame (its prepaint and
+    /// paint ranges) can be replayed this frame.
+    pub(crate) fn can_reuse_text(
+        &self,
+        prepaint: &Range<PrepaintStateIndex>,
+        paint: &Range<PaintIndex>,
+    ) -> bool {
+        self.text_system.can_reuse_layouts(
+            &(prepaint.start.line_layout_index.clone()..prepaint.end.line_layout_index.clone()),
+        ) && self.text_system.can_reuse_layouts(
+            &(paint.start.line_layout_index.clone()..paint.end.line_layout_index.clone()),
+        )
+    }
+
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         self.a11y
             .replay(range.start.a11y_index..range.end.a11y_index, self.focus);

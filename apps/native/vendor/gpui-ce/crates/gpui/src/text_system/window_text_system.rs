@@ -26,6 +26,10 @@ impl WindowTextSystem {
         self.line_layout_cache.font_generation()
     }
 
+    pub(crate) fn can_reuse_layouts(&self, range: &Range<LineLayoutIndex>) -> bool {
+        self.line_layout_cache.can_reuse_layouts(range)
+    }
+
     pub(crate) fn layout_index(&self) -> LineLayoutIndex {
         self.line_layout_cache.layout_index()
     }
