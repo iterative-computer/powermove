@@ -26,11 +26,6 @@ pub(crate) fn key(offset: &Rc<RefCell<Point<Pixels>>>) -> ScrollLayerKey {
     Rc::as_ptr(offset) as usize
 }
 
-/// A scroll layer, for content drawn outside the scene (an AppKit control's
-/// slot) to follow the layer's offset: see [`crate::Window::scroll_layer`]
-/// and [`crate::Window::scroll_layer_shift`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ScrollLayerId(pub(crate) ScrollLayerKey);
 
 /// Off with `PM_SCROLL_LAYER=0` (a measurement: every step renders the view
 /// and truncations are shaped each time, as before the layer).

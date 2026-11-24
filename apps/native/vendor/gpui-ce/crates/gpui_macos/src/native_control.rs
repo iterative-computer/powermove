@@ -14,19 +14,42 @@ struct State {
     control: Retained<NSView>,
     /// What a paint staged, with that paint's number: placed by the present
     /// that follows that paint, and by no later one.
-    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    /// The region is the scrolling region whose container holds the slot
+    /// (P-SLOT-REGION): bounds and clip are then in its content coordinates.
+    geometry: Cell<Option<(u64, crate::slot_region::Placement)>>,
     scroll_fade: crate::scroll_fade::ScrollFade,
-    staged: Cell<Option<(NSRect, NSRect)>>,
+    staged: Cell<Option<crate::slot_region::Placement>>,
     alpha: Cell<Option<(u64, f64)>>,
     staged_alpha: Cell<f64>,
+    /// A region's slot as the last present left it: its placement, its
+    /// container's content view and alpha. A frame that stages the same
+    /// touches no AppKit view of it (a scroll moves only the container).
+    settled: Cell<Option<(crate::slot_region::Placement, u64, f64, bool)>>,
 }
 impl State {
+    /// The region slot's settled key for this present, when its placement is
+    /// a region's (`apply` places the container to find its content view).
+    fn region_key(&self, apply: bool) -> Option<(crate::slot_region::Placement, u64, f64, bool)> {
+        let placement = self.placed()?;
+        let region = placement.region?;
+        crate::slot_region::content_view(&self.gpui, region, apply)?;
+        let serial = crate::slot_region::serial(&self.gpui, region)?;
+        let last = crate::composition::last_paint(self.key());
+        let alpha = self
+            .alpha
+            .get()
+            .filter(|(paint, _)| Some(*paint) == last)
+            .map_or(self.staged_alpha.get(), |(_, a)| a);
+        let visible = Self::visible_rect(placement.bounds, placement.clip);
+        let shows = crate::slot_region::shows(&self.gpui, region, visible);
+        Some((placement, serial, alpha, shows))
+    }
     fn key(&self) -> usize {
         Retained::as_ptr(&self.gpui) as usize
     }
-    fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
+    fn stage(&self, geometry: Option<crate::slot_region::Placement>) {
         let paint = crate::composition::open_paint(self.key());
-        self.geometry.set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+        self.geometry.set(geometry.map(|placement| (paint, placement)));
     }
     /// Powermove P-SLOT-LAZY: a control joins the window the first time a
     /// paint shows it. AppKit lays out every view in the window, hidden or
@@ -45,12 +68,12 @@ impl State {
         }
     }
     /// Where the last complete paint put this control, if it staged it.
-    fn placed(&self) -> Option<(NSRect, NSRect)> {
+    fn placed(&self) -> Option<crate::slot_region::Placement> {
         let last = crate::composition::last_paint(self.key());
         self.geometry
             .get()
-            .filter(|(paint, ..)| Some(*paint) == last)
-            .map(|(_, bounds, clip)| (bounds, clip))
+            .filter(|(paint, _)| Some(*paint) == last)
+            .map(|(_, placement)| placement)
     }
     fn visible_rect(bounds: NSRect, clip: NSRect) -> NSRect {
         let x = bounds.origin.x.max(clip.origin.x);
@@ -65,19 +88,35 @@ impl State {
     }
 
     fn place_fade(&self, apply: bool) -> bool {
-        let Some((bounds, clip)) = self.placed() else {
+        // In a region its container's clip fades.
+        let Some(placement) = self.placed().filter(|p| p.region.is_none()) else {
             return false;
         };
+        let (bounds, clip) = (placement.bounds, placement.clip);
         self.scroll_fade.place(&self.wrapper, Self::visible_rect(bounds, clip), clip, apply)
     }
-    /// The wrapper's frame, the control's frame inside it and whether the
-    /// wrapper is hidden, for what the last paint staged.
-    fn target(&self) -> Option<(NSRect, NSRect, bool)> {
-        let (bounds, clip) = self.placed()?;
+    /// The wrapper's frame, the control's frame inside it, whether the
+    /// wrapper is hidden and the view it belongs in (a region's content view,
+    /// or `None` for GPUI's view's parent), for what the last paint staged.
+    /// `apply` places the region's containers to find that view; otherwise
+    /// one not placed yet reads as a move.
+    fn target(&self, apply: bool) -> Option<(NSRect, NSRect, bool, Option<Retained<NSView>>)> {
+        let placement = self.placed()?;
+        let (bounds, clip) = (placement.bounds, placement.clip);
         let visible = Self::visible_rect(bounds, clip);
         let x = visible.origin.x;
         let y = visible.origin.y;
-        let frame = crate::composition::hosted_rect(&self.gpui, &self.wrapper, visible);
+        let (frame, parent, outside) = match placement.region {
+            None => (crate::composition::hosted_rect(&self.gpui, visible), None, false),
+            // Top-down content coordinates; hidden while its region's view
+            // (cut by the regions around it) shows none of it, so it takes no
+            // keys and is not read out while scrolled away (PM-696 review).
+            Some(region) => (
+                visible,
+                Some(crate::slot_region::content_view(&self.gpui, region, apply)?),
+                !crate::slot_region::shows(&self.gpui, region, visible),
+            ),
+        };
         let visible = visible.size;
         let local = NSRect::new(
             NSPoint::new(
@@ -86,7 +125,7 @@ impl State {
             ),
             bounds.size,
         );
-        Some((frame, local, visible.width <= 0. || visible.height <= 0.))
+        Some((frame, local, outside || visible.width <= 0. || visible.height <= 0., parent))
     }
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}
@@ -116,6 +155,7 @@ impl NativeControlSlot {
             staged: Cell::new(None),
             alpha: Cell::new(None),
             staged_alpha: Cell::new(1.),
+            settled: Cell::new(None),
         });
         SLOTS.with(|s| {
             s.borrow_mut()
@@ -129,9 +169,18 @@ impl NativeControlSlot {
         self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
     }
     pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
-        self.state.stage(Some((bounds, clip)));
-        self.state.staged.set(Some((bounds, clip)));
+        let placement = crate::slot_region::Placement { bounds, clip, region: None };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
         self.state.scroll_fade.stage(fade);
+    }
+    /// P-SLOT-REGION: staged in scrolling region `region`'s container, with
+    /// bounds and clip in its content coordinates (a scroll moves the
+    /// container, not the slot).
+    pub fn stage_in_region(&self, region: usize, bounds: NSRect, clip: NSRect) {
+        let placement = crate::slot_region::Placement { bounds, clip, region: Some(region) };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
     }
     pub fn stage_alpha(&self, alpha: f64) {
         let alpha = alpha.clamp(0., 1.);
@@ -150,102 +199,13 @@ impl NativeControlSlot {
         &self.state.wrapper
     }
 }
-/// A control as AppKit draws it now: premultiplied BGRA rows from the top,
-/// `width` by `height` pixels at the window's backing scale, BGRA with
-/// straight (not premultiplied) alpha, rows from the top.
-pub struct SlotPicture {
-    pub width: u32,
-    pub height: u32,
-    pub bgra: Vec<u8>,
-}
 impl NativeControlSlot {
-    /// Powermove P-SLOT-PICTURE: the control drawn into a bitmap in its
-    /// current state and appearance (light or dark, its value, enabled or
-    /// not), without moving or showing it: while a scroll moves, the panel
-    /// draws this picture with its rows instead of moving the AppKit view
-    /// (each move made the frame a synchronous present). `None` when AppKit
-    /// gives no 32-bit bitmap or the control has no size. `size` is where
-    /// the paint puts it, in points: the size a present would give it.
-    pub fn picture(&self, size: NSSize) -> Option<SlotPicture> {
-        if size.width < 1. || size.height < 1. {
-            return None;
-        }
-        // A control never shown yet joins the window (still hidden), so it
-        // draws in the window's appearance and key state, as it will show.
-        if unsafe { self.state.wrapper.superview() }.is_none() {
-            self.state.attach();
-        }
-        picture_of(&self.state.control, size)
-    }
-    /// Stages nothing: the next present hides the control (a picture of it
-    /// stands in the scene). [`Self::keep`] keeps it hidden.
+    /// Stages nothing: the next present hides the control; [`Self::keep`]
+    /// keeps it hidden.
     pub fn hide(&self) {
         self.state.stage(None);
         self.state.staged.set(None);
     }
-}
-/// `view` drawn by AppKit into a bitmap at `size` points, wherever it is
-/// and whether shown or not (P-SLOT-PICTURE).
-pub(crate) fn picture_of(view: &NSView, size: NSSize) -> Option<SlotPicture> {
-    use objc2::{msg_send, runtime::AnyObject};
-    if size.width < 1. || size.height < 1. {
-        return None;
-    }
-    if view.frame().size != size {
-        view.setFrameSize(size);
-    }
-    let control = view;
-    let bounds = view.bounds();
-    objc2::rc::autoreleasepool(|_| unsafe {
-        let rep: *mut AnyObject =
-            msg_send![control, bitmapImageRepForCachingDisplayInRect: bounds];
-        let rep = rep.as_ref()?;
-        let _: () = msg_send![control, cacheDisplayInRect: bounds, toBitmapImageRep: rep];
-        let width: isize = msg_send![rep, pixelsWide];
-        let height: isize = msg_send![rep, pixelsHigh];
-        let row: isize = msg_send![rep, bytesPerRow];
-        let bits: isize = msg_send![rep, bitsPerPixel];
-        let samples: isize = msg_send![rep, samplesPerPixel];
-        let format: usize = msg_send![rep, bitmapFormat];
-        let data: *const u8 = msg_send![rep, bitmapData];
-        if data.is_null() || bits != 32 || samples != 4 || width <= 0 || height <= 0 {
-            return None;
-        }
-        // NSBitmapFormat: alpha first (1 << 0), not premultiplied (1 << 1),
-        // floating point (1 << 2).
-        if format & 0b100 != 0 {
-            return None;
-        }
-        let alpha_first = format & 0b1 != 0;
-        let straight = format & 0b10 != 0;
-        let (w, h, row) = (width as usize, height as usize, row as usize);
-        let src = std::slice::from_raw_parts(data, row * h);
-        let mut bgra = Vec::with_capacity(w * h * 4);
-        for y in 0..h {
-            for x in 0..w {
-                let p = &src[y * row + x * 4..y * row + x * 4 + 4];
-                let (r, g, b, a) = if alpha_first {
-                    (p[1], p[2], p[3], p[0])
-                } else {
-                    (p[0], p[1], p[2], p[3])
-                };
-                // Straight alpha, GPUI's sprite format.
-                let out = |c: u8| {
-                    if straight || a == 0 || a == 255 {
-                        c
-                    } else {
-                        ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
-                    }
-                };
-                bgra.extend_from_slice(&[out(b), out(g), out(r), a]);
-            }
-        }
-        Some(SlotPicture {
-            width: w as u32,
-            height: h as u32,
-            bgra,
-        })
-    })
 }
 impl Drop for NativeControlSlot {
     fn drop(&mut self) {
@@ -287,10 +247,17 @@ pub(crate) fn pending(key: usize) -> bool {
     slots
         .into_iter()
         .filter_map(|s| s.upgrade())
-        .any(|state| match state.target() {
-            None => !state.wrapper.isHidden(),
-            Some((frame, local, hidden)) => {
-                state.wrapper.frame() != frame
+        .any(|state| {
+            if let Some(key) = state.region_key(false)
+                && state.settled.get() == Some(key)
+            {
+                return false;
+            }
+            match state.target(false) {
+            None => !state.wrapper.isHidden() || state.placed().is_some_and(|p| p.region.is_some()),
+            Some((frame, local, hidden, parent)) => {
+                crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+                    || state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
                     || (!hidden && state.place_fade(false))
@@ -299,14 +266,21 @@ pub(crate) fn pending(key: usize) -> bool {
                             && state.control.alphaValue() != alpha
                     })
             }
+        }
         })
 }
 pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
     let mut moved = false;
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
-        let target = state.target();
-        let Some((frame, local, hidden)) = target else {
+        let settled = state.region_key(true);
+        if settled.is_some() && state.settled.get() == settled {
+            state.geometry.set(None);
+            continue;
+        }
+        state.settled.set(None);
+        let target = state.target(true);
+        let Some((frame, local, hidden, parent)) = target else {
             state.geometry.set(None);
             if !state.wrapper.isHidden() {
                 state.wrapper.setHidden(true);
@@ -317,6 +291,16 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         // P-HIDDEN-MOVES: a wrapper hidden before and after (scrolled out
         // of its clip) follows its row unseen, with no synchronous present.
         let unseen = hidden && state.wrapper.isHidden();
+        // Into its region's container, or back out of one.
+        let (adopted, frame) =
+            crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame, !hidden);
+        if adopted {
+            moved = true;
+            // In a region its container's clip fades, not its own mask.
+            if parent.is_some() {
+                state.scroll_fade.clear(&state.wrapper);
+            }
+        }
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
             moved |= !unseen;
@@ -344,6 +328,15 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             state.wrapper.setHidden(hidden);
             moved = true;
             crate::composition_accessibility::changed(key);
+        }
+        // Settled only where it belongs: one held in its old parent for an
+        // edit is placed again by the frames after the edit ends.
+        let home = !crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+            && !crate::slot_region::holds_first_responder(&state.wrapper);
+        // Shown or hidden alike: whether its region's view shows it is part
+        // of the key.
+        if settled.is_some() && home {
+            state.settled.set(settled);
         }
     }
     moved.into()

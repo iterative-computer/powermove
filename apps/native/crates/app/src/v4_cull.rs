@@ -38,6 +38,11 @@ const NEAR: f32 = 0.25;
 
 /// Rows not measured yet that a frame builds anyway, to measure them.
 const MEASURE_PER_FRAME: usize = 4;
+/// How long after its last wheel step a panel in a scrolling body rests
+/// (`SurfaceView::body_wheeled`): just before the body's scroll layer
+/// settles (150 ms) and draws it once, so that draw keeps only the rows
+/// near the view and resting costs no draw of its own.
+const WHEEL_REST: std::time::Duration = std::time::Duration::from_millis(120);
 
 #[derive(Default)]
 pub(super) struct Cull {
@@ -58,6 +63,10 @@ pub(super) struct Cull {
     /// panel), and its offset when the panel was last laid out: a wheel step
     /// moves the panel before it is drawn again, by the difference.
     outer: Option<(ScrollHandle, Rc<std::cell::Cell<f32>>)>,
+    /// That body is being scrolled: rows are kept a viewport past each
+    /// edge, as its layer records, until the steps stop (counted, so only
+    /// the last step's rest ends it).
+    wheeling: Option<u64>,
 }
 
 impl Cull {
@@ -366,9 +375,60 @@ impl SurfaceView {
     pub(super) fn cull_large(&self) -> bool {
         self.prepared.nodes.len() > LARGE
     }
-    /// Whether the panel supports replaying wheel steps on a scroll layer.
-    pub(super) fn layered(&self) -> bool {
+    /// Whether wheel steps over the panel replay a scroll layer: the Project
+    /// panel's, and a panel in a body that scrolls (`builtins`), whose body
+    /// is one, while that body is being scrolled. Its rows are kept a
+    /// viewport past each edge, as the layer records; a step past them draws
+    /// the body again and culls anew. At rest the panel keeps only the rows
+    /// near its view, so a draw that is not a scroll (a hover, a resize, a
+    /// publication) costs no more than they (PM-696).
+    pub(crate) fn layered(&self) -> bool {
         &*self.publication.panel == pm_builtins::PROJECT_PANEL
+            || (self.cull.outer.is_some() && self.cull.wheeling.is_some())
+    }
+    /// A wheel step over the panel in a body that scrolls: the first of a
+    /// scroll draws the panel again with rows past each edge, for the body's
+    /// layer to replay the steps after; the panel rests once they stop.
+    pub(super) fn body_wheeled(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.cull.outer.is_none() {
+            return;
+        }
+        let step = self.cull.wheeling.map_or(0, |n| n + 1);
+        if self.cull.wheeling.replace(step).is_none() {
+            cx.notify();
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(WHEEL_REST).await;
+            let _ = this.update(cx, |v, _| {
+                if v.cull.wheeling == Some(step) {
+                    v.cull.wheeling = None;
+                }
+            });
+        })
+        .detach();
+    }
+    /// While its body is being scrolled: the pointer moving anywhere in the
+    /// window ends the scroll for the panel (a person scrolls, then moves on),
+    /// so the next draw (that hover's, a resize's) keeps only the rows near
+    /// the view, without waiting for the rest.
+    pub(super) fn body_rest_on_move(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        self.cull.wheeling?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let view = view.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            let _ = view.update(cx, |v, _| v.cull.wheeling = None);
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .into_any_element(),
+        )
     }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.

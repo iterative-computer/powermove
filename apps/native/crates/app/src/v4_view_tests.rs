@@ -2,9 +2,10 @@
 //! kernel. AppKit slots are absent in the test window; every other path is live.
 use crate::v4_view::{Natives, SurfaceView};
 use gpui::{
-    AppContext, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement, PinchEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
+    AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, PinchEvent, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use pm_builtins::{Builtins, Publication};
 use pm_kernel::{KernelActor, KernelConfig, KernelHandle, OpenSource};
@@ -3452,6 +3453,68 @@ fn streaming_conversation_never_paints_empty() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// PM-696: a panel whose height changes (rows measured as a scroll brings
+/// them near, content published) draws itself and the shell again, not every
+/// other panel: a window refresh drew them all, cached or not, on every wheel
+/// step that measured a row.
+struct Pair {
+    a: Entity<SurfaceView>,
+    b: Entity<SurfaceView>,
+}
+impl Render for Pair {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let column = |v: &Entity<SurfaceView>| {
+            div()
+                .w(px(100.))
+                .h(px(400.))
+                .child(v.clone().cached(StyleRefinement::default().w(px(100.)).h(px(400.))))
+        };
+        div().flex().child(column(&self.a)).child(column(&self.b))
+    }
+}
+#[gpui::test]
+fn a_panel_whose_height_changes_draws_no_other_panel_again(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    // A column with a block of `height`, as a side panel's content.
+    let page = |height: f64, generation: u64| {
+        let mut ops = node_ops(1, 0, "div", json!({"style":{"display":"flex","flexDirection":"column","flexGrow":1}}), &[]);
+        ops.extend(node_ops(2, 1, "div", json!({}), &[]));
+        ops.extend(node_ops(3, 2, "div", json!({"style":{"height":height,"flexShrink":0}}), &[]));
+        let mut p = synthetic(&rig, ops);
+        p.generation = generation;
+        p
+    };
+    cx.executor().allow_parking();
+    let runtime = rig.runtime.clone();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let mut panel = |p| {
+            cx.new(|cx| {
+                let mut v = SurfaceView::new(runtime.clone(), p, tokens(), Default::default(), window, cx);
+                v.grows = true;
+                v
+            })
+        };
+        let (a, b) = (panel(page(100., 1)), panel(page(100., 1)));
+        Pair { a, b }
+    });
+    let mut vcx = vcx.clone();
+    for _ in 0..4 {
+        vcx.run_until_parked();
+        vcx.simulate_frame();
+    }
+    let (a, b) = root.read_with(&vcx, |p, _| (p.a.clone(), p.b.clone()));
+    let before = b.read_with(&vcx, |v, _| v.renders);
+    a.update(&mut vcx, |v, cx| v.publish(page(300., 2), cx));
+    // Frames as the display link asks for them (next-frame callbacks run).
+    for _ in 0..4 {
+        vcx.run_until_parked();
+        vcx.simulate_frame();
+    }
+    assert!(a.read_with(&vcx, |v, _| v.natural_body_height()) >= 300., "the panel measured its new height");
+    assert_eq!(b.read_with(&vcx, |v, _| v.renders), before, "the other panel kept its drawing");
+}
+
 /// PM-698: a selection change re-renders the Effects browser and the
 /// viewer's chrome to the same trees; those commits are acknowledged, not
 /// published, so the views draw nothing again. Properties, which shows the
@@ -3553,4 +3616,129 @@ fn a_retheme_while_a_tree_compiles_shows_that_tree(cx: &mut TestAppContext) {
         shown,
         "the newer tree, in the new theme"
     );
+}
+/// A panel in a body that scrolls around it, a scroll layer, as a dock gives
+/// a side panel (`builtins::PanelBody`).
+struct Body {
+    child: Entity<SurfaceView>,
+    handle: gpui::ScrollHandle,
+}
+impl Render for Body {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = self.handle.clone();
+        self.child.update(cx, |v, _| v.scrolls_in(&handle));
+        div().size_full().child(
+            div()
+                .id("body")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.handle)
+                .scroll_layer()
+                .child(
+                    self.child
+                        .clone()
+                        .cached(StyleRefinement::default().w(px(100.)).h(px(400.))),
+                ),
+        )
+    }
+}
+/// The window's root, which draws every frame: the body is a view of its
+/// own under it, as the dock's are.
+struct BodyHolder {
+    body: Entity<Body>,
+}
+impl Render for BodyHolder {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(100.)).child(
+            self.body
+                .clone()
+                .cached(StyleRefinement::default().size(px(100.))),
+        )
+    }
+}
+/// PM-696: a panel in a scrolling body keeps rows a viewport past each edge
+/// (what the body's layer records) only while the body is being scrolled. At
+/// rest it keeps its rows near the view, so a hover or a resize draws no
+/// more than they; the first wheel step draws it once with the rows past
+/// each edge, the steps after replay, and it is back to rest once they stop.
+#[gpui::test]
+fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":100}}), &[]);
+    for i in 0..20u64 {
+        ops.extend(node_ops(
+            2 + i,
+            1,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    let layered = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.layered());
+    let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
+    assert!(!layered(&vcx), "at rest, rows are kept near the view only");
+    let at = point(px(50.), px(50.));
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    let rendered = renders(&vcx);
+    wheel(&mut vcx, -20.);
+    assert!(layered(&vcx));
+    assert_eq!(
+        renders(&vcx),
+        rendered + 1,
+        "the first step draws past each edge"
+    );
+    // The rows it brought in are measured over the next frames.
+    for _ in 0..4 {
+        vcx.simulate_frame();
+    }
+    let rendered = renders(&vcx);
+    wheel(&mut vcx, -20.);
+    vcx.simulate_frame();
+    assert_eq!(renders(&vcx), rendered, "the steps after replay");
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(!layered(&vcx), "back to rest once the steps stop");
+    assert_eq!(
+        renders(&vcx),
+        rendered + 1,
+        "the layer's settle draws it once, at rest"
+    );
+    // A hover draws only the rows near the view.
+    view.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    assert!(!layered(&vcx));
+    // Scrolling again, then the pointer moves on: at rest at once.
+    wheel(&mut vcx, 20.);
+    assert!(layered(&vcx));
+    vcx.simulate_mouse_move(point(px(60.), px(40.)), None, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!layered(&vcx), "a pointer move ends the scroll");
 }

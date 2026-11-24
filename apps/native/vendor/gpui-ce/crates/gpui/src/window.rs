@@ -1151,6 +1151,9 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     cursor_styles: Vec<CursorStyleRequest>,
+    /// P-SLOT-REGION: the scrolling regions this frame draws (painted, or in
+    /// a reused view's paint, a replayed scroll layer's included).
+    pub(crate) slot_regions: Vec<usize>,
     #[cfg(any(test, feature = "headless-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1180,6 +1183,7 @@ pub(crate) struct PaintIndex {
     pointer_observers_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
+    slot_regions_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
@@ -1202,6 +1206,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            slot_regions: Vec::new(),
 
             #[cfg(any(test, feature = "headless-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1225,6 +1230,7 @@ impl Frame {
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
+        self.slot_regions.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -1363,8 +1369,10 @@ pub struct Window {
     scroll_layer_pending_deferred: Vec<usize>,
     /// Layers resting, and the frame each records again.
     scroll_layer_rest: FxHashMap<crate::scroll_layer::ScrollLayerKey, u64>,
-    /// The layers being painted, innermost last.
-    scroll_layer_painting: Vec<crate::scroll_layer::ScrollLayerKey>,
+    /// Powermove P-SLOT-REGION: scrolling divs' regions (`crate::slot_region`).
+    pub(crate) slot_regions: FxHashMap<usize, crate::slot_region::RegionRecord>,
+    pub(crate) slot_regions_open: Vec<crate::slot_region::OpenRegion>,
+    pub(crate) slot_regions_sent: bool,
     /// Truncated labels, by what they were shaped from (`elements::text`).
     pub(crate) truncations: FxHashMap<u64, Vec<crate::elements::TruncationEntry>>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
@@ -2167,7 +2175,9 @@ impl Window {
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
             scroll_layer_rest: FxHashMap::default(),
-            scroll_layer_painting: Vec::new(),
+            slot_regions: FxHashMap::default(),
+            slot_regions_open: Vec::new(),
+            slot_regions_sent: false,
             truncations: FxHashMap::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
@@ -3445,6 +3455,7 @@ impl Window {
             self.draw_roots(cx);
             let frame = self.scroll_layer_frame;
             self.scroll_layers.retain(|_, layer| layer.frame == frame);
+            self.finish_slot_regions();
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -4190,8 +4201,11 @@ impl Window {
         layer.hitbox_range = start..start;
         layer.frame = frame;
         layer.recorded_at = layer.generation;
-        layer.shiftable = true;
-        layer.why = "";
+        // A layer recorded inside another's recording: the outer replays its
+        // content as recorded (its markers are dropped there), so its own
+        // offset-only steps would show nothing; they draw the view again.
+        layer.shiftable = self.scroll_layer_depth == 0;
+        layer.why = if layer.shiftable { "" } else { "nested" };
         self.scroll_layer_pending_deferred.push(deferred);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
@@ -4235,7 +4249,6 @@ impl Window {
         let outer = mem::take(&mut self.next_frame.scene);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
-        self.scroll_layer_painting.push(key);
         Some((outer, self.next_frame.input_handlers.len()))
     }
 
@@ -4248,7 +4261,6 @@ impl Window {
     ) {
         self.content_mask_stack.pop();
         self.scroll_layer_depth -= 1;
-        self.scroll_layer_painting.pop();
         let mut inner = mem::replace(&mut self.next_frame.scene, outer);
         let ops = inner.take_operations();
         let scale_factor = self.scale_factor();
@@ -4271,29 +4283,6 @@ impl Window {
             scene.insert_operation(op);
         }
         scene.insert_operation(crate::scene::PaintOperation::ScrollLayerEnd);
-    }
-
-    /// The scroll layer being painted here, if any: content placed outside
-    /// the scene (an AppKit control's slot) keeps it, to follow the layer's
-    /// offset on the frames that replay it ([`Self::scroll_layer_shift`]).
-    pub fn scroll_layer(&self) -> Option<crate::ScrollLayerId> {
-        self.scroll_layer_painting
-            .last()
-            .copied()
-            .map(crate::ScrollLayerId)
-    }
-
-    /// How far a scroll layer's content has moved since it was painted, and
-    /// the area where it shows; `None` once the layer is gone.
-    pub fn scroll_layer_shift(
-        &self,
-        layer: crate::ScrollLayerId,
-    ) -> Option<(Point<Pixels>, ContentMask<Pixels>)> {
-        let layer = self.scroll_layers.get(&layer.0)?;
-        if layer.frame != self.scroll_layer_frame {
-            return None;
-        }
-        Some((layer.current() - layer.recorded, layer.clip))
     }
 
     /// A step its owner makes on a driven scroll layer
@@ -4389,6 +4378,7 @@ impl Window {
             pointer_observers_index: self.next_frame.pointer_observers.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
+            slot_regions_index: self.next_frame.slot_regions.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
@@ -4401,6 +4391,10 @@ impl Window {
                 [range.start.pointer_observers_index..range.end.pointer_observers_index]
                 .iter()
                 .cloned(),
+        );
+        self.next_frame.slot_regions.extend_from_slice(
+            &self.rendered_frame.slot_regions
+                [range.start.slot_regions_index..range.end.slot_regions_index],
         );
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles

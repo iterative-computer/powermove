@@ -33,6 +33,7 @@ mod composition_accessibility_order;
 pub mod native_text;
 pub mod native_control;
 mod scroll_fade;
+pub mod slot_region;
 mod platform;
 mod window;
 #[cfg(feature = "frame-capture")]

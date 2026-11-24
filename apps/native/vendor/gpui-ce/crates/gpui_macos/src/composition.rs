@@ -12,8 +12,10 @@ use objc2_foundation::{NSPoint, NSRect};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Convert a paint-space rect, whose y runs down from the editor's top, to
-/// the actual AppKit parent that owns the hosted view.
-pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRect {
+/// GPUI's view's parent, where hosted views outside a scrolling region live
+/// (P-EMBED) — whatever parent the view has now: one leaving a region's
+/// container is placed there in the same present (PM-696 review).
+pub(crate) fn hosted_rect(editor: &NSView, rect: NSRect) -> NSRect {
     let bounds = editor.bounds();
     let local = NSRect::new(
         NSPoint::new(
@@ -26,8 +28,7 @@ pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRec
         ),
         rect.size,
     );
-    // Lazy control wrappers use the editor's parent on their first paint.
-    let parent = unsafe { view.superview().or_else(|| editor.superview()) };
+    let parent = unsafe { editor.superview() };
     editor.convertRect_toView(local, parent.as_deref())
 }
 
@@ -186,7 +187,10 @@ pub(crate) fn pending(view: usize, painted: bool) -> bool {
     {
         return true;
     }
-    painted && (crate::native_text::pending(view) || crate::native_control::pending(view))
+    painted
+        && (crate::slot_region::pending(view)
+            || crate::native_text::pending(view)
+            || crate::native_control::pending(view))
 }
 
 /// Where a window's frames get their drawables (P-120).
@@ -314,13 +318,34 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
         transaction.change = change.or(fresh.into());
     }
     if painted {
+        // Slots in a scrolling region place its container first (P-SLOT-REGION).
         let text = crate::native_text::present(view);
-        transaction.change = transaction
-            .change
-            .or(text)
-            .or(crate::native_control::present(view));
+        let control = crate::native_control::present(view);
+        let regions = crate::slot_region::finish(view);
+        transaction.change = transaction.change.or(text).or(control).or(regions.into());
     }
     Some(transaction)
+}
+/// Whether a frame waits for the next update rather than present: it would
+/// move hosted views (`pending`) while an earlier frame presented outside a
+/// transaction is still on its way to the layer. Landing after this frame's
+/// transaction, that older picture would show under views already moved.
+/// AppKit's own synchronous paints never wait.
+pub fn waits_for_async_present(forced: bool, async_in_flight: bool, pending: bool) -> bool {
+    !forced && async_in_flight && pending
+}
+/// Publishes a frame's hosted views only once its Metal frame is prepared
+/// (drawable in hand, commands encoded): a frame that cannot present leaves
+/// `painted` and every staged geometry for the next attempt, and the views
+/// where the picture on screen has them.
+pub(crate) fn publish<P>(
+    view: usize,
+    painted: &mut bool,
+    prepared: Option<P>,
+) -> Option<(P, Option<Transaction>)> {
+    let prepared = prepared?;
+    let transaction = present(view, std::mem::take(painted));
+    Some((prepared, transaction))
 }
 /// A frame drawn within this long after the previous one is "continuous".
 /// The legacy CVDisplayLink fallback couples frames within this interval.
@@ -451,6 +476,14 @@ pub mod probe {
     /// does; true when a hosted view moved.
     pub fn place(view: &NSView) -> bool {
         present(view as *const NSView as usize, true).is_some_and(|t| t.moved())
+    }
+    /// A frame of `view` as a window presents one: its hosted views are
+    /// published only when its Metal frame was prepared (`prepared`).
+    /// `None` when nothing was published; otherwise whether a view moved.
+    pub fn publish_frame(view: &NSView, prepared: bool) -> Option<bool> {
+        let mut painted = true;
+        publish(view as *const NSView as usize, &mut painted, prepared.then_some(()))
+            .map(|(_, t)| t.is_some_and(|t| t.moved()))
     }
     pub fn forget(view: &NSView) {
         super::forget_paints(view as *const NSView as usize);

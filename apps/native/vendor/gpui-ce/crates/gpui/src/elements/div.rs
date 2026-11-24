@@ -2762,6 +2762,7 @@ impl Element for Div {
 
         window.with_image_cache(image_cache, |window| {
             let layer_cell = self.interactivity.scroll_layer_cell();
+            let region_cell = self.interactivity.scroll_offset.clone();
             self.interactivity.paint(
                 global_id,
                 inspector_id,
@@ -2775,6 +2776,18 @@ impl Element for Div {
                         return;
                     }
 
+                    // P-SLOT-REGION: a scrolling div is a region for the
+                    // hosted views painted inside it.
+                    let region = region_cell.filter(|_| {
+                        style.overflow.x == Overflow::Scroll || style.overflow.y == Overflow::Scroll
+                    });
+                    if let Some(cell) = &region {
+                        let own = style
+                            .overflow_mask(bounds, window.rem_size())
+                            .map_or(bounds, |m| m.bounds);
+                        let offset = *cell.borrow();
+                        window.begin_slot_region(cell, bounds, own, offset);
+                    }
                     let layer = scroll_layer_reach(layer_cell, style, bounds)
                         .map(|(offset, _)| crate::scroll_layer::key(&offset))
                         .and_then(|key| Some((key, window.begin_scroll_layer_paint(key)?)));
@@ -2789,6 +2802,9 @@ impl Element for Div {
 
                     if let Some((key, outer)) = layer {
                         window.end_scroll_layer_paint(key, outer);
+                    }
+                    if region.is_some() {
+                        window.end_slot_region();
                     }
                 },
             )

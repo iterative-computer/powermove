@@ -1884,7 +1884,6 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
-        let surface = view.clone();
         view.update(cx, |v, _| v.scrolls_in(&handle));
         let on_wheel = {
             let panel = panel.clone();
@@ -1892,13 +1891,6 @@ impl Controller {
                 v.builtins
                     .scrolled_at
                     .insert(panel.clone(), std::time::Instant::now());
-                // A panel that leaves rows out draws again as its body
-                // scrolls, so they come back before they show (`v4_cull`).
-                if surface.read(cx).culls() {
-                    surface.update(cx, |_, cx| cx.notify());
-                }
-                // Its AppKit controls show as pictures until it rests.
-                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -1908,35 +1900,10 @@ impl Controller {
                 cx.notify();
             })
         };
-        // Only the Project panel's body is a view of its own, a scroll layer
-        // (PM-311). Every other body scrolls inside the window's own frame, as
-        // before: a cached body there drew its AppKit controls a row off their
-        // labels for a frame now and then while scrolling (PM-389).
-        if id != pm_builtins::PROJECT_PANEL {
-            return Some(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(body))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("panel-body-{id}")))
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&handle)
-                            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
-                            .on_scroll_wheel(on_wheel)
-                            // As tall as its content, at least its slot.
-                            .child({
-                                let content = view.read(cx).in_body(body);
-                                view.clone().cached(content)
-                            })
-                            .child(keep),
-                    )
-                    .children(thumb)
-                    .into_any_element(),
-            );
-        }
+        // Every panel body is a view of its own and a scroll layer (PM-311):
+        // a wheel step inside what it recorded replays it shifted, with no
+        // render or layout of the panel; its AppKit controls sit in the
+        // body's slot region and move with it (P-SLOT-REGION, PM-696).
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self
