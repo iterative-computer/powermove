@@ -218,12 +218,26 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   ).toMatchObject({
     timelineLayerDrag: { layer: "headline" },
   });
-  // Parent, cube and visibility are visible at rest. Lock keeps its space.
-  expect(switches.children.length).toBe(4);
+  // Parent, cube and visibility are visible at rest. Lock keeps its space:
+  // the host draws its blank until the pointer is over the row, then the
+  // switch in that column (`hoverOnly` / `hoverHide`, no publication).
+  expect(switches.children.length).toBe(5);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
-  for (const name of ["shy", "solo", "lock"])
+  for (const name of ["shy", "solo"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
+  const lock = byId(root, "timeline:lock:layer:headline");
+  expect(lock.props.metadata).toMatchObject({ hoverOnly: true });
+  const at = switches.children.indexOf(lock);
+  expect(switches.children[at + 1].props.metadata).toEqual({ hoverHide: true });
+  for (const slot of switches.children)
+    if (slot !== lock && slot !== switches.children[at + 1])
+      expect(slot.props.metadata?.hoverOnly).toBeUndefined();
+  // The row is the hover group, with its hovered fill.
+  expect(row.props.metadata).toMatchObject({
+    hoverGroup: true,
+    hoverStyle: { background: { token: "colors.hover" } },
+  });
   // Every column holds a switch's width (a hit target), drawn or not.
   for (const slot of switches.children)
     expect(slot.props.style).toMatchObject({
@@ -242,6 +256,9 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   expect(hovered.children.length).toBe(4);
   for (const name of ["parent", "threeD", "lock", "visibility"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
+  expect(
+    byId(root, "timeline:lock:layer:headline").props.metadata?.hoverOnly,
+  ).toBeUndefined();
   await root.dispose();
 });
 

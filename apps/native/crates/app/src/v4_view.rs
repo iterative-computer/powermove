@@ -452,6 +452,10 @@ struct Compiled {
 }
 pub struct SurfaceView {
     panel_build: Option<crate::generated_panel::panel_build::State>,
+    /// The `metadata.hoverGroup` node (a row) the pointer is over: the host
+    /// draws its hover (`hoverStyle`, `hoverOnly`, `hoverHide`), so a row's
+    /// hover is no publication of the panel.
+    hovered_group: Option<Id>,
     build_painted: Cell<u64>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
@@ -676,6 +680,7 @@ impl SurfaceView {
         .detach();
         let mut this = Self {
             panel_build: None,
+            hovered_group: None,
             build_painted: Cell::new(u64::MAX),
             runtime,
             publication,
@@ -4226,6 +4231,9 @@ impl SurfaceView {
                     .is_some_and(|id| rows.contains(id))
             })
         }) {
+            if !self.hover_shown(*child) {
+                continue;
+            }
             if let Some(stand_in) = self.cull.stand_in(*child) {
                 children.push(stand_in);
                 continue;
@@ -4253,6 +4261,16 @@ impl SurfaceView {
         }
         self.element_close(id, element, children, window, cx)
     }
+    /// The hover group the pointer is over, by its semantic id (tests).
+    #[cfg(test)]
+    pub(crate) fn hovered_row_for_test(&self) -> Option<String> {
+        let id = self.hovered_group?;
+        self.prepared
+            .node(id)?
+            .semantic
+            .as_ref()
+            .map(|s| s.to_string())
+    }
     /// How far the panel's own scrollers have moved, all summed (tests: a
     /// scroll case proves it moved something).
     #[cfg(test)]
@@ -4261,6 +4279,24 @@ impl SurfaceView {
             .values()
             .map(|h| f32::from(h.offset().x).abs() + f32::from(h.offset().y).abs())
             .sum()
+    }
+    /// A `hoverOnly` node shows while the hover group holding it is hovered,
+    /// a `hoverHide` one until then; every other node always.
+    fn hover_shown(&self, id: Id) -> bool {
+        let Some(shows) = self.prepared.node(id).and_then(|n| n.hover_shows) else {
+            return true;
+        };
+        let mut at = self.prepared.node(id).and_then(|n| n.parent);
+        while let Some(parent) = at {
+            let Some(node) = self.prepared.node(parent) else {
+                break;
+            };
+            if node.hover_group {
+                return (self.hovered_group == Some(parent)) == shows;
+            }
+            at = node.parent;
+        }
+        !shows
     }
     /// Draw the published search field and kit switch when no AppKit slot exists.
     fn offscreen_control(
@@ -4429,6 +4465,12 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if node.hover_group
+            && self.hovered_group == Some(id)
+            && let Some(background) = &node.hover_background
+        {
+            element.style().background = Some(background.clone());
+        }
         if self.publication.surface.node(id).and_then(|node| node.props.get("metadata"))
             .is_some_and(|m| m["wordEllipsis"] == true)
         {
@@ -5773,8 +5815,17 @@ impl SurfaceView {
                     }),
                 );
         }
-        if wash || events.hover {
+        let group = node.hover_group;
+        if wash || events.hover || group {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                if group {
+                    if *hovered {
+                        v.hovered_group = Some(id);
+                    } else if v.hovered_group == Some(id) {
+                        v.hovered_group = None;
+                    }
+                    cx.notify();
+                }
                 if wash {
                     let tokens = v.table.tokens.clone();
                     v.motion.hovers.hover(id, *hovered, &tokens);
