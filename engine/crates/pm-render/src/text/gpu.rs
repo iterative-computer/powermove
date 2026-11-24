@@ -3344,10 +3344,12 @@ mod atlas_tests {
                         let uploads = atlas.stats.image_uploads - before.image_uploads;
                         let pages = atlas.stats.image_pages - before.image_pages;
                         if !uploaded.contains(&working) {
+                            let first = uploaded.is_empty();
                             uploaded.push(working);
                             // 14 masks (one also blurred), a rotated mask
-                            // and a float image, on one page.
-                            assert_eq!((uploads, pages), (16, 1), "{label}");
+                            // and a float image; both encodings share the
+                            // first 512x512 atlas page.
+                            assert_eq!((uploads, pages), (16, u64::from(first)), "{label}");
                         } else {
                             // The same masks at another scale, phase or
                             // precision: all cached.

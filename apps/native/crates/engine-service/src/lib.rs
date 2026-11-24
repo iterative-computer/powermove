@@ -3359,6 +3359,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }));
             }
             let mut pause_at = v.pause_requested_at.take();
+            let mut scrub_cmd = false;
             while let Some(cmd) = v.commands.pop_front() {
                 // Any command (a seek, play) drops a pending settled picture,
                 // and one being drawn gives way.
@@ -3368,6 +3369,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    scrub_cmd = r.scrub;
                     r.refine_at = None;
                 }
                 let now = (now * 1e6) as i64;
@@ -3376,6 +3378,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     r.transport.command(cmd, now);
                 }
+            }
+            // The exact frame of a stop: clear scrub only when stopping
+            // playback without an accompanying scrub seek (and do this before
+            // the in-flight flight cap so a later scrub does not see a stale
+            // was_playing=true and lose its Moment::Scrub).
+            let playing_now = r.transport.clock.is_playing();
+            if std::mem::replace(&mut r.was_playing, playing_now) && !playing_now {
+                if !scrub_cmd {
+                    r.scrub = false;
+                }
+                v.dirty = true;
             }
             // Nobody watches a hidden viewer: it does not play (its frames,
             // audio and deadlines would hold exports, stills and the
@@ -3494,11 +3507,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 1.
             };
             let playing = r.transport.clock.is_playing();
-            // The exact frame of a stop, and of a stand-in whose decode landed.
-            if std::mem::replace(&mut r.was_playing, playing) && !playing {
-                r.scrub = false;
-                v.dirty = true;
-            }
+            // The exact frame of a stand-in whose decode landed.
             if r.stand_in.is_some_and(|at| at != landed) {
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;

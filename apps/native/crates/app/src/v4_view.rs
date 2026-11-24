@@ -495,6 +495,7 @@ pub struct SurfaceView {
     /// in they are this frame, 0–1. Set before the motion frame steps.
     presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
+    _escape_intercept: Subscription,
     focus_events: std::collections::BTreeSet<Id>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -704,6 +705,22 @@ impl SurfaceView {
             ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
+            _escape_intercept: {
+                let cancelled = cx.entity().downgrade();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        let _ = cancelled.update(cx, |v, cx| {
+                            if v.scrub.is_some() && v.cancel_gesture(cx) {
+                                cx.stop_propagation();
+                            } else if v.dragging.is_some() {
+                                cx.stop_active_drag(window);
+                                v.end_drag(cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                })
+            },
             focus_events: Default::default(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -3868,20 +3885,6 @@ impl SurfaceView {
                             v.release_pointer(event.position, 1, event.modifiers, cx);
                         }
                     });
-                });
-                let cancelled = weak.clone();
-                window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Capture && event.keystroke.key == "escape" {
-                        let _ = cancelled.update(cx, |v, cx| {
-                            if v.scrub.is_some() && v.cancel_gesture(cx) {
-                                cx.stop_propagation();
-                            } else if v.dragging.is_some() {
-                                cx.stop_active_drag(window);
-                                v.end_drag(cx);
-                                cx.stop_propagation();
-                            }
-                        });
-                    }
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {

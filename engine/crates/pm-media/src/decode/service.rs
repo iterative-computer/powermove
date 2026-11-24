@@ -428,15 +428,31 @@ impl SessionGuard<'_> {
         if f.is_ok() {
             s.replacement = false;
         }
-        // Everything the session decoded on the way is cached too. Insert in
-        // descending PTS order (farthest future frame first, requested/nearest
-        // frame last) so if the LRU cache is tight (e.g. 4K B-frame pyramid),
-        // the soonest upcoming frames stay most-recently-used and survive.
+        // Everything the session decoded on the way is cached too. Order from
+        // least to most urgent so a tight LRU cache (e.g. a 4K B-frame
+        // pyramid) keeps the requested frame and soonest upcoming frames:
+        //   1. past frames (pts < target) in ascending PTS (oldest evicted first)
+        //   2. future frames (pts > target) in descending PTS (farthest evicted first)
+        //   3. the requested frame itself last (guaranteed MRU)
+        let target_pts = f
+            .as_ref()
+            .ok()
+            .and_then(|o| o.as_ref())
+            .map(|fr| fr.pts)
+            .unwrap_or(self.source.index.frames[n].pts);
         let mut window_frames: Vec<(usize, DecodedFrame)> = s
             .window_frames()
             .map(|(k, fr)| (k, fr.clone()))
             .collect();
-        window_frames.sort_by(|a, b| b.1.pts.cmp(&a.1.pts));
+        window_frames.sort_by_key(|(k, fr)| {
+            if *k == sample {
+                (2u8, 0i64)
+            } else if fr.pts < target_pts {
+                (0u8, fr.pts)
+            } else {
+                (1u8, fr.pts.saturating_neg())
+            }
+        });
         for (k, fr) in window_frames {
             let key = FrameKey {
                 source: self.source.id,
@@ -1006,14 +1022,7 @@ impl DecodeService {
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.lease.lock().unwrap().decoders == 0;
         let kept = self.kept.lock().unwrap().clone();
-        let hot = (!zero)
-            .then(|| self.displayed.lock().unwrap().front().copied())
-            .flatten();
-        let eligible = |key: &SessionKey| {
-            eligible(key)
-                && !(zero && kept.contains(key))
-                && (zero || hot != Some(*key))
-        };
+        let eligible = |key: &SessionKey| eligible(key) && !(zero && kept.contains(key));
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.
