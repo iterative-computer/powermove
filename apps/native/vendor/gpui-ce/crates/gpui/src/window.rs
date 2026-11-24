@@ -2950,9 +2950,11 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
-    /// Pictures a prepainted subtree without inserting its pixels into this frame.
-    /// Used by snapshot transitions. The closure must paint only that subtree;
-    /// native child windows and deferred overlays are not part of the picture.
+    /// Pictures a prepainted subtree. The closure paints that subtree into
+    /// this frame as usual (cached views keep valid paint ranges for the
+    /// next frame), and exactly the operations it added are pictured
+    /// offscreen; a caller that must not show it paints over it. Native
+    /// child windows and deferred overlays are not part of the picture.
     /// Captures only on preparation, never in an animation frame loop.
     #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
     pub fn paint_snapshot(
@@ -2967,9 +2969,10 @@ impl Window {
                 && bounds.size.width > Pixels::ZERO && bounds.size.height > Pixels::ZERO,
             "snapshot must have positive dimensions and lie inside the window"
         );
-        let saved = std::mem::take(&mut self.next_frame.scene);
+        let start = self.next_frame.scene.len();
         paint(self, cx);
-        let mut captured = std::mem::replace(&mut self.next_frame.scene, saved);
+        let mut captured = Scene::default();
+        captured.replay(start..self.next_frame.scene.len(), &self.next_frame.scene);
         captured.finish();
         let image = self.platform_window.render_to_image(&captured)?;
         let scale = self.scale_factor();

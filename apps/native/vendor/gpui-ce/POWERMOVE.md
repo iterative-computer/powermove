@@ -280,9 +280,10 @@ has been made. No measurements from a locked or occluded session certify pacing.
 
 ### Snapshot view transitions
 
-`Window::paint_snapshot` (under the existing `frame-capture` feature) isolates a
-prepainted subtree into a temporary scene and returns its offscreen pixels,
-restoring the pending scene before rasterization. This lets a transition freeze
+`Window::paint_snapshot` (under the existing `frame-capture` feature) paints a
+prepainted subtree into the frame as usual and pictures a copy of exactly the
+operations it added offscreen. (Painting into a temporary scene instead broke
+cached views, whose recorded paint ranges then indexed the wrong scene.) This lets a transition freeze
 its own children without capturing the display or including its live overlay.
 The native Metal window exposes its retained `metal::Device` through the existing
 `gpu_context` hook, so custom surface producers use the renderer's device rather
