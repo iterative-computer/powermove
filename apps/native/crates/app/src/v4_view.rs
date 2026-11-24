@@ -380,6 +380,7 @@ struct ScrubDrag {
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     motion: pm_surface::kit::NumericMotion,
+    pub(super) infinite: crate::infinite_drag::InfiniteDrag,
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
@@ -3490,6 +3491,7 @@ impl SurfaceView {
                 f64::from(event.position.x),
                 number.value,
             ),
+            infinite: crate::infinite_drag::InfiniteDrag::new(),
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
@@ -3517,19 +3519,35 @@ impl SurfaceView {
             return;
         };
         let n = drag.number;
-        let Some(value) = drag.motion.sample(
-            f64::from(x),
-            threshold as f64,
-            n.step,
-            n.speed,
-            modifiers.shift,
-            modifiers.alt,
-            (n.min, n.max),
-        ) else {
+        let sampled = if let Some(dx) = drag.infinite.take_delta_x() {
+            drag.motion.sample_delta(
+                dx,
+                threshold as f64,
+                n.step,
+                n.speed,
+                modifiers.shift,
+                modifiers.alt,
+                (n.min, n.max),
+            )
+        } else {
+            drag.motion.sample(
+                f64::from(x),
+                threshold as f64,
+                n.step,
+                n.speed,
+                modifiers.shift,
+                modifiers.alt,
+                (n.min, n.max),
+            )
+        };
+        let Some(value) = sampled else {
             return;
         };
         let began = !drag.active;
         drag.active = true;
+        if began {
+            drag.infinite.engage();
+        }
         let id = drag.id;
         if !began && self.scrub_shown == Some((id, value)) {
             return;

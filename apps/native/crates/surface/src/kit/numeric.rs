@@ -255,8 +255,8 @@ mod horizontal_scrub_tests {
 /// when it arrives, including the segment that crosses the drag threshold.
 #[derive(Clone, Debug)]
 pub struct NumericMotion {
-    start_x: f64,
     previous_x: f64,
+    travel: f64,
     active: bool,
     current: f64,
 }
@@ -264,8 +264,8 @@ pub struct NumericMotion {
 impl NumericMotion {
     pub fn new(x: f64, value: f64) -> Self {
         Self {
-            start_x: x,
             previous_x: x,
+            travel: 0.,
             active: false,
             current: value,
         }
@@ -286,10 +286,29 @@ impl NumericMotion {
         }
         let delta = x - self.previous_x;
         self.previous_x = x;
+        self.sample_delta(delta, threshold, step, speed, shift, alt, bounds)
+    }
+
+    /// Accumulate relative horizontal pointer motion directly, for infinite
+    /// pointer-locked scrubbing that continues past screen edges.
+    pub fn sample_delta(
+        &mut self,
+        delta: f64,
+        threshold: f64,
+        step: f64,
+        speed: f64,
+        shift: bool,
+        alt: bool,
+        bounds: (f64, f64),
+    ) -> Option<f64> {
+        if !delta.is_finite() {
+            return None;
+        }
+        self.travel += delta;
         let multiplier = if shift { 10. } else if alt { 0.1 } else { 1. };
         self.current = (self.current + delta * step * speed * multiplier)
             .clamp(bounds.0, bounds.1);
-        self.active |= (x - self.start_x).abs() >= threshold;
+        self.active |= self.travel.abs() >= threshold;
         let scaled = self.current * 1000.;
         self.active.then(|| {
             if scaled.is_finite() {
@@ -330,5 +349,27 @@ mod numeric_motion_tests {
         assert_eq!(sample(&mut motion, 8., false, true), Some(11.2));
         assert_eq!(sample(&mut motion, 8., false, false), Some(11.2));
         assert_eq!(sample(&mut motion, 12., false, false), Some(13.2));
+    }
+
+    #[test]
+    fn sample_delta_accumulates_without_screen_bounds() {
+        let mut motion = NumericMotion::new(1440., 0.);
+        assert_eq!(
+            motion.sample(1444., 3., 1., 0.5, false, false, (-10000., 10000.)),
+            Some(2.)
+        );
+        // Pointer locked at screen edge: repeated relative deltas keep advancing.
+        for _ in 0..10 {
+            motion.sample_delta(200., 3., 1., 0.5, false, false, (-10000., 10000.));
+        }
+        assert_eq!(
+            motion.sample_delta(0., 3., 1., 0.5, false, false, (-10000., 10000.)),
+            Some(1002.)
+        );
+        // Fine modifier applies only to new relative motion.
+        assert_eq!(
+            motion.sample_delta(-100., 3., 1., 0.5, false, true, (-10000., 10000.)),
+            Some(997.)
+        );
     }
 }
