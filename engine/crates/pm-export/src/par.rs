@@ -102,8 +102,11 @@ impl WorkerPool {
         let f_ref: &(dyn Fn(usize) + Sync) = &f;
         // Erase the stack lifetime; `DispatchGuard` guarantees all workers
         // finish before `f` is dropped, even if band 0 unwinds.
-        let job_ptr: *const (dyn Fn(usize) + Sync) =
-            unsafe { std::mem::transmute::<*const (dyn Fn(usize) + Sync), *const (dyn Fn(usize) + Sync)>(f_ref) };
+        let job_ptr: *const (dyn Fn(usize) + Sync) = unsafe {
+            std::mem::transmute::<*const (dyn Fn(usize) + Sync), *const (dyn Fn(usize) + Sync)>(
+                f_ref,
+            )
+        };
         let (lock, work_cv, _done_cv) = &*self.shared;
         {
             let mut slot = lock.lock().unwrap();
@@ -265,9 +268,8 @@ pub(crate) fn rows_limited<T: Send>(
         let start = band * per * row_len;
         let end = (start + per * row_len).min(out_len);
         // SAFETY: bands partition `out` into strictly disjoint mutable ranges.
-        let chunk = unsafe {
-            std::slice::from_raw_parts_mut((out_ptr as *mut T).add(start), end - start)
-        };
+        let chunk =
+            unsafe { std::slice::from_raw_parts_mut((out_ptr as *mut T).add(start), end - start) };
         for (i, row) in chunk.chunks_mut(row_len).enumerate() {
             refresh_rows(refresh.as_ref(), i);
             f(band * per + i, row);
@@ -309,6 +311,16 @@ pub(crate) fn planes_with<A: Send, B: Send, C: Send, S>(
         return;
     }
     let total = a.len() / a_len;
+    assert!(
+        a.len() % a_len == 0,
+        "planes_with: the first plane ends in a partial row"
+    );
+    for (len, items) in [(b_len, b.len()), (c_len, c.len())] {
+        assert!(
+            len == 0 || total.checked_mul(len).is_some_and(|n| items >= n),
+            "planes_with: a plane is shorter than the first plane's rows"
+        );
+    }
     let threads = threads_for(total, MAX_THREADS);
     let per = total.div_ceil(threads);
     let refresh = QOS_REFRESH.with(|slot| slot.borrow().clone());
@@ -330,43 +342,32 @@ pub(crate) fn planes_with<A: Send, B: Send, C: Send, S>(
         band(0, a, b, c, refresh.as_ref());
         return;
     }
-    let qos = current_qos();
-    let band = &band;
-    let a_ptr = a.as_mut_ptr() as usize;
-    let a_total = a.len();
-    let b_ptr = b.as_mut_ptr() as usize;
-    let c_ptr = c.as_mut_ptr() as usize;
-    let bands = a_total.div_ceil(per * a_len);
+    // Every band's rows of every plane, split off with checked slicing
+    // before any worker runs.
+    let bands = total.div_ceil(per);
+    let (mut a, mut b, mut c) = (a, b, c);
+    let mut parts = Vec::with_capacity(bands);
+    for n in 0..bands {
+        let rows = per.min(total - n * per);
+        let (a_here, a_rest) = std::mem::take(&mut a).split_at_mut(rows * a_len);
+        let (b_here, b_rest) = std::mem::take(&mut b).split_at_mut(rows * b_len);
+        let (c_here, c_rest) = std::mem::take(&mut c).split_at_mut(rows * c_len);
+        (a, b, c) = (a_rest, b_rest, c_rest);
+        parts.push(std::sync::Mutex::new(Some((
+            n * per,
+            a_here,
+            b_here,
+            c_here,
+        ))));
+    }
+    let (qos, band, parts) = (current_qos(), &band, &parts);
     dispatch_bands(bands, qos, |n| {
-        let a_start = n * per * a_len;
-        let a_end = (a_start + per * a_len).min(a_total);
-        let rows = (a_end - a_start) / a_len;
-        let row_start = n * per;
-        // SAFETY: bands partition `a`, `b`, and `c` into disjoint mutable ranges.
-        let a_here = unsafe {
-            std::slice::from_raw_parts_mut((a_ptr as *mut A).add(a_start), a_end - a_start)
-        };
-        let b_here = if b_len == 0 {
-            &mut []
-        } else {
-            unsafe {
-                std::slice::from_raw_parts_mut(
-                    (b_ptr as *mut B).add(row_start * b_len),
-                    rows * b_len,
-                )
-            }
-        };
-        let c_here = if c_len == 0 {
-            &mut []
-        } else {
-            unsafe {
-                std::slice::from_raw_parts_mut(
-                    (c_ptr as *mut C).add(row_start * c_len),
-                    rows * c_len,
-                )
-            }
-        };
-        band(row_start, a_here, b_here, c_here, refresh.as_ref());
+        let (first, a, b, c) = parts[n]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("each band runs once");
+        band(first, a, b, c, refresh.as_ref());
     });
 }
 
@@ -410,6 +411,35 @@ mod tests {
     use super::*;
     #[cfg(target_vendor = "apple")]
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A secondary plane shorter than the first plane's rows is refused
+    /// before any band is cut (the parallel path once cut it unchecked).
+    #[test]
+    #[should_panic(expected = "shorter than the first plane's rows")]
+    fn a_short_secondary_plane_is_refused() {
+        let mut a = vec![0u8; 4096];
+        let mut b: Vec<u8> = Vec::new();
+        planes_with(
+            (&mut a, 1),
+            (&mut b, 1),
+            (&mut [] as &mut [u8], 0),
+            || (),
+            |_, _, _, b_row, _| assert_eq!(b_row.len(), 1),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "partial row")]
+    fn a_partial_first_row_is_refused() {
+        let mut a = vec![0u8; 4097];
+        planes_with(
+            (&mut a, 2),
+            (&mut [] as &mut [u8], 0),
+            (&mut [] as &mut [u8], 0),
+            || (),
+            |_, _, _, _, _| {},
+        );
+    }
 
     #[test]
     fn every_row_is_visited_once_with_its_index() {

@@ -106,10 +106,21 @@ fn decode_mapped_rows(
         wgpu::TextureFormat::Rgba32Float => 4,
         _ => unreachable!("read_into checked the texture format"),
     };
-    debug_assert_eq!(row % bytes_per_sample, 0);
-    debug_assert!(padded >= row && data.len() >= padded * height);
+    // Checked in release too: the decoders below trust this layout.
+    assert_eq!(row % bytes_per_sample, 0, "a partial sample per row");
+    assert!(
+        padded >= row
+            && padded
+                .checked_mul(height)
+                .is_some_and(|bytes| data.len() >= bytes),
+        "mapped rows shorter than their layout"
+    );
     let samples_per_row = row / bytes_per_sample;
-    debug_assert_eq!(destination.len(), samples_per_row * height);
+    assert_eq!(
+        Some(destination.len()),
+        samples_per_row.checked_mul(height),
+        "the destination must hold exactly the mapped rows"
+    );
     match format {
         // The unorm decode `pm_gpu::readback::read_f32` uses.
         wgpu::TextureFormat::Rgba8Unorm => {
@@ -132,10 +143,14 @@ fn decode_mapped_rows(
                 let input = &data[start..start + row];
                 #[cfg(target_endian = "little")]
                 // SAFETY: every 4-byte sequence is a valid f32 representation,
-                // and the byte view is exactly the length of the destination.
+                // and the byte view is exactly the destination row (the
+                // copy checks the source has as many bytes).
                 unsafe {
-                    std::slice::from_raw_parts_mut(output.as_mut_ptr().cast::<u8>(), input.len())
-                        .copy_from_slice(input);
+                    std::slice::from_raw_parts_mut(
+                        output.as_mut_ptr().cast::<u8>(),
+                        std::mem::size_of_val(output),
+                    )
+                    .copy_from_slice(input);
                 }
                 #[cfg(not(target_endian = "little"))]
                 for (sample, bytes) in output.iter_mut().zip(input.chunks_exact(4)) {
