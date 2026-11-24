@@ -335,3 +335,44 @@ fn alternating_playback_cadence_with_no_cache_room_lands_every_frame() {
     }
     assert!(viewer.stats().ahead > 0, "{:?}", viewer.stats());
 }
+
+/// w84 review P1-2: many layer instances of one source that stays in use.
+/// Instances that go idle give back their frames when their workers exit,
+/// and upkeep forgets the finished workers, so worker entries and decoded
+/// bytes settle at what the instance still playing keeps.
+#[test]
+fn idle_instances_of_a_busy_source_keep_no_decoded_frames() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc).with_idle_exit(Duration::from_millis(30));
+    let play = |instance, k| {
+        let f = viewer
+            .fetch(&src, instance, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert!(f.exact);
+        f.frame.bytes()
+    };
+    let frame = play(1, 0);
+    for instance in 2..26 {
+        play(instance, (instance as usize) % 20);
+    }
+    assert!(viewer.retained().0 >= 20, "{:?}", viewer.retained());
+    // Instance 1 keeps playing while the others sit idle.
+    let mut k = 1;
+    eventually("idle workers exit", || {
+        play(1, k);
+        k += 1;
+        std::thread::sleep(Duration::from_millis(5));
+        viewer.live_workers() == 1
+    });
+    // Exited workers still in the map keep no frames.
+    let (_, bytes) = viewer.retained();
+    assert!(bytes <= 2 * frame, "{bytes} bytes kept before upkeep, one frame is {frame}");
+    viewer.prune();
+    let (entries, bytes) = viewer.retained();
+    assert_eq!(entries, 1, "only the playing instance's worker stays");
+    assert!(bytes <= 2 * frame, "{bytes} bytes kept, one frame is {frame}");
+}

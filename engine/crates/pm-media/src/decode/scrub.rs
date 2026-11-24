@@ -508,6 +508,50 @@ impl ViewerDecode {
         }
     }
 
+    /// Stops the worker of one viewer instance of `source` (a layer that
+    /// no longer shows it).
+    pub fn release_instance(&self, source: u64, instance: InstanceId) {
+        let gone = self.workers.lock().unwrap().remove(&(source, instance));
+        if let Some(w) = gone {
+            w.stop();
+        }
+    }
+
+    /// Forgets workers that exited idle: their entries held nothing but
+    /// their place in the map.
+    pub fn prune(&self) {
+        let gone: Vec<Arc<Worker>> = {
+            let mut workers = self.workers.lock().unwrap();
+            let dead: Vec<_> = workers
+                .iter()
+                .filter(|(_, w)| !w.shared.alive.load(Ordering::Acquire))
+                .map(|(k, _)| *k)
+                .collect();
+            dead.iter().filter_map(|k| workers.remove(k)).collect()
+        };
+        for w in gone {
+            w.stop();
+        }
+    }
+
+    /// Worker entries held, and the bytes of the decoded frames they keep
+    /// (the last decoded and the last presented one each).
+    pub fn retained(&self) -> (usize, usize) {
+        let workers = self.workers.lock().unwrap();
+        let bytes = workers
+            .values()
+            .map(|w| {
+                let st = w.shared.state.lock().unwrap();
+                let presented = st
+                    .presented
+                    .as_ref()
+                    .filter(|(n, _)| st.latest.as_ref().is_none_or(|(m, _)| m != n));
+                st.latest.iter().chain(presented).map(|(_, f)| f.bytes()).sum::<usize>()
+            })
+            .sum();
+        (workers.len(), bytes)
+    }
+
     fn worker(&self, source: &Arc<MediaSource>, instance: InstanceId) -> Arc<Worker> {
         let mut workers = self.workers.lock().unwrap();
         let key = (source.id, instance);
@@ -832,7 +876,10 @@ impl Shared {
                 // Exiting under the lock: a request queued while it was
                 // held is decoded first (the loop sees it); one that takes
                 // the lock later sees `alive` false and `fetch` starts a
-                // new worker.
+                // new worker. The frames it kept go with it: its entry can
+                // stay in the worker map until upkeep prunes it.
+                st.latest = None;
+                st.presented = None;
                 self.alive.store(false, Ordering::Release);
                 return None;
             }
