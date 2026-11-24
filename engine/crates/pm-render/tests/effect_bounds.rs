@@ -27,6 +27,18 @@ fn blur2(amount: f64, repeat_edges: bool) -> Value {
 fn blur1(amount: f64) -> Value {
     json!({"id":"b1","type":"blur","version":1,"on":true,"p":{"amount":ch(json!(amount))}})
 }
+fn shadow1(distance: f64, angle: f64, softness: f64, opacity: f64) -> Value {
+    json!({"id":"s1","type":"shadow","version":1,"on":true,"p":{
+        "distance":ch(json!(distance)),"angle":ch(json!(angle)),
+        "softness":ch(json!(softness)),"opacity":ch(json!(opacity)),
+        "color":ch(json!("#182040"))}})
+}
+fn shadow2(distance: f64, angle: f64, softness: f64, opacity: f64, shadow_only: bool) -> Value {
+    json!({"id":"s2","type":"shadow","version":2,"on":true,"p":{
+        "color":ch(json!("#201030")),"opacity":ch(json!(opacity)),
+        "angle":ch(json!(angle)),"distance":ch(json!(distance)),
+        "softness":ch(json!(softness)),"shadowOnly":ch(json!(shadow_only))}})
+}
 fn glow(threshold: f64, radius: f64, intensity: f64) -> Value {
     json!({"id":"g","type":"glow","version":1,"on":true,"p":{
         "threshold":ch(json!(threshold)),"radius":ch(json!(radius)),"intensity":ch(json!(intensity))}})
@@ -236,7 +248,11 @@ fn wide_reaches_stay_bit_identical() {
     let mut r = Renderer::headless().unwrap();
     for amount in [0.5, 40., 200.] {
         let mut l = solid("w", "#FFFFFF", 12, 12, 128., 72.);
-        l["fx"] = json!([blur2(amount, false), glow(10., amount.min(120.), 200.), blur1(amount)]);
+        l["fx"] = json!([
+            blur2(amount, false),
+            glow(10., amount.min(120.), 200.),
+            blur1(amount)
+        ]);
         let v = project(W, H, 2., no_fill(), vec![l]);
         let variant = Variant {
             precision: Precision::Float32,
@@ -246,6 +262,82 @@ fn wide_reaches_stay_bit_identical() {
             scale: 1.,
         };
         compare(&mut r, &v, 0., &variant, &format!("amount {amount}"));
+    }
+}
+
+/// Drop Shadow v1 and v2 are zero-preserving and scissor bit-identically
+/// across angles, distances, softness, shadow-only mode, rotation, and scale.
+#[test]
+fn shadow_v1_and_v2_scissored_passes_are_bit_identical() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let mut a = solid("a", "#F0C040", 32, 24, 90., 60.);
+    a["p"]["rotation"] = ch(json!(28.));
+    a["fx"] = json!([shadow2(18., 135., 16., 75., false)]);
+    let mut b = solid("b", "#40A0F0", 28, 20, 175., 95.);
+    b["fx"] = json!([shadow2(12., -45., 24., 85., true)]);
+    let mut c = solid("c", "#E04080", 26, 22, 60., 110.);
+    c["fx"] = json!([shadow1(14., 210., 18., 70.)]);
+    let v = project(W, H, 2., no_fill(), vec![a, b, c]);
+    let mut hits = 0;
+    for (precision, linear, kind, scale) in [
+        (Precision::Float16, false, OutputKind::Final, 1.0),
+        (Precision::Float32, true, OutputKind::Final, 1.0),
+        (Precision::Float16, false, OutputKind::Preview, 1.5),
+    ] {
+        let variant = Variant {
+            precision,
+            linear,
+            kind,
+            region: None,
+            scale,
+        };
+        hits += compare(
+            &mut r,
+            &v,
+            0.,
+            &variant,
+            &format!("shadow {precision:?} linear {linear} {kind:?} scale {scale}"),
+        );
+    }
+    assert!(hits > 0, "shadow passes were not scissored");
+}
+
+/// Drop Shadow v2 on a 2.5D layer brought towards the camera: the plane
+/// magnifies the shadow's offset five times past what the layer's 2D
+/// transform says, and every shadow pixel still draws.
+#[test]
+fn shadow_v2_on_a_magnified_25d_plane_keeps_its_shadow() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    // Perspective 36 on a 256-wide frame: a focal length of 256 px, so a
+    // layer at Z = -0.8 × 256 is magnified 5×.
+    let mut l = solid("p", "#F0C040", 8, 8, 128., 72.);
+    l["threeD"] = json!(true);
+    set(&mut l, "anchor.x", json!(4));
+    set(&mut l, "anchor.y", json!(4));
+    set(&mut l, "position.z", json!(-204.8));
+    set(&mut l, "perspective", json!(36));
+    l["fx"] = json!([shadow2(12., 90., 0., 100., true)]);
+    let v = project(W, H, 2., no_fill(), vec![l]);
+    for (precision, kind, scale) in [
+        (Precision::Float16, OutputKind::Final, 1.0),
+        (Precision::Float32, OutputKind::Preview, 1.5),
+    ] {
+        let variant = Variant {
+            precision,
+            linear: false,
+            kind,
+            region: None,
+            scale,
+        };
+        compare(
+            &mut r,
+            &v,
+            0.,
+            &variant,
+            &format!("2.5D shadow {precision:?} {kind:?} scale {scale}"),
+        );
     }
 }
 
@@ -263,7 +355,10 @@ fn steps_that_do_not_keep_zero_are_not_scissored() {
         scale: 1.,
     };
     for (what, fx) in [
-        ("blur v2 repeating edge pixels", json!([blur2(6., true), blur1(4.)])),
+        (
+            "blur v2 repeating edge pixels",
+            json!([blur2(6., true), blur1(4.)]),
+        ),
         ("levels v2 lifting alpha", json!([levels2(0.2), blur1(4.)])),
     ] {
         let mut l = solid("n", "#80FF80", 30, 30, 128., 72.);

@@ -123,6 +123,9 @@ pub struct PickHit {
 /// The synchronous query facade. See the module documentation.
 pub struct QueryContext {
     engine: Engine,
+    /// Whether a composition holds any layer marked `threeD`, at a revision:
+    /// `(revision, composition, marked)`. See [`QueryContext::is_3d_layer`].
+    marked_3d: Option<(u64, String, bool)>,
 }
 
 impl QueryContext {
@@ -130,7 +133,10 @@ impl QueryContext {
     pub fn new(document: &Document) -> QueryContext {
         let mut engine = Engine::new();
         engine.adopt_document(document.clone(), ConsistencyHash::default());
-        QueryContext { engine }
+        QueryContext {
+            engine,
+            marked_3d: None,
+        }
     }
 
     /// Follows a committed transaction. `base` must be the revision this
@@ -411,6 +417,74 @@ impl QueryContext {
         matrix6(self.layer_query("worldMatrix", comp_id, layer_id, t, &[])?)
     }
 
+    /// Whether the layer (or any enclosing group) is in 2.5D 3D mode.
+    ///
+    /// Only a layer or group of the same composition marked `threeD` makes a
+    /// layer 3D, so a composition without one answers here (the viewer asks
+    /// for every layer it snaps to at each pointer move).
+    pub fn is_3d_layer(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<bool, QueryError> {
+        let (comp, _) = self.resolve(comp_id, layer_id)?;
+        let revision = self.engine.revision();
+        let marked = match &self.marked_3d {
+            Some((at, of, marked)) if *at == revision && *of == comp => *marked,
+            _ => {
+                let marked = self
+                    .root()
+                    .and_then(|root| model::comp_node(root, (!comp.is_empty()).then_some(&*comp)))
+                    .is_some_and(|node| {
+                        model::layers_of(node)
+                            .any(|layer| layer.get("threeD").is_some_and(model::truthy))
+                    });
+                self.marked_3d = Some((revision, comp, marked));
+                marked
+            }
+        };
+        if !marked {
+            return Ok(false);
+        }
+        Ok(self.layer_query("is3DLayer", comp_id, layer_id, t, &[])? == Value::Bool(true))
+    }
+
+    /// Column-major 3×3 perspective homography mapping layer pixels (or parent
+    /// plane when `positioning` is true) to composition pixels.
+    pub fn plane_matrix(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+        positioning: bool,
+    ) -> Result<[f64; 9], QueryError> {
+        matrix9(self.layer_query(
+            "planeMatrix",
+            comp_id,
+            layer_id,
+            t,
+            &[("positioning", Value::Bool(positioning))],
+        )?)
+    }
+
+    /// Column-major 4×4 3D world matrix of a layer in composition pixel space.
+    pub fn world_3d(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+        positioning: bool,
+    ) -> Result<[f64; 16], QueryError> {
+        matrix16(self.layer_query(
+            "world3D",
+            comp_id,
+            layer_id,
+            t,
+            &[("positioning", Value::Bool(positioning))],
+        )?)
+    }
+
     /// A text layer's caret geometry at `t` (`PM.textLayout` / raster.ts
     /// `textCaretLayout`): lines with UTF-16 caret boundaries in layer
     /// space. May answer *needs fonts*.
@@ -550,6 +624,34 @@ fn matrix6(v: Value) -> Result<[f64; 6], QueryError> {
         *slot = item
             .as_f64()
             .ok_or_else(|| QueryError::Error("expected a 6-number matrix".into()))?;
+    }
+    Ok(out)
+}
+
+fn matrix9(v: Value) -> Result<[f64; 9], QueryError> {
+    let items = v
+        .as_array()
+        .filter(|a| a.len() == 9)
+        .ok_or_else(|| QueryError::Error("expected a 9-number matrix".into()))?;
+    let mut out = [0.0; 9];
+    for (slot, item) in out.iter_mut().zip(items) {
+        *slot = item
+            .as_f64()
+            .ok_or_else(|| QueryError::Error("expected a 9-number matrix".into()))?;
+    }
+    Ok(out)
+}
+
+fn matrix16(v: Value) -> Result<[f64; 16], QueryError> {
+    let items = v
+        .as_array()
+        .filter(|a| a.len() == 16)
+        .ok_or_else(|| QueryError::Error("expected a 16-number matrix".into()))?;
+    let mut out = [0.0; 16];
+    for (slot, item) in out.iter_mut().zip(items) {
+        *slot = item
+            .as_f64()
+            .ok_or_else(|| QueryError::Error("expected a 16-number matrix".into()))?;
     }
     Ok(out)
 }

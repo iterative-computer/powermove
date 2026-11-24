@@ -188,10 +188,52 @@ pub fn dither_offset(frame: u32, x: u32, y: u32, channel: u32) -> f64 {
     offsets()[qy * SIZE + qx]
 }
 
+/// Hoists frame-wide shifts and the shared tile lookup out of the conversion
+/// loops. Pixel and chroma-site coordinates are the same as in dither_offset.
+pub(crate) struct FrameDither {
+    tile: &'static [f64],
+    shift: [(usize, usize); 3],
+}
+
+impl FrameDither {
+    pub(crate) fn new(frame: u32) -> Self {
+        Self {
+            tile: offsets(),
+            shift: std::array::from_fn(|ch| {
+                let h = hash_u32(frame.wrapping_mul(4).wrapping_add(ch as u32));
+                ((h & 63) as usize, ((h >> 6) & 63) as usize)
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn at(&self, x: usize, y: usize, channel: usize) -> f64 {
+        let (ox, oy) = self.shift[channel];
+        self.tile[((y.wrapping_add(oy) & 63) * SIZE) + (x.wrapping_add(ox) & 63)]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn cached_shifts_match_the_reference_for_every_tile_position() {
+        for frame in [0, 1, u32::MAX] {
+            let cached = FrameDither::new(frame);
+            for ch in 0..3 {
+                for y in 0..SIZE {
+                    for x in 0..SIZE {
+                        assert_eq!(
+                            cached.at(x, y, ch),
+                            dither_offset(frame, x as u32, y as u32, ch as u32),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn tile_is_a_permutation() {

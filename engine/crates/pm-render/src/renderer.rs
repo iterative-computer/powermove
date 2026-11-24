@@ -1516,6 +1516,11 @@ impl Renderer {
         self.text_gpu.cached_bytes()
     }
 
+    /// Standing budget for cached GPU text rasters.
+    pub fn set_text_cache_budget(&mut self, bytes: u64) {
+        self.text_gpu.set_cache_budget(bytes);
+    }
+
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
     /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
     /// processes; the engine host passes its shader cache folder.
@@ -1712,13 +1717,12 @@ impl Renderer {
     }
 
     /// Bounds the auxiliary caches while playback budgets are applied
-    /// individually to targets, bindings, video, images and vector rasters.
+    /// individually to targets, bindings, video, images, text and vector rasters.
     pub fn trim_playback_aux(&mut self, bytes: u64) {
         self.material.trim(bytes);
         let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
         self.release_frame_reuse();
         self.source_reuse.trim(bytes);
-        self.text_gpu.trim(bytes.saturating_sub(self.source_reuse.bytes()));
     }
 
     /// Frees idle intermediate targets and cached vector textures so that

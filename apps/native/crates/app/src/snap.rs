@@ -1,7 +1,7 @@
 //! Move snapping (viewer.ts `snapBox`): the moving selection's box corners
 //! and centre align with the composition's and other layers' within 8
 //! display points per axis; ties go to the shorter guide.
-use super::{GizmoSurface, Pose, transform};
+use super::{GizmoSurface, Pose, project_box};
 use gpui::*;
 use pm_kernel::QueryMirror;
 
@@ -49,14 +49,13 @@ pub fn points(p: &pm_kernel::Published, moving: &[String], time: f64) -> Option<
         if !q.active(None, &layer.id, time).unwrap_or(false) {
             continue;
         }
-        let (Ok(Some(b)), Ok(world)) = (
-            crate::text_host::query(p, |q| q.bounds(None, &layer.id, time)),
-            mirror.queries().world_matrix(None, &layer.id, time),
-        ) else {
+        let Ok(Some(b)) = crate::text_host::query(p, |q| q.bounds(None, &layer.id, time)) else {
             continue;
         };
-        let corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]];
-        if let Some(b) = box_of(corners.iter().map(|&c| transform(&world, c))) {
+        let Some((corners, _)) = project_box(mirror.queries(), &layer.id, time, b) else {
+            continue;
+        };
+        if let Some(b) = box_of(corners.into_iter()) {
             out.extend(corners_and_centre(b));
         }
     }

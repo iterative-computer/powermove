@@ -128,6 +128,7 @@ impl SourceRaster {
             size: [b.width, b.height],
             bounds: [b.x, b.y, b.width, b.height],
             pixel_scale: [m[0], m[3]],
+            planar: true,
         }
     }
 }

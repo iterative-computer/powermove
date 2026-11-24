@@ -238,10 +238,60 @@ pub(crate) fn catalog(role: &str, data: &Value) -> Vec<Field> {
             for (k, l, min, max) in [
                 ("near", "Clip Start", 0.0001, None),
                 ("far", "Clip End", 0.01, None),
-                ("fStop", "f-Stop", 0., Some(64.)),
-                ("focusDistance", "Focus", 0., None),
             ] {
                 add("Camera", "camera", k, l, "number", Some(min), max, "");
+            }
+            if data["camera"]["projection"] != "orthographic" {
+                add(
+                    "Depth of Field",
+                    "camera",
+                    "fStop",
+                    "Aperture (f-Stop)",
+                    "number",
+                    Some(0.7),
+                    Some(32.),
+                    "",
+                );
+                add(
+                    "Depth of Field",
+                    "camera",
+                    "focusDistance",
+                    "Focus Distance",
+                    "number",
+                    Some(0.),
+                    None,
+                    "",
+                );
+                add(
+                    "Depth of Field",
+                    "camera",
+                    "irisRoundness",
+                    "Bokeh Roundness",
+                    "number",
+                    Some(0.),
+                    Some(1.),
+                    "",
+                );
+                add(
+                    "Depth of Field",
+                    "camera",
+                    "irisAspect",
+                    "Anamorphic Aspect",
+                    "number",
+                    Some(0.25),
+                    Some(4.),
+                    "",
+                );
+                add(
+                    "Depth of Field",
+                    "camera",
+                    "irisRotation",
+                    "Bokeh Rotation",
+                    "number",
+                    Some(-180.),
+                    Some(180.),
+                    "°",
+                );
             }
             add(
                 "Environment",

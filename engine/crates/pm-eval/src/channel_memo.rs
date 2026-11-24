@@ -88,6 +88,16 @@ pub(crate) struct ChannelMemo {
     /// `pathGeometry(L, T)` by layer address when every path channel it
     /// reads is time-independent: the same at every time then.
     paths: HashMap<usize, Arc<crate::bounds::PathGeometry>, crate::scope::BuildAddressHasher>,
+    /// Static evaluated vertices of an editable path, by `(layer, path)`
+    /// node address, when no vertex channel of that path depends on time.
+    path_vertices: HashMap<
+        (usize, usize),
+        Arc<Vec<Vec<(pm_model::JsString, f64)>>>,
+        crate::scope::BuildAddressHasher,
+    >,
+    /// What `evP` finds for a property node inside `layer` (e.g. a path's
+    /// animated `trimOffset` or `rotation`), by `(layer, prop)` node address.
+    prop_tracks: HashMap<(usize, usize), Found, crate::scope::BuildAddressHasher>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
 }
@@ -112,6 +122,8 @@ impl ChannelMemo {
             self.ancestors.clear();
             self.locals.clear();
             self.paths.clear();
+            self.path_vertices.clear();
+            self.prop_tracks.clear();
             self.edition = Some(edition);
             // The first plan at an edition only notes it (see above).
             self.open = None;
@@ -135,6 +147,8 @@ impl ChannelMemo {
         self.ancestors.clear();
         self.locals.clear();
         self.paths.clear();
+        self.path_vertices.clear();
+        self.prop_tracks.clear();
         self.edition = None;
     }
 
@@ -209,6 +223,69 @@ impl ChannelMemo {
         if self.answers(cx) && is_element(cx.layers(), layer) {
             self.misses += 1;
             self.paths.insert(address(layer), geometry);
+        }
+    }
+
+    /// The time-independent vertex list kept for `path` (a node inside `layer`).
+    pub(crate) fn path_vertices(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        path: &Node,
+    ) -> Option<Arc<Vec<Vec<(pm_model::JsString, f64)>>>> {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return None;
+        }
+        let found = self
+            .path_vertices
+            .get(&(address(layer), address(path)))?
+            .clone();
+        self.hits += 1;
+        Some(found)
+    }
+
+    /// Keeps `path`'s time-independent vertex list.
+    pub(crate) fn keep_path_vertices(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        path: &Node,
+        vertices: Arc<Vec<Vec<(pm_model::JsString, f64)>>>,
+    ) {
+        if self.answers(cx) && is_element(cx.layers(), layer) {
+            self.misses += 1;
+            self.path_vertices
+                .insert((address(layer), address(path)), vertices);
+        }
+    }
+
+    /// What was kept for property node `prop` inside `layer`.
+    pub(crate) fn prop_track(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        prop: &Node,
+    ) -> Option<&Found> {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return None;
+        }
+        let found = self.prop_tracks.get(&(address(layer), address(prop)))?;
+        self.hits += 1;
+        Some(found)
+    }
+
+    /// Keeps what was found for property node `prop` inside `layer`.
+    pub(crate) fn keep_prop_track(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        prop: &Node,
+        found: Found,
+    ) {
+        if self.answers(cx) && is_element(cx.layers(), layer) {
+            self.misses += 1;
+            self.prop_tracks
+                .insert((address(layer), address(prop)), found);
         }
     }
 

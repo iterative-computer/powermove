@@ -634,6 +634,8 @@ pub fn channel_label(channel: &str) -> String {
         "opacity" => "Opacity",
         "skew" => "Skew",
         "perspective" => "Perspective",
+        "dofBlur" => "Depth of Field Blur",
+        "dofFocus" => "Focus Distance",
         "l.blend" => "Blend mode",
         "l.mblur" => "Motion blur",
         "l.on" => "Visibility",

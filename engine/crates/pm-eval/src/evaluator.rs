@@ -413,8 +413,8 @@ pub struct Evaluator {
     springs: SpringTables,
     compiled: CompiledCache,
     errors: HashMap<ErrorKey, String>,
-    /// Outstanding error count by composition and layer.
-    error_layers: HashMap<(JsString, JsString), usize>,
+    /// Outstanding error keys by composition and layer.
+    error_layers: HashMap<(JsString, JsString), Vec<JsString>>,
     ids: HashMap<PropAddress, PropId>,
     slots: Vec<Slot>,
     free: Vec<u32>,
@@ -650,16 +650,51 @@ impl Evaluator {
         }
     }
 
-    fn has_layer_errors(&self, cx: &Comp<'_>, layer: Option<&Node>) -> bool {
+    pub(crate) fn has_layer_errors(&self, cx: &Comp<'_>, layer: Option<&Node>) -> bool {
         !self.error_layers.is_empty()
             && self.error_layers.contains_key(&(cx.id().clone(), layer_id_string(layer)))
+    }
+
+    pub(crate) fn has_path_errors(&self, cx: &Comp<'_>, layer: &Node) -> bool {
+        if self.error_layers.is_empty() {
+            return false;
+        }
+        self.error_layers
+            .get(&(cx.id().clone(), layer_id_string(Some(layer))))
+            .is_some_and(|keys| keys.iter().any(|k| k.as_bytes().starts_with(b"g.")))
+    }
+
+    pub(crate) fn has_vertex_errors(&self, cx: &Comp<'_>, layer: &Node) -> bool {
+        if self.error_layers.is_empty() {
+            return false;
+        }
+        self.error_layers
+            .get(&(cx.id().clone(), layer_id_string(Some(layer))))
+            .is_some_and(|keys| {
+                keys.iter().any(|k| {
+                    let b = k.as_bytes();
+                    b.starts_with(b"g.") && b.windows(3).any(|w| w == b".v.")
+                })
+            })
+    }
+
+    pub(crate) fn has_channel_error(&self, cx: &Comp<'_>, layer: &Node, key: &str) -> bool {
+        if self.errors.is_empty() {
+            return false;
+        }
+        self.errors.contains_key(&ErrorKey {
+            comp: cx.id().clone(),
+            layer: layer_id_string(Some(layer)),
+            key: JsString::from(key),
+        })
     }
 
     fn record_error(&mut self, cx: &Comp<'_>, layer: Option<&Node>, key: &JsString, message: String) {
         let key = Self::error_key(cx, layer, key);
         let owner = (key.comp.clone(), key.layer.clone());
+        let err_key = key.key.clone();
         if self.errors.insert(key, message).is_none() {
-            *self.error_layers.entry(owner).or_default() += 1;
+            self.error_layers.entry(owner).or_default().push(err_key);
         }
     }
 
@@ -679,8 +714,8 @@ impl Evaluator {
                 })
                 .is_some()
         {
-            *layer.get_mut() -= 1;
-            if *layer.get() == 0 {
+            layer.get_mut().retain(|k| k != key);
+            if layer.get().is_empty() {
                 layer.remove();
             }
         }
@@ -786,7 +821,7 @@ impl Evaluator {
         cx: &Comp<'_>,
         layer: &Node,
     ) -> Option<Arc<crate::bounds::PathGeometry>> {
-        if self.hooks.overrides_channels() || self.has_layer_errors(cx, Some(layer)) {
+        if self.hooks.overrides_channels() || self.has_path_errors(cx, layer) {
             return None;
         }
         self.channel_memo.path_geometry(cx, layer)
@@ -799,9 +834,117 @@ impl Evaluator {
         layer: &Node,
         geometry: Arc<crate::bounds::PathGeometry>,
     ) {
-        if !self.hooks.overrides_channels() && !self.has_layer_errors(cx, Some(layer)) {
+        if !self.hooks.overrides_channels() && !self.has_path_errors(cx, layer) {
             self.channel_memo.keep_path_geometry(cx, layer, geometry);
         }
+    }
+
+    /// `path`'s time-independent vertices kept across the frames of an
+    /// unchanged document (`crate::channel_memo`).
+    pub(crate) fn kept_path_vertices(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        path: &Node,
+    ) -> Option<Arc<Vec<Vec<(JsString, f64)>>>> {
+        if self.hooks.overrides_channels() || self.has_vertex_errors(cx, layer) {
+            return None;
+        }
+        self.channel_memo.path_vertices(cx, layer, path)
+    }
+
+    /// Keeps `vertices`, computed from time-independent vertex channels only.
+    pub(crate) fn keep_path_vertices(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        path: &Node,
+        vertices: Arc<Vec<Vec<(JsString, f64)>>>,
+    ) {
+        if !self.hooks.overrides_channels() && !self.has_vertex_errors(cx, layer) {
+            self.channel_memo
+                .keep_path_vertices(cx, layer, path, vertices);
+        }
+    }
+
+    /// Memoized `ev_p` for a property node inside `layer` when the channel
+    /// memo is open and the caller has already verified no recorded expression
+    /// error needs to be cleared for this channel.
+    pub(crate) fn memo_prop_no_error(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        prop: &Node,
+        time: f64,
+    ) -> Option<(JsValue, bool)> {
+        use crate::channel_memo::Found;
+        if !self.channel_memo.is_open() || self.hooks.overrides_channels() {
+            return None;
+        }
+        let answer = |found: &Found| match found {
+            Found::Zero => Some((JsValue::Null, true)),
+            Found::Static(v) => Some((v.clone(), true)),
+            Found::Track { from, track } => {
+                let tl = time - from;
+                tl.is_finite().then(|| (track.value(tl), false))
+            }
+            Found::Ordinary => None,
+        };
+        if let Some(found) = self.channel_memo.prop_track(cx, layer, prop) {
+            return answer(found);
+        }
+        let found = self.classify_prop(layer, prop);
+        let result = answer(&found);
+        self.channel_memo.keep_prop_track(cx, layer, prop, found);
+        result
+    }
+
+    /// Static channel evaluation when the caller already verified no recorded
+    /// expression error needs to be cleared for this channel.
+    pub(crate) fn static_channel_no_error(&self, prop: Option<&Node>) -> Option<JsValue> {
+        if self.hooks.overrides_channels() {
+            return None;
+        }
+        let p = prop.filter(|p| {
+            node::truthy(Some(p))
+                && matches!(
+                    p.kind(),
+                    pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
+                )
+        })?;
+        let got = Got::Node(p);
+        if node::get(p, b"expr").truthy() || kf_length_truthy(&got) {
+            return None;
+        }
+        Some(node::get(p, b"v").to_js())
+    }
+
+    fn classify_prop(&self, layer: &Node, prop: &Node) -> crate::channel_memo::Found {
+        use crate::channel_memo::Found;
+        if !node::truthy(Some(prop))
+            || !matches!(
+                prop.kind(),
+                pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
+            )
+        {
+            return Found::Zero;
+        }
+        if node::get(prop, b"expr").truthy() {
+            return Found::Ordinary;
+        }
+        let got = Got::Node(prop);
+        if kf_length_truthy(&got) {
+            let Ok(from) = node::get_checked(Some(layer), b"from") else {
+                return Found::Ordinary;
+            };
+            let from = from.to_js().to_number();
+            let kf = node::member(Some(prop), "kf");
+            return match PreparedTrack::prepare(kf) {
+                PreparedTrack::Temporal(track) => Found::Track { from, track },
+                _ => Found::Ordinary,
+            };
+        }
+        Found::Static(node::get(prop, b"v").to_js())
     }
 
     /// Keeps `m`, `layer`'s local matrix just computed from `keys`, when

@@ -185,10 +185,15 @@ impl PixelBuffer {
                         unsafe { std::slice::from_raw_parts_mut(base.add(y * bpr), row_bytes) };
                     match &plane.data {
                         PlaneData::U16(v) => {
-                            for (d, s) in dst
-                                .chunks_exact_mut(2)
-                                .zip(&v[y * plane.row_samples..(y + 1) * plane.row_samples])
-                            {
+                            let src = &v[y * plane.row_samples..(y + 1) * plane.row_samples];
+                            #[cfg(target_endian = "little")]
+                            // SAFETY: initialized u16 samples viewed as their in-memory
+                            // little-endian bytes. This borrows exactly the row's length.
+                            dst.copy_from_slice(unsafe {
+                                std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), row_bytes)
+                            });
+                            #[cfg(not(target_endian = "little"))]
+                            for (d, s) in dst.chunks_exact_mut(2).zip(src) {
                                 d.copy_from_slice(&s.to_le_bytes());
                             }
                         }

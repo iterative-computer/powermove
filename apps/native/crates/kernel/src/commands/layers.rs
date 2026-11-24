@@ -341,7 +341,7 @@ fn type_color(t: &str) -> &'static str {
 }
 
 /// `CHANNELS_3D` (`legacy/core/space-3d.ts`).
-pub(crate) const CHANNELS_3D: [(&str, f64); 9] = [
+pub(crate) const CHANNELS_3D: [(&str, f64); 11] = [
     ("perspective", 50.0),
     ("position.z", 0.0),
     ("anchor.z", 0.0),
@@ -351,6 +351,8 @@ pub(crate) const CHANNELS_3D: [(&str, f64); 9] = [
     ("orientation.x", 0.0),
     ("orientation.y", 0.0),
     ("orientation.z", 0.0),
+    ("dofBlur", 0.0),
+    ("dofFocus", 0.0),
 ];
 
 const PLANAR_CHANNELS: [(&str, f64); 9] = [
@@ -627,26 +629,24 @@ pub(crate) fn expand_groups(layers: &[Value], ids: &HashSet<&str>) -> Vec<String
 
 /// `PM.normalizeGroupStack()`: every group directly above its members.
 pub(crate) fn normalize_group_stack(layers: Vec<Value>) -> Vec<Value> {
-    let mut children: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+    let mut children: std::collections::HashMap<Option<String>, Vec<usize>> =
+        std::collections::HashMap::with_capacity(layers.len() / 4 + 1);
     for (i, l) in layers.iter().enumerate() {
         let parent = values::text(l, "group")
             .filter(|g| !g.is_empty())
             .map(str::to_owned);
-        match children.iter_mut().find(|(p, _)| *p == parent) {
-            Some((_, list)) => list.push(i),
-            None => children.push((parent, vec![i])),
-        }
+        children.entry(parent).or_default().push(i);
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(layers.len());
     let mut order = Vec::with_capacity(layers.len());
     fn visit(
         parent: Option<&str>,
         layers: &[Value],
-        children: &[(Option<String>, Vec<usize>)],
+        children: &std::collections::HashMap<Option<String>, Vec<usize>>,
         seen: &mut HashSet<String>,
         order: &mut Vec<usize>,
     ) {
-        let Some((_, list)) = children.iter().find(|(p, _)| p.as_deref() == parent) else {
+        let Some(list) = children.get(&parent.map(str::to_owned)) else {
             return;
         };
         for &i in list {
@@ -663,14 +663,16 @@ pub(crate) fn normalize_group_stack(layers: Vec<Value>) -> Vec<Value> {
         }
     }
     visit(None, &layers, &children, &mut seen, &mut order);
-    let mut out: Vec<Value> = order.iter().map(|&i| layers[i].clone()).collect();
-    for l in &layers {
-        let id = values::text(l, "id").unwrap_or_default();
-        if !seen.contains(id) {
-            let mut l = l.clone();
-            values::obj(&mut l).insert("group", Value::Null);
-            out.push(l);
+    let mut slots: Vec<Option<Value>> = layers.into_iter().map(Some).collect();
+    let mut out: Vec<Value> = Vec::with_capacity(slots.len());
+    for i in order {
+        if let Some(layer) = slots[i].take() {
+            out.push(layer);
         }
+    }
+    for mut layer in slots.into_iter().flatten() {
+        values::obj(&mut layer).insert("group", Value::Null);
+        out.push(layer);
     }
     out
 }
@@ -1467,7 +1469,6 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
 
 /// `PM.cloneLayer(L)`: a deep copy with fresh key ids and a numbered name.
 pub(crate) fn clone_layer(layer: &Value, id: &str, siblings: &[Value]) -> Value {
-    let mut c = layer.clone();
     let name = values::text(layer, "name").unwrap_or_default();
     let base = strip_number(name, false);
     let count = siblings
@@ -1478,7 +1479,25 @@ pub(crate) fn clone_layer(layer: &Value, id: &str, siblings: &[Value]) -> Value 
                 .starts_with(base)
         })
         .count();
-    let renamed = format!("{} {}", strip_number(name, true), count + 1);
+    clone_layer_numbered(layer, id, count + 1)
+}
+
+/// Same as [`clone_layer`], using pre-collected sibling names so callers in
+/// loops (like splitting a large group) never clone `layers`.
+pub(crate) fn clone_layer_with_names(layer: &Value, id: &str, sibling_names: &[String]) -> Value {
+    let name = values::text(layer, "name").unwrap_or_default();
+    let base = strip_number(name, false);
+    let count = sibling_names
+        .iter()
+        .filter(|n| n.starts_with(base))
+        .count();
+    clone_layer_numbered(layer, id, count + 1)
+}
+
+fn clone_layer_numbered(layer: &Value, id: &str, number: usize) -> Value {
+    let mut c = layer.clone();
+    let name = values::text(layer, "name").unwrap_or_default();
+    let renamed = format!("{} {}", strip_number(name, true), number);
     let m = values::obj(&mut c);
     m.insert("id", values::s(id));
     m.insert("name", values::s(&renamed));
@@ -1527,8 +1546,13 @@ fn duplicate(
     };
     let comp = cx.find(first)?.comp_id;
     let layers = cx.layers(comp.as_deref());
-    let mut selected = Vec::new();
-    for id in layer_ids {
+    let mut explicit = std::collections::HashMap::with_capacity(layer_ids.len());
+    let mut requested = HashSet::with_capacity(layer_ids.len());
+    let mut used: HashSet<String> = layers
+        .iter()
+        .filter_map(|l| values::text(l, "id").map(str::to_owned))
+        .collect();
+    for (id, nid) in layer_ids.iter().zip(new_ids) {
         let l = layers
             .iter()
             .find(|l| values::text(l, "id") == Some(id.as_str()))
@@ -1539,27 +1563,38 @@ fn duplicate(
                 name: values::layer_name(l, id),
             });
         }
-        selected.push(l.clone());
+        explicit.insert(id.as_str(), nid.as_str());
+        requested.insert(id.as_str());
+        used.insert(nid.clone());
     }
-    // `selectedStackLayers`: stack order.
-    selected.sort_by_key(|l| {
-        layers
+    // Expanding groups brings every descendant along in stack order, so
+    // duplicating a group copies its entire subtree with remapped links.
+    let expanded = expand_groups(&layers, &requested);
+    let mut selected = Vec::with_capacity(expanded.len());
+    let mut ids = Vec::with_capacity(expanded.len());
+    for id in &expanded {
+        let Some(l) = layers
             .iter()
-            .position(|x| values::text(x, "id") == values::text(l, "id"))
-    });
+            .find(|l| values::text(l, "id") == Some(id.as_str()))
+        else {
+            continue;
+        };
+        let next_id = if let Some(&nid) = explicit.get(id.as_str()) {
+            nid.to_owned()
+        } else {
+            loop {
+                let candidate = new_id("L");
+                if used.insert(candidate.clone()) {
+                    break candidate;
+                }
+            }
+        };
+        selected.push(l.clone());
+        ids.push(next_id);
+    }
     let index = layers
         .iter()
-        .position(|l| values::text(l, "id").is_some_and(|i| layer_ids.iter().any(|x| x == i)));
-    let ids: Vec<String> = selected
-        .iter()
-        .map(|l| {
-            let i = layer_ids
-                .iter()
-                .position(|x| Some(x.as_str()) == values::text(l, "id"))
-                .expect("selected");
-            new_ids[i].clone()
-        })
-        .collect();
+        .position(|l| values::text(l, "id").is_some_and(|i| expanded.iter().any(|x| x == i)));
     paste(cx, comp.as_deref(), &selected, &ids, index, None, false)
 }
 

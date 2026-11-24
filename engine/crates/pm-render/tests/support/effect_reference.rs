@@ -833,7 +833,9 @@ pub fn layer_transition<'d>(
         })
         .collect::<Option<Vec<_>>>();
     let Some(params) = params else {
-        return Ok(Some(Err("gradient-stop transition is not reference-modeled".into())));
+        return Ok(Some(Err(
+            "gradient-stop transition is not reference-modeled".into(),
+        )));
     };
     Ok(Some(Ok((
         step.definition,
@@ -945,7 +947,9 @@ pub fn effect_chain<'d>(
                 Binding::Stops(_) => None,
             })
             .collect::<Option<Vec<_>>>();
-        let Some(params) = params else { return Ok(None); };
+        let Some(params) = params else {
+            return Ok(None);
+        };
         chain.push((step.definition, params));
     }
     Ok(Some(chain))

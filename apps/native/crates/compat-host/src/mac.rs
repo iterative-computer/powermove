@@ -1038,22 +1038,42 @@ impl SlotView {
             let (gradient, shape) = &mask.gradients[used];
             used += 1;
             let depth = f64::from(pm_design::DOCK_SCROLL_FADE);
-            let mut stops = [
-                0.,
-                (top / r.h).clamp(0., 1.),
-                (1. - bottom / r.h).clamp(0., 1.),
-                ((r.h + top - bottom) / (2. * r.h)).clamp(0., 1.),
-                1.,
-            ];
+            let (top, bottom) = (*top, *bottom);
+            let mut stops = Vec::with_capacity(9);
+            stops.push(0.);
+            if top > 0. {
+                let edge = (top / r.h).clamp(0., 1.);
+                stops.push(edge * 0.35);
+                stops.push(edge * 0.7);
+                stops.push(edge);
+            }
+            if bottom > 0. {
+                let edge = (1. - bottom / r.h).clamp(0., 1.);
+                stops.push(edge);
+                stops.push(edge + (1. - edge) * 0.3);
+                stops.push(edge + (1. - edge) * 0.65);
+            }
+            stops.push(((r.h + top - bottom) / (2. * r.h)).clamp(0., 1.));
+            stops.push(1.);
             stops.sort_by(f64::total_cmp);
-            let colors = stops.map(|t| {
-                let alpha = (1. + (t * r.h - top) / depth)
-                    .min(1. + ((1. - t) * r.h - bottom) / depth).clamp(0., 1.);
-                let color = NSColor::colorWithWhite_alpha(0., alpha).CGColor();
-                unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
-            });
+            // Keep alpha high across the fade interior (1 - p^3) so the GPUI
+            // ground gradient painted on top blends panel -> ground smoothly
+            // without exposing behind-window vibrancy at the midpoint.
+            let colors: Vec<_> = stops
+                .iter()
+                .map(|&t| {
+                    let linear = (1. + (t * r.h - top) / depth)
+                        .min(1. + ((1. - t) * r.h - bottom) / depth)
+                        .clamp(0., 1.);
+                    let p = 1. - linear;
+                    let alpha = (1. - p * p * p).clamp(0., 1.);
+                    let color = NSColor::colorWithWhite_alpha(0., alpha).CGColor();
+                    unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
+                })
+                .collect();
+            let locations: Vec<_> = stops.into_iter().map(NSNumber::new_f64).collect();
             unsafe { gradient.setColors(Some(&NSArray::from_retained_slice(&colors))) };
-            gradient.setLocations(Some(&NSArray::from_retained_slice(&stops.map(NSNumber::new_f64))));
+            gradient.setLocations(Some(&NSArray::from_retained_slice(&locations)));
             gradient.setFrame(frame);
             gradient.setHidden(false);
             shape.setFrame(gradient.bounds());

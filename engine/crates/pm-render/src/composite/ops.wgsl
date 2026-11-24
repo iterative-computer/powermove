@@ -281,3 +281,53 @@ fn fs_decode_source_value(in: VsOut) -> vec4<f32> {
 @fragment fn fs_scene_output_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_scene_output_value(in)); }
 @fragment fn fs_decode_source(in: VsOut) -> @location(0) vec4<f32> { return fs_decode_source_value(in); }
 @fragment fn fs_decode_source_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_decode_source_value(in)); }
+
+fn dof_coc_at(px: vec2<f32>) -> vec2<f32> {
+    let inv_w = op.inv0.x * px.x + op.inv0.y * px.y + op.inv0.z;
+    let w = 1.0 / max(inv_w, 0.05);
+    let coc = clamp(op.f.y * abs(w - op.f.x) / max(w, 0.1), 0.0, op.f.z) * op.inv1.z;
+    return vec2<f32>(w, coc);
+}
+
+// 2.5D depth-of-field bokeh pass (16-tap golden-angle Vogel disk with IGN jitter
+// and analytical depth-aware foreground/background separation). Works across all
+// working formats (Rgba8Unorm, Rgba16Float, Rgba32Float) via textureLoad.
+fn fs_dof_value(in: VsOut) -> vec4<f32> {
+    let base_pos = vec2<i32>(in.pos.xy) + op.off.xy;
+    let dims = vec2<i32>(i32(op.inv1.x), i32(op.inv1.y));
+    let c0 = textureLoad(ta, clamp(base_pos, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+    let wc0 = dof_coc_at(in.px);
+    let w0 = wc0.x;
+    let coc0 = wc0.y;
+    if (coc0 < 0.35) {
+        return c0;
+    }
+    let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+    let base_angle = ign * 6.2831853 + op.f.w;
+    let golden = 2.39996323;
+    let taps = 16u;
+    let inv_taps = 1.0 / 16.0;
+    var acc = c0;
+    var wsum = 1.0;
+    for (var t = 0u; t < taps; t = t + 1u) {
+        let r = sqrt((f32(t) + 0.5) * inv_taps) * coc0;
+        let a = base_angle + f32(t) * golden;
+        let delta = vec2<f32>(cos(a), sin(a)) * r;
+        let qpos = clamp(base_pos + vec2<i32>(round(delta)), vec2<i32>(0), dims - vec2<i32>(1));
+        // in.px is top-down while in.pos is GL bottom-up.
+        let qpx = in.px + vec2<f32>(delta.x, -delta.y);
+        let wcq = dof_coc_at(qpx);
+        let in_front = wcq.x < w0 - 0.01;
+        let eff_coc = select(min(coc0, max(wcq.y, coc0 * 0.6)), wcq.y, in_front);
+        let wt = smoothstep(r - 0.75, r + 0.75, eff_coc);
+        if (wt > 0.0) {
+            let sc = textureLoad(ta, qpos, 0);
+            acc += sc * wt;
+            wsum += wt;
+        }
+    }
+    return acc / max(wsum, 1e-6);
+}
+
+@fragment fn fs_dof(in: VsOut) -> @location(0) vec4<f32> { return fs_dof_value(in); }
+@fragment fn fs_dof_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_dof_value(in)); }

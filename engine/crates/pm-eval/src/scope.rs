@@ -53,6 +53,11 @@ pub(crate) struct LocalMemo<'d> {
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
     pub(crate) parent3d:
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) path_geom: std::collections::HashMap<
+        (usize, u64),
+        Arc<crate::bounds::PathGeometry>,
+        BuildAddressHasher,
+    >,
 }
 
 pub(crate) fn address(layer: &Node) -> usize {

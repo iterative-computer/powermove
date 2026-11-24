@@ -248,6 +248,75 @@ pub(crate) fn camera_rotation(forward: Vec3) -> Vec3 {
         0.,
     ]
 }
+/// Evaluated 3D position of a scene object layer at `time`.
+fn object_position(p: &Published, time: f64, id: &str) -> Result<Vec3> {
+    let mut mirror = QueryMirror::new(p);
+    let mut axis = |key: &str| -> Result<f64> {
+        mirror
+            .queries()
+            .evaluate(None, id, key, time)
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| invalid("Unreadable 3D object position"))
+    };
+    Ok([axis("position.x")?, axis("position.y")?, axis("position.z")?])
+}
+/// Options and active selection for the camera's `Focus On` picker:
+/// Point of Interest (Auto), each 3D model layer in the composition, and
+/// Custom Distance when `focusDistance` doesn't match any listed model.
+pub fn dof_focus_options(
+    p: &Published,
+    camera_layer: &str,
+    time: f64,
+    focus_distance: f64,
+) -> Result<(String, Vec<Value>)> {
+    let comp = composition(p)?;
+    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+    let cam = layers
+        .iter()
+        .find(|l| l["id"] == camera_layer)
+        .ok_or_else(|| invalid("Missing camera"))?;
+    let cam_pos = camera_channels(p, time, cam).map(|(pos, _, _)| pos).ok();
+    let mut options = vec![json!({
+        "v": "target",
+        "label": "Point of Interest (Auto)",
+        "detail": "Keeps focus locked to the camera's point of interest."
+    })];
+    let mut matched: Option<String> = None;
+    for l in &layers {
+        if schema::role(l) != Some(Role::Object)
+            || crate::fields::environment(&l["d"]["data"]).is_some()
+        {
+            continue;
+        }
+        let Some(id) = l["id"].as_str() else { continue };
+        let name = l["name"].as_str().unwrap_or("3D Object");
+        let v = format!("layer:{id}");
+        if focus_distance > 0.
+            && matched.is_none()
+            && let (Some(cp), Ok(op)) = (cam_pos, object_position(p, time, id))
+        {
+            let dist = ((op[0] - cp[0]).powi(2)
+                + (op[1] - cp[1]).powi(2)
+                + (op[2] - cp[2]).powi(2))
+            .sqrt();
+            if (dist - focus_distance).abs() <= (focus_distance * 0.02).max(0.02) {
+                matched = Some(v.clone());
+            }
+        }
+        options.push(json!({"v": v, "label": name}));
+    }
+    let current = if focus_distance <= 0. {
+        "target".to_owned()
+    } else if let Some(m) = matched {
+        m
+    } else {
+        options.push(json!({"v": "manual", "label": "Custom Distance", "disabled": true}));
+        "manual".to_owned()
+    };
+    Ok((current, options))
+}
 /// Switches a camera between aiming at its point of interest (two-node) and
 /// Auto-Orient Off (one-node), keeping the view exactly where it is: Off
 /// writes the rotation that looks where the point of interest was; back on
@@ -754,6 +823,62 @@ pub(crate) fn commands(
             }
             patch["projection"] = arg;
             ("set_camera", "Projection")
+        }
+        (Role::Camera, "dof.enabled") => {
+            let on = arg.as_bool().ok_or_else(|| invalid("Expected checkbox"))?;
+            let f_stop = if on { 2.8 } else { 0.0 };
+            let mut set = pm_kernel::commands::properties::SetProperty::new(
+                target,
+                "camera.fStop",
+                to_model(&json!(f_stop)),
+                time,
+            );
+            set.preserve_hand_edits = false;
+            set.mark_intent = true;
+            return Ok(("Depth of Field".into(), vec![pm_kernel::PropertyCommand::Set(set).into()]));
+        }
+        (Role::Camera, "dof.focusTarget") => {
+            let choice = arg.as_str().ok_or_else(|| invalid("Choose a focus target"))?;
+            let dist = if choice == "target" {
+                0.0
+            } else if let Some(obj_id) = choice.strip_prefix("layer:") {
+                let (cam_pos, _, _) = camera_channels(p, time, &l)?;
+                let obj_pos = object_position(p, time, obj_id)?;
+                ((obj_pos[0] - cam_pos[0]).powi(2)
+                    + (obj_pos[1] - cam_pos[1]).powi(2)
+                    + (obj_pos[2] - cam_pos[2]).powi(2))
+                .sqrt()
+                .max(0.05)
+            } else {
+                return Err(invalid("Invalid focus target"));
+            };
+            let mut set = pm_kernel::commands::properties::SetProperty::new(
+                target,
+                "camera.focusDistance",
+                to_model(&json!((dist * 1000.).round() / 1000.)),
+                time,
+            );
+            set.preserve_hand_edits = false;
+            set.mark_intent = true;
+            return Ok(("Focus Distance".into(), vec![pm_kernel::PropertyCommand::Set(set).into()]));
+        }
+        (Role::Camera, "dof.irisShape") => {
+            let blades = match &arg {
+                Value::String(s) => s.parse::<f64>().ok(),
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            }
+            .filter(|v| [0., 5., 6., 7., 8.].contains(v))
+            .ok_or_else(|| invalid("Invalid Bokeh Shape"))?;
+            let mut set = pm_kernel::commands::properties::SetProperty::new(
+                target,
+                "camera.irisShape",
+                to_model(&json!(blades)),
+                time,
+            );
+            set.preserve_hand_edits = false;
+            set.mark_intent = true;
+            return Ok(("Bokeh Shape".into(), vec![pm_kernel::PropertyCommand::Set(set).into()]));
         }
         (Role::Camera, "samples") => {
             if ![16, 64, 256, 1024].iter().any(|n| arg == *n)

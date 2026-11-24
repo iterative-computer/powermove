@@ -1153,7 +1153,15 @@ fn hover_controls(s: &mut PanelStage, id: &str, group: &str, name: &str) -> Case
     let ids = nodes(&s.view, &s.vcx, |n| {
         matches!(
             role(n),
-            "button" | "tab" | "option" | "menuitem" | "row" | "listitem" | "cell" | "gridcell"
+            "button"
+                | "tab"
+                | "option"
+                | "menuitem"
+                | "row"
+                | "listitem"
+                | "treeitem"
+                | "cell"
+                | "gridcell"
         )
     });
     let mut spots = vec![];

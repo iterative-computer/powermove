@@ -71,6 +71,19 @@ impl Node {
     }
 }
 
+/// 2.5D per-pixel depth-of-field parameters on a projected layer or 3D group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dof25d {
+    /// Row 2 of `inverse(plane_matrix)` in top-down output pixels: `1/w = inv_w · (x, y, 1)`.
+    pub inv_w: [f64; 3],
+    /// Projective depth `w = 1 + focus_z / f` at the focal plane.
+    pub focus_w: f64,
+    /// Circle-of-confusion scale in output pixels per unit relative depth error.
+    pub blur_px: f64,
+    /// Maximum blur radius in output pixels.
+    pub max_radius: f64,
+}
+
 /// A layer through its own target (today's slow path).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerNode {
@@ -88,6 +101,8 @@ pub struct LayerNode {
     pub alpha: f64,
     /// The active transition, run after the composite (`runTransition`).
     pub transition: Option<PreparedTransition>,
+    /// Optional 2.5D GPU depth-of-field blur stage.
+    pub dof: Option<Dof25d>,
 }
 
 /// An adjustment layer: its effects over the accumulator beneath it.
