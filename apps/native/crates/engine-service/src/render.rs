@@ -1012,7 +1012,7 @@ impl Engine {
                 // Playing frames need enough decoded-frame lookahead (>=2 4K
                 // frames on 16 GiB Macs), warm text/vector rasters, and pooled
                 // intermediate targets under the same grant.
-                (28, 3, 18, 18, 17, 16)
+                (26, 3, 20, 16, 21, 14)
             } else if shares {
                 (35, 10, 25, 5, 10, 10)
             } else {

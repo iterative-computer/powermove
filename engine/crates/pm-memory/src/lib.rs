@@ -82,6 +82,15 @@ pub struct Registration {
 }
 impl Registration {
     pub fn new(weight: u64, evict: impl Fn(u64, Pressure) + Send + Sync + 'static) -> Self {
+        Self::register(weight.max(1), evict)
+    }
+    /// Registers a pressure-only observer (weight 0). It receives every
+    /// pressure notification without reducing cache grants for active render
+    /// or media clients.
+    pub fn pressure_only(evict: impl Fn(u64, Pressure) + Send + Sync + 'static) -> Self {
+        Self::register(0, evict)
+    }
+    fn register(weight: u64, evict: impl Fn(u64, Pressure) + Send + Sync + 'static) -> Self {
         start_pressure_source();
         let grant = Arc::new(AtomicU64::new(0));
         let (id, requests) = {
@@ -91,7 +100,7 @@ impl Registration {
             g.clients.insert(
                 id,
                 Client {
-                    weight: weight.max(1),
+                    weight,
                     grant: grant.clone(),
                     usage: Default::default(),
                     evict: Arc::new(evict),
@@ -192,9 +201,10 @@ fn default_budget() -> u64 {
         );
     }
     // Leave the rest of a bounded footprint for the document, UI, live JS,
-    // driver and in-flight work. Scale smoothly (~1% of RAM, 160–384 MiB) so
-    // 24–32+ GiB machines don't thrash 1080p playback target/text caches.
-    ((ram >> 30) * 10 * MIB).clamp(160 * MIB, 384 * MIB)
+    // driver and in-flight work. Scale smoothly (~1.4% of RAM, 224–384 MiB) so
+    // heavy 1080p timelines with overlapping 4K video and 150+ text layers
+    // never thrash caches on 16–32+ GiB Macs.
+    ((ram >> 30) * 14 * MIB).clamp(224 * MIB, 384 * MIB)
 }
 static ALLOCATOR_RELIEF: OnceLock<fn()> = OnceLock::new();
 
@@ -293,5 +303,33 @@ mod tests {
             assert_eq!(g.budget, budget);
             assert!(requests.iter().map(|(_, b, _)| b).sum::<u64>() <= budget);
         }
+    }
+    #[test]
+    fn pressure_only_observers_do_not_dilute_cache_grants() {
+        let mut g = Governor::new(224 * MIB);
+        let viewer_grant = Arc::new(AtomicU64::new(0));
+        g.clients.insert(
+            1,
+            Client {
+                weight: 12,
+                grant: viewer_grant.clone(),
+                usage: Default::default(),
+                evict: Arc::new(|_, _| {}),
+            },
+        );
+        for id in 2..=13 {
+            g.clients.insert(
+                id,
+                Client {
+                    weight: 0,
+                    grant: Arc::default(),
+                    usage: Default::default(),
+                    evict: Arc::new(|_, _| {}),
+                },
+            );
+        }
+        let reqs = g.rebalance();
+        assert_eq!(viewer_grant.load(Ordering::Acquire), 224 * MIB);
+        assert_eq!(reqs.len(), 13);
     }
 }

@@ -1636,7 +1636,7 @@ fn worker(
     let notifier = Arc::downgrade(&mailbox);
     let _watchdog = WatchdogThread::new(&control, &config);
     let pressure_sender = notifier.clone();
-    let memory = pm_memory::Registration::new(1, move |_, level| {
+    let memory = pm_memory::Registration::pressure_only(move |_, level| {
         if level != pm_memory::Pressure::Normal
             && let Some(tx) = pressure_sender.upgrade()
         {
