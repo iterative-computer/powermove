@@ -1,0 +1,265 @@
+{
+  "format": "aero-eval-recording",
+  "version": 1,
+  "synthetic": true,
+  "provider": "openai-responses",
+  "harness": "toy",
+  "model": "toy-model",
+  "effort": "medium",
+  "task": "cut-drop-flubbed-take",
+  "normalise": {
+    "volatile": [
+      "/prompt_cache_key"
+    ]
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "body": {
+          "input": [
+            {
+              "content": "Take 2 is the flubbed one. Lose it and close the gap.",
+              "role": "user"
+            }
+          ],
+          "instructions": "You are a Powermove agent. Use the tools; finish with checks.",
+          "model": "toy-model",
+          "prompt_cache_key": "<volatile>",
+          "stream": true,
+          "tools": [
+            {
+              "name": "project",
+              "type": "function"
+            },
+            {
+              "name": "edit",
+              "type": "function"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "events": [
+          {
+            "event": "response.created",
+            "data": {
+              "response": {
+                "id": "resp_1"
+              },
+              "type": "response.created"
+            }
+          },
+          {
+            "event": "response.output_item.done",
+            "data": {
+              "item": {
+                "arguments": "{\"view\":\"timeline\"}",
+                "call_id": "call_1",
+                "name": "project",
+                "type": "function_call"
+              },
+              "type": "response.output_item.done"
+            }
+          },
+          {
+            "event": "response.completed",
+            "data": {
+              "response": {
+                "id": "resp_1",
+                "usage": {
+                  "input_tokens": 900,
+                  "input_tokens_details": {
+                    "cached_tokens": 600
+                  },
+                  "output_tokens": 40
+                }
+              },
+              "type": "response.completed"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "body": {
+          "input": [
+            {
+              "content": "Take 2 is the flubbed one. Lose it and close the gap.",
+              "role": "user"
+            },
+            {
+              "arguments": "{\"view\":\"timeline\"}",
+              "call_id": "call_1",
+              "name": "project",
+              "type": "function_call"
+            },
+            {
+              "call_id": "call_1",
+              "output": "{\"file\":\"/workspace/agent/work/interview.pmv\",\"layers\":[\"Take 1\",\"Take 2\",\"Take 3\"],\"revision\":7}",
+              "type": "function_call_output"
+            }
+          ],
+          "instructions": "You are a Powermove agent. Use the tools; finish with checks.",
+          "model": "toy-model",
+          "prompt_cache_key": "<volatile>",
+          "stream": true,
+          "tools": [
+            {
+              "name": "project",
+              "type": "function"
+            },
+            {
+              "name": "edit",
+              "type": "function"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "events": [
+          {
+            "event": "response.created",
+            "data": {
+              "response": {
+                "id": "resp_2"
+              },
+              "type": "response.created"
+            }
+          },
+          {
+            "event": "response.output_item.done",
+            "data": {
+              "item": {
+                "arguments": "{\"layer\":\"Take 2\",\"ripple\":true}",
+                "call_id": "call_2",
+                "name": "edit",
+                "type": "function_call"
+              },
+              "type": "response.output_item.done"
+            }
+          },
+          {
+            "event": "response.completed",
+            "data": {
+              "response": {
+                "id": "resp_2",
+                "usage": {
+                  "input_tokens": 900,
+                  "input_tokens_details": {
+                    "cached_tokens": 600
+                  },
+                  "output_tokens": 40
+                }
+              },
+              "type": "response.completed"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "body": {
+          "input": [
+            {
+              "content": "Take 2 is the flubbed one. Lose it and close the gap.",
+              "role": "user"
+            },
+            {
+              "arguments": "{\"view\":\"timeline\"}",
+              "call_id": "call_1",
+              "name": "project",
+              "type": "function_call"
+            },
+            {
+              "call_id": "call_1",
+              "output": "{\"file\":\"/workspace/agent/work/interview.pmv\",\"layers\":[\"Take 1\",\"Take 2\",\"Take 3\"],\"revision\":7}",
+              "type": "function_call_output"
+            },
+            {
+              "arguments": "{\"layer\":\"Take 2\",\"ripple\":true}",
+              "call_id": "call_2",
+              "name": "edit",
+              "type": "function_call"
+            },
+            {
+              "call_id": "call_2",
+              "output": "{\"check\":\"ok\",\"removed\":\"Take 2\",\"revision\":8}",
+              "type": "function_call_output"
+            }
+          ],
+          "instructions": "You are a Powermove agent. Use the tools; finish with checks.",
+          "model": "toy-model",
+          "prompt_cache_key": "<volatile>",
+          "stream": true,
+          "tools": [
+            {
+              "name": "project",
+              "type": "function"
+            },
+            {
+              "name": "edit",
+              "type": "function"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "events": [
+          {
+            "event": "response.created",
+            "data": {
+              "response": {
+                "id": "resp_3"
+              },
+              "type": "response.created"
+            }
+          },
+          {
+            "event": "response.output_text.delta",
+            "data": {
+              "delta": "Removed Take 2 ",
+              "type": "response.output_text.delta"
+            }
+          },
+          {
+            "event": "response.output_text.delta",
+            "data": {
+              "delta": "and closed the gap.",
+              "type": "response.output_text.delta"
+            }
+          },
+          {
+            "event": "response.completed",
+            "data": {
+              "response": {
+                "id": "resp_3",
+                "usage": {
+                  "input_tokens": 1200,
+                  "input_tokens_details": {
+                    "cached_tokens": 900
+                  },
+                  "output_tokens": 12
+                }
+              },
+              "type": "response.completed"
+            }
+          },
+          {
+            "text": "[DONE]"
+          }
+        ]
+      }
+    }
+  ]
+}

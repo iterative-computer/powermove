@@ -4690,6 +4690,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-aero-eval"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "pm-agents"
 version = "0.1.0"
 dependencies = [
