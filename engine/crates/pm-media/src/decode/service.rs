@@ -999,7 +999,14 @@ impl DecodeService {
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.lease.lock().unwrap().decoders == 0;
         let kept = self.kept.lock().unwrap().clone();
-        let eligible = |key: &SessionKey| eligible(key) && !(zero && kept.contains(key));
+        let hot = (!zero)
+            .then(|| self.displayed.lock().unwrap().front().copied())
+            .flatten();
+        let eligible = |key: &SessionKey| {
+            eligible(key)
+                && !(zero && kept.contains(key))
+                && (zero || hot != Some(*key))
+        };
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.

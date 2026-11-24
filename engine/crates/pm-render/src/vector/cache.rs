@@ -277,7 +277,7 @@ struct SceneOutlines {
 
 impl SceneOutlines {
     const MAX_BYTES: u64 = 32 * 1024 * 1024;
-    const MAX_ENTRIES: usize = 512;
+    const MAX_ENTRIES: usize = 2048;
 
     fn bytes(&self) -> u64 {
         self.bytes
@@ -845,9 +845,12 @@ impl VectorCache {
     fn fit_scene_scratch(&mut self, budget: u64) {
         let scratch_budget = budget.saturating_sub(self.bytes);
         if self.scene_scratch_bytes() > scratch_budget {
-            // Prepared CPU outlines are useful even when the GPU coverage
-            // pages are too expensive to keep.
-            let outlines = (self.scene_outlines.bytes() <= scratch_budget
+            // Prepared CPU outlines are useful even when cached rasters fill
+            // the vector budget and GPU coverage pages are too expensive to
+            // keep. Reserve a small share of the vector budget so outlines
+            // survive across frames (`self.evict` keeps total <= budget).
+            let outline_cap = scratch_budget.max((budget / 4).min(8 * 1024 * 1024));
+            let outlines = (self.scene_outlines.bytes() <= outline_cap
                 && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") != Some(0))
             .then(|| std::mem::take(&mut self.scene_outlines));
             self.clear_scene_scratch();

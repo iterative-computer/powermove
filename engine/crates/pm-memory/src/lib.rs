@@ -191,9 +191,10 @@ fn default_budget() -> u64 {
             0,
         );
     }
-    // Leave the rest of a 500 MiB footprint for the document, UI, live JS,
-    // driver and in-flight work. Larger machines can cache more.
-    160 * MIB * (ram / (32u64 << 30)).clamp(1, 2)
+    // Leave the rest of a bounded footprint for the document, UI, live JS,
+    // driver and in-flight work. Scale smoothly (~1% of RAM, 160–384 MiB) so
+    // 24–32+ GiB machines don't thrash 1080p playback target/text caches.
+    ((ram >> 30) * 10 * MIB).clamp(160 * MIB, 384 * MIB)
 }
 static ALLOCATOR_RELIEF: OnceLock<fn()> = OnceLock::new();
 
