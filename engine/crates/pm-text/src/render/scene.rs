@@ -155,7 +155,6 @@ impl ContourEdge {
             raw_point(elements, contour[(index + 1) % contour.len()]),
         )
     }
-
 }
 
 fn raw_point(elements: &[PathEl], index: u32) -> [f64; 2] {
