@@ -690,15 +690,14 @@ function Layer({
                 symbolSize: t("metrics.symbol_inline"),
               }}
             />
-          ) : item.available && (item.on || item.always || show) ? (
-            switchIcon(item, false)
           ) : item.available ? (
-            // Shown on the row's hover, which the host draws: the blank
-            // gives its column to the switch while the pointer is over the
-            // row (no publication of the panel per hover).
+            // One slot per switch, its Icon always first: shown, or shown on
+            // the row's hover (which the host draws, with the blank that
+            // holds its column until then), it stays the same native button,
+            // so a click sent to it lands through a lock toggle.
             <Fragment key={item.name}>
-              {switchIcon(item, true)}
-              {blank(item.name, true)}
+              {switchIcon(item, !(item.on || item.always || show))}
+              {!(item.on || item.always || show) && blank("hover", true)}
             </Fragment>
           ) : (
             blank(item.name, false)

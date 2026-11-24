@@ -791,3 +791,28 @@ test("reorder sources belong to layer headers and pause during inline rename", a
   expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
   await root.dispose();
 });
+
+// PM-698 review: the lock is the same native button whether it shows on
+// hover or because the layer is locked, so a click sent to the button the
+// person saw lands after the lock toggled (a second click is not dropped).
+test("a row's lock keeps its native button through a lock toggle", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  const send = (a: Intent) => actions.push(a);
+  const row = (locked: boolean) =>
+    frame({ window: { total: 1, first: 0, rows: [{ ...layer(), locked }] } });
+  await root.render(<TimelinePanel frame={row(false)} send={send} />);
+  const first = byId(root, "timeline:lock:layer:headline");
+  expect(first.props.metadata).toMatchObject({ hoverOnly: true });
+  const id = first.id;
+  await root.render(<TimelinePanel frame={row(true)} send={send} />);
+  const locked = byId(root, "timeline:lock:layer:headline");
+  expect(locked.id).toBe(id);
+  expect(locked.props.metadata?.hoverOnly).toBeUndefined();
+  await root.render(<TimelinePanel frame={row(false)} send={send} />);
+  expect(byId(root, "timeline:lock:layer:headline").id).toBe(id);
+  // A click on the button as first painted still reaches its layer.
+  await root.drive(id, "click", {});
+  expect(actions).toEqual([{ type: "switch", id: "layer:headline", name: "lock" }]);
+  await root.dispose();
+});
