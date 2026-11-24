@@ -789,6 +789,12 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         let state = state.filter(|s| s.resolve(s.now()) < 1.);
+        // No build now and none before: every control and field already
+        // shows none (they start without one, and the call that ended the
+        // last build cleared them). The panel asks on every frame it draws.
+        if state.is_none() && self.panel_build.is_none() {
+            return;
+        }
         if let Some(ready) = state
             .as_ref()
             .filter(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
