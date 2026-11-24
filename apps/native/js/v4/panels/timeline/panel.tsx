@@ -724,6 +724,90 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
         }}
       />
     );
+  const valueWells = (
+    <div
+      style={{
+        ...line,
+        width: t("metrics.value_column"),
+        flexShrink: 0,
+        gap: t(row.scaleLinked === undefined ? "metrics.gap" : "space.xs"),
+        ...(row.scaleLinked === undefined ? { paddingRight: t("metrics.gap") } : {}),
+      }}
+    >
+      {row.numeric && row.scaleLinked === undefined ? (
+        <UI.NumberField
+          id={`timeline:value:${row.id}`}
+          label={row.label}
+          {...row.numeric}
+          binding={
+            typeof row.numeric.binding === "string"
+              ? row.numeric.binding
+              : row.numeric.binding.handle
+          }
+          disabled={row.locked}
+          tabIndex={-1}
+        />
+      ) : (
+        (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
+          (axis) =>
+            axis.numeric ? (
+              <UI.NumberField
+                id={`timeline:value:${row.id}:${axis.path}`}
+                label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                {...axis.numeric}
+                binding={
+                  typeof axis.numeric.binding === "string"
+                    ? axis.numeric.binding
+                    : axis.numeric.binding.handle
+                }
+                disabled={row.locked}
+                tabIndex={-1}
+              />
+            ) : axis.editor ? (
+              <UI.TextField
+                id={`timeline:value-edit:${row.id}:${axis.path}`}
+                label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                value={axis.editor.value}
+                binding={axis.editor.binding}
+                style={{
+                  flexGrow: 1,
+                  flexBasis: t("metrics.hit"),
+                  minWidth: t("metrics.hit"),
+                }}
+                tabIndex={-1}
+                metadata={{ cancelChange: true }}
+                onChange={(e) =>
+                  send({ type: "editDone", value: String(e.value ?? "") })
+                }
+              />
+            ) : (
+              <text
+                id={`timeline:value:${row.id}:${axis.path}`}
+                label={`${row.label} ${axis.path.split(".").at(-1)}, ${axis.readout}`}
+                metadata={
+                  row.locked
+                    ? {}
+                    : {
+                        timelineScrub: { layer: row.layer, path: axis.path },
+                      }
+                }
+                style={{
+                  color: t(row.locked ? "colors.muted" : "colors.text"),
+                  fontSize: t("typography.body"),
+                  fontVariantNumeric: "tabular-nums",
+                  flexGrow: 1,
+                  flexBasis: t("metrics.hit"),
+                  minWidth: t("metrics.hit"),
+                  overflow: "hidden",
+                }}
+              >
+                {axis.readout}
+              </text>
+            ),
+        )
+      )}
+    </div>
+  );
   return (
     <>
       <div style={{ ...line, paddingLeft: t("metrics.gap") }}>
@@ -756,90 +840,9 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           {row.label}
         </text>
       </div>
-      <div
-        style={{
-          ...line,
-          width: t("metrics.value_column"),
-          flexShrink: 0,
-          gap: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
-        }}
-      >
-        {/* v1 propertyValueColumns: equal axis columns, then the Scale link. */}
-
-        {row.numeric && row.scaleLinked === undefined ? (
-          <UI.NumberField
-            id={`timeline:value:${row.id}`}
-            label={row.label}
-            {...row.numeric}
-            binding={
-              typeof row.numeric.binding === "string"
-                ? row.numeric.binding
-                : row.numeric.binding.handle
-            }
-            disabled={row.locked}
-            tabIndex={-1}
-          />
-        ) : (
-          (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
-            (axis) =>
-              axis.numeric ? (
-                <UI.NumberField
-                  id={`timeline:value:${row.id}:${axis.path}`}
-                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
-                  {...axis.numeric}
-                  binding={
-                    typeof axis.numeric.binding === "string"
-                      ? axis.numeric.binding
-                      : axis.numeric.binding.handle
-                  }
-                  disabled={row.locked}
-                  tabIndex={-1}
-                />
-              ) : axis.editor ? (
-                <UI.TextField
-                  id={`timeline:value-edit:${row.id}:${axis.path}`}
-                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
-                  value={axis.editor.value}
-                  binding={axis.editor.binding}
-                  style={{
-                    flexGrow: 1,
-                    flexBasis: t("metrics.hit"),
-                    minWidth: t("metrics.hit"),
-                  }}
-                  tabIndex={-1}
-                  metadata={{ cancelChange: true }}
-                  onChange={(e) =>
-                    send({ type: "editDone", value: String(e.value ?? "") })
-                  }
-                />
-              ) : (
-                <text
-                  id={`timeline:value:${row.id}:${axis.path}`}
-                  label={`${row.label} ${axis.path.split(".").at(-1)}, ${axis.readout}`}
-                  metadata={
-                    row.locked
-                      ? {}
-                      : {
-                          timelineScrub: { layer: row.layer, path: axis.path },
-                        }
-                  }
-                  style={{
-                    color: t(row.locked ? "colors.muted" : "colors.text"),
-                    fontSize: t("typography.body"),
-                    fontVariantNumeric: "tabular-nums",
-                    flexGrow: 1,
-                    flexBasis: t("metrics.hit"),
-                    minWidth: t("metrics.hit"),
-                    overflow: "hidden",
-                  }}
-                >
-                  {axis.readout}
-                </text>
-              ),
-          )
-        )}
-        {row.scaleLinked !== undefined && (
+      {row.scaleLinked === undefined ? valueWells : (
+        <div style={{ ...line, flexShrink: 0, gap: t("space.xs"), paddingRight: t("metrics.gap") }}>
+          {valueWells}
           <Icon
             id={`timeline:scale-link:${row.id}`}
             label={
@@ -854,8 +857,8 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             send={send}
             intent={{ type: "scaleLink", layer: row.layer }}
           />
-        )}
-      </div>
+        </div>
+      )}
     </>
   );
 }

@@ -189,6 +189,7 @@ enum Spec {
     Property {
         layer: String,
         path: String,
+        motion: pm_surface::kit::NumericMotion,
     },
     WorkIn,
     WorkOut,
@@ -275,6 +276,11 @@ enum Job {
     Sync,
     Disclosure(String),
     SelectLayer(String, Mods),
+    PaletteSelectLayer {
+        layer: String,
+        document: u64,
+        composition: Option<String>,
+    },
     SelectAll(Option<(u64, Option<String>, String)>),
     /// The transition selected on a clip's edge, or none.
     SelectTransition(Option<(String, pm_panel_timeline::render::Edge)>),
@@ -390,7 +396,7 @@ enum Gesture {
         proedit: bool,
         keys: bool,
         work: Option<WorkDragMapping>,
-        readout: bool,
+        property_motion: Option<pm_surface::kit::NumericMotion>,
         quick: Option<(Point<Pixels>, f64, usize)>,
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
@@ -473,6 +479,7 @@ pub struct TimelineSurface {
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     pending_scene: Option<(Built, bool)>,
+    seen_reveal_serial: u64,
     outline_runtime: std::sync::Weak<pm_builtins::Builtins>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
@@ -640,6 +647,7 @@ impl TimelineSurface {
             model: Default::default(),
             scene: None,
             pending_scene: None,
+            seen_reveal_serial: 0,
             outline_runtime: std::sync::Weak::new(),
             snap_guide: None,
             graph: None,
@@ -878,6 +886,24 @@ impl TimelineSurface {
         }
         self.pump(cx);
     }
+    pub(crate) fn palette_select_layer(
+        &mut self,
+        published: &pm_kernel::Published,
+        args: &[serde_json::Value],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(layer) = args.first().and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        self.queue.push_back(Job::PaletteSelectLayer {
+            layer: layer.to_owned(),
+            document: published.snapshot.doc_id,
+            composition: published.snapshot.open_comp(),
+        });
+        self.pump(cx);
+        true
+    }
+
     pub(crate) fn toggle_disclosure(&mut self, layer: String, cx: &mut Context<Self>) {
         self.queue.push_back(Job::Disclosure(layer));
         self.pump(cx);
@@ -1784,8 +1810,11 @@ impl TimelineSurface {
                 .detach();
             }
         }
-        self.view.scroll_y =
-            self.scroll_for_scene(&built.model, &built.scene, self.row_viewport_height());
+        let height = self.row_viewport_height();
+        self.view.scroll_y = self.scroll_for_scene(&built.model, &built.scene, height);
+        if height > 0. {
+            self.seen_reveal_serial = built.model.reveal_serial;
+        }
         self.model = built.model;
         let delegate = self.delegate.clone();
         let view = self.model.clone();
@@ -1856,26 +1885,26 @@ impl TimelineSurface {
     }
 
     fn scroll_for_scene(&self, model: &TimelineModel, scene: &Scene, height: f64) -> f64 {
-        let mut scroll = self.view.scroll_y;
-        if model.reveal_serial != self.model.reveal_serial
-            && let Some((layer, path)) = &model.reveal_target
-        {
-            let target = model.rows().iter().find(|row| match &row.id {
-                RowId::Property { layer_id, channel } if layer_id == layer => model
-                    .track_channels(layer, channel)
-                    .iter()
-                    .any(|c| &c.path == path),
-                _ => false,
-            });
-            if let Some(top) =
-                target.and_then(|row| scene.scroll_for(&pm_panel_timeline::v4::row_id(&row.id)))
-            {
-                let bottom = top + self.tokens.metrics.track_row as f64;
-                if top < scroll {
-                    scroll = top;
-                } else if bottom > scroll + height {
-                    scroll = (bottom - height).max(0.);
+        use pm_panel_timeline::RevealTarget;
+
+        let scroll = self.view.scroll_y;
+        if height > 0. && model.reveal_serial != self.seen_reveal_serial {
+            let target = match &model.reveal_target {
+                Some(RevealTarget::Layer(layer)) => Some(RowId::Layer(layer.clone())),
+                Some(RevealTarget::Property { layer, path }) => {
+                    model.rows().iter().find_map(|row| match &row.id {
+                        RowId::Property { layer_id, channel } if layer_id == layer => model
+                            .track_channels(layer, channel)
+                            .iter()
+                            .any(|c| &c.path == path)
+                            .then(|| row.id.clone()),
+                        _ => None,
+                    })
                 }
+                None => None,
+            };
+            if let Some(target) = target {
+                return scene.reveal_scroll(&pm_panel_timeline::v4::row_id(&target), scroll, height);
             }
         }
         scene.clamp_scroll(scroll, height)
@@ -1884,8 +1913,11 @@ impl TimelineSurface {
         let Some(scene) = &self.scene else {
             return;
         };
-        let height = f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64;
-        self.view.scroll_y = scene.clamp_scroll(self.view.scroll_y, height);
+        let height = self.row_viewport_height();
+        self.view.scroll_y = self.scroll_for_scene(&self.model, scene, height);
+        if height > 0. {
+            self.seen_reveal_serial = self.model.reveal_serial;
+        }
     }
     fn viewport(&self) -> Option<Viewport> {
         let (w, h) = (
@@ -3157,7 +3189,11 @@ impl TimelineSurface {
         self.start_pointer_gesture(cx);
         self.gesture = Gesture::Pressed(Press {
             origin,
-            spec: Some(Spec::Property { layer, path }),
+            spec: Some(Spec::Property {
+                layer,
+                path,
+                motion: pm_surface::kit::NumericMotion::new(f64::from(origin.x), 0.),
+            }),
             release: None,
         });
     }
@@ -3593,15 +3629,17 @@ impl TimelineSurface {
             Gesture::Idle => return false,
             Gesture::Pressed(press) => {
                 let delta = event.position - press.origin;
-                let travel = if matches!(press.spec, Some(Spec::Property { .. })) {
-                    f32::from(delta.x).abs()
-                } else {
-                    f32::from(delta.x).hypot(f32::from(delta.y))
-                };
-                if travel < self.tokens.metrics.drag_threshold
-                    && !matches!(press.spec, Some(Spec::TextStagger { .. }))
-                {
-                    return true;
+                let threshold = self.tokens.metrics.drag_threshold;
+                match &mut press.spec {
+                    Some(Spec::Property { motion, .. }) => {
+                        if motion.sample(f64::from(event.position.x), f64::from(threshold), 1., 0.5,
+                            event.modifiers.shift, event.modifiers.alt, (-f64::MAX, f64::MAX)).is_none() {
+                            return true;
+                        }
+                    }
+                    Some(Spec::TextStagger { .. }) => {}
+                    _ if f32::from(delta.x).hypot(f32::from(delta.y)) < threshold => return true,
+                    _ => {}
                 }
                 let origin = press.origin;
                 let Some(spec) = press.spec.take() else {
@@ -3625,7 +3663,10 @@ impl TimelineSurface {
                     spec,
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
                 );
-                let readout = matches!(spec, Spec::Property { .. });
+                let property_motion = match &spec {
+                    Spec::Property { motion, .. } => Some(motion.clone()),
+                    _ => None,
+                };
                 let quick_count = match spec {
                     Spec::QuickOffsetKeys => self
                         .model
@@ -3677,6 +3718,10 @@ impl TimelineSurface {
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
                     self.cursor = CursorStyle::ClosedHand;
                 }
+                if property_motion.is_some() {
+                    self.cursor = CursorStyle::ResizeLeftRight;
+                    cx.notify();
+                }
                 let keys = matches!(spec, Spec::Keys | Spec::GraphKeys);
                 let work =
                     matches!(spec, Spec::WorkIn | Spec::WorkOut | Spec::WorkMove).then(|| {
@@ -3704,7 +3749,7 @@ impl TimelineSurface {
                     proedit,
                     keys,
                     work,
-                    readout,
+                    property_motion,
                     quick,
                     quick_limits,
                     handle,
@@ -3718,7 +3763,7 @@ impl TimelineSurface {
                 proedit,
                 keys,
                 work,
-                readout,
+                property_motion,
                 quick,
                 quick_limits,
                 handle,
@@ -3734,8 +3779,11 @@ impl TimelineSurface {
                     }
                     cx.notify();
                 }
-                let (origin, proedit, keys, work, readout, handle) =
-                    (*origin, *proedit, *keys, *work, *readout, *handle);
+                let property_delta = property_motion.as_mut().and_then(|motion| motion.sample(
+                    f64::from(event.position.x), f64::from(self.tokens.metrics.drag_threshold),
+                    1., 0.5, event.modifiers.shift, event.modifiers.alt, (-f64::MAX, f64::MAX),
+                ));
+                let (origin, proedit, keys, work, handle) = (*origin, *proedit, *keys, *work, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
                 if let Some(work) = work {
                     let (x, _) = self.local(event.position);
@@ -3751,19 +3799,8 @@ impl TimelineSurface {
                     sample.handle_time = self.time_at(x) - layer_from;
                     sample.handle_value = graph.value_at(area, y);
                 }
-                if readout {
-                    let delta = event.position - origin;
-                    if let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
-                        start: 0.,
-                        delta: (f32::from(delta.x) as f64, f32::from(delta.y) as f64),
-                        step: 1.,
-                        speed: 0.5,
-                        shift: event.modifiers.shift,
-                        alt: event.modifiers.alt,
-                        bounds: (-f64::MAX, f64::MAX),
-                    }) {
-                        sample.value_delta = value;
-                    }
+                if let Some(value) = property_delta {
+                    sample.value_delta = value;
                 }
                 if proedit {
                     // Pro timing takes exact frames: the kernel never snaps subframes.
@@ -3803,7 +3840,7 @@ impl TimelineSurface {
                 }
                 // Work-area drags extrapolate beyond the ruler in Electron.
                 // Autoscroll would move its mapping under the held handle.
-                if work.is_none() {
+                if work.is_none() && property_delta.is_none() {
                     self.autoscroll(event.position, cx);
                 }
                 // Keep one sample for the next display refresh. A mouse-up
@@ -4019,7 +4056,7 @@ impl TimelineSurface {
                 }
             }
             Gesture::Pressed(press) => {
-                if let Some(Spec::Property { layer, path }) = press.spec {
+                if let Some(Spec::Property { layer, path, .. }) = press.spec {
                     // The value opens as a field: ⌘A, digits and Return typed
                     // from now on are its, never shortcuts on the layers.
                     pm_shell::typing::expect();
@@ -4033,7 +4070,10 @@ impl TimelineSurface {
                     self.queue.push_back(job);
                 }
             }
-            Gesture::Dragging { .. } => {
+            Gesture::Dragging { property_motion, .. } => {
+                if property_motion.is_some() {
+                    self.cursor = CursorStyle::Arrow;
+                }
                 self.transform = None;
                 self.graph_axis = false;
                 self.readout = None;
@@ -5005,6 +5045,27 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .await
                 .map_err(text)
         }
+        Job::PaletteSelectLayer { layer, document, composition } => {
+            client.sync().map_err(text)?;
+            client.adopt_view().map_err(text)?;
+            if client.model.index.doc_id != document || client.model.index.comp_id != composition {
+                return Ok(vec![]);
+            }
+            if client.model.index.layer(&layer).is_none() {
+                return Err("Unknown layer".into());
+            }
+            let selection = SelectionCall::Layers { ids: vec![layer.clone()], add: false };
+            let effects = client.dispatch(Plan {
+                calls: vec![SelectionCall::User(Box::new(selection)).into()],
+                expected_document: Some(document),
+                ..Default::default()
+            }).await.map_err(text)?;
+            if client.model.index.comp_id == composition {
+                client.model.reveal_layer(layer);
+                client.publish_view_if_changed().await.map_err(text)?;
+            }
+            Ok(effects)
+        }
         Job::SelectKey {
             layer,
             channel,
@@ -5340,7 +5401,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
             anchor_value,
         },
         Spec::Handle { key, side } => DragKind::Handle { id: key, side },
-        Spec::Property { layer, path } => {
+        Spec::Property { layer, path, .. } => {
             let paths: Vec<_> = model
                 .track_channels(&layer, &path)
                 .iter()

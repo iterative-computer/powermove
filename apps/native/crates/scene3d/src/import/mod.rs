@@ -13,6 +13,7 @@ pub mod path;
 mod ply;
 pub mod splats;
 mod stl;
+mod texture;
 mod three_ds;
 mod three_mf;
 mod xml;
@@ -20,6 +21,8 @@ use crate::{Error, Result, fail};
 pub use obj::ImportFile;
 use pm_geom3d::{gltf, model_import::glb::GlbWriter};
 use serde_json::json;
+type ResolveCompanion<'a> = dyn FnMut(&str) -> Result<Option<Vec<u8>>> + Send + 'a;
+
 pub const MAX_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_TRIANGLES: usize = 10_000_000;
 #[derive(Clone, Debug)]
@@ -56,7 +59,7 @@ pub fn load_with_cad(
         let prepared = archive::prepare_zip(bytes, cad)?;
         return load(&prepared.name, &prepared.bytes);
     }
-    if let Some(converted) = convert(&extension, bytes, cad)? {
+    if let Some(converted) = convert(&extension, bytes, cad, &mut |_| Ok(None))? {
         return load("converted.glb", &converted);
     }
     match extension.as_str() {
@@ -125,11 +128,53 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         .ok_or_else(|| {
             Error("Choose one model at a time with its material and texture files".into())
         })?;
+    let mut resolve = |uri: &str| {
+        let uri = path::relative_reference(uri)?;
+        let name = uri.rsplit('/').next().unwrap_or(&uri);
+        Ok(files
+            .iter()
+            .find(|file| file.name.eq_ignore_ascii_case(&uri))
+            .or_else(|| {
+                files.iter().find(|file| {
+                    file.name
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .is_some_and(|leaf| leaf.eq_ignore_ascii_case(name))
+                })
+            })
+            .map(|file| file.bytes.clone()))
+    };
+    let (name, bytes) = prepare_model(f, &files, cad, &mut resolve)?;
+    Ok(Prepared {
+        name,
+        bytes,
+        original: files,
+    })
+}
+
+fn prepare_model(
+    f: &ImportFile,
+    files: &[ImportFile],
+    cad: Option<&dyn cad::Tessellator>,
+    resolve: &mut ResolveCompanion<'_>,
+) -> Result<(String, Vec<u8>)> {
     let e = ext(&f.name);
     let (name, bytes) = if e == "zip" {
         let prepared = archive::prepare_zip(&f.bytes, cad)?;
         (prepared.name, prepared.bytes)
-    } else if let Some(converted) = convert(&e, &f.bytes, cad)? {
+    } else if e == "gltf" || (e == "vrm" && !f.bytes.starts_with(b"glTF")) {
+        let bytes = path::embed_gltf(&f.bytes, |uri| {
+            resolve(uri)?.ok_or_else(|| Error(format!("Missing glTF companion: {uri}")))
+        })?;
+        if e == "vrm" {
+            let bytes = convert(&e, &bytes, cad, resolve)?.unwrap();
+            load("converted.glb", &bytes)?;
+            (replace_ext(&f.name, "glb"), bytes)
+        } else {
+            load(&f.name, &bytes)?;
+            (f.name.clone(), bytes)
+        }
+    } else if let Some(converted) = convert(&e, &f.bytes, cad, resolve)? {
         load("converted.glb", &converted)?;
         (replace_ext(&f.name, "glb"), converted)
     } else if e == "obj" && files.len() > 1 {
@@ -144,25 +189,22 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         load(&f.name, &f.bytes)?;
         (f.name.clone(), f.bytes.clone())
     };
-    Ok(Prepared {
-        name,
-        bytes,
-        original: files,
-    })
+    Ok((name, bytes))
 }
 fn convert(
     extension: &str,
     bytes: &[u8],
     cad: Option<&dyn cad::Tessellator>,
+    resolve: &mut ResolveCompanion<'_>,
 ) -> Result<Option<Vec<u8>>> {
     let result = match extension {
-        "fbx" => convert_fbx(bytes),
+        "fbx" => convert_fbx(bytes, resolve),
         "stl" => stl::convert(bytes),
         "off" => off::convert(bytes),
         "ply" if splats::is_mesh_ply(bytes) => ply::convert(bytes),
         "3mf" => three_mf::convert(bytes),
-        "dae" => collada::convert(bytes),
-        "3ds" => three_ds::convert(bytes),
+        "dae" => collada::convert(bytes, resolve),
+        "3ds" => three_ds::convert(bytes, resolve),
         "vrm" if bytes.starts_with(b"glTF") => Ok(bytes.to_vec()),
         "vrm" => {
             let document =
@@ -189,12 +231,34 @@ fn convert(
 
 /// The shared importer never opens sibling files. Match its Electron host's
 /// stack allowance; source admission and rendering call this on workers.
-fn convert_fbx(bytes: &[u8]) -> Result<Vec<u8>> {
+fn convert_fbx(bytes: &[u8], resolve: &mut ResolveCompanion<'_>) -> Result<Vec<u8>> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("native-fbx-import".into())
             .stack_size(8 * 1024 * 1024)
-            .spawn_scoped(scope, || pm_import_fbx::convert(bytes))
+            .spawn_scoped(scope, || {
+                pm_import_fbx::convert_with_textures(bytes, |name, embedded, color| {
+                    let image = if embedded.is_empty() {
+                        // Some exporters store a platform-specific reference.
+                        // Only relative paths from the bundle may reach the resolver.
+                        if name.is_empty() || path::relative_reference(name).is_err() {
+                            return Ok(None);
+                        }
+                        texture::resolve(name, resolve).map_err(|e| e.to_string())?
+                    } else {
+                        // Keep existing support for geometry whose optional
+                        // embedded images use an unsupported encoding.
+                        texture::decode(embedded).ok()
+                    };
+                    image
+                        .map(|image| {
+                            texture::encode(image, color)
+                                .map(|(_, bytes)| bytes)
+                                .map_err(|e| e.to_string())
+                        })
+                        .transpose()
+                })
+            })
             .map_err(|e| Error(format!("Cannot start FBX import: {e}")))?
             .join()
             .map_err(|_| Error("FBX import worker stopped".into()))?

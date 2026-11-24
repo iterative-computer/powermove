@@ -2054,6 +2054,11 @@ impl Controller {
         let Some(published) = self.published.clone() else {
             return false;
         };
+        if name == "palette.selectLayer"
+            && let Some(timeline) = self.builtins.timeline.as_ref()
+        {
+            return timeline.update(cx, |t, cx| t.palette_select_layer(&published, args, cx));
+        }
         if name == "nudgeSelection" {
             self.extend_nudge_burst(cx);
         }

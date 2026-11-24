@@ -2,6 +2,12 @@
 use crate::{Channel, ModelError, TimelineModel};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevealTarget {
+    Layer(String),
+    Property { layer: String, path: String },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Disclosure {
     pub collapsed: bool,
@@ -368,4 +374,42 @@ fn same_paths(a: &[String], b: &[String]) -> bool {
     let a: HashSet<_> = a.iter().collect();
     let b: HashSet<_> = b.iter().collect();
     a == b
+}
+
+
+#[cfg(test)]
+mod layer_reveal_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn layer_reveal_opens_only_its_ancestor_groups() {
+        let root = pm_model::Node::parse_bytes(br#"{
+            "id":"project", "dur":10, "layers":[
+                {"id":"outer","type":"group"},
+                {"id":"inner","type":"group","group":"outer"},
+                {"id":"target","type":"shape","group":"inner"},
+                {"id":"other","type":"group"},
+                {"id":"hidden","type":"shape","group":"other"}
+            ]
+        }"#, 0).unwrap();
+        let snapshot = pm_kernel::Snapshot {
+            doc_id: 1,
+            revision: 0,
+            document: Arc::new(pm_model::Document::from_root(Some(root), 0)),
+        };
+        let mut model = TimelineModel::default();
+        model.index = Arc::new(crate::TimelineIndex::from_snapshot(&snapshot));
+        model.rebuild_rows();
+        let target = crate::RowId::Layer("target".into());
+        let hidden = crate::RowId::Layer("hidden".into());
+        assert!(!model.rows().iter().any(|row| row.id == target));
+        model.reveal_layer("target".into());
+        assert!(model.rows().iter().any(|row| row.id == target && row.depth == 2));
+        assert!(!model.rows().iter().any(|row| row.id == hidden));
+        assert!(!model.reveal.layers["outer"].group_collapsed);
+        assert!(!model.reveal.layers["inner"].group_collapsed);
+        assert_eq!(model.reveal_serial, 1);
+        assert_eq!(model.reveal_target, Some(RevealTarget::Layer("target".into())));
+    }
 }

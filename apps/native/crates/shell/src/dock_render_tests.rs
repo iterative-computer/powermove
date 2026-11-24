@@ -8,7 +8,7 @@ use std::{cell::Cell, sync::Arc};
 const PANELS: [&str; 5] = ["ext.logos", "fxbrowser", "easing", "ext.pixel", "ext.notes"];
 type Probe = (String, Bounds<Pixels>, Bounds<Pixels>);
 
-struct DockFixture(Rc<RefCell<Vec<Probe>>>);
+struct DockFixture(Rc<RefCell<Vec<Probe>>>, bool);
 
 impl crate::integration::Integration for DockFixture {
     fn observe(&self, _: &mut Context<Editor>) {}
@@ -71,15 +71,20 @@ impl crate::integration::Integration for DockFixture {
         _: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement> {
-        if id != "agent" || !tabbed {
+        if !tabbed || !self.1 {
             return None;
         }
+        let controls: &[(&str, f32)] = match id {
+            "agent" => &[("Threads", 94.), ("+", 26.)],
+            "assets" => &[("List", 26.), ("Grid", 26.), ("Search Media", 24.), ("Add", 24.)],
+            _ => return None,
+        };
         let probes = self.0.clone();
         Some(
             div()
                 .flex()
                 .h_full()
-                .children([("Threads", 94.), ("+", 26.)].map(|(label, width)| {
+                .children(controls.iter().map(|&(label, width)| {
                     let probes = probes.clone();
                     div()
                         .relative()
@@ -125,12 +130,22 @@ impl crate::integration::Integration for DockFixture {
 
 #[gpui::test]
 fn narrow_agent_stack_keeps_both_header_controls_inside_the_panel(cx: &mut gpui::TestAppContext) {
+    assert_tabbed_header_fits(cx, 0, "agent", &["Threads", "+"]);
+}
+
+#[gpui::test]
+fn tabbed_project_header_keeps_all_four_controls_visible(cx: &mut gpui::TestAppContext) {
+    assert_tabbed_header_fits(cx, 1, "assets", &["List", "Grid", "Search Media", "Add"]);
+}
+
+fn assert_tabbed_header_fits(cx: &mut gpui::TestAppContext, active: usize, id: &str, labels: &[&str]) {
     let probes = Rc::new(RefCell::new(Vec::new()));
     let recorded = probes.clone();
     let (view, cx) = cx.add_window_view(|_, cx| {
         let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
         let mut editor = Editor::new(tokens, None, cx);
-        editor.integration = Some(Rc::new(DockFixture(recorded)));
+        editor.integration = Some(Rc::new(DockFixture(recorded, true)));
+        editor.layout.close_panel("assets").unwrap();
         let right = editor
             .layout
             .docks
@@ -139,22 +154,29 @@ fn narrow_agent_stack_keeps_both_header_controls_inside_the_panel(cx: &mut gpui:
             .unwrap();
         right.size = Some(220.);
         right.groups = vec![layout::Group {
-            tabs: vec!["agent".into(), "project".into()],
-            active: 0,
+            tabs: vec!["agent".into(), "assets".into()],
+            active,
             size: None,
             collapsed: false,
         }];
         editor
     });
     cx.run_until_parked();
-    let panel = view.read_with(cx, |editor, _| editor.panel_rect("agent").unwrap());
+    let panel = view.read_with(cx, |editor, _| editor.panel_rect(id).unwrap());
     assert!(panel.w <= 250.);
-    for label in ["Threads", "+"] {
-        let frames = probes.borrow();
-        let (_, frame, clip) = frames.iter().rev().find(|(id, _, _)| id == label).unwrap();
-        assert!(frame.size.width > px(0.));
-        assert!(frame.right() <= px(panel.x + panel.w));
-        assert!(frame.right() <= clip.right());
+    let frames = probes.borrow();
+    for &label in labels {
+        let mut matching = frames.iter().filter(|(id, _, _)| id == label).peekable();
+        assert!(matching.peek().is_some(), "{label} never painted");
+        for (_, frame, clip) in matching {
+            assert!(frame.size.width > px(0.));
+            assert!(frame.left() >= px(panel.x));
+            assert!(
+                frame.right() <= px(panel.x + panel.w),
+                "{label}: {frame:?} outside {panel:?}",
+            );
+            assert!(frame.right() <= clip.right());
+        }
     }
 }
 
@@ -180,7 +202,7 @@ fn dock_render_follows_wheel_and_momentum() {
             .open_window(size(px(1000.), px(600.)), |_, cx| {
                 cx.new(|cx| {
                     let mut editor = Editor::new(tokens, None, cx);
-                    editor.integration = Some(Rc::new(DockFixture(probes.clone())));
+                    editor.integration = Some(Rc::new(DockFixture(probes.clone(), false)));
                     let right = editor
                         .layout
                         .docks

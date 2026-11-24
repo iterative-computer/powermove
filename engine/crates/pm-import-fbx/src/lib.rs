@@ -1,5 +1,5 @@
 //! FBX conversion shared by Electron and native Studio. Hosts run this on a
-//! worker with an 8 MiB stack, never in a UI callback. No external file reads.
+//! worker with an 8 MiB stack, never in a UI callback. Companions are supplied by the host.
 //! The durable result is ordinary glTF: parts, PBR materials, skins and baked TRS.
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -14,17 +14,20 @@ pub struct Imported {
     pub stats: Value,
 }
 
-#[derive(Default)]
-struct Gltf {
+type ImageResolver<'a> = dyn FnMut(&str, &[u8], bool) -> Result<Option<Vec<u8>>, String> + 'a;
+
+struct Gltf<'a> {
+    resolve_image: &'a mut ImageResolver<'a>,
+
     bin: Vec<u8>,
     views: Vec<Value>,
     accessors: Vec<Value>,
     images: Vec<Value>,
     textures: Vec<Value>,
-    texture_indices: HashMap<u32, usize>,
+    texture_indices: HashMap<(u32, bool), usize>,
     warnings: Vec<String>,
 }
-impl Gltf {
+impl Gltf<'_> {
     fn view(&mut self, bytes: &[u8]) -> Result<usize, String> {
         while self.bin.len() % 4 != 0 {
             self.bin.push(0);
@@ -73,6 +76,7 @@ impl Gltf {
         &mut self,
         map: &ufbx::MaterialMap,
         mesh: Option<&ufbx::Mesh>,
+        color: bool,
     ) -> Result<Option<Value>, String> {
         let Some(texture) = map.texture.as_ref().filter(|_| map.texture_enabled) else {
             return Ok(None);
@@ -84,32 +88,52 @@ impl Gltf {
         } else {
             &[]
         };
-        if content.is_empty() {
-            let warning = "External FBX textures are not read; embed PNG/JPEG images before import"
-                .to_string();
-            if !self.warnings.contains(&warning) {
-                self.warnings.push(warning);
-            }
-            return Ok(None);
-        }
-        let index = if let Some(index) = self.texture_indices.get(&texture.element.typed_id) {
+        let key = (texture.element.typed_id, color);
+        let index = if let Some(index) = self.texture_indices.get(&key) {
             *index
         } else {
+            let relative: &str = texture.relative_filename.as_ref();
+            let filename: &str = texture.filename.as_ref();
+            let name = if relative.is_empty() {
+                filename.rsplit(['/', '\\']).next().unwrap_or(filename)
+            } else {
+                relative
+            };
+            let Some(content) = (self.resolve_image)(name, content, color)? else {
+                if !self
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("Missing FBX"))
+                {
+                    self.warnings
+                        .push("Missing FBX texture; include the companion file or embed it".into());
+                }
+                return Ok(None);
+            };
             let mime = if content.starts_with(b"\x89PNG\r\n\x1a\n") {
                 "image/png"
             } else if content.starts_with(&[0xff, 0xd8, 0xff]) {
                 "image/jpeg"
             } else {
                 self.warnings
-                    .push("Unsupported embedded FBX image; use PNG or JPEG".into());
+                    .push("Unsupported FBX image; use PNG or JPEG".into());
                 return Ok(None);
             };
-            let view = self.view(content)?;
-            let index = self.textures.len();
-            self.images.push(json!({"bufferView":view,"mimeType":mime}));
-            self.textures
-                .push(json!({"source":self.images.len()-1,"sampler":0}));
-            self.texture_indices.insert(texture.element.typed_id, index);
+            let index = if let Some(index) = self.images.iter().position(|image| {
+                let view = &self.views[image["bufferView"].as_u64().unwrap() as usize];
+                let offset = view["byteOffset"].as_u64().unwrap() as usize;
+                let length = view["byteLength"].as_u64().unwrap() as usize;
+                self.bin[offset..offset + length] == content
+            }) {
+                index
+            } else {
+                let view = self.view(&content)?;
+                self.images.push(json!({"bufferView":view,"mimeType":mime}));
+                self.textures
+                    .push(json!({"source":self.images.len()-1,"sampler":0}));
+                self.textures.len() - 1
+            };
+            self.texture_indices.insert(key, index);
             index
         };
         let uv = mesh
@@ -148,13 +172,17 @@ impl Gltf {
         if alpha < 1.0 {
             out["alphaMode"] = json!("BLEND");
         }
-        if let Some(info) = self.texture(&p.base_color, None)? {
+        if let Some(info) = self.texture(&p.base_color, None, true)? {
             out["pbrMetallicRoughness"]["baseColorTexture"] = info;
         }
-        if let Some(info) = self.texture(&p.normal_map, None)? {
+        if let Some(info) = self.texture(&p.normal_map, None, false)? {
             out["normalTexture"] = info;
         }
-        let e = color(&p.emission_color, [0.0, 0.0, 0.0]);
+        let emissive_map = self.texture(&p.emission_color, None, true)?;
+        let e = color(
+            &p.emission_color,
+            [if emissive_map.is_some() { 1.0 } else { 0.0 }; 3],
+        );
         let emission = scalar(&p.emission_factor, 1.0);
         let emission_scale = e.into_iter().fold(1.0, f64::max);
         out["emissiveFactor"] = json!([
@@ -162,7 +190,7 @@ impl Gltf {
             (e[1] / emission_scale).max(0.0),
             (e[2] / emission_scale).max(0.0)
         ]);
-        if let Some(info) = self.texture(&p.emission_color, None)? {
+        if let Some(info) = emissive_map {
             out["emissiveTexture"] = info;
         }
         out["extensions"] = json!({
@@ -202,6 +230,17 @@ fn matrix(m: ufbx::Matrix) -> [f32; 16] {
 }
 
 pub fn convert(bytes: &[u8]) -> Result<Imported, String> {
+    convert_with_textures(bytes, |_, embedded, _| {
+        Ok((!embedded.is_empty()).then(|| embedded.to_vec()))
+    })
+}
+
+/// Resolve or normalize texture bytes without granting the FBX parser access
+/// to local paths. The host may supply a selected companion for an empty map.
+pub fn convert_with_textures(
+    bytes: &[u8],
+    mut resolve_image: impl FnMut(&str, &[u8], bool) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Imported, String> {
     let start = Instant::now();
     if bytes.is_empty() || bytes.len() > MAX_BYTES {
         return Err("FBX files must be between 1 byte and 256 MB".into());
@@ -243,7 +282,16 @@ pub fn convert(bytes: &[u8]) -> Result<Imported, String> {
     if scene.meshes.iter().map(|m| m.num_triangles).sum::<usize>() > MAX_TRIANGLES {
         return Err("FBX exceeds 10 million triangles".into());
     }
-    let mut g = Gltf::default();
+    let mut g = Gltf {
+        resolve_image: &mut resolve_image,
+        bin: Vec::new(),
+        views: Vec::new(),
+        accessors: Vec::new(),
+        images: Vec::new(),
+        textures: Vec::new(),
+        texture_indices: HashMap::new(),
+        warnings: Vec::new(),
+    };
     let mut materials = scene
         .materials
         .iter()
@@ -259,6 +307,7 @@ pub fn convert(bytes: &[u8]) -> Result<Imported, String> {
     let mut cameras = Vec::new();
     let mut lights = Vec::new();
     let mut triangle_count = 0usize;
+    let mut rigid_meshes = HashMap::new();
     for node in &scene.nodes {
         let t = &node.local_transform;
         let mut out = json!({"name":node.element.name.as_ref(),"translation":v3(t.translation),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"scale":v3(t.scale),"children":node.children.iter().map(|n|n.element.typed_id).collect::<Vec<_>>()});
@@ -267,124 +316,146 @@ pub fn convert(bytes: &[u8]) -> Result<Imported, String> {
         }
         if let Some(mesh) = &node.mesh {
             let skin = mesh.skin_deformers.first();
-            if skin.is_some_and(|s| s.clusters.len() > u16::MAX as usize) {
-                return Err("FBX skin has too many joints".into());
-            }
-            let mut primitives = Vec::new();
-            let mut groups: Vec<Vec<usize>> = vec![Vec::new(); node.materials.len().max(1)];
-            for face in 0..mesh.faces.len() {
-                let mat = mesh.face_material.get(face).copied().unwrap_or(0) as usize;
-                let mat = mat.min(groups.len() - 1);
-                groups[mat].push(face);
-            }
-            for (material, faces) in groups.iter().enumerate() {
-                let mut positions = Vec::new();
-                let mut normals = Vec::new();
-                let mut uv = Vec::new();
-                let mut uv1 = Vec::new();
-                let mut colors = Vec::new();
-                let mut joints = Vec::new();
-                let mut weights = Vec::new();
-                let mut corners = vec![0u32; mesh.max_face_triangles * 3];
-                for &face in faces {
-                    let count =
-                        ufbx::triangulate_face(&mut corners, mesh, mesh.faces[face]) as usize * 3;
-                    triangle_count += count / 3;
-                    if triangle_count > MAX_TRIANGLES {
-                        return Err("FBX instances exceed 10 million triangles".into());
+            let key = (
+                mesh.element.typed_id,
+                node.materials
+                    .iter()
+                    .map(|m| m.element.typed_id)
+                    .collect::<Vec<_>>(),
+            );
+            if skin.is_none()
+                && let Some(&(index, triangles)) = rigid_meshes.get(&key)
+            {
+                triangle_count += triangles;
+                if triangle_count > MAX_TRIANGLES {
+                    return Err("FBX instances exceed 10 million triangles".into());
+                }
+                out["mesh"] = json!(index);
+            } else {
+                let first_triangle = triangle_count;
+                if skin.is_some_and(|s| s.clusters.len() > u16::MAX as usize) {
+                    return Err("FBX skin has too many joints".into());
+                }
+                let mut primitives = Vec::new();
+                let mut groups: Vec<Vec<usize>> = vec![Vec::new(); node.materials.len().max(1)];
+                for face in 0..mesh.faces.len() {
+                    let mat = mesh.face_material.get(face).copied().unwrap_or(0) as usize;
+                    let mat = mat.min(groups.len() - 1);
+                    groups[mat].push(face);
+                }
+                for (material, faces) in groups.iter().enumerate() {
+                    let mut positions = Vec::new();
+                    let mut normals = Vec::new();
+                    let mut uv = Vec::new();
+                    let mut uv1 = Vec::new();
+                    let mut colors = Vec::new();
+                    let mut joints = Vec::new();
+                    let mut weights = Vec::new();
+                    let mut corners = vec![0u32; mesh.max_face_triangles * 3];
+                    for &face in faces {
+                        let count = ufbx::triangulate_face(&mut corners, mesh, mesh.faces[face])
+                            as usize
+                            * 3;
+                        triangle_count += count / 3;
+                        if triangle_count > MAX_TRIANGLES {
+                            return Err("FBX instances exceed 10 million triangles".into());
+                        }
+                        for &corner in &corners[..count] {
+                            let i = corner as usize;
+                            positions.extend(v3(mesh.vertex_position[i]));
+                            normals.extend(v3(mesh.vertex_normal[i]));
+                            if mesh.vertex_uv.exists {
+                                let p = mesh.vertex_uv[i];
+                                uv.extend([p.x as f32, 1.0 - p.y as f32]);
+                            }
+                            if let Some(set) = mesh.uv_sets.get(1) {
+                                let p = set.vertex_uv[i];
+                                uv1.extend([p.x as f32, 1.0 - p.y as f32]);
+                            }
+                            if mesh.vertex_color.exists {
+                                let c = mesh.vertex_color[i];
+                                colors.extend([c.x as f32, c.y as f32, c.z as f32, c.w as f32]);
+                            }
+                            if let Some(skin) = skin {
+                                let vertex = skin.vertices[mesh.vertex_indices[i] as usize];
+                                let influences = &skin.weights.as_ref()[vertex.weight_begin as usize
+                                    ..(vertex.weight_begin + vertex.num_weights) as usize];
+                                let mut js = [0u16; 4];
+                                let mut ws = [0f32; 4];
+                                for (j, w) in influences.iter().take(4).enumerate() {
+                                    js[j] = w.cluster_index as u16;
+                                    ws[j] = w.weight as f32;
+                                }
+                                let sum: f32 = ws.iter().sum();
+                                if sum <= 0.0 {
+                                    return Err("FBX skin contains an unweighted vertex".into());
+                                }
+                                for w in &mut ws {
+                                    *w /= sum;
+                                }
+                                joints.extend(js);
+                                weights.extend(ws);
+                                if influences.len() > 4
+                                    && !g.warnings.iter().any(|w| w.starts_with("Skin weights"))
+                                {
+                                    g.warnings.push(
+                                        "Skin weights use the four strongest influences per vertex"
+                                            .into(),
+                                    );
+                                }
+                            }
+                        }
                     }
-                    for &corner in &corners[..count] {
-                        let i = corner as usize;
-                        positions.extend(v3(mesh.vertex_position[i]));
-                        normals.extend(v3(mesh.vertex_normal[i]));
-                        if mesh.vertex_uv.exists {
-                            let p = mesh.vertex_uv[i];
-                            uv.extend([p.x as f32, 1.0 - p.y as f32]);
-                        }
-                        if let Some(set) = mesh.uv_sets.get(1) {
-                            let p = set.vertex_uv[i];
-                            uv1.extend([p.x as f32, 1.0 - p.y as f32]);
-                        }
-                        if mesh.vertex_color.exists {
-                            let c = mesh.vertex_color[i];
-                            colors.extend([c.x as f32, c.y as f32, c.z as f32, c.w as f32]);
-                        }
-                        if let Some(skin) = skin {
-                            let vertex = skin.vertices[mesh.vertex_indices[i] as usize];
-                            let influences = &skin.weights.as_ref()[vertex.weight_begin as usize
-                                ..(vertex.weight_begin + vertex.num_weights) as usize];
-                            let mut js = [0u16; 4];
-                            let mut ws = [0f32; 4];
-                            for (j, w) in influences.iter().take(4).enumerate() {
-                                js[j] = w.cluster_index as u16;
-                                ws[j] = w.weight as f32;
-                            }
-                            let sum: f32 = ws.iter().sum();
-                            if sum <= 0.0 {
-                                return Err("FBX skin contains an unweighted vertex".into());
-                            }
-                            for w in &mut ws {
-                                *w /= sum;
-                            }
-                            joints.extend(js);
-                            weights.extend(ws);
-                            if influences.len() > 4
-                                && !g.warnings.iter().any(|w| w.starts_with("Skin weights"))
-                            {
-                                g.warnings.push(
-                                    "Skin weights use the four strongest influences per vertex"
-                                        .into(),
-                                );
-                            }
-                        }
+                    if positions.is_empty() {
+                        continue;
                     }
+                    let mut attributes = json!({"POSITION":g.floats(&positions,"VEC3",3)?,"NORMAL":g.floats(&normals,"VEC3",3)?});
+                    if !uv.is_empty() {
+                        attributes["TEXCOORD_0"] = json!(g.floats(&uv, "VEC2", 2)?);
+                    }
+                    if !uv1.is_empty() {
+                        attributes["TEXCOORD_1"] = json!(g.floats(&uv1, "VEC2", 2)?);
+                    }
+                    if !colors.is_empty() {
+                        attributes["COLOR_0"] = json!(g.floats(&colors, "VEC4", 4)?);
+                    }
+                    if skin.is_some() {
+                        attributes["JOINTS_0"] = json!(g.joints(&joints)?);
+                        attributes["WEIGHTS_0"] = json!(g.floats(&weights, "VEC4", 4)?);
+                    }
+                    let mat = node
+                        .materials
+                        .get(material)
+                        .map(|m| m.element.typed_id as usize)
+                        .unwrap_or(default_material);
+                    primitives.push(json!({"attributes":attributes,"material":mat,"mode":4}));
                 }
-                if positions.is_empty() {
-                    continue;
-                }
-                let mut attributes = json!({"POSITION":g.floats(&positions,"VEC3",3)?,"NORMAL":g.floats(&normals,"VEC3",3)?});
-                if !uv.is_empty() {
-                    attributes["TEXCOORD_0"] = json!(g.floats(&uv, "VEC2", 2)?);
-                }
-                if !uv1.is_empty() {
-                    attributes["TEXCOORD_1"] = json!(g.floats(&uv1, "VEC2", 2)?);
-                }
-                if !colors.is_empty() {
-                    attributes["COLOR_0"] = json!(g.floats(&colors, "VEC4", 4)?);
-                }
-                if skin.is_some() {
-                    attributes["JOINTS_0"] = json!(g.joints(&joints)?);
-                    attributes["WEIGHTS_0"] = json!(g.floats(&weights, "VEC4", 4)?);
-                }
-                let mat = node
-                    .materials
-                    .get(material)
-                    .map(|m| m.element.typed_id as usize)
-                    .unwrap_or(default_material);
-                primitives.push(json!({"attributes":attributes,"material":mat,"mode":4}));
-            }
-            if !primitives.is_empty() {
-                out["mesh"] = json!(meshes.len());
-                meshes.push(json!({"name":mesh.element.name.as_ref(),"primitives":primitives}));
-                if let Some(skin) = skin {
-                    let matrices: Vec<f32> = skin
-                        .clusters
-                        .iter()
-                        .flat_map(|c| matrix(c.geometry_to_bone))
-                        .collect();
-                    let joints: Vec<u32> = skin
-                        .clusters
-                        .iter()
-                        .map(|c| {
-                            c.bone_node
-                                .as_ref()
-                                .map(|n| n.element.typed_id)
-                                .ok_or_else(|| "FBX skin is missing a joint".to_string())
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let accessor = g.floats(&matrices, "MAT4", 16)?;
-                    out["skin"] = json!(skins.len());
-                    skins.push(json!({"joints":joints,"inverseBindMatrices":accessor}));
+                if !primitives.is_empty() {
+                    out["mesh"] = json!(meshes.len());
+                    if skin.is_none() {
+                        rigid_meshes.insert(key, (meshes.len(), triangle_count - first_triangle));
+                    }
+                    meshes.push(json!({"name":mesh.element.name.as_ref(),"primitives":primitives}));
+                    if let Some(skin) = skin {
+                        let matrices: Vec<f32> = skin
+                            .clusters
+                            .iter()
+                            .flat_map(|c| matrix(c.geometry_to_bone))
+                            .collect();
+                        let joints: Vec<u32> = skin
+                            .clusters
+                            .iter()
+                            .map(|c| {
+                                c.bone_node
+                                    .as_ref()
+                                    .map(|n| n.element.typed_id)
+                                    .ok_or_else(|| "FBX skin is missing a joint".to_string())
+                            })
+                            .collect::<Result<_, _>>()?;
+                        let accessor = g.floats(&matrices, "MAT4", 16)?;
+                        out["skin"] = json!(skins.len());
+                        skins.push(json!({"joints":joints,"inverseBindMatrices":accessor}));
+                    }
                 }
             }
         }

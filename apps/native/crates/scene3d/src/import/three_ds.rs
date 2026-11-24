@@ -1,4 +1,8 @@
-use super::mesh::{Mesh, Scene, srgb};
+use super::{
+    ResolveCompanion,
+    mesh::{Alpha, Material, Mesh, Sampler, Scene, srgb},
+    texture,
+};
 use crate::{Error, Result, fail};
 use std::collections::{BTreeMap, HashMap};
 
@@ -40,7 +44,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
+pub fn convert(bytes: &[u8], resolve: &mut ResolveCompanion<'_>) -> Result<Vec<u8>> {
     let mut file = Reader(bytes);
     let Some((0x4d4d, mut main)) = file.chunk()? else {
         return fail("Invalid 3DS signature");
@@ -63,7 +67,10 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
                 }
                 0xafff => {
                     let mut name = None;
-                    let mut rgba = [1.; 4];
+                    let mut pbr = Material::default();
+                    let mut diffuse = None;
+                    let mut opacity = None;
+                    let mut bump = None;
                     while let Some((tag, mut value)) = entry.chunk()? {
                         match tag {
                             0xa000 => name = Some(value.name()?),
@@ -87,18 +94,48 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
                                     if !rgb.iter().all(|c| c.is_finite()) {
                                         return fail("Invalid 3DS material color");
                                     }
-                                    rgba[..3].copy_from_slice(&rgb.map(|c| {
+                                    pbr.base_color[..3].copy_from_slice(&rgb.map(|c| {
                                         let c = c.clamp(0., 1.);
                                         if is_linear { c } else { srgb(c) }
                                     }));
                                     linear = is_linear;
                                 }
                             }
+                            0xa050 => pbr.base_color[3] = 1. - percent(value)?.unwrap_or(0.),
+                            0xa040 => {
+                                if let Some(shininess) = percent(value)? {
+                                    pbr.roughness = (2. / (2. + 128. * shininess)).sqrt();
+                                }
+                            }
+                            0xa081 => pbr.double_sided = true,
+                            0xa200 => diffuse = map_name(value)?,
+                            0xa210 => opacity = map_name(value)?,
+                            0xa230 => bump = map_name(value)?,
                             _ => {}
                         }
                     }
                     if let Some(name) = name {
-                        materials.insert(name.clone(), scene.material(&name, rgba));
+                        let mut base = map_image(diffuse, resolve)?;
+                        if let Some(opacity) = map_image(opacity, resolve)? {
+                            base = Some(texture::with_opacity(base, opacity));
+                        }
+                        if let Some(image) = base {
+                            if image.pixels().any(|p| p[3] < 255) {
+                                pbr.alpha = Alpha::Blend;
+                            }
+                            pbr.base_map = Some(scene.texture(image, true, Sampler::default())?);
+                        }
+                        if pbr.base_color[3] < 1. {
+                            pbr.alpha = Alpha::Blend;
+                        }
+                        if let Some(image) = map_image(bump, resolve)? {
+                            pbr.normal_map = Some(scene.texture(
+                                super::obj::bump_normals(&image, 1.),
+                                false,
+                                Sampler::default(),
+                            )?);
+                        }
+                        materials.insert(name.clone(), scene.pbr_material(&name, pbr));
                     }
                 }
                 _ => {}
@@ -192,4 +229,38 @@ fn mesh(mut data: Reader<'_>, materials: &HashMap<String, usize>) -> Result<Vec<
         }
     }
     Ok(parts.into_values().map(|(part, _)| part).collect())
+}
+
+fn percent(mut data: Reader<'_>) -> Result<Option<f32>> {
+    while let Some((tag, mut value)) = data.chunk()? {
+        let value = match tag {
+            0x0030 => f32::from(value.u16()?) / 100.,
+            0x0031 => value.float()?,
+            _ => continue,
+        };
+        if !value.is_finite() {
+            return fail("Invalid 3DS material percentage");
+        }
+        return Ok(Some(value.clamp(0., 1.)));
+    }
+    Ok(None)
+}
+
+fn map_name(mut data: Reader<'_>) -> Result<Option<String>> {
+    while let Some((tag, mut value)) = data.chunk()? {
+        if tag == 0xa300 {
+            return value.name().map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn map_image(
+    name: Option<String>,
+    resolve: &mut ResolveCompanion<'_>,
+) -> Result<Option<image::RgbaImage>> {
+    match name {
+        Some(name) => texture::resolve(&name, resolve),
+        None => Ok(None),
+    }
 }

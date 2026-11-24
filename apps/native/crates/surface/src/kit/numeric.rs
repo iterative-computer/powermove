@@ -251,28 +251,29 @@ mod horizontal_scrub_tests {
     }
 }
 
-/// Incremental, axis-locked pointer travel. Native relative motion is immune
-/// to cursor warps and window moves; absolute positions are a headless fallback.
-#[derive(Debug)]
+/// Horizontal mouse travel. Accumulate each segment at the speed in effect
+/// when it arrives, including the segment that crosses the drag threshold.
+#[derive(Clone, Debug)]
 pub struct NumericMotion {
-    previous: (f64, f64),
-    travel: (f64, f64),
-    horizontal: Option<bool>,
+    start_x: f64,
+    previous_x: f64,
+    active: bool,
     current: f64,
 }
+
 impl NumericMotion {
-    pub fn new(position: (f64, f64), value: f64) -> Self {
+    pub fn new(x: f64, value: f64) -> Self {
         Self {
-            previous: position,
-            travel: (0., 0.),
-            horizontal: None,
+            start_x: x,
+            previous_x: x,
+            active: false,
             current: value,
         }
     }
+
     pub fn sample(
         &mut self,
-        position: (f64, f64),
-        relative: Option<(f64, f64)>,
+        x: f64,
         threshold: f64,
         step: f64,
         speed: f64,
@@ -280,97 +281,54 @@ impl NumericMotion {
         alt: bool,
         bounds: (f64, f64),
     ) -> Option<f64> {
-        let delta =
-            relative.unwrap_or((position.0 - self.previous.0, position.1 - self.previous.1));
-        self.previous = position;
-        if ![delta.0, delta.1].iter().all(|n| n.is_finite()) {
+        if !x.is_finite() {
             return None;
         }
-        self.travel.0 += delta.0;
-        self.travel.1 += delta.1;
-        let distance = if let Some(horizontal) = self.horizontal {
-            if horizontal { delta.0 } else { -delta.1 }
-        } else {
-            if self.travel.0.hypot(self.travel.1) < threshold {
-                return None;
-            }
-            let horizontal = self.travel.0.abs() >= self.travel.1.abs();
-            self.horizontal = Some(horizontal);
-            if horizontal {
-                self.travel.0
-            } else {
-                -self.travel.1
-            }
-        };
-        let multiplier = if shift {
-            10.
-        } else if alt {
-            0.1
-        } else {
-            1.
-        };
-        self.current =
-            (self.current + distance * step * speed * multiplier).clamp(bounds.0, bounds.1);
+        let delta = x - self.previous_x;
+        self.previous_x = x;
+        let multiplier = if shift { 10. } else if alt { 0.1 } else { 1. };
+        self.current = (self.current + delta * step * speed * multiplier)
+            .clamp(bounds.0, bounds.1);
+        self.active |= (x - self.start_x).abs() >= threshold;
         let scaled = self.current * 1000.;
-        Some(if scaled.is_finite() {
-            scaled.round() / 1000.
-        } else {
-            self.current
+        self.active.then(|| {
+            if scaled.is_finite() {
+                (scaled.round() / 1000.).clamp(bounds.0, bounds.1)
+            } else {
+                self.current
+            }
         })
     }
 }
+
 #[cfg(test)]
 mod numeric_motion_tests {
     use super::*;
+
+    fn sample(motion: &mut NumericMotion, x: f64, shift: bool, alt: bool) -> Option<f64> {
+        motion.sample(x, 3., 1., 0.5, shift, alt, (-100., 100.))
+    }
+
     #[test]
-    fn both_position_fields_are_monotonic_through_warps_in_both_directions() {
-        for start in [-1419.72, 1703.42] {
-            for direction in [-1., 1.] {
-                let mut motion = NumericMotion::new((800., 400.), start);
-                let mut previous = start;
-                // Absolute cursor warps back across the window. Only hardware
-                // travel counts, including a zero-motion synthetic warp event.
-                for (x, dx) in [
-                    (810., 10.),
-                    (820., 10.),
-                    (200., 0.),
-                    (210., 10.),
-                    (220., 10.),
-                    (100., 0.),
-                ] {
-                    let next = motion
-                        .sample(
-                            (x, 400.),
-                            Some((dx * direction, 0.)),
-                            3.,
-                            1.,
-                            0.5,
-                            false,
-                            false,
-                            (-1e6, 1e6),
-                        )
-                        .unwrap();
-                    assert!((next - previous) * direction >= 0.);
-                    previous = next;
-                }
-                assert!((previous - (start + 20. * direction)).abs() < 1e-6);
-            }
+    fn horizontal_threshold_decides_once_in_either_direction() {
+        for direction in [-1., 1.] {
+            let mut motion = NumericMotion::new(20., 0.);
+            assert_eq!(sample(&mut motion, 20., false, false), None);
+            assert_eq!(sample(&mut motion, 20. + direction * 2., false, false), None);
+            assert_eq!(sample(&mut motion, 20. + direction * 3., false, false), Some(direction * 1.5));
+            assert_eq!(sample(&mut motion, 20. + direction * 5., false, false), Some(direction * 2.5));
+            assert_eq!(sample(&mut motion, 20., false, false), Some(0.));
         }
     }
+
     #[test]
-    fn perpendicular_jitter_and_modifier_changes_never_rebase_the_value() {
-        let mut motion = NumericMotion::new((0., 0.), 0.);
-        assert_eq!(
-            motion.sample((4., 1.), None, 3., 1., 0.5, false, false, (-100., 100.)),
-            Some(2.)
-        );
-        assert_eq!(
-            motion.sample((6., 8.), None, 3., 1., 0.5, false, false, (-100., 100.)),
-            Some(3.)
-        );
-        assert_eq!(
-            motion.sample((8., 8.), None, 3., 1., 0.5, false, true, (-100., 100.)),
-            Some(3.1)
-        );
+    fn modifiers_change_only_the_speed_of_new_travel() {
+        let mut motion = NumericMotion::new(0., 0.);
+        assert_eq!(sample(&mut motion, 2., false, false), None);
+        assert_eq!(sample(&mut motion, 4., true, false), Some(11.));
+        assert_eq!(sample(&mut motion, 4., false, true), Some(11.));
+        assert_eq!(sample(&mut motion, 8., false, true), Some(11.2));
+        assert_eq!(sample(&mut motion, 8., false, false), Some(11.2));
+        assert_eq!(sample(&mut motion, 12., false, false), Some(13.2));
     }
 }

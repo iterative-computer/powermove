@@ -4245,6 +4245,42 @@ fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn palette_select_layer_expands_nested_groups_and_reveals_the_row(cx: &mut TestAppContext) {
+    use pm_panel_timeline::{RowId, v4::row_id};
+    use serde_json::{Value, json};
+
+    let mut project: Value = serde_json::from_str(&crate::v4_view_tests::project_json(80)).unwrap();
+    let layers = project["layers"].as_array_mut().unwrap();
+    layers[79]["group"] = json!("inner");
+    layers.insert(79, json!({"id":"outer","type":"group","name":"Outer","dur":10}));
+    layers.insert(80, json!({"id":"inner","type":"group","name":"Inner","group":"outer","dur":10}));
+    let mut s = stage_project(cx, project.to_string());
+    let target = row_id(&RowId::Layer("l79".into()));
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(t.scene().unwrap().scroll_for(&target).is_none());
+    });
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.palette_select_layer(&published, &[json!("l79")], cx));
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        let model = t.model();
+        assert_eq!(model.selection.layers(), ["l79"]);
+        assert!(!model.reveal.layers["outer"].group_collapsed);
+        assert!(!model.reveal.layers["inner"].group_collapsed);
+        let top = t.scene().unwrap().scroll_for(&target).unwrap();
+        let frame = t.frame().unwrap();
+        let scroll = t.scroll_y();
+        assert!(scroll > 0. && scroll <= top);
+        assert!(
+            top + f64::from(tokens().metrics.track_row)
+                <= scroll + frame.viewport.height - f64::from(tokens().metrics.ruler)
+        );
+    });
+}
+
+#[gpui::test]
 fn keyframe_reveal_scrolls_an_offscreen_row_without_moving_time(cx: &mut TestAppContext) {
     let mut s = stage(cx, 80);
     let before = s

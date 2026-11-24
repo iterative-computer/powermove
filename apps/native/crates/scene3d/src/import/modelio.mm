@@ -1,12 +1,198 @@
 #import <Foundation/Foundation.h>
 #import <ModelIO/ModelIO.h>
 #import <CoreGraphics/CoreGraphics.h>
+#include <algorithm>
 #include <cmath>
+#include <unordered_set>
 #include <cstring>
 #include <vector>
 
-using Emit = bool (*)(void *, const char *, const float *, const float *, const float *,
-                      size_t, const uint32_t *, size_t, const float *, const char *, const float *);
+struct Raster {
+    const uint8_t *pixels;
+    uint32_t width, height, wrapS, wrapT, magFilter, minFilter;
+};
+struct Material {
+    float rgba[4], emissive[3], metallic, roughness, occlusionStrength, alphaCutoff;
+    bool doubleSided;
+    Raster base, opacity, metal, rough, normal, occlusion, emission;
+};
+struct Part {
+    const uint32_t *indices;
+    size_t count, materialId;
+};
+using EmitMaterial = bool (*)(void *, size_t, const char *, const Material *);
+using EmitMesh = bool (*)(void *, size_t, const char *, const float *, const float *, const float *,
+                          size_t, const Part *, size_t);
+using EmitNode = bool (*)(void *, size_t, const char *, const float *);
+
+struct Output {
+    void *context;
+    EmitMaterial material;
+    EmitMesh mesh;
+    EmitNode node;
+    std::unordered_set<size_t> meshes, emptyMeshes, materials;
+};
+
+static size_t identity(id object) {
+    return reinterpret_cast<size_t>((__bridge const void *)object);
+}
+
+static uint32_t wrap(MDLMaterialTextureWrapMode mode) {
+    switch (mode) {
+        case MDLMaterialTextureWrapModeClamp: return 33071;
+        case MDLMaterialTextureWrapModeMirror: return 33648;
+        default: return 10497;
+    }
+}
+
+static Raster rasterize(MDLTextureSampler *sampler, bool color, std::vector<uint8_t> &bytes) {
+    MDLTexture *texture = sampler.texture;
+    if (!texture || texture.isCube) return {};
+    CGImageRef image = [texture imageFromTexture];
+    if (!image) return {};
+    CGImageRetain(image); // Model I/O owns the returned image.
+    const size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+    const size_t edge = std::max(w, h);
+    if (!w || !h) {
+        CGImageRelease(image);
+        return {};
+    }
+    const double scale = std::min(1.0, 2048.0 / edge);
+    const uint32_t width = std::max(1L, std::lround(w * scale));
+    const uint32_t height = std::max(1L, std::lround(h * scale));
+    CGColorSpaceRef rgb = CGColorSpaceCreateWithName(color ? kCGColorSpaceSRGB : kCGColorSpaceLinearSRGB);
+    // Scalar and vector data use the stored numeric samples. Reinterpret tagged
+    // RGB/gray images as linear before CoreGraphics performs any conversion.
+    if (!color) {
+        CGColorSpaceRef source = CGImageGetColorSpace(image);
+        CGColorSpaceRef linear = nullptr;
+        if (source && CGColorSpaceGetModel(source) == kCGColorSpaceModelRGB) {
+            linear = CGColorSpaceRetain(rgb);
+        } else if (source && CGColorSpaceGetModel(source) == kCGColorSpaceModelMonochrome) {
+            linear = CGColorSpaceCreateWithName(kCGColorSpaceLinearGray);
+        }
+        if (linear) {
+            CGImageRef copy = CGImageCreateCopyWithColorSpace(image, linear);
+            CGColorSpaceRelease(linear);
+            if (copy) {
+                CGImageRelease(image);
+                image = copy;
+            }
+        }
+    }
+    bytes.resize(size_t(width) * height * 4);
+    CGContextRef bitmap = CGBitmapContextCreate(bytes.data(), width, height, 8, width * 4, rgb,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(rgb);
+    if (!bitmap) {
+        CGImageRelease(image);
+        return {};
+    }
+    CGContextSetBlendMode(bitmap, kCGBlendModeCopy);
+    CGContextSetInterpolationQuality(bitmap, kCGInterpolationHigh);
+    CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(bitmap);
+    CGImageRelease(image);
+    // glTF stores straight (unassociated) alpha.
+    for (size_t i = 0; i < bytes.size(); i += 4) {
+        const unsigned alpha = bytes[i + 3];
+        if (alpha && alpha < 255) {
+            for (size_t c = 0; c < 3; c++) {
+                bytes[i + c] = std::min(255u, (bytes[i + c] * 255u + alpha / 2) / alpha);
+            }
+        }
+    }
+    MDLTextureFilter *filter = sampler.hardwareFilter;
+    const bool nearest = filter && filter.minFilter == MDLMaterialTextureFilterModeNearest;
+    uint32_t min = nearest ? 9728 : 9729;
+    if (!filter || filter.mipFilter == MDLMaterialMipMapFilterModeLinear) min = nearest ? 9986 : 9987;
+    else if (filter.mipFilter == MDLMaterialMipMapFilterModeNearest) min = nearest ? 9984 : 9985;
+    return {bytes.data(), width, height,
+            filter ? wrap(filter.sWrapMode) : 10497u, filter ? wrap(filter.tWrapMode) : 10497u,
+            filter && filter.magFilter == MDLMaterialTextureFilterModeNearest ? 9728u : 9729u, min};
+}
+
+static MDLMaterialProperty *scalarProperty(MDLMaterial *material, MDLMaterialSemantic semantic) {
+    // The built-in scattering function's defaults precede authored properties.
+    for (MDLMaterialProperty *property in [[material propertiesWithSemantic:semantic] reverseObjectEnumerator]) {
+        switch (property.type) {
+            case MDLMaterialPropertyTypeFloat:
+            case MDLMaterialPropertyTypeFloat3:
+            case MDLMaterialPropertyTypeFloat4:
+            case MDLMaterialPropertyTypeColor:
+                return property;
+            default: break;
+        }
+    }
+    return nil;
+}
+
+static float scalar(MDLMaterial *material, MDLMaterialSemantic semantic, float fallback) {
+    MDLMaterialProperty *property = scalarProperty(material, semantic);
+    return property ? property.floatValue : fallback;
+}
+
+static void colorFactor(MDLMaterialProperty *property, float *rgba, size_t count) {
+    if (property.type == MDLMaterialPropertyTypeFloat3) {
+        vector_float3 value = property.float3Value;
+        for (size_t i = 0; i < 3; i++) rgba[i] = value[i];
+    } else if (property.type == MDLMaterialPropertyTypeFloat4) {
+        vector_float4 value = property.float4Value;
+        for (size_t i = 0; i < count; i++) rgba[i] = value[i];
+    } else if (property.type == MDLMaterialPropertyTypeColor && property.color) {
+        CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        if (!space) return;
+        CGColorRef linear = CGColorCreateCopyByMatchingToColorSpace(space, kCGRenderingIntentDefault, property.color, nullptr);
+        if (linear) {
+            const CGFloat *channels = CGColorGetComponents(linear);
+            for (size_t i = 0; i < count; i++) rgba[i] = channels[i];
+            CGColorRelease(linear);
+        }
+        CGColorSpaceRelease(space);
+    } else if (property.type == MDLMaterialPropertyTypeFloat) {
+        for (size_t i = 0; i < 3; i++) rgba[i] = property.floatValue;
+    }
+}
+
+static Raster map(MDLMaterial *material, MDLMaterialSemantic semantic, bool color, std::vector<uint8_t> &bytes) {
+    for (MDLMaterialProperty *property in [[material propertiesWithSemantic:semantic] reverseObjectEnumerator]) {
+        if (property.type != MDLMaterialPropertyTypeTexture) continue;
+        Raster raster = rasterize(property.textureSamplerValue, color, bytes);
+        if (raster.pixels) return raster;
+    }
+    return {};
+}
+
+static bool emitMaterial(MDLMaterial *material, Output &out) {
+    if (!material || !out.materials.insert(identity(material)).second) return true;
+    @autoreleasepool {
+        std::vector<uint8_t> pixels[7];
+        Material m{};
+        m.base = map(material, MDLMaterialSemanticBaseColor, true, pixels[0]);
+        m.opacity = map(material, MDLMaterialSemanticOpacity, false, pixels[1]);
+        m.metal = map(material, MDLMaterialSemanticMetallic, false, pixels[2]);
+        m.rough = map(material, MDLMaterialSemanticRoughness, false, pixels[3]);
+        m.normal = map(material, MDLMaterialSemanticTangentSpaceNormal, false, pixels[4]);
+        m.occlusion = map(material, MDLMaterialSemanticAmbientOcclusion, false, pixels[5]);
+        m.emission = map(material, MDLMaterialSemanticEmission, true, pixels[6]);
+        std::fill_n(m.rgba, 4, 1.f);
+        MDLMaterialProperty *base = scalarProperty(material, MDLMaterialSemanticBaseColor);
+        if (!m.base.pixels || ![base.name isEqualToString:@"baseColor"]) colorFactor(base, m.rgba, 4);
+        MDLMaterialProperty *emission = scalarProperty(material, MDLMaterialSemanticEmission);
+        if (m.emission.pixels) std::fill_n(m.emissive, 3, 1.f);
+        if (!m.emission.pixels || ![emission.name isEqualToString:@"emission"]) colorFactor(emission, m.emissive, 3);
+        m.rgba[3] *= scalar(material, MDLMaterialSemanticOpacity, 1.f);
+        // Model I/O supplies scalar defaults even when the USD input is a map.
+        // The map replaces the default scalar for that input.
+        m.metallic = m.metal.pixels ? 1.f : scalar(material, MDLMaterialSemanticMetallic, 0.f);
+        m.roughness = m.rough.pixels ? 1.f : scalar(material, MDLMaterialSemanticRoughness, 1.f);
+        m.occlusionStrength = scalar(material, MDLMaterialSemanticAmbientOcclusionScale, 1.f);
+        m.alphaCutoff = [material propertyNamed:@"opacityThreshold"].floatValue;
+        m.doubleSided = material.materialFace == MDLMaterialFaceDoubleSided
+            || [material propertyNamed:@"doubleSided"].floatValue != 0.f;
+        return out.material(out.context, identity(material), material.name.UTF8String, &m);
+    }
+}
 
 static bool attribute(MDLMesh *mesh, NSString *name, MDLVertexFormat format, size_t width,
                       std::vector<float> &values) {
@@ -23,19 +209,30 @@ static bool attribute(MDLMesh *mesh, NSString *name, MDLVertexFormat format, siz
     return true;
 }
 
-static bool drawMesh(MDLMesh *mesh, matrix_float4x4 matrix, void *context, Emit emit) {
+static bool drawMesh(MDLMesh *mesh, NSString *name, matrix_float4x4 matrix, Output &out) {
+    const size_t id = identity(mesh);
+    if (out.emptyMeshes.count(id)) return true;
+    float transform[16];
+    std::memcpy(transform, &matrix, sizeof(transform));
+    if (!out.meshes.insert(id).second) return out.node(out.context, id, name.UTF8String, transform);
     const size_t count = mesh.vertexCount;
-    if (count == 0) return true;
+    if (count == 0) {
+        out.emptyMeshes.insert(id);
+        return true;
+    }
     if (count > 30000000) return false;
     std::vector<float> positions, normals, uv;
     if (!attribute(mesh, MDLVertexAttributePosition, MDLVertexFormatFloat3, 3, positions)) return false;
     bool hasNormals = attribute(mesh, MDLVertexAttributeNormal, MDLVertexFormatFloat3, 3, normals);
     bool hasUV = attribute(mesh, MDLVertexAttributeTextureCoordinate, MDLVertexFormatFloat2, 2, uv);
+    // MDL coordinates have bottom-left origin. CGImage and glTF use
+    // top-left image rows, so change V here exactly once.
     if (hasUV) {
         for (size_t i = 1; i < uv.size(); i += 2) uv[i] = 1.f - uv[i];
     }
-    float transform[16];
-    std::memcpy(transform, &matrix, sizeof(transform));
+    std::vector<std::vector<uint32_t>> indexBuffers;
+    std::vector<Part> parts;
+    size_t indexCount = 0;
     for (MDLSubmesh *part in mesh.submeshes) {
         const size_t n = part.indexCount;
         if (n == 0 || part.geometryType <= MDLGeometryTypeLines) continue;
@@ -72,35 +269,26 @@ static bool drawMesh(MDLMesh *mesh, matrix_float4x4 matrix, void *context, Emit 
                 return false;
         }
         if (output->empty()) continue;
-        float rgba[4] = {1, 1, 1, 1};
-        MDLMaterialProperty *color = [part.material propertyWithSemantic:MDLMaterialSemanticBaseColor];
-        if (color.type == MDLMaterialPropertyTypeFloat3) {
-            vector_float3 rgb = color.float3Value;
-            for (size_t i = 0; i < 3; i++) rgba[i] = rgb[i];
-        } else if (color.type == MDLMaterialPropertyTypeFloat4) {
-            vector_float4 value = color.float4Value;
-            for (size_t i = 0; i < 4; i++) rgba[i] = value[i];
-        } else if (color.type == MDLMaterialPropertyTypeColor && color.color) {
-            CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
-            if (space) {
-                CGColorRef linear = CGColorCreateCopyByMatchingToColorSpace(space, kCGRenderingIntentDefault, color.color, nullptr);
-                if (linear) {
-                    const CGFloat *channels = CGColorGetComponents(linear);
-                    for (size_t i = 0; i < 4; i++) rgba[i] = channels[i];
-                    CGColorRelease(linear);
-                }
-                CGColorSpaceRelease(space);
-            }
-        }
-        if (!emit(context, mesh.name.UTF8String, positions.data(), hasNormals ? normals.data() : nullptr,
-                  hasUV ? uv.data() : nullptr, count, output->data(), output->size(), transform,
-                  part.material.name.UTF8String, rgba)) return false;
+        indexCount += output->size();
+        if (indexCount > 30000000) return false;
+        MDLMaterial *material = part.material;
+        if (!emitMaterial(material, out)) return false;
+        indexBuffers.push_back(output == &indices ? std::move(indices) : std::move(triangles));
+        const auto &buffer = indexBuffers.back();
+        parts.push_back({buffer.data(), buffer.size(), identity(material)});
     }
-    return true;
+    if (parts.empty()) {
+        out.emptyMeshes.insert(id);
+        return true;
+    }
+    return out.mesh(out.context, id, mesh.name.UTF8String, positions.data(),
+                    hasNormals ? normals.data() : nullptr, hasUV ? uv.data() : nullptr,
+                    count, parts.data(), parts.size())
+        && out.node(out.context, id, name.UTF8String, transform);
 }
 
 static bool walk(MDLObject *object, matrix_float4x4 parent, matrix_float4x4 axis, double time, size_t depth,
-                 size_t &visited, void *context, Emit emit) {
+                 size_t &visited, Output &out, NSString *instanceName = nil) {
     if (depth == 64 || ++visited > 65536) return false;
     id<MDLTransformComponent> transform = object.transform;
     matrix_float4x4 world = parent;
@@ -109,10 +297,10 @@ static bool walk(MDLObject *object, matrix_float4x4 parent, matrix_float4x4 axis
             ? [transform localTransformAtTime:time] : transform.matrix;
         world = transform.resetsTransform ? local : simd_mul(parent, local);
     }
-    if ([object isKindOfClass:[MDLMesh class]] && !drawMesh((MDLMesh *)object, simd_mul(axis, world), context, emit)) return false;
-    if (object.instance && !walk(object.instance, world, axis, time, depth + 1, visited, context, emit)) return false;
+    if ([object isKindOfClass:[MDLMesh class]] && !drawMesh((MDLMesh *)object, instanceName ?: object.name, simd_mul(axis, world), out)) return false;
+    if (object.instance && !walk(object.instance, world, axis, time, depth + 1, visited, out, instanceName ?: object.name)) return false;
     for (MDLObject *child in object.children.objects) {
-        if (!walk(child, world, axis, time, depth + 1, visited, context, emit)) return false;
+        if (!walk(child, world, axis, time, depth + 1, visited, out)) return false;
     }
     return true;
 }
@@ -124,7 +312,8 @@ extern "C" bool pm_scene3d_modelio_supports(const char *extension) {
     }
 }
 
-extern "C" bool pm_scene3d_modelio_read(const char *path, void *context, Emit emit) {
+extern "C" bool pm_scene3d_modelio_read_scene(const char *path, void *context,
+                                         EmitMaterial material, EmitMesh mesh, EmitNode node) {
     @autoreleasepool {
         @try {
             try {
@@ -135,6 +324,8 @@ extern "C" bool pm_scene3d_modelio_read(const char *path, void *context, Emit em
                 MDLAsset *asset = [[MDLAsset alloc] initWithURL:url vertexDescriptor:nil
                     bufferAllocator:nil preserveTopology:NO error:&error];
                 if (!asset || error || asset.count == 0 || asset.count > 65536) return false;
+                [asset loadTextures];
+                Output out{context, material, mesh, node};
                 matrix_float4x4 axis = matrix_identity_float4x4;
                 vector_float3 up = asset.upAxis;
                 if (std::abs(up.z) > 0.5f) {
@@ -149,7 +340,7 @@ extern "C" bool pm_scene3d_modelio_read(const char *path, void *context, Emit em
                 size_t visited = 0;
                 for (NSUInteger i = 0; i < asset.count; i++) {
                     if (!walk([asset objectAtIndex:i], matrix_identity_float4x4, axis, asset.startTime,
-                              0, visited, context, emit)) return false;
+                              0, visited, out)) return false;
                 }
                 return true;
             } catch (...) {

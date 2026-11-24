@@ -1,6 +1,7 @@
 use super::{
     archive::Zip,
-    mesh::{Mesh, Scene, number, srgb},
+    mesh::{Alpha, Material, Mesh, Sampler, Scene, number, srgb},
+    texture,
     xml::{self, child, children},
 };
 use crate::{Error, Result, fail};
@@ -38,6 +39,10 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
     };
     let resources = child(model, "resources")?;
     let mut importer = Importer::default();
+    let mut textures = HashMap::new();
+    let mut remaining = super::MAX_BYTES
+        - relations.root_element().document().input_text().len()
+        - model.document().input_text().len();
     for entry in resources.children().filter(Node::is_element) {
         match entry.tag_name().name() {
             "object" => {
@@ -45,6 +50,45 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
                 if importer.objects.insert(id, entry).is_some() {
                     return fail("Duplicate 3MF object ID");
                 }
+            }
+            "texture2d" => {
+                let id: u32 = number(entry.attribute("id"))?;
+                let path = entry
+                    .attribute("path")
+                    .ok_or_else(|| Error("Missing 3MF texture path".into()))?;
+                let path = super::path::relative_reference(path.strip_prefix('/').unwrap_or(path))?;
+                let bytes = zip.read_named(&path, remaining)?;
+                remaining -= bytes.len();
+                let image = texture::decode(&bytes)?;
+                let alpha = if image.pixels().any(|p| p[3] < 255) {
+                    Alpha::Blend
+                } else {
+                    Alpha::Opaque
+                };
+                let wrap = |mode| match mode {
+                    Some("mirror") => 33648,
+                    Some("clamp" | "none") => 33071,
+                    _ => 10497,
+                };
+                let mut sampler = Sampler {
+                    wrap_s: wrap(entry.attribute("tilestyleu")),
+                    wrap_t: wrap(entry.attribute("tilestylev")),
+                    ..Sampler::default()
+                };
+                if entry.attribute("filter") == Some("nearest") {
+                    sampler.mag_filter = 9728;
+                    sampler.min_filter = 9984;
+                }
+                let map = importer.scene.texture(image, true, sampler)?;
+                let material = importer.scene.pbr_material(
+                    &path,
+                    Material {
+                        base_map: Some(map),
+                        alpha,
+                        ..Material::default()
+                    },
+                );
+                textures.insert(id, material);
             }
             "basematerials" => {
                 let id = number(entry.attribute("id"))?;
@@ -61,6 +105,22 @@ pub fn convert(bytes: &[u8]) -> Result<Vec<u8>> {
             }
             _ => {}
         }
+    }
+    for group in children(resources, "texture2dgroup") {
+        let id = number(group.attribute("id"))?;
+        let texid: u32 = number(group.attribute("texid"))?;
+        let material = *textures
+            .get(&texid)
+            .ok_or_else(|| Error("Missing 3MF texture resource".into()))?;
+        let uv = children(group, "tex2coord")
+            .map(|coord| {
+                Ok([
+                    number(coord.attribute("u"))?,
+                    1. - number::<f32>(coord.attribute("v"))?,
+                ])
+            })
+            .collect::<Result<_>>()?;
+        importer.texture_groups.insert(id, (material, uv));
     }
     let mut nodes = Vec::new();
     for item in children(child(model, "build")?, "item") {
@@ -84,6 +144,7 @@ struct Importer<'a, 'input> {
     objects: HashMap<u32, Node<'a, 'input>>,
     meshes: HashMap<u32, usize>,
     materials: HashMap<(u32, usize), usize>,
+    texture_groups: HashMap<u32, (usize, Vec<[f32; 2]>)>,
 }
 
 impl Importer<'_, '_> {
@@ -141,30 +202,55 @@ impl Importer<'_, '_> {
                 ])
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut parts = std::collections::BTreeMap::<_, (Mesh, HashMap<u32, u32>)>::new();
+        let mut parts = std::collections::BTreeMap::<_, (Mesh, HashMap<(u32, usize), u32>)>::new();
         for tri in children(child(mesh, "triangles")?, "triangle") {
-            let material = tri
+            let pid = tri
                 .attribute("pid")
                 .or_else(|| object.attribute("pid"))
-                .and_then(|id| id.parse().ok())
-                .zip(
-                    tri.attribute("p1")
-                        .or_else(|| object.attribute("pindex"))
-                        .and_then(|i| i.parse().ok()),
-                )
-                .and_then(|key| self.materials.get(&key).copied());
-            let (part, remap) = parts.entry(material).or_default();
+                .and_then(|id| id.parse::<u32>().ok());
+            let p1 = tri
+                .attribute("p1")
+                .or_else(|| object.attribute("pindex"))
+                .and_then(|index| index.parse::<usize>().ok())
+                .unwrap_or(0);
+            let group = pid.and_then(|id| self.texture_groups.get(&id));
+            let material = group
+                .map(|(material, _)| *material)
+                .or_else(|| pid.and_then(|id| self.materials.get(&(id, p1)).copied()));
+            // A face can share positions while its UVs lie on a different
+            // texture seam. Include the UV index when compacting corners.
+            let (part, remap) = parts
+                .entry((material, pid.filter(|_| group.is_some())))
+                .or_default();
             part.material = material;
-            for attribute in ["v1", "v2", "v3"] {
-                let i: u32 = number(tri.attribute(attribute))?;
+            for (vertex, property) in [("v1", "p1"), ("v2", "p2"), ("v3", "p3")] {
+                let i: u32 = number(tri.attribute(vertex))?;
                 let p = *positions
                     .get(i as usize)
                     .ok_or_else(|| Error("Invalid 3MF vertex index".into()))?;
-                let index = *remap.entry(i).or_insert_with(|| {
-                    let next = part.positions.len() as u32;
-                    part.positions.push(p);
-                    next
-                });
+                let uv_index = tri
+                    .attribute(property)
+                    .map(|index| number(Some(index)))
+                    .transpose()?
+                    .unwrap_or(p1);
+                let uv = group
+                    .map(|(_, coords)| {
+                        coords
+                            .get(uv_index)
+                            .copied()
+                            .ok_or_else(|| Error("Invalid 3MF texture coordinate index".into()))
+                    })
+                    .transpose()?;
+                let index = *remap
+                    .entry((i, if uv.is_some() { uv_index } else { 0 }))
+                    .or_insert_with(|| {
+                        let next = part.positions.len() as u32;
+                        part.positions.push(p);
+                        if let Some(uv) = uv {
+                            part.uv.push(uv);
+                        }
+                        next
+                    });
                 part.indices.push(index);
             }
         }

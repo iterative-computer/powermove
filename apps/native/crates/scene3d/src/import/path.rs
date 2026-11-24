@@ -129,7 +129,7 @@ pub(super) fn relative_reference(uri: &str) -> Result<String> {
         .map_err(|_| Error("Invalid model file reference".into()))?
         .replace('\\', "/");
     let p = Path::new(&name);
-    if name.contains(':')
+    if name.contains([':', '\0'])
         || p.is_absolute()
         || p.components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -138,7 +138,11 @@ pub(super) fn relative_reference(uri: &str) -> Result<String> {
             "Model companions must be relative files beside the model".into(),
         ));
     }
-    Ok(name)
+    let relative: std::path::PathBuf = p.components().collect();
+    if relative.as_os_str().is_empty() {
+        return Err(Error("Missing model companion filename".into()));
+    }
+    Ok(relative.to_string_lossy().into_owned())
 }
 pub fn prepare(path: &Path) -> Result<Prepared> {
     if let Some(message) = unsupported(path) {
@@ -157,17 +161,6 @@ pub fn prepare(path: &Path) -> Result<Prepared> {
     let root = path.parent().unwrap_or(Path::new("."));
     let mut total = 0;
     let bytes = read(path, &mut total)?;
-    if ext == "gltf" || (ext == "vrm" && !bytes.starts_with(b"glTF")) {
-        let bytes = embed_gltf(&bytes, |uri| read(&companion(root, uri)?, &mut total))?;
-        return super::prepare(
-            vec![ImportFile {
-                name,
-                mime: mime(&ext).into(),
-                bytes,
-            }],
-            None,
-        );
-    }
     let mut files = vec![ImportFile {
         name,
         mime: mime(&ext).into(),
@@ -179,7 +172,23 @@ pub fn prepare(path: &Path) -> Result<Prepared> {
         })?;
         files.extend(companions);
     }
-    super::prepare(files, None)
+    let mut companions = Vec::new();
+    let (name, bytes) = super::prepare_model(&files[0], &files, None, &mut |uri| {
+        let file = companion(root, uri)?;
+        let bytes = read(&file, &mut total)?;
+        companions.push(ImportFile {
+            name: uri.into(),
+            mime: String::new(),
+            bytes: bytes.clone(),
+        });
+        Ok(Some(bytes))
+    })?;
+    files.extend(companions);
+    Ok(Prepared {
+        name,
+        bytes,
+        original: files,
+    })
 }
 
 pub(super) fn embed_gltf(
@@ -189,16 +198,20 @@ pub(super) fn embed_gltf(
     let mut doc: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| Error(format!("Cannot read glTF: {e}")))?;
     let mut total = bytes.len();
+    // Resize only core glTF images. Extension images can require a specific
+    // codec, and for data maps lossless channel values matter.
+    let core_images: std::collections::HashSet<_> = doc["textures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|texture| texture["source"].as_u64())
+        .collect();
     for key in ["buffers", "images"] {
         if let Some(list) = doc[key].as_array_mut() {
-            for item in list {
+            for (index, item) in list.iter_mut().enumerate() {
                 if let Some(uri) = item["uri"].as_str().filter(|u| !u.starts_with("data:")) {
-                    let data = resolve(uri)?;
-                    total = total.saturating_add(data.len().div_ceil(3) * 4);
-                    if total > MAX_BYTES {
-                        return Err(Error("Embedded glTF exceeds 512 MB".into()));
-                    }
-                    let mime = if key == "images" {
+                    let mut data = resolve(uri)?;
+                    let mut mime = if key == "images" {
                         match super::ext(uri).as_str() {
                             "png" => "image/png",
                             "jpg" | "jpeg" => "image/jpeg",
@@ -208,6 +221,25 @@ pub(super) fn embed_gltf(
                     } else {
                         "application/octet-stream"
                     };
+                    if key == "images"
+                        && core_images.contains(&(index as u64))
+                        && matches!(mime, "image/png" | "image/jpeg")
+                        && image::ImageReader::new(std::io::Cursor::new(&data))
+                            .with_guessed_format()
+                            .and_then(|reader| {
+                                reader.into_dimensions().map_err(std::io::Error::other)
+                            })
+                            .is_ok_and(|(w, h)| w.max(h) > super::texture::MAX_EDGE)
+                    {
+                        // Preserve data channels regardless of which material
+                        // slots reference the image.
+                        (mime, data) =
+                            super::texture::encode(super::texture::decode(&data)?, false)?;
+                    }
+                    total = total.saturating_add(data.len().div_ceil(3) * 4);
+                    if total > MAX_BYTES {
+                        return Err(Error("Embedded glTF exceeds 512 MB".into()));
+                    }
                     item["uri"] = serde_json::Value::String(format!(
                         "data:{mime};base64,{}",
                         base64::engine::general_purpose::STANDARD.encode(data)
