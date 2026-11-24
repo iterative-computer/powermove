@@ -366,9 +366,12 @@ impl SurfaceView {
     pub(super) fn cull_large(&self) -> bool {
         self.prepared.nodes.len() > LARGE
     }
-    /// Whether the panel supports replaying wheel steps on a scroll layer.
+    /// Whether wheel steps over the panel replay a scroll layer: the Project
+    /// panel's, and every panel in a body that scrolls (`builtins`), whose
+    /// body is one. Its rows are kept a viewport past each edge, as the layer
+    /// records; a step past them draws the body again and culls anew.
     pub(super) fn layered(&self) -> bool {
-        &*self.publication.panel == pm_builtins::PROJECT_PANEL
+        &*self.publication.panel == pm_builtins::PROJECT_PANEL || self.cull.outer.is_some()
     }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.
