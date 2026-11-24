@@ -33,8 +33,15 @@ pub enum MediaCommand {
     /// Record an imported asset entry (`assets[id]`: name, kind, size,
     /// duration, ...). Label "Import".
     AddAsset { asset_id: String, asset: Value },
-    /// Add a new asset and carry over its embedded source, if it has one.
-    AddCopy { asset_id: String, asset: Value, media: Option<CopiedMedia> },
+    /// Add a new asset and carry over its embedded source, if it has one,
+    /// with the archive originals it lists (`native3dSources`, by their ids
+    /// in the target).
+    AddCopy {
+        asset_id: String,
+        asset: Value,
+        media: Option<CopiedMedia>,
+        originals: Vec<(String, CopiedMedia)>,
+    },
     /// Remove media (`MediaImport.removeAsset`): the layers showing it go
     /// with it, as before (children parented to them are unparented). Label
     /// "Remove Media".
@@ -148,13 +155,20 @@ impl MediaCommand {
     }
 }
 
-pub(crate) fn copied_media(command: &crate::Command) -> Option<MediaEntry> {
-    let crate::Command::Media(MediaCommand::AddCopy { asset_id, media: Some(source), .. }) = command else {
-        return None;
+pub(crate) fn copied_media(command: &crate::Command) -> Vec<MediaEntry> {
+    let crate::Command::Media(MediaCommand::AddCopy { asset_id, media, originals, .. }) = command else {
+        return vec![];
     };
-    let mut entry = (*source.0).clone();
-    entry.id = asset_id.as_str().into();
-    Some(entry)
+    media
+        .iter()
+        .map(|source| (asset_id, source))
+        .chain(originals.iter().map(|(id, source)| (id, source)))
+        .map(|(id, source)| {
+            let mut entry = (*source.0).clone();
+            entry.id = id.as_str().into();
+            entry
+        })
+        .collect()
 }
 
 /// `moveItems` for media: an unknown folder means the top level, and assets

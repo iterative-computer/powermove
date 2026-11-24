@@ -1026,8 +1026,11 @@ impl Engine {
             } else {
                 0
             };
+            // One allowance for targets, pyramids and bindings: playback's
+            // pool ceiling is its targets' part, never the whole of it again.
+            let targets = cache * pool_part / 100;
             let pool_limit = if playback {
-                (cache * pool_part / 100).min(96 << 20)
+                pm_render::target_shares(targets).0.min(96 << 20)
             } else {
                 0
             };
@@ -1043,7 +1046,7 @@ impl Engine {
                     .map_or(cache * if playback { 2 } else { 10 } / 100, |m| m << 20)
                     + extra * 4 / 10,
             );
-            self.renderer.set_target_pool_budget(cache * pool_part / 100);
+            self.renderer.set_target_pool_budget(targets);
             self.renderer
                 .set_playback_retention(pool_limit, shader_limit);
             let text_budget = if playback {

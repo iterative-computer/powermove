@@ -1102,6 +1102,12 @@ fn closing(intent: Intent, work: &str) -> String {
     }
 }
 impl Controller {
+    /// A region pick over this editor ends with the project it was for (the
+    /// editor closing, its project closing or being replaced).
+    pub(crate) fn end_region_pick(&self) {
+        pm_shell::region_pick::cancel_over(&self.host.borrow().window);
+    }
+
     fn dirty(&self) -> bool {
         self.session
             .as_ref()
@@ -1122,6 +1128,7 @@ impl Controller {
             .is_some_and(|s| self.kernel.published(&s.project).is_none())
         {
             self.linked_sync = Default::default();
+            self.end_region_pick();
             self.session = None;
         }
         self.mcp.bind_window(self.window_key, self.session.clone());
@@ -1270,6 +1277,7 @@ impl Controller {
             self.close_operation = self.mcp.try_operation();
             self.close_pending = true;
             self.mcp.closing.store(true, Ordering::Release);
+            self.end_region_pick();
             self.session = None;
             self.mcp.bind_window(self.window_key, None);
             self.complete_close(intent, cx);
@@ -1332,6 +1340,7 @@ impl Controller {
             .and_then(|s| self.kernel.published(&s.project));
         if p.is_none() {
             self.linked_sync = Default::default();
+            self.end_region_pick();
             self.session = None;
         }
         // A second Quit's own prompt on this window (Quit Now, while the

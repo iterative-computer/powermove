@@ -323,6 +323,11 @@ impl Uploads {
         self.entries.clear();
     }
 
+    /// Keeps only the textures frame `frame` drew.
+    pub(crate) fn keep_frame(&mut self, frame: u64) {
+        self.entries.retain(|e| e.used >= frame);
+    }
+
     /// GPU bytes the kept textures hold.
     pub(crate) fn bytes(&self) -> u64 {
         self.entries.iter().map(|e| e.bytes).sum()

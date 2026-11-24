@@ -508,6 +508,50 @@ impl ViewerDecode {
         }
     }
 
+    /// Stops the worker of one viewer instance of `source` (a layer that
+    /// no longer shows it).
+    pub fn release_instance(&self, source: u64, instance: InstanceId) {
+        let gone = self.workers.lock().unwrap().remove(&(source, instance));
+        if let Some(w) = gone {
+            w.stop();
+        }
+    }
+
+    /// Forgets workers that exited idle: their entries held nothing but
+    /// their place in the map.
+    pub fn prune(&self) {
+        let gone: Vec<Arc<Worker>> = {
+            let mut workers = self.workers.lock().unwrap();
+            let dead: Vec<_> = workers
+                .iter()
+                .filter(|(_, w)| !w.shared.alive.load(Ordering::Acquire))
+                .map(|(k, _)| *k)
+                .collect();
+            dead.iter().filter_map(|k| workers.remove(k)).collect()
+        };
+        for w in gone {
+            w.stop();
+        }
+    }
+
+    /// Worker entries held, and the bytes of the decoded frames they keep
+    /// (the last decoded and the last presented one each).
+    pub fn retained(&self) -> (usize, usize) {
+        let workers = self.workers.lock().unwrap();
+        let bytes = workers
+            .values()
+            .map(|w| {
+                let st = w.shared.state.lock().unwrap();
+                let presented = st
+                    .presented
+                    .as_ref()
+                    .filter(|(n, _)| st.latest.as_ref().is_none_or(|(m, _)| m != n));
+                st.latest.iter().chain(presented).map(|(_, f)| f.bytes()).sum::<usize>()
+            })
+            .sum();
+        (workers.len(), bytes)
+    }
+
     fn worker(&self, source: &Arc<MediaSource>, instance: InstanceId) -> Arc<Worker> {
         let mut workers = self.workers.lock().unwrap();
         let key = (source.id, instance);
@@ -832,7 +876,10 @@ impl Shared {
                 // Exiting under the lock: a request queued while it was
                 // held is decoded first (the loop sees it); one that takes
                 // the lock later sees `alive` false and `fetch` starts a
-                // new worker.
+                // new worker. The frames it kept go with it: its entry can
+                // stay in the worker map until upkeep prunes it.
+                st.latest = None;
+                st.presented = None;
                 self.alive.store(false, Ordering::Release);
                 return None;
             }
@@ -860,16 +907,21 @@ impl Shared {
         } else {
             // The playing viewer already pins its last shown frame. One
             // frame ahead can use the worker's existing latest slot when
-            // the cache share cannot keep both the shown and next frames.
+            // the cache share cannot keep both the shown and next frames,
+            // but only at stride one: at a larger or alternating stride
+            // (60 fps on a 24 fps timeline steps +3, +2) the frame one
+            // stride ahead can pass the next request, and decoding it can
+            // evict the frame that request needs (w84 review P0-1).
             // When the cache share only fits ~1 B-frame pyramid (e.g. 4K on
-            // a 16 GB machine), looking >1 frame ahead pulls in the next
-            // pyramid and evicts the imminent frame (from + stride) before
-            // the viewer reads it.
+            // a 16 GB machine), cap forward look-ahead to at most 1 step so
+            // decoding the next pyramid does not evict the imminent frame.
+            let free_slot = st.playing && stride == 1;
+            let base = self.cache_frames(st).max(usize::from(free_slot));
             let total_frames = self.cache_share() / st.frame_bytes.max(1);
             let max_ahead = if total_frames <= 6 {
-                1
+                base.min(1)
             } else {
-                self.cache_frames(st).max(usize::from(st.playing))
+                base
             };
             AHEAD.min(max_ahead)
         };

@@ -329,17 +329,13 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Projects…", "projects"),
                 sep(),
                 // ⌘W closes the tab (Tabs) or the project (Separate Windows),
-                // named by the mode the menu bar was built in.
+                // named by the mode the menu bar was built in. Either way it
+                // is closeTab with its own key: a page showing closes first,
+                // and on Home the window closes.
                 if crate::tabs_mode() {
                     m("closeTab")
                 } else {
-                    let default = equivalent_accelerator("closeProject").unwrap();
-                    let keys = crate::keymap::user_keys("closeProject");
-                    let chord = match &keys {
-                        Some(keys) => keys.first().map_or("", String::as_str),
-                        None => &default,
-                    };
-                    Item::command("Close Project", "closeProject", chord)
+                    Item { label: "Close Project".into(), ..m("closeTab") }
                 },
                 sep(),
                 m("save"),

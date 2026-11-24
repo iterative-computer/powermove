@@ -107,8 +107,13 @@ impl BindCache {
         // Submitted commands retain their own references until completion.
         let retained = self.retained_bytes();
         self.retained = Some(retained);
-        if retained > self.budget {
+        if retained + self.compat.bytes() > self.budget {
             self.clear_bindings();
+        }
+        // Compatibility uploads share the bindings' part: past it, only the
+        // ones this frame drew stay.
+        if self.compat.bytes() > self.budget {
+            self.compat.keep_frame(self.frame);
         }
     }
 

@@ -187,3 +187,103 @@ fn un_caching_an_outer_view_does_not_reuse_stale_inner_line_layouts() {
         );
     });
 }
+
+struct Label(&'static str, Rc<Cell<usize>>);
+impl Render for Label {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.1.set(self.1.get() + 1);
+        div().size_full().child(self.0)
+    }
+}
+
+/// Registers a font in its prepaint, once asked: between its cached
+/// neighbours' prepaints, with no text shaped in between.
+struct FontShell {
+    before: Entity<Label>,
+    load: Rc<Cell<bool>>,
+    after: Entity<Label>,
+}
+impl Render for FontShell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut style = StyleRefinement::default();
+        style.size.width = Some(px(120.).into());
+        style.size.height = Some(px(20.).into());
+        let load = self.load.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(["One", "Two", "Three", "Four"])
+            .child(self.before.clone().cached(style.clone()))
+            .child(
+                gpui::canvas(
+                    move |_, _, cx| {
+                        if load.replace(false) {
+                            let font = include_bytes!(
+                                "../../../vendor/gpui-ce/crates/gpui/test-fixtures/IBMPlexSans-Regular.ttf"
+                            );
+                            cx.text_system()
+                                .add_fonts(vec![std::borrow::Cow::Borrowed(&font[..])])
+                                .unwrap();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .w(px(10.))
+                .h(px(10.)),
+            )
+            .child(self.after.clone().cached(style))
+            .child("Tail")
+    }
+}
+
+/// w83 review P0-4: a font registered between two cached views clears the
+/// layout cache mid-frame; the next frames must not replay a range recorded
+/// before that clear (it panicked slicing the layout list), and a stable
+/// redraw after it draws the same pixels.
+#[test]
+fn a_font_registered_between_cached_views_never_replays_a_cleared_range() {
+    objc2::rc::autoreleasepool(|_| {
+        let renders = Rc::new(Cell::new(0));
+        let load = Rc::new(Cell::new(false));
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(
+                gpui_parley::SystemFonts::Load,
+            )),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window = cx
+            .open_window(size(px(200.), px(200.)), |_, cx| {
+                let before = cx.new(|_| Label("Before", renders.clone()));
+                let after = cx.new(|_| Label("After", renders.clone()));
+                cx.new(|_| FontShell {
+                    before,
+                    load: load.clone(),
+                    after,
+                })
+            })
+            .unwrap();
+        let redraw = |cx: &mut HeadlessAppContext| {
+            window.update(cx, |_, _, cx| cx.notify()).unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into()).unwrap()
+        };
+        redraw(&mut cx);
+        redraw(&mut cx);
+        load.set(true);
+        let _ = redraw(&mut cx);
+        assert!(!load.get(), "the font was registered in prepaint");
+        let settled = redraw(&mut cx);
+        for _ in 0..4 {
+            assert_eq!(redraw(&mut cx), settled, "stable geometry draws the same pixels");
+        }
+        let cached = renders.get();
+        redraw(&mut cx);
+        assert_eq!(renders.get(), cached, "the cached views replay again once settled");
+    });
+}

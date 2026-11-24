@@ -996,7 +996,14 @@ where
     }
 
     fn reuse(&mut self, previous: &mut Self, range: Range<usize>) {
-        for key in &previous.used[range] {
+        // A font load during this frame cleared the previous frame's
+        // layouts after a cached view chose to replay them: nothing to carry
+        // over then (that view renders afresh next frame; its generation
+        // is stale).
+        let Some(used) = previous.used.get(range) else {
+            return;
+        };
+        for key in used {
             if let Some(layout) = previous.entries.remove(key) {
                 self.entries.insert(key.clone(), layout);
             }
@@ -1066,11 +1073,18 @@ impl LineLayoutCache {
         }
     }
 
+    /// The font generation the cache's layouts belong to (synchronized
+    /// first, so an index taken next is from the same generation).
     pub fn font_generation(&self) -> u64 {
-        self.platform_text_system.font_generation()
+        self.sync_font_generation();
+        self.font_generation.load(Ordering::Acquire)
     }
 
+    /// Indices into the current frame's layouts. The cache synchronizes with
+    /// the platform's fonts first: a font load clears it, and an index taken
+    /// before that clear would point past the lists that follow it.
     pub fn layout_index(&self) -> LineLayoutIndex {
+        self.sync_font_generation();
         let frame = self.current_frame.read();
         LineLayoutIndex {
             lines_index: frame.lines.used.len(),
@@ -1091,6 +1105,26 @@ impl LineLayoutCache {
             self.clear();
             self.font_generation.store(generation, Ordering::Release);
         }
+    }
+
+    /// Whether `range`, recorded last frame, still names layouts of the
+    /// previous frame: ordered and within each of its three lists. A view
+    /// whose range fails this renders again instead of replaying it.
+    pub fn can_reuse_layouts(&self, range: &Range<LineLayoutIndex>) -> bool {
+        self.sync_font_generation();
+        let previous = self.previous_frame.lock();
+        let fits = |start: usize, end: usize, len: usize| start <= end && end <= len;
+        fits(range.start.lines_index, range.end.lines_index, previous.lines.used.len())
+            && fits(
+                range.start.shaped_texts_index,
+                range.end.shaped_texts_index,
+                previous.shaped_texts.used.len(),
+            )
+            && fits(
+                range.start.inline_layouts_index,
+                range.end.inline_layouts_index,
+                previous.inline_layouts.used.len(),
+            )
     }
 
     pub fn reuse_layouts(&self, range: Range<LineLayoutIndex>) {

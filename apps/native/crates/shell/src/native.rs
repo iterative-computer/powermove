@@ -8785,7 +8785,9 @@ pub fn check_palette_typing() {
     assert_eq!(popup_card_size(popup.window.frame().size).width, 540.);
     assert!(!popup.search.isBezeled());
     assert!(!popup.search.drawsBackground());
-    assert_eq!(popup.glider.cornerRadius(), 10.);
+    // Concentric with the palette's corner (31652371b).
+    assert_eq!(popup.glider.cornerRadius(), f64::from(spotlight::ROW_RADIUS));
+    assert_eq!(spotlight::ROW_RADIUS, spotlight::RADIUS - spotlight::ROW_INSET);
     assert_eq!(popup.scroll.frame().origin.y, spotlight::FOOTER);
     assert!(popup.chrome.as_ref().unwrap().clear.isHidden());
 

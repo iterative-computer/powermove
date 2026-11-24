@@ -194,7 +194,9 @@ unsafe extern "C" fn emit_material(
         if let Some((opacity, sampler, tex_coord)) = unsafe { data.opacity.read() } {
             let (color, sampler, tex_coord) = base.map_or(
                 (None, sampler, tex_coord),
-                |(image, sampler, base_coord)| (Some(image), sampler, base_coord),
+                |(image, sampler, base_coord)| {
+                    (Some(image), sampler, packed_coord(Some(base_coord), Some(tex_coord)))
+                },
             );
             base = Some((texture::with_opacity(color, opacity), sampler, tex_coord));
         }
@@ -225,7 +227,7 @@ unsafe extern "C" fn emit_material(
                 false,
                 rough_sampler.or(metal_sampler).unwrap_or_default(),
             )?);
-            material.metallic_roughness_tex_coord = rough_coord.or(metal_coord).unwrap_or(0);
+            material.metallic_roughness_tex_coord = packed_coord(rough_coord, metal_coord);
         }
         for (target, target_coord, raster, color) in [
             (
@@ -257,6 +259,31 @@ unsafe extern "C" fn emit_material(
         Ok(())
     })();
     output.record(result)
+}
+
+/// The UV set of two maps packed into one texture (opacity into base colour,
+/// metallic with roughness). Packed, they share one set: when theirs differ,
+/// both sample UV0 as they did before second UV sets were read, so neither
+/// map moves onto a set it was not authored for (w83 review P0-3).
+fn packed_coord(a: Option<u32>, b: Option<u32>) -> u32 {
+    match (a, b) {
+        (Some(a), Some(b)) if a != b => 0,
+        (a, b) => a.or(b).unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod packed_coord_tests {
+    use super::packed_coord;
+    #[test]
+    fn packed_maps_keep_a_set_both_were_authored_for() {
+        assert_eq!(packed_coord(Some(1), Some(1)), 1);
+        assert_eq!(packed_coord(Some(1), None), 1);
+        assert_eq!(packed_coord(None, Some(1)), 1);
+        assert_eq!(packed_coord(Some(1), Some(0)), 0);
+        assert_eq!(packed_coord(Some(0), Some(1)), 0);
+        assert_eq!(packed_coord(None, None), 0);
+    }
 }
 
 unsafe extern "C" fn emit_mesh(

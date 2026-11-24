@@ -114,7 +114,8 @@ fn main() {
         .into_iter()
         .find(|(title, _)| *title == "File")
         .unwrap();
-    assert!(file.iter().any(|item| item.label == "Close Project" && item.command == "closeProject"));
+    // Separate Windows names Command-W Close Project; it is still closeTab (w83 P1-3).
+    assert!(file.iter().any(|item| item.label == "Close Project" && item.command == "closeTab"));
     assert!(file.iter().any(|item| item.label == "Close Window" && item.command == "closeWindow"));
     pm_shell::set_tabs_mode(tabs_mode);
 

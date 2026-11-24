@@ -823,12 +823,13 @@ fn row_drag_index_and_empty_space_reorder_with_one_undo(cx: &mut TestAppContext)
         s.vcx.simulate_mouse_move(row.center(), None, Modifiers::none());
         s.idle(cx);
         let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l2"]"#);
-        let shy = bounds(&mut s.vcx, r#"timeline:shy:["layer","l2"]"#);
+        // The first switch column after the name (Shy left the row, PM-293).
+        let parent = bounds(&mut s.vcx, r#"timeline:parent:["layer","l2"]"#);
         let before_history = s.rig.kernel.published(PROJECT).unwrap().history.entries;
         let from = match source {
             "index" => point(row.origin.x + px(12.), row.center().y),
             "space" => point(
-                (name.origin.x + name.size.width + shy.origin.x) / 2.,
+                (name.origin.x + name.size.width + parent.origin.x) / 2.,
                 row.center().y,
             ),
             "badge" => point(
@@ -883,7 +884,7 @@ fn row_drag_under_threshold_selects_and_escape_cancels(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
-    for control in ["visibility", "lock", "parent", "disclosure", "shy", "solo"] {
+    for control in ["visibility", "lock", "parent", "disclosure", "threeD"] {
         let mut s = stage(cx, 3);
         keyed(&mut s, cx, &[0.5]);
         let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
@@ -2155,7 +2156,11 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     // Once the steps stop: the layers' render (each layer's settle, one
     // frame on screen) and the written view's publication.
     settle(&mut s);
-    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    let after = renders(&s);
+    assert!(
+        (rendered + 1..=rendered + 4).contains(&after),
+        "{after} renders once the steps stopped, from {rendered}"
+    );
     // Past the tracks' width drawn: drawn again at once.
     let rendered = renders(&s);
     wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
@@ -2957,9 +2962,13 @@ fn pressing_a_key_id_two_layers_share_selects_the_pressed_layer(cx: &mut TestApp
         layer("l1")
     );
     let mut s = stage_project(cx, project);
-    let row = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer("l0".into()));
-    let op = format!("key:{}", serde_json::json!([row, "k"]));
-    let at = op_center(&mut s, &op);
+    // Summary marks on a layer row are decorative (f34dec8e3): the key is
+    // pressed on its property row, revealed on both layers.
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:t", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = property_key_center(&mut s, "l0", "opacity");
     s.vcx.simulate_click(at, Modifiers::none());
     s.idle(cx);
     let selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();

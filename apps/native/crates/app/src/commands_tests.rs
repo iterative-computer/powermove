@@ -817,7 +817,7 @@ fn layer_paste_plans_a_copy_at_the_playhead_and_undo_removes_it(cx: &mut TestApp
     let root = snapshot.snapshot.root().unwrap();
     let at = pm_kernel::model::find_layer(root, "l0").unwrap();
     let copied = vec![pm_kernel::model::layer_at(root, &at).unwrap().to_value()];
-    let plan = paste_plan(copied, 3.);
+    let plan = paste_plan(copied, 3., false);
     call(
         &s.rig.kernel,
         transaction(&plan, Some(snapshot.revision())).unwrap(),

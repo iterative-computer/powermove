@@ -2739,8 +2739,21 @@ impl MediaCache {
         });
         self.frame_seen
             .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
-        self.video_seen
-            .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
+        // A layer instance that stopped showing its clip gives back the
+        // decode worker it kept (with its frames), even while other
+        // instances keep the source busy.
+        let gone: Vec<_> = self
+            .video_seen
+            .iter()
+            .filter(|(_, seen)| frame.wrapping_sub(**seen) > 30)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (path, instance) in gone {
+            self.video_seen.remove(&(path.clone(), instance));
+            if let Some((_, source)) = self.sources.get(&path) {
+                self.viewer.release_instance(source.id, instance);
+            }
+        }
         self.recount();
     }
 
@@ -2829,6 +2842,8 @@ impl MediaCache {
                 self.service.release(None, Some(source.id));
             }
         }
+        self.viewer.prune();
+        self.source_viewer.prune();
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture

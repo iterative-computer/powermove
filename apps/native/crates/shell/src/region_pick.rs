@@ -126,6 +126,30 @@ pub fn cancel() -> bool {
     true
 }
 
+/// Cancels the pick over `window`, if one is in progress there, on the next
+/// turn of the run loop: the caller may be inside a GPUI update (an editor
+/// closing or replacing its project), and ordering the overlay out calls
+/// AppKit back synchronously. A pick started meanwhile is not affected.
+pub fn cancel_over(window: &NSWindow) -> bool {
+    let Some(view) = PICKING.with(|p| p.borrow().clone()) else {
+        return false;
+    };
+    if !view.ivars().parent.borrow().as_ref().is_some_and(|parent| std::ptr::eq(&**parent, window)) {
+        return false;
+    }
+    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+        finish(&view, None)
+    });
+    let timer = unsafe {
+        objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0., false, &block)
+    };
+    unsafe {
+        objc2_foundation::NSRunLoop::mainRunLoop()
+            .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+    };
+    true
+}
+
 /// Starts a pick over `window`'s content; the receiver gets the box once.
 /// A pick already in progress is cancelled first.
 pub fn pick(window: &NSWindow) -> async_channel::Receiver<Picked> {
@@ -180,4 +204,63 @@ pub fn pick(window: &NSWindow) -> async_channel::Receiver<Picked> {
         }
     }
     rx
+}
+
+/// Main-thread AppKit check (`tests/region_pick.rs`): a pick over an editor
+/// ends when the editor closes or its project is replaced, without a run of
+/// AppKit inside the caller, and a fresh pick then works.
+pub fn check_region_pick() {
+    let mtm = MainThreadMarker::new().unwrap();
+    let _app = NSApplication::sharedApplication(mtm);
+    let window = |x: f64| {
+        let w = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(x, -20000.), NSSize::new(320., 200.)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { w.setReleasedWhenClosed(false) };
+        // Off screen and behind everything: never in front of anyone.
+        w.orderBack(None);
+        w
+    };
+    let turn = || {
+        objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(
+            &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05),
+        )
+    };
+    let children = |w: &NSWindow| w.childWindows().map_or(0, |c| c.count());
+    let (editor, other) = (window(-20000.), window(-19000.));
+    assert!(editor.isVisible(), "the editor is ordered in");
+
+    // The editor closes while the pick waits.
+    let closed = pick(&editor);
+    assert_eq!(children(&editor), 1, "the overlay is over the editor");
+    assert!(!cancel_over(&other), "another editor's teardown leaves it");
+    assert!(cancel_over(&editor));
+    assert!(closed.try_recv().is_err(), "nothing runs inside the caller");
+    assert_eq!(children(&editor), 1);
+    turn();
+    assert_eq!(closed.try_recv(), Ok(None));
+    assert_eq!(children(&editor), 0);
+    assert!(!cancel(), "no pick is left");
+
+    // The project is replaced, and a fresh pick starts before the deferred
+    // cancel runs: the fresh one survives it.
+    let replaced = pick(&editor);
+    assert!(cancel_over(&editor));
+    let fresh = pick(&editor);
+    assert_eq!(replaced.try_recv(), Ok(None));
+    turn();
+    assert!(fresh.try_recv().is_err(), "the fresh pick still waits");
+    assert_eq!(children(&editor), 1);
+    assert!(cancel());
+    assert_eq!(fresh.try_recv(), Ok(None));
+    assert_eq!(children(&editor), 0);
+    editor.close();
+    other.close();
+    println!("region_pick: ok");
 }
