@@ -290,6 +290,36 @@ fn a_track_matte_is_asked_where_serial_frames_ask_it() {
     assert_serial("matte", runs, false);
 }
 
+/// A solid matte asks the producer nothing: its consumer's frames are asked
+/// ahead, as serial frames ask them.
+#[test]
+fn a_solid_matte_keeps_its_frames_asked_ahead() {
+    let dur = 0.2;
+    let mut consumer = rect("C", 64.0, 100.0, dur);
+    consumer["matteSource"] = json!("M");
+    let solid = layer(
+        "M",
+        "solid",
+        json!({ "w": 60, "h": 30, "color": "#FFFFFF" }),
+        64.0,
+        32.0,
+        dur,
+    );
+    let doc = project(
+        W,
+        H,
+        dur,
+        no_fill(),
+        vec![rect("A", 30.0, 20.0, dur), solid, consumer],
+    );
+    let runs = runs(
+        &doc,
+        MediaPaths::default(),
+        settings(prores_4444(), 30, 0, 6),
+    );
+    assert_serial("solid matte", runs, true);
+}
+
 /// A precomp held on its own frame rate (15 fps child in a 30 fps parent,
 /// keepFrameRate) under a root layer A drawn first: each frame asks A at its
 /// time, which clears the serial cache, so the held child layer is asked

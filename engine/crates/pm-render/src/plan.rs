@@ -1106,11 +1106,15 @@ fn draw_layer<'d>(
     all: &[&'d Node],
     mut text_run: Option<&mut TextDrawRun>,
 ) -> JsResult<Option<Vec<Draw>>> {
-    // A matte is planned from its consumer, after layers its consumer's
-    // answer decides on: a frame with one is asked serially.
+    // A matte is planned from its consumer, only when the consumer draws
+    // (its answer decides): a frame whose matte may hold layers the producer
+    // is asked for is asked serially. Video, image and solid mattes ask it
+    // nothing.
     if b.compat_probing
         && js::flag(layer, "matteSource")
         && let Some(compat) = b.compat
+        && composite::build::matte_source(scope.layers(), layer)
+            .is_some_and(|m| !matches!(js::layer_type(m).as_str(), "video" | "image" | "solid"))
     {
         compat.probe_unsafe();
     }
