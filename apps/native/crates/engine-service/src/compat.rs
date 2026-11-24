@@ -38,6 +38,8 @@ pub struct BaseRequest {
     pub scale: f64,
     /// Today's preview crop window, in raster pixels.
     pub crop: Option<PixelRect>,
+    /// A lazy base canvas needs its geometry before anyone reads its pixels.
+    pub geometry_only: bool,
 }
 
 /// A base raster as an extension's canvas sees it: straight RGBA8 rows of
@@ -141,8 +143,17 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
     let content = request
         .content
         .map(|value| Node::from_value(value, request.document.revision()));
-    let painted = renderer
-        .layer_raster(
+    let painted = if request.geometry_only {
+        renderer.layer_raster_geometry(
+            &request.document,
+            &request.composition,
+            &request.layer,
+            content.as_ref(),
+            request.seconds,
+            request.scale,
+        )
+    } else {
+        renderer.layer_raster_window(
             &request.document,
             &request.composition,
             &request.layer,
@@ -150,8 +161,10 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
             request.seconds,
             request.scale,
             pm_protocol::color::Precision::Float16,
+            request.crop.map(|c| [c.x, c.y, c.width, c.height]),
         )
-        .map_err(|e| e.to_string())?;
+    }
+    .map_err(|e| e.to_string())?;
     let Some(raster) = painted else {
         return Ok(None);
     };
@@ -165,15 +178,9 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
         font_offset: raster.font_offset,
         uv,
     };
-    // Text with no ink is a transparent canvas of its geometry.
-    if raster.pixels.pixels.is_empty() {
+    if request.geometry_only {
         let (w, h) = raster.canvas;
-        return Ok(Some(geometry(
-            w,
-            h,
-            vec![0; w as usize * h as usize * 4],
-            [0., 0., 1., 1.],
-        )));
+        return Ok(Some(geometry(w, h, Vec::new(), [0., 0., 1., 1.])));
     }
     let painted =
         pm_export::raster::encode_rgba8_f32(&raster.pixels.pixels, SnapshotPixels::Straight);

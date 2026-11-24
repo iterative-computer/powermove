@@ -387,7 +387,7 @@ globalThis.__compat = {
         try {
           const layer = layerIn(realm.PM.proj, need.composition, need.layer);
           if (!layer) return { native: true };
-          realm.rasterContext = { composition: need.composition, layer };
+          realm.rasterContext = { composition: need.composition, layer, crop: need.crop };
           const result = realm.PM.raster(
             layer,
             need.scale,
