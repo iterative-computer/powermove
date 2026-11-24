@@ -1627,9 +1627,13 @@ impl NativeControl {
             }
         }
         // A value that changes while the picture stands brings the real
-        // control back for the rest of the hold.
+        // control back for the rest of the hold. Skip redundant AppKit work
+        // and repaints when nothing changed (e.g. streaming agent ticks).
         let seen = (value.clone(), options.to_vec(), disabled);
-        if self.seen.as_ref().is_some_and(|s| *s != seen) {
+        if self.seen.as_ref() == Some(&seen) {
+            return;
+        }
+        if self.seen.is_some() {
             self.picture.go_live();
         }
         self.seen = Some(seen);

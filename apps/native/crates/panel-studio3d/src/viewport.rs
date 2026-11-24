@@ -20,8 +20,14 @@ use pm_scene3d::{
 pub struct Item {
     pub id: String,
     pub role: Role,
+    /// True for 3D Null layers (empty scene-unit transform locators).
+    pub is_null: bool,
     pub name: String,
     pub locked: bool,
+    /// Evaluated world transform matrix (column-major 4×4).
+    pub world: [f64; 16],
+    /// Evaluated parent world transform matrix (column-major 4×4; identity when unparented).
+    pub parent_world: [f64; 16],
     /// World-space box (axis aligned).
     pub bounds: Bounds,
     /// Oriented 8 world-space corners of the object's local bounding box
@@ -181,22 +187,29 @@ impl Scene {
     }
     /// Everything pickable, or only the selection, as one box.
     pub fn bounds(&self, only: Option<&[String]>) -> Option<Bounds> {
-        let mut out: Option<Bounds> = None;
-        for item in self
-            .items
-            .iter()
-            .filter(|i| i.role == Role::Object && only.is_none_or(|o| o.contains(&i.id)))
-        {
-            let b = item.bounds;
-            out = Some(match out {
-                None => b,
-                Some(o) => Bounds {
-                    min: std::array::from_fn(|i| o.min[i].min(b.min[i])),
-                    max: std::array::from_fn(|i| o.max[i].max(b.max[i])),
-                },
-            });
+        let union = |include_nulls: bool| -> Option<Bounds> {
+            let mut out: Option<Bounds> = None;
+            for item in self.items.iter().filter(|i| {
+                i.role == Role::Object
+                    && (include_nulls || !i.is_null)
+                    && only.is_none_or(|o| o.contains(&i.id))
+            }) {
+                let b = item.bounds;
+                out = Some(match out {
+                    None => b,
+                    Some(o) => Bounds {
+                        min: std::array::from_fn(|i| o.min[i].min(b.min[i])),
+                        max: std::array::from_fn(|i| o.max[i].max(b.max[i])),
+                    },
+                });
+            }
+            out
+        };
+        if only.is_some() {
+            union(true)
+        } else {
+            union(false).or_else(|| union(true))
         }
-        out
     }
     /// The nearest layer the ray meets, with the face it meets.
     pub fn pick(&self, ray: &Ray) -> Option<Hit> {
@@ -261,15 +274,15 @@ fn translation(m: &[f64; 16]) -> Vec3 {
     )
     .map_or([0.; 3], |b| b.min)
 }
-/// Whether a composition node has a 3D object, light or camera layer
-/// (`schema::role`, read from the nodes).
+/// Whether a composition node has a 3D object, light, camera, or Studio 3D null
+/// layer (read from the nodes).
 fn has_roles(comp: &pm_model::Node) -> bool {
     let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
     else {
         return false;
     };
     layers.iter().any(|layer| {
-        layer
+        let is_role = layer
             .get("d")
             .and_then(|d| d.get("definition"))
             .is_some_and(|definition| match definition.kind() {
@@ -278,7 +291,21 @@ fn has_roles(comp: &pm_model::Node) -> bool {
                     [schema::OBJECT, schema::LIGHT, schema::CAMERA].contains(&s.as_str())
                 }
                 _ => false,
-            })
+            });
+        let is_studio_null = matches!(
+            layer.get("type").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::String(s)) if s.as_str() == Some("null")
+        ) && matches!(
+            layer.get("threeD").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(true))
+        ) && matches!(
+            layer
+                .get("d")
+                .and_then(|d| d.get("studio3d"))
+                .map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(true))
+        );
+        is_role || is_studio_null
     })
 }
 /// Read on a worker from one publication at `time`.
@@ -481,8 +508,74 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                 .unwrap_or(d)
         })
     };
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
     let mut items = vec![];
     for (index, l) in layers.iter().enumerate() {
+        if l["type"] == "null" && l["threeD"] == true {
+            if l["on"] == false {
+                continue;
+            }
+            let id = l["id"].as_str().unwrap_or_default().to_string();
+            let Some(world) = r.null_worlds.get(&id) else {
+                continue;
+            };
+            let parent_world = r.parent_worlds.get(&id).copied().unwrap_or(IDENTITY);
+            let name = l["name"].as_str().unwrap_or("").to_string();
+            let locked = l["lock"] == true;
+            let pivot = translation(world);
+            let local = Bounds {
+                min: [-0.25; 3],
+                max: [0.25; 3],
+            };
+            let transformed = pm_scene3d::geometry::transform(local, *world).unwrap_or(Bounds {
+                min: [pivot[0] - 0.25, pivot[1] - 0.25, pivot[2] - 0.25],
+                max: [pivot[0] + 0.25, pivot[1] + 0.25, pivot[2] + 0.25],
+            });
+            // Keep a minimum picking envelope even when a null is scaled tiny.
+            let pad = 0.12;
+            let bounds = Bounds {
+                min: std::array::from_fn(|i| transformed.min[i].min(pivot[i] - pad)),
+                max: std::array::from_fn(|i| transformed.max[i].max(pivot[i] + pad)),
+            };
+            let box_corners = (0..8)
+                .map(|n| {
+                    let c: Vec3 = std::array::from_fn(|i| {
+                        if n & (1 << i) == 0 {
+                            local.min[i]
+                        } else {
+                            local.max[i]
+                        }
+                    });
+                    pm_scene3d::geometry::transform(Bounds { min: c, max: c }, *world)
+                        .ok()
+                        .map(|b| b.min)
+                })
+                .collect::<Option<Vec<Vec3>>>()
+                .and_then(|v| v.try_into().ok());
+            items.push(Item {
+                position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
+                rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
+                scale: channels(&id, ["scale.x", "scale.y", "scale.z"], 100.),
+                pixels: None,
+                id,
+                role: Role::Object,
+                is_null: true,
+                name,
+                locked,
+                world: *world,
+                parent_world,
+                bounds,
+                box_corners,
+                pivot,
+                target: None,
+                aim: None,
+                light: None,
+                shape: [0.; 3],
+            });
+            continue;
+        }
         let Some(role) = schema::role(l) else {
             continue;
         };
@@ -490,6 +583,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         let data = &l["d"]["data"];
         let name = l["name"].as_str().unwrap_or("").to_string();
         let locked = l["lock"] == true;
+        let parent_world = r.parent_worlds.get(&id).copied().unwrap_or(IDENTITY);
         match role {
             Role::Object => {
                 // Environments (sky, fog, terrain, scatter) aren't picked in
@@ -540,8 +634,11 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     pixels: None,
                     id,
                     role,
+                    is_null: false,
                     name,
                     locked,
+                    world: *world,
+                    parent_world,
                     bounds,
                     box_corners,
                     pivot: translation(world),
@@ -564,8 +661,11 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     pixels: None,
                     id: id.clone(),
                     role,
+                    is_null: false,
                     name,
                     locked,
+                    world: *world,
+                    parent_world,
                     bounds: Bounds {
                         min: [pivot[0] - s, pivot[1] - s, pivot[2] - s],
                         max: [pivot[0] + s, pivot[1] + s, pivot[2] + s],
@@ -715,6 +815,7 @@ mod tests {
         let item = |id: &str, z| Item {
             id: id.into(),
             role: Role::Object,
+            is_null: false,
             name: id.into(),
             locked: false,
             bounds: b(z),
@@ -727,6 +828,8 @@ mod tests {
             position: [0., 0., z],
             rotation: [0.; 3],
             scale: [100.; 3],
+            world: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
+            parent_world: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
             pixels: None,
         };
         let scene = Scene {
@@ -842,5 +945,58 @@ mod tests {
         assert!((projected[0] - pb[0]).abs() < 1e-9 && (projected[1] - pb[1]).abs() < 1e-9);
         let rolled = scene.eye(Some(Pose { roll: 90., ..pose }));
         assert!(length(sub(rolled.right_up().0, [0., 1., 0.])) < 1e-9);
+    }
+    #[test]
+    fn bounds_prefers_objects_for_scene_framing_and_frames_selected_nulls() {
+        let e = eye();
+        let identity = [
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ];
+        let mk = |id: &str, is_null: bool, x: f64| Item {
+            id: id.into(),
+            role: Role::Object,
+            is_null,
+            name: id.into(),
+            locked: false,
+            bounds: Bounds {
+                min: [x - 0.5, -0.5, -0.5],
+                max: [x + 0.5, 0.5, 0.5],
+            },
+            box_corners: None,
+            pivot: [x, 0., 0.],
+            target: None,
+            aim: None,
+            light: None,
+            shape: [0.; 3],
+            position: [x, 0., 0.],
+            rotation: [0.; 3],
+            scale: [100.; 3],
+            world: identity,
+            parent_world: identity,
+            pixels: None,
+        };
+        let scene = Scene {
+            shot: e.pose,
+            lens: e.lens,
+            editor_lens: e.lens,
+            width: 1920.,
+            height: 1080.,
+            items: vec![mk("cube", false, 0.), mk("rig", true, 20.)],
+            revision: 1,
+            time: 0.,
+        };
+        // Whole-scene framing focuses on objects, not distant rig nulls.
+        let all = scene.bounds(None).unwrap();
+        assert!((all.max[0] - 0.5).abs() < 1e-9, "{all:?}");
+        // Explicitly framing the selected null frames its locator bounds.
+        let sel = scene.bounds(Some(&["rig".to_string()])).unwrap();
+        assert!((sel.min[0] - 19.5).abs() < 1e-9 && (sel.max[0] - 20.5).abs() < 1e-9, "{sel:?}");
+        // When a scene has only 3D nulls, whole-scene framing falls back to them.
+        let null_only = Scene {
+            items: vec![mk("rig", true, 5.)],
+            ..scene
+        };
+        let fallback = null_only.bounds(None).unwrap();
+        assert!((fallback.min[0] - 4.5).abs() < 1e-9, "{fallback:?}");
     }
 }

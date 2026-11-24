@@ -36,10 +36,24 @@ fn has_3d_layer(p: &Published) -> bool {
             .get("d")
             .and_then(|d| d.get("definition"))
             .map(pm_model::Node::kind);
-        matches!(definition, Some(pm_model::NodeKind::String(s))
+        let is_role = matches!(definition, Some(pm_model::NodeKind::String(s))
             if [schema::OBJECT, schema::LIGHT, schema::CAMERA]
                 .iter()
-                .any(|d| s.as_str() == Some(*d)))
+                .any(|d| s.as_str() == Some(*d)));
+        let is_studio_null = matches!(
+            layer.get("type").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::String(s)) if s.as_str() == Some("null")
+        ) && matches!(
+            layer.get("threeD").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(true))
+        ) && matches!(
+            layer
+                .get("d")
+                .and_then(|d| d.get("studio3d"))
+                .map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(true))
+        );
+        is_role || is_studio_null
     })
 }
 fn selected(p: &Published) -> Result<Value> {
@@ -70,12 +84,19 @@ pub(crate) fn allow_transform(p: &Published, action: &str) -> Result<()> {
             .iter()
             .find(|l| l["id"] == *id)
             .ok_or_else(|| invalid("Layer disappeared"))?;
+        let is_null_3d = l["type"] == "null" && l["threeD"] == true;
+        if is_null_3d {
+            if l["lock"] == true {
+                return Err(invalid("Layer is locked"));
+            }
+            continue;
+        }
         let role = schema::role(l).ok_or_else(|| invalid("Not available for this layer."))?;
         let kind = l["d"]["data"]["light"]["type"].as_str();
         if l["lock"] == true
             || (role == Role::Camera && action == "scale")
             || (role == Role::Light
-                && ((kind == Some("sun") && action != "rotate")
+                && ((kind == Some("sun") && action == "scale")
                     || (kind == Some("point") && action != "move")))
         {
             return Err(invalid(if l["lock"] == true {
@@ -132,7 +153,7 @@ pub(crate) fn inspector(
 pub fn add_menu() -> Value {
     json!([
     {"id":"box","label":"Cube"},{"id":"sphere","label":"Sphere"},{"id":"plane","label":"Plane"},{"id":"cylinder","label":"Cylinder"},{"id":"cone","label":"Cone"},{"id":"torus","label":"Torus"},{"id":"capsule","label":"Capsule"},{"id":"icosahedron","label":"Icosphere"},
-    {"id":"import","label":"Import 3D Model…"},{"id":"area","label":"Softbox"},{"id":"spot","label":"Spotlight"},{"id":"point","label":"Bulb"},{"id":"sun","label":"Sun"},{"id":"camera","label":"Camera"}])
+    {"id":"import","label":"Import 3D Model…"},{"id":"area","label":"Softbox"},{"id":"spot","label":"Spotlight"},{"id":"point","label":"Bulb"},{"id":"sun","label":"Sun"},{"id":"camera","label":"Camera"},{"id":"null","label":"3D Null"}])
 }
 pub fn shots() -> Value {
     json!([
@@ -575,6 +596,10 @@ pub(crate) fn commands(
     }
     if id == "add" {
         let kind = arg.as_str().ok_or_else(|| invalid("Invalid layer kind"))?;
+        if kind == "null" {
+            let (label, commands, _) = add_layer(p, time, "null", &pm_kernel::new_id("null"))?;
+            return Ok((label, commands));
+        }
         let args = match kind {
             "camera" => json!({"operation":"add_camera"}),
             "area" | "spot" | "point" | "sun" => {
@@ -1125,6 +1150,7 @@ pub fn new_menu() -> Vec<(&'static str, &'static str)> {
         ("point", "Bulb"),
         ("sun", "Sun"),
         ("camera", "Camera"),
+        ("null", "3D Null"),
         ("", ""),
         ("sky", "Sky"),
         ("fog", "Fog Volume"),
@@ -1482,6 +1508,61 @@ pub fn add_layer(
         .find(|(k, _)| *k == kind && !k.is_empty())
         .ok_or_else(|| invalid("Unknown 3D layer"))?
         .1;
+    if kind == "null" {
+        let mut properties = pm_model::Map::new();
+        for key in [
+            "position.x",
+            "position.y",
+            "position.z",
+            "anchor.x",
+            "anchor.y",
+            "anchor.z",
+        ] {
+            properties.insert(key, pm_model::Value::Number(0.0));
+        }
+        let mut content = pm_model::Map::new();
+        content.insert("studio3d", pm_model::Value::Bool(true));
+        let fps = comp["fps"]
+            .as_f64()
+            .filter(|f| f.is_finite() && *f > 0.)
+            .unwrap_or(30.);
+        let dur = comp["dur"].as_f64().unwrap_or(5.);
+        let from = (time * fps).round() / fps;
+        let duration = (dur - from).max(1.);
+        let add = pm_kernel::commands::layers::AddLayer {
+            id: id.into(),
+            layer_type: "null".into(),
+            comp: None,
+            name: Some(label.into()),
+            from: Some(from),
+            duration: Some(duration),
+            content,
+            properties,
+            color: None,
+            index: None,
+            parent: None,
+            blend: None,
+            motion_blur: None,
+            visible: None,
+            shy: None,
+            collapsed: None,
+            track: None,
+            time,
+        };
+        let set_3d = pm_kernel::LayerCommand::Set {
+            layer_id: id.into(),
+            patch: pm_kernel::commands::layers::LayerPatch {
+                three_d: Some(true),
+                time,
+                ..Default::default()
+            },
+        };
+        return Ok((
+            format!("Add {label}"),
+            vec![pm_kernel::LayerCommand::Add(Box::new(add)).into(), set_3d.into()],
+            id.into(),
+        ));
+    }
     let world = layers
         .iter()
         .find(|l| fields::environment(&l["d"]["data"]) == Some("world"))

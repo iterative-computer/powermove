@@ -1066,6 +1066,23 @@ fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), Comm
                     initialized = true;
                 }
             }
+            let layers = cx.layers(comp.as_deref());
+            let (w, h) = comp_dimensions(cx, comp.as_deref());
+            if layer_type == "null"
+                && comp_has_studio_3d(&layers)
+                && is_untouched_2d_null(&layer, &layers, w, h)
+            {
+                set_channel_number(&mut transform, "position.x", 0.0);
+                set_channel_number(&mut transform, "position.y", 0.0);
+                set_channel_number(&mut transform, "position.z", 0.0);
+                set_channel_number(&mut transform, "anchor.x", 0.0);
+                set_channel_number(&mut transform, "anchor.y", 0.0);
+                set_channel_number(&mut transform, "anchor.z", 0.0);
+                initialized = true;
+                let mut d_path = at("d");
+                d_path.push("studio3d".into());
+                cx.set(d_path, Value::Bool(true))?;
+            }
             if initialized {
                 cx.replace(at("p"), Value::Object(transform))?;
             }
@@ -1146,6 +1163,58 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
     if current == change.parent.as_deref() {
         return Ok(());
     }
+    if let Some(pidx) = parent_index
+        && is_studio_3d_layer(&layer)
+        && values::text(&layers[pidx], "type") == Some("null")
+    {
+        let parent_layer = &layers[pidx];
+        let parent_id = values::text(parent_layer, "id").unwrap_or_default();
+        let (ploc, _) = cx.layer(parent_id)?;
+        let mut transform = parent_layer
+            .get("p")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut changed_p = false;
+        for (path, default) in CHANNELS_3D.into_iter().chain(PLANAR_CHANNELS) {
+            if !transform.contains_key(path) {
+                transform.insert(path, property(n(default)));
+                changed_p = true;
+            }
+        }
+        let (w, h) = comp_dimensions(cx, comp.as_deref());
+        if !values::flag(parent_layer, "threeD") && is_untouched_2d_null(parent_layer, &layers, w, h)
+        {
+            set_channel_number(&mut transform, "position.x", 0.0);
+            set_channel_number(&mut transform, "position.y", 0.0);
+            set_channel_number(&mut transform, "position.z", 0.0);
+            set_channel_number(&mut transform, "anchor.x", 0.0);
+            set_channel_number(&mut transform, "anchor.y", 0.0);
+            set_channel_number(&mut transform, "anchor.z", 0.0);
+            changed_p = true;
+        }
+        if changed_p {
+            let mut p_path = ploc.path();
+            p_path.push("p".into());
+            cx.replace(p_path, Value::Object(transform))?;
+        }
+        if !values::flag(parent_layer, "threeD") {
+            let mut td_path = ploc.path();
+            td_path.push("threeD".into());
+            cx.set(td_path, Value::Bool(true))?;
+        }
+        if parent_layer
+            .get("d")
+            .and_then(|d| d.get("studio3d"))
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            let mut d_path = ploc.path();
+            d_path.push("d".into());
+            d_path.push("studio3d".into());
+            cx.set(d_path, Value::Bool(true))?;
+        }
+    }
     let time = values::finite(change.time, "time")?;
     let index = loc.index;
     cx.kernel(comp.as_deref(), |edit| {
@@ -1161,6 +1230,81 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
             .map(values::s)
             .unwrap_or(Value::Null),
     )
+}
+
+fn comp_dimensions(cx: &Cx<'_>, comp: Option<&str>) -> (f64, f64) {
+    let Ok(node) = cx.comp_node(comp) else {
+        return (1920.0, 1080.0);
+    };
+    let w = node
+        .get("w")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1920.0);
+    let h = node
+        .get("h")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1080.0);
+    (w, h)
+}
+
+fn is_studio_3d_layer(layer: &Value) -> bool {
+    layer
+        .get("d")
+        .and_then(|d| d.get("definition"))
+        .and_then(Value::as_str)
+        .is_some_and(|def| def.starts_with("powermove.3d."))
+}
+
+fn comp_has_studio_3d(layers: &[Value]) -> bool {
+    layers.iter().any(is_studio_3d_layer)
+}
+
+fn set_channel_number(transform: &mut Map, key: &str, value: f64) {
+    if let Some(ch) = transform.get_mut(key).and_then(Value::as_object_mut) {
+        ch.insert("v", n(value));
+    } else {
+        transform.insert(key, property(n(value)));
+    }
+}
+
+/// True when a 2D null still sits at its untouched pixel-space default pose
+/// (`(w/2, h/2, 0)` with anchor `(50, 50, 0)`), has no keyframes or expressions
+/// on position/anchor, and has no parent or children yet.
+fn is_untouched_2d_null(layer: &Value, layers: &[Value], w: f64, h: f64) -> bool {
+    let id = values::text(layer, "id").unwrap_or_default();
+    if values::text(layer, "parent").is_some_and(|p| !p.is_empty()) {
+        return false;
+    }
+    if layers
+        .iter()
+        .any(|other| values::text(other, "parent") == Some(id))
+    {
+        return false;
+    }
+    let Some(p) = layer.get("p") else {
+        return false;
+    };
+    let check = |key: &str, expected: f64| -> bool {
+        let Some(ch) = p.get(key) else {
+            return expected == 0.0;
+        };
+        let val = ch.get("v").and_then(Value::as_f64).unwrap_or(f64::NAN);
+        let has_kf = ch
+            .get("kf")
+            .and_then(Value::as_array)
+            .is_some_and(|kf| !kf.is_empty());
+        let has_expr = ch
+            .get("expr")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        !has_kf && !has_expr && (val - expected).abs() < 1e-6
+    };
+    check("position.x", w / 2.0)
+        && check("position.y", h / 2.0)
+        && check("position.z", 0.0)
+        && check("anchor.x", 50.0)
+        && check("anchor.y", 50.0)
+        && check("anchor.z", 0.0)
 }
 
 /// `addLayer(command)`.

@@ -256,12 +256,40 @@ fn dist_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     };
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
 }
-/// A scene-space move as the layer's position channels: scene units for
-/// Studio layers; pixels with y and z flipped for extruded text and shapes.
+/// Transform a world-space displacement vector into a parent's local space.
+fn parent_vector(parent_world: [f64; 16], w: Vec3) -> Vec3 {
+    if let Ok(inv) = pm_scene3d::geometry::inverse(parent_world) {
+        let a = pm_scene3d::render::gltf::math::apply(&inv, w);
+        let o = pm_scene3d::render::gltf::math::apply(&inv, [0.; 3]);
+        sub(a, o)
+    } else {
+        w
+    }
+}
+/// A scene-space move as the layer's position channels: parent-local scene
+/// units for Studio layers (including 3D nulls and parented objects/lights);
+/// pixels with y and z flipped for extruded text and shapes.
 fn channel_delta(item: &Item, w: Vec3) -> Vec3 {
     match item.pixels {
         Some(u) if u > 0. => [w[0] / u, -w[1] / u, -w[2] / u],
-        _ => w,
+        _ => parent_vector(item.parent_world, w),
+    }
+}
+/// The item's oriented world axes (accounting for any rotated parent null).
+fn world_basis(item: &Item) -> [Vec3; 3] {
+    if item.pixels.is_some() {
+        return object_basis(item.rotation);
+    }
+    let m = &item.world;
+    let cols = [
+        [m[0], m[1], m[2]],
+        [m[4], m[5], m[6]],
+        [m[8], m[9], m[10]],
+    ];
+    if cols.iter().all(|c| length(*c) > 1e-6) {
+        cols.map(normalize)
+    } else {
+        object_basis(item.rotation)
     }
 }
 /// The layer's own axes: the columns of Rz·Ry·Rx, the order the
@@ -337,9 +365,11 @@ impl State {
             .iter()
             .filter(|i| self.selected.contains(&i.id) && !i.locked)
             .filter(|i| match (i.role, i.light.as_deref(), self.tool) {
-                // A Sun only turns; a Bulb only moves (3d-studio.md §2).
-                (Role::Light, Some("sun"), Tool::Move | Tool::Scale) => false,
+                // Blender-style lights: Point moves; Sun moves & rotates;
+                // Area & Spot move, rotate, and scale (width/height or cone spread).
+                (Role::Light, Some("sun"), Tool::Scale) => false,
                 (Role::Light, Some("point"), Tool::Rotate | Tool::Scale) => false,
+                (Role::Light, Some("area" | "spot"), Tool::Scale) => true,
                 (Role::Light, _, Tool::Scale) => false,
                 _ => true,
             })
@@ -369,7 +399,7 @@ impl State {
             ];
         }
         match self.movable().first() {
-            Some(item) if self.object_axes => object_basis(item.rotation),
+            Some(item) if self.object_axes => world_basis(item),
             _ => AXES,
         }
     }
@@ -1125,17 +1155,89 @@ impl GizmoSurface {
             }
         };
         let vis = self.studio_visible(frame);
+        let drag_active = self.studio.drag.as_ref().is_some_and(|d| d.active);
         for (index, item) in scene.items.iter().enumerate() {
+            if item.is_null {
+                let sel = self.studio.selected.contains(&item.id);
+                let out = if sel { &mut selected } else { &mut markers };
+                let mut color = if sel { accent } else { ink };
+                if !sel {
+                    color[3] = 0.72;
+                }
+                // Unselected 3D nulls draw their oriented wireframe locator box
+                // (selected nulls get their accented box in `studio_handle_lines`).
+                if !sel
+                    && !drag_active
+                    && let Some(corners) = item.box_corners
+                {
+                    for (a, c) in [
+                        (0, 1),
+                        (2, 3),
+                        (4, 5),
+                        (6, 7),
+                        (0, 2),
+                        (1, 3),
+                        (4, 6),
+                        (5, 7),
+                        (0, 4),
+                        (1, 5),
+                        (2, 6),
+                        (3, 7),
+                    ] {
+                        if let (Some((pa, _)), Some((pb, _))) =
+                            (eye.project(corners[a]), eye.project(corners[c]))
+                        {
+                            out.push(line(pa, pb, color));
+                        }
+                    }
+                }
+                // Draw a crisp 3D axis crosshair at the null's pivot (Blender Empty style).
+                let axes = world_basis(item);
+                let arm = (10. * pt * eye.units_per_pixel(item.pivot)).max(0.08);
+                for axis in axes {
+                    if let (Some((a, _)), Some((b, _))) = (
+                        eye.project(add(item.pivot, mul(axis, -arm))),
+                        eye.project(add(item.pivot, mul(axis, arm))),
+                    ) {
+                        out.push(line(a, b, color));
+                    }
+                }
+                continue;
+            }
             if item.role != Role::Light {
                 continue;
             }
             let sel = self.studio.selected.contains(&item.id);
             let kind = item.light.as_deref().unwrap_or("area");
+            if sel && kind == "point" {
+                let arm = (12. * pt * eye.units_per_pixel(item.pivot)).max(0.08);
+                for axis in AXES {
+                    if let (Some((a, _)), Some((b, _))) = (
+                        eye.project(add(item.pivot, mul(axis, -arm))),
+                        eye.project(add(item.pivot, mul(axis, arm))),
+                    ) {
+                        selected.push(line(a, b, accent));
+                    }
+                }
+            }
             if sel
                 && kind != "point"
                 && let Some(target) = item.target
             {
-                let (_, side, up) = emitter_basis(item.pivot, target);
+                let (dir, side, up) = emitter_basis(item.pivot, target);
+                if kind == "sun" {
+                    let spread = (14. * pt * eye.units_per_pixel(item.pivot)).max(0.14);
+                    let ray_len = length(sub(target, item.pivot)).min(1.5).max(0.5);
+                    for s in [-1., 1.] {
+                        let start = add(item.pivot, mul(side, s * spread));
+                        let end = add(start, mul(dir, ray_len));
+                        if let (Some((a, _)), Some((b, _))) = (eye.project(start), eye.project(end)) {
+                            let mut c = accent;
+                            c[3] = 0.65;
+                            selected.push(line(a, b, c));
+                        }
+                    }
+                }
                 if kind == "area" && item.shape[0] > 0. {
                     let (hw, hh) = (item.shape[0] / 2., item.shape[1] / 2.);
                     let q: Vec<_> = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
@@ -1858,6 +1960,16 @@ impl GizmoSurface {
             self.studio_select(hit.id, shift, cx);
             return true;
         }
+        let nulls = Scene {
+            items: scene
+                .items
+                .iter()
+                .filter(|i| i.is_null)
+                .cloned()
+                .collect(),
+            ..(*scene).clone()
+        };
+        let null_hit = nulls.pick(&eye.ray(at)).filter(|h| !locked(&scene, &h.id));
         // A double-click on an imported model picks the part under the
         // pointer (viewer.ts dblclick → scene3d.pickPart).
         let part = event.click_count == 2 && !shift;
@@ -1866,11 +1978,15 @@ impl GizmoSurface {
             (at[1] / frame.size[1]) as f32,
         ];
         if let Some(rx) = self.host.pick_surface(uv, cx) {
+            let null_hit_id = null_hit.as_ref().map(|h| (h.id.clone(), h.distance));
             cx.spawn(async move |this, cx| {
                 let reply = rx.recv().await;
                 let _ = this.update(cx, |s, cx| {
                     let hit = match reply {
-                        Ok(Ok(reply)) => Ok(reply.hit.map(|h| h.layer)),
+                        Ok(Ok(reply)) => Ok(reply.hit.map(|h| {
+                            let dist = length(sub(h.point.map(f64::from), eye.pose.position));
+                            (h.layer, dist)
+                        })),
                         // A stale frame: the box pick answers instead.
                         _ => Err(s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)))),
                     };
@@ -1880,23 +1996,37 @@ impl GizmoSurface {
                         (!scene.as_ref().is_some_and(|sc| locked(sc, &id))).then_some(id)
                     };
                     match hit {
-                        Ok(Some(layer)) => match unlocked(layer) {
-                            Some(layer) if part => s.studio_part(layer, eye, at, cx),
-                            Some(layer) => s.studio_select(layer, shift, cx),
-                            None if !shift => {
+                        Ok(Some((layer, dist))) => {
+                            if let Some((null_id, null_dist)) = null_hit_id.as_ref()
+                                && *null_dist < dist
+                            {
+                                s.studio_select(null_id.clone(), shift, cx);
+                                return;
+                            }
+                            match unlocked(layer) {
+                                Some(layer) if part => s.studio_part(layer, eye, at, cx),
+                                Some(layer) => s.studio_select(layer, shift, cx),
+                                None if !shift => {
+                                    s.queue.push_back(Job::Select(None));
+                                    s.pump(cx);
+                                }
+                                None => {}
+                            }
+                        }
+                        Ok(None) => {
+                            if let Some((null_id, _)) = null_hit_id {
+                                s.studio_select(null_id, shift, cx);
+                            } else if !shift {
                                 s.queue.push_back(Job::Select(None));
                                 s.pump(cx);
                             }
-                            None => {}
-                        },
-                        Ok(None) if !shift => {
-                            s.queue.push_back(Job::Select(None));
-                            s.pump(cx);
                         }
-                        Ok(None) => {}
                         Err(hit) => {
                             if let Some(id) = hit.and_then(|h| unlocked(h.id)) {
-                                if part {
+                                let is_null = scene
+                                    .as_ref()
+                                    .is_some_and(|sc| sc.items.iter().any(|i| i.id == id && i.is_null));
+                                if part && !is_null {
                                     s.studio_part(id, eye, at, cx);
                                 } else {
                                     s.studio_select(id, shift, cx);
@@ -1912,7 +2042,11 @@ impl GizmoSurface {
         let Some(hit) = scene.pick(&eye.ray(at)).filter(|h| !locked(&scene, &h.id)) else {
             return false;
         };
-        if part {
+        let is_null = scene
+            .items
+            .iter()
+            .any(|i| i.id == hit.id && i.is_null);
+        if part && !is_null {
             self.studio_part(hit.id, eye, at, cx);
         } else {
             self.studio_select(hit.id, shift, cx);
@@ -2023,7 +2157,7 @@ impl GizmoSurface {
             items: scene
                 .items
                 .iter()
-                .filter(|i| i.role == Role::Object)
+                .filter(|i| i.role == Role::Object && !i.is_null)
                 .cloned()
                 .collect(),
             ..(*scene).clone()
@@ -2396,21 +2530,25 @@ impl GizmoSurface {
             return true;
         }
         // ⌥ while moving a light carries its target along (Electron), so it
-        // keeps aiming the same way.
+        // keeps aiming the same way. Sun lights always carry target on Move
+        // (Blender-style directional sun: moving relocates the icon without
+        // tilting the sun; rotating or dragging ◆ aims it).
         let carry = event.modifiers.alt;
         let aim_by = |item: &Item, w: Vec3, commands: &mut Vec<Command>| {
             if let Some(aim) = item.aim {
+                let local = parent_vector(item.parent_world, w);
                 for (a, key) in ["light.targetX", "light.targetY", "light.targetZ"]
                     .iter()
                     .enumerate()
                 {
-                    commands.push(set(&item.id, key, aim[a] + w[a], drag.time));
+                    commands.push(set(&item.id, key, aim[a] + local[a], drag.time));
                 }
             }
         };
         for item in &drag.items {
             let id = item.id.as_str();
             let light = item.role == Role::Light;
+            let carry_target = carry || item.light.as_deref() == Some("sun");
             match (drag.handle, tool) {
                 (Handle::Target(_), _) => {
                     // The aim point slides in the view plane through it.
@@ -2456,16 +2594,17 @@ impl GizmoSurface {
                     }
                     let w = mul(basis[i], t);
                     let c = channel_delta(item, w);
+                    let zero = c.iter().all(|v| v.abs() <= 1e-9);
                     for (a, key) in ["position.x", "position.y", "position.z"]
                         .iter()
                         .enumerate()
                     {
                         // An axis the move doesn't touch keeps its keyframes.
-                        if w[a].abs() > 1e-9 || a == i {
+                        if c[a].abs() > 1e-9 || (zero && a == i) {
                             commands.push(set(id, key, item.position[a] + c[a], drag.time));
                         }
                     }
-                    if light && carry {
+                    if light && carry_target {
                         aim_by(item, w, &mut commands);
                     }
                     offset = w;
@@ -2498,7 +2637,7 @@ impl GizmoSurface {
                     {
                         commands.push(set(id, key, item.position[a] + c[a], drag.time));
                     }
-                    if light && carry {
+                    if light && carry_target {
                         aim_by(item, w, &mut commands);
                     }
                     offset = w;
@@ -2517,7 +2656,7 @@ impl GizmoSurface {
                     {
                         commands.push(set(id, key, item.position[i] + c[i], drag.time));
                     }
-                    if light && carry {
+                    if light && carry_target {
                         aim_by(item, w, &mut commands);
                     }
                     offset = w;
@@ -2553,16 +2692,87 @@ impl GizmoSurface {
                     if snap {
                         k = (k * 10.).round() / 10.;
                     }
-                    let key = ["scale.x", "scale.y", "scale.z"][i];
-                    commands.push(set(id, key, item.scale[i] * k, drag.time));
+                    if light {
+                        match item.light.as_deref() {
+                            Some("area") => match i {
+                                0 => commands.push(set(
+                                    id,
+                                    "light.width",
+                                    (item.shape[0].max(0.01) * k).max(0.01),
+                                    drag.time,
+                                )),
+                                1 => commands.push(set(
+                                    id,
+                                    "light.height",
+                                    (item.shape[1].max(0.01) * k).max(0.01),
+                                    drag.time,
+                                )),
+                                _ => {
+                                    commands.push(set(
+                                        id,
+                                        "light.width",
+                                        (item.shape[0].max(0.01) * k).max(0.01),
+                                        drag.time,
+                                    ));
+                                    commands.push(set(
+                                        id,
+                                        "light.height",
+                                        (item.shape[1].max(0.01) * k).max(0.01),
+                                        drag.time,
+                                    ));
+                                }
+                            },
+                            Some("spot") => {
+                                commands.push(set(
+                                    id,
+                                    "light.angle",
+                                    (item.shape[2].max(1.) * k).clamp(1., 89.),
+                                    drag.time,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        let key = ["scale.x", "scale.y", "scale.z"][i];
+                        commands.push(set(id, key, item.scale[i] * k, drag.time));
+                    }
                 }
                 (Handle::Uniform, _) => {
                     let mut k = ((d[0] - d[1]) * 0.01).exp();
                     if snap {
                         k = (k * 10.).round() / 10.;
                     }
-                    for (i, key) in ["scale.x", "scale.y", "scale.z"].iter().enumerate() {
-                        commands.push(set(id, key, item.scale[i] * k.max(0.01), drag.time));
+                    let k = k.max(0.01);
+                    if light {
+                        match item.light.as_deref() {
+                            Some("area") => {
+                                commands.push(set(
+                                    id,
+                                    "light.width",
+                                    (item.shape[0].max(0.01) * k).max(0.01),
+                                    drag.time,
+                                ));
+                                commands.push(set(
+                                    id,
+                                    "light.height",
+                                    (item.shape[1].max(0.01) * k).max(0.01),
+                                    drag.time,
+                                ));
+                            }
+                            Some("spot") => {
+                                commands.push(set(
+                                    id,
+                                    "light.angle",
+                                    (item.shape[2].max(1.) * k).clamp(1., 89.),
+                                    drag.time,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        for (i, key) in ["scale.x", "scale.y", "scale.z"].iter().enumerate() {
+                            commands.push(set(id, key, item.scale[i] * k, drag.time));
+                        }
                     }
                 }
                 _ => {}
@@ -2928,5 +3138,45 @@ mod light_marker_tests {
         let w = turn(v, [0., 1., 0.], 90.);
         assert!((length(w) - 3.).abs() < 1e-9);
         assert!((w[0] + 3.).abs() < 1e-9 && w[2].abs() < 1e-9, "{w:?}");
+    }
+    #[test]
+    fn parent_vector_and_world_basis_transform_through_rotated_parent_null() {
+        // Parent null rotated +90 deg around Y (column-major):
+        // local X -> (0, 0, -1), local Y -> (0, 1, 0), local Z -> (1, 0, 0)
+        // translated by (10, 2, -5) and scaled by 2.
+        let parent_world = [
+            0., 0., -2., 0.,
+            0., 2., 0., 0.,
+            2., 0., 0., 0.,
+            10., 2., -5., 1.,
+        ];
+        // A world +X move of +4 maps to +2 along parent's local +Z axis.
+        let local = super::parent_vector(parent_world, [4., 0., 0.]);
+        assert!(local[0].abs() < 1e-9 && local[1].abs() < 1e-9 && (local[2] - 2.).abs() < 1e-9, "{local:?}");
+        // World basis extracts unit world axes from `item.world`.
+        let item = super::Item {
+            id: "child".into(),
+            role: super::Role::Object,
+            is_null: false,
+            name: "Child".into(),
+            locked: false,
+            bounds: pm_scene3d::navigation::Bounds { min: [-1.; 3], max: [1.; 3] },
+            box_corners: None,
+            pivot: [10., 2., -5.],
+            target: None,
+            aim: None,
+            light: None,
+            shape: [0.; 3],
+            position: [0.; 3],
+            rotation: [0.; 3],
+            scale: [100.; 3],
+            world: parent_world,
+            parent_world,
+            pixels: None,
+        };
+        let basis = super::world_basis(&item);
+        assert!((basis[0][2] + 1.).abs() < 1e-9, "{basis:?}");
+        assert!((basis[1][1] - 1.).abs() < 1e-9, "{basis:?}");
+        assert!((basis[2][0] - 1.).abs() < 1e-9, "{basis:?}");
     }
 }

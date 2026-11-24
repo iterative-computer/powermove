@@ -1643,6 +1643,18 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
+/// Additional rows shown in the toolbar's `+` menu when 3D mode is active
+/// (Blender-style lights + the Shift+A 3D Add menu).
+pub const ADD_3D: [(&str, &str); 7] = [
+    ("", ""),
+    ("new3d:point", "Point Light"),
+    ("new3d:sun", "Sun Light"),
+    ("new3d:spot", "Spot Light"),
+    ("new3d:area", "Area Light"),
+    ("", ""),
+    ("studio.addMenu", "Add 3D Object… (⇧A)"),
+];
+const ADD_3D_TAG: isize = 3001;
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -3029,6 +3041,20 @@ impl ToolbarDelegate {
                     continue;
                 }
                 let row = named_item(mtm, label, command);
+                unsafe { row.setTarget(Some(target)) };
+                menu.addItem(&row);
+            }
+            for (command, label) in ADD_3D {
+                if command.is_empty() {
+                    let sep = NSMenuItem::separatorItem(mtm);
+                    sep.setTag(ADD_3D_TAG);
+                    sep.setHidden(true);
+                    menu.addItem(&sep);
+                    continue;
+                }
+                let row = named_item(mtm, label, command);
+                row.setTag(ADD_3D_TAG);
+                row.setHidden(true);
                 unsafe { row.setTarget(Some(target)) };
                 menu.addItem(&row);
             }
@@ -6645,7 +6671,15 @@ impl Host {
             if item.itemIdentifier().to_string() == "add"
                 && let Ok(add) = item.clone().downcast::<objc2_app_kit::NSMenuToolbarItem>()
             {
+                let three_d = !disabled.contains("studio.view");
                 for row in add.menu().itemArray().to_vec() {
+                    if row.tag() == ADD_3D_TAG {
+                        row.setHidden(!three_d);
+                        if !row.isSeparatorItem() {
+                            row.setEnabled(three_d);
+                        }
+                        continue;
+                    }
                     let command: Option<Retained<NSString>> =
                         unsafe { row.representedObject().map(|o| Retained::cast_unchecked(o)) };
                     if let Some(command) = command {

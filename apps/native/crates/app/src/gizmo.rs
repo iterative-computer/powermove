@@ -3496,11 +3496,17 @@ fn extruded_item(
             l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
         })
         .unwrap_or_default();
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
     Some(pm_panel_studio3d::viewport::Item {
         id: pose.id.clone(),
         role: pm_scene3d::schema::Role::Object,
+        is_null: false,
         name,
         locked: pose.locked,
+        world: IDENTITY,
+        parent_world: IDENTITY,
         bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
         box_corners,
         pivot: to_scene(position[0], position[1], position[2]),
@@ -3525,12 +3531,51 @@ pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
 }
 pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
     p.snapshot.root().is_some_and(|root| {
-        pm_kernel::model::find_layer(root, id)
-            .and_then(|at| pm_kernel::model::layer_at(root, &at))
-            .and_then(|l| l.get("d"))
+        let Some(at) = pm_kernel::model::find_layer(root, id) else {
+            return false;
+        };
+        let Some(l) = pm_kernel::model::layer_at(root, &at) else {
+            return false;
+        };
+        if l.get("d")
             .and_then(|d| d.get("definition"))
             .and_then(|d| d.to_value().as_str().map(str::to_owned))
             .is_some_and(|d| d.starts_with("powermove.3d."))
+        {
+            return true;
+        }
+        if l.get("type")
+            .and_then(|v| v.to_value().as_str().map(str::to_owned))
+            .as_deref()
+            == Some("null")
+            && l.get("threeD").and_then(|v| v.to_value().as_bool()) == Some(true)
+        {
+            if l.get("d")
+                .and_then(|d| d.get("studio3d"))
+                .and_then(|v| v.to_value().as_bool())
+                == Some(true)
+            {
+                return true;
+            }
+            let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref());
+            return comp
+                .and_then(|c| c.get("layers"))
+                .is_some_and(|layers| match layers.kind() {
+                    pm_model::NodeKind::Array(arr) => arr.iter().any(|other| {
+                        other
+                            .get("d")
+                            .and_then(|d| d.get("definition"))
+                            .is_some_and(|def| match def.kind() {
+                                pm_model::NodeKind::String(s) => {
+                                    s.to_string_lossy().starts_with("powermove.3d.")
+                                }
+                                _ => false,
+                            })
+                    }),
+                    _ => false,
+                });
+        }
+        false
     })
 }
 

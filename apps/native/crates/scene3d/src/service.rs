@@ -591,8 +591,10 @@ pub(crate) fn studio_plan(
             };
             match args["shot"].as_str() {
                 Some("turntable") => {
-                    if schema::role(l) != Some(Role::Object) && l["type"] != "group" {
-                        return fail("A turntable needs a model or group");
+                    if schema::role(l) != Some(Role::Object)
+                        && !matches!(l["type"].as_str(), Some("group" | "null"))
+                    {
+                        return fail("A turntable needs a model, group, or null");
                     }
                     let from = l["p"]["rotation.y"]["v"].as_f64().unwrap_or(0.);
                     keys(
@@ -785,6 +787,8 @@ pub struct ResolvedScene {
     pub scene: Value,
     pub model_worlds: std::collections::BTreeMap<String, [f64; 16]>,
     pub light_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub null_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub parent_worlds: std::collections::BTreeMap<String, [f64; 16]>,
     pub targets: std::collections::BTreeMap<String, Vec3>,
     pub opacities: std::collections::BTreeMap<String, f64>,
     pub occludes: std::collections::BTreeMap<String, bool>,
@@ -799,6 +803,8 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         scene,
         model_worlds: Default::default(),
         light_worlds: Default::default(),
+        null_worlds: Default::default(),
+        parent_worlds: Default::default(),
         targets: Default::default(),
         opacities: Default::default(),
         occludes: Default::default(),
@@ -811,6 +817,26 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         .ok_or_else(|| Error("No composition layers".into()))?;
     let sources = scatter_sources(layers, time, ev)?;
     for l in layers {
+        if l["type"] == "null" && l["threeD"] == true {
+            if !ev.active(l, time)? {
+                continue;
+            }
+            let id = l["id"]
+                .as_str()
+                .ok_or_else(|| Error("Missing 3D layer ID".into()))?
+                .to_string();
+            let world = ev.world(l, time)?;
+            if !world.iter().all(|v| v.is_finite()) {
+                return fail("Invalid 3D world matrix");
+            }
+            let parent = ev.parent(l, time)?;
+            if !parent.iter().all(|v| v.is_finite()) {
+                return fail("Invalid 3D parent matrix");
+            }
+            result.null_worlds.insert(id.clone(), world);
+            result.parent_worlds.insert(id, parent);
+            continue;
+        }
         let Some(role) = schema::role(l) else {
             continue;
         };
@@ -829,6 +855,11 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         if !world.iter().all(|v| v.is_finite()) {
             return fail("Invalid 3D world matrix");
         }
+        let parent = ev.parent(l, time)?;
+        if !parent.iter().all(|v| v.is_finite()) {
+            return fail("Invalid 3D parent matrix");
+        }
+        result.parent_worlds.insert(id.clone(), parent);
         match role {
             Role::Object => {
                 result.model_worlds.insert(id.clone(), world);
@@ -858,10 +889,6 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
                 result.occludes.insert(id, occludes);
             }
             Role::Light | Role::Camera => {
-                let parent = ev.parent(l, time)?;
-                if !parent.iter().all(|v| v.is_finite()) {
-                    return fail("Invalid 3D parent matrix");
-                }
                 let mut aim = [0.; 3];
                 for (a, k) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
                     aim[a] = ev
@@ -925,6 +952,9 @@ pub fn depth_ids(
         if !ev.active(l, time)? {
             return Ok(true);
         }
+        if matches!(l["type"].as_str(), Some("null" | "audio")) {
+            return Ok(true);
+        }
         let Some(role) = schema::role(l) else {
             return Ok(false);
         };
@@ -970,10 +1000,13 @@ pub fn ordered_layers(
     }
     let mut out = vec![];
     let mut start = 0;
+    let is_3d_pass = |l: &Value| {
+        schema::role(l).is_some() || matches!(l["type"].as_str(), Some("null" | "audio"))
+    };
     while start < layers.len() {
-        let model = schema::role(&layers[start]).is_some();
+        let model = is_3d_pass(&layers[start]);
         let mut end = start + 1;
-        while end < layers.len() && schema::role(&layers[end]).is_some() == model {
+        while end < layers.len() && is_3d_pass(&layers[end]) == model {
             end += 1;
         }
         let mut block = layers[start..end].to_vec();

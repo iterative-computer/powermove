@@ -190,10 +190,26 @@ impl Properties {
             .and_then(|id| model.layer(id).ok())
             .map(|l| super::data::wire(&l))
             .and_then(|r| {
-                let (role, _) = pm_panel_studio3d::properties::fields(&r)?;
-                let data = &r["d"]["data"];
-                let env = pm_panel_studio3d::properties::environment(data);
-                Some((role, env, studio_label(role, env, data)))
+                if let Some((role, _)) = pm_panel_studio3d::properties::fields(&r) {
+                    let data = &r["d"]["data"];
+                    let env = pm_panel_studio3d::properties::environment(data);
+                    return Some((role, env, studio_label(role, env, data)));
+                }
+                if r["type"] == "null"
+                    && r["threeD"] == true
+                    && (r["d"]["studio3d"] == true
+                        || pm_panel_studio3d::properties::scene_summary(model.published())
+                            .ok()
+                            .flatten()
+                            .is_some())
+                {
+                    return Some((
+                        pm_panel_studio3d::properties::Role::Object,
+                        None,
+                        "3D Null",
+                    ));
+                }
+                None
             });
         let mut target = target;
         if let Some((_, _, label)) = &studio
@@ -223,7 +239,7 @@ impl Properties {
                 .get("type")
                 .and_then(pm_model::Value::as_str)
                 == Some("audio");
-            if model.selected_layers().len() == 1 && !audio {
+            if model.selected_layers().len() == 1 && !audio && studio.is_none() {
                 sections.extend(self.transition_sections(model, &layer, time)?);
             }
             let mut content = vec![];
@@ -897,6 +913,26 @@ impl Properties {
                     .map_err(|e| e.to_string())?;
                 if let Some(value) = state.value.as_f64() {
                     rows.push(json!({"id":id,"label":label,"control":{"kind":"number","axes":[{"binding":self.lease(model,id,binding)?,"value":value,"unit":unit,"step":step}]}}));
+                }
+            }
+            let bg_binding = Binding::Composition("bg".into());
+            if let Ok(state) = model.binding_state(&bg_binding, time) {
+                let value = super::data::wire(&state.value);
+                if value.is_string() {
+                    let lease = self.lease(model, "bg", bg_binding.clone())?;
+                    let hex = self.lease(model, "bg#hex", bg_binding)?;
+                    rows.push(json!({
+                        "id": "bg",
+                        "label": "Background",
+                        "control": {
+                            "kind": "colour",
+                            "binding": lease,
+                            "value": value,
+                            "mixed": false,
+                            "hexBinding": hex,
+                            "hex": value
+                        }
+                    }));
                 }
             }
             sections.push(

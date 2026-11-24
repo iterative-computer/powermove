@@ -71,9 +71,13 @@ impl MediaProbeRefresh {
 
 /// The viewer overlays a native Metal layer and must join each shell repaint,
 /// including the loading reveal, even when its panel publication is unchanged.
+/// The Agent panel hosts AppKit push buttons (`Open`, `Show in Finder`,
+/// `Answer`) inside its own scrolling conversation view; caching its GPUI
+/// paint prevents `NativeControl` slots from restaging on wheel scroll,
+/// causing buttons to vanish, lag, or miss clicks.
 /// The timeline's body can reuse its retained paint.
 pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElement {
-    if id == "viewer" {
+    if matches!(id, "viewer" | "agent") {
         view.clone().into_any_element()
     } else {
         view.clone()
@@ -1288,6 +1292,31 @@ impl Controller {
                 cx,
             );
         }
+    }
+    /// Blender-inspired Shift+A 3D Add menu: searchable categorized choices for
+    /// meshes, Blender-style lights, 3D null/empty, camera, light presets,
+    /// environments, and nature.
+    pub(crate) fn open_studio_add_menu(&mut self) {
+        let choices = studio_add_choices();
+        let anchor = self.host.borrow().viewer_rect.get().map(|r| {
+            let width = 320f32.min(r.w.max(200.));
+            pm_shell::layout::Rect {
+                x: r.x + (r.w - width) / 2.,
+                y: r.y + (r.h * 0.12).min(56.),
+                w: width,
+                h: 0.,
+            }
+        });
+        self.host.borrow_mut().open_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            Some(40),
+            None,
+            "Add 3D Object, Light, Camera, Null…",
+            None,
+        );
     }
     /// The Agent panel's pop-up menus (threads, model, access, slash): the
     /// field menu under the control that asked, standing above the popover
@@ -3401,20 +3430,25 @@ impl Controller {
                         }
                     } else {
                         cx.spawn(async move |this, cx| {
-                            let outcome = cx
+                            let resolved = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    let file = crate::platform::media_document(
-                                        std::path::Path::new(&path),
-                                    )?;
-                                    if reveal {
-                                        crate::platform::reveal(&file);
-                                    } else if !crate::platform::open_document(&file) {
-                                        return Err("No app on this Mac opens that file.");
-                                    }
-                                    Ok(())
+                                    crate::platform::media_document(std::path::Path::new(&path))
                                 })
                                 .await;
+                            let outcome = match resolved {
+                                Ok(file) => {
+                                    if reveal {
+                                        crate::platform::reveal(&file);
+                                        Ok(())
+                                    } else if !crate::platform::open_document(&file) {
+                                        Err("No app on this Mac opens that file.")
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                                Err(message) => Err(message),
+                            };
                             if let Err(message) = outcome {
                                 let _ = this.update(cx, |v, cx| {
                                     v.errors.borrow_mut().tell("Agent", message);
@@ -5243,6 +5277,124 @@ mod quick_look_tests {
             [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
         );
     }
+
+    #[test]
+    fn studio_add_choices_includes_blender_lights_null_meshes_and_camera() {
+        let choices = super::studio_add_choices();
+        let has = |cmd: &str| choices.iter().any(|c| c.command == cmd);
+        for cmd in [
+            "new3d:point",
+            "new3d:sun",
+            "new3d:spot",
+            "new3d:area",
+            "new3d:null",
+            "new3d:box",
+            "new3d:sphere",
+            "new3d:camera",
+        ] {
+            assert!(has(cmd), "missing Shift+A choice {cmd}");
+        }
+    }
+}
+
+pub(crate) fn studio_add_choices() -> Vec<pm_shell::transient::Choice> {
+    use pm_shell::transient::Choice;
+    let item = |label: &str, cmd: &str, cat: &str, detail: &str, aliases: &[&str]| {
+        let mut c = Choice::new(label, cmd).within(cat);
+        if !detail.is_empty() {
+            c = c.detail(detail);
+        }
+        if !aliases.is_empty() {
+            c = c.with_aliases(aliases.iter().map(|s| (*s).to_owned()).collect());
+        }
+        c
+    };
+    vec![
+        // Mesh
+        item("Cube", "new3d:box", "Mesh", "", &["Box", "Mesh"]),
+        item("Sphere", "new3d:sphere", "Mesh", "", &["UV Sphere", "Ball", "Mesh"]),
+        item("Plane", "new3d:plane", "Mesh", "", &["Floor", "Quad", "Mesh"]),
+        item("Cylinder", "new3d:cylinder", "Mesh", "", &["Tube", "Mesh"]),
+        item("Cone", "new3d:cone", "Mesh", "", &["Pyramid", "Mesh"]),
+        item("Torus", "new3d:torus", "Mesh", "", &["Donut", "Ring", "Mesh"]),
+        item("Capsule", "new3d:capsule", "Mesh", "", &["Pill", "Mesh"]),
+        item("Icosphere", "new3d:icosahedron", "Mesh", "", &["Ico Sphere", "Mesh"]),
+        item(
+            "Import 3D Model…",
+            "new3d:import",
+            "Mesh",
+            "Import GLB, GLTF, USDZ, OBJ, or FBX",
+            &["GLB", "GLTF", "USDZ", "OBJ", "FBX", "Model"],
+        ),
+        // Light (Blender's 4 core light types)
+        item(
+            "Point Light",
+            "new3d:point",
+            "Light",
+            "Omnidirectional light radiating in all directions",
+            &["Point", "Bulb", "Omni", "Light"],
+        ),
+        item(
+            "Sun Light",
+            "new3d:sun",
+            "Light",
+            "Directional parallel sunlight across the whole scene",
+            &["Sun", "Directional", "Light"],
+        ),
+        item(
+            "Spot Light",
+            "new3d:spot",
+            "Light",
+            "Focused cone with adjustable spread & softness",
+            &["Spot", "Spotlight", "Cone", "Light"],
+        ),
+        item(
+            "Area Light",
+            "new3d:area",
+            "Light",
+            "Softbox emitter with adjustable width & height",
+            &["Area", "Softbox", "Rect", "Light"],
+        ),
+        // Empty / Rig
+        item(
+            "3D Null",
+            "new3d:null",
+            "Empty",
+            "Empty 3D transform locator for rigging & parenting",
+            &["Empty", "Null", "Null Object", "Plain Axes", "Rig"],
+        ),
+        // Camera
+        item(
+            "Camera",
+            "new3d:camera",
+            "Camera",
+            "Perspective or orthographic 3D camera",
+            &["Shot", "Lens"],
+        ),
+        // Light Presets
+        item("Rim Strip Left", "new3d:preset:rim_left", "Light Presets", "", &["Light", "Preset"]),
+        item("Rim Strip Right", "new3d:preset:rim_right", "Light Presets", "", &["Light", "Preset"]),
+        item("Top Softbox", "new3d:preset:top", "Light Presets", "", &["Light", "Preset"]),
+        item(
+            "Edge Highlight Card",
+            "new3d:preset:edge_card",
+            "Light Presets",
+            "",
+            &["Light", "Preset"],
+        ),
+        item("Strip Light", "new3d:preset:strip", "Light Presets", "", &["Light", "Preset"]),
+        // Environment
+        item("Sky", "new3d:sky", "Environment", "Physical atmosphere & world sky", &["World", "HDRI"]),
+        item("Fog Volume", "new3d:fog", "Environment", "Volumetric fog box or sphere", &["Volume"]),
+        item("Terrain", "new3d:terrain", "Environment", "Procedural landscape heightfield", &["Landscape"]),
+        // Nature
+        item("Pine Trees", "new3d:scatter:conifer", "Nature", "", &["Scatter", "Trees"]),
+        item("Oak Trees", "new3d:scatter:broadleaf", "Nature", "", &["Scatter", "Trees"]),
+        item("Birch Trees", "new3d:scatter:birch", "Nature", "", &["Scatter", "Trees"]),
+        item("Bushes", "new3d:scatter:bush", "Nature", "", &["Scatter"]),
+        item("Grass", "new3d:scatter:grass", "Nature", "", &["Scatter"]),
+        item("Rocks", "new3d:scatter:rock", "Nature", "", &["Scatter"]),
+    ]
 }
 
 pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {

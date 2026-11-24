@@ -7390,3 +7390,213 @@ fn a_gain_drag_starts_without_waiting_on_a_busy_inspector() {
     panels.close();
     actor.shutdown();
 }
+
+#[test]
+fn composition_background_lives_in_properties_and_not_project_settings() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let proj = {
+        let backend = panels
+            .broker
+            .entry("inspector")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut guard = backend.lock().unwrap();
+        let b = &mut *guard;
+        b.native
+            .properties
+            .snapshot(b.model.as_mut().unwrap(), 0., false)
+            .unwrap()
+    };
+    let comp_rows = proj["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "composition")
+        .expect("composition section when nothing is selected")["rows"]
+        .as_array()
+        .unwrap();
+    let bg_row = comp_rows
+        .iter()
+        .find(|r| r["id"] == "bg")
+        .expect("Background row in Properties Composition section");
+    assert_eq!(bg_row["label"], "Background");
+    let binding = bg_row["control"]["binding"]["handle"].as_str().unwrap();
+    finish(panels.write("inspector", binding, json!("#1E2535")).unwrap());
+    let published = kernel.published("synthetic").unwrap();
+    let root = published.snapshot.root().unwrap();
+    let comp = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref()).unwrap();
+    assert_eq!(
+        comp.get("bg").and_then(|n| match n.kind() {
+            pm_model::NodeKind::String(s) => s.as_str(),
+            _ => None,
+        }),
+        Some("#1E2535")
+    );
+    finish(panels.mount("settings").unwrap());
+    let settings_proj = panels
+        .broker
+        .entry("settings")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone()
+        .lock()
+        .unwrap()
+        .settings_snapshot()
+        .unwrap();
+    let has_bg = settings_proj["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == "project.background");
+    assert!(
+        !has_bg,
+        "Background should be moved out of Project Settings into Properties"
+    );
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn parenting_studio_3d_layer_to_null_promotes_it_to_3d_null_at_origin() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let published = kernel.published("synthetic").unwrap();
+    let (_, cmds, cube_id) =
+        pm_panel_studio3d::view::add_layer(&published, 0., "box", "cube-3d").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(cmds),
+                    base_revision: None,
+                    label: Some("Add Cube".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let add_null = pm_kernel::commands::layers::AddLayer {
+        id: "rig-null".into(),
+        layer_type: "null".into(),
+        comp: None,
+        name: Some("Rig Null".into()),
+        from: Some(0.),
+        duration: Some(5.),
+        content: pm_model::Map::new(),
+        properties: pm_model::Map::new(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Add(Box::new(add_null)).into(),
+                    ]),
+                    base_revision: None,
+                    label: Some("Add Null".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Set {
+                            layer_id: cube_id.clone(),
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                parent: Some(pm_kernel::commands::layers::ParentChange {
+                                    parent: Some("rig-null".into()),
+                                    time: 0.,
+                                }),
+                                time: 0.,
+                                ..Default::default()
+                            },
+                        }
+                        .into(),
+                    ]),
+                    base_revision: None,
+                    label: Some("Parent".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let after = kernel.published("synthetic").unwrap();
+    let root = after.snapshot.root().unwrap();
+    let comp = pm_kernel::model::comp_node(root, after.snapshot.open_comp().as_deref()).unwrap();
+    let layers = match comp.get("layers").unwrap().kind() {
+        pm_model::NodeKind::Array(a) => a,
+        _ => panic!("layers array"),
+    };
+    let null = layers
+        .iter()
+        .find(|l| {
+            l.get("id")
+                .and_then(|n| n.to_value().as_str().map(str::to_owned))
+                .as_deref()
+                == Some("rig-null")
+        })
+        .unwrap();
+    assert_eq!(
+        null.get("threeD").map(pm_model::Node::to_value),
+        Some(pm_model::Value::Bool(true))
+    );
+    assert_eq!(
+        null.get("d")
+            .and_then(|d| d.get("studio3d"))
+            .map(pm_model::Node::to_value),
+        Some(pm_model::Value::Bool(true))
+    );
+    let ch = |n: &pm_model::Node, k: &str| {
+        n.get("p")
+            .and_then(|p| p.get(k))
+            .and_then(|c| c.get("v"))
+            .and_then(|v| v.to_value().as_f64())
+            .unwrap()
+    };
+    assert_eq!(ch(null, "position.x"), 0.0);
+    assert_eq!(ch(null, "position.y"), 0.0);
+    assert_eq!(ch(null, "position.z"), 0.0);
+    assert_eq!(ch(null, "anchor.x"), 0.0);
+    assert_eq!(ch(null, "anchor.y"), 0.0);
+    select_layer(&kernel, "rig-null");
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let proj = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(proj["target"]["first"]["studio"], true);
+    assert_eq!(proj["target"]["first"]["typeLabel"], "3D Null");
+    actor.shutdown();
+}

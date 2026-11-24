@@ -247,7 +247,6 @@ impl Backend {
             "project.name",
             "project.fps",
             "project.duration",
-            "project.background",
             "project.colorDepth",
             "project.output",
             "project.masteringPeak"
@@ -283,16 +282,6 @@ impl Backend {
                     .map(|n| wire(&n.to_value()))
                     .unwrap_or(json!(0.1)),
                 "",
-            ),
-            (
-                "project.background",
-                "Composition",
-                "Background",
-                "colour",
-                comp.get("bg")
-                    .map(|n| wire(&n.to_value()))
-                    .unwrap_or(Value::Null),
-                "Colour shown behind every layer of the composition.",
             ),
         ] {
             let mut row = json!({"id":id,"section":"project","group":group,"label":label,"control":control,"value":value,"detail":detail,"binding":fields[id],"disabled":false});

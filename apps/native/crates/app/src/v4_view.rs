@@ -4645,7 +4645,12 @@ impl SurfaceView {
             let anchor = metadata.and_then(|m| m["scrollAnchor"].as_str());
             let follows = anchor == Some("end");
             let starts = anchor == Some("start");
-            if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
+            let user_away = self
+                .follow
+                .borrow()
+                .get(&id)
+                .is_some_and(|f| f.away);
+            if follows && !user_away && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
                 scroll.scroll_to_bottom();
             }
             if node.scroll_y {

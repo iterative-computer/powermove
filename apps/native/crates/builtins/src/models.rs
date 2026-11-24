@@ -2153,16 +2153,19 @@ impl Backend {
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
                     if action["type"] == "openMedia" {
-                        // Only a file or address one of this thread's replies names.
+                        // Only a file or address one of this thread's replies
+                        // (archived conversation or live active-run trace) names.
                         let path = action["path"].as_str().unwrap_or_default();
                         let home = reply_home();
-                        let media = state
+                        let session = state
                             .panel
                             .session(&thread)
-                            .map_err(|e| format!("{e:?}"))?
+                            .map_err(|e| format!("{e:?}"))?;
+                        let media = session
                             .conversation
                             .values()
                             .flat_map(prose_rows)
+                            .chain(session.trace.rows.values())
                             .flat_map(|row| reply_media(row, &home))
                             .find(|m| m.path == path)
                             .ok_or("This file can't be opened from here.")?;

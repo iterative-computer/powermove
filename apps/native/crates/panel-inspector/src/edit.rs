@@ -545,6 +545,16 @@ impl Inspector {
                     "height" => patch.height = Some(numeric(&value)?),
                     "duration" => patch.duration = Some(numeric(&value)?),
                     "fps" => patch.fps = Some(numeric(&value)?),
+                    "bg" => {
+                        let s = value.as_str().ok_or(InspectorError::InvalidInput)?;
+                        if s.len() != 7
+                            || !s.starts_with('#')
+                            || !s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                        {
+                            return Err(InspectorError::InvalidInput);
+                        }
+                        patch.background = Some(s.to_owned());
+                    }
                     "backgroundFill" => patch.background_fill = Some(value),
                     _ => return Err(InspectorError::InvalidInput),
                 }

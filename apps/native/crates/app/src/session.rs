@@ -4475,6 +4475,20 @@ impl Controller {
             cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
             return true;
         }
+        // Blender-inspired Shift+A: opens the categorized 3D Add menu (meshes,
+        // lights, cameras, 3D null, environments & nature) when 3D mode is on.
+        if cmd.name == "timeline.revealProperty:a"
+            && cmd.args.first().and_then(|v| v.as_bool()) == Some(true)
+            && let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_active()
+        {
+            self.open_studio_add_menu();
+            return true;
+        }
+        if cmd.name == "studio.addMenu" {
+            self.open_studio_add_menu();
+            return true;
+        }
         match cmd.name.as_str() {
             // The Light panel's sliders: one Undo per pull ("Light Brightness").
             "studio.light" => {

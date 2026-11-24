@@ -2157,7 +2157,7 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
     }
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
-    for panel in ["viewer", "timeline"] {
+    for panel in ["viewer", "agent", "timeline"] {
         let surface = synthetic(&rig, node_ops(
             1, 0, "div", json!({"style":{"width":60,"height":60}}), &[],
         ));
@@ -2178,8 +2178,8 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
             vcx.run_until_parked();
         }
         let after = child.read_with(&vcx, |v, _| v.renders);
-        if panel == "viewer" {
-            assert!(after > first, "the viewer retained its loading-era overlay paint");
+        if matches!(panel, "viewer" | "agent") {
+            assert!(after > first, "{panel} retained stale cached paint");
         } else {
             assert_eq!(after, first, "timeline paint should remain reusable");
         }
