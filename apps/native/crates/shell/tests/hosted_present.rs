@@ -20,6 +20,7 @@ fn main() {
     macos::viewer_slot(mtm);
     macos::hidden_moves(mtm);
     macos::regions(mtm);
+    macos::unprepared_frames(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -42,6 +43,62 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// PM-696 review: hosted views are published only with a frame that
+    /// presents. A frame whose Metal frame could not be prepared (no drawable,
+    /// a failed encode) moves nothing and keeps its staging; the next prepared
+    /// frame moves the control. A frame that would move views waits while an
+    /// earlier frame presented outside a transaction is still in flight.
+    pub fn unprepared_frames(mtm: MainThreadMarker) {
+        use gpui_macos::composition::waits_for_async_present;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 300.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let button: Retained<NSView> = unsafe {
+            let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+            let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+            Retained::from_raw(raw).expect("a button")
+        };
+        let slot = NativeControlSlot::new(&gpui, button);
+        let clip = rect(0., 0., 400., 300.);
+        let top = |slot: &NativeControlSlot| {
+            let w = slot.wrapper();
+            let r = w.convertRect_toView(w.bounds(), Some(&gpui));
+            gpui.bounds().size.height - r.origin.y - r.size.height
+        };
+        slot.stage(rect(10., 20., 80., 20.), clip);
+        probe::painted(&gpui);
+        assert_eq!(probe::publish_frame(&gpui, true), Some(true));
+        assert_eq!(top(&slot), 20.);
+        // The row moves; its frame gets no drawable.
+        slot.stage(rect(10., 60., 80., 20.), clip);
+        probe::painted(&gpui);
+        assert_eq!(probe::publish_frame(&gpui, false), None, "nothing published");
+        assert_eq!(top(&slot), 20., "the control stays where the picture shown has it");
+        assert!(probe::pending(&gpui), "its staging waits for the next attempt");
+        assert_eq!(probe::publish_frame(&gpui, true), Some(true));
+        assert_eq!(top(&slot), 60., "the frame that presents moves it");
+        // A moving frame waits for an asynchronous present still in flight;
+        // nothing else waits, and AppKit's synchronous paints never do.
+        assert!(waits_for_async_present(false, true, true));
+        assert!(!waits_for_async_present(false, false, true));
+        assert!(!waits_for_async_present(false, true, false));
+        assert!(!waits_for_async_present(true, true, true));
+        drop(slot);
+        window.close();
+    }
 
     /// P-SLOT-REGION: slots in a scrolling region sit in its container at
     /// their content position; a step moves the container only (one view,

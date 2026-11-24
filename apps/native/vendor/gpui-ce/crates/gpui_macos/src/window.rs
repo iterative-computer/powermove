@@ -883,6 +883,9 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    /// The scene GPUI drew was not shown yet: the next update shows it,
+    /// without drawing the tree again.
+    present_pending: bool,
     frame_requested: bool,
     idle_cleanup: Option<gpui::Task<()>>,
     /// Powermove P-IDLE-WAKE: the link is paused because the window was idle
@@ -952,6 +955,7 @@ impl MacWindowState {
     fn next_frame_request(&mut self) -> RequestFrameOptions {
         RequestFrameOptions {
             force_render: mem::take(&mut self.force_render_pending),
+            require_presentation: mem::take(&mut self.present_pending),
             ..Default::default()
         }
     }
@@ -1212,7 +1216,8 @@ impl MacWindowState {
             return;
         };
         let idle = self.direct_source.as_mut().is_none_or(|source| source.idle());
-        if !crate::composition::leaves_direct(moved.elapsed(), self.force_render_pending, idle) {
+        let waiting = self.force_render_pending || self.present_pending;
+        if !crate::composition::leaves_direct(moved.elapsed(), waiting, idle) {
             return;
         }
         if let Some(source) = self.direct_source.as_mut() {
@@ -1501,6 +1506,7 @@ impl MacWindow {
                 frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
+                present_pending: false,
                 frame_requested: false,
                 idle_cleanup: None,
                 idle: false,
@@ -2592,10 +2598,38 @@ impl PlatformWindow for MacWindow {
                 }
             }
         }
-        // A scene shown again (GPUI keeps presenting for a moment after fast
-        // input) staged nothing new: hosted views stay as its paint put them.
-        let painted = std::mem::take(&mut this.painted);
-        let transaction = crate::composition::present(view, painted);
+        // P-SLOT-REGION: a frame presented outside a transaction reaches the
+        // layer when its GPU work completes. Were it still on its way, this
+        // frame's transaction could land first and the older picture then show
+        // under hosted views already moved for this one (controls a row off
+        // their labels for a frame). A frame that moves them waits for the next
+        // update instead; the main thread waits for nothing.
+        if crate::composition::waits_for_async_present(
+            forced,
+            this.renderer.async_presents_in_flight(),
+            this.renderer.async_presents_in_flight() && crate::composition::pending(view, this.painted),
+        ) {
+            this.present_pending = true;
+            drop(this);
+            return trace("wait", false, 0.);
+        }
+        // A host that cannot say beforehand that it will move (it gave no
+        // `composition::set_pending`) and moves under a CAMetalDisplayLink
+        // (`PM_GPUI_METAL_DISPLAY_LINK=1`) is found out after its views moved:
+        // that frame asks the layer on the main thread (the layer's timeout
+        // bounds the wait), as before, and the window is direct from then on.
+        // P-SLOT-REGION: everywhere else the Metal frame is prepared first, and
+        // the hosted views are published only when it will present; a frame
+        // with no drawable or a failed encode leaves the picture and the views
+        // on screen together and shows its scene on the next update.
+        let prepared = this.renderer.prepare(scene);
+        let Some((prepared, transaction)) =
+            crate::composition::publish(view, &mut this.painted, prepared)
+        else {
+            this.present_pending = true;
+            drop(this);
+            return trace("unprepared", false, 0.);
+        };
         let moved = transaction.as_ref().is_some_and(|t| t.moved());
         let now = std::time::Instant::now();
         let continuous = this
@@ -2615,23 +2649,18 @@ impl PlatformWindow for MacWindow {
             continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
             this.ca_display_link.is_some() || direct,
         );
-        this.renderer.set_presents_with_transaction(sync);
-        // A host that cannot say beforehand that it will move (it gave no
-        // `composition::set_pending`) has moved its views by now, under a
-        // link. This one frame asks the layer on the main thread, as AppKit's
-        // synchronous paints do (the layer's timeout bounds the wait), and
-        // the window is direct from here on.
         let late = !forced && !direct && moved && this.renderer.display_link_bound();
         if late {
             path = "late";
+            drop(prepared);
             this.renderer.set_display_link_drawable(None);
             this.release_display_link_for_sync_present();
-        }
-        if !this.renderer.draw(scene) {
-            // No drawable (a link owns the layer and this draw is outside
-            // its update, or the layer gave none): the next update paints
-            // this scene.
-            this.force_render_pending = true;
+            this.renderer.set_presents_with_transaction(true);
+            if !this.renderer.draw(scene) {
+                this.present_pending = true;
+            }
+        } else {
+            this.renderer.submit(prepared, sync);
         }
         if late {
             this.enter_direct();
@@ -2655,7 +2684,7 @@ impl PlatformWindow for MacWindow {
         // shows with its slots this frame and goes back to the layer, rather
         // than at the run loop's end (a frame drawn before then waited out
         // the layer's 1 s timeout for a drawable). NativeGPUI 0002 does the same.
-        if sync {
+        if sync || late {
             unsafe {
                 let _: () = msg_send![class!(CATransaction), flush];
             }
@@ -4209,7 +4238,7 @@ extern "C" fn step(view: *mut c_void) {
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
             // Device recovery can demand a forced retry during presentation.
-            if lock.force_render_pending {
+            if lock.force_render_pending || lock.present_pending {
                 lock.start_display_link();
             }
             // Only pause once GPUI has finished and no next frame was asked

@@ -325,6 +325,27 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     }
     Some(transaction)
 }
+/// Whether a frame waits for the next update rather than present: it would
+/// move hosted views (`pending`) while an earlier frame presented outside a
+/// transaction is still on its way to the layer. Landing after this frame's
+/// transaction, that older picture would show under views already moved.
+/// AppKit's own synchronous paints never wait.
+pub fn waits_for_async_present(forced: bool, async_in_flight: bool, pending: bool) -> bool {
+    !forced && async_in_flight && pending
+}
+/// Publishes a frame's hosted views only once its Metal frame is prepared
+/// (drawable in hand, commands encoded): a frame that cannot present leaves
+/// `painted` and every staged geometry for the next attempt, and the views
+/// where the picture on screen has them.
+pub(crate) fn publish<P>(
+    view: usize,
+    painted: &mut bool,
+    prepared: Option<P>,
+) -> Option<(P, Option<Transaction>)> {
+    let prepared = prepared?;
+    let transaction = present(view, std::mem::take(painted));
+    Some((prepared, transaction))
+}
 /// A frame drawn within this long after the previous one is "continuous".
 /// The legacy CVDisplayLink fallback couples frames within this interval.
 pub const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_micros(33_334);
@@ -454,6 +475,14 @@ pub mod probe {
     /// does; true when a hosted view moved.
     pub fn place(view: &NSView) -> bool {
         present(view as *const NSView as usize, true).is_some_and(|t| t.moved())
+    }
+    /// A frame of `view` as a window presents one: its hosted views are
+    /// published only when its Metal frame was prepared (`prepared`).
+    /// `None` when nothing was published; otherwise whether a view moved.
+    pub fn publish_frame(view: &NSView, prepared: bool) -> Option<bool> {
+        let mut painted = true;
+        publish(view as *const NSView as usize, &mut painted, prepared.then_some(()))
+            .map(|(_, t)| t.is_some_and(|t| t.moved()))
     }
     pub fn forget(view: &NSView) {
         super::forget_paints(view as *const NSView as usize);
