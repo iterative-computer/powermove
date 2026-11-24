@@ -1295,8 +1295,12 @@ mod estimate_tests {
         let options: pm_promedia::export_panel::Options = serde_json::from_value(json!({"format":"mp4","scale":1,"width":640,"height":360,"fps":30,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"})).unwrap();
         let whole = |comp: &serde_json::Value| {
             let (policy, label) = pm_panel_studio3d::properties::export_quality(comp, None)?;
-            let per = pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, 640., 360.);
-            Some(format!("3D {label}, {}", pm_panel_studio3d::properties::about(per * 90.)))
+            let per =
+                pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, 640., 360.);
+            Some(format!(
+                "3D {label}, {}",
+                pm_panel_studio3d::properties::about(per * 90.)
+            ))
         };
         for comp in [
             json!({"layers":[{"type":"text","d":{"text":"Title"}},{"type":"solid","d":{"definition":"powermove.3d.object"}}],"studioQuality":"draft"}),
@@ -1311,14 +1315,19 @@ mod estimate_tests {
             }
             let mut stored = comp.clone();
             if let Some(q) = &quality {
-                stored["studioQuality"] = expected.get("studioQuality").cloned().unwrap_or(q.clone());
+                stored["studioQuality"] =
+                    expected.get("studioQuality").cloned().unwrap_or(q.clone());
             }
             let document = pm_model::Document::new(
                 Some(pm_model::json::parse(&stored.to_string()).unwrap()),
                 1,
             );
             let node = document.root().unwrap();
-            assert_eq!(super::studio_estimate(node, &options, 90, 640., 360.), whole(&stored), "{comp}");
+            assert_eq!(
+                super::studio_estimate(node, &options, 90, 640., 360.),
+                whole(&stored),
+                "{comp}"
+            );
         }
     }
     fn ready(min: f64, max: f64) -> serde_json::Value {

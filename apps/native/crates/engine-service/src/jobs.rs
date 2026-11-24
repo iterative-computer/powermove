@@ -947,7 +947,9 @@ impl ExportHandle {
                         reply(&ParentMessage::Faces { id: ask, agree });
                     }
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
-                        let sent = asks.as_ref().is_some_and(|asks| asks.send((ask, needs)).is_ok());
+                        let sent = asks
+                            .as_ref()
+                            .is_some_and(|asks| asks.send((ask, needs)).is_ok());
                         if !sent {
                             reply(&ParentMessage::Compat {
                                 id: ask,
