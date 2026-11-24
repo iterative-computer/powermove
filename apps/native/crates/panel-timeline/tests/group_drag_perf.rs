@@ -384,3 +384,77 @@ fn preview_shares_unmoved_rows_and_cancel_keeps_foreign_edits() {
     assert_eq!(c.kernel.published("drag").unwrap().history.entries, 1);
     actor.shutdown();
 }
+
+#[test]
+fn large_group_trim_samples_locally() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let mut fixture = project();
+    let layers = fixture
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    for layer in layers.iter_mut().skip(11) {
+        layer
+            .as_object_mut()
+            .unwrap()
+            .insert("group", Value::String("g0".into()));
+    }
+    wait(kernel.open("drag", OpenSource::Untitled(fixture)))
+        .unwrap()
+        .unwrap();
+    let mut client = TimelineClient::new(kernel, "drag", Caller::native()).unwrap();
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let base = client.kernel.published("drag").unwrap();
+    for (label, kind) in [
+        (
+            "large group trim in",
+            DragKind::TrimIn {
+                ids: vec!["g0".into()],
+            },
+        ),
+        (
+            "large group trim out",
+            DragKind::TrimOut {
+                ids: vec!["g0".into()],
+            },
+        ),
+    ] {
+        client.begin_preview_drag(kind).unwrap();
+        let mut durations = Vec::new();
+        for sample in 1..=24 {
+            let start = Instant::now();
+            let time_delta = sample as f64 / 30.;
+            wait(client.drag(DragSample {
+                time_delta,
+                ..Default::default()
+            }))
+            .unwrap();
+            let frame = client.layer_preview().unwrap();
+            let mut published = (*base).clone();
+            published.snapshot = frame.snapshot.clone();
+            let mut model = client.model.clone();
+            model.sync(&published);
+            let scene = Scene::from_model(&model, &Presenter, &tokens, 0.).unwrap();
+            let row = pm_panel_timeline::v4::row_id(&RowId::Layer("g0".into()));
+            let RowContent::Layer {
+                clip: Some(clip), ..
+            } = &scene.row(&row).unwrap().content
+            else {
+                panic!("previewed group has no strip");
+            };
+            assert!(clip.from > 0.125 || clip.duration > 20.);
+            durations.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        stats(label, &mut durations);
+        wait(client.finish_drag(false)).unwrap();
+        assert_eq!(
+            client.kernel.published("drag").unwrap().revision(),
+            base.revision()
+        );
+    }
+    actor.shutdown();
+}

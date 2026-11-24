@@ -4,7 +4,7 @@ pub mod agent_launcher;
 /// co-founder 2026-11-14) or Separate windows (one project per window). The
 /// app sets it from the setting at launch and whenever it changes; the next
 /// project opened follows it.
-static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Projects open as tabs of the window in use (else each in a window of its own).
 pub fn tabs_mode() -> bool {
     TABS_MODE.load(std::sync::atomic::Ordering::Relaxed)
@@ -66,7 +66,9 @@ pub mod workspace;
 pub use macos::open_editor_tab;
 pub use native::{front_restoring, restore_arranging, set_front_restoring, window_shown};
 #[cfg(target_os = "macos")]
-pub use native::{bring_forward, install_menus, quit_blocker_window, set_quit_hook};
+pub use native::{
+    bring_forward, install_menus, quit_blocker_window, set_quit_hook, show_in_tab_group,
+};
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{
@@ -78,7 +80,7 @@ pub use native::{
     AgentStatus, viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,
     live_window_ids, opens_in_place, project_menu_entries,
     ADD, Command, FlowchartRow, TaskStatus, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    capture_agent_picker, check_view3d, document_subtitle, flush_typing, history_titles, native_color, popover_frame, request_close, resize_from_top,
+    capture_agent_picker, check_palette_typing, check_view3d, document_subtitle, flush_typing, history_titles, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,
 };

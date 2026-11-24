@@ -142,6 +142,15 @@ export class EffectsController {
           (r) => r.kind === "effect" && r.id === intent.id,
         ) as EffectHeader | undefined;
         if (effect) this.platform.announce(`Removed ${effect.label}`);
+      } else if (intent.type === "remove-selection") {
+        const removed = previous.effectCount - next.effectCount;
+        const effect = previous.rows.find(
+          (r) => r.kind === "effect" && r.selected,
+        );
+        if (removed === 1 && effect?.kind === "effect")
+          this.platform.announce(`Removed ${effect.label}`);
+        else if (removed > 0)
+          this.platform.announce(`Removed ${removed} effects`);
       } else if (intent.type === "paste")
         this.platform.announce(
           `Pasted ${Math.max(0, next.effectCount - previous.effectCount)} effects`,

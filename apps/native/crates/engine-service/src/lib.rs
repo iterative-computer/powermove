@@ -627,6 +627,8 @@ struct View {
     monitor: Option<Vec<String>>,
     #[cfg(feature = "kernel")]
     audio_preview: GainPreviewSender,
+    audio_control: std::sync::Weak<audio::AudioLink>,
+    pause_requested_at: Option<i64>,
     desired_rate: pm_protocol::common::PlaybackRate,
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
@@ -749,13 +751,39 @@ impl View {
             self.dirty = true;
         }
     }
+    fn request_pause(&mut self, audio: &mut Option<Arc<audio::AudioLink>>) -> Result<bool> {
+        if self.desired_rate.num == 0 && self.resume_on_show.is_none() {
+            return Ok(false);
+        }
+        let at = (trace::now() * 1e6) as i64;
+        self.enqueue(TransportCommand::Pause)?;
+        // A start still in this queue has never reached audio. Cancel it
+        // instead of sending Play ahead of the worker's copy of Pause.
+        self.commands.retain(|cmd| !matches!(cmd,
+            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+        ));
+        self.pause_requested_at.get_or_insert(at);
+        // Keep the link alive until the caller releases the viewer lock.
+        *audio = self.audio_control.upgrade();
+        if let Some(link) = audio {
+            link.send(audio::AudioCtl::Pause);
+        }
+        if let Some(clock) = &mut self.status.clock {
+            transport::freeze_sample(clock, at, self.config.rate.exact_frame_ticks().unwrap_or(1));
+        }
+        self.status.wants_display = false;
+        Ok(true)
+    }
+
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
         if matches!(cmd, TransportCommand::Seek { .. })
             && matches!(self.commands.back(), Some(TransportCommand::Seek { .. }))
         {
             self.commands.pop_back();
         }
-        ensure!(self.commands.len() < 64, "transport queue full");
+        // Leave a slot for Pause even when edits filled the normal queue.
+        let limit = if cmd == TransportCommand::Pause { 64 } else { 63 };
+        ensure!(self.commands.len() < limit, "transport queue full");
         if matches!(
             cmd,
             TransportCommand::Play { .. }
@@ -794,6 +822,9 @@ impl View {
         Ok(())
     }
 }
+/// Retire playback queues that grew beyond this after a document closes.
+const PROJECT_GPU_RENEWAL_BYTES: u64 = 128 << 20;
+
 /// Viewers that keep a settled picture at once, at most (the front tab's,
 /// popouts, windows side by side).
 const SETTLED_PICTURES: usize = 4;
@@ -857,6 +888,8 @@ struct Shared {
     memory: Mutex<memory::CacheUsage>,
     /// Times a closed document's caches were released (`CacheUsage`).
     project_releases: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    project_device_renewals: std::sync::atomic::AtomicU64,
     wake: std::sync::mpsc::SyncSender<()>,
     /// Moves when a frame being drawn is superseded (a transport command, a
     /// new revision, other media or quality, a viewer closing): a frame
@@ -1304,13 +1337,14 @@ impl Viewer {
                     mode: pm_protocol::clock::SeekMode::Scrub,
                     ..
                 })
-            ) && v.commands.len() >= 2
+            ) && v.pause_requested_at.is_none()
+                && v.commands.len() >= 2
                 && v.commands[v.commands.len() - 2] == TransportCommand::Pause
             {
                 v.commands.pop_back();
                 v.commands.pop_back();
             }
-            ensure!(v.commands.len() <= 62, "transport queue full");
+            ensure!(v.commands.len() <= 61, "transport queue full");
             v.enqueue(TransportCommand::Pause)?;
             v.enqueue(TransportCommand::Seek {
                 time,
@@ -1416,8 +1450,17 @@ impl Viewer {
     fn command_traced(&self, cmd: TransportCommand, input: Option<f64>) -> Result<()> {
         use pm_protocol::validate::Validate;
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut paused = false;
+        let mut audio = None;
         self.edit(|v| {
-            v.enqueue(cmd)?;
+            if cmd == TransportCommand::Pause {
+                paused = v.request_pause(&mut audio)?;
+                if !paused {
+                    return Ok(());
+                }
+            } else {
+                v.enqueue(cmd)?;
+            }
             if let Some(input) = input {
                 v.input = Some(input);
                 v.pipeline = trace::Pipeline {
@@ -1425,9 +1468,12 @@ impl Viewer {
                     ..Default::default()
                 };
             }
+            self.shared.supersede();
             Ok(())
         })?;
-        self.shared.supersede();
+        if paused {
+            self.shared.state.lock().unwrap().notify();
+        }
         Ok(())
     }
     /// Update the playback mix without touching the presenter's frame state.
@@ -1451,23 +1497,35 @@ impl Viewer {
     }
     /// Whether a run is asked for or in progress, including the moment a
     /// new run waits for the audio clock (when the clock itself reads
-    /// stopped).
+    /// stopped). A stop still draining is also consumed as Pause by toggles.
     pub fn running(&self) -> bool {
         let state = self.shared.state.lock().unwrap();
         state
             .views
             .get(&self.id)
-            .is_some_and(|v| v.desired_rate.num != 0)
+            .is_some_and(|v| v.desired_rate.num != 0 || v.pause_requested_at.is_some())
     }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
+        let mut audio = None;
         self.edit(|v| {
-            if let Some(cmd) = transport::shuttle(key, v.desired_rate, from_pause) {
-                v.enqueue(cmd)?;
+            if key == transport::ShuttleKey::K && v.pause_requested_at.is_some() {
+                consumed = true;
+            } else if let Some(cmd) = transport::shuttle(key, v.desired_rate, from_pause) {
+                if cmd == TransportCommand::Pause {
+                    if v.request_pause(&mut audio)? {
+                        self.shared.supersede();
+                    }
+                } else {
+                    v.enqueue(cmd)?;
+                }
                 consumed = true;
             }
             Ok(())
         })?;
+        if consumed && key == transport::ShuttleKey::K {
+            self.shared.state.lock().unwrap().notify();
+        }
         Ok(consumed)
     }
     /// The host's CADisplayLink timestamp/interval, in monotonic host seconds.
@@ -1687,6 +1745,8 @@ impl EngineService {
             state: Mutex::new(State::default()),
             memory: Mutex::default(),
             project_releases: Default::default(),
+            #[cfg(test)]
+            project_device_renewals: Default::default(),
             wake,
             superseded: Default::default(),
             interactive: {
@@ -1813,8 +1873,8 @@ impl EngineService {
         self.shared.state.lock().unwrap().subscribers.push(tx);
         rx
     }
-    /// The device viewer layers and popouts must use. It changes after a
-    /// GPU loss; the worker re-points layers it already draws into.
+    /// The device viewer layers and popouts start with. On device renewal,
+    /// the worker re-points layers it already draws into.
     pub fn metal_device(&self) -> metal::Device {
         self.shared.device.lock().unwrap().clone()
     }
@@ -1938,6 +1998,8 @@ impl EngineService {
                 monitor: None,
                 #[cfg(feature = "kernel")]
                 audio_preview: audio_preview.clone(),
+                audio_control: Default::default(),
+                pause_requested_at: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
                     proxied,
@@ -2175,6 +2237,13 @@ const MAX_LEAD_REFRESHES: f64 = 6.;
 /// A jump of more frames than this (2 s at 24 fps) between played frames
 /// is a seek, not a stall; a short seek taken for one only renders more.
 const DROPS_AT_MOST: i64 = 48;
+thread_local! {
+    // Studio captures use a separate renderer, reached through the compositor
+    // on this same worker. Exact reads and offscreen jobs keep their own policy.
+    static MATERIAL_PLAYBACK: std::cell::RefCell<Option<pm_render::media::Interrupt>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// One frame taken from the shared state, drawn without its lock.
 struct Work {
     transient: bool,
@@ -2572,6 +2641,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     shared.disk.set_activity(shared.interactive.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
+    let mut project_gpu_peak = 0;
     // Each view's last played frame (disk render cache index).
     let mut played: std::collections::HashMap<u64, i64> = Default::default();
     let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
@@ -2638,6 +2708,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         let mut usage = engine.govern_memory();
         engine.poll();
         usage.gpu_allocated_bytes = engine.metal().current_allocated_size();
+        project_gpu_peak = project_gpu_peak.max(usage.gpu_allocated_bytes);
         *shared.memory.lock().unwrap() = usage;
         pass.mark("memory");
         if engine.lost() {
@@ -2678,6 +2749,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     engine = next;
                     settling = None;
                     rebuilt_at = Some(std::time::Instant::now());
+                    project_gpu_peak = 0;
                     *shared.device.lock().unwrap() = engine.metal().to_owned();
                     for (id, v) in state.views.iter_mut() {
                         v.status.device_losses += 1;
@@ -3078,6 +3150,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             .collect();
         if !retired.is_empty() || !closed.is_empty() {
             let last_view_closed = state.views.is_empty();
+            if !closed.is_empty() && !flights.is_empty() {
+                // Let completion/presentation handlers give up the old
+                // command buffers before retiring their queues. No new work
+                // is submitted while a document is waiting for this drain.
+                state.retired_documents.extend(closed);
+                drop(state);
+                let _ = wakes.recv_timeout(Duration::from_millis(4));
+                continue;
+            }
             if !closed.is_empty() {
                 for v in state.views.values_mut() {
                     v.dirty = true;
@@ -3095,21 +3176,35 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     shared.disk.forget_document(doc);
                 }
                 engine.release_project_memory();
-                if last_view_closed {
-                    // Metal command queues and wgpu encoder pools retain
-                    // their playback high-water storage after caches empty.
-                    // No viewer uses this device now; retire those owners as
-                    // well. The ordinary rebuild path preserves fonts/cache
-                    // configuration and recreates programs on next use.
-                    match engine.rebuild() {
-                        Ok(next) => {
-                            engine = next;
-                            settling = None;
+                settling = None;
+                // Queues and encoders can retain their high-water storage
+                // even after the renderer's caches have emptied.
+                if last_view_closed || project_gpu_peak >= PROJECT_GPU_RENEWAL_BYTES
+                    || engine.metal().current_allocated_size() >= PROJECT_GPU_RENEWAL_BYTES
+                {
+                    match objc2::rc::autoreleasepool(|_| {
+                        engine.rebuild().map(|next| engine = next)
+                    }) {
+                        Ok(()) => {
+                            project_gpu_peak = 0;
+                            let mut state = shared.state.lock().unwrap();
                             *shared.device.lock().unwrap() = engine.metal().to_owned();
+                            for (id, view) in &mut state.views {
+                                view.stamp.sequence += 1;
+                                bump_site(line!(), "");
+                                view.dirty = true;
+                                if let Some(r) = runtime.get_mut(id) {
+                                    r.last = None;
+                                    (r.full_owed, r.settle_at, r.full_for) = (None, None, None);
+                                }
+                            }
+                            // The next submission retargets CAMetalLayer on
+                            // this worker, just as after a GPU loss.
+                            state.notify();
+                            #[cfg(test)]
+                            shared.project_device_renewals.fetch_add(1, std::sync::atomic::Ordering::Release);
                         }
-                        Err(error) => {
-                            eprintln!("Viewer cleanup could not renew the idle device: {error:#}")
-                        }
+                        Err(error) => eprintln!("Viewer cleanup could not renew the device: {error:#}"),
                     }
                     crate::memory::pressure_relief();
                 }
@@ -3202,10 +3297,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.status.error = Some(e.to_string());
                     }
                 }
-                #[cfg(feature = "kernel")]
-                {
-                    *v.audio_preview.lock().unwrap() =
-                        transport.audio.as_ref().map(audio::AudioLink::preview_sender);
+                if let Some(audio) = &transport.audio {
+                    v.audio_control = Arc::downgrade(audio);
+                    #[cfg(feature = "kernel")]
+                    {
+                        *v.audio_preview.lock().unwrap() = Some(audio.preview_sender());
+                    }
                 }
                 Runtime {
                     transport,
@@ -3261,6 +3358,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     "sent": sent, "drained": now, "viewer_id": id,
                 }));
             }
+            let mut pause_at = v.pause_requested_at.take();
             while let Some(cmd) = v.commands.pop_front() {
                 // Any command (a seek, play) drops a pending settled picture,
                 // and one being drawn gives way.
@@ -3272,7 +3370,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
                     r.refine_at = None;
                 }
-                r.transport.command(cmd, (now * 1e6) as i64);
+                let now = (now * 1e6) as i64;
+                if cmd == TransportCommand::Pause {
+                    r.transport.pause_at(pause_at.take().unwrap_or(now));
+                } else {
+                    r.transport.command(cmd, now);
+                }
             }
             // Nobody watches a hidden viewer: it does not play (its frames,
             // audio and deadlines would hold exports, stills and the
@@ -3633,6 +3736,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 },
                 studio_preview: if capture {
                     studio::Preview::Final
+                } else if playing && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final) {
+                    studio::Preview::Live
                 } else {
                     v.studio_preview
                 },
@@ -3779,6 +3884,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             frame_ticks,
         }) = work
         {
+            let superseded = &shared.superseded;
+            let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
@@ -3870,10 +3977,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     } else {
                         render::Readback::None
                     };
-                    let superseded = &shared.superseded;
-                    let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
-                    engine.set_interrupt(Some((superseded.clone(), armed)));
+                    let interrupt = (superseded.clone(), armed);
+                    engine.set_interrupt(Some(interrupt.clone()));
+                    if spec.moment == Moment::Playing && !spec.exact {
+                        MATERIAL_PLAYBACK.replace(Some(interrupt));
+                    }
                     let frame = engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
+                    MATERIAL_PLAYBACK.replace(None);
                     engine.set_interrupt(None);
                     frame
                 });
@@ -4548,6 +4658,34 @@ fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn pause_freezes_the_viewer_while_the_worker_is_busy() {
+        let (_shaders, service) = rebuilding_service("pause-while-encoding");
+        let view = shapes_viewer(&service, None);
+        wait_for(&view, "initial frame", |status| status.frame.is_some());
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        view.command(TransportCommand::Play { rate: pm_protocol::common::PlaybackRate::NORMAL }).unwrap();
+        blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+        view.command(TransportCommand::Pause).unwrap();
+        let first = view.stamp().unwrap();
+        let is_toggle_pause = view.running();
+        let frozen = view.status();
+        view.command(TransportCommand::Pause).unwrap();
+        let duplicate = view.stamp().unwrap();
+        release.send(()).unwrap();
+        assert!(is_toggle_pause, "a toggle during the pending stop still pauses");
+        assert!(!frozen.wants_display);
+        assert_eq!(frozen.clock.unwrap().state, pm_protocol::clock::TransportState::Stopped);
+        assert_eq!(duplicate, first, "duplicate Pause does not queue more work");
+        wait_for(&view, "paused frame", |status| status.frame.as_ref().is_some_and(|f| f.stamp == first));
+        assert!(!view.running());
+    }
 
     #[test]
     fn headless_pump_answers_fonts_during_a_blocking_render() {
@@ -6769,6 +6907,43 @@ mod worker_tests {
         }
         assert!(!Arc::ptr_eq(&service.compat(doc), &store));
         other.retire();
+    }
+
+    #[test]
+    fn replacing_a_high_water_document_renews_the_device_and_draws_the_new_viewer() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("project-renew-test").unwrap()).unwrap();
+        let old = shapes_viewer(&service, None);
+        let first = wait_for(&old, "the first document's frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let old_doc = first.frame.unwrap().stamp.doc_id;
+        let allocation = service.metal_device().new_buffer(
+            PROJECT_GPU_RENEWAL_BYTES,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+        old.scrub(Ticks::ZERO).unwrap();
+        wait_for(&old, "the worker to observe the allocation", |_| {
+            service.memory_usage().gpu_allocated_bytes >= PROJECT_GPU_RENEWAL_BYTES
+        });
+        drop(allocation);
+
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let mut config = shapes_config(Some(layer));
+        // The test also builds without the kernel's document ID allocator.
+        config.snapshot.doc_id = old_doc + 1;
+        let viewer = service.replace_viewer(&old, config).unwrap();
+        wait_for(&viewer, "project cleanup and the replacement frame", |s| {
+            service.memory_usage().project_releases == 1
+                && s.frame.as_ref().is_some_and(|f| f.gpu_ok && f.stamp.doc_id == old_doc + 1)
+        });
+        assert_eq!(service.shared.project_device_renewals.load(Ordering::Acquire), 1);
+        assert_eq!(viewer.status().device_losses, 0);
+        viewer.retire();
     }
 
     /// A capture is an exact read: full resolution and paused whatever the

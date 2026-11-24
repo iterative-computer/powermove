@@ -220,6 +220,76 @@ fn sample_entry(id: &str, name: &str, version: &str, bytes: usize) -> Entry {
     }
 }
 
+#[test]
+fn project_extensions_leave_builtin_3d_out_of_portable_exports() {
+    let items = pm_protocol::definitions::BUILTIN_3D_IDS
+        .into_iter()
+        .map(|definition| Usage {
+            composition: "root".into(),
+            layer: definition.into(),
+            kind: "layer".into(),
+            definition: definition.into(),
+        })
+        .collect();
+    let bundle = Bundle::collect(
+        items,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        builtin_definitions(),
+        &BTreeSet::new(),
+        true,
+    );
+    assert!(bundle.entries.is_empty(), "{:?}", bundle.entries);
+}
+
+#[test]
+fn project_extensions_open_old_builtin_3d_bundles_without_warning() {
+    let profile = tempfile::tempdir().unwrap();
+    let mut builtin = sample_entry("powermove", "Powermove", "", 0);
+    builtin.status = Status::Unavailable;
+    builtin.items[0].kind = "layer".into();
+    builtin.items[0].definition = "powermove.3d.object".into();
+    let prepare = |entry: &Entry| {
+        let extra = json!({"extensions/manifest": {"version": 1, "entries": [entry]}});
+        let extra = pm_model::json::parse(&extra.to_string()).unwrap();
+        Open::prepare(extra.as_object().unwrap(), profile.path())
+    };
+    assert!(prepare(&builtin).frame().is_none());
+
+    // A stale entry can be ignored only if every reference is builtin.
+    builtin.items.extend(sample_entry("toy", "Toy", "", 0).items);
+    assert!(prepare(&builtin).frame().is_some());
+}
+
+#[gpui::test]
+fn project_extensions_each_choice_dismisses_the_sheet(cx: &mut gpui::TestAppContext) {
+    let parent = cx.add_window(|_, _| gpui::EmptyView).into();
+    let mut app = cx.update(|cx| cx.to_async());
+    let frame = Open {
+        bundle: Bundle::default(),
+        required: vec![sample_entry("toy", "Toy", "1.0", 0)],
+        excluded: BTreeSet::new(),
+        warnings: vec![],
+    }
+    .frame()
+    .unwrap();
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+
+    for (button, choice) in [
+        ("welcome-without", Choice::Without),
+        ("welcome-library", Choice::Library),
+        ("welcome-project", Choice::Project),
+    ] {
+        let reply = sheet(frame.clone(), tokens.clone(), parent, &mut app).unwrap();
+        let dialog = cx.windows().into_iter().find(|&id| id != parent).unwrap();
+        let mut view = gpui::VisualTestContext::from_window(dialog, cx);
+        let at = view.debug_bounds(button).expect("visible sheet button").center();
+        view.simulate_click(at, gpui::Modifiers::none());
+        assert_eq!(reply.try_recv().unwrap(), choice);
+        assert_eq!(cx.windows(), vec![parent], "{button} left the sheet open");
+    }
+}
+
 fn finish(ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>) {
     crate::ticket::answer(ticket, Instant::now() + Duration::from_secs(30))
         .unwrap()

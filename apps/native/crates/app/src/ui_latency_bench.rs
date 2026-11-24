@@ -1545,7 +1545,6 @@ fn shared_cases(out: &mut Vec<Case>) {
             let _ = crate::layer_commands::disabled(
                 Some(&*p),
                 &list,
-                &crate::layer_commands::Clipboard::default(),
             );
             let ms = t.elapsed().as_secs_f64() * 1e3;
             disabled.samples.push(Sample {

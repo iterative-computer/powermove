@@ -331,6 +331,7 @@ struct Built {
     scene: Arc<Scene>,
     graph: Option<Arc<Graph>>,
     model: Arc<TimelineModel>,
+    outline_requested: bool,
     /// Audio clips whose waveforms the scene drew as still reading.
     wanted: Vec<crate::waveforms::Key>,
 }
@@ -472,6 +473,7 @@ pub struct TimelineSurface {
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     pending_scene: Option<(Built, bool)>,
+    outline_runtime: std::sync::Weak<pm_builtins::Builtins>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
     focused: bool,
@@ -638,6 +640,7 @@ impl TimelineSurface {
             model: Default::default(),
             scene: None,
             pending_scene: None,
+            outline_runtime: std::sync::Weak::new(),
             snap_guide: None,
             graph: None,
             graph_fitted: None,
@@ -851,6 +854,10 @@ impl TimelineSurface {
         serde_json::json!({"frames":self.agent_ink_frames,"paint_p95_ms":if n==0 {0.}else{samples[(n-1)*95/100]},"samples":self.agent_ink_sample_count})
     }
     /// A kernel publication landed: follow it on a worker.
+    pub fn set_outline_runtime(&mut self, runtime: &Arc<pm_builtins::Builtins>) {
+        self.outline_runtime = Arc::downgrade(runtime);
+    }
+
     pub fn published(&mut self, cx: &mut Context<Self>) {
         if self.scene.is_some() && !self.current_composition(&self.model) {
             let timeline = cx.entity().downgrade();
@@ -1495,6 +1502,8 @@ impl TimelineSurface {
             .scene
             .as_ref()
             .map(|scene| (scene.clone(), self.model.clone()));
+        let previous_mode = self.model.mode;
+        let outline = self.outline_runtime.upgrade();
         let preview_update = matches!(&job, Job::Sample(_));
         let finish_gain = matches!(&job, Job::Finish(true));
         let (tokens, offline, sources) = (
@@ -1511,10 +1520,10 @@ impl TimelineSurface {
                         .as_ref()
                         .ok()
                         .and_then(|_| client.layer_preview().cloned());
-                    let built = if let Some(gain) =
-                        preview.as_ref().filter(|p| p.gain_commands.is_some())
+                    let built = if let Some(frame) =
+                        preview.as_ref().filter(|p| p.gain_commands.is_some() || p.trimmed)
                     {
-                        build_with(&client, &tokens, offline, sources, Some(&gain.snapshot))
+                        build_with(&client, &tokens, offline, sources, Some(&frame.snapshot), None)
                     } else if preview_update
                         && preview.is_some()
                         && let Some((scene, model)) = previous_scene
@@ -1528,10 +1537,12 @@ impl TimelineSurface {
                             scene: Arc::new(scene),
                             graph: None,
                             model: Arc::new(client.model.clone()),
+                            outline_requested: false,
                             wanted: vec![],
                         })
                     } else {
-                        let mut built = build(&client, &tokens, offline, sources);
+                        let outline = outline.as_deref().map(|runtime| (runtime, previous_mode));
+                        let mut built = build_with(&client, &tokens, offline, sources, None, outline);
                         if let (Some(built), Some(preview)) = (&mut built, &preview) {
                             Arc::make_mut(&mut built.scene)
                                 .preview_times(&client.model, &preview.starts);
@@ -1543,9 +1554,10 @@ impl TimelineSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                let shown_index = built.as_ref().map_or(&client.model.index, |b| &b.model.index);
                 s.snap_guide = client
                     .active_drag()
-                    .and_then(|d| d.snap_target_in(&client.model.index));
+                    .and_then(|d| d.snap_target_in(shown_index));
                 let gain_revision = client.model.index.revision;
                 s.client = Some(client);
                 s.busy = false;
@@ -1617,11 +1629,14 @@ impl TimelineSurface {
             return;
         }
         let model = built.model.clone();
+        let outline_requested = built.outline_requested;
         self.pending_scene = Some((built, hold_time_mapping));
         self.show_pending_scene(cx);
-        let delegate = self.delegate.clone();
         let refresh = self.pending_scene.is_some();
-        cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        if !outline_requested {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        }
         if refresh {
             self.outline.reconcile_timeline(cx);
         }
@@ -4061,7 +4076,12 @@ impl TimelineSurface {
         let (x, y) = self.local(event.position);
         // A scroll starts no skim (the pointer did not move); a skim showing
         // stays under the pointer as the time moves beneath it.
-        self.pointer = Some(event.position);
+        if window.is_window_active() {
+            self.pointer = Some(event.position);
+        } else {
+            self.pointer = None;
+            self.set_skimmer(None, cx);
+        }
         // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
         // pinch reads).
         if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
@@ -4257,6 +4277,10 @@ impl TimelineSurface {
         }
         if matches!(context, MenuContext::Empty) {
             host_row(&mut rows, empty_new_menu());
+            host_row(&mut rows, serde_json::json!({
+                "command":"pasteLayers", "label":"Paste",
+                "disabled": !crate::layer_commands::can_paste(),
+            }));
         }
         // What v1's extensions added under the ruler and between rows: New
         // Composition…, Import Captions…, Add 3D Layer.
@@ -5002,7 +5026,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Begin(spec, time) => {
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            if client.is_gain_drag(&kind)
+            if client.is_gain_drag(&kind) || kind.is_strip_trim()
                 || (matches!(&kind, DragKind::Layers { .. })
                     && client.model.mode == TimelineMode::Layers
                     && client.model.graph_display == GraphDisplay::DopeSheet)
@@ -5631,7 +5655,7 @@ fn build(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
 ) -> Option<Built> {
-    build_with(client, tokens, offline, sources, None)
+    build_with(client, tokens, offline, sources, None, None)
 }
 fn build_with(
     client: &TimelineClient,
@@ -5639,6 +5663,7 @@ fn build_with(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     preview: Option<&pm_kernel::Snapshot>,
+    outline: Option<(&pm_builtins::Builtins, pm_panel_timeline::TimelineMode)>,
 ) -> Option<Built> {
     let mut published = client.kernel.published(&client.project)?;
     let mut model = client.model.clone();
@@ -5646,6 +5671,12 @@ fn build_with(
         Arc::make_mut(&mut published).snapshot = snapshot.clone();
     }
     model.sync(&published);
+    let model = Arc::new(model);
+    // Run the outline worker and scene build in parallel on a mode switch.
+    // The host still swaps them together after verifying the row identities.
+    let outline_requested = outline.is_some_and(|(runtime, previous_mode)| {
+        model.mode != previous_mode && runtime.update_timeline_outline(model.clone(), true)
+    });
     let presenter = Presenter {
         offline,
         sources,
@@ -5679,7 +5710,8 @@ fn build_with(
     Some(Built {
         scene: Arc::new(scene),
         graph: graph.map(Arc::new),
-        model: Arc::new(model),
+        model,
+        outline_requested,
         wanted: presenter.wanted.into_inner(),
     })
 }
@@ -5691,6 +5723,7 @@ impl Render for TimelineSurface {
             self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
                 if !window.is_window_active() {
                     s.cancel_pointer_gesture(cx);
+                    s.pointer = None;
                     s.set_skimmer(None, cx);
                 }
             }));
@@ -6441,8 +6474,10 @@ impl Render for TimelineSurface {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    let over = s.over_bar(e.position, cx);
-                                    if s.bounds.contains(&e.position) && !over {
+                                    if !window.is_window_active() {
+                                        s.pointer = None;
+                                        s.set_skimmer(None, cx);
+                                    } else if s.bounds.contains(&e.position) && !s.over_bar(e.position, cx) {
                                         s.hover(e.position, cx);
                                     } else {
                                         if s.model.edit_tool == EditTool::Split { s.pointer = None; cx.notify(); }
@@ -7557,6 +7592,7 @@ mod cull_tests {
             detail: serde_json::json!({"half": null}),
             clip: None,
             covered,
+            decorative: false,
         }
     }
 
@@ -7609,14 +7645,14 @@ pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
 /// v1's least layer column (`GUTTER_MIN`, 320 pt).
 const V1_LEAST_LAYER_COLUMN: f64 = 320.;
 /// The narrowest the layer column goes: a layer row's number, disclosure,
-/// kind badge, three slots of name and its five switches (parent link, Shy,
-/// Solo, Lock, Visibility), with its insets and gaps, and never narrower
+/// kind badge, three slots of name and its four switches (parent link, 3D,
+/// Lock, Visibility), with its insets and gaps, and never narrower
 /// than v1's. The name truncates first; the switches always fit.
 pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
     let (gap, hit) = (m.gap as f64, m.hit as f64);
     // Insets and the gaps between number, disclosure, badge and name.
     let room = 2. * gap + 4. * gap;
-    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 5. * hit;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 4. * hit;
     row.max(V1_LEAST_LAYER_COLUMN).ceil()
 }
 

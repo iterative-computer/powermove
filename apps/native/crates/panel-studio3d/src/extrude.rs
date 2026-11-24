@@ -332,7 +332,7 @@ pub(crate) fn part_commands(
             vec![apply(
                 p,
                 time,
-                json!({"operation":"set_material_map","target":layer,"materialIndex":index,"slot":"color","map":source_record(&arg)}),
+                json!({"operation":"set_material_map","target":layer,"materialIndex":index,"preserveMaterialMode":true,"slot":"color","map":source_record(&arg)}),
             )],
         ));
     }
@@ -353,7 +353,7 @@ pub(crate) fn part_commands(
         vec![apply(
             p,
             time,
-            json!({"operation":"set_material_properties","target":layer,"materialIndex":index,"patch":{rest: arg}}),
+            json!({"operation":"set_material_properties","target":layer,"materialIndex":index,"preserveMaterialMode":true,"patch":{rest: arg}}),
         )],
     ))
 }

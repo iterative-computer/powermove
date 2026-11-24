@@ -39,13 +39,14 @@ impl From<ModelError> for ClientError {
     }
 }
 
-/// An immutable frame for a local clip move or audio gain edit. Its snapshot
+/// An immutable frame for a local clip move, trim or audio gain edit. Its snapshot
 /// is never published to the project's kernel.
 #[derive(Clone, Debug)]
 pub struct LayerPreviewFrame {
     pub starts: std::sync::Arc<[(String, f64)]>,
     pub snapshot: pm_kernel::Snapshot,
     pub gain_commands: Option<std::sync::Arc<[pm_kernel::Command]>>,
+    pub trimmed: bool,
 }
 struct LayerPreview {
     drag: Drag,
@@ -282,7 +283,7 @@ impl TimelineClient {
         self.active = Some((id, drag));
         Ok(())
     }
-    /// Native clip moves and gain drags preview locally. The writer, history
+    /// Native clip moves, edge trims and gain drags preview locally. The writer, history
     /// and published document are used only at mouse-up.
     pub fn begin_preview_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
         if self.active.is_some() || self.preview.is_some() {
@@ -290,7 +291,7 @@ impl TimelineClient {
         }
         self.sync()?;
         let gain = self.is_gain_drag(&kind);
-        if !gain && !matches!(kind, DragKind::Layers { .. }) {
+        if !gain && !kind.is_strip_trim() && !matches!(kind, DragKind::Layers { .. }) {
             return Err(ModelError::InvalidGesture.into());
         }
         let mut drag = Drag::begin(&self.model, kind)?;
@@ -368,22 +369,33 @@ impl TimelineClient {
             return Err(ClientError::ConcurrentRelativeGesture);
         }
         let commands = preview.drag.commands(sample)?;
-        if preview.gain {
-            let mut document = Document::from_root(
-                p.snapshot.root().cloned(),
-                p.revision() + preview.serial + 1,
-            );
-            for command in &commands {
-                let ops = command
-                    .plan(
-                        document.root().ok_or(ClientError::Closed)?,
-                        self.caller.origin,
-                    )
-                    .map_err(|e| ClientError::Rejected(e.to_string()))?;
+        let trimmed = preview.drag.kind.is_strip_trim();
+        if preview.gain || trimmed {
+            let root = p.snapshot.root().ok_or(ClientError::Closed)?;
+            let revision = p.revision() + preview.serial + 1;
+            let document = if trimmed {
+                pm_kernel::commands::timing::preview_strip_trim(
+                    root,
+                    revision,
+                    self.caller.origin,
+                    &commands,
+                )
+                .map_err(|e| ClientError::Rejected(e.to_string()))?
+            } else {
+                let mut document = Document::from_root(Some(root.clone()), revision);
+                for command in &commands {
+                    let ops = command
+                        .plan(
+                            document.root().ok_or(ClientError::Closed)?,
+                            self.caller.origin,
+                        )
+                        .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                    document
+                        .apply_ops(&ops)
+                        .map_err(|e| ClientError::Kernel(e.to_string()))?;
+                }
                 document
-                    .apply_ops(&ops)
-                    .map_err(|e| ClientError::Kernel(e.to_string()))?;
-            }
+            };
             preview.serial = document.revision() - p.revision();
             preview.frame = Some(LayerPreviewFrame {
                 starts: [].into(),
@@ -392,7 +404,8 @@ impl TimelineClient {
                     revision: document.revision(),
                     document: std::sync::Arc::new(document),
                 },
-                gain_commands: Some(commands.clone().into()),
+                gain_commands: preview.gain.then(|| commands.clone().into()),
+                trimmed,
             });
             preview.sample = Some(sample);
             preview.commands = commands;
@@ -422,7 +435,11 @@ impl TimelineClient {
             })
             .collect();
         let mut ops = Vec::with_capacity(starts.len());
-        for (id, from) in &starts {
+        for command in &commands {
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id: id, patch }) = command else {
+                continue;
+            };
+            let Some(from) = patch.from else { continue };
             let index = *locations
                 .get(id)
                 .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
@@ -431,8 +448,13 @@ impl TimelineClient {
                 index,
             }
             .path();
+            if let Some(duration) = patch.duration {
+                let mut duration_path = path.clone();
+                duration_path.push("dur".into());
+                ops.push(Op::Leaf(Patch::set(duration_path, pm_model::Value::Number(duration))));
+            }
             path.push("from".into());
-            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(*from))));
+            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(from))));
         }
         preview.serial += 1;
         let revision = p.revision() + preview.serial;
@@ -445,6 +467,7 @@ impl TimelineClient {
         preview.frame = Some(LayerPreviewFrame {
             starts: starts.into(),
             gain_commands: None,
+            trimmed: false,
             snapshot: pm_kernel::Snapshot {
                 doc_id: p.snapshot.doc_id,
                 revision,
@@ -502,7 +525,9 @@ impl TimelineClient {
                 .kernel
                 .published(&self.project)
                 .ok_or(ClientError::Closed)?;
-            if published.snapshot.doc_id != preview.drag.start.doc_id {
+            if published.snapshot.doc_id != preview.drag.start.doc_id
+                || published.snapshot.open_comp() != preview.drag.start.comp_id
+            {
                 self.sync()?;
                 return Err(ClientError::DocumentChanged);
             }

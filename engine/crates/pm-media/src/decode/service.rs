@@ -247,7 +247,9 @@ impl Default for ServiceConfig {
         ServiceConfig {
             cache_bytes: 24 << 20,
             pool_free_bytes: 16 << 20,
-            threads: 4,
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get().clamp(4, 12) as i32)
+                .unwrap_or(4),
             idle_sessions: 1,
             session_window: super::session::DEFAULT_WINDOW,
         }

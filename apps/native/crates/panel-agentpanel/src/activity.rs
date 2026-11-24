@@ -326,11 +326,19 @@ impl Trace {
         }
         Ok(())
     }
+    pub(crate) fn settled_answers(&self) -> impl Iterator<Item = String> + '_ {
+        self.rows.order.iter().filter(|r| r.value["kind"] == "text").map(|row| {
+            self.answer_sources.get(&row.id).map_or_else(
+                || pm_agents::launch::reply_text(row.value["text"].as_str().unwrap_or_default()),
+                |raw| settled_answer(raw),
+            )
+        })
+    }
+
     pub fn seal(&mut self, now: u64) -> Result<()> {
         self.finish_thought(now)?;
         for (id, raw) in &self.answer_sources {
-            let split = crate::placement::split(raw, false);
-            self.rows.update(id, |v| v["text"] = json!(split.text))?;
+            self.rows.update(id, |v| v["text"] = json!(settled_answer(raw)))?;
         }
         let ids: Vec<_> = self
             .rows
@@ -351,6 +359,10 @@ impl Trace {
         Ok(())
     }
 }
+fn settled_answer(raw: &str) -> String {
+    crate::placement::split(&pm_agents::launch::reply_text(raw), false).text
+}
+
 fn event_id(event: &Value) -> Result<&str> {
     event["itemId"]
         .as_str()

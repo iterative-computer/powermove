@@ -516,10 +516,11 @@ impl<'c> Gpu<'c> {
         self.unbounded = false;
         let mut output_bounds = None;
         for step in steps {
-            bounds = bounds.and_then(|b| {
+            let scissor = bounds.and_then(|input| {
                 let definition = self.effects.get(DefinitionKind::Effect, &step.definition)?;
-                Some(super::bounds::grow(b, super::bounds::reach(step, definition)?, size))
+                super::bounds::scissors(step, definition, input, size)
             });
+            bounds = scissor.as_ref().map(|s| s.output);
             let from = current.as_ref().unwrap_or(&input).clone();
             self.output_bounds = None;
             if let Some(next) = self.run_effect(
@@ -529,7 +530,7 @@ impl<'c> Gpu<'c> {
                 backdrop.as_ref(),
                 time,
                 coordinates,
-                bounds,
+                scissor,
             ) {
                 output_bounds = self.output_bounds;
                 if let Some(previous) = current.replace(next) {
@@ -562,11 +563,12 @@ impl<'c> Gpu<'c> {
     }
 
     /// `runEffects` for one effect: its passes from `input`; the output, or
-    /// `None` when the effect is skipped. `bounds`: the scissor its passes
-    /// may keep to (target texels, GL rows), outside which every pass of
-    /// it writes exact zeros ([`super::bounds`]).
+    /// `None` when the effect is skipped. `scissor`: the bounds its passes
+    /// may keep to (target texels, GL rows). Omitted texels are equivalent
+    /// to clear for the next pass, and exactly clear in the final pass
+    /// ([`super::bounds`]).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run_effect(
+    fn run_effect(
         &mut self,
         layer: &str,
         step: &EffectStep,
@@ -574,7 +576,7 @@ impl<'c> Gpu<'c> {
         backdrop: Option<&Target>,
         time: f64,
         (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
-        bounds: Option<(u32, u32, u32, u32)>,
+        scissor: Option<super::bounds::Scissor>,
     ) -> Option<Target> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
@@ -858,26 +860,33 @@ impl<'c> Gpu<'c> {
                     (d.height * sy).ceil().min((oh - y) as f64) as u32,
                 )
             });
-            // Kept to the pixels the step can change (same-size passes
-            // only; a scissor equal to the whole target is no scissor).
-            let bounds = bounds.filter(|b| (ow, oh) == (w, h) && *b != (0, 0, w, h));
-            if bounds.is_some() {
-                pm_perf::bump(pm_perf::Counter::EffectScissorHits);
-            }
-            let clip = match (clip, bounds) {
-                (Some(a), Some(b)) => Some(super::bounds::intersect(a, b)),
-                (a, b) => a.or(b),
+            // Packed intermediates use their own tile coordinates. Only
+            // the final pass can certify the output for its compositor.
+            const EMPTY: super::bounds::Rect = (0, 0, 0, 0);
+            let last = pass + 1 == passes;
+            let bounds = scissor.as_ref().filter(|s| {
+                (ow, oh) == (w, h) && (s.output != (0, 0, w, h) || (!last && s.packed.is_some()))
+            });
+            let clips = match bounds {
+                Some(bounds) => {
+                    pm_perf::bump(pm_perf::Counter::EffectScissorHits);
+                    let rects = bounds.packed.as_ref()
+                        .and_then(|packed| packed.get(pass as usize).copied())
+                        .unwrap_or([bounds.output, EMPTY]);
+                    Some(rects.map(|r| clip.map_or(r, |clip| super::bounds::intersect(clip, r))))
+                }
+                None => clip.map(|clip| [clip, EMPTY]),
             };
-            // Only inherit a certificate from the actual last full-size
-            // reviewed writer, with its actual clip (including any intersection).
-            self.output_bounds = bounds.and(clip).map(EffectOutputBounds);
+            if last {
+                self.output_bounds = bounds.and(clips).map(|clips| EffectOutputBounds(clips[0]));
+            }
             self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
                 &calls,
                 &units,
                 &out,
-                clip,
+                clips,
             );
             drop(units);
             self.inputs = ready;
@@ -1341,7 +1350,7 @@ impl<'c> Gpu<'c> {
         calls: &[(String, Call)],
         units: &[Option<&Target>],
         out: &Target,
-        clip: Option<(u32, u32, u32, u32)>,
+        clips: Option<[super::bounds::Rect; 2]>,
     ) {
         let device = self.device;
         let queue = self.queue;
@@ -1443,16 +1452,19 @@ impl<'c> Gpu<'c> {
             "pm legacy glsl",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
-        if let Some((x, y, w, h)) = clip {
-            if w == 0 || h == 0 {
-                return;
-            }
-            pass.set_scissor_rect(x, y, w, h);
-        }
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &fragment, &[]);
         pass.set_bind_group(1, &vertex, &[]);
-        pass.draw(0..4, 0..1);
+        if let Some(clips) = clips {
+            for (x, y, w, h) in clips {
+                if w != 0 && h != 0 {
+                    pass.set_scissor_rect(x, y, w, h);
+                    pass.draw(0..4, 0..1);
+                }
+            }
+        } else {
+            pass.draw(0..4, 0..1);
+        }
     }
 
     /// A per-pixel pass of `source` into `out`: `clamp: true` (0..1), or

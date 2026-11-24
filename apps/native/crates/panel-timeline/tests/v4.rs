@@ -1367,3 +1367,46 @@ fn option_track_disclosure_closes_and_opens_every_track() {
     .unwrap();
     assert_eq!(frame_rows(&mut c), open_rows);
 }
+
+#[test]
+fn three_d_switch_updates_the_native_row_without_revealing_properties() {
+    let (_actor, mut c) = client();
+    let before = v4::project_window(&c.model, 0, 10).unwrap();
+    assert_eq!(before["window"]["rows"][0]["canOpen"], true);
+    assert_eq!(before["window"]["rows"][1]["canOpen"], false);
+    assert_eq!(before["window"]["rows"][0]["canBe3D"], true);
+    assert_eq!(before["window"]["rows"][0]["threeD"], false);
+
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("a:[]"),"name":"threeD"}),
+    )
+    .unwrap();
+    let after = v4::project_window(&c.model, 0, 10).unwrap();
+    assert_eq!(after["window"]["rows"][0]["threeD"], true);
+    assert_eq!(after["window"]["rows"][0]["expanded"], false);
+    assert_eq!(
+        c.model
+            .index
+            .channel("a:[]", "perspective")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(50.)
+    );
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(!c.model.index.layer("a:[]").unwrap().three_d);
+}
+
+#[test]
+fn separate_dimensions_preserves_a_closed_strip() {
+    let (_actor, mut c) = position_client();
+    c.model.toggle_disclosure("p").unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    assert!(!c.model.layer_expanded("p"));
+    assert_eq!(c.model.rows().len(), 1);
+}

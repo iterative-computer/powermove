@@ -1151,6 +1151,7 @@ mod tests {
     /// refusal (`compile`) is final.
     #[test]
     fn a_lost_runner_context_is_retried_and_the_layer_draws_again() {
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{Duration, Instant};
         let code = "void main(){ fragColor = vec4(0.125, 0.5, 0.75, 1.0) + vec4(uv * 0.0, 0.0, 0.0); } // lost context probe";

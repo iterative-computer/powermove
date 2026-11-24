@@ -117,6 +117,35 @@ pub struct Layer {
     /// read of the layer and shared by every scene until the layer changes.
     summary: std::sync::OnceLock<Arc<[crate::render::Key]>>,
 }
+
+impl Layer {
+    pub fn can_be_3d(&self) -> bool {
+        !matches!(self.kind.as_str(), "audio" | "adjustment")
+    }
+
+    pub(crate) fn has_keyframed_channels(&self) -> bool {
+        self.channels
+            .iter()
+            .any(|channel| !channel.keys.is_empty() && self.channel_available(&channel.path))
+    }
+
+    pub(crate) fn channel_available(&self, path: &str) -> bool {
+        self.three_d
+            || !matches!(
+                path,
+                "perspective"
+                    | "position.z"
+                    | "anchor.z"
+                    | "scale.z"
+                    | "rotation.x"
+                    | "rotation.y"
+                    | "orientation.x"
+                    | "orientation.y"
+                    | "orientation.z"
+            )
+    }
+}
+
 impl Layer {
     pub(crate) fn path_name(&self, path: &str) -> &str {
         self.path_groups.get(path).map_or("Path", String::as_str)
@@ -155,6 +184,7 @@ pub struct TimelineIndex {
     pub markers: Vec<Marker>,
     by_id: HashMap<String, usize>,
     locked_descendants: HashSet<String>,
+    groups_with_children: HashSet<String>,
     /// Key ids by layer position, [`KEY_BLOCK`] layers a block. A block whose
     /// layers are all reused is reused, so an edit re-indexes one block.
     key_blocks: Vec<Arc<KeyBlock>>,
@@ -219,6 +249,7 @@ impl Default for TimelineIndex {
             markers: Vec::new(),
             by_id: HashMap::new(),
             locked_descendants: HashSet::new(),
+            groups_with_children: HashSet::new(),
             key_blocks: Vec::new(),
         }
     }
@@ -318,6 +349,12 @@ impl TimelineIndex {
                 .unwrap_or_else(|| Arc::new(Self::read_layer(layer, id, from, duration)));
             result.layers.push(layer);
         }
+        result.groups_with_children.extend(
+            result
+                .layers
+                .iter()
+                .filter_map(|layer| layer.group.as_ref().filter(|id| **id != layer.id).cloned()),
+        );
         // Memoised group locks, bounded even on corrupt/cyclic input. Transform parents
         // do not imply group locks (kernel's lock policy).
         let mut locked = vec![None; result.layers.len()];
@@ -693,6 +730,10 @@ impl TimelineIndex {
             .fold(0., f64::min)
             .min(self.work[0])
     }
+    pub(crate) fn group_has_children(&self, id: &str) -> bool {
+        self.groups_with_children.contains(id)
+    }
+
     pub fn children(&self) -> HashMap<Option<String>, Vec<usize>> {
         let mut children: HashMap<Option<String>, Vec<usize>> = HashMap::new();
         for (i, l) in self.layers.iter().enumerate() {
@@ -726,6 +767,23 @@ impl TimelineIndex {
             }
         }
         roots
+    }
+    /// Imported groups without saved timing display the extent of their members.
+    pub fn strip_span(&self, layer: &Layer) -> (f64, f64) {
+        if layer.kind != "group" || layer.duration > 0. {
+            return (layer.from, layer.duration);
+        }
+        let mut extent: Option<(f64, f64)> = None;
+        for id in self.expanded_ids(std::slice::from_ref(&layer.id)) {
+            let member = self.layer(&id).unwrap();
+            if member.kind != "group" {
+                let end = member.from + member.duration;
+                extent = Some(extent.map_or((member.from, end), |(start, stop)| {
+                    (start.min(member.from), stop.max(end))
+                }));
+            }
+        }
+        extent.map_or((0., self.duration), |(start, end)| (start, end - start))
     }
     pub fn expanded_ids(&self, roots: &[String]) -> Vec<String> {
         let children = self.children();

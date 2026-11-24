@@ -114,7 +114,7 @@ pub struct EditSession {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) initial: HashMap<Binding, Value>,
     pub(crate) targets: HashMap<Binding, Vec<Binding>>,
-    pairs: HashMap<Binding, (Binding, Option<f64>, bool)>,
+    linked_scale: HashMap<Binding, (Vec<(Binding, f64)>, bool)>,
 }
 impl Inspector {
     pub(crate) fn translate(
@@ -358,48 +358,48 @@ impl Inspector {
         }
         let mut initial = HashMap::new();
         let mut targets = HashMap::new();
-        let mut pairs = HashMap::new();
+        let mut linked_scale = HashMap::new();
         let mut expanded = bindings.to_vec();
         for binding in bindings {
             if let Binding::Property(id) = binding
-                && matches!(id.path.as_str(), "scale.x" | "scale.y")
+                && matches!(id.path.as_str(), "scale.x" | "scale.y" | "scale.z")
             {
-                let other = Binding::Property(PropertyId::new(
-                    &id.layer,
-                    if id.path == "scale.x" {
-                        "scale.y"
-                    } else {
-                        "scale.x"
-                    },
-                ));
-                let linked = self
-                    .layer(&id.layer)?
-                    .get("scaleLinked")
-                    .and_then(Value::as_bool)
-                    == Some(true);
-                let own_prop = self.property(id)?;
-                let other_prop = self.property(&other.property_id().expect("property"))?;
-                let animated = [own_prop, other_prop]
-                    .iter()
-                    .any(|p| p.as_ref().is_some_and(|p| !array(p.get("kf")).is_empty()));
-                if linked && !bindings.contains(&other) {
-                    let own = self
-                        .read_binding(binding, time)?
-                        .as_f64()
-                        .ok_or(InspectorError::InvalidInput)?;
-                    let paired = self
+                let layer = self.layer(&id.layer)?;
+                if layer.get("scaleLinked").and_then(Value::as_bool) != Some(true) {
+                    continue;
+                }
+                let three_d = layer.get("threeD").and_then(Value::as_bool) == Some(true);
+                let own = self
+                    .read_binding(binding, time)?
+                    .as_f64()
+                    .ok_or(InspectorError::InvalidInput)?;
+                let mut animated = self
+                    .property(id)?
+                    .is_some_and(|p| !array(p.get("kf")).is_empty());
+                let mut others = Vec::new();
+                for path in ["scale.x", "scale.y", "scale.z"] {
+                    if path == id.path || (path == "scale.z" && !three_d) {
+                        continue;
+                    }
+                    let property = PropertyId::new(&id.layer, path);
+                    let Some(channel) = self.property(&property)? else {
+                        continue;
+                    };
+                    let other = Binding::Property(property);
+                    if bindings.contains(&other) {
+                        continue;
+                    }
+                    animated |= !array(channel.get("kf")).is_empty();
+                    let value = self
                         .read_binding(&other, time)?
                         .as_f64()
                         .ok_or(InspectorError::InvalidInput)?;
-                    pairs.insert(
-                        binding.clone(),
-                        (
-                            other.clone(),
-                            linked.then_some(if own.abs() > 1e-8 { paired / own } else { 1.0 }),
-                            animated,
-                        ),
-                    );
-                    expanded.push(other);
+                    let ratio = if own.abs() > 1e-8 { value / own } else { 1.0 };
+                    expanded.push(other.clone());
+                    others.push((other, ratio));
+                }
+                if !others.is_empty() {
+                    linked_scale.insert(binding.clone(), (others, animated));
                 }
             }
         }
@@ -419,7 +419,7 @@ impl Inspector {
             bindings: bindings.to_vec(),
             initial,
             targets,
-            pairs,
+            linked_scale,
         })
     }
     fn session_commands(
@@ -434,16 +434,17 @@ impl Inspector {
         let mut commands = Vec::new();
         let mut expanded = Vec::new();
         for (binding, value) in session.bindings.iter().zip(values) {
-            let pair = session.pairs.get(binding);
-            expanded.push((binding.clone(), value.clone(), pair.is_some_and(|p| p.2)));
-            if let Some((other, ratio, animated)) = pair {
-                let next = match ratio {
-                    Some(ratio) => {
-                        Value::Number(value.as_f64().ok_or(InspectorError::InvalidInput)? * ratio)
-                    }
-                    None => session.initial[other].clone(),
-                };
-                expanded.push((other.clone(), next, *animated));
+            let linked = session.linked_scale.get(binding);
+            expanded.push((
+                binding.clone(),
+                value.clone(),
+                linked.is_some_and(|(_, animated)| *animated),
+            ));
+            if let Some((others, animated)) = linked {
+                let value = value.as_f64().ok_or(InspectorError::InvalidInput)?;
+                for (other, ratio) in others {
+                    expanded.push((other.clone(), Value::Number(value * ratio), *animated));
+                }
             }
         }
         for (binding, value, force_keyframe) in &expanded {

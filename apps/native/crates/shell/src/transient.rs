@@ -123,6 +123,9 @@ impl Choice {
         self
     }
     pub fn display_label(&self, query: &str) -> String {
+        if self.aliases.is_empty() {
+            return self.label.clone();
+        }
         let query = query.trim().to_lowercase();
         if !query.is_empty()
             && !self.label.to_lowercase().contains(&query)
@@ -190,17 +193,23 @@ pub fn rank(text: &str, query: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
     }
-    let t = text.to_lowercase();
-    let q = query.to_lowercase();
-    if t.starts_with(&q) {
+    rank_lowercase(text, &query.to_lowercase())
+}
+
+fn lowercase(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() && !text.bytes().any(|b| b.is_ascii_uppercase()) {
+        return text.into();
+    }
+    text.to_lowercase().into()
+}
+
+fn rank_lowercase(text: &str, q: &str) -> Option<u32> {
+    if q.is_empty() {
         return Some(0);
     }
-    if let Some(i) = t.find(&q) {
-        let word = t[..i]
-            .chars()
-            .next_back()
-            .is_some_and(|c| !c.is_alphanumeric());
-        return Some(if word { 1 } else { 2 });
+    let t = lowercase(text);
+    if let Some(rank) = rank_contiguous(&t, q) {
+        return Some(rank);
     }
     let mut chars = t.chars();
     q.chars()
@@ -208,6 +217,35 @@ pub fn rank(text: &str, query: &str) -> Option<u32> {
         .all(|qc| chars.any(|tc| tc == qc))
         .then_some(3)
 }
+
+fn rank_contiguous(text: &str, q: &str) -> Option<u32> {
+    if text.starts_with(q) {
+        return Some(0);
+    }
+    let i = text.find(q)?;
+    let word = text[..i]
+        .chars()
+        .next_back()
+        .is_some_and(|c| !c.is_alphanumeric());
+    Some(if word { 1 } else { 2 })
+}
+
+fn rank_content_name(name: &str, query: &str) -> Option<u32> {
+    if name == query {
+        return Some(0);
+    }
+    let rank = rank_contiguous(name, query)?;
+    // An earlier substring can precede a better word-start match.
+    if rank == 2
+        && name
+            .char_indices()
+            .any(|(i, c)| !c.is_alphanumeric() && name[i + c.len_utf8()..].starts_with(query))
+    {
+        return Some(2);
+    }
+    Some(rank + 1)
+}
+
 impl Picker {
     pub fn open_providers(&mut self, saved: BTreeMap<String, bool>) {
         self.provider_choices = saved;
@@ -249,10 +287,16 @@ impl Picker {
     }
 
     pub fn rows(&self) -> Vec<PickerRow> {
+        self.rows_and_unlisted().0
+    }
+
+    /// The displayed rows and their overflow, from one ranked list.
+    pub fn rows_and_unlisted(&self) -> (Vec<PickerRow>, usize) {
+        let (indices, unlisted) = self.filtered_and_unlisted();
         let headers = self.has_provider_headers();
         let mut seen = HashSet::new();
         let mut rows = Vec::new();
-        for index in self.filtered() {
+        for index in indices {
             if headers && let Some(provider) = &self.choices[index].provider {
                 if seen.insert(provider) {
                     rows.push(PickerRow::Provider(index));
@@ -263,7 +307,7 @@ impl Picker {
             }
             rows.push(PickerRow::Choice(index));
         }
-        rows
+        (rows, unlisted)
     }
 
     pub fn provider_expanded(&self, index: usize) -> bool {
@@ -277,6 +321,19 @@ impl Picker {
     }
 
     pub fn provider_summary(&self, index: usize) -> String {
+        self.provider_summary_with_count(index, || {
+            self.filtered()
+                .into_iter()
+                .filter(|&i| self.choices[i].provider == self.choices[index].provider)
+                .count()
+        })
+    }
+
+    pub(crate) fn provider_summary_with_count(
+        &self,
+        index: usize,
+        matched: impl FnOnce() -> usize,
+    ) -> String {
         let provider = &self.choices[index].provider;
         let members = || {
             self.choices
@@ -291,10 +348,7 @@ impl Picker {
         let count = if self.query.trim().is_empty() {
             members().count()
         } else {
-            self.filtered()
-                .into_iter()
-                .filter(|&i| &self.choices[i].provider == provider)
-                .count()
+            matched()
         };
         count.to_string()
     }
@@ -337,15 +391,20 @@ impl Picker {
     pub fn lit_row(&self) -> Option<PickerRow> {
         self.lit().and_then(|place| self.rows().get(place).copied())
     }
-    /// Matching choice indices. Sections stay whole: a section stands where
-    /// its best match does, and its rows run best match first; ties keep
-    /// their original order.
+    /// Matching choice indices. Within each search priority, sections stand
+    /// where their best match does and their rows run best match first.
     pub fn filtered(&self) -> Vec<usize> {
+        self.filtered_and_unlisted().0
+    }
+
+    fn filtered_and_unlisted(&self) -> (Vec<usize>, usize) {
         let mut rows = self.matches();
+        let mut unlisted = 0;
         if let Some(page) = self.page {
+            unlisted = rows.len().saturating_sub(page);
             rows.truncate(page);
         }
-        rows
+        (rows, unlisted)
     }
     /// Matching rows past the page, not listed.
     pub fn unlisted(&self) -> usize {
@@ -364,8 +423,16 @@ impl Picker {
         )
     }
     fn matches(&self) -> Vec<usize> {
-        let query = self.query.to_lowercase();
-        let mut ranked: Vec<(u32, usize)> = self
+        let trimmed = self.query.trim();
+        let trimmed_lower = lowercase(trimmed);
+        let query_lower = if trimmed.len() == self.query.len() {
+            None
+        } else {
+            Some(lowercase(&self.query))
+        };
+        let query_lower = query_lower.as_deref().unwrap_or(&trimmed_lower);
+        // Sort by command or content priority, then by content match quality and length.
+        let mut ranked: Vec<_> = self
             .choices
             .iter()
             .enumerate()
@@ -374,48 +441,59 @@ impl Picker {
                     return None;
                 }
                 if c.search_only {
-                    let query = self.query.trim().to_lowercase();
-                    let name = if c.category == "Effect" {
+                    if trimmed.is_empty() {
+                        return self.recents.contains(&c.command).then_some(((2, 0, 0), i));
+                    }
+                    let is_effect = c.category == "Effect";
+                    let name = if is_effect {
                         c.label.strip_prefix("Effect · ").unwrap_or(&c.label)
                     } else {
                         &c.label
                     };
-                    return ((query.is_empty() && self.recents.contains(&c.command))
-                        || (!query.is_empty() && name.to_lowercase().contains(&query)))
-                    .then_some((2, i));
+                    let name = lowercase(name);
+                    let quality = rank_content_name(&name, &trimmed_lower)?;
+                    let priority = if is_effect { 3 } else { 4 };
+                    return Some(((priority, quality, name.len()), i));
                 }
-                let label = rank(&c.label, self.query.trim());
+                let label = rank_lowercase(&c.label, &trimmed_lower);
+                if let Some(rank) = label.filter(|&rank| rank <= 2) {
+                    return Some(((rank, 0, 0), i));
+                }
                 // Command ids only match literally; subsequences of ids are noise.
-                let command = c.command.to_lowercase().contains(&query).then_some(2);
-                let alias = c
-                    .aliases
-                    .iter()
-                    .filter(|term| {
-                        term.to_lowercase()
-                            .contains(self.query.trim().to_lowercase().as_str())
-                    })
-                    .map(|_| 2)
-                    .min();
-                label
-                    .into_iter()
-                    .chain(command)
-                    .chain(alias)
-                    .min()
-                    .map(|r| (r, i))
+                if lowercase(&c.command).contains(query_lower)
+                    || c.aliases
+                        .iter()
+                        .any(|term| lowercase(term).contains(trimmed_lower.as_ref()))
+                {
+                    return Some(((2, 0, 0), i));
+                }
+                label.map(|_| ((5, 0, 0), i))
             })
             .collect();
-        let section = |i: usize| {
+        let has_content_matches =
+            !trimmed.is_empty() && ranked.iter().any(|&(_, i)| self.choices[i].search_only);
+        let section = |priority: u32, i: usize| {
             let choice = &self.choices[i];
-            (choice.provider.is_some(), choice.provider.as_deref().unwrap_or(&choice.category))
+            // Keep literal command matches together ahead of content matches.
+            let priority = if has_content_matches {
+                priority.max(2)
+            } else {
+                0
+            };
+            (
+                priority,
+                choice.provider.is_some(),
+                choice.provider.as_deref().unwrap_or(&choice.category),
+            )
         };
         let mut best = std::collections::HashMap::new();
         for &(r, i) in &ranked {
-            let at = best.entry(section(i)).or_insert((r, i));
+            let at = best.entry(section(r.0, i)).or_insert((r, i));
             *at = (*at).min((r, i));
         }
-        ranked.sort_by_key(|&(r, i)| (best[&section(i)], r, i));
+        ranked.sort_by_key(|&(r, i)| (best[&section(r.0, i)], r, i));
         let mut indices: Vec<_> = ranked.into_iter().map(|(_, i)| i).collect();
-        if self.query.trim().is_empty() {
+        if trimmed.is_empty() {
             indices.sort_by_key(|&i| {
                 self.recents
                     .iter()
@@ -443,6 +521,20 @@ impl Picker {
             Some(0)
         };
     }
+    /// Changes the query and selects its best displayed result using the same rows.
+    pub(crate) fn search_and_list(&mut self, query: String) -> (Vec<PickerRow>, usize) {
+        self.hover = None;
+        self.query = query;
+        let (rows, unlisted) = self.rows_and_unlisted();
+        self.keyed = if self.query.trim().is_empty() {
+            None
+        } else {
+            rows.iter()
+                .position(|row| matches!(row, PickerRow::Choice(_)))
+        };
+        (rows, unlisted)
+    }
+
     /// The pointer is over `row`, or has left the rows. True if the light moved.
     pub fn point(&mut self, row: Option<usize>) -> bool {
         let before = self.lit();
@@ -646,6 +738,56 @@ mod palette_effect_tests {
         picker.search("Effect".into());
         assert!(picker.filtered().is_empty());
     }
+
+    #[test]
+    fn effects_precede_layers_and_closer_name_matches_come_first() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Deep Glow Gradient 1", "layer:gradient")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Deep Glow 1", "layer:glow")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Effect · Deep Glow Gradient", "effect:gradient")
+                    .within("Effect")
+                    .on_search(),
+                Choice::new("Effect · Deep Glow", "effect:glow")
+                    .within("Effect")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
+        picker.search("deep glow".into());
+        assert_eq!(picker.filtered(), vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn effect_substrings_precede_other_search_only_prefixes() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Glowing Borders", "preset:borders")
+                    .within("Preset")
+                    .on_search(),
+                Choice::new("Glow 1", "layer:glow")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Effect · Afterglow", "effect:afterglow")
+                    .within("Effect")
+                    .on_search(),
+                Choice::new("Lowglow Settings", "settings"),
+                Choice::new("Grid Layout Overview", "overview"),
+                Choice::new("Glow Settings", "glowSettings"),
+                Choice::new("Adjust Glow", "adjustGlow"),
+                Choice::new("Effect · Afterglow · Glow", "effect:word-start")
+                    .within("Effect")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
+        picker.search("glow".into());
+        assert_eq!(picker.filtered(), vec![5, 6, 3, 7, 2, 1, 0, 4]);
+    }
 }
 
 /// Most recently executed palette commands, newest first.
@@ -742,6 +884,30 @@ mod provider_tests {
         };
         picker.open_providers(Default::default());
         picker
+    }
+
+    #[test]
+    fn rows_and_unlisted_preserves_paging_and_provider_disclosure() {
+        let mut picker = menu();
+        picker
+            .choices
+            .push(Choice::new("Read only", "note").on_search());
+        for query in ["", "  ", "O", "  OpUs  ", "unmatched"] {
+            picker.search(query.to_owned());
+            for page in [None, Some(0), Some(1), Some(2), Some(10)] {
+                picker.page = page;
+                assert_eq!(
+                    picker.rows_and_unlisted(),
+                    (picker.rows(), picker.unlisted())
+                );
+            }
+        }
+        picker.search(String::new());
+        picker.page = Some(1);
+        assert_eq!(
+            picker.rows_and_unlisted(),
+            (vec![PickerRow::Provider(0), PickerRow::Choice(0)], 1)
+        );
     }
 
     #[test]

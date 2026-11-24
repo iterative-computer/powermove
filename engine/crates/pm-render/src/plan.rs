@@ -341,6 +341,7 @@ pub struct Build<'r> {
     /// producer draws, and what the frame still needs from it.
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     pub compat_missing: Vec<crate::compat::CompatNeed>,
+    compat_probe_only: bool,
     /// See [`BuildOptions::offline_cards`].
     offline_cards: bool,
     /// [`BuildOptions::preview`].
@@ -454,6 +455,8 @@ pub struct BuildOptions {
     /// top-level draw). Otherwise such a group is left out of the plan when
     /// leaving it out cannot change a pixel ([`draw_layer`]).
     pub keep_empty_groups: bool,
+    /// Collect outstanding raster overrides without building native content.
+    pub compat_probe_only: bool,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -629,6 +632,7 @@ pub(crate) fn build_reusing<'r>(
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
+        compat_probe_only: options.compat_probe_only,
         preview: options.preview,
         offline_cards: options.offline_cards,
         reuse,
@@ -665,12 +669,29 @@ fn layer_failure(b: &mut Build<'_>, comp: &Comp<'_>, layer: &Node, message: Stri
 struct TextDrawRun {
     paint: crate::text::Level1PaintRun,
     draws: Vec<TextDrawSlot>,
-    pending: Option<(String, f64)>,
+    pending: Option<TextDrawSlot>,
+}
+
+struct DeferredText<'a> {
+    paint: &'a mut crate::text::Level1PaintRun,
+    slot: usize,
+    local: &'a mut Option<LocalTextPlacement>,
+}
+
+struct LocalTextPlacement {
+    raster: pm_eval::text_geom::TextRaster,
+    world: Mat2d,
+    offset: pm_eval::anchor::Offset,
 }
 
 enum TextDrawSlot {
     Ready(Vec<Draw>),
-    Pending { layer: String, alpha: f64 },
+    Pending {
+        layer: String,
+        alpha: f64,
+        local: Option<LocalTextPlacement>,
+        clip: Option<kurbo::Rect>,
+    },
 }
 
 impl TextDrawRun {
@@ -687,12 +708,44 @@ impl TextDrawRun {
                 .and_then(|(_, p)| p);
             match draw {
                 TextDrawSlot::Ready(draws) => out.extend(draws),
-                TextDrawSlot::Pending { layer, alpha } => {
-                    if let Some(p) = painted {
-                        let [x0, y0, x1, y1] = p.crop.map(f64::from);
+                TextDrawSlot::Pending {
+                    layer,
+                    alpha,
+                    local,
+                    clip,
+                } => {
+                    let Some(plan) = painted else {
+                        continue;
+                    };
+                    if let Some(local) = local {
+                        let mut quad =
+                            text_texture(crate::text::TextContext::local_quad(plan, local.raster));
+                        quad.offset_anchor(local.offset);
+                        if clip.is_some_and(|rect| !clip_local_raster(&mut quad, local.world, rect))
+                        {
+                            continue;
+                        }
+                        let Quad::Texture {
+                            source,
+                            w,
+                            h,
+                            ax,
+                            ay,
+                            uv,
+                        } = quad
+                        else {
+                            unreachable!("local text is a texture");
+                        };
+                        out.push(Draw {
+                            layer,
+                            matrix: mul(&local.world, &[w, 0., 0., h, -ax, -ay]),
+                            content: Content::Texture { source, uv, alpha },
+                        });
+                    } else {
+                        let [x0, y0, x1, y1] = plan.crop.map(f64::from);
                         out.push(device_draw(
                             layer,
-                            Source::Text(Box::new(p)),
+                            Source::Text(Box::new(plan)),
                             [x0, y0, x1 - x0, y1 - y0],
                             alpha,
                         ));
@@ -776,6 +829,19 @@ pub(crate) fn comp_pass<'d>(
                 side(cw, width, scale.0.abs()),
                 side(ch, height, scale.1.abs()),
             );
+            // A density replay has no output origin (view is None).
+            // Map the viewport through the same resize as its output quad.
+            let outer_preview = b.preview;
+            b.preview = outer_preview.map(|window| {
+                let sx = f64::from(w1) / f64::from(width);
+                let sy = f64::from(h1) / f64::from(height);
+                crate::compat_crop::PreviewWindow {
+                    x: window.x * sx,
+                    y: window.y * sy,
+                    width: window.width * sx,
+                    height: window.height * sy,
+                }
+            });
             let inner = comp_pass(
                 scope,
                 b,
@@ -786,6 +852,7 @@ pub(crate) fn comp_pass<'d>(
                 transparent,
                 group_parent,
             );
+            b.preview = outer_preview;
             return CompPlan {
                 composition: comp_id.clone(),
                 group: group_parent.is_some(),
@@ -923,34 +990,39 @@ pub(crate) fn comp_pass<'d>(
     }
     let solo = facts.solo;
     let mut text_run = TextDrawRun::default();
-    let batch_text = pm_text::render::scene::CanvasRows::available()
+    let batch_text = !b.compat_probe_only
+        && pm_text::render::scene::CanvasRows::available()
         && b.text.as_deref().is_some_and(|text| text.has_fonts())
         && b.material.is_none()
         && b.source_raster.is_none()
         && b.forced_on.is_none()
         && b.options3d.studio.is_none()
         && b.video_center.is_none()
-        && b.matte_depth == 0
-        && !b
-            .compat
-            .is_some_and(|compat| compat.producing(crate::compat::CompatSource::RasterOverride));
+        && b.matte_depth == 0;
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
         let id = node::get(layer, b"id").to_js();
         if facts.matte_sources.contains(&id) {
-            text_run.flush(b, &mut plan.draws);
             continue;
         }
+        let ty = js::layer_type(layer);
+        let has = |key| node::array(node::member(Some(layer), key)).is_some_and(|v| !v.is_empty());
         let candidate = batch_text
-            && js::layer_type(layer) == "text"
+            && ty == "text"
             && !pm_eval::text_level2::is_level2(layer)
-            && ["fx", "masks"].into_iter().all(|key| {
-                node::array(node::member(Some(layer), key)).is_none_or(|v| v.is_empty())
-            })
+            && !has("fx")
+            && !has("masks")
             && ["matteSource", "transitionIn", "transitionOut"]
                 .into_iter()
                 .all(|key| !node::truthy(node::member(Some(layer), key)));
-        if !candidate {
+        // Nested passes and other text painters may sync fonts or change
+        // the glyph cache. Ordinary interleaved draws share this wave.
+        if !text_run.draws.is_empty()
+            && !candidate
+            && (matches!(ty.as_str(), "text" | "captions" | "group" | "precomp")
+                || has("fx")
+                || js::flag(layer, "matteSource"))
+        {
             text_run.flush(b, &mut plan.draws);
         }
         let drawn =
@@ -969,29 +1041,21 @@ pub(crate) fn comp_pass<'d>(
                     candidate.then_some(&mut text_run),
                 )
             });
-        if candidate {
-            let draws = match drawn {
-                Ok(draws) => draws.unwrap_or_default(),
-                Err(e) => {
-                    let comp = scope.comp.clone();
-                    layer_failure(b, &comp, layer, e.to_string());
-                    Vec::new()
-                }
-            };
-            let slot = if let Some((layer, alpha)) = text_run.pending.take() {
-                TextDrawSlot::Pending { layer, alpha }
-            } else {
-                TextDrawSlot::Ready(draws)
-            };
-            text_run.draws.push(slot);
-            continue;
-        }
-        match drawn {
-            Ok(Some(draws)) => plan.draws.extend(draws),
-            Ok(None) => {}
+        let draws = match drawn {
+            Ok(draws) => draws,
             Err(e) => {
                 let comp = scope.comp.clone();
                 layer_failure(b, &comp, layer, e.to_string());
+                None
+            }
+        };
+        if let Some(pending) = text_run.pending.take() {
+            text_run.draws.push(pending);
+        } else if let Some(draws) = draws {
+            if text_run.draws.is_empty() {
+                plan.draws.extend(draws);
+            } else {
+                text_run.draws.push(TextDrawSlot::Ready(draws));
             }
         }
     }
@@ -1037,6 +1101,14 @@ fn draw_layer<'d>(
     all: &[&'d Node],
     mut text_run: Option<&mut TextDrawRun>,
 ) -> JsResult<Option<Vec<Draw>>> {
+    // Whether the matte is visited depends on its consumer producing
+    // content, including an empty boundary group's elision.
+    if b.compat_probe_only && js::flag(layer, "matteSource") {
+        b.compat_probe_only = false;
+        let drawn = draw_layer(scope, b, layer, time, width, height, scale, solo, all, None);
+        b.compat_probe_only = true;
+        return drawn.map(|_| None);
+    }
     let ty = js::layer_type(layer);
     if solo && !js::flag(layer, "solo") {
         let ancestors = scope.group_ancestors(layer)?;
@@ -1410,6 +1482,7 @@ fn draw_layer<'d>(
         .map_or(composite::effects::Padding::NONE, |e| e.padding);
     let draw = if let Some(run) = text_run {
         let slot = run.draws.len();
+        let mut local = None;
         let result = layer_draw_with_padding(
             scope,
             b,
@@ -1420,10 +1493,26 @@ fn draw_layer<'d>(
             scale,
             alpha,
             padding,
-            Some((&mut run.paint, slot)),
+            Some(DeferredText {
+                paint: &mut run.paint,
+                slot,
+                local: &mut local,
+            }),
         )?;
         if run.paint.is_queued(slot) {
-            run.pending = Some((id.clone(), alpha));
+            let clip = match padding {
+                composite::effects::Padding::Pixels(margin) if b.precomp_depth == 0 => Some(
+                    kurbo::Rect::new(0., 0., width.into(), height.into())
+                        .inflate(margin.into(), margin.into()),
+                ),
+                _ => None,
+            };
+            run.pending = Some(TextDrawSlot::Pending {
+                layer: id.clone(),
+                alpha,
+                local,
+                clip,
+            });
         }
         result
     } else {
@@ -1477,7 +1566,7 @@ fn layer_draw_with_padding<'d>(
     scale: (f64, f64),
     alpha: f64,
     padding: composite::effects::Padding,
-    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
+    text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Draw>> {
     let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
         return Ok(None);
@@ -1503,59 +1592,14 @@ fn layer_draw_with_padding<'d>(
         && b.material.is_none()
         && !js::flag(layer, "matteSource")
         && let composite::effects::Padding::Pixels(margin) = padding
+        && !clip_local_raster(
+            &mut quad,
+            world,
+            kurbo::Rect::new(0., 0., width.into(), height.into())
+                .inflate(margin.into(), margin.into()),
+        )
     {
-        if let Quad::Texture {
-            source,
-            w,
-            h,
-            ax,
-            ay,
-            ..
-        } = &mut quad
-        {
-            let old = match source {
-                Source::Vector(v) => match &**v {
-                    crate::vector::VectorSource::Scene { rect, .. } => Some(*rect),
-                    _ => None,
-                },
-                Source::Text(p) => Some(pm_vector::render::scene::PixelRect::new(
-                    p.crop[0] as i32,
-                    p.crop[1] as i32,
-                    p.width(),
-                    p.height(),
-                )),
-                _ => None,
-            };
-            if let Some(old) = old {
-                let sx = *w / old.width as f64;
-                let sy = *h / old.height as f64;
-                let map = kurbo::Affine::new(world)
-                    * kurbo::Affine::translate((-*ax, -*ay))
-                    * kurbo::Affine::scale_non_uniform(sx, sy)
-                    * kurbo::Affine::translate((-(old.x as f64), -(old.y as f64)));
-                let Some(rect) = crate::raster_roi::visible(
-                    old,
-                    map,
-                    kurbo::Rect::new(0., 0., width as f64, height as f64)
-                        .inflate(margin as f64, margin as f64),
-                ) else {
-                    return Ok(None);
-                };
-                *ax -= (rect.x - old.x) as f64 * sx;
-                *ay -= (rect.y - old.y) as f64 * sy;
-                *w = rect.width as f64 * sx;
-                *h = rect.height as f64 * sy;
-                match source {
-                    Source::Vector(v) => {
-                        if let crate::vector::VectorSource::Scene { rect: r, .. } = &mut **v {
-                            *r = rect;
-                        }
-                    }
-                    Source::Text(p) => p.retain_rect(rect),
-                    _ => unreachable!(),
-                }
-            }
-        }
+        return Ok(None);
     }
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
@@ -1790,6 +1834,57 @@ fn matte_pass<'d>(
     plan
 }
 
+fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bool {
+    if let Quad::Texture {
+        source,
+        w,
+        h,
+        ax,
+        ay,
+        ..
+    } = quad
+    {
+        let old = match source {
+            Source::Vector(v) => match &**v {
+                crate::vector::VectorSource::Scene { rect, .. } => Some(*rect),
+                _ => None,
+            },
+            Source::Text(p) => Some(pm_vector::render::scene::PixelRect::new(
+                p.crop[0] as i32,
+                p.crop[1] as i32,
+                p.width(),
+                p.height(),
+            )),
+            _ => None,
+        };
+        if let Some(old) = old {
+            let sx = *w / old.width as f64;
+            let sy = *h / old.height as f64;
+            let map = kurbo::Affine::new(world)
+                * kurbo::Affine::translate((-*ax, -*ay))
+                * kurbo::Affine::scale_non_uniform(sx, sy)
+                * kurbo::Affine::translate((-(old.x as f64), -(old.y as f64)));
+            let Some(rect) = crate::raster_roi::visible(old, map, viewport) else {
+                return false;
+            };
+            *ax -= (rect.x - old.x) as f64 * sx;
+            *ay -= (rect.y - old.y) as f64 * sy;
+            *w = rect.width as f64 * sx;
+            *h = rect.height as f64 * sy;
+            match source {
+                Source::Vector(v) => {
+                    if let crate::vector::VectorSource::Scene { rect: r, .. } = &mut **v {
+                        *r = rect;
+                    }
+                }
+                Source::Text(p) => p.retain_rect(rect),
+                _ => unreachable!(),
+            }
+        }
+    }
+    true
+}
+
 /// `scaledWorld(L, T, W, H)`: the output origin is the preview viewport's
 /// (`(world[4] − viewport.x) × sx`, as `x · sx − origin`).
 fn scaled_world<'d>(
@@ -1849,7 +1944,7 @@ fn content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
-    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
+    text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let quad = native_content_quad(scope, b, layer, time, width, height, scale, text)?;
     let Some(mut quad) = quad else {
@@ -1858,17 +1953,22 @@ fn content_quad<'d>(
     if matches!(quad, Quad::Screen { .. } | Quad::Device { .. }) {
         return Ok(Some(quad));
     }
-    let offset = scope.size_anchor_offset(layer, time)?;
-    if offset.x != 0.0 || offset.y != 0.0 {
-        match &mut quad {
-            Quad::Solid { ax, ay, .. } | Quad::Texture { ax, ay, .. } => {
-                *ax -= offset.x;
-                *ay -= offset.y;
+    quad.offset_anchor(scope.size_anchor_offset(layer, time)?);
+    Ok(Some(quad))
+}
+
+impl Quad {
+    fn offset_anchor(&mut self, offset: pm_eval::anchor::Offset) {
+        if offset.x != 0.0 || offset.y != 0.0 {
+            match self {
+                Self::Solid { ax, ay, .. } | Self::Texture { ax, ay, .. } => {
+                    *ax -= offset.x;
+                    *ay -= offset.y;
+                }
+                _ => {}
             }
-            Quad::Screen { .. } | Quad::Device { .. } => {}
         }
     }
-    Ok(Some(quad))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1880,7 +1980,7 @@ fn native_content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
-    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
+    text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
@@ -1913,7 +2013,11 @@ fn native_content_quad<'d>(
     // What today's preview crop measured of a plain text layer, handed to
     // its native draw below instead of measured again.
     let mut measured = None;
-    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale, &mut measured)? {
+    let answer = compat_quad(scope, b, layer, &ty, time, scale, &mut measured)?;
+    if b.compat_probe_only && ty != "precomp" {
+        return Ok(None);
+    }
+    if let Some(quad) = answer {
         return Ok(quad);
     }
     let (wf, hf) = b
@@ -1948,6 +2052,22 @@ fn native_content_quad<'d>(
                 );
             }
             let world = vector_world(scope, b, layer, time, scale)?;
+            if b.read_ahead
+                && !b.final_output
+                && b.source_raster.is_none()
+                && b.material.is_none()
+                && b.matte_depth == 0
+                && !js::flag(layer, "matteSource")
+                && !scope.has_renderable_effects(layer, time)?
+                && world[1] == 0.0
+                && world[2] == 0.0
+                && world[0] > 0.0
+                && world[3] > 0.0
+                && !crate::raster_roi::at_rest(&world)
+                && let Some(quad) = playback_shape(scope, layer, &d, time, &world)?
+            {
+                return Ok(Some(quad));
+            }
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
             Ok(quad.map(device_quad))
@@ -2838,6 +2958,49 @@ fn vector_world<'d>(
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
 
+/// Raster small 2D shapes on a stable local grid during playback. The
+/// world transform moves the quad each frame, while its coverage can be
+/// reused until the geometry or the raster density changes.
+fn playback_shape<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    content: &pm_eval::Content,
+    time: f64,
+    world: &Mat2d,
+) -> JsResult<Option<Quad>> {
+    let density = crate::text::continuous_raster_scale(world);
+    let local = [density, 0., 0., density, 0., 0.];
+    let bounds = crate::space25d::local::unbounded();
+    let Some(crate::vector::VectorQuad::Device { source, rect }) =
+        crate::vector::plan_shape(scope, layer, content, time, &local, bounds)?
+    else {
+        return Ok(None);
+    };
+    // Large shapes keep the device path, where the viewport can bound the
+    // coverage before it is rasterized. A shape touching the local limit
+    // may have been clipped by the planning bounds.
+    if rect.area() > 256 * 1024
+        || rect.width > 4096
+        || rect.height > 4096
+        || rect.x <= bounds.x
+        || rect.y <= bounds.y
+        || i64::from(rect.x) + i64::from(rect.width)
+            >= i64::from(bounds.x) + i64::from(bounds.width)
+        || i64::from(rect.y) + i64::from(rect.height)
+            >= i64::from(bounds.y) + i64::from(bounds.height)
+    {
+        return Ok(None);
+    }
+    Ok(Some(Quad::Texture {
+        source: Source::Vector(Box::new(source)),
+        w: f64::from(rect.width) / density,
+        h: f64::from(rect.height) / density,
+        ax: -f64::from(rect.x) / density,
+        ay: -f64::from(rect.y) / density,
+        uv: [0., 0., 1., 1.],
+    }))
+}
+
 /// Places vector content under a world matrix into a clip
 /// ([`local_level2`]).
 type PlanVector<'p, 'd> = dyn FnMut(
@@ -2936,7 +3099,7 @@ fn text_quad<'d>(
     target: (u32, u32),
     scale: (f64, f64),
     measured: Option<crate::text::Level1Measured>,
-    mut deferred: Option<(&mut crate::text::Level1PaintRun, usize)>,
+    mut deferred: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
@@ -2952,8 +3115,8 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
-    if level2 && let Some((run, _)) = deferred.take() {
-        run.flush(text);
+    if level2 && let Some(defer) = deferred.take() {
+        defer.paint.flush(text);
     }
     if level2 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
@@ -2980,7 +3143,12 @@ fn text_quad<'d>(
             }
         }));
     }
-    let device_world = if scope.is_3d_layer(layer)? {
+    // Read-ahead identifies transport playback independently of sampling.
+    // Reuse the local raster for plain 2D text during viewer playback.
+    let reuse_local =
+        b.read_ahead && !b.final_output && ty == "text" && crate::text::plain_level1(layer);
+    let plane = scope.is_3d_layer(layer)?;
+    let device_world = if plane {
         crate::space25d::local::content_plane(scope, layer, time, scale)?
             .map(|p| plane_at_origin(p, b.origin))
             .filter(|p| {
@@ -2992,12 +3160,13 @@ fn text_quad<'d>(
             })
             .filter(|m| m.iter().all(|v| v.is_finite()))
     } else {
-        Some(world)
+        (!reuse_local).then_some(world)
     };
     if let Some(m) = device_world.filter(|m| !crate::raster_roi::at_rest(m)) {
         let m = kurbo::Affine::new(m);
         let plan = if ty == "text" {
-            text.level1_device(scope, layer, time, m, target, measured, deferred)?
+            let paint = deferred.map(|defer| (defer.paint, defer.slot));
+            text.level1_device(scope, layer, time, m, target, measured, paint)?
         } else {
             text.captions_layer_level1_device(scope, layer, time, m, target)?
         };
@@ -3013,11 +3182,32 @@ fn text_quad<'d>(
             }
         }));
     }
-    if let Some((run, _)) = deferred {
-        run.flush(text);
-    }
     let density = crate::text::continuous_raster_scale(&world);
-    let quad = if ty == "text" {
+    let plain = !plane && crate::text::plain_level1(layer);
+    if !plain && let Some(defer) = deferred.take() {
+        defer.paint.flush(text);
+    }
+    let quad = if let Some(defer) = deferred {
+        // Local playback rasters are keyed by the density and content, so
+        // the exact transform can move without repainting the text.
+        let offset = scope.size_anchor_offset(layer, time)?;
+        let (plan, raster) = text.level1_local(
+            scope,
+            layer,
+            time,
+            density,
+            measured,
+            Some((defer.paint, defer.slot)),
+        )?;
+        if defer.paint.is_queued(defer.slot) {
+            *defer.local = Some(LocalTextPlacement {
+                raster,
+                world,
+                offset,
+            });
+        }
+        plan.map(|plan| crate::text::TextContext::local_quad(plan, raster))
+    } else if ty == "text" {
         text.text_layer_measured(scope, layer, time, density, measured)?
     } else {
         text.captions_layer(scope, layer, time, density)?
@@ -3026,14 +3216,18 @@ fn text_quad<'d>(
         b.unsupported
             .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
     }
-    Ok(quad.map(|q| Quad::Texture {
+    Ok(quad.map(text_texture))
+}
+
+fn text_texture(q: crate::text::TextQuad) -> Quad {
+    Quad::Texture {
         source: Source::Text(Box::new(q.plan)),
         w: q.w,
         h: q.h,
         ax: q.ax,
         ay: q.ay,
         uv: [0.0, 0.0, 1.0, 1.0],
-    }))
+    }
 }
 
 /// Text or captions on a 2.5D plane: layout stays at its compatibility

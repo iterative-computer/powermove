@@ -120,7 +120,8 @@ test("the user message keeps a fill and radius without a border while working an
     p.snapshot.elapsedMs = runId ? 11_000 : null;
     await root.render(<AgentView publication={p} send={() => {}} />);
     const message = byLabel(root, "You said: Make the headline");
-    const bubble = node(root, (n) => n.id === message.children[0]);
+    const content = node(root, (n) => n.id === message.children[0]);
+    const bubble = node(root, (n) => n.id === content.children[0]);
     expect(bubble.props.style).toMatchObject({
       background: { token: "colors.field" },
       borderRadius: { token: "metrics.panel_radius" },
@@ -163,6 +164,28 @@ test("focus order follows the thread bar, conversation and composer as the origi
   );
   root.dispose();
 });
+test("only the model gives up space in the docked composer", async () => {
+  const { root } = mount();
+  const p = states.selected();
+  p.native.presentation = "docked";
+  p.snapshot.catalog.efforts = ["high"];
+  p.snapshot.settings.effort = "high";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  const nodes = root.inspect().nodes;
+  const model = byId(root, "agent-model");
+  expect(model.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
+  for (const id of ["agent-effort", "agent-access"]) {
+    const picker = byId(root, id);
+    expect(picker.props.style).toMatchObject({ flexShrink: 0 });
+    const label = nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
+    expect(label?.props.style).toMatchObject({ flexShrink: 0 });
+    expect(label?.props.metadata).toBeUndefined();
+  }
+  expect(byId(root, "agent-threads")).toBeDefined();
+  expect(byId(root, "agent-new")).toBeDefined();
+  root.dispose();
+});
+
 test("new thread, send and stop use the model's commands; Send hides while working on an empty draft", async () => {
   const { root, commits } = mount();
   const actions: Action[] = [];
@@ -1243,6 +1266,63 @@ test("each attachment kind has its tile, and file drops route to native attachme
   );
   expect(byId(root, "agent-attach").props.disabled).toBe(true);
   expect(byId(root, "agent-pick-region").props.title).toContain("six");
+  root.dispose();
+});
+
+test("region chips and floating sent thumbnails open from their images", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const region = (id: string, name: string) => ({
+    id,
+    name,
+    type: "image/png",
+    screenPick: true,
+    payloadAvailable: true,
+    thumbnail: id + "-thumb",
+  });
+  const p = withRows([
+    {
+      id: "history:attachment-only",
+      commandId: "",
+      chosen: {},
+      open: false,
+      value: { role: "user", attachments: [region("sent", "Sent region")] },
+    },
+    {
+      id: "history:with-text",
+      commandId: "",
+      chosen: {},
+      open: false,
+      value: { role: "user", text: "Use this", attachments: [region("reply", "Reply")] },
+    },
+  ]);
+  p.snapshot.attachments = [
+    region("viewer", "Viewer · 0:03.43"),
+    region("window", "Powermove"),
+  ];
+  await root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+  const nodes = root.inspect().nodes;
+  const byNodeId = (id: number) => nodes.find((n) => n.id === id)!;
+  const style = (n: (typeof nodes)[number]) => n.props.style as any;
+  const texts = (n: (typeof nodes)[number]): string[] =>
+    [n.text, ...n.children.flatMap((id) => texts(byNodeId(id)))].filter(Boolean);
+  const chip = byLabel(root, "Open Viewer · 0:03.43");
+  expect(style(chip).borderRadius).toEqual({ token: "metrics.inner_radius" });
+  expect(texts(chip)).toEqual(["Viewer", "0:03.43"]);
+  expect(texts(byLabel(root, "Open Powermove"))).toEqual(["Powermove", "Region"]);
+
+  for (const id of ["viewer", "sent", "reply"]) {
+    const image = node(root, (n) => n.props.resource === id + "-thumb");
+    await root.drive(image.id, "click");
+    expect(actions.at(-1)).toEqual({ type: "openAttachment", id });
+  }
+  const only = byNodeId(byLabel(root, "You said: Attached 1 file").children[0]!);
+  expect(only.children).toHaveLength(1);
+  expect(style(byNodeId(only.children[0]!)).background).toBeUndefined();
+  const withText = byNodeId(byLabel(root, "You said: Use this").children[0]!);
+  expect(withText.children).toHaveLength(2);
+  expect(style(byNodeId(withText.children[0]!)).background).toBeUndefined();
+  expect(style(byNodeId(withText.children[1]!)).background).toEqual({ token: "colors.field" });
   root.dispose();
 });
 

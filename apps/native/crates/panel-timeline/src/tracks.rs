@@ -119,6 +119,16 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
                 .map(|k| units[*k].end)
                 .reduce(f64::max)
                 .unwrap_or(index.duration);
+            // Reserve the group strip and the members' lanes across both spans.
+            let (from, end) = if l.duration > 0. {
+                if kids.is_empty() {
+                    (l.from, l.from + l.duration)
+                } else {
+                    (from.min(l.from), end.max(l.from + l.duration))
+                }
+            } else {
+                (from, end)
+            };
             let open = !reveal
                 .layers
                 .get(&l.id)

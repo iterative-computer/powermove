@@ -169,11 +169,17 @@ fn usable_file_url(path: &Path) -> bool {
     if temporary_path(path, &temp) {
         return false;
     }
-    let Ok(path) = fs::canonicalize(path) else {
-        return false;
-    };
     let temp = fs::canonicalize(&temp).unwrap_or(temp);
-    !temporary_path(&path, &temp)
+    // Resolve the containing directory before following the file itself.
+    // A symlink in a temporary directory is temporary even if its target is durable.
+    if path
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .is_some_and(|parent| temporary_path(&parent, &temp))
+    {
+        return false;
+    }
+    fs::canonicalize(path).is_ok_and(|path| !temporary_path(&path, &temp))
 }
 
 fn temporary_path(path: &Path, temp: &Path) -> bool {

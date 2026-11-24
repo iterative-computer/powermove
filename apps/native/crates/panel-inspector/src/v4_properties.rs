@@ -209,7 +209,7 @@ impl V4Adapter {
         if action == V4Action::LinkScale {
             if !ids
                 .iter()
-                .all(|id| matches!(id.path.as_str(), "scale.x" | "scale.y"))
+                .all(|id| matches!(id.path.as_str(), "scale.x" | "scale.y" | "scale.z"))
             {
                 return Err(InspectorError::InvalidInput);
             }

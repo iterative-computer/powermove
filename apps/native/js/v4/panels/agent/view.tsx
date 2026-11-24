@@ -195,8 +195,15 @@ export function AttachmentTile({
   };
   const kind = attachmentKind(a);
   const visual = ["image", "video", "pick"].includes(kind);
+  const pill = kind === "pick" && !small;
   const side = t(
-    small ? "metrics.agent_attachment_sent" : "metrics.agent_attachment",
+    small || pill ? "metrics.agent_attachment_sent" : "metrics.agent_attachment",
+  );
+  const [title, ...details] = pill
+    ? String(a.caption || a.name).split(" · ")
+    : [];
+  const thumbnailRadius = t(
+    pill ? "metrics.media_small_radius" : "metrics.inner_radius",
   );
   const symbol =
     kind === "pick"
@@ -221,7 +228,7 @@ export function AttachmentTile({
       metadata={{ armed, kind }}
       onPointerEnter={() => setHovered(true)}
       onPointerLeave={() => setHovered(false)}
-      style={{ ...column, gap: t("metrics.gap"), position: "relative" }}
+      style={{ ...column, flexShrink: 1, position: "relative" }}
     >
       <UI.ToolbarItem
         role="button"
@@ -235,17 +242,26 @@ export function AttachmentTile({
           ...row,
           ...target,
           gap: t("metrics.gap"),
-          width: visual ? side : t("metrics.thumbnail_min"),
-          height: side,
+          width: pill ? null : visual ? side : t("metrics.thumbnail_min"),
+          height: pill ? null : side,
           background: t(armed ? "colors.selected_fill" : "colors.fill"),
           borderRadius: t("metrics.inner_radius"),
           position: "relative",
           overflow: "hidden",
-          padding: visual ? null : t("metrics.gap"),
+          padding: pill
+            ? t("metrics.pill_inset")
+            : visual
+              ? null
+              : t("metrics.gap"),
+          ...(pill && {
+            borderWidth: t("metrics.border"),
+            borderColor: t("colors.hairline"),
+            paddingRight: t("metrics.gap"),
+          }),
         }}
       >
         <div
-          metadata={{ symbol }}
+          metadata={a.thumbnail ? undefined : { symbol }}
           style={{
             ...row,
             justifyContent: "center",
@@ -256,6 +272,7 @@ export function AttachmentTile({
             symbolSize: t("metrics.symbol_panel"),
             position: "relative",
             overflow: "hidden",
+            borderRadius: thumbnailRadius,
           }}
         >
           {a.thumbnail && (
@@ -266,6 +283,7 @@ export function AttachmentTile({
               style={{
                 position: "absolute",
                 inset: "fill",
+                borderRadius: thumbnailRadius,
               }}
             />
           )}
@@ -274,12 +292,61 @@ export function AttachmentTile({
               style={{
                 position: "absolute",
                 inset: "fill",
+                borderRadius: thumbnailRadius,
                 background: t("colors.selected_fill"),
                 opacity: t("metrics.drag_opacity"),
               }}
             />
           )}
+          {kind === "pick" && (
+            <div
+              metadata={{ symbol: "rectangle.dashed" }}
+              style={{
+                position: "absolute",
+                right: t("metrics.pill_inset"),
+                bottom: t("metrics.pill_inset"),
+                color: t("colors.text"),
+                background: t("colors.floating"),
+                borderRadius: t("metrics.pill_inset"),
+                symbolSize: t("metrics.symbol_inline"),
+                width: t("metrics.symbol_inline"),
+                height: t("metrics.symbol_inline"),
+              }}
+            />
+          )}
         </div>
+        {pill && (
+          <>
+            <div
+              style={{ ...column, ...shrink, maxWidth: t("metrics.thumbnail_min") }}
+            >
+              <text
+                style={{
+                  ...quiet,
+                  color: t("colors.text"),
+                  whiteSpace: "nowrap",
+                  textOverflow: "ellipsis",
+                  ...shrink,
+                }}
+              >
+                {title}
+              </text>
+              <text
+                style={{
+                  ...faint,
+                  fontSize: t("typography.minimum"),
+                  whiteSpace: "nowrap",
+                  textOverflow: "ellipsis",
+                  ...shrink,
+                }}
+              >
+                {details.join(" · ") || "Region"}
+              </text>
+            </div>
+            {/* Keep the pill the same width as the remove button comes and goes. */}
+            <div style={{ width: t("metrics.hit"), flexShrink: 0 }} />
+          </>
+        )}
         {!visual && (
           <div style={{ ...column, ...shrink }}>
             <text
@@ -301,21 +368,6 @@ export function AttachmentTile({
             </text>
           </div>
         )}
-        {kind === "pick" && (
-          <div
-            metadata={{ symbol: "rectangle.dashed" }}
-            style={{
-              position: "absolute",
-              right: t("metrics.pill_inset"),
-              bottom: t("metrics.pill_inset"),
-              color: t("colors.text"),
-              background: t("colors.floating"),
-              symbolSize: t("metrics.symbol_inline"),
-              width: t("metrics.symbol_inline"),
-              height: t("metrics.symbol_inline"),
-            }}
-          />
-        )}
         {kind === "video" && (
           <text
             style={{
@@ -325,17 +377,13 @@ export function AttachmentTile({
               bottom: t("metrics.pill_inset"),
               right: t("metrics.pill_inset"),
               background: t("colors.floating"),
+              borderRadius: t("radius.xs"),
             }}
           >
             {a.duration || "Video"}
           </text>
         )}
       </UI.ToolbarItem>
-      {kind === "pick" && !small && (
-        <text style={{ ...faint, maxWidth: t("metrics.thumbnail_min") }}>
-          {a.caption || a.name}
-        </text>
-      )}
       {!small && (hovered || focused || armed) && (
         <UI.ToolbarItem
           label={`Remove ${a.name}`}
@@ -345,8 +393,14 @@ export function AttachmentTile({
           metadata={{ symbol: "xmark.circle.fill" }}
           style={{
             position: "absolute",
-            right: t("metrics.agent_remove_offset"),
-            top: t("metrics.agent_remove_offset"),
+            right: t(pill ? "metrics.gap" : "metrics.pill_inset"),
+            top: t("metrics.pill_inset"),
+            ...(pill
+              ? { bottom: t("metrics.pill_inset") }
+              : {
+                  background: t("colors.floating"),
+                  borderRadius: t("metrics.media_small_radius"),
+                }),
             symbolSize: t("metrics.symbol_inline"),
           }}
           onClick={() => send({ type: "removeAttachment", id: a.id })}
@@ -355,6 +409,7 @@ export function AttachmentTile({
     </div>
   );
 }
+const cardControl: Style = { borderRadius: t("radius.xs") };
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -704,7 +759,7 @@ function ProseBlock({
           style={{
             ...shrink,
             background: t("colors.fill"),
-            borderRadius: t("metrics.inner_radius"),
+            borderRadius: t("radius.xs"),
             padding: t("metrics.text_padding"),
           }}
         >
@@ -807,6 +862,7 @@ function Trigger({
   open,
   tone = "colors.secondary",
   fixed,
+  compact = false,
 }: {
   id: string;
   label: string;
@@ -816,6 +872,7 @@ function Trigger({
   tone?: string;
   /** A short label (an effort) keeps its width; the model's name gives way. */
   fixed?: boolean;
+  compact?: boolean;
 }) {
   return (
     <UI.ToolbarItem
@@ -830,8 +887,8 @@ function Trigger({
         ...row,
         ...(fixed ? { flexShrink: 0 } : shrink),
         gap: t("metrics.pill_inset"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: t(compact ? "metrics.pill_inset" : "metrics.gap"),
+        paddingRight: t(compact ? "metrics.pill_inset" : "metrics.gap"),
         borderRadius: t("metrics.inner_radius"),
         color: t(tone),
       }}
@@ -867,6 +924,7 @@ function Picker({
   icon,
   title,
   open,
+  flexible = false,
 }: {
   id: string;
   label: string;
@@ -874,6 +932,7 @@ function Picker({
   disabled: boolean;
   opened: boolean;
   icon?: string;
+  flexible?: boolean;
   title: string;
   open: (anchor: number) => void;
 }) {
@@ -901,20 +960,27 @@ function Picker({
       style={{
         ...target,
         ...row,
-        ...shrink,
+        ...(flexible ? shrink : { flexShrink: 0 }),
         gap: t("metrics.pill_inset"),
         height: t("metrics.control"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: t("metrics.pill_inset"),
+        paddingRight: t("metrics.pill_inset"),
         ...(opened || !icon ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
-        borderRadius: t("metrics.control_radius"),
+        borderRadius: t("metrics.panel_radius"),
         color: ink,
       }}
     >
       {icon && <div metadata={{ symbol: icon }} style={{
         flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
       }} />}
-      <text metadata={{ wordEllipsis: true }} style={{ ...quiet, ...shrink, color: ink, whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+      <text
+        style={{
+          ...quiet,
+          ...(flexible ? { ...shrink, textOverflow: "ellipsis" } : { flexShrink: 0 }),
+          color: ink,
+          whiteSpace: "nowrap",
+        }}
+      >
         {text}
       </text>
       <div metadata={{ symbol: "chevron.up.chevron.down" }} style={{
@@ -951,8 +1017,10 @@ function Header({
         flexShrink: 0,
         gap: t("metrics.pill_inset"),
         height: t("metrics.header"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        ...(popover ? {
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        } : {}),
       }}
     >
       <Trigger
@@ -964,6 +1032,8 @@ function Header({
         }
         // Docked, the trigger names the list and the tab keeps its name.
         text={popover ? title : "Threads"}
+        compact={!popover}
+        fixed={!popover}
         tone="colors.text"
         disabled={!menu || blocked}
         open={(anchor) => {
@@ -1003,7 +1073,7 @@ function Header({
           });
         }}
       />
-      <div style={{ flexGrow: 1 }} />
+      {popover && <div style={{ flexGrow: 1 }} />}
       <UI.ToolbarItem
         id="agent-new"
         label="New Thread"
@@ -1255,6 +1325,7 @@ function Gate({
           <div style={{ ...row }}>
             <UI.PushButton
               id="agent-connect-action"
+              style={cardControl}
               role="default"
               label={
                 checking
@@ -1351,6 +1422,7 @@ function ErrorNotice({
             {retry && (
               <UI.PushButton
                 id={`${id}-retry`}
+                style={cardControl}
                 label="Try Again"
                 disabled={retryDisabled}
                 onClick={retryDisabled ? undefined : retry}
@@ -1371,7 +1443,7 @@ function ErrorNotice({
                   height: t("metrics.hit"),
                   paddingLeft: t("metrics.text_padding"),
                   paddingRight: t("metrics.gap"),
-                  borderRadius: t("metrics.inner_radius"),
+                  borderRadius: t("radius.xs"),
                 }}
               >
                 <text style={faint}>Details</text>
@@ -1391,7 +1463,7 @@ function ErrorNotice({
             style={{
               ...shrink,
               background: t("colors.panel_secondary"),
-              borderRadius: t("metrics.inner_radius"),
+              borderRadius: t("radius.xs"),
               padding: t("metrics.text_padding"),
             }}
           >
@@ -1435,6 +1507,7 @@ function UserMessageView({
 }) {
   const text = str(m.value.text);
   const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
+  const citations = Array.isArray(m.value.citations) ? m.value.citations : [];
   const delivery =
     m.value.delivery === "queued"
       ? "Queued for next step"
@@ -1461,35 +1534,8 @@ function UserMessageView({
       }}
     >
       <div
-        style={{
-          ...column,
-          ...shrink,
-          gap: t("metrics.gap"),
-          background: t("colors.field"),
-          borderRadius: t("metrics.panel_radius"),
-          paddingTop: t("metrics.text_padding"),
-          paddingBottom: t("metrics.text_padding"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
+        style={{ ...column, ...shrink, alignItems: "end", gap: t("metrics.gap") }}
       >
-        {Array.isArray(m.value.citations) &&
-          m.value.citations.map((value, i) => {
-            const q = obj(value);
-            return (
-              <div
-                key={i}
-                role="group"
-                label={`Quoted: ${str(q.text)}`}
-                style={{ ...column, ...citationChip }}
-              >
-                <text style={quiet}>{"❝ " + str(q.text)}</text>
-                {str(q.comment) && (
-                  <text style={reading}>{str(q.comment)}</text>
-                )}
-              </div>
-            );
-          })}
         {files.length > 0 && (
           <div
             style={{
@@ -1504,20 +1550,61 @@ function UserMessageView({
             ))}
           </div>
         )}
-        {text && <QuoteSource id={m.rowId} text={text} userMessage />}
-        {pending && (
-          <text role="status" label="Steering" style={faint}>
-            Steering
-          </text>
-        )}
-        {delivery && (retry ? (
-          <div style={{ ...row, gap: t("metrics.gap") }}>
-            <text style={quiet}>{delivery} ·</text>
-            <button role="button" label="Retry" tabIndex={0} style={quiet} onClick={retry}>
-              Retry
-            </button>
+        {(citations.length > 0 || text || pending || delivery) && (
+          <div
+            style={{
+              ...column,
+              ...shrink,
+              gap: t("metrics.gap"),
+              background: t("colors.field"),
+              borderRadius: t("metrics.panel_radius"),
+              paddingTop: t("metrics.text_padding"),
+              paddingBottom: t("metrics.text_padding"),
+              paddingLeft: t("metrics.inset"),
+              paddingRight: t("metrics.inset"),
+            }}
+          >
+            {citations.map((value, i) => {
+              const q = obj(value);
+              return (
+                <div
+                  key={i}
+                  role="group"
+                  label={`Quoted: ${str(q.text)}`}
+                  style={{ ...column, ...citationChip, ...cardControl }}
+                >
+                  <text style={quiet}>{"❝ " + str(q.text)}</text>
+                  {str(q.comment) && (
+                    <text style={reading}>{str(q.comment)}</text>
+                  )}
+                </div>
+              );
+            })}
+            {text && <QuoteSource id={m.rowId} text={text} userMessage />}
+            {pending && (
+              <text role="status" label="Steering" style={faint}>
+                Steering
+              </text>
+            )}
+            {delivery &&
+              (retry ? (
+                <div style={{ ...row, gap: t("metrics.gap") }}>
+                  <text style={quiet}>{delivery} ·</text>
+                  <button
+                    role="button"
+                    label="Retry"
+                    tabIndex={0}
+                    style={quiet}
+                    onClick={retry}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : (
+                <text style={quiet}>{delivery}</text>
+              ))}
           </div>
-        ) : <text style={quiet}>{delivery}</text>)}
+        )}
       </div>
     </div>
   );
@@ -1649,6 +1736,7 @@ function ReplyCards({
             </div>
             <UI.PushButton
               id={`${m.rowId}-${str(r.id)}`}
+              style={cardControl}
               label="Open"
               onClick={() => send({ type: "openVisual", id: str(r.id) })}
             />
@@ -1676,12 +1764,14 @@ function ReplyCards({
             <div style={{ ...row, gap: t("metrics.text_padding") }}>
               <UI.PushButton
                 id={`${m.rowId}-media-${index}`}
+                style={cardControl}
                 label={remote ? "Open in Browser" : "Open"}
                 onClick={() => send({ type: "openMedia", path, reveal: false })}
               />
               {!remote && (
                 <UI.PushButton
                   id={`${m.rowId}-media-${index}-reveal`}
+                  style={cardControl}
                   label="Show in Finder"
                   onClick={() =>
                     send({ type: "openMedia", path, reveal: true })
@@ -1730,6 +1820,7 @@ function PlanPreview({ s, send }: { s: Snapshot; send: Send }) {
       {allowed && (
         <UI.PushButton
           label="Apply change"
+          style={cardControl}
           onClick={() => send({ type: "applyPlan" })}
         />
       )}
@@ -1800,6 +1891,7 @@ function Result({
             {canOpen && (
               <UI.PushButton
                 label={`Open panel, ${str(e.name)}`}
+                style={cardControl}
                 onClick={() =>
                   send({
                     type: "openResultPanel",
@@ -1823,12 +1915,14 @@ function Result({
           {s.resultActions?.undo === true && (
             <UI.PushButton
               label="Undo Change"
+              style={cardControl}
               onClick={() => send({ type: "undoResult" })}
             />
           )}
           {s.resultActions?.keep === true && (
             <UI.PushButton
               label="Keep Change"
+              style={cardControl}
               onClick={() => send({ type: "keepResult" })}
             />
           )}
@@ -2302,7 +2396,7 @@ function Question({
                             paddingBottom: t("metrics.gap"),
                             paddingLeft: t("metrics.text_padding"),
                             paddingRight: t("metrics.text_padding"),
-                            borderRadius: t("metrics.control_radius"),
+                            borderRadius: t("radius.xs"),
                             ...(on
                               ? { background: t("colors.fill_strong") }
                               : {}),
@@ -2353,6 +2447,7 @@ function Question({
                 {q.allowOther !== false && (
                   <Field
                     id={`${r.id}-${id}-other`}
+                    style={cardControl}
                     label={`Answer: ${plain(str(q.question))}`}
                     value={local.typed[typedKey(id)] ?? ""}
                     metadata={{
@@ -2439,6 +2534,7 @@ function Question({
           {v.transport === "reply" && (
             <UI.PushButton
               id={`${r.id}-skip`}
+              style={cardControl}
               label="Skip"
               onClick={() =>
                 send({ type: "answer", step: r.commandId, skip: true })
@@ -2447,6 +2543,7 @@ function Question({
           )}
           <UI.PushButton
             id={`${r.id}-answer`}
+            style={cardControl}
             role="default"
             label="Answer"
             disabled={!answered}
@@ -2853,8 +2950,6 @@ function Composer({
               alignItems: "start",
               flexWrap: "wrap",
               gap: t("metrics.gap"),
-              paddingLeft: t("metrics.gap"),
-              paddingRight: t("metrics.gap"),
             }}
           >
             {s.attachments.map((a) => (
@@ -2976,7 +3071,7 @@ function Composer({
                 flexShrink: 0,
                 width: t("metrics.control"),
                 height: t("metrics.control"),
-                borderRadius: t("metrics.control_radius"),
+                borderRadius: t("metrics.inner_radius"),
                 background: t("colors.text"),
                 color: t("colors.floating"),
                 symbolSize: t("metrics.symbol_inline"),
@@ -3009,7 +3104,7 @@ function Composer({
                 flexShrink: 0,
                 width: t("metrics.control"),
                 height: t("metrics.control"),
-                borderRadius: t("metrics.control_radius"),
+                borderRadius: t("metrics.inner_radius"),
                 symbolSize: t("metrics.symbol_panel"),
                 // A quiet square until there is something to send (v1's).
                 background: t(
@@ -3029,14 +3124,15 @@ function Composer({
         id="agent-options"
         style={{
           ...row,
-          gap: t("metrics.gap"),
+          gap: t("metrics.pill_inset"),
           height: t("metrics.control"),
-          paddingLeft: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
+          paddingLeft: t("metrics.pill_inset"),
+          paddingRight: t("metrics.pill_inset"),
         }}
       >
         <Picker
           id="agent-model"
+          flexible
           title="Model"
           label={`Model, ${modelName}`}
           text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}

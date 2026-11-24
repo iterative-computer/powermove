@@ -3338,6 +3338,9 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         use pm_surface::kit::{HORIZONTAL_SCRUB_REST, HorizontalScrub};
+        if !window.is_window_active() {
+            return;
+        }
         if event.touch_phase == TouchPhase::Started {
             self.wheel_lifted = false;
         }
@@ -5769,6 +5772,44 @@ impl SurfaceView {
             .find(|(_, h)| h.is_focused(window))
             .map(|(id, _)| *id)
     }
+    /// The native shortcut queue runs before GPUI keydown. Forward Delete
+    /// to the effect list when this panel owns keyboard focus.
+    pub(crate) fn delete_focused_effect(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(focused) = self.focused_node(window) else {
+            return false;
+        };
+        let Some(&list) = self.prepared.semantics.get("layer-effects:list") else {
+            return false;
+        };
+        if self.fields.contains_key(&focused) {
+            return false;
+        }
+        let selected = self.publication.surface.node(list).is_some_and(|node| {
+            node.props
+                .get("metadata")
+                .and_then(|m| m.get("focus"))
+                .and_then(Value::as_str)
+                .is_some()
+        });
+        if focused != list && !selected {
+            return false;
+        }
+        self.send(
+            list,
+            "keydown",
+            EventDetail {
+                key: Some("delete".into()),
+                ..Default::default()
+            },
+            cx,
+        );
+        true
+    }
+
     /// A key its window's root took while nothing in the panel was focused
     /// (a sheet just opened): the panel's root hears it as its own keys,
     /// so Return presses a sheet's default button and Escape cancels it.
@@ -5930,7 +5971,7 @@ impl SurfaceView {
                 let side = px(t.metrics.field - 2. * t.space.xs);
                 let mut chip = div()
                     .size(side)
-                    .rounded(px(t.radius.xs))
+                    .rounded(px((t.metrics.inner_radius - t.space.xs).max(t.space.hair)))
                     .shadow(vec![BoxShadow {
                         color: pm_shell::kit::ink(*keyline, 1.).into(),
                         offset: point(px(0.), px(0.)),
@@ -6102,13 +6143,15 @@ impl SurfaceView {
             .as_ref()
             .and_then(|key| crate::media_thumbs::resolve(key))
         {
-            element = element.child(img(path).absolute().inset_0().size_full().object_fit(
+            let mut picture = img(path).absolute().inset_0().size_full().object_fit(
                 if node.contain {
                     ObjectFit::Contain
                 } else {
                     ObjectFit::Cover
                 },
-            ));
+            );
+            picture.style().corner_radii = node.style.corner_radii.clone();
+            element = element.child(picture);
         }
         if let Some(text) = &node.text {
             if node.component == Some(Component::PopUpButton) {
@@ -6454,7 +6497,9 @@ impl Render for SurfaceView {
                             "natural": height, "demand": demand, "fit": fit}));
                     }
                     if changed || column_changed {
-                        window.refresh();
+                        // Prepaint is still drawing. Refresh the whole window
+                        // on the next frame so the shell can use the new demand.
+                        window.on_next_frame(|window, _| window.refresh());
                     }
                 })
         } else {

@@ -643,13 +643,46 @@ pub fn instantiate(
     cast_shadow: bool,
     receive_shadow: bool,
 ) -> Instance {
+    instantiate_with_parts(
+        asset,
+        id,
+        object,
+        world,
+        time,
+        visible,
+        materials,
+        cast_shadow,
+        receive_shadow,
+        &pose::PartTransforms::new(),
+    )
+}
+
+/// Places the model with authored part transforms layered over its animation.
+#[allow(clippy::too_many_arguments)]
+pub fn instantiate_with_parts(
+    asset: &GltfAsset,
+    id: &str,
+    object: usize,
+    world: &Mat4,
+    time: f64,
+    visible: bool,
+    materials: Override<'_>,
+    cast_shadow: bool,
+    receive_shadow: bool,
+    parts: &pose::PartTransforms,
+) -> Instance {
     let model = &asset.model;
-    let (parent, pose) = pose::placed(model, pose::Pose::at(model, time), world);
+    let mut pose = pose::Pose::at(model, time);
+    let shown = (!parts.is_empty()).then(|| pose::apply_parts(model, &mut pose, parts));
+    let (parent, pose) = pose::placed(model, pose, world);
     let worlds = pose::world(model, &pose, Some(&parent));
     let mut meshes = Vec::new();
     let mut lights = Vec::new();
     let base = (object as u64) << 32;
     for (n, i) in model.traversal().into_iter().enumerate() {
+        if shown.as_ref().is_some_and(|shown| !shown[i]) {
+            continue;
+        }
         let o = &model.objects[i];
         match &o.kind {
             ObjectKind::Drawable(d) => {

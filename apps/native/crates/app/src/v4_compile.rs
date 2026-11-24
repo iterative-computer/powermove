@@ -753,7 +753,7 @@ fn compile(
                 .sheet
                 .flex_1()
                 .px(px(t.metrics.gap))
-                .rounded(px(t.metrics.inner_radius))
+                .rounded(px((t.metrics.inner_radius - inset).max(t.radius.xs)))
         } else {
             compiled
                 .sheet
@@ -1144,6 +1144,11 @@ fn compile(
                     .filter_map(|c| surface.node(*c))
                     .filter(|c| Component::of(c) == Some(Component::NumberField))
                     .collect();
+                let budget = if wells.len() == 3 {
+                    6
+                } else {
+                    SPLIT_WELL_CHARS
+                };
                 wells.len() < 2
                     || wells.iter().all(|w| {
                         let shown = w
@@ -1151,7 +1156,7 @@ fn compile(
                             .get("value")
                             .and_then(Value::as_f64)
                             .map_or(0, |v| number_facts(w).text(v).chars().count());
-                        shown + 1 + u.chars().count() <= SPLIT_WELL_CHARS
+                        shown + 1 + u.chars().count() <= budget
                     })
             })
             .map(|u| SharedString::from(u.to_owned())),

@@ -27,6 +27,8 @@ export function layer(id = "headline", index = 1): LayerRow {
     locked: false,
     visible: true,
     solo: false,
+    threeD: false,
+    canBe3D: true,
     transformable: true,
     parent: { name: "None", set: false },
     media: "ready",

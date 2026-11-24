@@ -73,6 +73,144 @@ impl Pose {
     }
 }
 
+/// A saved child-index path under the glTF scene group.
+pub fn part_index(model: &Model, key: &str) -> Option<usize> {
+    let mut node = 0;
+    for (depth, step) in key.split('_').enumerate() {
+        let index: usize = step.parse().ok()?;
+        if depth >= 64 || index > 9999 || index.to_string() != step {
+            return None;
+        }
+        node = *model.objects[node].children.get(index)?;
+    }
+    Some(node)
+}
+
+pub fn part_key(model: &Model, mut node: usize) -> Option<String> {
+    let mut path = vec![];
+    while node != 0 {
+        let parent = model.objects.get(node)?.parent?;
+        let index = model.objects[parent]
+            .children
+            .iter()
+            .position(|&i| i == node)?;
+        if index > 9999 || path.len() >= 64 {
+            return None;
+        }
+        path.push(index.to_string());
+        node = parent;
+    }
+    (!path.is_empty()).then(|| path.into_iter().rev().collect::<Vec<_>>().join("_"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartTransform {
+    pub position: Vec3,
+    pub rotation: Vec3,
+    pub scale: f64,
+    pub visible: bool,
+}
+impl Default for PartTransform {
+    fn default() -> Self {
+        Self {
+            position: [0.; 3],
+            rotation: [0.; 3],
+            scale: 100.,
+            visible: true,
+        }
+    }
+}
+impl PartTransform {
+    /// Accept either resolved values or unanimated stored channel wrappers.
+    pub fn from_properties(p: &serde_json::Value) -> Self {
+        let value = |key: &str| p[key].get("v").unwrap_or(&p[key]);
+        let n = |key: &str, default: f64| {
+            value(key)
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .unwrap_or(default)
+        };
+        Self {
+            position: [n("x", 0.), n("y", 0.), n("z", 0.)],
+            rotation: [n("rx", 0.), n("ry", 0.), n("rz", 0.)],
+            scale: n("scale", 100.),
+            visible: value("visible").as_bool().unwrap_or(true),
+        }
+    }
+}
+
+pub type PartTransforms = std::collections::BTreeMap<String, PartTransform>;
+
+pub fn part_transforms(parts: &serde_json::Value) -> PartTransforms {
+    parts
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, part)| {
+            let transform = PartTransform::from_properties(&part["p"]);
+            (transform != PartTransform::default()).then(|| (key.clone(), transform))
+        })
+        .collect()
+}
+
+fn multiply_quat([x, y, z, w]: [f64; 4], [a, b, c, d]: [f64; 4]) -> [f64; 4] {
+    [
+        w * a + x * d + y * c - z * b,
+        w * b - x * c + y * d + z * a,
+        w * c + x * b - y * a + z * d,
+        w * d - x * a - y * b - z * c,
+    ]
+}
+
+fn xyz_quaternion(rotation: Vec3) -> [f64; 4] {
+    let [(sx, cx), (sy, cy), (sz, cz)] = rotation.map(|v| (v.to_radians() / 2.).sin_cos());
+    multiply_quat(
+        multiply_quat([sx, 0., 0., cx], [0., sy, 0., cy]),
+        [0., 0., sz, cz],
+    )
+}
+
+/// Offsets are authored in normalized model axes. Apply them after the
+/// mixer, parent first, and carry visibility through the hierarchy.
+pub fn apply_parts(model: &Model, pose: &mut Pose, parts: &PartTransforms) -> Vec<bool> {
+    if parts.is_empty() {
+        return reachable(model);
+    }
+    let overrides: std::collections::HashMap<_, _> = parts
+        .iter()
+        .filter_map(|(key, value)| Some((part_index(model, key)?, *value)))
+        .collect();
+    let normalized = math::compose([0.; 3], [0., 0., 0., 1.], [1. / model.fit.radius; 3]);
+    let mut worlds = vec![math::IDENTITY; model.objects.len()];
+    worlds[0] = math::multiply(&normalized, &pose.local(0));
+    let mut visible = vec![false; model.objects.len()];
+    visible[0] = true;
+    for i in model.traversal().into_iter().skip(1) {
+        let parent = model.objects[i].parent.unwrap_or(0);
+        let frame = &worlds[parent];
+        visible[i] = visible[parent];
+        if let Some(part) = overrides.get(&i) {
+            if part.position != [0.; 3] && math::determinant(frame).abs() > 0. {
+                let inv = math::invert(frame);
+                let offset = math::apply(&inv, part.position);
+                for axis in 0..3 {
+                    pose.position[i][axis] += offset[axis] - inv[12 + axis];
+                }
+            }
+            if part.rotation != [0.; 3] && math::determinant(frame).abs() > 0. {
+                let (_, q, _) = math::decompose(frame);
+                let inverse = [-q[0], -q[1], -q[2], q[3]];
+                let turn = multiply_quat(multiply_quat(inverse, xyz_quaternion(part.rotation)), q);
+                pose.quaternion[i] = multiply_quat(turn, pose.quaternion[i]);
+            }
+            pose.scale[i] = pose.scale[i].map(|scale| scale * part.scale.max(0.) / 100.);
+            visible[i] &= part.visible;
+        }
+        worlds[i] = math::multiply(frame, &pose.local(i));
+    }
+    visible
+}
+
 /// World matrices of the objects reachable from the scene group, whose
 /// parent's `matrixWorld` is `parent` (`None`: no parent, so the scene
 /// group's world is its local matrix). Unreachable objects get identity.

@@ -1876,14 +1876,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -1893,29 +1893,6 @@
             26.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            46.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -2110,14 +2087,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -2127,29 +2104,6 @@
             56.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            76.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -2270,14 +2224,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -2287,29 +2241,6 @@
             86.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            106.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -2456,14 +2387,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -2473,29 +2404,6 @@
             116.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            136.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -5102,14 +5010,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -5119,29 +5027,6 @@
             26.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            46.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -5336,14 +5221,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -5353,29 +5238,6 @@
             56.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            76.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -5496,14 +5358,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -5513,29 +5375,6 @@
             86.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            106.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -5682,14 +5521,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 21338,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -5699,29 +5538,6 @@
             116.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            136.5,
-            4.0,
-            4.0
-          ],
-          "color": 9013901,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -8225,14 +8041,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -8242,29 +8058,6 @@
             28.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            43.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -8482,14 +8275,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -8499,29 +8292,6 @@
             58.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            73.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -8665,14 +8435,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -8682,29 +8452,6 @@
             88.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            103.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -8874,14 +8621,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -8891,29 +8638,6 @@
             118.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            133.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -11440,14 +11164,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -11457,29 +11181,6 @@
             28.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            43.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -11697,14 +11398,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -11714,29 +11415,6 @@
             58.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            73.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -11880,14 +11558,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -11897,29 +11575,6 @@
             88.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            103.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -12089,14 +11744,14 @@
             4.0,
             4.0
           ],
-          "color": 15751180,
-          "opacity": 1.0,
+          "color": 1908517,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 16645630,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -12106,29 +11761,6 @@
             118.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            133.0,
-            4.0,
-            4.0
-          ],
-          "color": 3684927,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -14758,14 +14390,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 8486,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -14775,29 +14407,6 @@
             26.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            46.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -14992,14 +14601,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -15009,29 +14618,6 @@
             56.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            76.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -15152,14 +14738,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -15169,29 +14755,6 @@
             86.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            106.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -15338,14 +14901,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -15355,29 +14918,6 @@
             116.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            136.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -17984,14 +17524,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 8486,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -18001,29 +17541,6 @@
             26.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            46.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -18218,14 +17735,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -18235,29 +17752,6 @@
             56.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            76.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -18378,14 +17872,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -18395,29 +17889,6 @@
             86.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            106.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -18564,14 +18035,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 6430,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 1.0,
             "half": null,
             "seconds": 2.25
@@ -18581,29 +18052,6 @@
             116.0,
             449.0,
             26.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            136.5,
-            4.0,
-            4.0
-          ],
-          "color": 10131863,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -21107,14 +20555,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -21124,29 +20572,6 @@
             28.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            43.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -21364,14 +20789,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -21381,29 +20806,6 @@
             58.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            73.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -21547,14 +20949,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -21564,29 +20966,6 @@
             88.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            103.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -21756,14 +21135,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -21773,29 +21152,6 @@
             118.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            133.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -24322,14 +23678,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -24339,29 +23695,6 @@
             28.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"selected\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            43.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -24579,14 +23912,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -24596,29 +23929,6 @@
             58.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"offline\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            73.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -24762,14 +24072,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -24779,29 +24089,6 @@
             88.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"loading\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            103.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {
@@ -24971,14 +24258,14 @@
             4.0,
             4.0
           ],
-          "color": 16409360,
-          "opacity": 1.0,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": {
-            "keyline": 1841431,
+            "keyline": null,
             "keylineWidth": 2.0,
             "half": null,
             "seconds": 2.25
@@ -24988,29 +24275,6 @@
             118.0,
             448.0,
             22.0
-          ]
-        },
-        {
-          "id": "key-focus:[\"locked\",\"ease\"]",
-          "shape": "outside-ring",
-          "bounds": [
-            443.0,
-            133.0,
-            4.0,
-            4.0
-          ],
-          "color": 14408665,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 2.0,
-          "text": null,
-          "fontSize": 0.0,
-          "detail": null,
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
           ]
         },
         {

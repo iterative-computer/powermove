@@ -492,7 +492,7 @@ impl WelcomeView {
                             .px(px(m.gap))
                             .flex()
                             .items_center()
-                            .rounded(px(m.control_radius))
+                            .rounded(px((m.group_radius - m.inset).max(t.radius.xs)))
                             .bg(rgb(c.panel_secondary))
                             .text_size(px(t.typography.body))
                             .text_color(rgb(c.secondary))

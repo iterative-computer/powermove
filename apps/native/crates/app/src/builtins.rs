@@ -472,6 +472,9 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        if let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |timeline, _| timeline.set_outline_runtime(&runtime));
+        }
         // Recover may have received the extension publication before this
         // runtime existed. Replay it, including surfaces mounted in Home's
         // retired runtime, even if discovery's revision has not changed.
@@ -2252,12 +2255,6 @@ impl Controller {
         } else {
             editor.origin + point(px(m.toolbar), px(m.toolbar))
         };
-        let title: SharedString = match id {
-            "agent" => "Agent",
-            "settings" => "Settings",
-            _ => "Export",
-        }
-        .into();
         // Settings opens on the page asked for, else the one it was left on.
         let page = (id == "settings")
             .then(|| {
@@ -2328,6 +2325,7 @@ impl Controller {
             if !current {
                 return;
             }
+            let dialog = kind == WindowKind::Dialog;
             let mut options = WindowOptions::new().kind(kind);
             options.parent = parent;
             if popover.is_some() {
@@ -2339,15 +2337,18 @@ impl Controller {
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
+            if dialog {
+                options.is_resizable = false;
+                options.is_minimizable = false;
+                options.is_movable = false;
+            }
             let settings = panel == "settings";
             let result = cx.open_window(
                 options
-                    // A popover has no title bar; other panel windows get a
-                    // seamless transparent one over their own material
-                    // (Settings: AppKit's own, under its toolbar).
-                    .titlebar(popover.is_none().then(|| TitlebarOptions {
-                        title: Some(title),
-                        appears_transparent: !settings,
+                    // Settings uses AppKit chrome under its toolbar.
+                    .titlebar(settings.then(|| TitlebarOptions {
+                        title: Some("Settings".into()),
+                        appears_transparent: false,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
@@ -2906,68 +2907,67 @@ impl Controller {
                         break 'pick Err("The attachment's thread is unavailable.".into());
                     };
                     let (project, thread) = (project.to_owned(), thread.to_owned());
+                    if self.builtins.agent_picking {
+                        break 'pick Ok(Value::Null);
+                    }
                     let editor = self.host.borrow().window.clone();
-                    // The answer goes to the editor's window: the popover that
-                    // asked closes now, and its handle with it.
-                    let handle = cx
-                        .windows()
-                        .into_iter()
-                        .find(|h| {
-                            h.update(cx, |_, w, _| {
-                                crate::platform::ns_window(w).is_some_and(|n| {
-                                    objc2::rc::Retained::as_ptr(&n)
-                                        == objc2::rc::Retained::as_ptr(&editor)
-                                })
-                            })
-                            .unwrap_or(false)
+                    let current = window.window_handle();
+                    let native = crate::platform::ns_window(window);
+                    let editor_handle = native.as_ref()
+                        .filter(|native| {
+                            objc2::rc::Retained::as_ptr(native) == objc2::rc::Retained::as_ptr(&editor)
                         })
-                        .unwrap_or_else(|| window.window_handle());
-                    // The popover steps aside, kept as it is: back, it shows
-                    // the new chip at once instead of rebuilding first.
-                    let popover = self
-                        .builtins
-                        .windows
-                        .get("agent")
-                        .copied()
-                        .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
-                        .flatten();
-                    if let Some(popover) = &popover {
-                        if let Some(parent) = popover.parentWindow() {
-                            parent.removeChildWindow(popover);
-                        }
-                        popover.orderOut(None);
-                    }
-                    self.builtins.agent_picking = popover.is_some();
-                    let picked = pm_shell::region_pick::pick(&editor);
-                    // The overlay takes the pointer from here: no layer stays
-                    // outlined under it, nor after.
-                    // Deferred: the viewer's redraw reads this controller.
-                    if let Some(gizmos) = self.builtins.gizmos.clone() {
-                        cx.defer(move |cx| gizmos.update(cx, |g, cx| g.clear_hover(cx)));
-                    }
+                        .map(|_| current)
+                        .or(self.close_window);
+                    let Some(editor_handle) = editor_handle else {
+                        break 'pick Err("The editor window is unavailable.".into());
+                    };
+                    let popover_handle = self.builtins.windows.get("agent").copied();
+                    self.builtins.agent_picking = true;
+                    let gizmos = self.builtins.gizmos.clone();
                     cx.spawn(async move |this, cx| {
-                        let picked = picked.recv().await.ok().flatten();
-                        let _ = handle.update(cx, |_, window, cx| {
-                            if let Some(rect) = picked {
+                        let popover = popover_handle.and_then(|handle| {
+                            if handle == current {
+                                native
+                            } else {
+                                handle.update(cx, |_, w, _| crate::platform::ns_window(w))
+                                    .ok().flatten()
+                            }
+                        });
+                        if let Some(gizmos) = gizmos {
+                            gizmos.update(cx, |g, cx| g.clear_hover(cx));
+                        }
+                        // AppKit sends delegate callbacks synchronously. Leave
+                        // both GPUI's app and entity updates before ordering windows.
+                        if let Some(popover) = &popover {
+                            if let Some(parent) = popover.parentWindow() {
+                                parent.removeChildWindow(popover);
+                            }
+                            popover.orderOut(None);
+                            if editor.isVisible() && !editor.isKeyWindow() {
+                                editor.makeKeyWindow();
+                            }
+                        }
+                        let picked = pm_shell::region_pick::pick(&editor).recv().await.ok().flatten();
+                        if let Some(rect) = picked {
+                            let _ = editor_handle.update(cx, |_, window, cx| {
                                 let _ = this.update(cx, |v, cx| {
                                     v.attach_region(rect, project, thread, window, cx)
                                 });
-                            }
-                            // Put the popover back after the deferred capture has drawn.
-                            window.defer(cx, move |window, cx| {
-                                let _ = this.update(cx, |v, cx| {
-                                    v.builtins.agent_picking = false;
-                                    match &popover {
-                                        Some(popover) if v.builtins.windows.contains_key("agent") => {
-                                            let editor = v.host.borrow().window.clone();
-                                            gpui_macos::child_window::attach(popover, &editor);
-                                            gpui_macos::child_window::show(popover, true);
-                                        }
-                                        _ => v.show_builtin("agent", window, cx),
-                                    }
-                                });
                             });
-                        });
+                        }
+                        // The editor update flushes its deferred capture before
+                        // the popover is ordered back in.
+                        let restore = this.update(cx, |v, _| {
+                            v.builtins.agent_picking = false;
+                            popover_handle.is_some()
+                                && v.builtins.windows.get("agent").copied() == popover_handle
+                        }).unwrap_or(false);
+                        if restore && editor.isVisible() && let Some(popover) = popover {
+                            let key = editor.isKeyWindow();
+                            gpui_macos::child_window::attach(&popover, &editor);
+                            gpui_macos::child_window::show(&popover, key);
+                        }
                     })
                     .detach();
                     Ok(Value::Null)
@@ -2981,7 +2981,7 @@ impl Controller {
                             .spawn(async move { crate::media::attachment_preview_path(&record) })
                             .await;
                         let _ = this.update(cx, |v, cx| match file {
-                            Ok(path) => crate::quick_look::toggle(vec![(path, name)]),
+                            Ok(path) => crate::quick_look::show(vec![(path, name)]),
                             Err(message) => {
                                 v.errors.borrow_mut().tell("Agent", &message);
                                 cx.notify();
@@ -3607,8 +3607,8 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
             E::CopyKeys(tracks) => {
-                v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
-                v.update_disabled();
+                crate::layer_commands::set_clipboard(crate::layer_commands::Clipboard::Keys(tracks));
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("Powermove keyframes".into()));
             }
             // The keyframe sheets on the keys the right-click was on.
             E::EditKeyValues(keys) => {
@@ -3677,7 +3677,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         controller
             .published
             .as_ref()
-            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time()))
+            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time(), crate::layer_commands::can_paste()))
             .unwrap_or_default()
     }
     fn menu(
@@ -3910,7 +3910,7 @@ impl crate::gizmo::Host for ControllerDelegate {
                     ),
                 ];
                 // Then the whole composition, then the view (viewer.ts).
-                let tail = canvas_menu_tail(!v.layers().is_empty());
+                let tail = canvas_menu_tail(!v.layers().is_empty(), crate::layer_commands::can_paste());
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
                 if let Some(entries) = v.extension_menu_with_tail(locations, entries, tail, at, cx)
                 {
@@ -3925,7 +3925,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             .read(cx)
             .published
             .as_ref()
-            .map(|p| crate::layer_commands::layer_menu(p, &id, time))
+            .map(|p| crate::layer_commands::layer_menu(p, &id, time, crate::layer_commands::can_paste()))
             .unwrap_or_default();
         let chosen = rows.clone();
         let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
@@ -4735,11 +4735,13 @@ mod follow_selection_tests {
 
 /// The viewer canvas menu's closing rows (viewer.ts): the composition's
 /// Paste and Select All Layers, then its view and settings.
-pub(crate) fn canvas_menu_tail(has_layers: bool) -> Vec<pm_shell::MenuEntry> {
+pub(crate) fn canvas_menu_tail(has_layers: bool, can_paste: bool) -> Vec<pm_shell::MenuEntry> {
     let mut select = pm_shell::MenuEntry::item("Select All Layers", "selectAll");
     select.enabled = has_layers;
+    let mut paste = pm_shell::MenuEntry::item("Paste", "pasteLayers");
+    paste.enabled = can_paste;
     vec![
-        pm_shell::MenuEntry::item("Paste", "pasteLayers"),
+        paste,
         select,
         pm_shell::MenuEntry::separator(),
         pm_shell::MenuEntry::item("Fit Composition in View", "fitComposition"),
@@ -4754,7 +4756,7 @@ mod canvas_menu_tests {
     /// and Composition Settings…, each a command the app routes.
     #[test]
     fn the_canvas_menu_closes_with_the_composition_rows_in_electrons_order() {
-        let rows = super::canvas_menu_tail(true);
+        let rows = super::canvas_menu_tail(true, true);
         let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -4778,9 +4780,10 @@ mod canvas_menu_tests {
             ]
         );
         assert!(rows.iter().all(|r| r.enabled || r.label.is_empty()));
-        let empty = super::canvas_menu_tail(false);
+        let empty = super::canvas_menu_tail(false, false);
         assert!(!empty[1].enabled, "nothing to select");
-        assert!(empty[0].enabled && empty[3].enabled && empty[4].enabled);
+        assert!(!empty[0].enabled, "clipboard is empty");
+        assert!(empty[3].enabled && empty[4].enabled);
     }
 }
 

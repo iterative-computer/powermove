@@ -816,3 +816,56 @@ fn raster_textures_follow_the_frames_that_draw_them() {
     }
     assert_eq!(kept.len(), 12, "every answer is still held");
 }
+
+#[test]
+fn probe_finds_the_same_needs_in_boundary_groups_and_precomps() {
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Missing)));
+    let shape = |id| {
+        layer(
+            id,
+            "shape",
+            json!({"shape": "rect", "w": 40, "h": 28, "color": "#FFFFFF"}),
+            64.,
+            64.,
+            2.,
+        )
+    };
+    let mut group = layer("group", "group", json!({}), 0., 0., 2.);
+    set(&mut group, "opacity", json!(60));
+    let mut grouped = shape("grouped");
+    grouped["group"] = json!("group");
+    let mut inactive = shape("inactive");
+    inactive["on"] = json!(false);
+    let child = layer(
+        "instance",
+        "precomp",
+        json!({"comp": "nested", "w": 128, "h": 128}),
+        0.,
+        0.,
+        2.,
+    );
+    let mut value = project(W, H, 2., no_fill(), vec![grouped, group, child, inactive]);
+    composition(&mut value, "nested", 128, 128, 2., vec![shape("child")]);
+    let doc = load(&value);
+    let mut request = RenderRequest::sized(Size::new(W / 2, H / 2), Precision::Float32);
+    request.preview_canvas = true;
+    let assets = MapResolver::default();
+    let at = ticks(0.5);
+    let probed = renderer
+        .compat_missing(&doc, "Ptest-root", at, &request, &assets)
+        .unwrap();
+    let Err(RenderError::CompatPending(rendered)) =
+        renderer.render(&doc, "Ptest-root", at, &request, &assets)
+    else {
+        panic!("the frame must wait for its overrides");
+    };
+    assert_eq!(probed, rendered);
+    assert_eq!(
+        probed
+            .iter()
+            .map(|need| (need.composition.as_str(), need.layer.as_str()))
+            .collect::<Vec<_>>(),
+        [("nested", "child"), ("Ptest-root", "grouped")],
+    );
+}

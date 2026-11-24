@@ -283,6 +283,7 @@ export function ProjectView(props: ProjectViewProps) {
           }}
           style={{
             color: token(action.disabled ? "colors.muted" : ink),
+            borderRadius: token("radius.xs"),
           }}
         />
       ))}
@@ -441,7 +442,7 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: token(small ? "metrics.media_small_radius" : "metrics.control_radius"),
+          borderRadius: token(small ? "radius.xs" : "metrics.control_radius"),
           background: token(
             dropTarget ? "colors.accent_wash" : "colors.fill",
           ),
@@ -483,7 +484,7 @@ export function ProjectView(props: ProjectViewProps) {
               position: "absolute",
               inset: small ? "fill" : token("metrics.media_comp_inset"),
               overflow: "hidden",
-              borderRadius: token(small ? "metrics.media_small_radius" : "metrics.media_frame_radius"),
+              borderRadius: token(small ? "radius.xs" : "metrics.media_frame_radius"),
               // A readiness refresh keeps the last good picture unchanged.
               opacity: f.attention
                 ? token("metrics.media_offline_opacity")
@@ -512,7 +513,7 @@ export function ProjectView(props: ProjectViewProps) {
             style={{
               position: "absolute",
               inset: "fill",
-              borderRadius: token(small ? "metrics.media_small_radius" : "metrics.control_radius"),
+              borderRadius: token(small ? "radius.xs" : "metrics.control_radius"),
               borderWidth: token(
                 small ? "metrics.border" : "metrics.media_ring",
               ),

@@ -465,7 +465,7 @@ impl Render for ScopesView {
             .flex_1()
             .min_h_0()
             .w_full()
-            .rounded(px(m.control_radius))
+            .rounded(px(m.inner_radius))
             .overflow_hidden()
             .bg(rgb(c.viewer))
             .flex()
@@ -479,7 +479,12 @@ impl Render for ScopesView {
                     .child(error.clone()),
             ),
             (Some(image), _) => {
-                plot.child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
+                plot.child(
+                    img(image.clone())
+                        .size_full()
+                        .rounded(px(m.inner_radius))
+                        .object_fit(ObjectFit::Fill),
+                )
             }
             _ => plot.child(crate::view::empty_state(
                 t,

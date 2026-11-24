@@ -292,37 +292,22 @@ pub async fn dispatch(
         "disclosure" => {
             let id = layer_row(intent)?;
             let open = boolean(intent, "open")?;
-            let layer = client
-                .model
-                .index
-                .layer(&id)
-                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
-            let current = client.model.reveal.layers.get(&id);
-            let closed = if layer.kind == "group" {
-                current
-                    .map(|d| d.group_collapsed)
-                    .unwrap_or(layer.group_collapsed)
-            } else {
-                current.map(|d| d.collapsed).unwrap_or(layer.collapsed)
-            };
             if intent.get("all").and_then(Value::as_bool) == Some(true) {
                 let ids: Vec<_> = client
                     .model
                     .index
                     .layers
                     .iter()
-                    .map(|l| l.id.clone())
+                    .filter(|layer| client.model.layer_disclosable(&layer.id))
+                    .map(|layer| layer.id.clone())
                     .collect();
                 for id in ids {
-                    let layer = client.model.index.layer(&id).unwrap();
-                    let d = client.model.reveal.layers.entry(id).or_default();
-                    d.collapsed = !open;
-                    if layer.kind == "group" {
-                        d.group_collapsed = !open;
-                    }
+                    client.model.set_disclosure(&id, open)?;
                 }
                 client.model.rebuild_rows();
-            } else if open == closed {
+            } else if open != client.model.layer_expanded(&id)
+                && client.model.layer_disclosable(&id)
+            {
                 client.model.toggle_disclosure(&id)?;
             }
             persist = true;
@@ -342,6 +327,7 @@ pub async fn dispatch(
                 "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
                 "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
                 "shy" => client.model.switch(&id, LayerSwitch::Shy)?,
+                "threeD" => client.model.switch(&id, LayerSwitch::ThreeD)?,
                 "mute" => client.model.mute(&id, context.time)?,
                 _ => return Err(Error::InvalidIntent("switch")),
             }
@@ -627,7 +613,6 @@ pub fn project_window(
                         .index
                         .layer(id)
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
-                    let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
                     value["canOpen"] = json!(model.layer_disclosable(id));
                     value["layer"] = json!(id);
@@ -643,13 +628,9 @@ pub fn project_window(
                     value["visible"] = json!(layer.visible);
                     value["solo"] = json!(layer.solo);
                     value["shy"] = json!(layer.shy);
-                    value["expanded"] = json!(!if layer.kind == "group" {
-                        disclosure
-                            .map(|d| d.group_collapsed)
-                            .unwrap_or(layer.group_collapsed)
-                    } else {
-                        disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed)
-                    });
+                    value["threeD"] = json!(layer.three_d);
+                    value["canBe3D"] = json!(layer.can_be_3d());
+                    value["expanded"] = json!(model.layer_expanded(id));
                     if layer.effectively_locked {
                         value["lockRow"] = json!(
                             model
@@ -722,7 +703,21 @@ fn track_window(
     visible: usize,
 ) -> Result<Value, Error> {
     use crate::tracks::Area;
-    let layout = crate::tracks::layout(&model.index, &model.reveal);
+    let layout = model.track_layout();
+    let mut clips_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
+    for item in &layout.items {
+        if let Some(clip) = model.index.layer(&item.id) {
+            clips_by_lane.entry((item.area, item.lane)).or_default().push(clip);
+        }
+    }
+    let mut properties_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
+    for row in model.rows() {
+        if let RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } = &row.id
+            && let Some(item) = layout.item(layer_id)
+        {
+            properties_by_lane.entry((item.area, item.lane)).or_default().push((row, layer_id));
+        }
+    }
     let mut rows = vec![];
     for (area, lane) in layout.display_order() {
         let (short, audio) = match area {
@@ -730,12 +725,7 @@ fn track_window(
             Area::Audio => ("A", true),
             Area::Captions => ("C", false),
         };
-        let clips: Vec<_> = layout
-            .items
-            .iter()
-            .filter(|i| i.area == area && i.lane == lane)
-            .filter_map(|i| model.index.layer(&i.id))
-            .collect();
+        let clips = clips_by_lane.remove(&(area, lane)).unwrap_or_default();
         let label = format!("{short}{}", lane + 1);
         let enabled = clips
             .iter()
@@ -749,19 +739,9 @@ fn track_window(
         };
         let collapsed = model.track_collapsed(area, lane);
         let mut lane_rows = vec![];
-        let mut can_open = false;
-        for row in model.rows() {
-            let layer = match &row.id {
-                RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } => layer_id,
-                _ => continue,
-            };
-            if !clips.iter().any(|clip| clip.id == *layer) {
-                continue;
-            }
-            can_open = true;
-            if collapsed {
-                break;
-            }
+        let properties = properties_by_lane.remove(&(area, lane)).unwrap_or_default();
+        let can_open = !properties.is_empty();
+        for (row, layer) in properties.into_iter().filter(|_| !collapsed) {
             match &row.id {
                 RowId::Path { path, .. } => lane_rows.push(path_heading(model, row, layer, path)?),
                 RowId::Property { channel, .. } => lane_rows.push(json!({

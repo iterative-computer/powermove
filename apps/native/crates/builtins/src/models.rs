@@ -102,23 +102,22 @@ pub(crate) struct Models {
     timeline_editor: Option<TimelineEditor>,
 }
 /// Keep small outlines mounted so their wheel steps need no JS publication.
-fn retained_outline(rows: &[Row]) -> bool {
+fn retained_outline(rows: &[Row], track_headers: Option<usize>) -> Option<usize> {
     const BUDGET: usize = 512;
-    if rows.len() > BUDGET {
-        return false;
-    }
-    // A property can carry several values, editors and keyframe controls.
-    // Count those rows more heavily than layer rows and section headings.
-    let mut cost = rows.len();
+    let mut count = track_headers.unwrap_or(0);
+    let mut cost = count;
     for row in rows {
-        if matches!(row.id, RowId::Property { .. }) {
-            cost += 3;
-            if cost > BUDGET {
-                return false;
-            }
+        if track_headers.is_some() && !matches!(row.id, RowId::Property { .. } | RowId::Path { .. }) {
+            continue;
+        }
+        count += 1;
+        // Property rows carry multiple values, editors and key controls.
+        cost += if matches!(row.id, RowId::Property { .. }) { 4 } else { 1 };
+        if cost > BUDGET {
+            return None;
         }
     }
-    true
+    (cost <= BUDGET).then_some(count.max(1))
 }
 
 impl Models {
@@ -310,32 +309,30 @@ impl Backend {
             .as_mut()
             .ok_or("No open project")?
             .sync(p.clone());
-        client.model.sync(&p);
         let editing = match &self.native.timeline_editor {
             Some(TimelineEditor::Property(l, p)) => Some((l.clone(), p.clone())),
             _ => None,
         };
-        if client.model.editing_property != editing {
-            client.model.editing_property = editing;
-            client.model.rebuild_rows();
-        }
-        // A hosted outline decorates the same immutable model the canvas
-        // drew. A standalone panel has its own client for the same API.
-        let timeline = outline
-            .as_deref()
-            .filter(|model| model.follows_publication(&p))
-            .unwrap_or(&client.model);
+        // A hosted outline decorates the same immutable model as the canvas.
+        let timeline = if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
+            outline
+        } else {
+            client.model.sync(&p);
+            if client.model.editing_property != editing {
+                client.model.editing_property = editing;
+                client.model.rebuild_rows();
+            }
+            &client.model
+        };
         // Retain modest outlines across scrolls. Only the native host mounts rows;
         // wheel input must never wait for another JS publication. Property
         // rows carry more controls and readouts than ordinary layer rows.
-        let rows = timeline.rows();
-        let retained = timeline.mode == pm_panel_timeline::TimelineMode::Layers
-            && retained_outline(rows);
-        let (first, visible) = if retained {
-            (0, rows.len().max(1))
-        } else {
-            (first, visible)
-        };
+        let track_headers = (timeline.mode == pm_panel_timeline::TimelineMode::Tracks).then(|| {
+            let layout = timeline.track_layout();
+            layout.video + layout.audio + layout.captions
+        });
+        let retained = retained_outline(timeline.rows(), track_headers);
+        let (first, visible) = retained.map_or((first, visible), |rows| (0, rows));
         let mut frame = pm_panel_timeline::v4::project_window(timeline, first, visible)
             .map_err(|e| e.to_string())?;
         frame["composition"] = json!(timeline.index.comp_id);
@@ -496,7 +493,7 @@ impl Backend {
             display.push(row);
         }
         frame["window"]["rows"] = json!(display);
-        frame["window"]["retained"] = json!(retained);
+        frame["window"]["retained"] = json!(retained.is_some());
         let (timecode, spoken) = timecode(time, fps);
         frame["playing"] = json!(playing);
         frame["timecode"] = json!(timecode);

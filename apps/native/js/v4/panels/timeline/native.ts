@@ -47,7 +47,11 @@ export function completeFrame(
     const row = record(value);
     if (typeof row.id !== "string" || !details.has(row.id))
       throw new TypeError("Missing native row presentation");
-    return { ...details.get(row.id), ...row };
+    const switches =
+      row.kind === "layer"
+        ? { threeD: row.threeD === true, canBe3D: row.canBe3D === true }
+        : {};
+    return { ...details.get(row.id), ...row, ...switches };
   });
   // Deliberately enumerate the model envelope; unknown native row data remains
   // inspectable without becoming style or authored document writes.

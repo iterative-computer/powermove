@@ -272,7 +272,6 @@ pub(super) async fn dispatch(
         _ => {}
     }
     let edit = |commands: Vec<Command>| Plan::edit(commands, c.model.index.revision);
-    let mut reveal_dimensions = None;
     let persist_view = action == "command"
         && v["command"].as_str().is_some_and(|id| {
             (id.starts_with("timeline.reveal")
@@ -348,7 +347,6 @@ pub(super) async fn dispatch(
             if targets.is_empty() {
                 return Err(invalid("targets"));
             }
-            reveal_dimensions = Some(targets.clone());
             let commands = targets
                 .into_iter()
                 .map(|layer_id| {
@@ -468,23 +466,7 @@ pub(super) async fn dispatch(
         _ => return Ok(None),
     };
     let effects = c.dispatch(plan).await?;
-    if let Some(layers) = reveal_dimensions {
-        for id in layers {
-            let d = c.model.reveal.layers.entry(id).or_default();
-            d.collapsed = false;
-            if let Some(paths) = &mut d.paths {
-                for path in ["position.x", "position.y", "position.z"] {
-                    if !paths.iter().any(|p| p == path) {
-                        paths.push(path.into());
-                    }
-                }
-            }
-        }
-        c.model.rebuild_rows();
-    }
-    if (action == "separateDimensions" || persist_view)
-        && let Err(error) = c.publish_view().await
-    {
+    if persist_view && let Err(error) = c.publish_view().await {
         if let Some(published) = c.kernel.published(&c.project) {
             c.model.restore_ui(&published.ui_state);
         }

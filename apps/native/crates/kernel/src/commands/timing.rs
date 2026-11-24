@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use pm_model::{Map, Value};
+use pm_model::{Document, Map, Node, Value};
 
 use super::{Cx, channels, comps, layers, new_id, track, values};
 use crate::error::CommandError;
@@ -34,12 +34,12 @@ pub enum TimingCommand {
     /// and audio cannot start before their source (`earliestStart`) and keep
     /// showing the same source frames (`d.trim` follows the edge); caption
     /// cues stay in place. Keys are re-based to keep their composition times
-    /// unchanged. Group and locked layers are skipped. Send absolute times
-    /// in a drag. Label "Trim Layer".
+    /// unchanged. Applies to the listed unlocked layers, including groups.
+    /// Send absolute times in a drag. Label "Trim Layer".
     TrimIn { layer_ids: Vec<String>, time: f64 },
     /// Drag the Out edge / Option+`]`: the layer ends at `time`, at least
-    /// one frame long. Group and locked layers are skipped. Label "Trim
-    /// Layer".
+    /// one frame long. Applies to the listed unlocked layers, including
+    /// groups. Label "Trim Layer".
     TrimOut { layer_ids: Vec<String>, time: f64 },
     /// `[`: move the layer so its In point is at `time` (Option+Home: the
     /// composition start). Label "Move Layer In".
@@ -513,38 +513,85 @@ fn duplicate_precomp_source(
     Ok(())
 }
 
-/// Trim In / Trim Out (the timeline's `trim`): groups and locked layers are
-/// skipped.
+/// Apply one strip-trim sample in a private scratch document. Each command
+/// sees the earlier writes, including track pinning and legacy group spans.
+pub fn preview_strip_trim(
+    root: &Node,
+    revision: u64,
+    origin: super::Origin,
+    commands: &[super::Command],
+) -> Result<Document, CommandError> {
+    let mut cx = Cx::new_at(root, origin, revision);
+    for command in commands {
+        match command {
+            super::Command::Timing(
+                timing @ (TimingCommand::TrimIn { .. }
+                    | TimingCommand::TrimOut { .. }
+                    | TimingCommand::PinTracks { .. }),
+            ) => timing.plan(&mut cx)?,
+            _ => return Err(CommandError::Invalid("Expected a strip trim.".into())),
+        }
+    }
+    Ok(cx.into_document())
+}
+
+/// Trim only the requested layers at this time, skipping locked layers.
 fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
+    let locations = (layer_ids.len() > 1).then(|| crate::model::find_layers(cx.root(), layer_ids));
+    let mut targets = Vec::with_capacity(layer_ids.len());
     for id in layer_ids {
-        let (loc, layer) = cx.layer(id)?;
-        if values::text(&layer, "type") == Some("group") || cx.check_lock(&loc, id).is_err() {
+        let loc = match &locations {
+            Some(locations) => locations.get(id.as_str()).cloned()
+                .ok_or_else(|| CommandError::LayerNotFound(id.clone()))?,
+            None => cx.find(id)?,
+        };
+        if cx.check_lock(&loc, id).is_err() {
             continue;
         }
-        let fps = cx.fps(loc.comp_id.as_deref());
+        let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = values::num(&layer, "dur").unwrap_or(0.0);
+        let (from, dur) = if values::text(&layer, "type") == Some("group") && dur <= 0. {
+            let comp = loc.comp_id.as_deref();
+            span(&cx.layers(comp), &layer, cx.duration(comp))
+        } else {
+            (from, dur)
+        };
+        targets.push((loc, layer, from, dur));
+    }
+    for (loc, layer, from, dur) in targets {
+        let fps = cx.fps(loc.comp_id.as_deref());
         if (start && time >= from + dur) || (!start && time <= from) {
             return Err(CommandError::Invalid(
                 "Trim refused: the playhead must leave at least one frame in the clip.".into(),
             ));
         }
-        let mut next = layer.clone();
         if start {
             let mut nf = time.min(from + dur - 1.0 / fps);
             if is_timed(&layer) {
                 nf = nf.max(earliest_start(&layer));
             }
-            next = cut_head(&layer, next, nf);
+            let mut next = cut_head(&layer, layer.clone(), nf);
+            values::obj(&mut next).insert("dur", Value::Number(from + dur - nf));
             preserve_source_time(cx, loc.comp_id.as_deref(), &layer, &mut next, nf)?;
+            cx.put_layer(&loc, next)?;
         } else {
             // Never past the media's end at the clip's speed.
             let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
-            let dur = (time - from).min(longest).max(1.0 / fps);
-            values::obj(&mut next).insert("dur", Value::Number(dur));
+            let duration = Value::Number((time - from).min(longest).max(1.0 / fps));
+            if values::text(&layer, "type") == Some("group")
+                && values::num(&layer, "dur").unwrap_or(0.) <= 0.
+            {
+                let mut next = cut_head(&layer, layer.clone(), from);
+                values::obj(&mut next).insert("dur", duration);
+                cx.put_layer(&loc, next)?;
+            } else {
+                let mut path = loc.path();
+                path.push("dur".into());
+                cx.set(path, duration)?;
+            }
         }
-        cx.put_layer(&loc, next)?;
     }
     Ok(())
 }

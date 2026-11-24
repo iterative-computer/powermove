@@ -1179,6 +1179,7 @@ impl Controller {
             let window = objc2::rc::Weak::from(&*self.host.borrow().window);
             gpui_macos::child_window::when_shown(move || {
                 if let Some(window) = window.load() {
+                    pm_shell::show_in_tab_group(&window);
                     window.makeKeyAndOrderFront(None);
                 }
             });
@@ -1289,6 +1290,8 @@ impl Controller {
                 self.bring_forward();
                 cancel_quit(cx);
                 cx.notify();
+            } else if self.host.borrow().window.attachedSheet().is_some() {
+                self.show_window();
             }
             return;
         }
@@ -1466,6 +1469,7 @@ impl Controller {
             .unwrap_or_else(|| "Untitled".into());
         // Nobody is hurried while asked: the quit's bound waits for the answer.
         crate::quit_limit::cancel();
+        self.show_window();
         let rx = unsaved(&name).sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
             let choice = rx.recv().await.ok().flatten();
@@ -1556,9 +1560,6 @@ impl Controller {
         }
         let kernel = self.kernel.clone();
         let session = self.session.clone();
-        // A discarded close has already released its session; its project
-        // is still published here until the close finishes.
-        let had_project = session.is_some() || self.published.is_some();
         if intent == Intent::Quit {
             // This window's questions are answered: its close is bounded.
             arm(cx, "windows", crate::quit_limit::WINDOWS);
@@ -1689,12 +1690,11 @@ impl Controller {
                         v.closed_for_quit = true;
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
-                    } else if intent == Intent::Project
-                        || (had_project && crate::entry::editors(cx).len() <= 1)
-                    {
-                        // v1: closing the last project shows Home; the
-                        // window stays, its session forgets the project.
+                    } else if intent == Intent::Project {
+                        // The window stays on Home and its session forgets
+                        // the project, regardless of other open windows.
                         v.show_no_project(cx);
+                        v.leave_page(cx);
                         // The project this one gave way to opens here.
                         if let Some(next) = v.replace_with.take() {
                             v.apply_pending(next, cx);

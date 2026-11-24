@@ -89,6 +89,13 @@ pub enum GraphDisplay {
     Graph,
 }
 
+#[derive(Debug)]
+struct CachedTrackLayout {
+    index: Arc<TimelineIndex>,
+    held: HashMap<String, reveal::Held>,
+    layout: Arc<tracks::Layout>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TimelineModel {
     pub index: Arc<TimelineIndex>,
@@ -125,6 +132,7 @@ pub struct TimelineModel {
     pub(crate) anchor: Option<String>,
     rows: Vec<Row>,
     row_positions: HashMap<RowId, usize>,
+    track_layout: Arc<std::sync::Mutex<Option<CachedTrackLayout>>>,
     pub rebuilds: u64,
     /// Monotonic request, consumed once by the native scroll host.
     pub reveal_serial: u64,
@@ -137,6 +145,25 @@ pub struct TimelineModel {
 }
 
 impl TimelineModel {
+    /// Lane packing depends on the immutable index and the held lane assignments.
+    /// Model clones used by the canvas and outline share the packed result.
+    pub fn track_layout(&self) -> Arc<tracks::Layout> {
+        let mut cached = self.track_layout.lock().unwrap();
+        if let Some(entry) = &*cached
+            && Arc::ptr_eq(&entry.index, &self.index)
+            && entry.held == self.reveal.held
+        {
+            return entry.layout.clone();
+        }
+        let layout = Arc::new(tracks::layout(&self.index, &self.reveal));
+        *cached = Some(CachedTrackLayout {
+            index: self.index.clone(),
+            held: self.reveal.held.clone(),
+            layout: layout.clone(),
+        });
+        layout
+    }
+
     pub fn follows_publication(&self, published: &Published) -> bool {
         self.follows_snapshot(&published.snapshot)
             && self.ui_seen.as_ref() == Some(&published.ui_state.timeline)
@@ -226,41 +253,70 @@ impl TimelineModel {
         if let Some(previous) = previous {
             let mut added = Vec::new();
             let mut removed = Vec::new();
+            let mut closed_empty_strip = false;
             for layer in &self.index.layers {
-                if previous
-                    .layer(&layer.id)
-                    .is_some_and(|old| std::ptr::eq(old, layer.as_ref()))
-                {
+                let Some(old_layer) = previous.layer(&layer.id) else {
+                    continue;
+                };
+                if std::ptr::eq(old_layer, layer.as_ref()) {
                     continue;
                 }
+                // An older document can have an empty, open disclosure.
+                // Adding a ready-animated effect or enabling a saved 3D
+                // channel must not turn that into a visible strip.
+                if !old_layer.has_keyframed_channels() && layer.has_keyframed_channels() {
+                    let d = self.reveal.layers.entry(layer.id.clone()).or_insert_with(|| Disclosure {
+                        collapsed: layer.collapsed,
+                        group_collapsed: layer.group_collapsed,
+                        paths: None,
+                    });
+                    if d.paths.is_none() && !d.collapsed {
+                        d.collapsed = true;
+                        closed_empty_strip = true;
+                    }
+                }
+                // Reparenting and timing edits can generate keys to preserve
+                // the layer's pose or the clip's boundary values.
+                let structural_edit = old_layer.parent != layer.parent
+                    || old_layer.group != layer.group
+                    || old_layer.from != layer.from
+                    || old_layer.duration != layer.duration;
                 for channel in &layer.channels {
-                    let old = previous.channel(&layer.id, &channel.path);
-                    let old_keys: HashMap<_, _> = old
-                        .into_iter()
-                        .flat_map(|c| &c.keys)
-                        .map(|k| (k.id.as_str(), &k.stored))
-                        .collect();
-                    if channel.keys.iter().any(|key| {
-                        old_keys
-                            .get(key.id.as_str())
-                            .is_none_or(|stored| **stored != key.stored)
-                    }) {
+                    // New effect and mask channels may arrive with saved keys.
+                    // Reveal only keys added to a channel already on this layer.
+                    let Some(old) = previous.channel(&layer.id, &channel.path) else {
+                        continue;
+                    };
+                    if channel.keys.is_empty() {
+                        if !old.keys.is_empty() {
+                            removed.push((layer.id.clone(), channel.path.clone()));
+                        }
+                        continue;
+                    }
+                    // A switch can insert a key on an already animated flag.
+                    if structural_edit
+                        || channel.path.starts_with("l.")
+                        || channel.path.ends_with(".$enabled")
+                        || channel.path == "c.audioMuted"
+                        || !layer.channel_available(&channel.path)
+                    {
+                        continue;
+                    }
+                    let old_keys: HashSet<_> = old.keys.iter().map(|key| key.id.as_str()).collect();
+                    if channel.keys.iter().any(|key| !old_keys.contains(key.id.as_str())) {
                         added.push((layer.id.clone(), channel.path.clone()));
-                    } else if channel.keys.is_empty() && old.is_some_and(|c| !c.keys.is_empty()) {
-                        removed.push((layer.id.clone(), channel.path.clone()));
                     }
                 }
             }
-            let disclosure_changed = !added.is_empty() || !removed.is_empty();
+            let disclosure_changed = closed_empty_strip || !added.is_empty() || !removed.is_empty();
             // Keep the final diamond's row under the pointer without opening
             // anything on deletion. A later animated-only refresh replaces it.
             for (layer, path) in removed {
-                self.reveal.retained_empty.insert((layer.clone(), path.clone()));
                 let l = self.index.layer(&layer).unwrap();
                 let d = self
                     .reveal
                     .layers
-                    .entry(layer)
+                    .entry(layer.clone())
                     .or_insert_with(|| Disclosure {
                         collapsed: l.collapsed,
                         group_collapsed: l.group_collapsed,
@@ -274,6 +330,7 @@ impl TimelineModel {
                         .collect()
                 });
                 if !paths.contains(&path) {
+                    self.reveal.retained_empty.insert((layer, path.clone()));
                     paths.push(path);
                 }
             }
@@ -287,7 +344,7 @@ impl TimelineModel {
                 if entry.is_some() && !self.reveal.revealed_in_entry.insert((layer.clone(), path.clone())) {
                     continue;
                 }
-                let _ = self.include_paths(&layer, &[path.clone()]);
+                let _ = self.open_property_rows(&layer, None);
                 self.reveal_serial += 1;
                 self.reveal_target = Some((layer, path));
             }
@@ -404,20 +461,7 @@ impl TimelineModel {
             let joined_position = !layer.separate_dimensions && position.len() >= 2;
             let first_position = position.first().map(|c| c.path.as_str());
             for channel in &layer.channels {
-                if !layer.three_d
-                    && [
-                        "perspective",
-                        "position.z",
-                        "anchor.z",
-                        "scale.z",
-                        "rotation.x",
-                        "rotation.y",
-                        "orientation.x",
-                        "orientation.y",
-                        "orientation.z",
-                    ]
-                    .contains(&channel.path.as_str())
-                {
+                if !layer.channel_available(&channel.path) {
                     continue;
                 }
                 if has_scale && channel.path == "scale.y" {
@@ -900,47 +944,68 @@ impl TimelineModel {
                 .as_ref()
                 .is_some_and(|(l, p)| l == layer && p == &channel.path)
     }
-    pub fn layer_disclosable(&self, id: &str) -> bool {
-        self.index.layer(id).is_some_and(|l| {
-            l.kind == "group"
-                || l.channels.iter().any(|c| {
-                    (l.three_d
-                        || ![
-                            "perspective",
-                            "position.z",
-                            "anchor.z",
-                            "scale.z",
-                            "rotation.x",
-                            "rotation.y",
-                            "orientation.x",
-                            "orientation.y",
-                            "orientation.z",
-                        ]
-                        .contains(&c.path.as_str()))
-                        && self.property_visible(id, c)
-                })
-        })
+    fn group_has_children(&self, id: &str) -> bool {
+        self.index
+            .layer(id)
+            .is_some_and(|layer| layer.kind == "group")
+            && self.index.group_has_children(id)
     }
-    pub fn toggle_disclosure(&mut self, id: &str) -> Result<(), ModelError> {
-        let l = self
+
+    pub fn layer_disclosable(&self, id: &str) -> bool {
+        self.group_has_children(id)
+            || self.index.layer(id).is_some_and(|layer| {
+                let explicitly_open = self
+                    .reveal
+                    .layers
+                    .get(id)
+                    .is_some_and(|d| !d.collapsed && d.paths.is_some());
+                layer.channels.iter().any(|channel| {
+                    layer.channel_available(&channel.path)
+                        && (!channel.keys.is_empty()
+                            || (explicitly_open
+                                && self.property_visible(id, channel)
+                                && !self.reveal.retained_empty.contains(&(id.into(), channel.path.clone()))))
+                })
+            })
+    }
+
+    pub fn layer_expanded(&self, id: &str) -> bool {
+        let Some(layer) = self.index.layer(id) else {
+            return false;
+        };
+        let disclosure = self.reveal.layers.get(id);
+        if self.group_has_children(id) {
+            !disclosure.map_or(layer.group_collapsed, |d| d.group_collapsed)
+        } else {
+            !disclosure.map_or(layer.collapsed, |d| d.collapsed)
+        }
+    }
+
+    pub(crate) fn set_disclosure(&mut self, id: &str, open: bool) -> Result<(), ModelError> {
+        let layer = self
             .index
             .layer(id)
             .ok_or_else(|| ModelError::UnknownId(id.into()))?;
+        let group = self.group_has_children(id);
         let d = self
             .reveal
             .layers
             .entry(id.into())
             .or_insert_with(|| Disclosure {
-                collapsed: l.collapsed,
-                group_collapsed: l.group_collapsed,
+                collapsed: layer.collapsed,
+                group_collapsed: layer.group_collapsed,
                 paths: None,
             });
-        if l.kind == "group" {
-            d.group_collapsed = !d.group_collapsed;
-            d.collapsed = d.group_collapsed;
-        } else {
-            d.collapsed = !d.collapsed;
+        d.collapsed = !open;
+        if group {
+            d.group_collapsed = !open;
         }
+        d.paths = None;
+        Ok(())
+    }
+
+    pub fn toggle_disclosure(&mut self, id: &str) -> Result<(), ModelError> {
+        self.set_disclosure(id, !self.layer_expanded(id))?;
         self.rebuild_rows();
         Ok(())
     }
@@ -967,7 +1032,7 @@ impl TimelineModel {
     /// Option-click on a track header opens or closes every track at once,
     /// as the layer rows' `all` disclosure does for every layer.
     pub fn disclose_all_tracks(&mut self, open: bool) {
-        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let layout = self.track_layout();
         let tracks = self
             .reveal
             .tracks

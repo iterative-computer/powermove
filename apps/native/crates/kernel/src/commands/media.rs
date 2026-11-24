@@ -9,6 +9,18 @@
 use pm_model::{Map, Value};
 
 use super::{Cx, values};
+use crate::project_io::MediaEntry;
+use std::sync::Arc;
+
+/// An owned source carried by the clipboard, shared until the target can save it.
+#[derive(Clone, Debug)]
+pub struct CopiedMedia(pub Arc<MediaEntry>);
+
+impl PartialEq for CopiedMedia {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 use crate::error::CommandError;
 
 /// Media commands.
@@ -21,6 +33,8 @@ pub enum MediaCommand {
     /// Record an imported asset entry (`assets[id]`: name, kind, size,
     /// duration, ...). Label "Import".
     AddAsset { asset_id: String, asset: Value },
+    /// Add a new asset and carry over its embedded source, if it has one.
+    AddCopy { asset_id: String, asset: Value, media: Option<CopiedMedia> },
     /// Remove media (`MediaImport.removeAsset`): the layers showing it go
     /// with it, as before (children parented to them are unparented). Label
     /// "Remove Media".
@@ -46,6 +60,7 @@ impl MediaCommand {
         match self {
             MediaCommand::Replace { .. } => "Replace Media",
             MediaCommand::AddAsset { .. } => "Import",
+            MediaCommand::AddCopy { .. } => "Paste",
             MediaCommand::RemoveAsset { .. } => "Remove Media",
             MediaCommand::RenameAsset { .. } => "Rename Media",
             MediaCommand::SetInterpretation { .. } => "Interpret Footage",
@@ -56,6 +71,12 @@ impl MediaCommand {
 
     pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
         match self {
+            MediaCommand::AddCopy { asset_id, asset, .. } => {
+                if cx.lookup(&["assets".into(), asset_id.as_str().into()]).is_some() {
+                    return Err(CommandError::Invalid(format!("Asset id already exists: {asset_id}")));
+                }
+                MediaCommand::AddAsset { asset_id: asset_id.clone(), asset: asset.clone() }.plan(cx)
+            }
             MediaCommand::Replace { layer_id, asset_id } => {
                 let (loc, layer) = cx.layer_mut_checked(layer_id)?;
                 if !matches!(
@@ -125,6 +146,15 @@ impl MediaCommand {
             }
         }
     }
+}
+
+pub(crate) fn copied_media(command: &crate::Command) -> Option<MediaEntry> {
+    let crate::Command::Media(MediaCommand::AddCopy { asset_id, media: Some(source), .. }) = command else {
+        return None;
+    };
+    let mut entry = (*source.0).clone();
+    entry.id = asset_id.as_str().into();
+    Some(entry)
 }
 
 /// `moveItems` for media: an unknown folder means the top level, and assets

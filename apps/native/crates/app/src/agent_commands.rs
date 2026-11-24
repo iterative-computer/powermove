@@ -68,7 +68,8 @@ pub const AGENT: [(&str, &str, &str, &str); 10] = [
 /// own panel).
 pub fn refused(command: &str) -> Option<Option<&'static str>> {
     Some(match command {
-        "quit" | "closeWindow" | "closeTab" | "newWindow" | "newTab" | "moveTabToNewWindow"
+        "quit" | "closeWindow" | "closeTab" | "closeProject" | "newWindow" | "newTab"
+        | "moveTabToNewWindow"
         | "nextTab" | "previousTab" | "checkForUpdates" | "help" | "palette" | "fieldMenu"
         | "agent" | "bringWorkspace" | "bringSignIns" | "panelLibrary" => None,
         "open" | "openRecent" => Some("open_project"),

@@ -108,6 +108,16 @@ fn main() {
     unsafe {
         std::env::set_var("PM_NATIVE_SHELL_STATE", scratch.join("session.json"));
     }
+    let tabs_mode = pm_shell::tabs_mode();
+    pm_shell::set_tabs_mode(false);
+    let (_, file) = pm_shell::menu::menus()
+        .into_iter()
+        .find(|(title, _)| *title == "File")
+        .unwrap();
+    assert!(file.iter().any(|item| item.label == "Close Project" && item.command == "closeProject"));
+    assert!(file.iter().any(|item| item.label == "Close Window" && item.command == "closeWindow"));
+    pm_shell::set_tabs_mode(tabs_mode);
+
     let heard = Rc::new(RefCell::new(Vec::<String>::new()));
     let started = Rc::new(std::cell::Cell::new(false));
     let factory = Rc::new(
@@ -166,24 +176,38 @@ fn main() {
                     .update(|cx| {
                         let mut options = WindowOptions::new().kind(WindowKind::Dialog);
                         options.parent = Some(handle);
+                        options.titlebar = None;
+                        options.is_resizable = false;
+                        options.is_minimizable = false;
+                        options.is_movable = false;
                         options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
                             point(px(0.), px(0.)),
-                            size(px(420.), px(260.)),
+                            size(px(600.), px(260.)),
                         )));
                         cx.open_window(options, |_, cx| cx.new(|_| Empty))
                     })
                     .unwrap();
                 wait(400).await;
                 let sheet = editor.attachedSheet().expect("the Export dialog is a sheet");
+                let width = sheet.contentView().unwrap().bounds().size.width;
+                assert!((width - 600.).abs() < 1., "sheet content width: {width}");
+                assert!(
+                    !sheet.styleMask().intersects(
+                        NSWindowStyleMask::Resizable | NSWindowStyleMask::Miniaturizable
+                    ),
+                    "the attached sheet has fixed chrome"
+                );
+                let midpoint = |rect: NSRect| rect.origin.x + rect.size.width / 2.;
+                assert!(
+                    (midpoint(sheet.frame()) - midpoint(editor.frame())).abs() < 2.,
+                    "AppKit centers the sheet on its editor"
+                );
                 held("Export", &sheet);
                 wait(400).await;
                 nothing_heard("Export");
                 cx.update(|cx| dialog.update(cx, |_, w, _| w.remove_window()).unwrap());
                 wait(400).await;
-                if let Some(sheet) = editor.attachedSheet() {
-                    editor.endSheet(&sheet);
-                    wait(300).await;
-                }
+                assert!(editor.attachedSheet().is_none(), "closing the dialog ends the sheet");
                 // Composition Settings and the other forms: an AppKit sheet.
                 let form = unsafe {
                     NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -219,8 +243,24 @@ fn main() {
                 nothing_heard("Recovery");
                 editor.endSheet(&sheet);
                 wait(300).await;
+                // Closing the last editor leaves the app running. Its Dock reopen
+                // event opens another editor through the AppKit delegate.
+                cx.update(|cx| handle.update(cx, |_, window, _| window.remove_window()).unwrap());
+                wait(400).await;
+                assert!(cx.update(|cx| cx.windows().is_empty()));
+                let app = NSApplication::sharedApplication(mtm);
+                let delegate = app.delegate().unwrap();
+                let handled: bool = unsafe {
+                    msg_send![&*delegate, applicationShouldHandleReopen: &*app, hasVisibleWindows: false]
+                };
+                assert!(handled);
+                wait(400).await;
+                let reopened = cx.update(|cx| cx.windows());
+                assert_eq!(reopened.len(), 1);
+                assert!(reopened[0].downcast::<pm_shell::view::Editor>().is_some());
+                assert_ne!(reopened[0], handle);
                 println!(
-                    "modal_sheets: Export, Composition Settings and Recovery each hold the project's menu commands and ⌘Z"
+                    "modal_sheets: sheets hold project commands and Dock reopen opens an editor"
                 );
                 std::process::exit(0);
             })

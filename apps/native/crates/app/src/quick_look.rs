@@ -10,14 +10,21 @@ use objc2::{
     sel,
 };
 use objc2_foundation::{NSString, NSURL};
-use std::{cell::RefCell, path::PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+};
 
 #[link(name = "Quartz", kind = "framework")]
 unsafe extern "C" {}
 
 /// What Quick Look shows: the files, in the selection's order.
 #[derive(Default)]
-pub struct Items(RefCell<Vec<Retained<Item>>>);
+pub struct Items {
+    opening: Cell<bool>,
+    files: RefCell<Vec<(PathBuf, String)>>,
+    previews: RefCell<Vec<Retained<Item>>>,
+}
 
 /// One preview: the original file under the name the Project shows (an
 /// original in the library's store is named by its bytes, not by the file).
@@ -53,12 +60,12 @@ define_class!(
     impl Source {
         #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
         fn count(&self, _panel: *mut AnyObject) -> isize {
-            self.ivars().0.borrow().len() as isize
+            self.ivars().previews.borrow().len() as isize
         }
         #[unsafe(method(previewPanel:previewItemAtIndex:))]
         fn item(&self, _panel: *mut AnyObject, index: isize) -> *mut AnyObject {
             self.ivars()
-                .0
+                .previews
                 .borrow()
                 .get(index.max(0) as usize)
                 .map_or(std::ptr::null_mut(), |item| {
@@ -123,53 +130,82 @@ pub fn showing() -> bool {
 /// Project shows; closed again if it is showing). Files that are gone are
 /// left out; none left, nothing opens.
 pub fn toggle(files: Vec<(PathBuf, String)>) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    if showing() {
+        hide();
+    } else {
+        show(files);
+    }
+}
+
+fn hide() {
+    let _: () = unsafe { msg_send![panel(), orderOut: std::ptr::null::<AnyObject>()] };
+}
+
+/// Clicking an attachment toggles its own preview or replaces the open one.
+pub fn show(mut files: Vec<(PathBuf, String)>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    install(mtm);
-    if showing() {
-        let _: () = unsafe { msg_send![panel(), orderOut: std::ptr::null::<AnyObject>()] };
+    files.retain(|(path, _)| path.is_file());
+    if files.is_empty() {
         return;
     }
-    let urls: Vec<Retained<Item>> = files
+    let source = source(mtm);
+    if showing() && has_source(panel(), &source) && *source.ivars().files.borrow() == files {
+        hide();
+        return;
+    }
+    install();
+    *source.ivars().previews.borrow_mut() = files
         .iter()
-        .filter(|(p, _)| p.exists())
-        .map(|(p, name)| {
+        .map(|(path, name)| {
             let data = ItemData {
-                url: NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())),
+                url: NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy())),
                 title: NSString::from_str(name),
             };
             unsafe { msg_send![super(Item::alloc(mtm).set_ivars(data)), init] }
         })
         .collect();
-    if urls.is_empty() {
-        return;
-    }
-    *source(mtm).ivars().0.borrow_mut() = urls;
+    *source.ivars().files.borrow_mut() = files;
     let panel = panel();
     if panel.is_null() {
         return;
     }
+    source.ivars().opening.set(true);
     unsafe {
+        // Becoming key can change the responder chain, including when an
+        // AppKit field held focus in a non-main popover. Bind to the controller
+        // the panel resolves after that transition.
         let _: () = msg_send![panel, updateController];
-        let _: () = msg_send![panel, reloadData];
-        let _: () = msg_send![panel, setCurrentPreviewItemIndex: 0isize];
         let _: () = msg_send![panel, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        let _: () = msg_send![panel, updateController];
+        if has_source(panel, &source) {
+            let _: () = msg_send![panel, reloadData];
+            let _: () = msg_send![panel, setCurrentPreviewItemIndex: 0isize];
+        }
     }
+    source.ivars().opening.set(false);
 }
 
-/// The editor windows' Quick Look control (added once to GPUI's window
-/// class): they accept it while there is something to show and hand the
-/// panel this module's source.
-fn install(mtm: MainThreadMarker) {
-    thread_local!(static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
-    if DONE.with(|d| d.replace(true)) {
-        return;
-    }
-    let _ = source(mtm);
-    extern "C-unwind" fn accepts(_: *mut AnyObject, _: Sel, _panel: *mut AnyObject) -> Bool {
-        let items = SOURCE.with(|s| s.borrow().as_ref().map_or(0, |s| s.ivars().0.borrow().len()));
-        Bool::new(items > 0)
+fn has_source(panel: *mut AnyObject, source: &Retained<Source>) -> bool {
+    let data_source: *mut AnyObject = unsafe { msg_send![panel, dataSource] };
+    std::ptr::eq(data_source, Retained::as_ptr(source).cast::<AnyObject>())
+}
+
+/// The docked view and popover both use GPUI windows. The application
+/// provides a final responder if a native control or the preview takes key.
+fn install() {
+    extern "C-unwind" fn accepts(_: *mut AnyObject, _: Sel, panel: *mut AnyObject) -> Bool {
+        let visible: Bool = unsafe { msg_send![panel, isVisible] };
+        SOURCE.with(|s| {
+            Bool::new(s.borrow().as_ref().is_some_and(|source| {
+                let items = source.ivars();
+                (items.opening.get() || visible.as_bool()) && !items.previews.borrow().is_empty()
+            }))
+        })
     }
     extern "C-unwind" fn begin(_: *mut AnyObject, _: Sel, panel: *mut AnyObject) {
         SOURCE.with(|s| {
@@ -188,7 +224,14 @@ fn install(mtm: MainThreadMarker) {
             let _: () = msg_send![panel, setDelegate: std::ptr::null::<AnyObject>()];
         }
     }
-    for name in [c"GPUIWindow", c"GPUIPanel"] {
+    // Add only to our own classes. A panel class may be registered after
+    // the first preview; class_addMethod leaves installed methods in place.
+    for name in [
+        c"GPUIWindow",
+        c"GPUIPanel",
+        c"GPUIApplication",
+        c"GPUIApplicationDelegate",
+    ] {
         let Some(class) = AnyClass::get(name) else {
             continue;
         };

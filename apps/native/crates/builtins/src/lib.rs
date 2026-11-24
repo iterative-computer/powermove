@@ -1939,13 +1939,13 @@ impl Builtins {
         &self,
         view: Arc<pm_panel_timeline::TimelineModel>,
         refresh: bool,
-    ) {
+    ) -> bool {
         *self.broker.timeline_outline.shared() = Some(view);
-        if refresh && let Ok(realm) = self.realm_of("timeline") {
-            // Geometry can change without a new project, selection, or time
-            // subscription value. Refresh the outline's native projection.
-            let _ = realm.notify_latest(StateChannel::TimelineOutline, "__pmBuiltin.publish(true)");
-        }
+        // Geometry can change without a new project, selection, or time
+        // subscription value. Refresh the outline's native projection.
+        refresh && self.realm_of("timeline").is_ok_and(|realm| {
+            realm.notify_latest(StateChannel::TimelineOutline, "__pmBuiltin.publish(true)").is_ok()
+        })
     }
     fn prepare_timeline_request(
         &self,

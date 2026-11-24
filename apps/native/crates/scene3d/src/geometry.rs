@@ -2,7 +2,7 @@
 //! actor verifies the snapshot before accepting any geometry-derived edits.
 use crate::{Error, Result, fail, navigation::*, schema};
 use pm_geom3d::{
-    gltf::{self, math},
+    gltf::{self, math, pose},
     primitives::Parameters,
     source::{MeshSource, Source},
 };
@@ -27,6 +27,71 @@ pub struct PartHit {
     pub point: Vec3,
     pub distance: f64,
 }
+/// A part is a node in the model, with an optional source material slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPart {
+    pub key: String,
+    pub name: String,
+    pub material: Option<usize>,
+}
+
+fn part_info(model: &gltf::Model, index: usize) -> Option<ModelPart> {
+    let key = pose::part_key(model, index)?;
+    let object = &model.objects[index];
+    let material = match &object.kind {
+        gltf::ObjectKind::Drawable(d) => model.material_sources[d.material],
+        _ => None,
+    };
+    let name = if object.name.trim().is_empty() || object.name.starts_with("mesh_") {
+        match &object.kind {
+            gltf::ObjectKind::Drawable(d) => model.materials.get(d.material)
+                .map(|material| material.name.trim()).filter(|name| !name.is_empty()),
+            _ => None,
+        }
+    } else {
+        Some(object.name.as_str())
+    }.map(|name| name.chars().take(40).collect())
+        .unwrap_or_else(|| format!("Part {}", key.replace('_', ".")));
+    Some(ModelPart {
+        key,
+        name,
+        material,
+    })
+}
+
+pub fn model_parts(model: &crate::import::Model) -> Vec<ModelPart> {
+    let crate::import::Model::Gltf(model) = model else {
+        return vec![];
+    };
+    let nodes = model.traversal();
+    let mut has_surface = vec![false; model.objects.len()];
+    for &index in nodes.iter().rev() {
+        if matches!(model.objects[index].kind, gltf::ObjectKind::Drawable(_)) {
+            has_surface[index] = true;
+        }
+        if has_surface[index]
+            && let Some(parent) = model.objects[index].parent
+        {
+            has_surface[parent] = true;
+        }
+    }
+    nodes
+        .into_iter()
+        .filter(|&index| has_surface[index])
+        .filter_map(|index| part_info(model, index))
+        .take(4096)
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartPlacement {
+    pub part: ModelPart,
+    pub transform: pose::PartTransform,
+    pub pivot: Vec3,
+    pub bounds: Option<Bounds>,
+    pub layer_world: math::Mat4,
+}
+
 pub trait AssetGeometry: Send + Sync {
     fn bounds(&self, id: &str, record: &Value, time: f64) -> Result<Bounds>;
     /// The part of the model asset `id`, placed by the layer matrix `world`
@@ -42,6 +107,30 @@ pub trait AssetGeometry: Send + Sync {
         _direction: Vec3,
     ) -> Result<Option<PartHit>> {
         fail(format!("3D model geometry is not loaded: {id}"))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn pick_model_part(
+        &self,
+        _id: &str,
+        _record: &Value,
+        _world: math::Mat4,
+        _time: f64,
+        _parts: &Value,
+        _origin: Vec3,
+        _direction: Vec3,
+    ) -> Result<Option<PartPlacement>> {
+        Ok(None)
+    }
+    fn model_part(
+        &self,
+        _id: &str,
+        _record: &Value,
+        _world: math::Mat4,
+        _time: f64,
+        _parts: &Value,
+        _key: &str,
+    ) -> Result<Option<PartPlacement>> {
+        Ok(None)
     }
     /// The glTF source uses metres. Its fit is inverted when a command opts
     /// into original size/origin; the renderer's normalized resource is kept.
@@ -103,6 +192,16 @@ impl LoadedAssets {
     ) {
         self.models.insert(id, (record, model));
     }
+    fn loaded_model(&self, id: &str, record: &Value) -> Result<&crate::import::Model> {
+        let (loaded, model) = self
+            .models
+            .get(id)
+            .ok_or_else(|| Error(format!("3D model geometry is not loaded: {id}")))?;
+        if loaded != record {
+            return fail("3D model source changed; reload geometry");
+        }
+        Ok(model)
+    }
     pub fn remove(&mut self, id: &str) {
         self.models.remove(id);
     }
@@ -127,6 +226,39 @@ impl AssetGeometry for LoadedAssets {
             return fail("3D model source changed; reload geometry");
         }
         source_fit(model)
+    }
+    fn pick_model_part(
+        &self,
+        id: &str,
+        record: &Value,
+        world: math::Mat4,
+        time: f64,
+        parts: &Value,
+        origin: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<PartPlacement>> {
+        let model = self.loaded_model(id, record)?;
+        let crate::import::Model::Gltf(model) = model else {
+            return Ok(None);
+        };
+        let picker = gltf::pick::Picker::new(std::sync::Arc::new((**model).clone()));
+        Ok(pick_model_part(
+            &picker, world, time, parts, origin, direction,
+        ))
+    }
+    fn model_part(
+        &self,
+        id: &str,
+        record: &Value,
+        world: math::Mat4,
+        time: f64,
+        parts: &Value,
+        key: &str,
+    ) -> Result<Option<PartPlacement>> {
+        let crate::import::Model::Gltf(model) = self.loaded_model(id, record)? else {
+            return Ok(None);
+        };
+        Ok(model_part(model, world, time, parts, key))
     }
     fn part_at(
         &self,
@@ -265,6 +397,36 @@ impl AssetGeometry for FileAssets {
     fn source_fit(&self, id: &str, record: &Value) -> Result<gltf::Fit> {
         source_fit(&self.resource(id, record)?.model)
     }
+    fn pick_model_part(
+        &self,
+        id: &str,
+        record: &Value,
+        world: math::Mat4,
+        time: f64,
+        parts: &Value,
+        origin: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<PartPlacement>> {
+        Ok(self
+            .resource(id, record)?
+            .picker()
+            .and_then(|picker| pick_model_part(&picker, world, time, parts, origin, direction)))
+    }
+    fn model_part(
+        &self,
+        id: &str,
+        record: &Value,
+        world: math::Mat4,
+        time: f64,
+        parts: &Value,
+        key: &str,
+    ) -> Result<Option<PartPlacement>> {
+        let resource = self.resource(id, record)?;
+        let crate::import::Model::Gltf(model) = &resource.model else {
+            return Ok(None);
+        };
+        Ok(model_part(model, world, time, parts, key))
+    }
     fn part_at(
         &self,
         id: &str,
@@ -280,6 +442,154 @@ impl AssetGeometry for FileAssets {
         }
     }
 }
+fn placed_parts(
+    model: &gltf::Model,
+    layer: &math::Mat4,
+    time: f64,
+    parts: &pose::PartTransforms,
+) -> (pose::Pose, Vec<math::Mat4>, Vec<bool>) {
+    let mut sample = pose::Pose::at(model, time);
+    let visible = pose::apply_parts(model, &mut sample, parts);
+    let (parent, placed) = pose::placed(model, sample.clone(), layer);
+    (sample, pose::world(model, &placed, Some(&parent)), visible)
+}
+
+/// Bake one overridden sample when a skeleton needs the new bone and bind
+/// matrices. Geometry and texture buffers remain shared with the source.
+fn baked_model(model: &gltf::Model, sample: &pose::Pose) -> gltf::Model {
+    let mut model = model.clone();
+    model.clips.clear();
+    for (i, object) in model.objects.iter_mut().enumerate() {
+        object.position = sample.position[i];
+        object.quaternion = sample.quaternion[i];
+        object.scale = sample.scale[i];
+        if let gltf::ObjectKind::Drawable(d) = &mut object.kind {
+            d.morph_influences.clone_from(&sample.influences[i]);
+        }
+    }
+    model
+}
+
+fn model_part(
+    model: &gltf::Model,
+    layer: math::Mat4,
+    time: f64,
+    parts: &Value,
+    key: &str,
+) -> Option<PartPlacement> {
+    let index = pose::part_index(model, key)?;
+    let part = part_info(model, index)?;
+    let transforms = pose::part_transforms(parts);
+    let (sample, worlds, _) = placed_parts(model, &layer, time, &transforms);
+    let mut stack = vec![index];
+    let mut bounds: Option<Bounds> = None;
+    while let Some(node) = stack.pop() {
+        stack.extend(model.objects[node].children.iter().copied());
+        let gltf::ObjectKind::Drawable(d) = &model.objects[node].kind else { continue };
+        let Some((min, max)) = pose::local_box(model, node, d, &sample, &worlds) else { continue };
+        let Ok(next) = transform(Bounds { min, max }, worlds[node]) else { continue };
+        bounds = Some(bounds.map_or(next, |prior| Bounds {
+            min: std::array::from_fn(|i| prior.min[i].min(next.min[i])),
+            max: std::array::from_fn(|i| prior.max[i].max(next.max[i])),
+        }));
+    }
+    Some(PartPlacement {
+        transform: transforms.get(key).copied().unwrap_or_default(),
+        part,
+        pivot: math::apply(&worlds[index], [0.; 3]),
+        bounds,
+        layer_world: layer,
+    })
+}
+
+fn pick_model_part(
+    picker: &gltf::pick::Picker,
+    layer: math::Mat4,
+    time: f64,
+    parts: &Value,
+    origin: Vec3,
+    direction: Vec3,
+) -> Option<PartPlacement> {
+    let transforms = pose::part_transforms(parts);
+    let model = &picker.model;
+    let (sample, worlds, visible) = placed_parts(model, &layer, time, &transforms);
+    let baked = (!transforms.is_empty() && !model.skins.is_empty())
+        .then(|| gltf::pick::Picker::new(std::sync::Arc::new(baked_model(model, &sample))));
+    let picker = baked.as_ref().unwrap_or(picker);
+    let mut posed = picker.pose(&layer, if baked.is_some() { 0. } else { time });
+    posed.world = worlds;
+    let hit = picker.pick(
+        &posed,
+        &gltf::pick::Ray {
+            origin,
+            direction: normalize(direction),
+        },
+        0.,
+        f64::INFINITY,
+        &|_| gltf::pick::Side::Double,
+        &|index| !visible[index],
+    )?;
+    let part = part_info(model, hit.object)?;
+    Some(PartPlacement {
+        transform: transforms.get(&part.key).copied().unwrap_or_default(),
+        part,
+        pivot: math::apply(&posed.world[hit.object], [0.; 3]),
+        bounds: None,
+        layer_world: layer,
+    })
+}
+
+impl crate::render::Resource {
+    /// The native Studio surfaces at one time, with evaluated layer overrides.
+    pub fn parts_with_overrides(
+        &self,
+        time: f64,
+        parts: &Value,
+    ) -> Result<Vec<crate::render::Part>> {
+        let transforms = pose::part_transforms(parts);
+        let crate::import::Model::Gltf(model) = &self.model else {
+            return self.parts(time);
+        };
+        if transforms.is_empty() || !time.is_finite() {
+            return self.parts(time);
+        }
+        let (sample, worlds, visible) = placed_parts(model, &math::IDENTITY, time, &transforms);
+        let surfaces = if model.skins.is_empty() {
+            self.parts(time)?
+        } else {
+            let baked = crate::import::Model::Gltf(Box::new(baked_model(model, &sample)));
+            Self::new(baked).parts(0.)?
+        };
+        let mut placements = vec![];
+        for i in model.traversal() {
+            let gltf::ObjectKind::Drawable(d) = &model.objects[i].kind else {
+                continue;
+            };
+            if let Some(instances) = &d.instances {
+                placements.extend(instances.matrices.iter().map(|matrix| {
+                    (
+                        visible[i],
+                        math::multiply(&worlds[i], &matrix.map(f64::from)),
+                    )
+                }));
+            } else {
+                placements.push((visible[i], worlds[i]));
+            }
+        }
+        if surfaces.len() != placements.len() {
+            return fail("Model surface placement changed");
+        }
+        Ok(surfaces
+            .into_iter()
+            .zip(placements)
+            .filter_map(|(mut part, (visible, world))| {
+                part.world = world;
+                visible.then_some(part)
+            })
+            .collect())
+    }
+}
+
 fn source_fit(model: &crate::import::Model) -> Result<gltf::Fit> {
     let crate::import::Model::Gltf(model) = model else {
         return fail("Real-world import scale requires glTF/GLB geometry in metres");
@@ -622,6 +932,46 @@ mod part_tests {
             .part_at("a", &record, world, 0., [x(1.2), 0., -5.], [0., 0., 1.])
             .unwrap();
         assert_eq!(back.map(|h| h.slot), Some(1));
+    }
+    #[test]
+    fn saved_node_offsets_and_visibility_match_native_surfaces_and_picking() {
+        let resource = crate::render::Resource::load("Camera.glb", &two_parts()).unwrap();
+        let crate::import::Model::Gltf(model) = &resource.model else {
+            panic!("glTF")
+        };
+        let baseline = resource.parts(0.).unwrap();
+        let picker = resource.picker().unwrap();
+        let x = |source: f64| (source - model.fit.center[0]) / model.fit.radius;
+        let pick = |at, parts: &Value| {
+            pick_model_part(
+                &picker,
+                math::IDENTITY,
+                0.,
+                parts,
+                [at, 0., 5.],
+                [0., 0., -1.],
+            )
+        };
+        let body = pick(x(-1.), &Value::Null).unwrap();
+        let lens = pick(x(1.), &Value::Null).unwrap();
+        assert_ne!(body.part.key, lens.part.key);
+        let edits = json!({
+            (&body.part.key): {"name":"Body","p":{"x":{"v":-3.},"rz":{"v":0.}}},
+            (&lens.part.key): {"name":"Lens","p":{"visible":false}}
+        });
+        let surfaces = resource.parts_with_overrides(0., &edits).unwrap();
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].source_material, Some(0));
+        assert!((surfaces[0].world[12] - baseline[0].world[12] + 3.).abs() < 1e-9);
+        assert!(pick(x(-1.), &edits).is_none());
+        assert!(pick(x(1.), &edits).is_none());
+        assert_eq!(pick(x(-1.) - 3., &edits).unwrap().part.key, body.part.key);
+        assert!(
+            resource
+                .parts_with_overrides(0., &json!({"0":{"p":{"visible":false}}}))
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn the_layer_matrix_places_the_model_it_picks() {

@@ -25,6 +25,7 @@ fn main() {
             None,
         ))
     };
+    density_replay_keeps_compat_passthrough_layers(fonts());
     let blur = json!({
         "text": "Blur in\nsecond line", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
         "font": "SF Pro Display", "weight": 700, "size": 44, "tracking": -2, "leading": 1.2,
@@ -1027,4 +1028,136 @@ fn legacy_affine_planes_match_2d(renderer: &mut pm_render::Renderer, failures: &
     renderer
         .text()
         .set_weight(pm_render::text::TextWeight::Exact);
+}
+
+#[cfg(target_os = "macos")]
+fn density_replay_keeps_compat_passthrough_layers(fonts: Box<dyn pm_render::text::TextFonts>) {
+    use pm_eval::{JsResult, Scope};
+    use pm_model::Node;
+    use pm_protocol::{
+        color::Precision,
+        common::{PixelRect, Size},
+    };
+    use pm_render::compat::{CompatAnswer, CompatRasters, CompatSource};
+    use pm_render::composite::effects::EffectFrame;
+    use pm_render::composite::{EffectHost, PreparedEffects};
+    use pm_render::{Feature, MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use std::sync::Arc;
+    use support::doc::{layer, load, no_fill, project, set};
+
+    struct PhysicalEffect;
+    impl EffectHost for PhysicalEffect {
+        fn prepare<'d>(
+            &self,
+            _: &mut Scope<'_, 'd>,
+            _: &'d Node,
+            _: EffectFrame,
+        ) -> JsResult<Result<Option<PreparedEffects>, Feature>> {
+            Ok(Ok(None))
+        }
+        fn needs_composition_density<'d>(
+            &self,
+            _: &mut Scope<'_, 'd>,
+            layer: &'d Node,
+            _: f64,
+            _: bool,
+        ) -> JsResult<bool> {
+            Ok(pm_eval::node::truthy(pm_eval::node::member(
+                Some(layer),
+                "fx",
+            )))
+        }
+    }
+
+    struct Native;
+    impl CompatRasters for Native {
+        fn producing(&self, source: CompatSource) -> bool {
+            source == CompatSource::RasterOverride
+        }
+        fn answer(
+            &self,
+            _: &str,
+            _: &str,
+            _: f64,
+            _: f64,
+            _: CompatSource,
+            _: Option<PixelRect>,
+        ) -> CompatAnswer {
+            CompatAnswer::Native
+        }
+    }
+
+    let shape = layer(
+        "box",
+        "shape",
+        json!({
+            "shape": "rect", "w": 160, "h": 80, "color": "#FF0000", "stroke": 0,
+        }),
+        1500.,
+        850.,
+        2.,
+    );
+    let text = layer(
+        "title",
+        "text",
+        json!({
+            "text": "Visible", "font": "Helvetica", "weight": 600, "size": 60, "color": "#FFFFFF",
+        }),
+        1500.,
+        700.,
+        2.,
+    );
+    let mut effect_owner = layer(
+        "physical",
+        "solid",
+        json!({"color": "#000000", "w": 2, "h": 2}),
+        10.,
+        10.,
+        2.,
+    );
+    set(
+        &mut effect_owner,
+        "fx",
+        json!([{"id": "fx", "type": "physical", "on": true, "p": {}}]),
+    );
+    let doc = load(&project(
+        1920,
+        1080,
+        2.,
+        no_fill(),
+        vec![text, shape, effect_owner],
+    ));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    renderer.set_effect_host(Some(Arc::new(PhysicalEffect)));
+    let mut request = RenderRequest::sized(Size::new(778, 438), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Preview;
+    request.preview_canvas = true;
+    request.read_ahead = true;
+    let draw = |renderer: &mut Renderer| {
+        let frame = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        renderer.read_rgba(&frame).unwrap()
+    };
+    let expected = draw(&mut renderer);
+    let pixel = |x: usize, y: usize| (y * 778 + x) * 4;
+    assert!(expected[pixel(608, 345)] > 0.9, "bottom-right box");
+    assert!(
+        (260..310).any(|y| (550..680).any(|x| expected[pixel(x, y)] > 0.9)),
+        "bottom-right text"
+    );
+    renderer.set_compat_rasters(Some(Arc::new(Native)));
+    assert!(
+        draw(&mut renderer) == expected,
+        "native overrides preserve the density replay"
+    );
 }

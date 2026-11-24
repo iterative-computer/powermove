@@ -83,12 +83,12 @@ impl Drop for Release {
 impl WriteCoordinator for System {
     fn coordinate(&self, path: &Path, work: &mut dyn FnMut(bool)) {
         let shared: Shared = Arc::new((Mutex::new(Turn::Asking), Condvar::new()));
-        let coordinator = NSFileCoordinator::new();
+        let coordinator = objc2::rc::autoreleasepool(|_| NSFileCoordinator::new());
         let asking = Asking(coordinator.clone());
         let (theirs, file) = (shared.clone(), path.to_owned());
         let asked = std::thread::Builder::new()
             .name("pm-file-coordination".into())
-            .spawn(move || {
+            .spawn(move || objc2::rc::autoreleasepool(|_| {
                 let asking = asking;
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
                 let held = theirs.clone();
@@ -124,7 +124,7 @@ impl WriteCoordinator for System {
                     *turn = Turn::GaveUp;
                     changed.notify_all();
                 }
-            });
+            }));
         let (turn, changed) = &*shared;
         let granted = asked.is_ok() && {
             let (mut now, _) = changed
@@ -179,7 +179,7 @@ mod tests {
         let (has_it, wait_for_it) = mpsc::channel();
         let (let_go, released) = mpsc::channel();
         let file = file.to_owned();
-        std::thread::spawn(move || {
+        std::thread::spawn(move || objc2::rc::autoreleasepool(|_| {
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
             let accessor = RcBlock::new(move |_: NonNull<NSURL>| {
                 has_it.send(()).unwrap();
@@ -192,7 +192,7 @@ mod tests {
                 None,
                 &accessor,
             );
-        });
+        }));
         wait_for_it.recv().unwrap();
         released
     }

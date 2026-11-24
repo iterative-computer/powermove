@@ -155,9 +155,8 @@ impl TextureSource for DocumentTextures<'_> {
     }
 }
 
-/// Model assets as the asset store holds them: `kind: 'model'` records
-/// with `format` `obj` (parsed meshes), `gltf` or `glb` (imported scenes),
-/// or `blend` (no geometry in the 3D pass).
+/// The media store supplies canonical GLB for converted meshes. Older
+/// records can identify those meshes by their original source format.
 pub(crate) struct DocumentModels<'a> {
     pub root: &'a Node,
     pub assets: &'a dyn AssetResolver,
@@ -169,22 +168,32 @@ impl super::model::ModelSource for DocumentModels<'_> {
         let Some(record) = node::member(node::member(Some(self.root), "assets"), asset) else {
             return ModelLookup::Missing;
         };
-        let format = str_member(Some(record), "format").unwrap_or_default();
-        let name = str_member(Some(record), "name")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let gltf = match format.as_str() {
-            "gltf" | "glb" => true,
-            "obj" => false,
-            _ if name.ends_with(".glb") || name.ends_with(".gltf") => true,
-            _ if name.ends_with(".obj") => false,
-            _ => return ModelLookup::Missing,
-        };
         let Some(path) = self.assets.path(asset, Some(record)) else {
             return ModelLookup::Missing;
         };
-        if gltf {
+        let is_model = node::is_str(node::member(Some(record), "kind"), "model");
+        let is_gltf = |ext: &str| matches!(ext, "gltf" | "glb" | "vrm");
+        if is_model
+            && path.extension().and_then(|e| e.to_str()).is_some_and(is_gltf)
+        {
             return super::gltf::lookup(&path);
+        }
+        let format = str_member(Some(record), "format")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let name = str_member(Some(record), "name")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
+        if is_gltf(&format) || (format != "obj" && is_gltf(extension)) {
+            return super::gltf::lookup(&path);
+        }
+        if format != "obj" && extension != "obj" {
+            return if is_model && !matches!(format.as_str(), "blend" | "ply" | "splat") {
+                super::gltf::lookup(&path)
+            } else {
+                ModelLookup::Missing
+            };
         }
         match super::legacy::obj_mesh_versioned(&path) {
             Ok((key, mesh)) => ModelLookup::Obj { key, mesh },

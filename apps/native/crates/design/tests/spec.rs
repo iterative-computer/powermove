@@ -12,10 +12,6 @@ use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
     (
-        "metrics.agent_remove_offset",
-        "Remove control outset at an attachment corner",
-    ),
-    (
         "metrics.agent_attachment",
         "Square draft attachment thumbnail edge",
     ),
@@ -969,6 +965,17 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        assert_eq!(
+            m.panel_radius,
+            t.radius.nested(m.popover_radius, m.composer_tray)
+        );
+        assert_eq!(m.inner_radius, t.radius.nested(m.panel_radius, m.gap));
+        assert_eq!(m.media_small_radius, m.inner_radius - m.pill_inset);
+        assert_eq!(
+            m.media_frame_radius,
+            (m.control_radius - m.media_comp_inset).max(2.)
+        );
+        assert_eq!(m.panel_radius - m.text_padding, t.radius.xs);
         let r = t.radius;
         assert_eq!(
             (r.xs, r.sm, r.md, r.lg, r.xl),

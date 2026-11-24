@@ -201,7 +201,8 @@ impl CanvasCache {
     }
 }
 
-const WARM_PANEL_LIMIT: usize = 2;
+/// Maximum detached panel renderers kept warm per editor window.
+pub const WARM_PANEL_LIMIT: usize = 16;
 const WARM_PANEL_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Recently detached views keep their renderer and are never drawn or counted
@@ -272,12 +273,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn dock_panel_cache_keeps_two_detached_views_and_expires_them() {
+    fn dock_panel_cache_keeps_recent_detached_views_and_expires_them() {
         let now = Instant::now();
         let mut cache = WarmPanels::default();
         let earliest = Rc::new(());
         let expired = Rc::downgrade(&earliest);
         cache.retain("pexels".into(), earliest, now);
+        for index in 0..WARM_PANEL_LIMIT - 2 {
+            cache.retain(format!("panel-{index}"), Rc::new(()), now);
+        }
+        assert!(expired.upgrade().is_some());
         let voiceover = Rc::new(());
         cache.retain("voiceover".into(), voiceover.clone(), now);
         let notes = Rc::new(());

@@ -242,7 +242,9 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
     } else {
         "metrics."
     };
-    token.starts_with(group) || (group == "metrics." && token.starts_with("space."))
+    token.starts_with(group)
+        || (group == "metrics." && token.starts_with("space."))
+        || (key == "borderRadius" && token.starts_with("radius."))
 }
 /// IDs in visual depth-first order, compatible with Interaction::tab. Positive
 /// tabindex never reorders a panel away from its visual order.

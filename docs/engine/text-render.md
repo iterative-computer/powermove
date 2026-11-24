@@ -21,8 +21,10 @@ anchor, then samples that texture through the world transform. Resting means
 uniform positive scale within 5% of 100%, without rotation or skew; fractional
 translation keeps the local glyph strike and baseline phase. Other affine
 transforms paint directly at output resolution, including 3D planes whose
-projected homography is affine and in front of the camera. Perspective planes
-keep the local canvas and project it through their homography. Level 2 uses
+projected homography is affine and in front of the camera. During viewer
+playback, read-ahead frames reuse the local raster for plain 2D text where
+possible. Perspective planes keep the local canvas and project it through
+their homography. Level 2 uses
 `Quad::Device`: transforms affect its outlines at the requested output size.
 
 Layout is an exact gate independent of pixels. Raster improvements must
@@ -133,9 +135,9 @@ Exact painter. Legacy macOS fills use the Canvas masks described above to
 preserve authored pixels. Neither path changes font selection or layout.
 Legacy text and captions use the same resting-versus-device-coverage decision
 on 2D layers and affine 3D planes, using the projected transform for planes.
-Resting cases and perspective planes retain local canvas density and bilinear
-sampling. Native level-2 planes retain their perspective-density raster and
-output resampler.
+Plain 2D text on non-final read-ahead frames, resting cases, and perspective
+planes retain local canvas density and bilinear sampling. Native level-2
+planes retain their perspective-density raster and output resampler.
 
 **TEXT-SMOOTH-1:** frames draw with the authored platform weight by default
 (`TextWeight::Smoothed`): legacy macOS fills use the Canvas masks above;

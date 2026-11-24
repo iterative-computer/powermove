@@ -32,6 +32,7 @@ pub struct Properties {
     /// per asset into `slots`).
     pub originals: BTreeMap<String, std::path::PathBuf>,
     slots: BTreeMap<String, Vec<Value>>,
+    model_parts: BTreeMap<String, Vec<pm_scene3d::geometry::ModelPart>>,
     /// The model part a viewer double-click focused, `(layer, slot)`, and
     /// the request number it came with (each request opens its section once).
     part_focus: Option<(String, u64)>,
@@ -507,9 +508,9 @@ impl Properties {
             if model.selected_layers().len() == 1 {
                 let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
                 if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
+                    sections.extend(self.part_sections(model, &layer, &record, time)?);
                     sections
                         .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
-                    sections.extend(self.part_sections(model, &layer, &record, time)?);
                 } else if matches!(record["type"].as_str(), Some("text" | "shape")) {
                     sections.extend(self.extrude_sections(model, &layer, &record, time)?);
                 }
@@ -523,7 +524,13 @@ impl Properties {
                 }
             } else if !audio {
                 let mut rows = vec![];
-                for (id, label, paths, unit, step) in [
+                let three_d = model
+                    .layer(&layer)
+                    .map_err(|e| e.to_string())?
+                    .get("threeD")
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true);
+                let mut groups = vec![
                     (
                         "position",
                         "Position",
@@ -532,17 +539,36 @@ impl Properties {
                         1.,
                     ),
                     ("scale", "Scale", vec!["scale.x", "scale.y"], "%", 1.),
-                    ("rotation", "Rotation", vec!["rotation"], "°", 1.),
+                ];
+                if three_d {
+                    groups[0].2.push("position.z");
+                    groups[1].2.push("scale.z");
+                    groups.extend([
+                        (
+                            "orientation",
+                            "Orientation",
+                            vec!["orientation.x", "orientation.y", "orientation.z"],
+                            "°",
+                            1.,
+                        ),
+                        ("rotation.x", "X Rotation", vec!["rotation.x"], "°", 1.),
+                        ("rotation.y", "Y Rotation", vec!["rotation.y"], "°", 1.),
+                        ("rotation", "Z Rotation", vec!["rotation"], "°", 1.),
+                        ("perspective", "Perspective", vec!["perspective"], "mm", 1.),
+                    ]);
+                } else {
+                    groups.push(("rotation", "Rotation", vec!["rotation"], "°", 1.));
+                }
+                let mut anchor = vec!["anchor.x", "anchor.y"];
+                if three_d {
+                    anchor.push("anchor.z");
+                }
+                groups.extend([
                     ("skew", "Skew", vec!["skew"], "°", 1.),
-                    (
-                        "anchor",
-                        "Anchor Point",
-                        vec!["anchor.x", "anchor.y"],
-                        "px",
-                        1.,
-                    ),
+                    ("anchor", "Anchor Point", anchor, "px", 1.),
                     ("opacity", "Opacity", vec!["opacity"], "%", 1.),
-                ] {
+                ]);
+                for (id, label, paths, unit, step) in groups {
                     let mut axes = vec![];
                     let mut animation = "static";
                     let (mut bound, mut expression) = (vec![], None);
@@ -559,18 +585,20 @@ impl Properties {
                             .ok_or_else(|| format!("Non-numeric {path}"))?;
                         if state.key_at_playhead {
                             animation = "key-at-playhead";
-                        } else if state.animated {
+                        } else if state.animated && animation == "static" {
                             animation = "animated";
                         }
                         bound.push(binding.clone());
                         expression = expression.or_else(|| state.expression.clone());
                         let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
                         if paths.len() > 1 {
-                            axis["axis"] = json!(if index == 0 { "X" } else { "Y" });
+                            axis["axis"] = json!(["X", "Y", "Z"][index]);
                         }
                         if *path == "opacity" {
                             axis["min"] = json!(0);
                             axis["max"] = json!(100);
+                        } else if *path == "perspective" {
+                            axis["min"] = json!(0.001);
                         }
                         axes.push(axis);
                     }
@@ -975,24 +1003,6 @@ impl Properties {
         let mut rows = vec![
             json!({"id":"3d.scene.quality","label":"Render Quality","control":{"kind":"choice","binding":lease,"value":quality,"options":options}}),
         ];
-        let q = &summary["quality"];
-        let detail = format!(
-            "{}–{} samples · {} bounces{}{}",
-            q["minSamples"].as_f64().unwrap_or(0.),
-            q["maxSamples"].as_f64().unwrap_or(0.),
-            q["maxBounces"].as_f64().unwrap_or(0.),
-            if q["caustics"] == true {
-                " · caustics"
-            } else {
-                ""
-            },
-            if q["denoise"] == true {
-                " · denoised"
-            } else {
-                ""
-            },
-        );
-
         let sky = summary["sky"].as_str().unwrap_or("none");
         let mut skies: Vec<Value> = vec![json!({"v":"none","label":"None"})];
         skies.extend(
@@ -1020,7 +1030,7 @@ impl Properties {
         let lease = self.control_lease("3d.scene.shot");
         rows.push(json!({"id":"3d.scene.shot","label":"Shot","control":{"kind":"choice","binding":lease,"value":"add","options":shots}}));
         Ok(Some(
-            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"note":detail,"action":"set-up-studio"}),
+            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"action":"set-up-studio"}),
         ))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
@@ -1033,10 +1043,83 @@ impl Properties {
             .clone();
         json!({"handle":handle,"channels":[id]})
     }
-    /// An imported model's material slots (its parts): one section each,
-    /// closed until opened, with the part's own values until it's edited.
-    /// Edits are overrides in the project (`mi.<slot>.<key>`, keyframeable);
-    /// the file is never touched.
+    fn part_transform_rows(
+        &mut self,
+        model: &Inspector,
+        record: &Value,
+        layer: &str,
+        key: &str,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        let p = model.published();
+        let evaluated = pm_kernel::commands::scene3d::resolve_scene(
+            &p.snapshot,
+            p.snapshot.open_comp().as_deref(),
+            time,
+        )
+        .map_err(|error| error.to_string())?;
+        let values = evaluated.scene["objects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|object| object["id"] == layer)
+            .map(|object| &object["parts"][key]["p"]);
+        let defaults =
+            pm_scene3d::schema::properties("part", None).map_err(|error| error.to_string())?;
+        let saved = &record["d"]["data"]["object"]["parts"][key]["p"];
+        let local = time - record["from"].as_f64().unwrap_or(0.);
+        let fps = p
+            .snapshot
+            .root()
+            .and_then(|root| root.get("fps"))
+            .and_then(|v| v.to_value().as_f64())
+            .filter(|fps| *fps > 0.)
+            .unwrap_or(30.);
+        let mut rows = vec![];
+        for &(field, label) in pm_scene3d::part_material::TRANSFORM_FIELDS {
+            let id = format!("3d.part.{key}.{field}");
+            let lease = self.control_lease(&id);
+            let value = values
+                .and_then(|values| values.get(field))
+                .map(|channel| channel.get("v").unwrap_or(channel))
+                .or_else(|| saved[field].get("v"))
+                .unwrap_or(&defaults[field]["v"]);
+            let keys = saved[field]["kf"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let animation = if keys.iter().any(|k| {
+                k["t"]
+                    .as_f64()
+                    .is_some_and(|t| (t - local).abs() < 0.5 / fps)
+            }) {
+                "key-at-playhead"
+            } else if keys.is_empty() {
+                "static"
+            } else {
+                "animated"
+            };
+            let control = if field == "visible" {
+                json!({"kind":"toggle","binding":lease,"value":value})
+            } else {
+                let unit = match field {
+                    "scale" => "%",
+                    "rx" | "ry" | "rz" => "°",
+                    _ => "",
+                };
+                let mut axis = json!({"binding":lease,"value":value,"unit":unit,"step":if unit.is_empty() {0.1} else {1.},"precision":2});
+                if field == "scale" {
+                    axis["min"] = json!(0);
+                    axis["max"] = json!(10000);
+                }
+                json!({"kind":"number","axes":[axis]})
+            };
+            rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":control}));
+        }
+        Ok(rows)
+    }
+
+    /// Pick one node and expose its transform and source material slot.
     fn part_sections(
         &mut self,
         model: &mut Inspector,
@@ -1048,9 +1131,60 @@ impl Properties {
         let Some(asset) = object["source"]["assetId"].as_str() else {
             return Ok(vec![]);
         };
-        if object["useSourceMaterials"] != true {
+        if !self.model_parts.contains_key(asset) {
+            let parts = self.originals.get(asset).and_then(|path| {
+                let name = path.file_name()?.to_str()?;
+                let bytes = std::fs::read(path).ok()?;
+                let source = pm_scene3d::import::load(name, &bytes).ok()?;
+                Some(pm_scene3d::geometry::model_parts(&source))
+            });
+            if let Some(parts) = parts {
+                self.model_parts.insert(asset.to_owned(), parts);
+            }
+        }
+        let active = pm_panel_studio3d::properties::active_part(&model.published().selection)
+            .and_then(|(selected, key)| (selected == layer).then(|| key.to_owned()));
+        let mut parts = self.model_parts.get(asset).cloned().unwrap_or_default();
+        if let Some(saved) = object["parts"].as_object() {
+            for (key, part) in saved {
+                if !parts.iter().any(|entry| &entry.key == key) {
+                    parts.push(pm_scene3d::geometry::ModelPart {
+                        key: key.clone(),
+                        name: part["name"].as_str().unwrap_or("Part").into(),
+                        material: None,
+                    });
+                }
+            }
+        }
+        if parts.is_empty() {
             return Ok(vec![]);
         }
+        let selected = active
+            .as_deref()
+            .and_then(|key| parts.iter().find(|part| part.key == key));
+        let mut options = vec![json!({"v":null,"label":"Whole Model"})];
+        options.extend(
+            parts
+                .iter()
+                .map(|part| json!({"v":part.key,"label":part.name})),
+        );
+        let id = "3d.part.select";
+        let lease = self.control_lease(id);
+        let mut rows = vec![
+            json!({"id":id,"label":"Edit","control":{"kind":"choice","binding":lease,"value":selected.map(|p| &p.key),"options":options}}),
+        ];
+        if let Some(part) = selected {
+            rows.extend(self.part_transform_rows(model, record, layer, &part.key, time)?);
+        }
+        let mut sections = vec![
+            json!({"id":"3d.part","title":"Model Part","collapsed":self.collapsed.get("3d.part").copied().unwrap_or(false),"rows":rows}),
+        ];
+        let Some(index) = selected
+            .and_then(|part| part.material)
+            .map(|slot| slot as u64)
+        else {
+            return Ok(sections);
+        };
         if !self.slots.contains_key(asset) {
             let slots = self
                 .originals
@@ -1073,12 +1207,11 @@ impl Properties {
         let locked = !model.editable(layer);
         let live = pm_panel_studio3d::extrude::sources(model.published(), layer)
             .map_err(|e| e.to_string())?;
-        let mut sections = vec![];
-        for slot in slots {
-            let Some(index) = slot["index"].as_u64() else {
-                continue;
-            };
-            let title = slot["name"].as_str().unwrap_or("Part").to_owned();
+        for slot in slots
+            .into_iter()
+            .filter(|slot| slot["index"].as_u64() == Some(index))
+        {
+            let title = "Part Material";
             let stored = &object["sourceMaterialProperties"][index.to_string()];
             let mut rows = vec![];
             for (key, label, range, unit) in [
@@ -1127,7 +1260,17 @@ impl Properties {
                 // creates the override.
                 let id = format!("3d.part.{index}.{key}");
                 let lease = self.control_lease(&id);
-                let value = slot["values"][key].clone();
+                let material_key = match key {
+                    "metallic" => "metalness",
+                    "emissionColor" => "emissive",
+                    "emissionIntensity" => "emissiveIntensity",
+                    _ => key,
+                };
+                let value = if object["useSourceMaterials"] == true {
+                    slot["values"][key].clone()
+                } else {
+                    object["material"]["p"][material_key]["v"].clone()
+                };
                 let control = match range {
                     None => {
                         json!({"kind":"colour","binding":lease,"value":if value.is_string() { value } else { json!("#FFFFFF") }})
@@ -1148,7 +1291,7 @@ impl Properties {
             let lease = self.control_lease(&id);
             rows.push(json!({"id":id,"label":"Color Map","locked":locked,"animation":null,"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
             let id = format!("3d.part.{index}");
-            let collapsed = self.collapsed.get(&id).copied().unwrap_or(true);
+            let collapsed = self.collapsed.get(&id).copied().unwrap_or(false);
             let focused = self
                 .part_focus
                 .as_ref()
@@ -1279,80 +1422,87 @@ impl Properties {
             ));
         }
         let collapsed = self.collapsed.get("3d.extrude").copied().unwrap_or(false);
-        let mut section =
+        let section =
             json!({"id":"3d.extrude","title":"Extrude","collapsed":collapsed,"rows":rows});
-        if !on {
-            section["note"] = json!(
-                "Give this layer depth, a bevel and its own surfaces. It lights like any 3D model."
-            );
-        }
         sections.push(section);
         if !on {
             return Ok(sections);
         }
         let sources = pm_panel_studio3d::extrude::sources(model.published(), layer)
             .map_err(|e| e.to_string())?;
-        for (surface, title) in extrude::SURFACE_LABELS {
-            if *surface == "bevel" && bevel == "none" {
+        let surfaces = extrude::SURFACE_LABELS.iter()
+            .filter(|(surface, _)| *surface != "bevel" || bevel != "none")
+            .map(|(surface, _)| *surface)
+            .collect::<Vec<_>>();
+        let surface = model.published().selection.channel()
+            .and_then(|channel| channel.strip_prefix("studioSurface:"))
+            .and_then(|channel| channel.split_once(':'))
+            .filter(|(_, owner)| *owner == layer)
+            .and_then(|(side, _)| surfaces.iter().copied().find(|surface| *surface == side))
+            .unwrap_or("front");
+        let options: Vec<_> = surfaces.iter().map(|side| json!({
+            "v":side, "label": match *side {
+                "bevel" => "Bevel", "side" => "Side", "back" => "Back", _ => "Front",
+            },
+        })).collect();
+        let selector = "3d.extrude.surface";
+        let lease = self.control_lease(selector);
+        let mut rows = vec![row(selector, "Surface", Value::Null,
+            json!({"kind":"choice","binding":lease,"value":surface,"options":options}))];
+        // Each surface reads like a model's material: Opacity in percent,
+        // and Emission (colour) with its strength, as on 3D models.
+        for (key, label, range, unit, precision) in [
+            ("color", "Color", None, "", 2),
+            ("roughness", "Roughness", Some((0., 1., 0.01)), "", 2),
+            ("metallic", "Metalness", Some((0., 1., 0.01)), "", 2),
+            ("opacity", "Opacity", Some((0., 100., 1.)), "%", 0),
+            ("emissionColor", "Emission", None, "", 2),
+            (
+                "emissionIntensity",
+                "Emission Strength",
+                Some((0., 100., 0.1)),
+                "",
+                1,
+            ),
+        ] {
+            let path = format!("ms.{surface}.{key}");
+            if extrude::has_override(record, surface, key)
+                && let Some(r) = channel(self, model, &path, label, unit, range)?
+            {
+                rows.push(r);
                 continue;
             }
-            let mut rows = vec![];
-            // Each surface reads like a model's material: Opacity in percent,
-            // and Emission (colour) with its strength, as on 3D models.
-            for (key, label, range, unit, precision) in [
-                ("color", "Color", None, "", 2),
-                ("roughness", "Roughness", Some((0., 1., 0.01)), "", 2),
-                ("metallic", "Metalness", Some((0., 1., 0.01)), "", 2),
-                ("opacity", "Opacity", Some((0., 100., 1.)), "%", 0),
-                ("emissionColor", "Emission", None, "", 2),
-                (
-                    "emissionIntensity",
-                    "Emission Strength",
-                    Some((0., 100., 0.1)),
-                    "",
-                    1,
-                ),
-            ] {
-                let path = format!("ms.{surface}.{key}");
-                if extrude::has_override(record, surface, key)
-                    && let Some(r) = channel(self, model, &path, label, unit, range)?
-                {
-                    rows.push(r);
-                    continue;
+            // Not stored yet: what it starts from, created on first edit.
+            let id = format!("3d.extrude.{surface}.{key}");
+            let lease = self.control_lease(&id);
+            let value = extrude::surface_value(record, surface, key);
+            let control = match range {
+                None => json!({"kind":"colour","binding":lease,"value":value}),
+                Some((min, max, step)) => {
+                    json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":precision,"min":min,"max":max}]})
                 }
-                // Not stored yet: what it starts from, created on first edit.
-                let id = format!("3d.extrude.{surface}.{key}");
-                let lease = self.control_lease(&id);
-                let value = extrude::surface_value(record, surface, key);
-                let control = match range {
-                    None => json!({"kind":"colour","binding":lease,"value":value}),
-                    Some((min, max, step)) => {
-                        json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":precision,"min":min,"max":max}]})
-                    }
-                };
-                rows.push(row(&id, label, Value::Null, control));
-            }
-            // Color and Emission maps: a live layer, group or composition
-            // can paint the surface or make it glow (AE 27 layers as materials).
-            for (slot, label) in [("color", "Color Map"), ("emissive", "Emission Map")] {
-                let map = &data["surfaces"][surface]["maps"][slot];
-                let mut options = vec![json!({"v":null,"label":"None"})];
-                options.extend(sources.iter().cloned());
-                let value = extrude::source_value(map);
-                let id = format!("3d.extrude.{surface}.map.{slot}");
-                let lease = self.control_lease(&id);
-                rows.push(row(
-                    &id,
-                    label,
-                    Value::Null,
-                    json!({"kind":"choice","binding":lease,"value":value,"options":options}),
-                ));
-            }
-            let id = format!("3d.extrude.{surface}");
-            let closed = *surface != "front";
-            let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
-            sections.push(json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows}));
+            };
+            rows.push(row(&id, label, Value::Null, control));
         }
+        // Color and Emission maps: a live layer, group or composition
+        // can paint the surface or make it glow (AE 27 layers as materials).
+        for (slot, label) in [("color", "Color Map"), ("emissive", "Emission Map")] {
+            let map = &data["surfaces"][surface]["maps"][slot];
+            let mut options = vec![json!({"v":null,"label":"None"})];
+            options.extend(sources.iter().cloned());
+            let value = extrude::source_value(map);
+            let id = format!("3d.extrude.{surface}.map.{slot}");
+            let lease = self.control_lease(&id);
+            rows.push(row(
+                &id,
+                label,
+                Value::Null,
+                json!({"kind":"choice","binding":lease,"value":value,"options":options}),
+            ));
+        }
+        let id = "3d.extrude.material";
+        let collapsed = self.collapsed.get(id).copied().unwrap_or(false);
+        sections.push(json!({"id":id,"title":"Surface Material","collapsed":collapsed,"rows":rows}));
         Ok(sections)
     }
     /// 3d-studio.md §8: Model, Material and its groups, Light, Camera, Shot
@@ -1555,7 +1705,7 @@ impl Properties {
                     push(
                         &mut groups,
                         "Model",
-                        toggle(self, "3d.useSourceMaterials", "Model Materials", on),
+                        toggle(self, "3d.useSourceMaterials", "Use File Materials", on),
                     );
                 }
                 if object["useSourceMaterials"] != true {
@@ -1740,9 +1890,13 @@ impl Properties {
             } else {
                 "static"
             };
+            let group = match field.group {
+                "Coat and Glass" | "Surface" | "Emission" => "Material Details",
+                _ => field.group,
+            };
             push(
                 &mut groups,
-                field.group,
+                group,
                 json!({"id":field.id,"label":field.label,"locked":locked,"animation":animation,"control":control}),
             );
         }
@@ -1850,7 +2004,7 @@ impl Properties {
             }
             Role::Camera => {
                 let environment = &data["environment"];
-                // Samples per frame now come from the composition's Render
+                // Samples per frame come from the composition's Render
                 // Quality; the camera shows that same control, not a second one.
                 let preset = pm_panel_studio3d::properties::scene_summary(model.published())
                     .ok()
@@ -1906,8 +2060,9 @@ impl Properties {
         }
         // Maps and options read after the material's own looks.
         groups.sort_by_key(|(title, _)| match *title {
-            "Texture Maps" => 1,
-            "Material Options" => 2,
+            "Material Details" => 1,
+            "Texture Maps" => 2,
+            "Material Options" => 3,
             _ => 0,
         });
         Ok(groups
@@ -1917,9 +2072,7 @@ impl Properties {
                 // Disclosure groups start closed unless a row inside is animated.
                 let closed = matches!(
                     title,
-                    "Coat and Glass"
-                        | "Surface"
-                        | "Emission"
+                    "Material Details"
                         | "Material Options"
                         | "Texture Maps"
                         | "Atmosphere"
@@ -2726,6 +2879,25 @@ impl Properties {
             {
                 return Err("The selection changed".into());
             }
+            if control == "extrude.surface" {
+                let layer = model.primary().ok_or("Choose a layer")?;
+                let surface = value.as_str().filter(|surface| {
+                    pm_panel_studio3d::extrude::SURFACE_LABELS.iter().any(|(name, _)| name == surface)
+                }).ok_or("Choose an extrusion surface")?;
+                return Ok(Request::new(caller, pm_kernel::SelectionCall::Channel(
+                    Some(format!("studioSurface:{surface}:{layer}")),
+                ).user()));
+            }
+            if control == "part.select" {
+                let key = value.as_str();
+                if key.is_none() && !matches!(value, pm_model::Value::Null) {
+                    return Err("Choose a model part".into());
+                }
+                let layer = model.primary().ok_or("Choose a model")?;
+                let select = pm_panel_studio3d::properties::select_part(layer, key)
+                    .map_err(|error| error.to_string())?;
+                return Ok(Request::new(caller, select.user()));
+            }
             let (label, commands) = pm_panel_studio3d::properties::command(
                 &published,
                 time,
@@ -2985,6 +3157,64 @@ impl Properties {
                 intent["collapsed"].as_bool().ok_or("collapsed")?,
             );
             return Ok(None);
+        }
+        if let Some((key, field)) = path
+            .strip_prefix("3d.part.")
+            .and_then(|p| p.split_once('.'))
+            && pm_scene3d::part_material::TRANSFORM_FIELDS
+                .iter()
+                .any(|(name, _)| *name == field)
+            && self.handles.contains_key(path)
+            && (intent["type"] == "key"
+                || matches!(
+                    intent["action"].as_str(),
+                    Some("add-key" | "remove-animation")
+                ))
+        {
+            let p = model.published();
+            let layer = model.primary().ok_or("Choose a model")?;
+            if p.selection.layers() != model.selected_layers() {
+                return Err("The selection changed".into());
+            }
+            let mut commands =
+                pm_panel_studio3d::properties::part_commands(p, time, layer, key, "", &json!({}))
+                    .map_err(|error| error.to_string())?;
+            let layer_id = layer.into();
+            let channel = format!("pt.{key}.{field}");
+            let key_id = pm_kernel::new_id("kf");
+            let command =
+                if intent["removeAnimation"] == true || intent["action"] == "remove-animation" {
+                    pm_kernel::KeyframeCommand::ClearAll {
+                        layer_id,
+                        channel,
+                        time,
+                    }
+                } else if intent["action"] == "add-key" {
+                    pm_kernel::KeyframeCommand::Add {
+                        layer_id,
+                        channel,
+                        time,
+                        key_id,
+                        value: None,
+                    }
+                } else {
+                    pm_kernel::KeyframeCommand::Toggle {
+                        layer_id,
+                        channel,
+                        time,
+                        key_id,
+                        value: None,
+                    }
+                };
+            commands.push(command.into());
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Keyframe Model Part".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
+                },
+            )));
         }
         let handle = self.handles.get(path).ok_or("Unknown property row")?;
         if intent["type"] == "set-value" {

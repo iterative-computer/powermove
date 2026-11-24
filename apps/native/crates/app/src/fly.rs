@@ -16,10 +16,32 @@ const MAX_PITCH: f64 = 89.;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Held {
-    pub left: bool,
-    pub right: bool,
-    pub up: bool,
-    pub down: bool,
+    keys: u8,
+}
+
+impl Held {
+    pub fn set(&mut self, key: &str, pressed: bool) {
+        let bit = match key {
+            "a" => 0,
+            "left" => 1,
+            "d" => 2,
+            "right" => 3,
+            "e" => 4,
+            "r" => 5,
+            "q" => 6,
+            "f" => 7,
+            _ => return,
+        };
+        let mask = 1 << bit;
+        self.keys = if pressed {
+            self.keys | mask
+        } else {
+            self.keys & !mask
+        };
+    }
+    fn active(&self, mask: u8) -> f64 {
+        f64::from(u8::from(self.keys & mask != 0))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,8 +135,8 @@ impl Fly {
         // speed or one step when flying slowly or not at all.
         let pace = self.speed.abs().max(self.step) * gear * dt;
         let right = normalize(cross(f, [0., 1., 0.]));
-        let side = f64::from(self.held.right as u8) - f64::from(self.held.left as u8);
-        let lift = f64::from(self.held.up as u8) - f64::from(self.held.down as u8);
+        let side = self.held.active(0b1100) - self.held.active(0b0011);
+        let lift = self.held.active(0b0011_0000) - self.held.active(0b1100_0000);
         if length(right) > 1e-9 {
             self.position = add(self.position, mul(right, side * pace));
         }
@@ -188,7 +210,7 @@ mod tests {
             target: [0., 0., 0.],
             zoom: 1.,
         });
-        f.held.up = true;
+        f.held.set("e", true);
         let at = f.position;
         f.tick(0.1);
         let d = sub(f.position, at);
@@ -227,5 +249,16 @@ mod tests {
         }
         let moved = |f: &Fly| 10. - f.position[2];
         assert!(moved(&b) > moved(&a) && moved(&a) > moved(&c));
+    }
+
+    #[test]
+    fn releasing_one_alias_keeps_the_other_held() {
+        let mut held = Held::default();
+        held.set("a", true);
+        held.set("left", true);
+        held.set("a", false);
+        assert_eq!(held.active(0b0011), 1.);
+        held.set("left", false);
+        assert_eq!(held.active(0b0011), 0.);
     }
 }

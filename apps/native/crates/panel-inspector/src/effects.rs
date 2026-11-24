@@ -348,7 +348,13 @@ impl Inspector {
         layer: &str,
         fallback: &str,
     ) -> Result<(Request, EffectSelection), InspectorError> {
-        let removing = self.active_effects(layer, fallback)?;
+        let removing = if self.effects.layer.as_deref() == Some(layer)
+            && self.effects.ids.iter().any(|id| id == fallback)
+        {
+            self.active_effects(layer, fallback)?
+        } else {
+            vec![self.effect(layer, fallback)?]
+        };
         let ids = removing
             .iter()
             .map(|f| text(f, "id").to_owned())

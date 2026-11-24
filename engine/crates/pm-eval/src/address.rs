@@ -538,6 +538,14 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
                     &js("Part Materials"),
                 );
             }
+            for (key, part) in entries_or_empty(node::member(object, "parts")) {
+                collect_kf(
+                    &mut out,
+                    node::member(part.node(), "p"),
+                    &cat(&[&s("pt."), &key]),
+                    &js("Part Transform"),
+                );
+            }
         }
         Some(Layer3dRole::Light) => {
             let light = node::member_checked(data, "light")?;
@@ -660,6 +668,7 @@ pub fn is_scene_key(key: &[u8]) -> bool {
         b"geo.",
         b"ms.",
         b"mi.",
+        b"pt.",
     ]
     .iter()
     .any(|p| key.starts_with(p))

@@ -71,6 +71,12 @@ pub fn catalog() -> &'static Value {
                     "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
                 });
             }
+            if tool["name"] == "apply_commands" {
+                let description = tool["description"].as_str().unwrap();
+                tool["description"] = Value::String(format!(
+                    "{description} Use add_marker only when requested or when a few sparse structural cues would help."
+                ));
+            }
             let overlay = &speed_catalog()["overlays"][tool["name"].as_str().unwrap()];
             if let Some(note) = overlay["note"].as_str() {
                 let existing = tool["description"].as_str().unwrap();

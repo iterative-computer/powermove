@@ -88,7 +88,7 @@ pub fn parse_splat(bytes: &[u8]) -> Result<Data> {
     Ok(Data { splats })
 }
 #[derive(Clone, Copy)]
-enum Ty {
+pub(super) enum Ty {
     F32,
     F64,
     U8,
@@ -99,7 +99,7 @@ enum Ty {
     I32,
 }
 impl Ty {
-    fn parse(s: &str) -> Result<Self> {
+    pub(super) fn parse(s: &str) -> Result<Self> {
         match s {
             "float" | "float32" => Ok(Self::F32),
             "double" | "float64" => Ok(Self::F64),
@@ -112,7 +112,7 @@ impl Ty {
             _ => fail("Unsupported PLY scalar type"),
         }
     }
-    fn size(self) -> usize {
+    pub(super) fn size(self) -> usize {
         match self {
             Self::F64 => 8,
             Self::U8 | Self::I8 => 1,
@@ -120,7 +120,7 @@ impl Ty {
             _ => 4,
         }
     }
-    fn read(self, b: &[u8], o: usize) -> f64 {
+    pub(super) fn read(self, b: &[u8], o: usize) -> f64 {
         match self {
             Self::F32 => f32_at(b, o),
             Self::F64 => f64::from_le_bytes(b[o..o + 8].try_into().unwrap()),
@@ -133,6 +133,36 @@ impl Ty {
         }
     }
 }
+/// Keep Gaussian and point-only PLY files on the existing splat route.
+pub(super) fn is_mesh_ply(bytes: &[u8]) -> bool {
+    let mut vertex = false;
+    let mut faces = false;
+    let head = &bytes[..bytes.len().min(65536)];
+    for raw in head.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(raw) else {
+            break;
+        };
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("end_header") => return faces,
+            Some("element") => {
+                let kind = words.next();
+                vertex = kind == Some("vertex");
+                if kind == Some("face") {
+                    faces = words.next().and_then(|v| v.parse::<usize>().ok()) != Some(0);
+                }
+            }
+            Some("property") if vertex => {
+                if matches!(words.last(), Some("f_dc_0" | "scale_0" | "rot_0")) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn parse_ply(bytes: &[u8]) -> Result<Data> {
     let head = &bytes[..bytes.len().min(65536)];
     let mut offset = 0;

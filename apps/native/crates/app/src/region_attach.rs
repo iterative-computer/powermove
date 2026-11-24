@@ -29,6 +29,12 @@ pub(crate) fn composition_region(
     size: [f64; 2],
 ) -> Option<(u32, u32, u32, u32)> {
     let [cw, ch] = size;
+    if ![x, y, w, h, origin.0, origin.1, scale, cw, ch]
+        .into_iter().all(f64::is_finite)
+        || scale <= 0. || cw <= 0. || ch <= 0. || w < 0. || h < 0.
+    {
+        return None;
+    }
     let to = |px: f64, py: f64| ((px - origin.0) / scale, (py - origin.1) / scale);
     if w == 0. && h == 0. {
         let (cx, cy) = to(x, y);
@@ -50,12 +56,17 @@ pub(crate) fn crop(
     height: u32,
     (x, y, w, h): (u32, u32, u32, u32),
 ) -> (u32, u32, Vec<u8>) {
+    let stride = width as usize * 4;
+    if stride.checked_mul(height as usize).is_none_or(|len| len > rgba.len()) {
+        return (0, 0, Vec::new());
+    }
     let (x, y) = (x.min(width), y.min(height));
     let (w, h) = (w.min(width - x), h.min(height - y));
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let row_bytes = w as usize * 4;
+    let mut out = Vec::with_capacity(row_bytes * h as usize);
     for row in y..y + h {
-        let start = ((row * width + x) * 4) as usize;
-        out.extend_from_slice(&rgba[start..start + (w * 4) as usize]);
+        let start = row as usize * stride + x as usize * 4;
+        out.extend_from_slice(&rgba[start..start + row_bytes]);
     }
     (w, h, out)
 }

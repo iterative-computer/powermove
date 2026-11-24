@@ -97,7 +97,8 @@ struct Frame {
 pub(super) struct Bindings {
     request: SceneRequest,
     tier: Tier,
-    frames: HashMap<(String, String), Result<Frame, String>>,
+    frames: HashMap<(String, String), Result<Option<Frame>, String>>,
+    playback: bool,
 }
 fn map_key(source: &Value) -> String {
     source.to_string()
@@ -423,8 +424,13 @@ impl DocumentSource {
     ) -> Result<Vec<(String, Value)>, String> {
         // Selectors belong to this immutable document; file/font/time changes
         // affect captured pixels, not which receivers reference which sources.
-        let mut cached=self.material_references.lock().map_err(|_|"Material reference cache poisoned")?;
-        if let Some(references)=cached.get(&request.composition) { return Ok(references.as_ref().clone()); }
+        let mut cached = self
+            .material_references
+            .lock()
+            .map_err(|_| "Material reference cache poisoned")?;
+        if let Some(references) = cached.get(&request.composition) {
+            return Ok(references.as_ref().clone());
+        }
         let comp = Comp::resolve(&self.snapshot.document, &request.composition)
             .map_err(|e| e.to_string())?;
         let mut out = vec![];
@@ -444,7 +450,7 @@ impl DocumentSource {
                     .map(|source| (id.into(), source)),
             );
         }
-        cached.insert(request.composition.clone(),Arc::new(out.clone()));
+        cached.insert(request.composition.clone(), Arc::new(out.clone()));
         Ok(out)
     }
     pub(super) fn captured_material(
@@ -452,20 +458,37 @@ impl DocumentSource {
         request: &SceneRequest,
         owner: &str,
         source: &Value,
-    ) -> Result<(String, Arc<Vec<u8>>), String> {
+    ) -> Result<Option<(String, Arc<Vec<u8>>)>, String> {
         let bindings = self
             .capture_bindings
             .lock()
             .map_err(|_| "Material capture bindings poisoned")?;
-        let frame = bindings
+        let Some(frame) = bindings
             .as_ref()
             .filter(|b| b.request == *request)
             .and_then(|b| b.frames.get(&(owner.into(), map_key(source))))
-            .ok_or("Live layer/group material capture is not ready")?
+        else {
+            return Ok(None);
+        };
+        Ok(frame
             .as_ref()
-            .map_err(Clone::clone)?;
-        Ok((format!("capture:{}", frame.key), frame.pixels.clone()))
+            .map_err(Clone::clone)?
+            .as_ref()
+            .map(|frame| (format!("capture:{}", frame.key), frame.pixels.clone())))
     }
+
+    fn previous_material(&self, binding_key: &(String, String)) -> Option<Frame> {
+        self.capture_bindings
+            .lock()
+            .ok()?
+            .as_ref()?
+            .frames
+            .get(binding_key)?
+            .as_ref()
+            .ok()?
+            .clone()
+    }
+
     pub(super) fn capture_materials(
         &self,
         renderer: &mut pm_render::Renderer,
@@ -473,6 +496,8 @@ impl DocumentSource {
         tier: Tier,
     ) -> Result<bool, String> {
         let refs = self.material_references(request)?;
+        let interrupt = crate::MATERIAL_PLAYBACK.with(|value| value.borrow().clone());
+        let playback = interrupt.is_some() && !matches!(tier, Tier::Final { .. });
         if refs.is_empty() {
             return Ok(false);
         }
@@ -504,13 +529,29 @@ impl DocumentSource {
         let mut scope = Scope::new(&mut evaluator, &receiver, &project);
         let time = request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
         let mut frames = HashMap::new();
-        let resolver = pm_render::MapResolver {
-            paths: self.media.paths.clone(),
-            originals: self.media.originals.clone(),
-        };
         for (owner, source) in refs {
+            let receiver_layer = receiver
+                .layers()
+                .iter()
+                .find(|layer| pm_eval::node::is_str(layer.get("id"), &owner));
+            // Start decoding the first map just before its receiver's cut.
+            // Match timing only: a hidden Studio object can still supply
+            // geometry and materials to a visible scatter.
+            let time = if playback
+                && let Some(receiver) = receiver_layer
+                && let Some(start) = pm_eval::node::number(receiver.get("from"))
+            {
+                let end =
+                    pm_eval::node::number(receiver.get("dur")).map(|duration| start + duration);
+                if time < start - 0.25 || end.is_some_and(|end| time > end + 1e-6) {
+                    continue;
+                }
+                time.max(start)
+            } else {
+                time
+            };
             let binding_key = (owner.clone(), map_key(&source));
-            let result = (|| -> Result<Frame, String> {
+            let result = (|| -> Result<Option<Frame>, String> {
                 let plan = {
                     let mut plans = self
                         .capture_plans
@@ -540,24 +581,38 @@ impl DocumentSource {
                 let fps = pm_eval::node::number(target.member("fps"))
                     .unwrap_or(30.)
                     .max(1.);
+                // A 60 fps scene does not need to convert 60 full-resolution
+                // source planes for a screen that is only a part of the preview.
+                let capture_rate = if playback { fps.min(30.) } else { fps };
                 let at = if plan.layer.is_some() {
+                    let origin = if playback {
+                        receiver_layer
+                            .and_then(|layer| pm_eval::node::number(layer.get("from")))
+                            .unwrap_or(0.)
+                    } else {
+                        0.
+                    };
+                    let time =
+                        origin + ((time - origin) * capture_rate + 1e-6).floor() / capture_rate;
                     (time * fps + 1e-6).floor() / fps
                 } else {
-                    let layer = receiver
-                        .layers()
-                        .iter()
-                        .find(|l| pm_eval::node::is_str(l.get("id"), &owner))
-                        .ok_or("Material receiver disappeared")?;
+                    let layer = receiver_layer.ok_or("Material receiver disappeared")?;
                     let mapped = scope
                         .source_time_with(layer, time, pm_eval::retime::Retiming::Legacy, None)
                         .map_err(|e| e.message)?;
-                    ((mapped * fps + 1e-6)
+                    let at = (mapped * capture_rate + 1e-6).floor() / capture_rate;
+                    ((at * fps + 1e-6)
                         .floor()
                         .max(0.)
                         .min((target.duration() * fps).ceil().max(1.) - 1.))
                         / fps
                 };
                 let mut key = plan.key.clone();
+                if playback {
+                    // Retimed receivers can use different frames of one
+                    // source. A queued preview belongs to its own receiver.
+                    key.push_str(&format!(":receiver:{owner}"));
+                }
                 if plan.expressions {
                     key.push_str(&format!(":revision:{}", self.snapshot.revision));
                 }
@@ -574,31 +629,71 @@ impl DocumentSource {
                         }
                     }
                 }
-                let frame = renderer
-                    .capture_material(
-                        &self.snapshot.document,
-                        &pm_render::MaterialCaptureRequest {
-                            composition: plan.composition.clone(),
-                            layer: plan.layer.clone(),
-                            time: pm_protocol::common::Ticks::new(
-                                (at * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
-                            )
-                            .map_err(|e| format!("{e:?}"))?,
-                            width: 1024,
-                            height: 1024,
-                            source_key: key,
-                            frame_key: plan.clock.key(&self.snapshot.document, at)?,
-                            cache_bytes: 128 * 1024 * 1024,
-                            final_output: matches!(tier, Tier::Final { .. }),
-                        },
-                        &resolver,
+                if plan
+                    .files
+                    .iter()
+                    .any(|asset| self.media.resolving.contains(asset))
+                {
+                    return Ok(None);
+                }
+                let size = if playback { 512 } else { 1024 };
+                let capture = pm_render::MaterialCaptureRequest {
+                    composition: plan.composition.clone(),
+                    layer: plan.layer.clone(),
+                    time: pm_protocol::common::Ticks::new(
+                        (at * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
                     )
-                    .map_err(|e| e.to_string())?;
-                let pixels = frame.pixels.clone();
-                Ok(Frame {
-                    key: frame.key.clone(),
-                    pixels,
-                })
+                    .map_err(|e| format!("{e:?}"))?,
+                    width: size,
+                    height: size,
+                    source_key: key,
+                    frame_key: plan.clock.key(&self.snapshot.document, at)?,
+                    cache_bytes: if playback {
+                        16 * 1024 * 1024
+                    } else {
+                        128 * 1024 * 1024
+                    },
+                    final_output: matches!(tier, Tier::Final { .. }),
+                };
+                let result = if playback {
+                    renderer.set_interrupt(interrupt.clone());
+                    let result = renderer.try_capture_material(
+                        &self.snapshot.document,
+                        &capture,
+                        &self.media,
+                    );
+                    renderer.set_interrupt(None);
+                    result
+                } else {
+                    renderer
+                        .capture_material(&self.snapshot.document, &capture, &self.media)
+                        .map(Some)
+                };
+                let previous = self.previous_material(&binding_key);
+                match result {
+                    Ok(Some(frame)) => {
+                        let key = frame.key.clone();
+                        if let Some(frame) = previous.filter(|frame| frame.key == key) {
+                            return Ok(Some(frame));
+                        }
+                        let pixels = if playback {
+                            Arc::new(expand_playback_map(&frame.pixels, size as usize))
+                        } else {
+                            frame.pixels.clone()
+                        };
+                        Ok(Some(Frame { key, pixels }))
+                    }
+                    Ok(None) | Err(pm_render::RenderError::MediaPending) => {
+                        Ok(previous.filter(|_| playback))
+                    }
+                    Err(error) if !capture.final_output => {
+                        if std::env::var_os("STUDIO_TIMINGS").is_some() {
+                            eprintln!("Studio material capture {owner}: {error}");
+                        }
+                        Ok(previous.filter(|_| playback))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             })();
             frames.insert(binding_key, result);
         }
@@ -609,11 +704,13 @@ impl DocumentSource {
         let changed = bindings.as_ref().is_none_or(|old| {
             old.request != *request
                 || old.tier != tier
+                || old.playback != playback
                 || old.frames.len() != frames.len()
                 || frames
                     .iter()
                     .any(|(key, frame)| match (old.frames.get(key), frame) {
-                        (Some(Ok(a)), Ok(b)) => a.key != b.key,
+                        (Some(Ok(Some(a))), Ok(Some(b))) => a.key != b.key,
+                        (Some(Ok(None)), Ok(None)) => false,
                         (Some(Err(a)), Err(b)) => a != b,
                         _ => true,
                     })
@@ -621,8 +718,28 @@ impl DocumentSource {
         *bindings = Some(Bindings {
             request: request.clone(),
             tier,
+            playback,
             frames,
         });
         Ok(changed)
     }
+}
+
+// The Studio array has one grid for imported images and live maps. Expand
+// the playback map to that grid after the smaller render/readback.
+fn expand_playback_map(pixels: &[u8], size: usize) -> Vec<u8> {
+    let stride = size * 8;
+    let mut expanded = vec![0; stride * size * 2];
+    for (source, rows) in pixels
+        .chunks_exact(size * 4)
+        .zip(expanded.chunks_exact_mut(stride * 2))
+    {
+        let (first, second) = rows.split_at_mut(stride);
+        for (pixel, pair) in source.chunks_exact(4).zip(first.chunks_exact_mut(8)) {
+            pair[..4].copy_from_slice(pixel);
+            pair[4..].copy_from_slice(pixel);
+        }
+        second.copy_from_slice(first);
+    }
+    expanded
 }

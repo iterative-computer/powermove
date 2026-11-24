@@ -544,6 +544,62 @@ fn paste_moves_the_block_to_the_playhead_and_remaps_links() {
 }
 
 #[test]
+fn paste_keeps_a_matte_in_the_target_and_clears_an_absent_one() {
+    let mut s = store();
+    for (matte, id, expected) in [
+        ("top", "with-matte", Some("top")),
+        ("foreign", "without-matte", None),
+    ] {
+        let mut copied = layer(&s, "box");
+        copied.as_object_mut().unwrap().insert("matteSource", Value::from(matte));
+        run(&mut s, LayerCommand::Paste {
+            comp: None, layers: vec![copied], new_ids: vec![id.into()], index: None, time: None,
+        });
+        assert_eq!(layer(&s, id).get("matteSource").and_then(Value::as_str), expected);
+    }
+}
+
+#[test]
+fn pasted_embedded_media_is_admitted_atomically_with_the_layer() {
+    use pm_kernel::commands::media::{CopiedMedia, MediaCommand};
+    use pm_kernel::project_io::{MediaEntry, MediaSource};
+    use std::sync::Arc;
+
+    let mut s = store();
+    let asset = MediaCommand::AddCopy {
+        asset_id: "pasted-image".into(),
+        asset: parse(r#"{"kind":"image","name":"Pasted image","persisted":true}"#).unwrap(),
+        media: Some(CopiedMedia(Arc::new(MediaEntry {
+            id: "source-image".into(),
+            media_type: "image/png".into(),
+            revision: "source-revision".into(),
+            source: MediaSource::Memory(Arc::from(&b"synthetic image bytes"[..])),
+        }))),
+    };
+    let mut clipboard = layer(&s, "clip");
+    clipboard.as_object_mut().unwrap().get_mut("d").unwrap().as_object_mut().unwrap()
+        .insert("asset", Value::from("pasted-image"));
+    let paste = |id: &str| LayerCommand::Paste {
+        comp: None, layers: vec![clipboard.clone()], new_ids: vec![id.into()], index: None, time: None,
+    };
+    assert!(s.transact("Paste", Origin::Interface, &[asset.clone().into(), paste("top").into()]).is_err());
+    assert!(s.media().get("pasted-image").is_none());
+    assert!(s.root().unwrap().get("assets").unwrap().get("pasted-image").is_none());
+
+    s.transact("Paste", Origin::Interface, &[asset.into(), paste("pasted-layer").into()]).unwrap().unwrap();
+    assert_eq!(get(&layer(&s, "pasted-layer"), &["d", "asset"]).as_str(), Some("pasted-image"));
+    let copied = s.media().get("pasted-image").unwrap();
+    let MediaSource::Memory(bytes) = &copied.source else { panic!("clipboard bytes were lost") };
+    assert_eq!(bytes.as_ref(), b"synthetic image bytes");
+    s.undo().unwrap();
+    assert!(!ids(&s).contains(&"pasted-layer".into()));
+    assert!(s.root().unwrap().get("assets").unwrap().get("pasted-image").is_none());
+    s.redo().unwrap();
+    assert_eq!(get(&layer(&s, "pasted-layer"), &["d", "asset"]).as_str(), Some("pasted-image"));
+    assert!(s.media().get("pasted-image").is_some());
+}
+
+#[test]
 fn an_inserted_block_keeps_names_group_local_poses_and_locks_in_one_step() {
     let mut s = store();
     let before = s.revision();
@@ -629,6 +685,71 @@ fn reorder_and_restack() {
 }
 
 // ── timing ──────────────────────────────────────────────────────────────────
+
+fn trim_group_store() -> DocumentStore {
+    store_with(|project| {
+        project.as_object_mut().unwrap().insert("layers", parse(r#"[
+            {"id":"g","type":"group","from":1,"dur":8,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
+            {"id":"n","type":"group","group":"g","from":2,"dur":6,"p":{}},
+            {"id":"leaf","type":"shape","group":"n","from":3,"dur":5,"p":{}},
+            {"id":"locked","type":"shape","group":"g","from":1,"dur":8,"lock":true,"p":{}},
+            {"id":"empty","type":"group","from":2,"dur":3,"p":{}}
+        ]"#).unwrap());
+    })
+}
+
+#[test]
+fn group_trim_out_updates_explicit_layers_and_undo_restores_their_spans() {
+    let mut s = trim_group_store();
+    let ids = ["g", "n", "leaf", "locked", "empty"];
+    let durations = |s: &DocumentStore| ids.map(|id| num(&layer(s, id), &["dur"]));
+    let before = durations(&s);
+    for (time, expected) in [(11., [10., 9., 8., 8., 9.]), (6., [5., 4., 3., 8., 4.])] {
+        run(
+            &mut s,
+            TimingCommand::TrimOut {
+                layer_ids: ids.map(str::to_owned).to_vec(),
+                time,
+            },
+        );
+        assert_eq!(durations(&s), expected);
+        s.undo().unwrap();
+        assert_eq!(durations(&s), before);
+    }
+
+    run(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["g".into()],
+            time: 7.,
+        },
+    );
+    assert_eq!(durations(&s), [6., 6., 5., 8., 3.]);
+}
+
+#[test]
+fn group_trim_in_rebases_group_keys_and_preserves_the_old_end() {
+    let mut s = trim_group_store();
+    run(
+        &mut s,
+        TimingCommand::TrimIn {
+            layer_ids: ["g", "n", "leaf", "locked"].map(str::to_owned).to_vec(),
+            time: 4.,
+        },
+    );
+    for (id, from, dur) in [
+        ("g", 4., 5.),
+        ("n", 4., 4.),
+        ("leaf", 4., 4.),
+        ("locked", 1., 8.),
+    ] {
+        let l = layer(&s, id);
+        assert_eq!((num(&l, &["from"]), num(&l, &["dur"])), (from, dur), "{id}");
+    }
+    let g = layer(&s, "g");
+    let key = get(&g, &["p", "opacity", "kf", "0"]);
+    assert_eq!(num(&g, &["from"]) + num(key, &["t"]), 5.);
+}
 
 #[test]
 fn trim_in_keeps_media_frames_and_clamps_to_the_source() {
@@ -1915,4 +2036,37 @@ fn g3_intentional_time_remaps_keep_their_authored_length() {
     run(&mut s, pm_kernel::ContentCommand::Set { layer_id: "clip".into(), patch: [("timeRemap".into(), Value::from(true))].into_iter().collect(), time: 0.0 });
     run(&mut s, TimingCommand::TrimOut { layer_ids: vec!["clip".into()], time: 20.0 });
     assert_eq!(num(&layer(&s, "clip"), &["dur"]), 18.0);
+}
+
+#[test]
+fn enabling_three_d_initializes_missing_channels_and_depth_affects_projection() {
+    let mut store = DocumentStore::new_untitled(parse(PROJECT).unwrap());
+    let before = projected_anchor(&store, "box");
+    run(
+        &mut store,
+        LayerCommand::Set {
+            layer_id: "box".into(),
+            patch: LayerPatch {
+                three_d: Some(true),
+                ..Default::default()
+            },
+        },
+    );
+    let layer = layer(&store, "box");
+    assert_eq!(num(&layer, &["p", "perspective", "v"]), 50.);
+    assert_eq!(num(&layer, &["p", "scale.z", "v"]), 100.);
+    assert_eq!(num(&layer, &["p", "orientation.z", "v"]), 0.);
+    assert_eq!(num(&layer, &["p", "position.x", "v"]), 50.);
+    assert_eq!(projected_anchor(&store, "box"), before);
+
+    run(
+        &mut store,
+        pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+            "box",
+            "position.z",
+            100.,
+            0.,
+        )),
+    );
+    assert_ne!(projected_anchor(&store, "box"), before);
 }

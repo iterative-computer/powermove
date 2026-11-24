@@ -875,40 +875,42 @@ impl CoreTextRegistry {
     }
 
     fn font_bytes(&mut self, ct: &CTFont) -> (FontBytes, u32, String) {
-        let ps = unsafe { ct.post_script_name() }.to_string();
-        let cg_ps = unsafe { ct.graphics_font(std::ptr::null_mut()) };
-        let cg_ps = objc2_core_graphics::CGFont::post_script_name(Some(&cg_ps))
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let url = unsafe { ct.attribute(kCTFontURLAttribute) }
-            .and_then(|u| u.downcast::<CFURL>().ok())
-            .and_then(|u| u.to_file_path());
-        if let Some(path) = &url
-            && let Some((data, key)) = self.file_bytes(path)
-            && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps])
-        {
-            return (data, index, key);
-        }
-        // No file (or no matching face in it): rebuild an sfnt from the
-        // tables CoreText serves, as Skia does for HarfBuzz on macOS. The
-        // tables are of the font's file as it is now: its version is
-        // recorded as a read, so whoever holds work to the fonts read
-        // holds it to this file too.
-        if let Some(path) = &url
-            && !self.files.contains_key(path.as_path())
-            && let Some(version) = crate::file_version::FileVersion::of(path)
-        {
-            crate::system_fonts::note_read(path, version);
-        }
-        if let Some((d, key)) = self.table_fonts.get(&ps) {
-            return (d.clone(), 0, key.clone());
-        }
-        let bytes = sfnt_from_tables(ct);
-        let key = content_key(&bytes);
-        let d = FontBytes::new(bytes);
-        self.blobs.insert(key.clone(), d.clone());
-        self.table_fonts.insert(ps, (d.clone(), key.clone()));
-        (d, 0, key)
+        objc2::rc::autoreleasepool(|_| {
+            let ps = unsafe { ct.post_script_name() }.to_string();
+            let cg_ps = unsafe { ct.graphics_font(std::ptr::null_mut()) };
+            let cg_ps = objc2_core_graphics::CGFont::post_script_name(Some(&cg_ps))
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let url = unsafe { ct.attribute(kCTFontURLAttribute) }
+                .and_then(|u| u.downcast::<CFURL>().ok())
+                .and_then(|u| u.to_file_path());
+            if let Some(path) = &url
+                && let Some((data, key)) = self.file_bytes(path)
+                && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps])
+            {
+                return (data, index, key);
+            }
+            // No file (or no matching face in it): rebuild an sfnt from the
+            // tables CoreText serves, as Skia does for HarfBuzz on macOS. The
+            // tables are of the font's file as it is now: its version is
+            // recorded as a read, so whoever holds work to the fonts read
+            // holds it to this file too.
+            if let Some(path) = &url
+                && !self.files.contains_key(path.as_path())
+                && let Some(version) = crate::file_version::FileVersion::of(path)
+            {
+                crate::system_fonts::note_read(path, version);
+            }
+            if let Some((d, key)) = self.table_fonts.get(&ps) {
+                return (d.clone(), 0, key.clone());
+            }
+            let bytes = sfnt_from_tables(ct);
+            let key = content_key(&bytes);
+            let d = FontBytes::new(bytes);
+            self.blobs.insert(key.clone(), d.clone());
+            self.table_fonts.insert(ps, (d.clone(), key.clone()));
+            (d, 0, key)
+        })
     }
 
     fn intern(
@@ -1194,9 +1196,22 @@ impl CoreTextRegistry {
         t
     }
 
+    fn match_font_family(&mut self, family: &str, desc: &FontDesc) -> Option<CFRetained<CTFont>> {
+        self.match_installed_family(family, desc).or_else(|| {
+            // AppKit excludes its UI monospaced font from available families.
+            // An installed SF Mono family takes precedence over this alias.
+            (family.eq_ignore_ascii_case("SF Mono") || family.eq_ignore_ascii_case("ui-monospace"))
+                .then(|| system_monospace(desc))
+        })
+    }
+
     /// `MatchFontFamily` with the feature flags Chromium 152 ships with
     /// (AppKit style matching and AppKit PostScript matching).
-    fn match_font_family(&mut self, family: &str, desc: &FontDesc) -> Option<CFRetained<CTFont>> {
+    fn match_installed_family(
+        &mut self,
+        family: &str,
+        desc: &FontDesc,
+    ) -> Option<CFRetained<CTFont>> {
         if family.is_empty() || self.unavailable.contains(family) {
             return None;
         }
@@ -1677,6 +1692,21 @@ fn skia_exact_copy(ct: &CTFont, size: f32) -> CFRetained<CTFont> {
     unsafe { base.copy_with_attributes(size as f64, std::ptr::null(), Some(&desc)) }
 }
 
+fn system_monospace(desc: &FontDesc) -> CFRetained<CTFont> {
+    let size = f64::from(desc.size);
+    let weight = f64::from(to_ct_weight(desc.weight.clamp(100., 900.) as i32));
+    let font = nsfont_to_ct(&NSFont::monospacedSystemFontOfSize_weight(size, weight));
+    if desc.italic {
+        let italic = CTFontSymbolicTraits::TraitItalic;
+        if let Some(face) =
+            unsafe { font.copy_with_symbolic_traits(size, std::ptr::null(), italic, italic) }
+        {
+            return face;
+        }
+    }
+    font
+}
+
 fn nsfont_to_ct(f: &NSFont) -> CFRetained<CTFont> {
     // NSFont is toll-free bridged to CTFont.
     let ptr = f as *const NSFont as *const CTFont;
@@ -1864,51 +1894,53 @@ mod snapshot_tests {
 /// Files of the installed faces whose family, display or PostScript name is
 /// `family`, Regular faces first, then by PostScript name.
 fn installed_family_files(family: &str) -> Vec<PathBuf> {
-    let normalize = |s: &str| {
-        s.trim()
-            .trim_matches(|c| c == '"' || c == '\'')
-            .to_lowercase()
-    };
-    let key = normalize(family);
-    if key.is_empty() {
-        return vec![];
-    }
-    let all = unsafe { CTFontCollection::from_available_fonts(None) };
-    let Some(list) = (unsafe { all.matching_font_descriptors() }) else {
-        return vec![];
-    };
-    // SAFETY: the array holds CTFontDescriptors.
-    let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
-    let mut candidates: Vec<(String, bool, PathBuf)> = Vec::new();
-    for desc in list.iter() {
-        let string = |k: &CFString| {
-            unsafe { desc.attribute(k) }
-                .and_then(|v| v.downcast::<CFString>().ok())
-                .map(|s| s.to_string())
+    objc2::rc::autoreleasepool(|_| {
+        let normalize = |s: &str| {
+            s.trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_lowercase()
         };
-        let ps = string(unsafe { kCTFontNameAttribute }).unwrap_or_default();
-        let names = [
-            string(unsafe { kCTFontFamilyNameAttribute }),
-            string(unsafe { kCTFontDisplayNameAttribute }),
-            Some(ps.clone()),
-        ];
-        if !names.iter().flatten().any(|n| normalize(n) == key) {
-            continue;
+        let key = normalize(family);
+        if key.is_empty() {
+            return vec![];
         }
-        let style = string(unsafe { kCTFontStyleNameAttribute })
-            .or_else(|| string(unsafe { kCTFontDisplayNameAttribute }))
-            .unwrap_or_default();
-        let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }
-            .and_then(|u| u.downcast::<CFURL>().ok())
-            .and_then(|u| u.to_file_path())
-        else {
-            continue;
+        let all = unsafe { CTFontCollection::from_available_fonts(None) };
+        let Some(list) = (unsafe { all.matching_font_descriptors() }) else {
+            return vec![];
         };
-        candidates.push((ps, style.to_lowercase().contains("regular"), path));
-    }
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates.sort_by_key(|c| !c.1);
-    candidates.into_iter().map(|(_, _, path)| path).collect()
+        // SAFETY: the array holds CTFontDescriptors.
+        let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+        let mut candidates: Vec<(String, bool, PathBuf)> = Vec::new();
+        for desc in list.iter() {
+            let string = |k: &CFString| {
+                unsafe { desc.attribute(k) }
+                    .and_then(|v| v.downcast::<CFString>().ok())
+                    .map(|s| s.to_string())
+            };
+            let ps = string(unsafe { kCTFontNameAttribute }).unwrap_or_default();
+            let names = [
+                string(unsafe { kCTFontFamilyNameAttribute }),
+                string(unsafe { kCTFontDisplayNameAttribute }),
+                Some(ps.clone()),
+            ];
+            if !names.iter().flatten().any(|n| normalize(n) == key) {
+                continue;
+            }
+            let style = string(unsafe { kCTFontStyleNameAttribute })
+                .or_else(|| string(unsafe { kCTFontDisplayNameAttribute }))
+                .unwrap_or_default();
+            let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }
+                .and_then(|u| u.downcast::<CFURL>().ok())
+                .and_then(|u| u.to_file_path())
+            else {
+                continue;
+            };
+            candidates.push((ps, style.to_lowercase().contains("regular"), path));
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.sort_by_key(|c| !c.1);
+        candidates.into_iter().map(|(_, _, path)| path).collect()
+    })
 }
 
 /// What an installed family offers for variation (`inspectFont`): `None` when

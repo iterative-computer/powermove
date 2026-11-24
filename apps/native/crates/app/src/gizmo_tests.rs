@@ -200,6 +200,11 @@ impl Host for Recording {
     fn focus_part(&self, layer: &str, slot: Option<u64>, _: &mut App) {
         self.0.parts.borrow_mut().push((layer.into(), slot));
     }
+    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        if let Some(owner) = self.0.lease.borrow().as_ref() {
+            owner.read(cx);
+        }
+    }
     fn input(&self, at: f64, _: &mut App) {
         self.0.stamps.borrow_mut().push(at);
     }
@@ -999,8 +1004,12 @@ fn digits_reach_the_3d_view_only_while_it_has_the_keyboard_in_free_view() {
     assert!(!crate::gizmo::studio_key("look", true, true, false), "0 never turns 3D on by key");
     assert!(!crate::gizmo::studio_key("nav", false, true, true), "the 3D view has no keyboard");
     assert!(crate::gizmo::studio_key("nav", true, true, true));
-    assert!(crate::gizmo::studio_key("look", true, true, true), "0 leaves Free View");
-    assert!(crate::gizmo::studio_key("fly", true, true, false));
+    assert!(
+        crate::gizmo::studio_key("look", true, true, true),
+        "0 leaves Free View"
+    );
+    assert!(crate::gizmo::studio_key("fly", false, true, false));
+    assert!(!crate::gizmo::studio_key("fly", false, false, false));
 }
 #[gpui::test]
 fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
@@ -2769,7 +2778,8 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(cx: &m
     assert_eq!(*s.recorder.parts.borrow(), [("model".to_string(), Some(0))]);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
-        kernel.published(PROJECT).unwrap().selection.layers() == ["model".to_string()]
+        let p = kernel.published(PROJECT).unwrap();
+        p.selection.layers() == ["model".to_string()] && p.selection.channel() == Some("studioPart:0_0:model")
     });
     // Further right along the middle, the lens answers with its own slot.
     for x in (330..640).step_by(10) {
@@ -3253,6 +3263,43 @@ fn files_dropped_on_the_viewer_are_imported_there(cx: &mut TestAppContext) {
         .simulate_event(gpui::FileDropEvent::Submit { position: at });
     s.vcx.run_until_parked();
     assert_eq!(*s.recorder.files.borrow(), paths);
+}
+
+#[gpui::test]
+fn studio_view_commands_run_after_the_controller_update(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let owner = gpui::VisualContext::new_window_entity(&mut s.vcx, |_, _| 0);
+    *s.recorder.lease.borrow_mut() = Some(owner.clone());
+    let capture = Rc::new(Cell::new(false));
+    let command = |vcx: &mut VisualTestContext, group: &str, value: &str| {
+        let recorder = s.recorder.clone();
+        owner.update_in(vcx, |_, window, cx| {
+            // The delegate reads the owner while pushing each view.
+            crate::session::defer_studio_view(
+                s.surface.clone(),
+                group.into(),
+                value.into(),
+                capture.clone(),
+                move || recorder.canvas_focuses.set(recorder.canvas_focuses.get() + 1),
+                window,
+                cx,
+            );
+        });
+    };
+
+    command(&mut s.vcx, "fly", "");
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(capture.get());
+    assert_eq!(s.recorder.canvas_focuses.get(), 1);
+
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_fly_end(false, cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!capture.get());
+
+    command(&mut s.vcx, "look", "free");
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    assert!(!capture.get());
+    assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }
 
 /// Fly navigation (Shift+`, Blender's Fly) through the shot camera: confirm

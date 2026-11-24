@@ -72,9 +72,7 @@ fn prepare_import_scale(
     }
     let id = args["object"]["source"]["assetId"]
         .as_str()
-        .ok_or_else(|| {
-            Error::invalid("keepRealWorldScale requires an imported glTF/GLB assetId")
-        })?;
+        .ok_or_else(|| Error::invalid("keepRealWorldScale requires an imported model assetId"))?;
     // Apply further transforms after import, so the source's shared origin
     // and units cannot be confused with already-normalized transform values.
     if args["object"]
@@ -93,18 +91,22 @@ fn prepare_import_scale(
         .transpose()
         .map_err(Error::kernel)?
         .ok_or_else(|| Error::invalid("Imported model asset was not found"))?;
-    let format = record["format"]
+    let name_extension = |name: &str| name.rsplit_once('.').map(|(_, ext)| ext.to_owned());
+    let format = record["native3dSourceFormat"]
         .as_str()
+        .map(str::to_owned)
         .or_else(|| {
-            record["name"]
+            record["native3dSources"][0]["name"]
                 .as_str()
-                .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+                .and_then(name_extension)
         })
-        .unwrap_or("")
+        .or_else(|| record["format"].as_str().map(str::to_owned))
+        .or_else(|| record["name"].as_str().and_then(name_extension))
+        .unwrap_or_default()
         .to_ascii_lowercase();
-    if !["glb", "gltf"].contains(&format.as_str()) {
+    if !pm_scene3d::import::path::has_metre_units(&format) {
         return Err(Error::invalid(
-            "Real-world import scale requires glTF/GLB; other source formats do not declare reliable metre units",
+            "Real-world import scale requires a model with known units",
         ));
     }
     let fit = assets.source_fit(id, &record).map_err(Error::kernel)?;

@@ -88,6 +88,12 @@ fn only_pinned_native_overlays_change_the_frozen_catalog() {
                 .unwrap_or_default();
             assert!(!required.contains(&Value::from("compositionId")), "{name}");
         }
+        if name == "apply_commands" {
+            let base = tool["description"].as_str().unwrap()
+                .strip_suffix(" Use add_marker only when requested or when a few sparse structural cues would help.")
+                .expect("native marker guidance");
+            tool["description"] = json!(base);
+        }
         let overlay = &speed["overlays"][name];
         if let Some(note) = overlay["note"].as_str() {
             let base = tool["description"].as_str().unwrap()

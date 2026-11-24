@@ -33,11 +33,21 @@ impl Open {
     pub fn prepare(extra: &pm_model::Map, profile: &Path) -> Self {
         let library = installed(&crate::extensions::roots(profile));
         let mut warnings = vec![];
-        let bundle = Bundle::read(extra).unwrap_or_else(|error| {
+        let mut bundle = Bundle::read(extra).unwrap_or_else(|error| {
             warnings.push(format!(
                 "The bundled extension manifest couldn’t be read. {error}"
             ));
             Bundle::default()
+        });
+        // Older exports could report the app's own 3D layers as a missing extension.
+        bundle.entries.retain(|entry| {
+            !(entry.id == "powermove"
+                && entry.status == Status::Unavailable
+                && !entry.items.is_empty()
+                && entry
+                    .items
+                    .iter()
+                    .all(|item| item.definition.starts_with("powermove.")))
         });
         let excluded = bundle.exclusions(&library);
         let mut required = vec![];
@@ -315,6 +325,10 @@ pub fn sheet(
             point(px(0.), px(0.)),
             size(px(tokens.metrics.sheet_width_wide), px(360.)),
         ))),
+        titlebar: None,
+        is_resizable: false,
+        is_minimizable: false,
+        is_movable: false,
         ..WindowOptions::new().kind(WindowKind::Dialog)
     };
     cx.open_window(options, move |window, cx| {
@@ -331,7 +345,10 @@ pub fn sheet(
                 _ => Choice::Without,
             };
             if tx.try_send(choice).is_ok() {
-                let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+                // The button dispatch already has this window on GPUI's update stack.
+                cx.defer(move |cx| {
+                    let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+                });
             }
         });
         let view = cx.new(|cx| pm_shell::welcome_view::WelcomeView::new(tokens, frame, action, cx));
@@ -444,6 +461,11 @@ fn builtin_definitions() -> &'static std::collections::BTreeSet<(String, String)
                     };
                     (kind.into(), item.id.as_str().into())
                 })
+                .chain(
+                    pm_protocol::definitions::BUILTIN_3D_IDS
+                        .into_iter()
+                        .map(|id| ("layer".into(), id.into())),
+                )
                 .collect()
         });
     &SET

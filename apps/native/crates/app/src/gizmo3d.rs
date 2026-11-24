@@ -141,6 +141,8 @@ struct Drag {
     /// World length of one handle (axis length), for scaling deltas.
     length: f64,
     items: Vec<Item>,
+    part: Option<pm_scene3d::geometry::PartPlacement>,
+    part_initialized: bool,
     active: bool,
     time: f64,
     /// How far a move has carried the pivot, so the handle follows.
@@ -182,12 +184,22 @@ pub(super) struct FlyRun {
     last: std::time::Instant,
     _keys: Option<Subscription>,
     _clock: Option<Task<()>>,
+    window_activation: Option<Subscription>,
+    capture: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+}
+impl Drop for FlyRun {
+    fn drop(&mut self) {
+        if let Some(capture) = &self.capture {
+            capture.set(false);
+        }
+    }
 }
 #[derive(Default)]
 pub struct State {
     pub scene: Option<Arc<Scene>>,
     /// The 3D layers in the selection.
     pub selected: Vec<String>,
+    pub(super) part: Option<pm_scene3d::geometry::PartPlacement>,
     pub tool: Tool,
     /// Looking through Free View rather than the shot (UI state `studioLook`).
     pub free_look: bool,
@@ -322,11 +334,30 @@ impl State {
                 _ => true,
             })
             .cloned()
+            .map(|mut item| {
+                if let Some(part) = &self.part {
+                    item.pivot = part.pivot;
+                    if let Some(bounds) = part.bounds {
+                        item.bounds = bounds;
+                    }
+                }
+                item
+            })
             .collect()
     }
     /// Handle axes: the scene's, or with Object Axes the first selected
     /// layer's own.
     pub(super) fn basis(&self) -> [Vec3; 3] {
+        if let Some(part) = &self.part
+            && (self.object_axes || self.tool == Tool::Rotate)
+        {
+            let m = &part.layer_world;
+            return [
+                normalize([m[0], m[1], m[2]]),
+                normalize([m[4], m[5], m[6]]),
+                normalize([m[8], m[9], m[10]]),
+            ];
+        }
         match self.movable().first() {
             Some(item) if self.object_axes => object_basis(item.rotation),
             _ => AXES,
@@ -536,6 +567,26 @@ impl GizmoSurface {
     pub fn studio_flying(&self) -> bool {
         self.studio.fly.is_some()
     }
+    /// Share the modal state with the shell's native key monitor.
+    pub fn set_fly_capture(&mut self, capture: std::rc::Rc<std::cell::Cell<bool>>) {
+        capture.set(self.studio_flying());
+        self.fly_capture = Some(capture);
+    }
+    pub fn studio_focus_fly(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+            if !focus.is_focused(window) {
+                window.focus(&focus, cx);
+            }
+            run.window_activation.get_or_insert_with(|| {
+                cx.observe_window_activation(window, |surface, window, cx| {
+                    if !window.is_window_active() {
+                        surface.studio_fly_end(false, cx);
+                    }
+                })
+            });
+        }
+    }
     /// Shift+`: start flying from the view on screen, the shot camera's or
     /// the editor view's (Blender's Fly navigation).
     pub fn studio_fly_start(&mut self, cx: &mut Context<Self>) {
@@ -554,8 +605,14 @@ impl GizmoSurface {
         self.studio.look_pending = Some(true);
         self.studio.free = Some(start);
         let this = cx.entity().downgrade();
-        let keys = cx.intercept_keystrokes(move |event, _, cx| {
-            if let Some(this) = this.upgrade() {
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if let Some(this) = this.upgrade()
+                && this
+                    .read(cx)
+                    .focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.is_focused(window))
+            {
                 this.update(cx, |s, cx| s.studio_fly_key(&event.keystroke, true, cx));
                 cx.stop_propagation();
             }
@@ -581,7 +638,12 @@ impl GizmoSurface {
             last: std::time::Instant::now(),
             _keys: Some(keys),
             _clock: Some(clock),
+            window_activation: None,
+            capture: self.fly_capture.clone(),
         });
+        if let Some(capture) = &self.fly_capture {
+            capture.set(true);
+        }
         self.cursor = CursorStyle::Crosshair;
         // The viewer shows the keys while flying (UI state, not the document).
         self.studio_ui("studioFly", "on", cx);
@@ -610,17 +672,12 @@ impl GizmoSurface {
         };
         run.fly.fast = key.modifiers.shift;
         run.fly.slow = key.modifiers.alt;
-        let held = &mut run.fly.held;
         match (key.key.as_str(), down) {
             ("w" | "up" | "+" | "=", true) => run.fly.accelerate(1.),
             ("s" | "down" | "-", true) => run.fly.accelerate(-1.),
-            ("a" | "left", d) => held.left = d,
-            ("d" | "right", d) => held.right = d,
-            ("e" | "r", d) => held.up = d,
-            ("q" | "f", d) => held.down = d,
             ("enter", true) => return self.studio_fly_end(true, cx),
             ("escape", true) => return self.studio_fly_end(false, cx),
-            _ => {}
+            (key, pressed) => run.fly.held.set(key, pressed),
         }
     }
     /// Shift and Option while flying (pressed or released alone).
@@ -658,6 +715,9 @@ impl GizmoSurface {
         let Some(run) = self.studio.fly.take() else {
             return;
         };
+        if let Some(capture) = &self.fly_capture {
+            capture.set(false);
+        }
         let end = run.fly.pose();
         if keep && run.camera {
             let time = self.host.time(cx);
@@ -1219,7 +1279,7 @@ impl GizmoSurface {
             if drag.is_some() {
                 break;
             }
-            let b = item.bounds;
+            let b = self.studio.part.as_ref().and_then(|part| part.bounds).unwrap_or(item.bounds);
             let corner = |n: usize| -> Vec3 {
                 std::array::from_fn(|i| {
                     if n & (1 << i) == 0 {
@@ -1644,7 +1704,12 @@ impl GizmoSurface {
             }
             return true;
         }
-        if let Some(handle) = self.studio_handle(at, frame) {
+        if event.click_count < 2
+            && let Some(handle) = self.studio_handle(at, frame)
+        {
+            let part = (!matches!(handle, Handle::Marker(..) | Handle::Target(_)))
+                .then(|| self.studio.part.clone())
+                .flatten();
             let (handle, items) = match handle {
                 Handle::Marker(index, _) | Handle::Target(index) => {
                     let Some(item) = self
@@ -1683,6 +1748,8 @@ impl GizmoSurface {
                 pivot,
                 length: axis_px * eye.units_per_pixel(pivot),
                 items,
+                part,
+                part_initialized: false,
                 active: false,
                 time: self.host.time(cx),
                 offset: [0.; 3],
@@ -1786,28 +1853,55 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     let assets = assets?;
-                    pm_panel_studio3d::viewport::pick_part(
+                    let picked = pm_panel_studio3d::viewport::model_part(
                         &p.snapshot,
                         time,
                         &layer,
-                        &ray,
+                        None,
+                        Some(&ray),
                         &*assets,
                     )
                     .ok()
-                    .flatten()
+                    .flatten()?;
+                    Some((p.snapshot.doc_id, p.snapshot.render_comp(), picked))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| match picked {
-                Some(hit) => {
-                    if s.studio.selected != [id.clone()] {
-                        s.studio_select(id.clone(), false, cx);
+                Some((document, comp, hit)) => {
+                    let Some(p) = s.kernel.published(&s.project) else {
+                        return;
+                    };
+                    if p.snapshot.doc_id != document || p.snapshot.render_comp() != comp {
+                        return;
                     }
-                    s.host.focus_part(&id, Some(hit.slot as u64), cx);
+                    s.studio_select_part(id.clone(), &hit.part.key, cx);
+                    s.host
+                        .focus_part(&id, hit.part.material.map(|slot| slot as u64), cx);
                 }
                 None => s.studio_select(id, false, cx),
             });
         })
         .detach();
+    }
+    fn studio_select_part(&self, id: String, key: &str, cx: &mut Context<Self>) {
+        let Ok(part) = pm_panel_studio3d::properties::select_part(&id, Some(key)) else {
+            return;
+        };
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let selected = SelectionCall::Batch(vec![
+                    SelectionCall::Layers {
+                        ids: vec![id],
+                        add: false,
+                    },
+                    part,
+                ]);
+                let _ = kernel
+                    .call(&project, Request::new(Caller::native(), selected.user()))
+                    .await;
+            })
+            .detach();
     }
     /// Select a layer the pointer found; ⇧ adds or removes it.
     fn studio_select(&mut self, id: String, shift: bool, cx: &mut Context<Self>) {
@@ -1823,13 +1917,16 @@ impl GizmoSurface {
             vec![id.clone()]
         };
         let add = shift && !self.studio.selected.contains(&id);
+        let layers = SelectionCall::Layers { ids, add };
+        let selection = if self.studio.part.is_some() {
+            SelectionCall::Batch(vec![layers, SelectionCall::Channel(None)])
+        } else {
+            layers
+        };
         cx.background_executor()
             .spawn(async move {
                 kernel
-                    .call(
-                        &project,
-                        Request::new(Caller::native(), SelectionCall::Layers { ids, add }.user()),
-                    )
+                    .call(&project, Request::new(Caller::native(), selection.user()))
                     .await;
             })
             .detach();
@@ -2034,8 +2131,14 @@ impl GizmoSurface {
             let plural = drag.items.len() > 1;
             let lights = drag.items.iter().all(|i| i.role == Role::Light);
             let scale = self.studio.tool == Tool::Scale;
-            self.queue
-                .push_back(Job::Begin(match (drag.handle, plural) {
+            let label = if drag.part.is_some() {
+                match self.studio.tool {
+                    Tool::Rotate => "Rotate Model Part",
+                    Tool::Scale => "Scale Model Part",
+                    _ => "Move Model Part",
+                }
+            } else {
+                match (drag.handle, plural) {
                     (Handle::Target(_), _) => "Aim Light",
                     (Handle::Ring(_), _) if lights => "Aim Light",
                     (Handle::Plane | Handle::Axis(_) | Handle::Pair(_), false)
@@ -2062,7 +2165,9 @@ impl GizmoSurface {
                     }
                     (_, false) => "Move 3D Layer",
                     (_, true) => "Move 3D Layers",
-                }));
+                }
+            };
+            self.queue.push_back(Job::Begin(label));
         }
         let at = [
             f32::from(event.position.x - frame.origin.x) as f64 / frame.scale,
@@ -2090,6 +2195,114 @@ impl GizmoSurface {
                 (d[0] * s[0] + d[1] * s[1]) / l2
             })
         };
+        if let Some(part) = &drag.part {
+            use pm_scene3d::render::gltf::math;
+            let mut values = serde_json::Map::new();
+            match (drag.handle, tool) {
+                (Handle::Ring(axis), Tool::Rotate) => {
+                    let Some((c, _)) = eye.project(drag.pivot) else {
+                        return true;
+                    };
+                    let a = [drag.origin[0] - c[0], drag.origin[1] - c[1]];
+                    let b = [at[0] - c[0], at[1] - c[1]];
+                    let mut degrees = (a[0] * b[1] - a[1] * b[0])
+                        .atan2(a[0] * b[0] + a[1] * b[1])
+                        .to_degrees()
+                        * fine;
+                    if dot(basis[axis], sub(eye.pose.target, eye.pose.position)) > 0. {
+                        degrees = -degrees;
+                    }
+                    if snap {
+                        degrees = (degrees / 15.).round() * 15.;
+                    }
+                    values.insert(
+                        ["rx", "ry", "rz"][axis].into(),
+                        serde_json::json!(part.transform.rotation[axis] + degrees),
+                    );
+                }
+                (handle, Tool::Scale) => {
+                    let mut factor = match handle {
+                        Handle::Axis(axis) => 1. + along(axis),
+                        _ => ((d[0] - d[1]) * 0.01).exp(),
+                    };
+                    if snap {
+                        factor = (factor * 10.).round() / 10.;
+                    }
+                    values.insert(
+                        "scale".into(),
+                        serde_json::json!((part.transform.scale * factor.max(0.01)).min(10000.)),
+                    );
+                }
+                (_, Tool::Move) => {
+                    let (right, up) = eye.right_up();
+                    let units = eye.units_per_pixel(drag.pivot);
+                    let planar = add(mul(right, d[0] * units), mul(up, -d[1] * units));
+                    let mut world = match drag.handle {
+                        Handle::Axis(i) => mul(basis[i], along(i) * drag.length),
+                        Handle::Pair(i) => {
+                            let ray = eye.ray([drag.origin[0] + d[0], drag.origin[1] + d[1]]);
+                            let normal = basis[i];
+                            let den = dot(ray.dir, normal);
+                            if den.abs() < 1e-6 {
+                                return true;
+                            }
+                            sub(
+                                add(
+                                    ray.origin,
+                                    mul(ray.dir, dot(sub(drag.pivot, ray.origin), normal) / den),
+                                ),
+                                drag.pivot,
+                            )
+                        }
+                        _ => planar,
+                    };
+                    if snap {
+                        world = world.map(f64::round);
+                    }
+                    let Ok(inverse) = pm_scene3d::geometry::inverse(part.layer_world) else {
+                        return true;
+                    };
+                    let local = sub(math::apply(&inverse, world), math::apply(&inverse, [0.; 3]));
+                    for (axis, key) in ["x", "y", "z"].into_iter().enumerate() {
+                        if local[axis].abs() > 1e-9 || world == [0.; 3] {
+                            values.insert(
+                                key.into(),
+                                serde_json::json!(part.transform.position[axis] + local[axis]),
+                            );
+                        }
+                    }
+                    drag.offset = world;
+                }
+                _ => return true,
+            }
+            let Some(p) = self.kernel.published(&self.project) else {
+                return true;
+            };
+            match pm_panel_studio3d::properties::part_commands(
+                &p,
+                drag.time,
+                &drag.items[0].id,
+                &part.part.key,
+                &part.part.name,
+                &serde_json::Value::Object(values),
+            ) {
+                Ok(mut commands) => {
+                    if drag.part_initialized {
+                        commands.retain(|command| !matches!(command,
+                            Command::Scene3d(Scene3dCommand::SetData { .. })
+                        ));
+                    }
+                    // The first step may install channels. Keep that step even
+                    // when later pointer samples are coalesced.
+                    self.queue.push_back(Job::Step(commands, drag.part_initialized));
+                    drag.part_initialized = true;
+                }
+                Err(error) => self.host.report(error.to_string(), cx),
+            }
+            self.pump(cx);
+            self.draw(cx);
+            return true;
+        }
         // ⌥ while moving a light carries its target along (Electron), so it
         // keeps aiming the same way.
         let carry = event.modifiers.alt;

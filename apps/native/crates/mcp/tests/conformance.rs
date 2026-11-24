@@ -270,6 +270,12 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                         .unwrap() = replacement.clone();
                 }
                 for tool in &mut tools {
+                    if tool["name"] == "apply_commands" {
+                        let description = tool["description"].as_str().unwrap();
+                        tool["description"] = json!(format!(
+                            "{description} Use add_marker only when requested or when a few sparse structural cues would help."
+                        ));
+                    }
                     let overlay = &speed["overlays"][tool["name"].as_str().unwrap()];
                     if let Some(note) = overlay["note"].as_str() {
                         tool["description"] = json!(format!("{note}\n\n{}", tool["description"].as_str().unwrap()));

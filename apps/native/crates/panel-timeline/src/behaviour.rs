@@ -266,7 +266,7 @@ impl TimelineModel {
         time: f64,
     ) -> Result<Plan, ModelError> {
         use crate::tracks::Area;
-        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let layout = self.track_layout();
         let clips: Vec<_> = layout
             .items
             .iter()
@@ -634,7 +634,7 @@ impl TimelineModel {
         lane: usize,
         action: TrackHeaderAction,
     ) -> Plan {
-        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let layout = self.track_layout();
         let ids: Vec<_> = layout
             .items
             .iter()

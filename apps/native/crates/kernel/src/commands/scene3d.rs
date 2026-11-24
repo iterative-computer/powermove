@@ -1304,7 +1304,7 @@ pub fn resolve_scene_with_camera(
         queries: crate::queries::QueryContext,
         comp: String,
         camera: Option<String>,
-        layers: Vec<serde_json::Value>,
+        layer_indices: std::collections::HashMap<String, usize>,
     }
     impl Evaluator {
         fn query(
@@ -1315,9 +1315,8 @@ pub fn resolve_scene_with_camera(
             extra: serde_json::Value,
         ) -> pm_scene3d::Result<serde_json::Value> {
             let i = self
-                .layers
-                .iter()
-                .position(|n| n["id"] == l["id"])
+                .layer_indices
+                .get(l["id"].as_str().unwrap_or_default())
                 .ok_or_else(|| pm_scene3d::Error("3D layer moved".into()))?;
             let mut request =
                 serde_json::json!({"op":op,"comp":self.comp,"open":self.comp,"layer":i,"t":t});
@@ -1375,17 +1374,34 @@ pub fn resolve_scene_with_camera(
     let comp = comp.map(str::to_owned).or_else(|| snapshot.open_comp());
     let c =
         crate::model::comp_node(root, comp.as_deref()).ok_or_else(|| invalid("No composition"))?;
-    let c = pm_scene3d::from_model(&c.to_value()).map_err(invalid)?;
+    // Studio's renderer reads the layer stack and the composition quality.
+    // The evaluator still queries the complete original snapshot.
+    let Some(pm_model::NodeKind::Array(layers)) = c.get("layers").map(pm_model::Node::kind) else {
+        return Err(invalid("No layers"));
+    };
+    let layers = layers.iter().map(|layer| match layer.kind() {
+        pm_model::NodeKind::Object(fields) => Value::Object(
+            fields.iter()
+                .filter(|(key, _)| key.as_str() != Some("native3dArchive"))
+                .map(|(key, value)| (key.clone(), value.to_value()))
+                .collect(),
+        ),
+        _ => layer.to_value(),
+    }).collect();
+    let mut evaluated = pm_model::Map::new();
+    evaluated.insert("layers", Value::Array(layers));
+    if let Some(quality) = c.get("studioQuality") {
+        evaluated.insert("studioQuality", quality.to_value());
+    }
+    let evaluated = Value::Object(evaluated);
+    let c = pm_scene3d::from_model(&evaluated).map_err(invalid)?;
     let comp = comp.unwrap_or_else(|| {
         format!(
             "@root:{}",
             root.get("id").and_then(crate::model::str_of).unwrap_or("")
         )
     });
-    let layers = c["layers"]
-        .as_array()
-        .ok_or_else(|| invalid("No layers"))?
-        .clone();
+    let layers = c["layers"].as_array().ok_or_else(|| invalid("No layers"))?;
     if let Some(camera) = camera
         && !layers.iter().any(|l| {
             l["id"] == camera
@@ -1394,6 +1410,12 @@ pub fn resolve_scene_with_camera(
     {
         return Err(invalid("View camera layer is missing"));
     }
+    let mut layer_indices = std::collections::HashMap::with_capacity(layers.len());
+    for (index, layer) in layers.iter().enumerate() {
+        if let Some(id) = layer["id"].as_str() {
+            layer_indices.entry(id.to_owned()).or_insert(index);
+        }
+    }
     pm_scene3d::service::resolve(
         &c,
         time,
@@ -1401,7 +1423,7 @@ pub fn resolve_scene_with_camera(
             queries: crate::queries::QueryContext::new(&snapshot.document),
             comp,
             camera: camera.map(str::to_owned),
-            layers,
+            layer_indices,
         },
     )
     .map_err(invalid)

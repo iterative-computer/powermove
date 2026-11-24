@@ -18,7 +18,8 @@ use objc2_core_graphics::{
     CGImageComponentInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorsFromData, kCTFontVariationAttribute,
+    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorsFromData, kCTFontNameAttribute,
+    kCTFontVariationAttribute,
 };
 
 /// One run to draw: a face's bytes, its size and user-space variation
@@ -72,7 +73,7 @@ pub struct CoreTextReference {
     /// `CGFontCreateCopyWithVariations` of a `graphics` font, per
     /// coordinates (hidden system faces such as `.SFNS`).
     graphics_variants: HashMap<VariantKey, CFRetained<CGFont>>,
-    /// A variable descriptor's instance at the default size with its
+    /// A variable font's instance at the default size with its
     /// variations applied, per coordinates (`variable_font`).
     variable_variants: HashMap<VariantKey, CFRetained<CTFont>>,
     source_bytes: usize,
@@ -147,72 +148,59 @@ impl CoreTextReference {
             // multi-megabyte font again for every size causes allocation churn.
             self.fonts.clear();
         }
-        // SkTypeface_Mac::MakeFromStream instances variable data through a
-        // CTFont descriptor at its default size, then the scaler makes an
-        // exact copy at the strike size. CGFontCreateCopyWithVariations is
-        // a different instancing path and changes variable outlines.
-        if let Some(font) = self.variable_font(id, run) {
-            self.keep_font(key, font.clone(), run.data.len());
-            return Some(font);
-        }
-        // Single fonts go through CGFont, so CoreText never looks the face
-        // up by name (it substitutes Times for a hidden system font's
-        // PostScript name, ".SFNS-Regular"); variations are applied by axis
-        // name in `fvar` order.
-        let single = read_fonts::FileRef::new(run.data)
-            .map(|f| matches!(f, read_fonts::FileRef::Font(_)))
-            .unwrap_or(false);
-        if single {
-            let font = self.graphics_font(id, run)?;
-            self.keep_font(key, font.clone(), run.data.len());
-            return Some(font);
-        }
-        let desc = match self.descriptors.entry((id, run.index)) {
-            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let data = CFData::from_bytes(run.data);
-                let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
-                // SAFETY: the function returns an array of font descriptors.
-                let arr: CFRetained<CFArray<CTFontDescriptor>> =
-                    unsafe { CFRetained::cast_unchecked(arr) };
-                {
-                    let desc = arr.get(run.index as usize)?;
-                    if run.data.len() <= FONT_SOURCE_BYTES {
-                        self.source_bytes += run.data.len();
-                        e.insert(desc.clone());
-                    }
-                    desc
-                }
-            }
+        let single = matches!(
+            read_fonts::FileRef::new(run.data),
+            Ok(read_fonts::FileRef::Font(_))
+        );
+        // SkTypeface_Mac::MakeFromStream instances variable data at the
+        // default size, then the scaler makes an exact copy at the strike size.
+        let font = if let Some(font) = self.variable_font(id, run, single) {
+            font
+        } else if single {
+            // Hidden single-face system fonts (such as ".SFNS-Regular") stay
+            // on the CGFont path so CoreText cannot substitute a different face.
+            self.graphics_font(id, run)?
+        } else {
+            let desc = self.collection_descriptor(id, run)?;
+            unsafe { CTFont::with_font_descriptor(&desc, f64::from(run.size), std::ptr::null()) }
         };
-        let mut font =
-            unsafe { CTFont::with_font_descriptor(&desc, f64::from(run.size), std::ptr::null()) };
-        if !run.coords.is_empty() {
-            let keys: Vec<CFRetained<CFNumber>> = run
-                .coords
-                .iter()
-                .map(|(t, _)| CFNumber::new_i64(i64::from(*t)))
-                .collect();
-            let vals: Vec<CFRetained<CFNumber>> = run
-                .coords
-                .iter()
-                .map(|(_, v)| CFNumber::new_f64(f64::from(*v)))
-                .collect();
-            let kr: Vec<&CFNumber> = keys.iter().map(|k| &**k).collect();
-            let vr: Vec<&CFNumber> = vals.iter().map(|v| &**v).collect();
-            let variations: CFRetained<CFDictionary<CFNumber, CFNumber>> =
-                CFDictionary::from_slices(&kr, &vr);
-            let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
-                &[unsafe { kCTFontVariationAttribute }],
-                &[variations.as_ref() as &CFType],
-            );
-            let var_desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
-            font = unsafe {
-                font.copy_with_attributes(f64::from(run.size), std::ptr::null(), Some(&var_desc))
-            };
-        }
         self.keep_font(key, font.clone(), run.data.len());
         Some(font)
+    }
+
+    fn collection_descriptor(
+        &mut self,
+        id: Source,
+        run: &RefRun<'_>,
+    ) -> Option<CFRetained<CTFontDescriptor>> {
+        use skrifa::{MetadataProvider, string::StringId};
+
+        let source = (id, run.index);
+        if let Some(desc) = self.descriptors.get(&source) {
+            return Some(desc.clone());
+        }
+        let face = skrifa::FontRef::from_index(run.data, run.index).ok()?;
+        let names: Vec<_> = face
+            .localized_strings(StringId::POSTSCRIPT_NAME)
+            .map(|name| name.to_string())
+            .collect();
+        let axes = crate::font::axes(run.data, run.index);
+        let data = CFData::from_bytes(run.data);
+        let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
+        // SAFETY: the function returns an array of font descriptors.
+        let arr: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(arr) };
+        // CoreText enumerates named instances alongside collection faces.
+        let desc = arr.iter().find(|desc| {
+            unsafe { desc.attribute(kCTFontNameAttribute) }
+                .and_then(|name| name.downcast::<CFString>().ok())
+                .is_some_and(|name| names.contains(&name.to_string()))
+                && descriptor_uses_default_axes(desc, &axes)
+        })?;
+        if run.data.len() <= FONT_SOURCE_BYTES {
+            self.source_bytes += run.data.len();
+            self.descriptors.insert(source, desc.clone());
+        }
+        Some(desc)
     }
 
     fn keep_font(&mut self, key: FontKey, font: CFRetained<CTFont>, source_bytes: usize) {
@@ -222,7 +210,12 @@ impl CoreTextReference {
         }
     }
 
-    fn variable_font(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+    fn variable_font(
+        &mut self,
+        id: Source,
+        run: &RefRun<'_>,
+        single: bool,
+    ) -> Option<CFRetained<CTFont>> {
         // The instance with the run's variations does not depend on the
         // strike size: make it once per coordinates and copy only the size
         // (and the optical size the strike asks for) below.
@@ -230,7 +223,7 @@ impl CoreTextReference {
         let font = match self.variable_variants.get(&key) {
             Some(font) => font.clone(),
             None => {
-                let font = self.variable_instance(id, run)?;
+                let font = self.variable_instance(id, run, single)?;
                 // Oversize sources still draw; no native object retains them here.
                 if run.data.len() <= FONT_SOURCE_BYTES {
                     self.make_variant_room();
@@ -256,38 +249,32 @@ impl CoreTextReference {
         Some(unsafe { font.copy_with_attributes(run.size as f64, std::ptr::null(), Some(&desc)) })
     }
 
-    /// A variable descriptor's instance at the default size with the run's
-    /// variations, or `None` when the face has no `fvar` or is hidden.
-    fn variable_instance(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
-        use skrifa::{MetadataProvider, raw::TableProvider};
+    /// A variable instance at the default size with the run's variations.
+    fn variable_instance(
+        &mut self,
+        id: Source,
+        run: &RefRun<'_>,
+        single: bool,
+    ) -> Option<CFRetained<CTFont>> {
+        use skrifa::{MetadataProvider, raw::TableProvider, string::StringId};
         let file = skrifa::FontRef::from_index(run.data, run.index).ok()?;
         let axes = file.fvar().ok()?.axes().ok()?;
-        // Hidden system fonts must retain the CGFont identity: descriptor
-        // matching can substitute Times for a hidden PostScript name.
-        let hidden = file
-            .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
-            .any(|name| name.chars().next() == Some('.'));
-        if hidden {
-            return None;
-        }
-        let desc = match self.descriptors.entry((id, run.index)) {
-            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let data = CFData::from_bytes(run.data);
-                let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
-                let arr: CFRetained<CFArray<CTFontDescriptor>> =
-                    unsafe { CFRetained::cast_unchecked(arr) };
-                {
-                    let desc = arr.get(run.index as usize)?;
-                    if run.data.len() <= FONT_SOURCE_BYTES {
-                        self.source_bytes += run.data.len();
-                        e.insert(desc.clone());
-                    }
-                    desc
-                }
+        let font = if single {
+            if file
+                .localized_strings(StringId::POSTSCRIPT_NAME)
+                .any(|name| name.chars().next() == Some('.'))
+            {
+                return None;
             }
+            // Data descriptors can start at a named instance, e.g.
+            // SFPro-CompressedUltralight. CoreText elides explicit axis
+            // defaults when applying variations, so start at the raw face.
+            let cg = self.graphics_base(id, run)?;
+            unsafe { CTFont::with_graphics_font(&cg, 0.0, std::ptr::null(), None) }
+        } else {
+            let desc = self.collection_descriptor(id, run)?;
+            unsafe { CTFont::with_font_descriptor(&desc, 0.0, std::ptr::null()) }
         };
-        let mut font = unsafe { CTFont::with_font_descriptor(&desc, 0.0, std::ptr::null()) };
         let keys: Vec<_> = axes
             .iter()
             .map(|a| CFNumber::new_i64(i64::from(u32::from_be_bytes(a.axis_tag().into_bytes()))))
@@ -314,8 +301,7 @@ impl CoreTextReference {
             &[variations.as_ref() as &CFType],
         );
         let var_desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
-        font = unsafe { font.copy_with_attributes(0.0, std::ptr::null(), Some(&var_desc)) };
-        Some(font)
+        Some(unsafe { font.copy_with_attributes(0.0, std::ptr::null(), Some(&var_desc)) })
     }
 
     fn graphics_font(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
@@ -376,6 +362,24 @@ impl CoreTextReference {
             cg
         })
     }
+}
+
+fn descriptor_uses_default_axes(desc: &CTFontDescriptor, axes: &[crate::font::Axis]) -> bool {
+    let Some(variations) = (unsafe { desc.attribute(kCTFontVariationAttribute) }) else {
+        return true;
+    };
+    let Ok(variations) = variations.downcast::<CFDictionary>() else {
+        return false;
+    };
+    // SAFETY: CoreText uses numeric OpenType tags and values for variations.
+    let variations: &CFDictionary<CFNumber, CFNumber> = unsafe { variations.cast_unchecked() };
+    let (tags, values) = variations.to_vecs();
+    tags.iter().zip(&values).all(|(tag, value)| {
+        axes.iter().any(|axis| {
+            tag.as_i64() == Some(i64::from(axis.tag))
+                && value.as_f64().map(|v| v as f32) == Some(axis.default)
+        })
+    })
 }
 
 /// `base` with the run's variations, applied by axis name in `fvar` order.
@@ -554,7 +558,7 @@ mod tests {
     #[test]
     fn animated_strikes_bound_native_font_data() {
         // Static CoreGraphics faces copy a provider per strike; variable
-        // descriptors share their provider but still retain native strikes.
+        // fonts share their provider but still retain native strikes.
         let faces = [
             std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial"),
             include_bytes!("../../tests/fixtures/Geist-Variable.ttf").to_vec(),
@@ -666,11 +670,107 @@ mod tests {
         out
     }
 
+    #[test]
+    fn sf_pro_uses_default_width_at_canvas_weights() {
+        use read_fonts::TableProvider;
+
+        let data = match std::fs::read("/Library/Fonts/SF-Pro.ttf") {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => panic!("reading SF Pro: {e}"),
+        };
+        let cmap = read_fonts::FontRef::new(&data).unwrap().cmap().unwrap();
+        let glyphs: Vec<_> = "Properties 1920"
+            .chars()
+            .map(|c| cmap.map_codepoint(c as u32).unwrap().to_u32() as u16)
+            .collect();
+
+        let mut reference = CoreTextReference::new();
+        for (weight, name) in [
+            (400., "SFPro-Regular"),
+            (510., "SFPro-Medium"),
+            (590., "SFPro-Semibold"),
+        ] {
+            let run = RefRun {
+                data: &data,
+                index: 0,
+                size: 13.,
+                coords: &[
+                    (WGHT, weight),
+                    (u32::from_be_bytes(*b"wdth"), 100.),
+                    (OPSZ, 17.),
+                ],
+                glyphs: vec![],
+                color: [1.; 4],
+            };
+            let actual = reference.font(&run).unwrap();
+            let name = CFString::from_str(name);
+            let expected = unsafe { CTFont::with_name(&name, 13., std::ptr::null()) };
+            assert_eq!(unsafe { expected.post_script_name() }, name);
+            // The rasterizer receives already-spaced glyph positions. Disable
+            // CoreText tracking on the named face too when comparing advances.
+            let tracking = CFString::from_str("NSCTFontUnscaledTrackingAttribute");
+            let zero = CFNumber::new_i32(0);
+            let attrs: CFRetained<CFDictionary<CFString, CFType>> =
+                CFDictionary::from_slices(&[&*tracking], &[zero.as_ref() as &CFType]);
+            let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
+            let expected =
+                unsafe { expected.copy_with_attributes(13., std::ptr::null(), Some(&desc)) };
+            let actual_metrics = metrics(&actual, &glyphs);
+            let expected_metrics = metrics(&expected, &glyphs);
+            assert_eq!(
+                f64::from_bits(actual_metrics[1]),
+                f64::from_bits(expected_metrics[1]),
+                "total advance at wght={weight}",
+            );
+            assert_eq!(
+                actual_metrics, expected_metrics,
+                "glyph metrics at wght={weight}"
+            );
+            let actual_path =
+                unsafe { actual.path_for_glyph(glyphs[0], std::ptr::null()) }.unwrap();
+            let expected_path =
+                unsafe { expected.path_for_glyph(glyphs[0], std::ptr::null()) }.unwrap();
+            assert!(
+                objc2_core_graphics::CGPath::equal_to_path(
+                    Some(&actual_path),
+                    Some(&expected_path),
+                ),
+                "outline at wght={weight}"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_indices_select_faces_instead_of_named_instances() {
+        let data = match std::fs::read("/System/Library/Fonts/ThonburiUI.ttc") {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => panic!("reading ThonburiUI: {e}"),
+        };
+        let mut reference = CoreTextReference::new();
+        for (index, name) in [".ThonburiUI-Regular", ".ThonburiUIWatch-Regular"]
+            .into_iter()
+            .enumerate()
+        {
+            let run = RefRun {
+                data: &data,
+                index: index as u32,
+                size: 13.,
+                coords: &[(WGHT, 400.)],
+                glyphs: vec![],
+                color: [1.; 4],
+            };
+            let font = reference.font(&run).unwrap();
+            assert_eq!(unsafe { font.post_script_name() }.to_string(), name);
+        }
+    }
+
     /// Fonts made from cached, per-coordinates variation instances are the
     /// fonts a fresh CoreTextReference makes: the same size, advances and
     /// glyph boxes, and the same reference-rendered pixels, for SF Pro
     /// (hidden: the CGFont variation path) and a visible variable face (the
-    /// descriptor path), across weights, the optical size axis and the
+    /// CTFont variation path), across weights, the optical size axis and the
     /// fixture's animated fractional sizes.
     #[test]
     fn cached_variation_instances_make_the_fonts_fresh_ones_make() {

@@ -256,7 +256,7 @@ function CompositionTab({
             paddingRight: t("metrics.border"),
             symbolSize: t("metrics.symbol_inline"),
             color: t("colors.muted"),
-            borderRadius: t("metrics.inner_radius"),
+            borderRadius: t("radius.xs"),
           }}
           onPointerDown={(event) => {
             event.stopPropagation();
@@ -475,49 +475,30 @@ function Layer({
   /** Selected while the timeline holds the keyboard: the accent's. */
   lit: boolean;
 }) {
-  // As v1 and After Effects: every row keeps its switches' columns at its
-  // trailing edge, so names truncate at the same place on every row and
-  // nothing moves under the pointer. Visibility and the parent link always
-  // show; Shy, Solo and Lock show when set, or under the pointer, keyboard
-  // focus or a single selected layer (PM-367: they stay on the row, and in
-  // the Layer menu and the row menu).
   const show = row.hovered || row.focused || (row.selected && single);
-  // In column order, the last at the row's trailing edge.
   const switches = [
-    ...(row.transformable
-      ? [
-          {
-            name: "parent" as const,
-            on: row.parent.set,
-            label: `Parent: ${row.parent.name} · Drag to a layer`,
-            symbol: "link",
-            active: undefined as boolean | undefined,
-            always: true,
-          },
-        ]
-      : []),
     {
-      name: "shy" as const,
-      on: row.shy === true,
-      label: "Toggle Shy",
-      symbol: row.shy ? "face.dashed.fill" : "face.dashed",
-      active: row.shy === true,
-      always: false,
+      name: "parent" as const,
+      on: row.parent.set,
+      label: `Parent: ${row.parent.name} · Drag to a layer`,
+      symbol: "link",
+      available: row.transformable,
+      always: true,
     },
     {
-      name: "solo" as const,
-      on: row.solo,
-      label: "Toggle Solo",
-      symbol: row.solo ? "s.circle.fill" : "s.circle",
-      active: row.solo,
-      always: false,
+      name: "threeD" as const,
+      on: row.threeD === true,
+      label: "Toggle 3D Layer",
+      symbol: row.threeD ? "cube.fill" : "cube",
+      available: row.canBe3D === true,
+      always: true,
     },
     {
       name: "lock" as const,
       on: row.locked,
       label: row.lockRow ? "Unlock Layer" : "Toggle Lock",
       symbol: row.locked ? "lock" : "lock.open",
-      active: undefined,
+      available: true,
       always: false,
     },
     {
@@ -525,7 +506,7 @@ function Layer({
       on: !row.visible,
       label: "Toggle Visibility",
       symbol: row.visible ? "eye" : "eye.slash",
-      active: undefined,
+      available: true,
       always: true,
     },
   ];
@@ -664,7 +645,7 @@ function Layer({
                 symbolSize: t("metrics.symbol_inline"),
               }}
             />
-          ) : item.on || item.always || show ? (
+          ) : item.available && (item.on || item.always || show) ? (
             <Icon
               key={item.name}
               parentPick={item.name === "parent" ? row.layer : undefined}
@@ -674,22 +655,19 @@ function Layer({
               tint={
                 lit
                   ? "colors.accent_text"
-                  : // Solo and shy show their state in ink: solo's dot
-                    // takes the accent while on, both are dim while off.
-                    item.name === "solo" || item.name === "shy"
+                  : item.name === "threeD"
                     ? item.on
-                      ? item.name === "solo"
-                        ? "colors.accent"
-                        : undefined
+                      ? "colors.accent"
                       : "colors.muted"
                     : undefined
               }
-              active={item.active}
+              active={item.name === "threeD" ? item.on : undefined}
+              disabled={item.name === "threeD" && row.locked}
               tabIndex={-1}
               send={send}
               intent={{
                 type: "switch",
-                id: item.name === "lock" ? row.lockRow ?? row.id : row.id,
+                id: item.name === "lock" ? (row.lockRow ?? row.id) : row.id,
                 name: item.name,
               }}
             />
@@ -979,13 +957,18 @@ const TimelineRow = memo(
               }
             : row.selected
               ? { background: t("colors.selected_fill") }
-            : row.hovered
-              ? { background: t("colors.hover") }
-              : {}),
+              : row.hovered
+                ? { background: t("colors.hover") }
+                : {}),
         }}
       >
         {row.kind === "layer" ? (
-          <Layer row={row} send={send} single={single} lit={row.selected && focused} />
+          <Layer
+            row={row}
+            send={send}
+            single={single}
+            lit={row.selected && focused}
+          />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
         ) : (
@@ -1164,7 +1147,9 @@ export function TimelinePanel({
                     indexDigits: f.indexDigits,
                     nativeFirstRow: f.window.rows[0]?.id ?? null,
                     nativeWindow: [f.window.first, f.window.rows.length],
-                    ...(f.window.retained === true ? { nativeRetained: true } : {}),
+                    ...(f.window.retained === true
+                      ? { nativeRetained: true }
+                      : {}),
                   }}
                   onKeyDown={(event) => {
                     event.stopPropagation();

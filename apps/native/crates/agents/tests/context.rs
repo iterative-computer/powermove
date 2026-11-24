@@ -54,6 +54,9 @@ fn region_meaning_travels_with_pixels_and_fences_stale_documents() {
 #[test]
 fn ordinary_prompt_has_v1_task_creative_style_and_native_authoring_rules() {
     let p = assemble("Create a polished effect panel and theme");
+    assert!(p.contains(
+        "Add timeline markers only when requested or when a few sparse structural cues would help."
+    ));
     for section in ["TASK FOCUS", "CREATIVE JUDGMENT", "RESPONSE STYLE"] {
         assert!(p.contains(section), "missing {section}");
     }

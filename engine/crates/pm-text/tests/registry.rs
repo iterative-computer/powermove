@@ -235,6 +235,8 @@ fn main() {
         format!("{system_faces:?}"),
     );
 
+    check("SF Mono resolves and shapes", sf_mono(), String::new());
+
     // Subsets carry the amended table list and nothing else.
     let allowed = pm_text::subset::TABLES;
     for (family, must) in [
@@ -367,6 +369,109 @@ fn main() {
         );
     }
     println!("{checks} checks passed");
+}
+
+// AppKit's shared font manager requires the main thread.
+#[cfg(all(target_os = "macos", feature = "system"))]
+fn sf_mono() -> bool {
+    use pm_text::compat::{Compat, TextContent};
+    use pm_text::font::{FontDesc, FontResolver, WGHT};
+    use pm_text::registry::CoreTextRegistry;
+
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSFontManager;
+    use objc2_foundation::NSString;
+
+    let installed = NSFontManager::sharedFontManager(MainThreadMarker::new().unwrap())
+        .availableMembersOfFontFamily(&NSString::from_str("SF Mono"))
+        .is_some_and(|members| members.count() > 0);
+    let family = if installed { "ui-monospace" } else { "SF Mono" };
+    let mut compat = Compat::new(CoreTextRegistry::new());
+    let mut weights = Vec::new();
+    #[cfg(feature = "coretext-reference")]
+    let mut coverage = Vec::new();
+    for weight in [400., 600.] {
+        let desc = FontDesc {
+            weight,
+            italic: false,
+            size: 13.,
+        };
+        let registry = compat.resolver_mut();
+        let named = registry.family("SF Mono", &desc).expect("SF Mono");
+        assert_eq!(registry.family("sf mono", &desc), Some(named));
+        let face = registry
+            .family("ui-monospace", &desc)
+            .expect("ui-monospace");
+        assert_eq!(named != face, installed);
+        assert_ne!(registry.family("SF Pro Display", &desc), Some(face));
+        let info = registry.face(face);
+        weights.push(info.coords.iter().find(|(tag, _)| *tag == WGHT).unwrap().1);
+        let content = TextContent {
+            font: Some(family.into()),
+            weight: Some(f64::from(weight)),
+            size: Some(13.),
+            ..Default::default()
+        };
+        let (narrow, i) = compat.text_runs(&content, "i", 0.);
+        let (wide, w) = compat.text_runs(&content, "W", 0.);
+        assert_eq!(narrow[0].face, face);
+        assert_eq!(wide[0].face, face);
+        assert!(i > 0.);
+        assert_eq!(i, w);
+
+        #[cfg(feature = "coretext-reference")]
+        {
+            use pm_text::render::coretext::{CoreTextReference, RefRun};
+            let info = compat.resolver().face(face);
+            let run = &wide[0];
+            let glyphs = run
+                .glyphs
+                .iter()
+                .map(|g| (g.id as u16, g.x + 4., g.y + 18.))
+                .collect();
+            let pixels = CoreTextReference::new().render(
+                &[RefRun {
+                    data: info.data.as_slice(),
+                    index: info.index,
+                    size: run.size,
+                    coords: &run.coords,
+                    glyphs,
+                    color: [1.; 4],
+                }],
+                24,
+                24,
+                false,
+            );
+            coverage.push(pixels.chunks_exact(4).map(|pixel| pixel[3]).sum::<f32>());
+        }
+    }
+    assert!(weights[1] > weights[0], "{weights:?}");
+    #[cfg(feature = "coretext-reference")]
+    assert!(
+        coverage[1] > coverage[0] && coverage[0] > 0.,
+        "{coverage:?}"
+    );
+
+    let registry = compat.resolver_mut();
+    let faces = registry.family_faces(family);
+    assert!(
+        faces
+            .iter()
+            .any(|face| face.postscript_name.ends_with("Regular"))
+    );
+    assert!(
+        faces
+            .iter()
+            .any(|face| face.postscript_name.ends_with("RegularItalic"))
+    );
+    assert!(
+        registry
+            .fallback_manifest("ui-monospace")
+            .faces
+            .iter()
+            .any(|face| face.family == "ui-monospace" && faces.contains(&face.source))
+    );
+    true
 }
 
 #[cfg(not(all(target_os = "macos", feature = "system")))]

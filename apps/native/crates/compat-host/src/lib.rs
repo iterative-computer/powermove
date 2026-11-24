@@ -23,6 +23,8 @@ mod panel_document;
 #[cfg(target_os = "macos")]
 mod panel_renderers;
 #[cfg(target_os = "macos")]
+pub use panel_renderers::WARM_PANEL_LIMIT;
+#[cfg(target_os = "macos")]
 mod panel_slot;
 #[cfg(target_os = "macos")]
 pub mod visual;

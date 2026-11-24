@@ -218,6 +218,34 @@ pub fn find_layer(root: &Node, layer_id: &str) -> Option<LayerLoc> {
     None
 }
 
+/// Resolve a batch in one pass, with the same open-composition priority as
+/// `find_layer`. A group trim can target hundreds of layers at once.
+pub(crate) fn find_layers<'a>(
+    root: &Node,
+    layer_ids: &'a [String],
+) -> std::collections::HashMap<&'a str, LayerLoc> {
+    let mut remaining: std::collections::HashSet<_> =
+        layer_ids.iter().map(String::as_str).collect();
+    let mut found = std::collections::HashMap::with_capacity(remaining.len());
+    for comp_id in comp_ids(root) {
+        let Some(comp) = comp_node(root, comp_id.as_deref()) else {
+            continue;
+        };
+        for (index, layer) in layers_of(comp).enumerate() {
+            let Some(id) = layer.get("id").and_then(str_of) else {
+                continue;
+            };
+            if let Some(id) = remaining.take(id) {
+                found.insert(id, LayerLoc { comp_id: comp_id.clone(), index });
+                if remaining.is_empty() {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
 /// The layer node at `loc`.
 pub fn layer_at<'a>(root: &'a Node, loc: &LayerLoc) -> Option<&'a Node> {
     comp_node(root, loc.comp_id.as_deref())?

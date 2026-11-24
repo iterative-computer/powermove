@@ -383,8 +383,6 @@ pub struct Metrics {
     pub agent_width: f32,
     /// Agent attachment and pop-up geometry, shared by light and dark themes.
     pub agent_attachment: f32,
-    /// Half the remove control sits outside the thumbnail corner.
-    pub agent_remove_offset: f32,
     pub agent_attachment_sent: f32,
     pub agent_model_min: f32,
     pub agent_effort_width: f32,
@@ -911,7 +909,7 @@ impl Tokens {
                 store_column: 960.,
                 menu_inset: 12.,
                 menu_row: 30.,
-                inner_radius: radius.sm,
+                inner_radius: radius.nested(radius.lg, space.sm),
                 tab: 28.,
                 pill_radius: radius.md,
                 pill_inset: space.hair,
@@ -956,7 +954,6 @@ impl Tokens {
                 // tool group's mono chips without wrapping every line.
                 agent_width: 440.,
                 agent_attachment: 56.,
-                agent_remove_offset: -12.,
                 agent_attachment_sent: 40.,
                 agent_model_min: 96.,
                 agent_effort_width: 72.,

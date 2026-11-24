@@ -419,6 +419,7 @@ export function ViewerPanel({
         style={{
           color: token("colors.text"),
           fontSize: token("typography.body"),
+          borderRadius: token("radius.xs"),
         }}
         onClick={() => actions.drive("viewer.studio.look", "camera")}
       >

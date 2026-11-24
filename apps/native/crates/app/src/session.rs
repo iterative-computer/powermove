@@ -11,7 +11,36 @@ use pm_protocol::{
     common::{PlaybackRate, TICKS_PER_SECOND, Ticks},
 };
 use pm_shell::{Command as ShellCommand, Host};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
+
+pub(crate) fn defer_studio_view(
+    gizmos: Entity<crate::gizmo::GizmoSurface>,
+    group: String,
+    value: String,
+    capture: Rc<Cell<bool>>,
+    focus_canvas: impl FnOnce() + 'static,
+    window: &Window,
+    cx: &mut App,
+) {
+    // The gizmo's delegate reads the controller while applying the setting.
+    window.defer(cx, move |window, cx| {
+        gizmos.update(cx, |gizmos, cx| {
+            if group == "fly" {
+                gizmos.set_fly_capture(capture);
+            }
+            gizmos.studio_setting(&group, &value, cx);
+            if group == "fly" && gizmos.studio_flying() {
+                focus_canvas();
+                gizmos.studio_focus_fly(window, cx);
+            }
+        });
+    });
+}
 
 /// Cancellation wins even if the sheet's abort callback also sent an answer.
 /// Poll both channels so Quit wakes a wait whose sheet was never visible.
@@ -274,7 +303,6 @@ pub struct Controller {
     pub view: crate::gizmo::ViewPlacement,
     /// The pending or running write of `view`.
     pub(crate) view_write: Option<gpui::Task<()>>,
-    pub clipboard: crate::layer_commands::Clipboard,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
     transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
@@ -921,6 +949,11 @@ impl Controller {
     pub(crate) fn unavailable_commands(&self) -> std::collections::BTreeSet<String> {
         let v = self;
         let mut off = v.disabled.clone();
+        // Read at menu time so copies and pasteboard changes in another
+        // window are visible without a fresh project publication here.
+        if v.published.is_some() && crate::layer_commands::can_paste() {
+            off.remove("pasteLayers");
+        }
         if v.transition_refusal().is_some() {
             off.insert("addDefaultTransition".into());
         }
@@ -1401,8 +1434,7 @@ impl Controller {
             shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
-            clipboard: Default::default(),
-            disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
+            disabled: crate::layer_commands::disabled(None, &[]),
             transition_menu: Default::default(),
             save_pending: false,
             choosing_save_path: false,
@@ -2099,8 +2131,8 @@ impl Controller {
         .detach();
     }
     /// Selected keyframes take precedence over their layers, as Delete does.
-    fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
-        use crate::layer_commands::Clipboard;
+    fn copy_selection(&mut self, cut: bool, pressed: Option<&str>, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::{self, Clipboard};
         let Some(published) = self.published.clone() else {
             return false;
         };
@@ -2108,38 +2140,40 @@ impl Controller {
             .builtins
             .timeline
             .as_ref()
+            .filter(|_| pressed.is_none())
             .map(|t| t.read(cx).copied_keys())
             .unwrap_or_default();
-        let (clipboard, text) = if !keys.is_empty() {
-            (Clipboard::Keys(keys), "Powermove keyframes".to_owned())
+        let (clipboard, text, cut_layers) = if keys.is_empty() {
+            let Some((copied, ids)) = layer_commands::copy_layers(
+                &published, pressed, cut, &self.media.originals,
+            ) else {
+                return false;
+            };
+            let text = copied.layers.iter()
+                .filter_map(|layer| layer.get("name").and_then(pm_model::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (Clipboard::Layers(Arc::new(copied)), text, Some(ids))
         } else {
-            let selected = published.selection.layers();
-            let root = published.snapshot.root();
-            let layers: Vec<pm_model::Value> = selected
-                .iter()
-                .filter_map(|id| {
-                    let root = root?;
-                    let at = pm_kernel::model::find_layer(root, id)?;
-                    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
-                })
-                .collect();
-            if layers.is_empty() {
+            if cut && self.disabled.contains("cutLayers") {
                 return false;
             }
-            let names: Vec<&str> = layers
-                .iter()
-                .filter_map(|l| l.get("name").and_then(pm_model::Value::as_str))
-                .collect();
-            let text = names.join("\n");
-            (Clipboard::Layers(layers), text)
+            (Clipboard::Keys(keys), "Powermove keyframes".to_owned(), None)
         };
-        self.clipboard = clipboard;
-        // Replaces any older system media, as a text copy does.
+        layer_commands::set_clipboard(clipboard);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        self.update_disabled();
-        if cut && let Some(timeline) = self.builtins.timeline.clone() {
-            let time = self.time();
-            timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+        if cut {
+            if let Some(layer_ids) = cut_layers {
+                self.run_layer_plan(layer_commands::Plan {
+                    label: "Cut".into(),
+                    commands: vec![pm_kernel::LayerCommand::Delete { layer_ids }.into()],
+                    select: Some(Vec::new()),
+                    count_keys: None,
+                }, cx);
+            } else if let Some(timeline) = self.builtins.timeline.clone() {
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+            }
         }
         true
     }
@@ -2155,7 +2189,7 @@ impl Controller {
             return true;
         }
         let time = self.time();
-        match self.clipboard.clone() {
+        match crate::layer_commands::shared_clipboard() {
             Clipboard::Empty => false,
             Clipboard::Keys(tracks) => {
                 let Some(timeline) = self.builtins.timeline.clone() else {
@@ -2165,18 +2199,17 @@ impl Controller {
                 true
             }
             Clipboard::Layers(layers) => {
-                self.run_layer_plan(crate::layer_commands::paste_plan(layers, time), cx);
+                let Some(plan) = self.published.as_ref().and_then(|p| layers.paste(p, time)) else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
                 true
             }
         }
     }
     /// Menus, palette and toolbar enablement for the current document state.
     pub fn update_disabled(&mut self) {
-        self.disabled = crate::layer_commands::disabled(
-            self.published.as_deref(),
-            self.layers(),
-            &self.clipboard,
-        );
+        self.disabled = crate::layer_commands::disabled(self.published.as_deref(), self.layers());
     }
     /// One Undo step, then the selection it leads to.
     /// Project items as layers at the playhead, the first on top, in one
@@ -3750,6 +3783,9 @@ impl Controller {
     pub fn save(&mut self, as_path: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.recovery_pending || self.save_pending {
             self.message = "Finish the recovery decision or current save first".into();
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         }
         // An edit left open (its owner never ended it: no button is held,
@@ -3770,6 +3806,9 @@ impl Controller {
             return;
         }
         let Some(session) = self.session.clone() else {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         };
         self.save_pending = true;
@@ -4101,6 +4140,9 @@ impl Controller {
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         if self.recovery_pending || self.save_pending || self.session.is_none() {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         }
         self.save_pending = true;
@@ -4134,13 +4176,25 @@ impl Controller {
                     Some(&folder),
                 ))
                 .ok();
-            let Some(rx) = rx else { return };
+            let Some(rx) = rx else {
+                let _ = this.update(cx, |v, cx| {
+                    v.save_pending = false;
+                    v.choosing_save_path = false;
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
+                });
+                return;
+            };
             let path = rx.recv().await.ok().flatten();
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 v.choosing_save_path = false;
                 cx.notify();
                 if v.session != session {
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
                     return;
                 }
                 if let Some(path) = path {
@@ -4166,7 +4220,7 @@ impl Controller {
                 .cloned()
                 .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
         }
-        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") {
+        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") && cmd.args.is_empty() {
             if self.builtins.views.get("agent").cloned().is_some_and(|view| {
                 view.update(cx, |v, cx| v.copy_selection(window, cx))
             }) {
@@ -4243,7 +4297,7 @@ impl Controller {
                 let Some(published) = self.published.as_ref() else {
                     return false;
                 };
-                let rows = crate::layer_commands::layer_menu(published, id, self.time());
+                let rows = crate::layer_commands::layer_menu(published, id, self.time(), crate::layer_commands::can_paste());
                 let items = rows
                     .iter()
                     .find(|row| row["label"] == "Parent")
@@ -4446,8 +4500,18 @@ impl Controller {
                         return false;
                     }
                 }
-                if let Some(g) = self.builtins.gizmos.clone() {
-                    cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let host = self.host.clone();
+                    let capture = host.borrow().studio_flying.clone();
+                    defer_studio_view(
+                        gizmos,
+                        group,
+                        value,
+                        capture,
+                        move || host.borrow_mut().focus_canvas(),
+                        window,
+                        cx,
+                    );
                 }
                 return true;
             }
@@ -4478,10 +4542,22 @@ impl Controller {
         {
             return true;
         }
+        if cmd.name == "delete"
+            && cmd.args.is_empty()
+            && ["inspector", "layer-effects"].into_iter().any(|panel| {
+                self.builtins.views.get(panel).cloned().is_some_and(|view| {
+                    view.update(cx, |view, cx| view.delete_focused_effect(window, cx))
+                })
+            })
+        {
+            return true;
+        }
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {
             Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
-            Some(Route::Copy { cut }) => return self.copy_selection(cut, cx),
+            Some(Route::Copy { cut }) => {
+                return self.copy_selection(cut, cmd.args.first().and_then(serde_json::Value::as_str), cx);
+            }
             Some(Route::Paste) => return self.paste_clipboard(cx),
             Some(Route::Timeline { frames, shift }) => {
                 let Some(timeline) = self.builtins.timeline.clone() else {
@@ -4636,21 +4712,32 @@ impl Controller {
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
+            // Close Project always closes the open project and returns this
+            // window to Home (even if a page like Settings is showing). On
+            // Home, keep the editor open.
+            "closeProject" => {
+                if self.session.is_some() {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Project, cx);
+                }
+            }
             // ⌘W: a page showing (Settings, the Store) closes back to the
-            // project; else the project closes and the window shows Home;
-            // with no project the window closes.
-            "closeTab" | "closeProject" if self.pages.shown.is_some() => {
+            // project; else in separate-windows mode (or the last editor tab)
+            // the project closes and the window shows Home; otherwise the
+            // tab/window closes.
+            "closeTab" if self.pages.shown.is_some() => {
                 if let Some(id) = self.pages.shown.clone() {
                     self.close_tab_page(&id, cx);
                 }
             }
-            // Tabs mode: the tab closes (its window; the last one stays on
-            // Home). Separate windows: the project closes, the window stays.
-            "closeTab" | "closeProject" if self.session.is_some() && !pm_shell::tabs_mode() => {
+            "closeTab"
+                if self.session.is_some()
+                    && (!pm_shell::tabs_mode() || crate::entry::editors(cx).len() <= 1) =>
+            {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Project, cx)
             }
-            "closeWindow" | "closeTab" | "closeProject" => {
+            "closeWindow" | "closeTab" => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Window, cx)
             }
@@ -5159,10 +5246,12 @@ impl Controller {
             {
                 return false;
             }
-            // Space held over the viewer is the hand: Play waits for the key
-            // to come up (no drag) instead of starting on the way down.
+            // Space held over the viewer is the hand when paused: Play waits for
+            // the key to come up (no drag) instead of starting on the way down.
+            // While playing, Space pauses immediately without arming the hand.
             "play"
-                if cmd.token.is_some()
+                if !self.running()
+                    && cmd.token.is_some()
                     && self.viewer.is_some()
                     && self
                         .builtins
@@ -5195,6 +5284,7 @@ impl Controller {
                     }
                 }
                 if cmd.name == "play"
+                    && !self.running()
                     && over
                     && let Some(at) = self.skimming.at
                     && self.viewer.as_ref().is_some_and(|v| {

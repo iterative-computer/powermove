@@ -18,7 +18,7 @@ impl GeometryIdentity {
         use std::sync::Arc;
         self.shape == Self::shape(e) && self.instances.len() == input.instances.len()
             && self.instances.iter().zip(&input.instances).all(|(a,b)| {
-                a.layer==b.layer && Arc::ptr_eq(&a.mesh,&b.mesh)
+                Arc::ptr_eq(&a.mesh,&b.mesh)
                     && match (&a.attributes,&b.attributes) {
                         (Some(a),Some(b)) => Arc::ptr_eq(a,b),
                         (None,None) => true,
@@ -348,11 +348,21 @@ impl StudioService {
         let texture_start = std::time::Instant::now();
         if textures_changed {
             if let Some(maps) = &input.maps {
-                let mut pixels = Vec::with_capacity(maps.layers.iter().map(|m| m.len()).sum());
-                for layer in &maps.layers {
-                    pixels.extend_from_slice(layer);
+                if let Some(old) = self.uploaded_maps.as_ref()
+                    .filter(|old| self.texture_uploads != 0 && old.same_layout(maps))
+                {
+                    for (index, layer) in maps.layers.iter().enumerate() {
+                        if !old.same_layer(maps, index) {
+                            r.update_map(layer, maps.width, maps.height, index as u32);
+                        }
+                    }
+                } else {
+                    let mut pixels = Vec::with_capacity(maps.layers.iter().map(|m| m.len()).sum());
+                    for layer in &maps.layers {
+                        pixels.extend_from_slice(layer);
+                    }
+                    r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
                 }
-                r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
             }
