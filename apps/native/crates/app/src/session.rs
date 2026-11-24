@@ -958,7 +958,7 @@ impl Controller {
         let mut off = v.disabled.clone();
         // Read at menu time so copies and pasteboard changes in another
         // window are visible without a fresh project publication here.
-        if v.published.is_some() && crate::layer_commands::can_paste() {
+        if v.published.is_some() && crate::layer_commands::can_paste_per_frame() {
             off.remove("pasteLayers");
         }
         if v.transition_refusal().is_some() {
