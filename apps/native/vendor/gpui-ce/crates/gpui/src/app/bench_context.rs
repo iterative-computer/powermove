@@ -533,6 +533,9 @@ impl<'a, 'measurement> BenchAppContext<'a, 'measurement> {
         let http_client: Arc<dyn crate::http_client::HttpClient> =
             Arc::new(crate::http_client::BlockedHttpClient::new());
         let app = App::new_app(platform, asset_source, http_client);
+        // A benchmark draws dirty windows as effects settle; a production app
+        // linked with this feature does not (PM-696 review).
+        app.borrow_mut().settle_draws = true;
 
         Self {
             app,
