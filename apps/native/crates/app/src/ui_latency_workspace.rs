@@ -1177,7 +1177,12 @@ pub(super) fn workspace_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
     if std::env::var("PM_UI_LATENCY_CASES").is_ok_and(|ids| !ids.contains('p')) {
         return;
     }
-    let mut playback = match Playback::start(&ws) {
+    // A busy machine can hold the engine's first frames past the wait
+    // (seen once in six runs): a second viewer before the cases count it a
+    // failure, which the gate reports.
+    let started = Playback::start(&ws)
+        .or_else(|first| Playback::start(&ws).map_err(|again| format!("{first}; again: {again}")));
+    let mut playback = match started {
         Ok(p) => Some(p),
         Err(why) => {
             out.push(Case::new("W0p", "workspace", "Start playback").skip(why));
