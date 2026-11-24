@@ -3211,9 +3211,11 @@ impl SurfaceView {
         let Some(binding) = binding.filter(|_| self.natives.gain_preview.borrow().is_some()) else {
             return false;
         };
+        // Never waits on the inspector's worker: while it is busy, the drag
+        // is an ordinary scrub (no live gain preview), still one undo step.
         let Some(mut request) =
             self.runtime
-                .gain_scrub_request(&self.publication.panel, binding.as_ref(), value)
+                .try_gain_scrub_request(&self.publication.panel, binding.as_ref(), value)
         else {
             return false;
         };

@@ -10,6 +10,7 @@ publish = false
 # (docs/gpui/engine-boundary.md, section 2).
 
 [dependencies]
+pm-perf = { path = "../../../../engine/crates/pm-perf" }
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-scene3d = { path = "../scene3d" }

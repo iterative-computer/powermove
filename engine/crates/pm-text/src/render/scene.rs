@@ -141,6 +141,9 @@ pub(crate) struct NonzeroResolver {
 struct ContourEdge {
     contour: u32,
     index: u32,
+    // The sweep sorts and compares these many times per outline.
+    min_x: f64,
+    max_x: f64,
 }
 
 impl ContourEdge {
@@ -151,16 +154,6 @@ impl ContourEdge {
             raw_point(elements, contour[index]),
             raw_point(elements, contour[(index + 1) % contour.len()]),
         )
-    }
-
-    fn min_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
-        let (a, b) = self.endpoints(contours, elements);
-        a[0].min(b[0])
-    }
-
-    fn max_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
-        let (a, b) = self.endpoints(contours, elements);
-        a[0].max(b[0])
     }
 
     fn min_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
@@ -509,20 +502,18 @@ impl NonzeroResolver {
                 self.edges.push(ContourEdge {
                     contour: contour_index as u32,
                     index: index as u32,
+                    min_x: a[0].min(b[0]),
+                    max_x: a[0].max(b[0]),
                 });
             }
         }
         let contours = &self.raw_contours;
-        self.edges.sort_unstable_by(|a, b| {
-            a.min_x(contours, elements)
-                .total_cmp(&b.min_x(contours, elements))
-        });
+        self.edges
+            .sort_unstable_by(|a, b| a.min_x.total_cmp(&b.min_x));
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
-            self.active_edges.retain(|&other| {
-                self.edges[other as usize].max_x(contours, elements)
-                    >= edge.min_x(contours, elements)
-            });
+            self.active_edges
+                .retain(|&other| self.edges[other as usize].max_x >= edge.min_x);
             for &other_index in &self.active_edges {
                 let other = self.edges[other_index as usize];
                 if edge.max_y(contours, elements) < other.min_y(contours, elements)

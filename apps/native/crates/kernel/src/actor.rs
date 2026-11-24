@@ -1049,6 +1049,9 @@ fn run(
         };
         let Ok(msg) = received else { break };
         let shutdown = matches!(msg, Msg::Shutdown);
+        if !shutdown {
+            pm_perf::stall::stall(pm_perf::stall::Stage::Kernel);
+        }
         let scope = scope(&msg);
         crate::fault_injection::enter(match &scope {
             Scope::Project(id) => Some(id),
