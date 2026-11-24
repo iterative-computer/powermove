@@ -3536,6 +3536,7 @@ impl Controller {
         self.composition_views.clear();
         self.rows.clear();
         self.keyframes = 0;
+        self.end_region_pick();
         self.session = Some(session);
         self.poster_once_open(cx);
         self.media_refresh.reset();
@@ -5461,6 +5462,7 @@ pub(crate) fn stable_id(path: &std::path::Path) -> String {
 impl Drop for Controller {
     fn drop(&mut self) {
         crate::diag::EDITORS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.end_region_pick();
         if let Some(v) = &self.viewer {
             v.retire();
         }

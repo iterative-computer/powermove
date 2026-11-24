@@ -2925,6 +2925,11 @@ impl Controller {
                     let popover_handle = self.builtins.windows.get("agent").copied();
                     self.builtins.agent_picking = true;
                     let gizmos = self.builtins.gizmos.clone();
+                    // The box is attached only to the document it was drawn
+                    // over: closing or replacing the project cancels the
+                    // pick, and a late answer is checked again here.
+                    let document = self.session.as_ref().map(|s| s.project.clone())
+                        .zip(self.published.as_ref().map(|p| p.snapshot.doc_id));
                     cx.spawn(async move |this, cx| {
                         let popover = popover_handle.and_then(|handle| {
                             if handle == current {
@@ -2952,7 +2957,11 @@ impl Controller {
                         if let Some(rect) = picked {
                             let _ = editor_handle.update(cx, |_, window, cx| {
                                 let _ = this.update(cx, |v, cx| {
-                                    v.attach_region(rect, project, thread, window, cx)
+                                    let now = v.session.as_ref().map(|s| s.project.clone())
+                                        .zip(v.published.as_ref().map(|p| p.snapshot.doc_id));
+                                    if document.is_some() && now == document {
+                                        v.attach_region(rect, project, thread, window, cx)
+                                    }
                                 });
                             });
                         }

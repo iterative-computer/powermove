@@ -74,3 +74,6 @@ harness = false
 [[test]]
 name = "palette_typing"
 harness = false
+[[test]]
+name = "region_pick"
+harness = false
