@@ -1450,10 +1450,22 @@ impl Renderer {
     pub fn set_converted_frame_budget(&mut self, bytes: u64) {
         self.media.trim_frames(bytes);
     }
+    /// One allowance for reusable targets, kept mip pyramids and kept bind
+    /// groups (with the compatibility uploads they own), split so that
+    /// together they keep at most `bytes` ([`target_shares`]). Visible
+    /// playback's pool ceiling ([`Self::set_playback_retention`]) is the
+    /// targets' part of the same allowance.
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
-        self.pool.set_free_budget(bytes);
-        self.pyramids.set_budget(bytes);
-        self.binds.set_budget(bytes);
+        let (targets, pyramids, binds) = target_shares(bytes);
+        self.pool.set_free_budget(targets);
+        self.pyramids.set_budget(pyramids);
+        self.binds.set_budget(binds);
+    }
+
+    /// Bytes the pooled targets, kept pyramids and kept bindings hold now
+    /// (bindings with their compatibility uploads).
+    pub fn target_store_bytes(&self) -> (u64, u64, u64) {
+        (self.pool.bytes(), self.pyramids.bytes(), self.binding_cache_bytes())
     }
 
     /// Visible play shares a 128 MiB ceiling across both kinds of retention.
@@ -1490,8 +1502,10 @@ impl Renderer {
         self.pool.retired_bytes()
     }
 
+    /// What only bindings keep: the textures and buffers they reference and
+    /// the compatibility uploads they own.
     pub fn binding_cache_bytes(&self) -> u64 {
-        self.binds.retained_bytes()
+        self.binds.retained_bytes() + self.binds.compat.bytes()
     }
     pub fn converted_frame_bytes(&self) -> u64 {
         self.media.frame_bytes()
@@ -3081,6 +3095,30 @@ fn storage_precision(precision: Precision) -> Precision {
     match precision {
         Precision::Unorm8 => Precision::Float16,
         _ => precision,
+    }
+}
+
+/// The parts of one target allowance: half to reusable targets (visible
+/// playback's pool ceiling), a quarter each to kept mip pyramids and kept
+/// bind groups. They sum to `bytes`.
+pub fn target_shares(bytes: u64) -> (u64, u64, u64) {
+    let targets = bytes / 2;
+    let pyramids = bytes / 4;
+    (targets, pyramids, bytes - targets - pyramids)
+}
+
+#[cfg(test)]
+mod target_share_tests {
+    /// w84 review P1-1: targets, pyramids and bindings split one allowance;
+    /// none of them gets the whole of it, and together they never exceed it.
+    #[test]
+    fn one_allowance_is_split_across_targets_pyramids_and_bindings() {
+        for bytes in [0, 1, 3, 10 << 20, (2u64 << 30) / 5, u64::MAX / 2] {
+            let (targets, pyramids, binds) = super::target_shares(bytes);
+            assert_eq!(targets + pyramids + binds, bytes);
+            // Bindings take the rounding remainder: under four bytes.
+            assert!(targets <= bytes / 2 && pyramids <= bytes / 4 && binds < bytes / 4 + 4);
+        }
     }
 }
 

@@ -71,7 +71,7 @@ pub use error::{LayerFailure, ReadCause, RenderError, SvgFallback, UnreadFrame};
 pub use renderer::{
     CommandBracket, Frame, FrameFootage, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,
-    MaterialCaptureRequest, MaterialPixels, MaterialCaptureStats,
+    MaterialCaptureRequest, MaterialPixels, MaterialCaptureStats, target_shares,
 };
 pub use request::{OutputKind, OutputTone, RenderRequest};
 pub use shader_layers::all_builtin_definitions;
