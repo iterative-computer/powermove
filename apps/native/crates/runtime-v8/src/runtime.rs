@@ -1697,6 +1697,7 @@ fn worker(
         };
         let command = match mailbox.receive(deadline) {
             Ok(Some(command)) => {
+                pm_perf::stall::stall(pm_perf::stall::Stage::V8);
                 trim_at = Some(Instant::now() + IDLE_TRIM);
                 command
             }

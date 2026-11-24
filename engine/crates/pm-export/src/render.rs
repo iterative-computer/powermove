@@ -1894,6 +1894,7 @@ where
             Ok(tx.send(Rendered::Frame(n, rgba, chroma)).is_ok())
         };
         for n in 0..frames {
+            pm_perf::stall::stall(pm_perf::stall::Stage::Export);
             gate.sync_worker_qos();
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);

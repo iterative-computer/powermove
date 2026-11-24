@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { memo } from "../../src/memo";
-import type { ComponentChildren } from "preact";
+import { Fragment, type ComponentChildren } from "preact";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
 import type {
@@ -67,6 +67,8 @@ function Icon(props: {
   key?: string;
   children?: ComponentChildren;
   parentPick?: string;
+  /** Drawn by the host only while the pointer is over its row. */
+  hoverOnly?: boolean;
 }) {
   // DESIGN-TODO(opus) T1: kit has no symbol slot. This is a neutral, labelled
   // control with inspectable required symbol, not a text/emoji icon substitute.
@@ -81,6 +83,7 @@ function Icon(props: {
         ...(props.parentPick
           ? { timelineParentPick: { layer: props.parentPick } }
           : {}),
+        ...(props.hoverOnly ? { hoverOnly: true } : {}),
       }}
       disabled={props.disabled}
       active={props.active}
@@ -510,6 +513,48 @@ function Layer({
       always: true,
     },
   ];
+  const switchIcon = (item: (typeof switches)[number], hoverOnly: boolean) => (
+    <Icon
+      key={item.name}
+      parentPick={item.name === "parent" ? row.layer : undefined}
+      id={`timeline:${item.name}:${row.id}`}
+      label={item.label}
+      symbol={item.symbol}
+      tint={
+        lit
+          ? "colors.accent_text"
+          : item.name === "threeD"
+            ? item.on
+              ? "colors.accent"
+              : "colors.muted"
+            : undefined
+      }
+      active={item.name === "threeD" ? item.on : undefined}
+      disabled={item.name === "threeD" && row.locked}
+      tabIndex={-1}
+      send={send}
+      hoverOnly={hoverOnly}
+      intent={{
+        type: "switch",
+        id: item.name === "lock" ? (row.lockRow ?? row.id) : row.id,
+        name: item.name,
+      }}
+    />
+  );
+  // An unset switch keeps its column, so the name never reflows.
+  const blank = (key: string, hoverHide: boolean) => (
+    <div
+      key={key}
+      role="presentation"
+      metadata={hoverHide ? { hoverHide: true } : undefined}
+      style={{
+        width: t("metrics.hit"),
+        minWidth: t("metrics.hit"),
+        flexShrink: 0,
+        height: t("metrics.hit"),
+      }}
+    />
+  );
   return (
     <>
       <div
@@ -645,44 +690,17 @@ function Layer({
                 symbolSize: t("metrics.symbol_inline"),
               }}
             />
-          ) : item.available && (item.on || item.always || show) ? (
-            <Icon
-              key={item.name}
-              parentPick={item.name === "parent" ? row.layer : undefined}
-              id={`timeline:${item.name}:${row.id}`}
-              label={item.label}
-              symbol={item.symbol}
-              tint={
-                lit
-                  ? "colors.accent_text"
-                  : item.name === "threeD"
-                    ? item.on
-                      ? "colors.accent"
-                      : "colors.muted"
-                    : undefined
-              }
-              active={item.name === "threeD" ? item.on : undefined}
-              disabled={item.name === "threeD" && row.locked}
-              tabIndex={-1}
-              send={send}
-              intent={{
-                type: "switch",
-                id: item.name === "lock" ? (row.lockRow ?? row.id) : row.id,
-                name: item.name,
-              }}
-            />
+          ) : item.available ? (
+            // One slot per switch, its Icon always first: shown, or shown on
+            // the row's hover (which the host draws, with the blank that
+            // holds its column until then), it stays the same native button,
+            // so a click sent to it lands through a lock toggle.
+            <Fragment key={item.name}>
+              {switchIcon(item, !(item.on || item.always || show))}
+              {!(item.on || item.always || show) && blank("hover", true)}
+            </Fragment>
           ) : (
-            // An unset switch keeps its column, so the name never reflows.
-            <div
-              key={item.name}
-              role="presentation"
-              style={{
-                width: t("metrics.hit"),
-                minWidth: t("metrics.hit"),
-                flexShrink: 0,
-                height: t("metrics.hit"),
-              }}
-            />
+            blank(item.name, false)
           ),
         )}
       </div>
@@ -877,7 +895,6 @@ const TimelineRow = memo(
     focused: boolean;
     key?: string;
   }) {
-    const [hover, setHover] = useState(false);
     if (published.kind === "heading")
       return (
         <div
@@ -899,9 +916,16 @@ const TimelineRow = memo(
         </div>
       );
     let clickModifiers: Modifiers = {};
-    // Hover is the pointer's, local to the row: switches show without a host trip.
-    const row =
-      hover && !published.hovered ? { ...published, hovered: true } : published;
+    const row = published;
+    // The pointer's hover is the host's (`hoverGroup`): it draws the hovered
+    // fill below and the switches that show on hover, with no publication of
+    // the panel per row the pointer crosses.
+    const hoverFill =
+      row.selected && focused
+        ? t("colors.timeline_selected_hover")
+        : row.selected
+          ? null
+          : t("colors.hover");
     return (
       <UI.TreeItem
         id={`timeline:row:${row.id}`}
@@ -923,6 +947,8 @@ const TimelineRow = memo(
           nativeRow: row.id,
           depth: row.depth,
           designTodo: "T4",
+          hoverGroup: true,
+          ...(hoverFill ? { hoverStyle: { background: hoverFill } } : {}),
           ...(row.kind === "layer"
             ? {
                 media: row.media,
@@ -935,8 +961,6 @@ const TimelineRow = memo(
         onClickCapture={(event) => {
           clickModifiers = modifiers(event);
         }}
-        onPointerEnter={() => setHover(true)}
-        onPointerLeave={() => setHover(false)}
         onSelect={() => {
           send({ type: "selectRow", id: row.id, modifiers: clickModifiers });
           clickModifiers = {};

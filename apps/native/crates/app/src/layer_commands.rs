@@ -221,8 +221,16 @@ pub fn set_clipboard(value: Clipboard) {
 }
 
 pub fn can_paste() -> bool {
-    let has_copy = !matches!(*CLIPBOARD.lock().unwrap(), Clipboard::Empty);
-    has_copy || crate::platform::has_pasteboard_content()
+    has_copy() || crate::platform::has_pasteboard_content()
+}
+
+/// `can_paste` for the menus' state, asked on every frame the window draws.
+pub fn can_paste_per_frame() -> bool {
+    has_copy() || crate::platform::has_pasteboard_content_per_frame()
+}
+
+fn has_copy() -> bool {
+    !matches!(*CLIPBOARD.lock().unwrap(), Clipboard::Empty)
 }
 
 #[derive(Debug)]

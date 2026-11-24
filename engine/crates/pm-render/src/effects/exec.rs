@@ -887,6 +887,16 @@ impl<'c> Gpu<'c> {
                 &units,
                 &out,
                 clips,
+                pass == 6
+                    && scissor
+                        .as_ref()
+                        .is_some_and(|bounds| bounds.packed.is_some())
+                    && ["highQuality", "dispersion"].iter().all(|key| {
+                        step.params.iter().any(|p| {
+                            p.key == *key
+                                && matches!(p.value, Binding::Float(v) if v.to_bits() == 0)
+                        })
+                    }),
             );
             drop(units);
             self.inputs = ready;
@@ -1340,7 +1350,7 @@ impl<'c> Gpu<'c> {
         units: &[Option<&Target>],
         out: &Target,
     ) {
-        self.legacy_pass_clipped(kind, definition, calls, units, out, None);
+        self.legacy_pass_clipped(kind, definition, calls, units, out, None, false);
     }
     #[allow(clippy::too_many_arguments)]
     fn legacy_pass_clipped(
@@ -1351,6 +1361,7 @@ impl<'c> Gpu<'c> {
         units: &[Option<&Target>],
         out: &Target,
         clips: Option<[super::bounds::Rect; 2]>,
+        glow_blur: bool,
     ) {
         let device = self.device;
         let queue = self.queue;
@@ -1441,10 +1452,16 @@ impl<'c> Gpu<'c> {
             layout: &program.vertex_layout,
             entries: &vertex_entries,
         });
-        let pipeline = program
-            .pipeline(device, format)
-            .expect("built above")
-            .clone();
+        let optimized = glow_blur
+            .then(|| program.glow_blur_pipeline(device, format))
+            .flatten()
+            .cloned();
+        let pipeline = optimized.unwrap_or_else(|| {
+            program
+                .pipeline(device, format)
+                .expect("built above")
+                .clone()
+        });
         self.effects.uniforms = uniforms;
         let mut pass = begin(
             self.encoder,

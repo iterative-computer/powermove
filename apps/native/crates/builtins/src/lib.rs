@@ -343,6 +343,10 @@ struct Broker {
     parked: Mutex<std::collections::BTreeSet<String>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
     overlays_cleared: Mutex<Vec<String>>,
+    /// The Export sheet's checks, drained by main on every wake without the
+    /// panel's entry or backend, which its V8 worker holds for whole host
+    /// calls (PM-699).
+    export_probe: Mutex<Option<Arc<Mutex<models::Probe>>>>,
 }
 /// v1's inspector-service effect clipboard for one window: `copy` takes the
 /// effects selected in its Effect Controls, `paste` adds the clipboard's
@@ -1429,6 +1433,7 @@ impl Builtins {
             commands: Default::default(),
             themes: Default::default(),
             overlays_cleared: Default::default(),
+            export_probe: Default::default(),
             parked: Default::default(),
             theme_request: Default::default(),
             effect_clipboard: Default::default(),
@@ -1603,6 +1608,9 @@ impl Builtins {
         }
         self.broker.forget_effects(panel);
         self.broker.entries.shared().remove(panel);
+        if panel == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
         self.broker.publications.shared().remove(panel);
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
@@ -1710,6 +1718,9 @@ impl Builtins {
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.forget_effects(id);
         self.broker.entries.shared().remove(id);
+        if id == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
@@ -1915,9 +1926,7 @@ impl Builtins {
     /// so its formats and Export Video leave "Checking…" without waiting for
     /// some other change. The host calls it on every wake.
     pub fn publish_finished_checks(&self) -> Option<Result<Ticket<Evaluation>>> {
-        let entry = self.broker.entry("export")?;
-        let backend = entry.shared().backend.clone();
-        let probe = backend.shared().native.export_probe.clone();
+        let probe = self.broker.export_probe.shared().clone()?;
         let finished = std::mem::take(&mut probe.lock().unwrap().unpublished);
         finished.then(|| {
             self.realm_of("export").and_then(|realm| {
@@ -2504,6 +2513,31 @@ impl Builtins {
         }
         let backend = self.backend(panel).ok()?;
         let mut backend = backend.shared();
+        Self::gain_request(&mut backend, handle, value)
+    }
+    /// `gain_scrub_request` for the start of a drag, on the main thread:
+    /// `None` while the inspector's worker holds its panel (a host call, a
+    /// slow tick), and the drag takes the ordinary scrub path instead of
+    /// waiting (PM-699).
+    pub fn try_gain_scrub_request(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if panel != "inspector" {
+            return None;
+        }
+        let entry = self.broker.entries.try_lock().ok()?.get(panel)?.clone();
+        let entry = entry.try_lock().ok()?;
+        let mut backend = entry.backend.try_lock().ok()?;
+        Self::gain_request(&mut backend, handle, value)
+    }
+    fn gain_request(
+        backend: &mut data::Backend,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
         if !backend.native.properties.is_gain_handle(handle) {
             return None;
         }
@@ -2782,6 +2816,9 @@ impl EngineProxy for Broker {
                     .map_err(Error::Host)?,
             )
             .map_err(Error::Host)?;
+            if panel == "export" {
+                *self.export_probe.shared() = Some(backend.shared().native.export_probe.clone());
+            }
             entries.insert(
                 panel.into(),
                 Arc::new(Mutex::new(Entry {
@@ -2858,6 +2895,9 @@ impl EngineProxy for Broker {
                             }
                         }
                     }
+                    // A panel's host work is the V8 stage a stall holds up
+                    // (`pm_perf::stall`), with its backend locked as here.
+                    pm_perf::stall::stall(pm_perf::stall::Stage::V8);
                     backend.tick().map_err(Error::Host)?;
                     self.forward_platform(&mut backend, panel, generation.number);
                 }
@@ -3041,20 +3081,29 @@ impl EngineProxy for Broker {
                     Ok(_) => {
                         let applied = started.elapsed();
                         entry.interaction.reconcile(&entry.surface);
-                        let surface = Arc::new(entry.surface.clone());
                         if tracing() {
                             trace(json!({"panel": panel, "commit_ms": ms(applied),
                                 "publish_ms": ms(started.elapsed()), "input_bytes": input.to_string().len()}));
                         }
-                        self.publications.shared().insert(
-                            panel.into(),
-                            Publication {
-                                panel: panel.into(),
-                                generation: generation.number,
-                                surface,
-                            },
-                        );
-                        (self.wake)();
+                        // A commit that set the tree to what it was (a
+                        // re-render that came out the same: the Effects
+                        // browser and the viewer's chrome on every selection
+                        // change) is acknowledged, not published: the panel's
+                        // view would compile, install and draw it again for
+                        // nothing. Its revision still counts, and the view's
+                        // events stay valid (nothing in them changed).
+                        if entry.surface.last_commit_changed() {
+                            let surface = Arc::new(entry.surface.clone());
+                            self.publications.shared().insert(
+                                panel.into(),
+                                Publication {
+                                    panel: panel.into(),
+                                    generation: generation.number,
+                                    surface,
+                                },
+                            );
+                            (self.wake)();
+                        }
                         Ok(json!({"accepted":true,"revision":entry.surface.revision()}))
                     }
                     Err(error) => Ok(

@@ -24,6 +24,7 @@
 use pm_eval::{Comp, Scope};
 use pm_model::{Document, Node};
 use pm_protocol::color::Precision;
+use pm_vector::render::scene::PixelRect;
 
 use super::Renderer;
 use crate::capability::{self, Feature, Unsupported};
@@ -55,6 +56,29 @@ pub struct LayerRaster {
     pub font_offset: Option<(f64, f64)>,
     /// Whether today's raster honors a crop window for this layer.
     pub crops: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RasterArea {
+    Canvas(Option<[u32; 4]>),
+    Geometry,
+}
+
+impl RasterArea {
+    fn window(self, crop: PixelRect) -> Option<PixelRect> {
+        match self {
+            Self::Geometry => None,
+            Self::Canvas(None) => Some(crop),
+            Self::Canvas(Some([x, y, w, h])) => {
+                let right = x.saturating_add(w).min(crop.right() as u32);
+                let bottom = y.saturating_add(h).min(crop.bottom() as u32);
+                let x = x.max(crop.x as u32);
+                let y = y.max(crop.y as u32);
+                (right > x && bottom > y)
+                    .then(|| PixelRect::new(x as i32, y as i32, right - x, bottom - y))
+            }
+        }
+    }
 }
 
 /// `min(scale, 8192 / w, 8192 / h)`: today's raster density.
@@ -146,6 +170,52 @@ impl Renderer {
         scale: f64,
         precision: Precision,
         window: Option<[u32; 4]>,
+    ) -> Result<Option<LayerRaster>, RenderError> {
+        self.layer_raster_in(
+            document,
+            composition,
+            layer,
+            content,
+            seconds,
+            scale,
+            precision,
+            RasterArea::Canvas(window),
+        )
+    }
+
+    /// The canvas and placement of a base raster without painting its pixels.
+    pub fn layer_raster_geometry(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        content: Option<&Node>,
+        seconds: f64,
+        scale: f64,
+    ) -> Result<Option<LayerRaster>, RenderError> {
+        self.layer_raster_in(
+            document,
+            composition,
+            layer,
+            content,
+            seconds,
+            scale,
+            Precision::Float16,
+            RasterArea::Geometry,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layer_raster_in(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        content: Option<&Node>,
+        seconds: f64,
+        scale: f64,
+        precision: Precision,
+        area: RasterArea,
     ) -> Result<Option<LayerRaster>, RenderError> {
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
@@ -260,42 +330,63 @@ impl Renderer {
                     anchor: (placed.anchor_x, placed.anchor_y),
                     selection,
                     font_offset,
-                    crops: !animated,
+                    // The legacy base canvas for text with no ink is whole.
+                    crops: false,
                 }));
             };
-            self.text_gpu.begin_frame();
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("pm layer raster"),
-                });
-            let mut taken = Vec::new();
-            let view = self
-                .text_gpu
-                .render(
-                    &self.device,
-                    &self.queue,
-                    &mut encoder,
-                    &mut self.pool,
-                    &mut taken,
-                    &quad.plan,
-                    precision,
-                    pm_protocol::color::WorkingEncoding::Standard,
-                )
-                .map_err(RenderError::Media)?;
-            self.queue.submit([encoder.finish()]);
-            for t in taken {
-                self.pool.give(t);
-            }
             let [cx0, cy0, cx1, cy1] = quad.plan.crop;
             let held = [cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0)];
-            let pixels = read_pixels(&self.device, &self.queue, view.texture(), held, window)?;
+            let crops = ty == "text" && !animated;
+            let window = match area {
+                RasterArea::Canvas(window) if crops => window,
+                _ => None,
+            };
+            let rect = PixelRect::new(held[0] as i32, held[1] as i32, held[2], held[3]);
+            let draw_area = match area {
+                RasterArea::Canvas(Some(_)) if !crops => RasterArea::Canvas(None),
+                _ => area,
+            };
+            let pixels = match draw_area.window(rect) {
+                None => LayerPixels {
+                    pixels: Vec::new(),
+                    crop: [0, 0, 0, 0],
+                },
+                Some(_) => {
+                    // Preserve the whole text target's coverage and paint
+                    // coordinates. A window limits only the texels read back.
+                    self.text_gpu.begin_frame();
+                    let mut encoder =
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("pm layer raster"),
+                            });
+                    let mut taken = Vec::new();
+                    let view = self
+                        .text_gpu
+                        .render(
+                            &self.device,
+                            &self.queue,
+                            &mut encoder,
+                            &mut self.pool,
+                            &mut taken,
+                            &quad.plan,
+                            precision,
+                            pm_protocol::color::WorkingEncoding::Standard,
+                        )
+                        .map_err(RenderError::Media)?;
+                    self.queue.submit([encoder.finish()]);
+                    for t in taken {
+                        self.pool.give(t);
+                    }
+                    read_pixels(&self.device, &self.queue, view.texture(), held, window)?
+                }
+            };
             // The pixels are placed in the whole canvas (only its inked part
             // is painted, and the quad shrinks to it for compositing), so
             // the surface's box and anchor are the whole canvas's, as
             // today's `RasterSurface` has them: a wrapper drawing `cv` at
             // `w` × `h` from `-anchorX, -anchorY` must not squeeze it.
-            let crop = quad.plan.crop;
+            let crop = [cx0, cy0, cx1, cy1];
             let canvas = (quad.plan.scene.width, quad.plan.scene.height);
             let (box_size, anchor) = whole.unwrap_or_else(|| {
                 // The quad is the ink crop `[x0, y0, x1, y1]` of a canvas
@@ -327,7 +418,7 @@ impl Renderer {
                 anchor,
                 selection,
                 font_offset,
-                crops: ty == "text" && !animated,
+                crops,
             }));
         }
         if has_paths {
@@ -341,7 +432,11 @@ impl Renderer {
                 &layer_paths.layer_to_pixels(&raster).as_coeffs(),
             );
             drop(scope);
-            let pixels = self.paint_scene(scene, canvas, precision, window)?;
+            let area = match area {
+                RasterArea::Geometry => area,
+                _ => RasterArea::Canvas(None),
+            };
+            let pixels = self.paint_scene(scene, canvas, precision, area)?;
             let b = layer_paths.bounds;
             return Ok(Some(LayerRaster {
                 canvas,
@@ -370,7 +465,7 @@ impl Renderer {
             &colors.stroke_color,
         );
         let canvas = (g.width as u32, g.height as u32);
-        let pixels = self.paint_scene(scene, canvas, precision, window)?;
+        let pixels = self.paint_scene(scene, canvas, precision, area)?;
         let s = g.selection;
         Ok(Some(LayerRaster {
             canvas,
@@ -390,22 +485,19 @@ impl Renderer {
         scene: pm_vector::render::scene::CoverageScene,
         canvas: (u32, u32),
         precision: Precision,
-        window: Option<[u32; 4]>,
+        area: RasterArea,
     ) -> Result<LayerPixels, RenderError> {
-        let crop = [0, 0, canvas.0, canvas.1];
-        let rect = pm_vector::render::scene::PixelRect::new(0, 0, canvas.0, canvas.1);
+        let Some(rect) = area.window(PixelRect::new(0, 0, canvas.0, canvas.1)) else {
+            return Ok(LayerPixels {
+                pixels: Vec::new(),
+                crop: [0, 0, 0, 0],
+            });
+        };
+        let crop = [rect.x as u32, rect.y as u32, rect.width, rect.height];
         if scene.pixel_bounds(rect).is_none() {
-            // Nothing is inked: the canvas is transparent (a window of it
-            // holds no painted pixels).
-            return Ok(match window {
-                None => LayerPixels {
-                    pixels: vec![0.0; canvas.0 as usize * canvas.1 as usize * 4],
-                    crop,
-                },
-                Some(_) => LayerPixels {
-                    pixels: Vec::new(),
-                    crop: [0, 0, 0, 0],
-                },
+            return Ok(LayerPixels {
+                pixels: vec![0.0; rect.width as usize * rect.height as usize * 4],
+                crop,
             });
         }
         let view = self
@@ -417,6 +509,6 @@ impl Renderer {
                 precision,
             )
             .map_err(RenderError::Media)?;
-        read_pixels(&self.device, &self.queue, view.texture(), crop, window)
+        read_pixels(&self.device, &self.queue, view.texture(), crop, None)
     }
 }

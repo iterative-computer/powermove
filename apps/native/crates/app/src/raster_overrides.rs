@@ -257,6 +257,7 @@ impl Overrides {
                     width,
                     height,
                 }),
+                geometry_only: request.geometry_only,
             })?;
             let ms = started.elapsed().as_millis() as u64;
             if ms >= 20 {

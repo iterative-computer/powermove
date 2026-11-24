@@ -20,7 +20,16 @@
 //! continuous interaction would present on a synthetic 120 Hz clock
 //! (skipped vsyncs, superseded results; see `cadence_120`).
 //!
-//! `PM_UI_LATENCY_OUT=/path.json` writes the catalogue; `PM_UI_LATENCY_BUDGET=1`
+//! Wall times swing 2-3x with the machine's load, so each step also records
+//! the main thread's own CPU time and the instructions it retired
+//! (`main_minstr`, xnu's thread counters, about 2 % between identical runs):
+//! pm-gate holds each case to its recorded p99 of instructions (PM-698,
+//! `~/Developer/pm-durable/bin/pm-ui-latency-check`). The workspace group
+//! (`ui_latency_workspace.rs`) runs the real shell with every built-in panel,
+//! paused and with a real engine viewer playing.
+//!
+//! `PM_UI_LATENCY_GROUPS=workspace,timeline` and `PM_UI_LATENCY_CASES=K1,K1p`
+//! pick what runs (profiling). `PM_UI_LATENCY_OUT=/path.json` writes the catalogue; `PM_UI_LATENCY_BUDGET=1`
 //! turns the budgets (p50 ≤ one 120 Hz frame, p95 ≤ 50 ms; and the pacing
 //! gates p99 ≤ two frames, hitches ≤ `PM_UI_LATENCY_MAX_HITCHES` (0), runs
 //! over 4 ms ≤ `PM_UI_LATENCY_MAX_MAIN_OVER_4MS` (0)) into assertions.
@@ -49,6 +58,11 @@ const FRAME_MS: f64 = 1000. / 120.;
 const P95_MS: f64 = 50.;
 /// A hitch: longer than 1.5 display intervals at 120 Hz (12.5 ms).
 const HITCH_MS: f64 = 1.5 * FRAME_MS;
+/// A hitch in work, independent of the machine's load: the instructions
+/// a performance core of the test Mac retires in `HITCH_MS` on this code
+/// (PM-698: about 12 million a millisecond on its quiet steps, release).
+const HITCH_MINSTR: f64 = 12.5 * MINSTR_PER_MS;
+const MINSTR_PER_MS: f64 = 12.;
 /// Never more than this at p99: a result lands at worst one vsync late.
 const P99_MS: f64 = 2. * FRAME_MS;
 /// One contiguous main-thread run longer than this is flagged.
@@ -87,6 +101,15 @@ fn layer_count() -> usize {
 struct Sample {
     input_to_frame_ms: f64,
     main_ms: f64,
+    /// CPU time the test thread itself spent in `main_ms`: what the main
+    /// thread costs, unmoved by other processes taking the cores (wall
+    /// times on a shared machine swing 2-3x with its load).
+    main_cpu_ms: f64,
+    /// Instructions the test thread retired in `main_ms`, millions: the
+    /// work itself, the same on a busy machine and an idle one, on a
+    /// performance core and an efficiency core (the gate's measure).
+    /// `None` when the thread's counters could not be read.
+    main_minstr: Option<f64>,
     /// The result never showed within `WAIT`.
     missed: bool,
     /// The runs inside `main_ms` were timed one by one (`Probe`). A direct
@@ -96,7 +119,8 @@ struct Sample {
     max_slice_ms: f64,
     /// Contiguous test-thread runs over `MAIN_SLICE_MS`.
     slices_over: u32,
-    /// The whole-window draw (`draw`: next-frame callbacks, layout, paint).
+    /// The display tick (`draw`: next-frame callbacks, and the draw of a
+    /// window they invalidate).
     frame_ms: f64,
 }
 
@@ -122,6 +146,9 @@ impl Sample {
 struct Probe {
     start: Instant,
     main: Duration,
+    cpu: Duration,
+    /// `None` once a read of the counters failed: no number, never zero.
+    instructions: Option<u64>,
     max_slice: Duration,
     slices_over: u32,
     frame: Duration,
@@ -132,15 +159,22 @@ impl Probe {
         Self {
             start: Instant::now(),
             main: Duration::ZERO,
+            cpu: Duration::ZERO,
+            instructions: Some(0),
             max_slice: Duration::ZERO,
             slices_over: 0,
             frame: Duration::ZERO,
         }
     }
     fn run<R>(&mut self, f: impl FnOnce() -> R) -> R {
-        let at = Instant::now();
+        let (at, cpu, instructions) = (Instant::now(), thread_cpu(), thread_instructions());
         let out = f();
         let slice = at.elapsed();
+        self.cpu += thread_cpu().saturating_sub(cpu);
+        self.instructions = match (self.instructions, instructions, thread_instructions()) {
+            (Some(sum), Some(from), Some(to)) => Some(sum + to.saturating_sub(from)),
+            _ => None,
+        };
         self.main += slice;
         self.max_slice = self.max_slice.max(slice);
         self.slices_over += u32::from(slice.as_secs_f64() * 1e3 > MAIN_SLICE_MS);
@@ -153,6 +187,8 @@ impl Probe {
         Sample {
             input_to_frame_ms: self.elapsed_ms(),
             main_ms: self.main.as_secs_f64() * 1e3,
+            main_cpu_ms: self.cpu.as_secs_f64() * 1e3,
+            main_minstr: self.instructions.map(|n| n as f64 / 1e6),
             missed,
             sliced: true,
             max_slice_ms: self.max_slice.as_secs_f64() * 1e3,
@@ -160,6 +196,31 @@ impl Probe {
             frame_ms: self.frame.as_secs_f64() * 1e3,
         }
     }
+}
+
+/// This thread's CPU time.
+fn thread_cpu() -> Duration {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `t` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+unsafe extern "C" {
+    /// xnu: this thread's fixed counters (type 1: instructions, cycles).
+    fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+}
+
+/// Instructions this thread has retired; `None` where the counters are
+/// off (a reading of zero is no reading either).
+fn thread_instructions() -> Option<u64> {
+    let mut counts = [0u64; 2];
+    // SAFETY: `counts` is two u64s, the size passed.
+    let ok = unsafe { thread_selfcounts(1, counts.as_mut_ptr(), std::mem::size_of_val(&counts)) };
+    (ok == 0 && counts[0] > 0).then_some(counts[0])
 }
 
 /// Lets GPUI tasks and the kernel/V8 threads run until `done` holds.
@@ -180,13 +241,16 @@ fn pump_until(
     }
 }
 
-/// A whole-window frame, as the next display-link tick draws it.
+/// The next display-link tick: its frame callbacks run, and the window
+/// draws if anything invalidated it, as `on_request_frame` does. Never a
+/// `refresh()`: that sets `refreshing`, which re-renders every cached view,
+/// work no display tick does (every sample paid it until PM-698). A draw
+/// the input caused runs in the input's own update.
 fn draw(vcx: &mut VisualTestContext, probe: &mut Probe) {
     let at = Instant::now();
     probe.run(|| {
         vcx.update(|window, cx| {
             window.simulate_next_frame(cx);
-            window.refresh();
         });
         vcx.run_until_parked();
     });
@@ -249,6 +313,25 @@ impl Case {
                 json!({"p50": p50, "p95": p95, "p99": percentile(v, 0.99), "max": max})
             }
         };
+        let cpu: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| s.sliced)
+            .map(|s| s.main_cpu_ms)
+            .collect();
+        let instr_read: Vec<Option<f64>> = self
+            .samples
+            .iter()
+            .filter(|s| s.sliced)
+            .map(|s| s.main_minstr)
+            .collect();
+        let unavailable = instr_read.iter().filter(|m| m.is_none()).count();
+        // A step without a reading leaves the case without the measure.
+        let instr: Vec<f64> = if unavailable == 0 {
+            instr_read.iter().flatten().copied().collect()
+        } else {
+            vec![]
+        };
         let slices: Vec<f64> = self.samples.iter().map(Sample::max_slice).collect();
         let frames: Vec<f64> = self
             .samples
@@ -266,6 +349,10 @@ impl Case {
             "skipped": self.skipped,
             "input_to_frame_ms": summary(&frame),
             "main_ms": summary(&main),
+            "main_cpu_ms": summary(&cpu),
+            "main_minstr": summary(&instr),
+            "instr_hitches": instr.iter().filter(|m| **m > HITCH_MINSTR).count(),
+            "instr_unavailable": unavailable,
             "within_budget": self.within_budget(),
             "hitches": self.hitches(),
             "main_over_4ms": self.main_over(),
@@ -595,13 +682,18 @@ struct PanelStage {
 }
 
 fn panel_stage(cx: &mut TestAppContext, panel: &str, project: &str) -> PanelStage {
+    try_panel_stage(cx, panel, project).expect("the panel published a surface")
+}
+
+/// `None` when the panel publishes no surface of its own here.
+fn try_panel_stage(cx: &mut TestAppContext, panel: &str, project: &str) -> Option<PanelStage> {
     let rig = rig_project(panel, project);
-    let first = publication(&rig);
+    let first = rig.runtime.take_publications().pop()?;
     let (view, mut vcx) = window(cx, &rig, first, Natives::default());
     let mut probe = Probe::start();
     republish(&rig, &view, &mut vcx, &mut probe);
     draw(&mut vcx, &mut probe);
-    PanelStage { rig, view, vcx }
+    Some(PanelStage { rig, view, vcx })
 }
 
 // -------------------------------------------------------- viewer gizmos
@@ -1061,7 +1153,7 @@ fn hover_controls(s: &mut PanelStage, id: &str, group: &str, name: &str) -> Case
     let ids = nodes(&s.view, &s.vcx, |n| {
         matches!(
             role(n),
-            "button" | "tab" | "option" | "menuitem" | "row" | "listitem"
+            "button" | "tab" | "option" | "menuitem" | "row" | "listitem" | "cell" | "gridcell"
         )
     });
     let mut spots = vec![];
@@ -1209,8 +1301,17 @@ fn panel_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
         &["layer"],
     ));
     out.push(scroll(&mut s, "J2", "project", "Scroll the Project panel"));
-    // Settings.
-    let mut s = panel_stage(cx, "settings", &project);
+    // Settings: in the app it is a form of its own (`publish_settings_form`),
+    // and the rig's mount publishes no surface for it.
+    let Some(mut s) = try_panel_stage(cx, "settings", &project) else {
+        for (id, name) in [
+            ("S1", "Scroll the Settings panel"),
+            ("S2", "Toggle a checkbox/switch in Settings"),
+        ] {
+            out.push(Case::new(id, "settings", name).skip("Settings published no surface"));
+        }
+        return;
+    };
     out.push(scroll(
         &mut s,
         "S1",
@@ -1755,9 +1856,22 @@ fn appkit_cases(out: &mut Vec<Case>) {
     }
 }
 
+#[path = "ui_latency_workspace.rs"]
+mod workspace;
+
 // ----------------------------------------------------------------- runner
 
+/// `PM_UI_LATENCY_GROUPS=workspace,timeline` runs only those groups.
+fn selected(group: &str) -> bool {
+    std::env::var("PM_UI_LATENCY_GROUPS")
+        .map(|groups| groups.split(',').any(|g| g.trim() == group))
+        .unwrap_or(true)
+}
+
 fn guarded(out: &mut Vec<Case>, group: &str, f: impl FnOnce(&mut Vec<Case>)) {
+    if !selected(group) {
+        return;
+    }
     let mut cases = vec![];
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut cases)));
     out.extend(cases);
@@ -1773,7 +1887,8 @@ fn guarded(out: &mut Vec<Case>, group: &str, f: impl FnOnce(&mut Vec<Case>)) {
 
 fn report(cases: &[Case]) -> Value {
     json!({
-        "version": 2,
+        // 3: steps carry `main_minstr` (pm-gate requires it; 2 is legacy).
+        "version": 3,
         "frame_budget_ms": FRAME_MS,
         "p95_budget_ms": P95_MS,
         "pacing": {
@@ -1831,6 +1946,13 @@ fn print(cases: &[Case]) {
 #[gpui::test]
 fn ui_latency_catalogue(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
+    // The app's main thread runs at user-interactive QoS (performance
+    // cores); a test thread at the default QoS lands on efficiency cores
+    // when the machine is busy, and every timing doubles.
+    // SAFETY: sets this thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
     let mut cases = vec![];
     // Priority first: the tester's "moving and resizing shapes lags".
     guarded(&mut cases, "viewer", |out| viewer_cases(cx, out));
@@ -1839,7 +1961,12 @@ fn ui_latency_catalogue(cx: &mut TestAppContext) {
     guarded(&mut cases, "timeline", |out| timeline_cases(cx, out));
     guarded(&mut cases, "panels", |out| panel_cases(cx, out));
     guarded(&mut cases, "shared", shared_cases);
-    appkit_cases(&mut cases);
+    guarded(&mut cases, "workspace", |out| {
+        workspace::workspace_cases(cx, out)
+    });
+    if selected("appkit") {
+        appkit_cases(&mut cases);
+    }
     print(&cases);
     if let Some(path) = std::env::var_os("PM_UI_LATENCY_OUT") {
         let text = serde_json::to_string_pretty(&report(&cases)).unwrap();
@@ -1931,6 +2058,25 @@ fn ui_latency_stats_and_budget() {
     assert_eq!(hitch.superseded, 1);
     assert_eq!(hitch.skipped_vsyncs, 2);
     assert_eq!(hitch.max_gap_vsyncs, 3);
+    // Instructions: a step without a reading leaves the case without the
+    // measure (the gate fails it), never a zero.
+    let mut read = Case::new("I", "test", "instructions");
+    read.samples = (0..3)
+        .map(|i| Sample {
+            sliced: true,
+            main_minstr: Some(20. + i as f64),
+            ..Default::default()
+        })
+        .collect();
+    let json = read.to_json();
+    assert_eq!(json["main_minstr"]["p99"], 22.);
+    assert_eq!(json["instr_unavailable"], 0);
+    read.samples[1].main_minstr = None;
+    let json = read.to_json();
+    assert!(json["main_minstr"].is_null());
+    assert_eq!(json["instr_unavailable"], 1);
+    assert_eq!(report(&[read])["version"], 3);
+    assert!(thread_instructions().is_some_and(|n| n > 0));
     let project: Value = serde_json::from_str(&project_json(6)).unwrap();
     assert_eq!(project["layers"].as_array().unwrap().len(), 6);
     assert_eq!(project["layers"][1]["type"], "image");
