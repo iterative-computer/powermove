@@ -895,6 +895,175 @@ def Xform "Deck" {
     );
 }
 
+/// w83 review P0-3: two maps packed into one texture share one UV set. When
+/// theirs differ, both use UV0 (as before second sets were read), so the
+/// opacity and roughness maps authored on UV0 are not moved onto UV1; maps
+/// that agree on UV1 keep it.
+#[cfg(target_os = "macos")]
+#[test]
+fn usdz_packed_maps_never_move_onto_another_uv_set() {
+    let usda = br#"#usda 1.0
+(
+    defaultPrim = "Deck"
+    upAxis = "Y"
+)
+def Xform "Deck" {
+    def Mesh "A" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "vertex")
+        texCoord2f[] primvars:st1 = [(0, 1), (1, 1), (1, 0)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/MixedAlpha>
+    }
+    def Mesh "B" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "vertex")
+        texCoord2f[] primvars:st1 = [(0, 1), (1, 1), (1, 0)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/MixedPbr>
+    }
+    def Mesh "C" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(4, 0, 0), (5, 0, 0), (4, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "vertex")
+        texCoord2f[] primvars:st1 = [(0, 1), (1, 1), (1, 0)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/AgreedAlpha>
+    }
+    def Material "MixedAlpha" {
+        token outputs:surface.connect = </Deck/MixedAlpha/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Deck/MixedAlpha/A.outputs:rgb>
+            float inputs:opacity.connect = </Deck/MixedAlpha/B.outputs:r>
+            token outputs:surface
+        }
+        def Shader "A" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/MixedAlpha/UV1.outputs:result>
+            float3 outputs:rgb
+            float outputs:r
+        }
+        def Shader "B" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/MixedAlpha/UV0.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV0" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st"
+            float2 outputs:result
+        }
+        def Shader "UV1" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st1"
+            float2 outputs:result
+        }
+    }
+    def Material "MixedPbr" {
+        token outputs:surface.connect = </Deck/MixedPbr/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:metallic.connect = </Deck/MixedPbr/B.outputs:r>
+            float inputs:roughness.connect = </Deck/MixedPbr/A.outputs:r>
+            token outputs:surface
+        }
+        def Shader "A" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/MixedPbr/UV1.outputs:result>
+            float3 outputs:rgb
+            float outputs:r
+        }
+        def Shader "B" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/MixedPbr/UV0.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV0" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st"
+            float2 outputs:result
+        }
+        def Shader "UV1" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st1"
+            float2 outputs:result
+        }
+    }
+    def Material "AgreedAlpha" {
+        token outputs:surface.connect = </Deck/AgreedAlpha/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Deck/AgreedAlpha/A.outputs:rgb>
+            float inputs:opacity.connect = </Deck/AgreedAlpha/B.outputs:r>
+            token outputs:surface
+        }
+        def Shader "A" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/AgreedAlpha/UV1.outputs:result>
+            float3 outputs:rgb
+            float outputs:r
+        }
+        def Shader "B" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/AgreedAlpha/UV1.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV0" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st"
+            float2 outputs:result
+        }
+        def Shader "UV1" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st1"
+            float2 outputs:result
+        }
+    }
+}
+"#;
+    let bytes = archive(
+        &[("deck.usda", usda), ("paper.png", &test_texture())],
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .with_alignment(64),
+    );
+    let prepared = prepare(vec![fixture("deck.usdz", &bytes)], None).unwrap();
+    let doc = pm_geom3d::model_import::json_of(&prepared.bytes).unwrap();
+    let materials = doc["materials"].as_array().unwrap();
+    let find = |name: &str| {
+        materials
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing material {name}: {materials:?}"))
+    };
+    let coord = |texture: &serde_json::Value| {
+        assert!(texture.is_object(), "the map is imported");
+        texture["texCoord"].as_u64().unwrap_or(0)
+    };
+    let pbr = |name: &str| find(name)["pbrMetallicRoughness"].clone();
+    assert_eq!(coord(&pbr("MixedAlpha")["baseColorTexture"]), 0);
+    assert_eq!(coord(&pbr("MixedPbr")["metallicRoughnessTexture"]), 0);
+    assert_eq!(coord(&pbr("AgreedAlpha")["baseColorTexture"]), 1);
+}
+
 #[test]
 fn gltf_selected_and_zip_companions_cap_large_images() {
     let mut writer = pm_geom3d::model_import::glb::GlbWriter::default();
