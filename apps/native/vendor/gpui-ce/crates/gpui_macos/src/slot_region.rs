@@ -383,17 +383,31 @@ pub(crate) fn finish(view: usize) -> bool {
 }
 
 /// Whether placing the containers as the last draw asks would move one
-/// (nothing is touched). A region whose container is not made yet is found
-/// by its slot (its view is not in that container yet).
-pub(crate) fn pending(view: usize) -> bool {
+/// (nothing is touched): a shown container whose region moved, or that no
+/// staged slot uses now (`used`: the regions the staged slots are in), which
+/// `finish` would hide. A region whose container is not made yet is found by
+/// its slot (its view is not in that container yet).
+pub(crate) fn pending(view: usize, used: &[usize]) -> bool {
     HOSTS.with_borrow(|hosts| {
         hosts.get(&view).is_some_and(|host| {
+            // The regions in use and every region around them.
+            let mut kept = HashSet::new();
+            for &id in used {
+                let mut at = Some(id);
+                while let Some(id) = at {
+                    if !kept.insert(id) {
+                        break;
+                    }
+                    at = host.targets.get(&id).and_then(|t| t.parent);
+                }
+            }
             host.containers.iter().any(|(id, c)| {
                 !c.clip.isHidden()
-                    && host
+                    && (host
                         .targets
                         .get(id)
-                        .is_some_and(|t| c.applied != Some(applied(t)))
+                        .is_none_or(|t| c.applied != Some(applied(t)))
+                        || (!kept.contains(id) && !holds_first_responder(&c.clip)))
             })
         })
     })

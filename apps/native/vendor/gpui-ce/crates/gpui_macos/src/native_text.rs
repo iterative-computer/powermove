@@ -1294,6 +1294,22 @@ impl State {
 pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     place(key, true).into()
 }
+/// The scrolling regions the fields staged by the last paint are in.
+pub(crate) fn staged_regions(key: usize) -> Vec<usize> {
+    let last = crate::composition::last_paint(key);
+    let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
+    slots
+        .into_iter()
+        .filter_map(|s| s.upgrade())
+        .filter_map(|state| {
+            state
+                .geometry
+                .get()
+                .filter(|(paint, _)| Some(*paint) == last)
+                .and_then(|(_, p)| p.region)
+        })
+        .collect()
+}
 /// Whether [`present`] would move a slot. Nothing is touched.
 pub(crate) fn pending(key: usize) -> bool {
     place(key, false)

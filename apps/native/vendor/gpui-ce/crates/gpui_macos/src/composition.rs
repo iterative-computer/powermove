@@ -187,10 +187,14 @@ pub(crate) fn pending(view: usize, painted: bool) -> bool {
     {
         return true;
     }
-    painted
-        && (crate::slot_region::pending(view)
-            || crate::native_text::pending(view)
-            || crate::native_control::pending(view))
+    if !painted {
+        return false;
+    }
+    let mut used = crate::native_control::staged_regions(view);
+    used.extend(crate::native_text::staged_regions(view));
+    crate::slot_region::pending(view, &used)
+        || crate::native_text::pending(view)
+        || crate::native_control::pending(view)
 }
 
 /// Where a window's frames get their drawables (P-120).

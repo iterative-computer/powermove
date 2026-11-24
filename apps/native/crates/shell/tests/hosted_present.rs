@@ -92,6 +92,38 @@ mod macos {
         probe::place(&gpui);
         let clip = regions::clip(&gpui, 1).expect("its container");
         assert!(clip.window().is_some() && !slot.wrapper().isHiddenOrHasHiddenAncestor());
+        // Scrolled so the slot is out of its region's view: it hides, its
+        // container stays shown. Then a paint stages no slot of the region (its
+        // row is left out): only the container hides, and that is a move known
+        // before it is made (the frame then shows when its rendering completes).
+        let at = |y: f32| {
+            regions::set(
+                &gpui,
+                &[SlotRegionGeometry {
+                    id: 1,
+                    parent: None,
+                    frame: Bounds::new(point(px(0.), px(50.)), size(px(200.), px(300.))),
+                    origin: point(px(0.), px(y)),
+                    fade: [px(0.), px(0.)],
+                }],
+            )
+        };
+        at(-400.);
+        slot.keep();
+        probe::painted(&gpui);
+        probe::place(&gpui);
+        assert!(slot.wrapper().isHidden() && !clip.isHidden(), "the slot out of view, its container shown");
+        at(-400.);
+        probe::painted(&gpui);
+        assert!(probe::pending(&gpui), "a container about to hide is a pending move");
+        probe::place(&gpui);
+        assert!(clip.isHidden());
+        // Back in view and staged again.
+        at(0.);
+        slot.stage_in_region(1, rect(10., 10., 80., 20.), rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6));
+        probe::painted(&gpui);
+        probe::place(&gpui);
+        assert!(!clip.isHidden() && !slot.wrapper().isHiddenOrHasHiddenAncestor());
         // The next draw makes no such region; the slot is kept as painted.
         regions::set(&gpui, &[]);
         slot.keep();

@@ -241,6 +241,15 @@ pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::Accessibility
             .collect()
     })
 }
+/// The scrolling regions the controls staged by the last paint are in.
+pub(crate) fn staged_regions(key: usize) -> Vec<usize> {
+    let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
+    slots
+        .into_iter()
+        .filter_map(|s| s.upgrade())
+        .filter_map(|state| state.placed().and_then(|p| p.region))
+        .collect()
+}
 /// Whether [`present`] would move a control. Nothing is touched.
 pub(crate) fn pending(key: usize) -> bool {
     let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
