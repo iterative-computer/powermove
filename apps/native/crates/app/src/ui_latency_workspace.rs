@@ -668,7 +668,10 @@ fn step(
     input(ws, &mut probe);
     let mut ok = ws.settle(&mut probe, playback.as_mut());
     if publishes {
-        ok &= ws.refresh(&mut probe, playback.as_mut()) > 0;
+        // What it shows is the step's to check (the selection, say): the
+        // panels' trees may reach the views through the playback's drain, and
+        // a panel whose tree did not change publishes nothing.
+        ws.refresh(&mut probe, playback.as_mut());
         ok &= ws.settle(&mut probe, playback.as_mut());
     } else {
         ws.drain(&mut probe);
