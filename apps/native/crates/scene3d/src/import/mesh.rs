@@ -38,6 +38,7 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     pub colors: Vec<[f32; 4]>,
     pub uv: Vec<[f32; 2]>,
+    pub uv1: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub material: Option<usize>,
 }
@@ -72,14 +73,19 @@ pub enum Alpha {
 pub struct Material {
     pub base_color: [f32; 4],
     pub base_map: Option<usize>,
+    pub base_tex_coord: u32,
     pub metallic: f32,
     pub roughness: f32,
     pub metallic_roughness_map: Option<usize>,
+    pub metallic_roughness_tex_coord: u32,
     pub normal_map: Option<usize>,
+    pub normal_tex_coord: u32,
     pub occlusion_map: Option<usize>,
+    pub occlusion_tex_coord: u32,
     pub occlusion_strength: f32,
     pub emissive: [f32; 3],
     pub emissive_map: Option<usize>,
+    pub emissive_tex_coord: u32,
     pub alpha: Alpha,
     pub double_sided: bool,
 }
@@ -89,14 +95,19 @@ impl Default for Material {
         Self {
             base_color: [1.; 4],
             base_map: None,
+            base_tex_coord: 0,
             metallic: 0.,
             roughness: 1.,
             metallic_roughness_map: None,
+            metallic_roughness_tex_coord: 0,
             normal_map: None,
+            normal_tex_coord: 0,
             occlusion_map: None,
+            occlusion_tex_coord: 0,
             occlusion_strength: 1.,
             emissive: [0.; 3],
             emissive_map: None,
+            emissive_tex_coord: 0,
             alpha: Alpha::Opaque,
             double_sided: false,
         }
@@ -144,26 +155,38 @@ impl Scene {
         if let Alpha::Mask(cutoff) = m.alpha {
             material["alphaCutoff"] = json!(cutoff);
         }
+        let tex_info = |index: usize, coord: u32| {
+            if coord > 0 {
+                json!({"index": index, "texCoord": coord})
+            } else {
+                json!({"index": index})
+            }
+        };
         let pbr = &mut material["pbrMetallicRoughness"];
-        for (key, map) in [
-            ("baseColorTexture", m.base_map),
-            ("metallicRoughnessTexture", m.metallic_roughness_map),
+        for (key, map, coord) in [
+            ("baseColorTexture", m.base_map, m.base_tex_coord),
+            (
+                "metallicRoughnessTexture",
+                m.metallic_roughness_map,
+                m.metallic_roughness_tex_coord,
+            ),
         ] {
             if let Some(index) = map {
-                pbr[key] = json!({"index": index});
+                pbr[key] = tex_info(index, coord);
             }
         }
-        for (key, map) in [
-            ("normalTexture", m.normal_map),
-            ("emissiveTexture", m.emissive_map),
+        for (key, map, coord) in [
+            ("normalTexture", m.normal_map, m.normal_tex_coord),
+            ("emissiveTexture", m.emissive_map, m.emissive_tex_coord),
         ] {
             if let Some(index) = map {
-                material[key] = json!({"index": index});
+                material[key] = tex_info(index, coord);
             }
         }
         if let Some(index) = m.occlusion_map {
-            material["occlusionTexture"] =
-                json!({"index": index, "strength": m.occlusion_strength});
+            let mut info = tex_info(index, m.occlusion_tex_coord);
+            info["strength"] = json!(m.occlusion_strength);
+            material["occlusionTexture"] = info;
         }
         let key = material.to_string();
         *self.material_keys.entry(key).or_insert_with(|| {
@@ -233,6 +256,7 @@ impl Scene {
             &vertices.normals.len(),
             &vertices.colors.len(),
             &vertices.uv.len(),
+            &vertices.uv1.len(),
         ]
         .into_iter()
         .any(|&len| len != 0 && len != count)
@@ -278,6 +302,9 @@ impl Scene {
                     if !vertices.uv.is_empty() {
                         part.uv.push(vertices.uv[i]);
                     }
+                    if !vertices.uv1.is_empty() {
+                        part.uv1.push(vertices.uv1[i]);
+                    }
                     local
                 });
                 part.indices.push(local);
@@ -300,6 +327,7 @@ impl Scene {
                 + part.normals.len() * 12
                 + part.colors.len() * 16
                 + part.uv.len() * 8
+                + part.uv1.len() * 8
                 + part.indices.len() * 4;
             if self.vertices > MAX_VERTICES
                 || self.triangles > MAX_TRIANGLES
@@ -327,6 +355,10 @@ impl Scene {
                     part.uv.len(),
                     part.uv.iter().flatten().all(|v| v.is_finite()),
                 ),
+                (
+                    part.uv1.len(),
+                    part.uv1.iter().flatten().all(|v| v.is_finite()),
+                ),
             ] {
                 if length != 0 && (length != count || !valid) {
                     return fail("Invalid mesh vertex attributes");
@@ -340,6 +372,9 @@ impl Scene {
             }
             if !part.uv.is_empty() {
                 attributes["TEXCOORD_0"] = json!(self.writer.floats(&part.uv, false));
+            }
+            if !part.uv1.is_empty() {
+                attributes["TEXCOORD_1"] = json!(self.writer.floats(&part.uv1, false));
             }
             let mut primitive =
                 json!({"attributes": attributes, "indices": self.writer.indices(&part.indices)});

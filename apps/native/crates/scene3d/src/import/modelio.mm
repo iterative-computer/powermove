@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <ModelIO/ModelIO.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <objc/message.h>
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
@@ -9,7 +10,7 @@
 
 struct Raster {
     const uint8_t *pixels;
-    uint32_t width, height, wrapS, wrapT, magFilter, minFilter;
+    uint32_t width, height, wrapS, wrapT, magFilter, minFilter, texCoord;
 };
 struct Material {
     float rgba[4], emissive[3], metallic, roughness, occlusionStrength, alphaCutoff;
@@ -22,7 +23,7 @@ struct Part {
 };
 using EmitMaterial = bool (*)(void *, size_t, const char *, const Material *);
 using EmitMesh = bool (*)(void *, size_t, const char *, const float *, const float *, const float *,
-                          size_t, const Part *, size_t);
+                          const float *, size_t, const Part *, size_t);
 using EmitNode = bool (*)(void *, size_t, const char *, const float *);
 
 struct Output {
@@ -45,7 +46,8 @@ static uint32_t wrap(MDLMaterialTextureWrapMode mode) {
     }
 }
 
-static Raster rasterize(MDLTextureSampler *sampler, bool color, std::vector<uint8_t> &bytes) {
+static Raster rasterize(MDLTextureSampler *sampler, bool color, bool hasUV1,
+                        const bool repeatU[2], const bool repeatV[2], std::vector<uint8_t> &bytes) {
     MDLTexture *texture = sampler.texture;
     if (!texture || texture.isCube) return {};
     CGImageRef image = [texture imageFromTexture];
@@ -102,19 +104,32 @@ static Raster rasterize(MDLTextureSampler *sampler, bool color, std::vector<uint
             }
         }
     }
+    SEL mappingSel = NSSelectorFromString(@"mappingChannel");
+    const NSUInteger channel = (mappingSel && [sampler respondsToSelector:mappingSel])
+        ? reinterpret_cast<NSUInteger (*)(id, SEL)>(objc_msgSend)(sampler, mappingSel)
+        : 0u;
+    const uint32_t texCoord = (channel == 1u && hasUV1) ? 1u : 0u;
     MDLTextureFilter *filter = sampler.hardwareFilter;
     const bool nearest = filter && filter.minFilter == MDLMaterialTextureFilterModeNearest;
     uint32_t min = nearest ? 9728 : 9729;
     if (!filter || filter.mipFilter == MDLMaterialMipMapFilterModeLinear) min = nearest ? 9986 : 9987;
     else if (filter.mipFilter == MDLMaterialMipMapFilterModeNearest) min = nearest ? 9984 : 9985;
-    return {bytes.data(), width, height,
-            filter ? wrap(filter.sWrapMode) : 10497u, filter ? wrap(filter.tWrapMode) : 10497u,
-            filter && filter.magFilter == MDLMaterialTextureFilterModeNearest ? 9728u : 9729u, min};
+    uint32_t wrapS = filter ? wrap(filter.sWrapMode) : 10497u;
+    uint32_t wrapT = filter ? wrap(filter.tWrapMode) : 10497u;
+    // Some USDZ assets author UsdPreviewSurface with clamp while their RealityKit
+    // MaterialX twin uses repeat across UVs that tile multiple times; honor repeat
+    // when the bound submesh spans more than 1.5 tiles along that axis.
+    if (wrapS == 33071u && repeatU[texCoord]) wrapS = 10497u;
+    if (wrapT == 33071u && repeatV[texCoord]) wrapT = 10497u;
+    return {bytes.data(), width, height, wrapS, wrapT,
+            filter && filter.magFilter == MDLMaterialTextureFilterModeNearest ? 9728u : 9729u,
+            min, texCoord};
 }
 
 static MDLMaterialProperty *scalarProperty(MDLMaterial *material, MDLMaterialSemantic semantic) {
-    // The built-in scattering function's defaults precede authored properties.
-    for (MDLMaterialProperty *property in [[material propertiesWithSemantic:semantic] reverseObjectEnumerator]) {
+    // `propertiesWithSemantic:` returns authored material properties before the
+    // scattering function's built-in defaults (e.g. `diffuseColor` before `baseColor`).
+    for (MDLMaterialProperty *property in [material propertiesWithSemantic:semantic]) {
         switch (property.type) {
             case MDLMaterialPropertyTypeFloat:
             case MDLMaterialPropertyTypeFloat3:
@@ -154,33 +169,44 @@ static void colorFactor(MDLMaterialProperty *property, float *rgba, size_t count
     }
 }
 
-static Raster map(MDLMaterial *material, MDLMaterialSemantic semantic, bool color, std::vector<uint8_t> &bytes) {
-    for (MDLMaterialProperty *property in [[material propertiesWithSemantic:semantic] reverseObjectEnumerator]) {
+static Raster map(MDLMaterial *material, MDLMaterialSemantic semantic, bool color, bool hasUV1,
+                  const bool repeatU[2], const bool repeatV[2], std::vector<uint8_t> &bytes) {
+    for (MDLMaterialProperty *property in [material propertiesWithSemantic:semantic]) {
         if (property.type != MDLMaterialPropertyTypeTexture) continue;
-        Raster raster = rasterize(property.textureSamplerValue, color, bytes);
+        Raster raster = rasterize(property.textureSamplerValue, color, hasUV1, repeatU, repeatV, bytes);
         if (raster.pixels) return raster;
     }
     return {};
 }
 
-static bool emitMaterial(MDLMaterial *material, Output &out) {
-    if (!material || !out.materials.insert(identity(material)).second) return true;
+static size_t materialKey(MDLMaterial *material, bool hasUV1, const bool repeatU[2], const bool repeatV[2]) {
+    if (!material) return 0;
+    const size_t flags = (hasUV1 ? 1u : 0u)
+        | (repeatU[0] ? 2u : 0u) | (repeatV[0] ? 4u : 0u)
+        | (repeatU[1] ? 8u : 0u) | (repeatV[1] ? 16u : 0u);
+    return (identity(material) << 5) ^ (identity(material) >> 59) ^ flags;
+}
+
+static bool emitMaterial(MDLMaterial *material, bool hasUV1, const bool repeatU[2], const bool repeatV[2],
+                         Output &out, size_t &materialId) {
+    materialId = materialKey(material, hasUV1, repeatU, repeatV);
+    if (!material || !out.materials.insert(materialId).second) return true;
     @autoreleasepool {
         std::vector<uint8_t> pixels[7];
         Material m{};
-        m.base = map(material, MDLMaterialSemanticBaseColor, true, pixels[0]);
-        m.opacity = map(material, MDLMaterialSemanticOpacity, false, pixels[1]);
-        m.metal = map(material, MDLMaterialSemanticMetallic, false, pixels[2]);
-        m.rough = map(material, MDLMaterialSemanticRoughness, false, pixels[3]);
-        m.normal = map(material, MDLMaterialSemanticTangentSpaceNormal, false, pixels[4]);
-        m.occlusion = map(material, MDLMaterialSemanticAmbientOcclusion, false, pixels[5]);
-        m.emission = map(material, MDLMaterialSemanticEmission, true, pixels[6]);
+        m.base = map(material, MDLMaterialSemanticBaseColor, true, hasUV1, repeatU, repeatV, pixels[0]);
+        m.opacity = map(material, MDLMaterialSemanticOpacity, false, hasUV1, repeatU, repeatV, pixels[1]);
+        m.metal = map(material, MDLMaterialSemanticMetallic, false, hasUV1, repeatU, repeatV, pixels[2]);
+        m.rough = map(material, MDLMaterialSemanticRoughness, false, hasUV1, repeatU, repeatV, pixels[3]);
+        m.normal = map(material, MDLMaterialSemanticTangentSpaceNormal, false, hasUV1, repeatU, repeatV, pixels[4]);
+        m.occlusion = map(material, MDLMaterialSemanticAmbientOcclusion, false, hasUV1, repeatU, repeatV, pixels[5]);
+        m.emission = map(material, MDLMaterialSemanticEmission, true, hasUV1, repeatU, repeatV, pixels[6]);
         std::fill_n(m.rgba, 4, 1.f);
         MDLMaterialProperty *base = scalarProperty(material, MDLMaterialSemanticBaseColor);
-        if (!m.base.pixels || ![base.name isEqualToString:@"baseColor"]) colorFactor(base, m.rgba, 4);
+        if (base && (!m.base.pixels || ![base.name isEqualToString:@"baseColor"])) colorFactor(base, m.rgba, 4);
         MDLMaterialProperty *emission = scalarProperty(material, MDLMaterialSemanticEmission);
         if (m.emission.pixels) std::fill_n(m.emissive, 3, 1.f);
-        if (!m.emission.pixels || ![emission.name isEqualToString:@"emission"]) colorFactor(emission, m.emissive, 3);
+        if (emission && (!m.emission.pixels || ![emission.name isEqualToString:@"emission"])) colorFactor(emission, m.emissive, 3);
         m.rgba[3] *= scalar(material, MDLMaterialSemanticOpacity, 1.f);
         // Model I/O supplies scalar defaults even when the USD input is a map.
         // The map replaces the default scalar for that input.
@@ -190,7 +216,7 @@ static bool emitMaterial(MDLMaterial *material, Output &out) {
         m.alphaCutoff = [material propertyNamed:@"opacityThreshold"].floatValue;
         m.doubleSided = material.materialFace == MDLMaterialFaceDoubleSided
             || [material propertyNamed:@"doubleSided"].floatValue != 0.f;
-        return out.material(out.context, identity(material), material.name.UTF8String, &m);
+        return out.material(out.context, materialId, material.name.UTF8String, &m);
     }
 }
 
@@ -221,15 +247,33 @@ static bool drawMesh(MDLMesh *mesh, NSString *name, matrix_float4x4 matrix, Outp
         return true;
     }
     if (count > 30000000) return false;
-    std::vector<float> positions, normals, uv;
+    std::vector<float> positions, normals, uv, uv1;
     if (!attribute(mesh, MDLVertexAttributePosition, MDLVertexFormatFloat3, 3, positions)) return false;
     bool hasNormals = attribute(mesh, MDLVertexAttributeNormal, MDLVertexFormatFloat3, 3, normals);
     bool hasUV = attribute(mesh, MDLVertexAttributeTextureCoordinate, MDLVertexFormatFloat2, 2, uv);
+    bool hasUV1 = attribute(mesh, @"textureCoordinate1", MDLVertexFormatFloat2, 2, uv1);
     // MDL coordinates have bottom-left origin. CGImage and glTF use
     // top-left image rows, so change V here exactly once.
     if (hasUV) {
         for (size_t i = 1; i < uv.size(); i += 2) uv[i] = 1.f - uv[i];
     }
+    if (hasUV1) {
+        for (size_t i = 1; i < uv1.size(); i += 2) uv1[i] = 1.f - uv1[i];
+    }
+    auto uvSpan = [count](const std::vector<float> &coords, const std::vector<uint32_t> &indices,
+                          bool &tileU, bool &tileV) {
+        if (coords.empty() || indices.empty()) return;
+        float minU = INFINITY, maxU = -INFINITY, minV = INFINITY, maxV = -INFINITY;
+        for (uint32_t idx : indices) {
+            if (idx >= count) continue;
+            const float u = coords[size_t(idx) * 2];
+            const float v = coords[size_t(idx) * 2 + 1];
+            if (std::isfinite(u)) { minU = std::min(minU, u); maxU = std::max(maxU, u); }
+            if (std::isfinite(v)) { minV = std::min(minV, v); maxV = std::max(maxV, v); }
+        }
+        if (maxU - minU > 1.5f) tileU = true;
+        if (maxV - minV > 1.5f) tileV = true;
+    };
     std::vector<std::vector<uint32_t>> indexBuffers;
     std::vector<Part> parts;
     size_t indexCount = 0;
@@ -272,10 +316,15 @@ static bool drawMesh(MDLMesh *mesh, NSString *name, matrix_float4x4 matrix, Outp
         indexCount += output->size();
         if (indexCount > 30000000) return false;
         MDLMaterial *material = part.material;
-        if (!emitMaterial(material, out)) return false;
+        bool repeatU[2] = {false, false};
+        bool repeatV[2] = {false, false};
+        uvSpan(uv, *output, repeatU[0], repeatV[0]);
+        uvSpan(uv1, *output, repeatU[1], repeatV[1]);
+        size_t matId = 0;
+        if (!emitMaterial(material, hasUV1, repeatU, repeatV, out, matId)) return false;
         indexBuffers.push_back(output == &indices ? std::move(indices) : std::move(triangles));
         const auto &buffer = indexBuffers.back();
-        parts.push_back({buffer.data(), buffer.size(), identity(material)});
+        parts.push_back({buffer.data(), buffer.size(), matId});
     }
     if (parts.empty()) {
         out.emptyMeshes.insert(id);
@@ -283,7 +332,7 @@ static bool drawMesh(MDLMesh *mesh, NSString *name, matrix_float4x4 matrix, Outp
     }
     return out.mesh(out.context, id, mesh.name.UTF8String, positions.data(),
                     hasNormals ? normals.data() : nullptr, hasUV ? uv.data() : nullptr,
-                    count, parts.data(), parts.size())
+                    hasUV1 ? uv1.data() : nullptr, count, parts.data(), parts.size())
         && out.node(out.context, id, name.UTF8String, transform);
 }
 

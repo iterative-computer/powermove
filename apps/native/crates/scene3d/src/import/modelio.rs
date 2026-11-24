@@ -20,10 +20,11 @@ struct Raster {
     wrap_t: u32,
     mag_filter: u32,
     min_filter: u32,
+    tex_coord: u32,
 }
 
 impl Raster {
-    unsafe fn read(self) -> Option<(RgbaImage, Sampler)> {
+    unsafe fn read(self) -> Option<(RgbaImage, Sampler, u32)> {
         if self.pixels.is_null() {
             return None;
         }
@@ -38,6 +39,7 @@ impl Raster {
                 mag_filter: self.mag_filter,
                 min_filter: self.min_filter,
             },
+            self.tex_coord,
         ))
     }
 }
@@ -75,6 +77,7 @@ type EmitMesh = unsafe extern "C" fn(
     *const c_char,
     *const [f32; 3],
     *const [f32; 3],
+    *const [f32; 2],
     *const [f32; 2],
     usize,
     *const NativePart,
@@ -188,15 +191,18 @@ unsafe extern "C" fn emit_material(
             ..Material::default()
         };
         let mut base = unsafe { data.base.read() };
-        if let Some((opacity, sampler)) = unsafe { data.opacity.read() } {
-            let (color, sampler) =
-                base.map_or((None, sampler), |(image, sampler)| (Some(image), sampler));
-            base = Some((texture::with_opacity(color, opacity), sampler));
+        if let Some((opacity, sampler, tex_coord)) = unsafe { data.opacity.read() } {
+            let (color, sampler, tex_coord) = base.map_or(
+                (None, sampler, tex_coord),
+                |(image, sampler, base_coord)| (Some(image), sampler, base_coord),
+            );
+            base = Some((texture::with_opacity(color, opacity), sampler, tex_coord));
         }
         let mut has_alpha = material.base_color[3] < 1.;
-        if let Some((base, sampler)) = base {
+        if let Some((base, sampler, tex_coord)) = base {
             has_alpha |= base.pixels().any(|pixel| pixel[3] < 255);
             material.base_map = Some(output.scene.texture(base, true, sampler)?);
+            material.base_tex_coord = tex_coord;
         }
         material.alpha = if data.alpha_cutoff > 0. {
             Alpha::Mask(factor(data.alpha_cutoff))
@@ -205,22 +211,45 @@ unsafe extern "C" fn emit_material(
         } else {
             Alpha::Opaque
         };
-        let (rough, rough_sampler) = unsafe { data.rough.read() }.unzip();
-        let (metal, metal_sampler) = unsafe { data.metal.read() }.unzip();
+        let (rough, rough_sampler, rough_coord) = match unsafe { data.rough.read() } {
+            Some((image, sampler, coord)) => (Some(image), Some(sampler), Some(coord)),
+            None => (None, None, None),
+        };
+        let (metal, metal_sampler, metal_coord) = match unsafe { data.metal.read() } {
+            Some((image, sampler, coord)) => (Some(image), Some(sampler), Some(coord)),
+            None => (None, None, None),
+        };
         if let Some(image) = texture::metallic_roughness(rough, metal) {
             material.metallic_roughness_map = Some(output.scene.texture(
                 image,
                 false,
                 rough_sampler.or(metal_sampler).unwrap_or_default(),
             )?);
+            material.metallic_roughness_tex_coord = rough_coord.or(metal_coord).unwrap_or(0);
         }
-        for (target, raster, color) in [
-            (&mut material.normal_map, data.normal, false),
-            (&mut material.occlusion_map, data.occlusion, false),
-            (&mut material.emissive_map, data.emission, true),
+        for (target, target_coord, raster, color) in [
+            (
+                &mut material.normal_map,
+                &mut material.normal_tex_coord,
+                data.normal,
+                false,
+            ),
+            (
+                &mut material.occlusion_map,
+                &mut material.occlusion_tex_coord,
+                data.occlusion,
+                false,
+            ),
+            (
+                &mut material.emissive_map,
+                &mut material.emissive_tex_coord,
+                data.emission,
+                true,
+            ),
         ] {
-            if let Some((image, sampler)) = unsafe { raster.read() } {
+            if let Some((image, sampler, tex_coord)) = unsafe { raster.read() } {
                 *target = Some(output.scene.texture(image, color, sampler)?);
+                *target_coord = tex_coord;
             }
         }
         let index = output.scene.pbr_material(&label, material);
@@ -237,6 +266,7 @@ unsafe extern "C" fn emit_mesh(
     positions: *const [f32; 3],
     normals: *const [f32; 3],
     uv: *const [f32; 2],
+    uv1: *const [f32; 2],
     count: usize,
     parts: *const NativePart,
     num_parts: usize,
@@ -247,6 +277,7 @@ unsafe extern "C" fn emit_mesh(
         positions: unsafe { std::slice::from_raw_parts(positions, count) }.to_vec(),
         normals: unsafe { copy_attribute(normals, count) },
         uv: unsafe { copy_attribute(uv, count) },
+        uv1: unsafe { copy_attribute(uv1, count) },
         ..Mesh::default()
     };
     let parts = unsafe { std::slice::from_raw_parts(parts, num_parts) }

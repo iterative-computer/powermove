@@ -704,6 +704,168 @@ def Xform "Card" {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn usdz_prefers_authored_colors_second_uv_set_and_tiled_opacity_wrap() {
+    let usda = br#"#usda 1.0
+(
+    defaultPrim = "Deck"
+    upAxis = "Y"
+)
+def Xform "Deck" {
+    def Mesh "Key" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (10, 0), (0, 10)] (interpolation = "vertex")
+        texCoord2f[] primvars:st1 = [(0, 0), (1, 0), (0, 1)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/DarkKey>
+    }
+    def Mesh "Legend" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0.1), (1, 0, 0.1), (0, 1, 0.1)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/WhiteLegend>
+    }
+    def Mesh "Speaker" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]
+        texCoord2f[] primvars:st = [(0.1, 0.1), (2.7, 0.1), (0.1, 22.2)] (interpolation = "vertex")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </Deck/Grille>
+    }
+    def Material "DarkKey" {
+        token outputs:surface.connect = </Deck/DarkKey/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.0035, 0.0036, 0.0040)
+            float inputs:metallic = 0.2
+            float inputs:roughness = 0.55
+            float inputs:occlusion.connect = </Deck/DarkKey/AO.outputs:r>
+            token outputs:surface
+        }
+        def Shader "AO" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            float2 inputs:st.connect = </Deck/DarkKey/UV1.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV1" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st1"
+            float2 outputs:result
+        }
+    }
+    def Material "WhiteLegend" {
+        token outputs:surface.connect = </Deck/WhiteLegend/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+            color3f inputs:emissiveColor = (0.5, 0.5, 0.5)
+            token outputs:surface
+        }
+    }
+    def Material "Grille" {
+        token outputs:surface.connect = </Deck/Grille/Surface.outputs:surface>
+        def Shader "Surface" {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0, 0, 0)
+            float inputs:opacity.connect = </Deck/Grille/Mask.outputs:r>
+            token outputs:surface
+        }
+        def Shader "Mask" {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @paper.png@
+            token inputs:wrapS = "clamp"
+            token inputs:wrapT = "clamp"
+            float2 inputs:st.connect = </Deck/Grille/UV0.outputs:result>
+            float outputs:r
+        }
+        def Shader "UV0" {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st"
+            float2 outputs:result
+        }
+    }
+}
+"#;
+    let bytes = archive(
+        &[("deck.usda", usda), ("paper.png", &test_texture())],
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .with_alignment(64),
+    );
+    let prepared = prepare(vec![fixture("deck.usdz", &bytes)], None).unwrap();
+    let doc = pm_geom3d::model_import::json_of(&prepared.bytes).unwrap();
+    let materials = doc["materials"].as_array().unwrap();
+    let find = |name: &str| {
+        materials
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing material {name}: {materials:?}"))
+    };
+    let dark = find("DarkKey");
+    let dark_rgb = dark["pbrMetallicRoughness"]["baseColorFactor"]
+        .as_array()
+        .unwrap();
+    assert!(
+        (dark_rgb[0].as_f64().unwrap() - 0.0035).abs() < 1e-4,
+        "DarkKey must keep authored diffuseColor, not 0.18 default: {dark_rgb:?}"
+    );
+    assert_eq!(dark["occlusionTexture"]["texCoord"].as_u64(), Some(1));
+
+    let legend = find("WhiteLegend");
+    let legend_rgb = legend["pbrMetallicRoughness"]["baseColorFactor"]
+        .as_array()
+        .unwrap();
+    assert!(
+        (legend_rgb[0].as_f64().unwrap() - 0.8).abs() < 1e-4,
+        "WhiteLegend must keep authored diffuseColor: {legend_rgb:?}"
+    );
+    assert!(
+        (legend["emissiveFactor"][0].as_f64().unwrap() - 0.5).abs() < 1e-4,
+        "WhiteLegend must keep authored emissiveColor"
+    );
+
+    let grille = find("Grille");
+    let grille_rgb = grille["pbrMetallicRoughness"]["baseColorFactor"]
+        .as_array()
+        .unwrap();
+    assert!(
+        grille_rgb[0].as_f64().unwrap() < 1e-4,
+        "Grille must keep authored black diffuseColor: {grille_rgb:?}"
+    );
+    let tex_index = grille["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+        .as_u64()
+        .unwrap() as usize;
+    let sampler_index = doc["textures"][tex_index]["sampler"].as_u64().unwrap() as usize;
+    assert_eq!(
+        doc["samplers"][sampler_index]["wrapS"].as_u64(),
+        Some(10497),
+        "Tiled opacity mesh should promote clamp to repeat on U"
+    );
+    assert_eq!(
+        doc["samplers"][sampler_index]["wrapT"].as_u64(),
+        Some(10497),
+        "Tiled opacity mesh should promote clamp to repeat on V"
+    );
+
+    let model = pm_geom3d::gltf::load(&prepared.bytes).unwrap();
+    assert!(
+        model.geometries.iter().any(|g| g.uv[1].is_some()),
+        "Key mesh must preserve TEXCOORD_1"
+    );
+}
+
 #[test]
 fn gltf_selected_and_zip_companions_cap_large_images() {
     let mut writer = pm_geom3d::model_import::glb::GlbWriter::default();
