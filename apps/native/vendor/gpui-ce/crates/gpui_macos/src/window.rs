@@ -2650,6 +2650,16 @@ impl PlatformWindow for MacWindow {
         // the lock first, or the main thread deadlocks on itself.
         drop(this);
         drop(transaction);
+        // A drawable presented with the transaction reaches the render
+        // server only when the outermost transaction does: flushed now, it
+        // shows with its slots this frame and goes back to the layer, rather
+        // than at the run loop's end (a frame drawn before then waited out
+        // the layer's 1 s timeout for a drawable). NativeGPUI 0002 does the same.
+        if sync {
+            unsafe {
+                let _: () = msg_send![class!(CATransaction), flush];
+            }
+        }
         trace(path, moved, acquire);
     }
 
