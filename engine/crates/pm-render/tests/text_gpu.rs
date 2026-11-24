@@ -26,6 +26,7 @@ fn main() {
         ))
     };
     density_replay_keeps_compat_passthrough_layers(fonts());
+    a_base_text_window_reads_the_same_texels_as_the_whole_canvas(fonts());
     let blur = json!({
         "text": "Blur in\nsecond line", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
         "font": "SF Pro Display", "weight": 700, "size": 44, "tracking": -2, "leading": 1.2,
@@ -239,6 +240,85 @@ fn main() {
         println!("FAILED {f}");
     }
     assert!(failures.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+fn a_base_text_window_reads_the_same_texels_as_the_whole_canvas(
+    fonts: Box<dyn pm_render::text::TextFonts>,
+) {
+    use pm_protocol::color::Precision;
+    use pm_render::Renderer;
+    use serde_json::json;
+    use support::doc::{layer, load, no_fill, project};
+
+    let title = layer(
+        "title",
+        "text",
+        json!({"text":"M", "font":"SF Pro Display", "size":420, "color":"#F2F2F2"}),
+        960.,
+        540.,
+        1.,
+    );
+    let document = load(&project(1920, 1080, 1., no_fill(), vec![title]));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    let whole = renderer
+        .layer_raster(
+            &document,
+            "Ptest-root",
+            "title",
+            None,
+            0.,
+            4.,
+            Precision::Float16,
+        )
+        .unwrap()
+        .unwrap();
+    let [x, y, w, h] = whole.pixels.crop;
+    let (dx, dy) = (w / 4, h / 4);
+    let win = [x + dx, y + dy, w / 2, h / 2];
+    let part = renderer
+        .layer_raster_window(
+            &document,
+            "Ptest-root",
+            "title",
+            None,
+            0.,
+            4.,
+            Precision::Float16,
+            Some(win),
+        )
+        .unwrap()
+        .unwrap();
+    let geometry = renderer
+        .layer_raster_geometry(&document, "Ptest-root", "title", None, 0., 4.)
+        .unwrap()
+        .unwrap();
+    for result in [&part, &geometry] {
+        assert_eq!(
+            (
+                result.canvas,
+                result.box_size,
+                result.anchor,
+                result.selection
+            ),
+            (whole.canvas, whole.box_size, whole.anchor, whole.selection)
+        );
+    }
+    assert!(geometry.pixels.pixels.is_empty());
+    assert_eq!(part.pixels.crop, win);
+    assert!(part.pixels.pixels.iter().any(|p| *p > 0.));
+    let stride = (win[2] * 4) as usize;
+    for (row, painted) in part.pixels.pixels.chunks_exact(stride).enumerate() {
+        let start = ((row + dy as usize) * w as usize + dx as usize) * 4;
+        assert!(
+            painted
+                .iter()
+                .zip(&whole.pixels.pixels[start..start + stride])
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "window row {row}"
+        );
+    }
 }
 
 /// A text-heavy layer (large glyphs of many shapes and color emoji, more

@@ -847,7 +847,7 @@ export class CompatRealm {
    * What an override answer is for, while the realm answers it: the need's
    * composition (a nested layer's base paints in its own composition).
    */
-  rasterContext: { composition?: string; layer?: object } | null = null;
+  rasterContext: { composition?: string; layer?: object; crop?: unknown } | null = null;
   /**
    * Whether `value` is the base raster of exactly `need`'s layer, frame, scale
    * and crop, untouched: an override that returns it passes the layer through.
@@ -949,7 +949,7 @@ export class CompatRealm {
       state.loaded = true;
       this.flush();
       const value = this.options.host.query("render.raster", {
-        args: [spec, scale, time, crop ?? null],
+        args: [spec, scale, time, crop ?? null, !!context?.crop && !crop && layer.type === "text"],
         revision: this.publication.revision,
         realm: this.options.id,
         generation: this.options.generation,

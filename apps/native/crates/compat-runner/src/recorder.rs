@@ -16,6 +16,9 @@ struct State {
     next: u64,
     paints: BTreeMap<String, Paint>,
     surfaces: BTreeMap<String, Canvas>,
+    /// A base's first read already pinned its source document. Its pixels are
+    /// painted only when something actually uses the canvas.
+    pending_bases: BTreeMap<String, crate::BaseRasterRequest>,
     pins: BTreeMap<(String, u64), (Source, usize)>,
     missing: BTreeSet<String>,
     dom: Vec<Value>,
@@ -265,26 +268,64 @@ impl NativeHost {
     }
     /// A recorder canvas holding straight RGBA8 pixels, as a surface id.
     fn canvas_of(&self, width: u32, height: u32, rgba: Vec<u8>) -> Result<String> {
-        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
-        let pixels = ImageData::from_rgba(width, height, rgba).map_err(host_error)?;
         let mut state = self.state.lock().unwrap();
         state.next += 1;
         let id = state.next;
+        let canvas = Self::base_canvas(id, width, height, rgba)?;
+        state.surfaces.insert(id.to_string(), canvas);
+        Ok(id.to_string())
+    }
+    fn base_canvas(id: u64, width: u32, height: u32, rgba: Vec<u8>) -> Result<Canvas> {
+        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
+        let pixels = ImageData::from_rgba(width, height, rgba).map_err(host_error)?;
         let mut canvas = Canvas::new(id, width, height).map_err(host_error)?;
         canvas
             .put_image_data(pixels, 0, 0, None)
             .map_err(host_error)?;
-        state.surfaces.insert(id.to_string(), canvas);
-        Ok(id.to_string())
+        Ok(canvas)
+    }
+
+    fn materialize_base(&self, id: &str) -> Result<()> {
+        let request = self.state.lock().unwrap().pending_bases.get(id).cloned();
+        let Some(request) = request else {
+            return Ok(());
+        };
+        let hooks = self.raster_hooks()?;
+        let reply = (hooks.base)(request)
+            .map_err(Error::Host)?
+            .ok_or(Error::Invalid("base raster disappeared"))?;
+        let number = id
+            .parse()
+            .map_err(|_| Error::Invalid("base raster surface"))?;
+        let canvas = Self::base_canvas(number, reply.width, reply.height, reply.straight_rgba)?;
+        let mut state = self.state.lock().unwrap();
+        if state.pending_bases.remove(id).is_some() {
+            state.surfaces.insert(id.into(), canvas);
+        }
+        Ok(())
     }
     /// `render.raster(layer, scale, time, uploaded, crop)`'s base: the layer as
     /// the engine paints it, with today's geometry, as a recorder canvas.
-    /// Args: `[{id, content?, composition?}, scale, time, crop?]`.
+    /// Args: `[{id, content?, composition?}, scale, time, crop?, deferPixels?]`.
     fn base_raster(&self, args: &Value) -> Result<Value> {
-        let Some(reply) = self.base_reply(args)? else {
+        let mut request = self.base_request(args)?;
+        let pending = (request.crop.is_none() && args.get(4) == Some(&Value::Bool(true)))
+            .then(|| request.clone());
+        request.geometry_only = pending.is_some();
+        let hooks = self.raster_hooks()?;
+        let Some(reply) = (hooks.base)(request).map_err(Error::Host)? else {
             return Ok(Value::Null);
         };
-        let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
+        let surface = if let Some(request) = pending.filter(|_| reply.straight_rgba.is_empty()) {
+            crate::image::rgba_bytes(u64::from(reply.width), u64::from(reply.height))?;
+            let mut state = self.state.lock().unwrap();
+            state.next += 1;
+            let surface = state.next.to_string();
+            state.pending_bases.insert(surface.clone(), request);
+            surface
+        } else {
+            self.canvas_of(reply.width, reply.height, reply.straight_rgba)?
+        };
         Ok(
             json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
             "height":reply.height,"w":reply.size.0,"h":reply.size.1,
@@ -295,10 +336,13 @@ impl NativeHost {
     }
     /// The engine's base raster for `render.raster`'s `args`, of the project
     /// as it is.
-    fn base_reply(&self, args: &Value) -> Result<Option<crate::BaseRasterReply>> {
-        let hooks = self.rasters.lock().unwrap().clone().ok_or_else(|| {
+    fn raster_hooks(&self) -> Result<crate::RasterHooks> {
+        self.rasters.lock().unwrap().clone().ok_or_else(|| {
             Error::Host("render.raster needs the engine, which this host does not have".into())
-        })?;
+        })
+    }
+
+    fn base_request(&self, args: &Value) -> Result<crate::BaseRasterRequest> {
         let spec = &args[0];
         let (document, open) = self.kernel.lock().unwrap().document()?;
         let number = |i: usize, default: f64| {
@@ -318,7 +362,7 @@ impl NativeHost {
             ),
             _ => None,
         };
-        (hooks.base)(crate::BaseRasterRequest {
+        Ok(crate::BaseRasterRequest {
             document,
             composition: spec["composition"].as_str().map_or(open, str::to_owned),
             layer: spec["id"].as_str().unwrap_or_default().to_owned(),
@@ -326,8 +370,8 @@ impl NativeHost {
             seconds: number(2, self.transport.time()),
             scale: number(1, 1.).max(1e-6),
             crop,
+            geometry_only: false,
         })
-        .map_err(Error::Host)
     }
     /// One batch of override answers: `{batch, answers: [{native} | {hidden} |
     /// {retry} | {error} | {surface, w, h, anchorX, anchorY, uv?}]}`, the
@@ -345,9 +389,19 @@ impl NativeHost {
         let mut answers = Vec::with_capacity(items.len());
         let mut state = self.state.lock().unwrap();
         for item in items {
-            let surface = item["surface"]
-                .as_str()
-                .and_then(|id| state.surfaces.get_mut(id));
+            let id = item["surface"].as_str();
+            if let Some(id) = id
+                && state.pending_bases.contains_key(id)
+            {
+                drop(state);
+                let materialized = self.materialize_base(id);
+                state = self.state.lock().unwrap();
+                if let Err(error) = materialized {
+                    answers.push(crate::RasterAnswer::Unavailable(error.to_string()));
+                    continue;
+                }
+            }
+            let surface = id.and_then(|id| state.surfaces.get_mut(id));
             let number = |k: &str, default: f64| {
                 item[k]
                     .as_f64()
@@ -598,7 +652,7 @@ impl NativeHost {
     }
     pub fn diagnostics(&self) -> Value {
         let state = self.state.lock().unwrap();
-        json!({"missing":state.missing,"surfaces":state.surfaces.len(),"pins":state.pins.len(),"dom_pending":state.dom.len()})
+        json!({"missing":state.missing,"surfaces":state.surfaces.len() + state.pending_bases.len(),"pins":state.pins.len(),"dom_pending":state.dom.len()})
     }
     /// Messages from the page for the realm. Whether the realm must be asked
     /// to take them: once until it has (`dom.takeMessages`), however many
@@ -691,6 +745,16 @@ impl NativeHost {
             .as_array()
             .ok_or(Error::Invalid("recorder argument array"))?;
         let mut state = self.state.lock().unwrap();
+        if matches!(
+            operation,
+            "recorder.read" | "recorder.command" | "recorder.reset" | "recorder.retainVersion"
+        ) && let Some(id) = args.first().and_then(Value::as_str)
+            && state.pending_bases.contains_key(id)
+        {
+            drop(state);
+            self.materialize_base(id)?;
+            state = self.state.lock().unwrap();
+        }
         if operation == "recorder.create" {
             let (w, h) = (dimension(args.first())?, dimension(args.get(1))?);
             state.next += 1;
@@ -792,6 +856,9 @@ impl NativeHost {
             return Ok(json!({"surface":id,"version":version}));
         }
         if operation == "recorder.release" {
+            if state.pending_bases.remove(&id).is_some() {
+                return Ok(Value::Null);
+            }
             state
                 .surfaces
                 .remove(&id)
@@ -1719,11 +1786,16 @@ impl EngineProxy for NativeHost {
             )));
         }
         if operation == "recorder.bind" {
-            let mut state = self.state.lock().unwrap();
             let inputs = input["bindings"]
                 .as_array()
                 .filter(|items| items.len() <= 4096)
                 .ok_or(Error::Invalid("canvas bindings"))?;
+            for input in inputs {
+                if let Some(id) = input["surface"].as_str() {
+                    self.materialize_base(id)?;
+                }
+            }
+            let mut state = self.state.lock().unwrap();
             let mut bindings = BTreeMap::new();
             for input in inputs {
                 let node = input["node"]
