@@ -494,6 +494,10 @@ impl TextField {
         Some(text)
     }
 
+    pub fn composer_epoch(&self) -> Option<u64> {
+        self.composer_epoch
+    }
+
     pub fn set_composer_value(
         &mut self,
         value: &str,

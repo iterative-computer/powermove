@@ -37,7 +37,7 @@ fn main() {
     assert!(status.success(), "Model I/O bridge archive failed");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=pm_scene3d_modelio");
-    for framework in ["ModelIO", "Foundation", "CoreGraphics"] {
+    for framework in ["ModelIO", "Foundation", "CoreGraphics", "ImageIO"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=c++");

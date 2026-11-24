@@ -379,7 +379,7 @@ fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> E
         roll: 0.,
         position: r
             .camera_position
-            .unwrap_or([n("x", 3.), n("y", 2.), n("z", 6.)]),
+            .unwrap_or([n("x", 0.), n("y", 0.), n("z", 6.)]),
         target: r
             .camera_id
             .as_ref()

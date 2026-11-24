@@ -275,6 +275,15 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
                 "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
             });
         }
+        if tool["name"] == "apply_commands" {
+            let description = tool["description"].as_str().unwrap();
+            tool["description"] = json!(format!(
+                "{description} Use add_marker only when requested or when a few sparse structural cues would help."
+            ));
+        }
+        if tool["name"] == "render_frames" {
+            tool["inputSchema"]["properties"]["width"]["maximum"] = json!(8192);
+        }
         if let Some(note) = overlay["note"].as_str() {
             tool["description"] = json!(format!("{note}\n\n{}", tool["description"].as_str().unwrap()));
         }

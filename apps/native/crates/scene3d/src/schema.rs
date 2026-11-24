@@ -142,8 +142,8 @@ fn fields(group: &str) -> Vec<Field> {
             n("height", 0.001, 100000., 1.2),
         ],
         "camera" => vec![
-            basic("x", 3.),
-            basic("y", 2.),
+            basic("x", 0.),
+            basic("y", 0.),
             basic("z", 6.),
             basic("targetX", 0.),
             basic("targetY", 0.),

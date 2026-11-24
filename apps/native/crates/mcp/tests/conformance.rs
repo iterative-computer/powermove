@@ -276,6 +276,9 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                             "{description} Use add_marker only when requested or when a few sparse structural cues would help."
                         ));
                     }
+                    if tool["name"] == "render_frames" {
+                        tool["inputSchema"]["properties"]["width"]["maximum"] = json!(8192);
+                    }
                     let overlay = &speed["overlays"][tool["name"].as_str().unwrap()];
                     if let Some(note) = overlay["note"].as_str() {
                         tool["description"] = json!(format!("{note}\n\n{}", tool["description"].as_str().unwrap()));

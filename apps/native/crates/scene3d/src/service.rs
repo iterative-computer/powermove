@@ -22,7 +22,7 @@ pub fn new_layer(
     let position = match role {
         Role::Object => [0., 0., 0.],
         Role::Light => [-3., 5., 4.],
-        Role::Camera => [3., 2., 6.],
+        Role::Camera => [0., 0., 6.],
     };
     let mut p = json!({});
     for (alias, path) in schema::TRANSFORMS {
@@ -473,7 +473,7 @@ pub(crate) fn studio_plan(
         "light_highlight" => {
             let point = vec3(&args["at"])?;
             let normal = vec3(&args["normal"])?;
-            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let eye = camera.map(pos).unwrap_or([0., 0., 6.]);
             let distance = scalar(args, "distance", (length(sub(eye, point)) * 0.9).max(2.))?;
             let size = args.get("size").map(|_| scalar(args, "size", 0.)).transpose()?;
             let (at, size) = if camera.is_some_and(|c| c["d"]["data"]["environment"]["shadowCatcher"] == true) {
@@ -489,7 +489,7 @@ pub(crate) fn studio_plan(
             let preset = args["preset"].as_str().unwrap_or("");
             let product = product_for(layers, layer)?;
             let (c, r) = product_frame(comp, product);
-            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let eye = camera.map(pos).unwrap_or([0., 0., 6.]);
             let placement = crate::light_tool::preset_placement(preset, c, r, eye)?;
             let color = match args.get("temperature") {
                 Some(t) => crate::light_tool::kelvin_hex(

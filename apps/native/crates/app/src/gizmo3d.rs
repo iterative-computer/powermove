@@ -182,6 +182,9 @@ pub(super) struct FlyRun {
     was_free: bool,
     prev_free: Option<View>,
     last: std::time::Instant,
+    /// Last pointer position in pixels so mouse-look uses direct deltas
+    /// without continuous center-offset drift.
+    last_pointer: Option<[f64; 2]>,
     _keys: Option<Subscription>,
     _clock: Option<Task<()>>,
     window_activation: Option<Subscription>,
@@ -557,15 +560,25 @@ impl GizmoSurface {
     pub(crate) fn studio_free_pose(&self) -> Option<View> {
         self.studio.free_look.then_some(self.studio.free).flatten()
     }
-    /// Tests: speed up `notches` and fly `seconds` without the frame clock.
+    /// Tests: adjust speed by `notches` and move forward for `seconds` without
+    /// the frame clock.
     #[cfg(test)]
     pub(crate) fn studio_fly_advance(&mut self, notches: f64, seconds: f64, cx: &mut Context<Self>) {
         if let Some(run) = self.studio.fly.as_mut() {
-            run.fly.accelerate(notches);
-            run.fly.tick(seconds.min(0.1));
-            for _ in 1..(seconds / 0.1).round() as usize {
-                run.fly.tick(0.1);
+            if notches >= 0. {
+                run.fly.adjust_speed(notches);
+                run.fly.held.set("w", true);
+            } else {
+                run.fly.adjust_speed(-notches);
+                run.fly.held.set("s", true);
             }
+            let steps = (seconds / 0.1).round().max(1.) as usize;
+            let dt = seconds / steps as f64;
+            for _ in 0..steps {
+                run.fly.tick(dt);
+            }
+            run.fly.held.set("w", false);
+            run.fly.held.set("s", false);
             self.studio.free = Some(run.fly.pose());
             self.studio_push_view(cx);
         }
@@ -643,6 +656,7 @@ impl GizmoSurface {
             was_free,
             prev_free,
             last: std::time::Instant::now(),
+            last_pointer: None,
             _keys: Some(keys),
             _clock: Some(clock),
             window_activation: None,
@@ -663,16 +677,18 @@ impl GizmoSurface {
             return false;
         };
         let now = std::time::Instant::now();
-        run.fly.tick(now.duration_since(run.last).as_secs_f64());
+        let dt = now.duration_since(run.last).as_secs_f64();
         run.last = now;
-        self.studio.free = Some(run.fly.pose());
-        self.studio_push_view(cx);
-        self.draw(cx);
+        if run.fly.tick(dt) {
+            self.studio.free = Some(run.fly.pose());
+            self.studio_push_view(cx);
+            self.draw(cx);
+        }
         true
     }
-    /// A key while flying. Down: W/S (and ↑/↓) change speed, A/D (←/→)
-    /// strafe, E/R climb, Q/F descend, Enter confirms, Esc cancels, +/−
-    /// change speed. Up releases a held move.
+    /// A key while flying. WASD / arrows move while held, E/R climb, Q/F
+    /// descend, +/- adjust speed, Enter confirms, Esc cancels. Releasing keys
+    /// stops immediately with zero glide.
     pub(super) fn studio_fly_key(&mut self, key: &Keystroke, down: bool, cx: &mut Context<Self>) {
         let Some(run) = self.studio.fly.as_mut() else {
             return;
@@ -680,8 +696,8 @@ impl GizmoSurface {
         run.fly.fast = key.modifiers.shift;
         run.fly.slow = key.modifiers.alt;
         match (key.key.as_str(), down) {
-            ("w" | "up" | "+" | "=", true) => run.fly.accelerate(1.),
-            ("s" | "down" | "-", true) => run.fly.accelerate(-1.),
+            ("+" | "=", true) => run.fly.adjust_speed(1.),
+            ("-", true) => run.fly.adjust_speed(-1.),
             ("enter", true) => return self.studio_fly_end(true, cx),
             ("escape", true) => return self.studio_fly_end(false, cx),
             (key, pressed) => run.fly.held.set(key, pressed),
@@ -694,25 +710,27 @@ impl GizmoSurface {
             run.fly.slow = m.alt;
         }
     }
-    /// The pointer while flying: its offset from the viewer's centre steers.
-    pub(super) fn studio_fly_pointer(&mut self, at: Point<Pixels>) {
-        let b = self.bounds;
+    /// Direct mouse-look while flying: pointer deltas turn the camera and stop
+    /// turning the instant the pointer stops.
+    pub(super) fn studio_fly_pointer(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(run) = self.studio.fly.as_mut() else {
             return;
         };
-        let (w, h) = (f32::from(b.size.width) as f64, f32::from(b.size.height) as f64);
-        if w <= 0. || h <= 0. {
-            return;
+        let pos = [f32::from(at.x) as f64, f32::from(at.y) as f64];
+        if let Some(prev) = run.last_pointer.replace(pos) {
+            let (dx, dy) = (pos[0] - prev[0], pos[1] - prev[1]);
+            if dx.abs() > 0. || dy.abs() > 0. {
+                run.fly.look(dx, dy);
+                self.studio.free = Some(run.fly.pose());
+                self.studio_push_view(cx);
+                self.draw(cx);
+            }
         }
-        run.fly.pointer = [
-            ((f32::from(at.x - b.origin.x) as f64) - w / 2.) / (w / 2.),
-            ((f32::from(at.y - b.origin.y) as f64) - h / 2.) / (h / 2.),
-        ];
     }
-    /// Scroll while flying: each notch is one speed step.
+    /// Scroll while flying: adjusts movement speed without imparting glide.
     pub(super) fn studio_fly_scroll(&mut self, notches: f64) {
         if let Some(run) = self.studio.fly.as_mut() {
-            run.fly.accelerate(notches);
+            run.fly.adjust_speed(notches);
         }
     }
     /// Confirm (click, Enter) keeps the flight; cancel (Esc, right-click)
@@ -2715,9 +2733,13 @@ impl GizmoSurface {
     }
     /// Highlight a specific model part in the 3D viewport while browsing the
     /// searchable part picker, or clear the preview with `None`.
+    /// Callers already holding a mutable lease on `Controller` pass `assets`
+    /// and `time` directly so this never re-enters `ControllerDelegate`.
     pub fn set_hovered_part(
         &mut self,
         target: Option<(String, String)>,
+        assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
+        time: f64,
         cx: &mut Context<Self>,
     ) {
         self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
@@ -2730,8 +2752,6 @@ impl GizmoSurface {
             return;
         };
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
-        let assets = self.host.scene3d_assets(cx);
-        let time = self.host.time(cx);
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()

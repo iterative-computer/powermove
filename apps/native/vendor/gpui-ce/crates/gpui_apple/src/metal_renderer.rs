@@ -923,19 +923,51 @@ impl MetalRenderer {
         }
     }
 
-    /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
-    /// the layer, a draw outside its update has none, and asking the layer for
-    /// one raises `CAMetalLayerInvalidOperation` (aborting the app): the caller
-    /// paints on the link's next update instead. Synchronous presents release
-    /// the link first, so they may ask.
-    pub fn draw(&mut self, scene: &Scene) -> bool {
+}
+
+/// A Metal frame already encoded into its drawable, ready to commit and present
+/// inside the same `CATransaction` as any AppKit slot geometry moves.
+pub struct PreparedDraw {
+    command_buffer: metal::CommandBuffer,
+    drawable: metal::MetalDrawable,
+    presents_with_transaction: bool,
+    supplied: bool,
+}
+
+impl PreparedDraw {
+    pub fn present(self) {
+        if self.presents_with_transaction {
+            self.command_buffer.commit();
+            measure_native("GPUI scheduled", || {
+                self.command_buffer.wait_until_scheduled()
+            });
+            self.drawable.present();
+        } else if self.supplied {
+            // CAMetalDisplayLink requires present() before targetTimestamp.
+            // Queuing present on the buffer defers that call until scheduling,
+            // which can miss the CPU deadline after timely encoding.
+            // Its update tracks the committed rendering; no scheduled wait is needed.
+            self.command_buffer.commit();
+            self.drawable.present();
+        } else {
+            self.command_buffer.present_drawable(&self.drawable);
+            self.command_buffer.commit();
+        }
+    }
+}
+
+impl MetalRenderer {
+    /// Acquires a drawable and encodes `scene` without presenting yet. Returns
+    /// `None` if no drawable is available or encoding failed, allowing callers
+    /// to avoid moving hosted AppKit views when the Metal layer cannot update.
+    pub fn prepare_draw(&mut self, scene: &Scene) -> Option<PreparedDraw> {
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
                 log::error!(
                     "draw() called on headless renderer - use render_scene_to_image() instead"
                 );
-                return false;
+                return None;
             }
         };
         let viewport_size = layer.drawable_size();
@@ -946,15 +978,16 @@ impl MetalRenderer {
         // Never into a drawable of another size, whoever supplied it.
         if !self.supplied_fits() {
             self.display_link_drawable = None;
-            return false;
+            return None;
         }
         let supplied = self.display_link_drawable.take();
         if supplied.is_none() && self.display_link_bound {
-            return false;
+            return None;
         }
         let asked = present_trace().then(std::time::Instant::now);
+        let from_supplied = supplied.is_some();
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
-            supplied.as_deref().or_else(|| layer.next_drawable())
+            supplied.or_else(|| layer.next_drawable().map(|d| d.to_owned()))
         }) {
             self.acquire_seconds = asked.map_or(0., |at| at.elapsed().as_secs_f64());
             drawable
@@ -963,7 +996,7 @@ impl MetalRenderer {
                 "failed to retrieve next drawable, drawable size: {:?}",
                 viewport_size
             );
-            return false;
+            return None;
         };
 
         // A display-link update can carry the previous size during live resize.
@@ -995,7 +1028,7 @@ impl MetalRenderer {
             let draw = crate::feel::now();
             let target = crate::feel::target();
             let frame = crate::feel::frame_start();
-            let path = match (self.presents_with_transaction, supplied.is_some()) {
+            let path = match (self.presents_with_transaction, from_supplied) {
                 (true, _) => "transaction",
                 (false, true) => "link",
                 (false, false) => "queued",
@@ -1011,33 +1044,39 @@ impl MetalRenderer {
         }
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer = match measure_native("GPUI encode", || {
-            self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size)
+            self.draw_primitives(scene, &mut instance_buffer, &drawable, viewport_size)
         }) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
                 log::error!("failed to render pre-sized scene: {error}");
-                return false;
+                return None;
             }
         };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
 
-        if self.presents_with_transaction {
-            command_buffer.commit();
-            measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
-            drawable.present();
-        } else if supplied.is_some() {
-            // CAMetalDisplayLink requires present() before targetTimestamp.
-            // Queuing present on the buffer defers that call until scheduling,
-            // which can miss the CPU deadline after timely encoding.
-            // Its update tracks the committed rendering; no scheduled wait is needed.
-            command_buffer.commit();
-            drawable.present();
-        } else {
-            command_buffer.present_drawable(drawable);
-            command_buffer.commit();
-        }
+        Some(PreparedDraw {
+            command_buffer,
+            drawable,
+            presents_with_transaction: self.presents_with_transaction,
+            supplied: from_supplied,
+        })
+    }
+
+    /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
+    /// the layer, a draw outside its update has none, and asking the layer for
+    /// one raises `CAMetalLayerInvalidOperation` (aborting the app): the caller
+    /// paints on the link's next update instead. Synchronous presents release
+    /// the link first, so they may ask.
+    pub fn draw(&mut self, scene: &Scene) -> bool {
+        let Some(prepared) = self.prepare_draw(scene) else {
+            return false;
+        };
+        prepared.present();
         true
     }
+}
+
+impl MetalRenderer {
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing

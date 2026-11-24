@@ -1,22 +1,22 @@
-//! Fly navigation (Blender's View ▸ Navigation ▸ Fly, Shift+`): the view
-//! flies continuously; the pointer's offset from the viewer's centre steers
-//! (further out turns faster, a small dead zone in the middle holds course);
-//! W/S and the scroll wheel change the forward speed, which persists; A/D
-//! strafe, E/Q (and R/F) climb and descend along world vertical; Shift is
-//! faster, Option slower. Pure state and maths: the viewer feeds it pointer,
-//! keys and time, and reads the pose.
+//! Direct Walk/Fly navigation (Shift+`): move only while WASD / Arrow / Q / E
+//! keys are held (no cruise-control glide after release) and look directly with
+//! mouse movement deltas (no drift when the pointer stops). Scroll wheel or
+//! +/- adjusts movement speed; Shift is faster, Option is slower. Pure state
+//! and maths: the viewer feeds pointer deltas, keys, and time, and reads the
+//! pose.
 use pm_scene3d::navigation::{Pose, Vec3, add, cross, length, mul, normalize, sub};
 
-/// Degrees per second at the edge of the viewer.
-pub const MAX_TURN: f64 = 90.;
-/// The share of the half-viewer around the centre that doesn't steer.
-pub const DEAD_ZONE: f64 = 0.08;
+/// Degrees turned per pixel of pointer movement.
+pub const LOOK_SENSITIVITY: f64 = 0.22;
 /// Steepest pitch, degrees (looking straight up or down has no heading).
 const MAX_PITCH: f64 = 89.;
+/// Minimum and maximum user speed multiplier (adjusted by scroll / +/-).
+const MIN_SPEED_SCALE: f64 = 0.05;
+const MAX_SPEED_SCALE: f64 = 25.;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Held {
-    keys: u8,
+    keys: u16,
 }
 
 impl Held {
@@ -30,16 +30,23 @@ impl Held {
             "r" => 5,
             "q" => 6,
             "f" => 7,
+            "w" => 8,
+            "up" => 9,
+            "s" => 10,
+            "down" => 11,
             _ => return,
         };
-        let mask = 1 << bit;
+        let mask = 1u16 << bit;
         self.keys = if pressed {
             self.keys | mask
         } else {
             self.keys & !mask
         };
     }
-    fn active(&self, mask: u8) -> f64 {
+    pub fn any(&self) -> bool {
+        self.keys != 0
+    }
+    fn active(&self, mask: u16) -> f64 {
         f64::from(u8::from(self.keys & mask != 0))
     }
 }
@@ -52,16 +59,12 @@ pub struct Fly {
     /// Heading and pitch, degrees, as a camera's rotation y and x.
     pub yaw: f64,
     pub pitch: f64,
-    /// Forward speed, scene units per second (negative flies backward).
-    pub speed: f64,
-    /// One speed step, and the strafe/climb speed at rest: scaled to the
-    /// scene so a product and a landscape both feel right.
+    /// User-adjustable movement speed multiplier (scroll wheel / +/-).
+    pub speed_scale: f64,
+    /// Base movement speed in scene units per second, scaled to the scene.
     pub step: f64,
     /// Where the view looks, as the pose's target distance.
     pub focus: f64,
-    /// The pointer's offset from the viewer centre, −1…1 on each axis
-    /// (x right, y down), in the viewer's own proportions.
-    pub pointer: [f64; 2],
     pub held: Held,
     pub fast: bool,
     pub slow: bool,
@@ -76,15 +79,10 @@ pub fn forward(pitch: f64, yaw: f64) -> Vec3 {
 /// (pitch, yaw) degrees looking along `f`.
 pub fn angles(f: Vec3) -> (f64, f64) {
     let f = normalize(f);
-    (f[1].clamp(-1., 1.).asin().to_degrees(), (-f[0]).atan2(-f[2]).to_degrees())
-}
-fn steer(offset: f64) -> f64 {
-    let o = offset.clamp(-1., 1.);
-    if o.abs() <= DEAD_ZONE {
-        return 0.;
-    }
-    // Linear beyond the dead zone: further from the centre turns faster.
-    o.signum() * (o.abs() - DEAD_ZONE) / (1. - DEAD_ZONE)
+    (
+        f[1].clamp(-1., 1.).asin().to_degrees(),
+        (-f[0]).atan2(-f[2]).to_degrees(),
+    )
 }
 
 impl Fly {
@@ -97,11 +95,10 @@ impl Fly {
             position: start.position,
             yaw,
             pitch,
-            speed: 0.,
-            // A tenth of the distance to what it looked at, per second.
-            step: (focus * 0.1).max(1e-3),
+            speed_scale: 1.,
+            // Responsive pace scaled to scene focus distance.
+            step: (focus * 0.45).max(0.05),
             focus,
-            pointer: [0.; 2],
             held: Held::default(),
             fast: false,
             slow: false,
@@ -109,38 +106,51 @@ impl Fly {
     }
     fn gear(&self) -> f64 {
         if self.fast {
-            4.
+            3.
         } else if self.slow {
             0.25
         } else {
             1.
         }
     }
-    /// W or a scroll notch away (+1), S or toward (−1): one speed step.
-    pub fn accelerate(&mut self, notches: f64) {
-        self.speed += notches * self.step;
-        if self.speed.abs() < self.step * 1e-6 {
-            self.speed = 0.;
-        }
+    /// Scroll wheel or +/- adjusts movement speed multiplier cleanly without
+    /// imparting any persistent velocity or glide.
+    pub fn adjust_speed(&mut self, notches: f64) {
+        self.speed_scale = (self.speed_scale * 1.2f64.powf(notches))
+            .clamp(MIN_SPEED_SCALE, MAX_SPEED_SCALE);
     }
-    /// Advances `dt` seconds.
-    pub fn tick(&mut self, dt: f64) {
+    /// Direct mouse-look from pointer movement in pixels: stops turning the
+    /// moment the pointer stops moving.
+    pub fn look(&mut self, dx: f64, dy: f64) {
+        self.yaw -= dx * LOOK_SENSITIVITY;
+        self.pitch = (self.pitch - dy * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
+    }
+    /// Advances `dt` seconds. Moves strictly while directional keys are held;
+    /// releasing all keys stops immediately with zero glide.
+    pub fn tick(&mut self, dt: f64) -> bool {
         let dt = dt.clamp(0., 0.1);
-        self.yaw -= steer(self.pointer[0]) * MAX_TURN * dt;
-        self.pitch = (self.pitch - steer(self.pointer[1]) * MAX_TURN * dt).clamp(-MAX_PITCH, MAX_PITCH);
-        let f = forward(self.pitch, self.yaw);
-        let gear = self.gear();
-        self.position = add(self.position, mul(f, self.speed * gear * dt));
-        // Strafe on the level and climb along world vertical, at the current
-        // speed or one step when flying slowly or not at all.
-        let pace = self.speed.abs().max(self.step) * gear * dt;
-        let right = normalize(cross(f, [0., 1., 0.]));
-        let side = self.held.active(0b1100) - self.held.active(0b0011);
-        let lift = self.held.active(0b0011_0000) - self.held.active(0b1100_0000);
-        if length(right) > 1e-9 {
-            self.position = add(self.position, mul(right, side * pace));
+        if !self.held.any() || dt <= 0. {
+            return false;
         }
-        self.position = add(self.position, [0., lift * pace, 0.]);
+        let f = forward(self.pitch, self.yaw);
+        let right = normalize(cross(f, [0., 1., 0.]));
+        let fwd = self.held.active(0b0011_0000_0000) - self.held.active(0b1100_0000_0000);
+        let side = self.held.active(0b0000_0000_1100) - self.held.active(0b0000_0000_0011);
+        let lift = self.held.active(0b0000_0011_0000) - self.held.active(0b0000_1100_0000);
+        let mut dir = [0., lift, 0.];
+        if fwd != 0. {
+            dir = add(dir, mul(f, fwd));
+        }
+        if side != 0. && length(right) > 1e-9 {
+            dir = add(dir, mul(right, side));
+        }
+        let mag = length(dir);
+        if mag <= 1e-9 {
+            return false;
+        }
+        let distance = self.step * self.speed_scale * self.gear() * dt;
+        self.position = add(self.position, mul(dir, distance / mag));
+        true
     }
     /// The view now: where it stands and what it looks at.
     pub fn pose(&self) -> Pose {
@@ -186,20 +196,19 @@ mod tests {
         assert!(close(p.target, [0.5, 0.2, -1.]), "{:?}", p.target);
     }
     #[test]
-    fn forward_follows_the_view_and_speed_persists() {
+    fn forward_moves_only_while_held_with_no_glide() {
         let mut f = Fly::new(start());
-        f.accelerate(2.);
+        f.held.set("w", true);
         for _ in 0..10 {
-            f.tick(0.1);
+            assert!(f.tick(0.1));
         }
-        // Looking down −Z at two steps (2 × 1.0) per second for 1 s.
-        assert!(close(f.position, [0., 0., 8.]), "{:?}", f.position);
-        f.tick(0.1);
-        assert!(f.position[2] < 8., "it keeps flying");
-        f.accelerate(-2.);
+        // Moved forward along −Z by 1s × step (4.5).
+        assert!(close(f.position, [0., 0., 5.5]), "{:?}", f.position);
+        // Releasing W stops immediately with zero residual glide.
+        f.held.set("w", false);
         let at = f.position;
-        f.tick(0.1);
-        assert!(close(f.position, at), "speed back to zero stops it");
+        assert!(!f.tick(0.1));
+        assert!(close(f.position, at), "no glide after key release");
     }
     #[test]
     fn climbing_is_world_vertical_even_looking_down() {
@@ -220,45 +229,32 @@ mod tests {
         );
     }
     #[test]
-    fn the_pointer_steers_harder_further_out_and_not_in_the_dead_zone() {
+    fn mouse_look_is_direct_and_never_drifts_on_tick() {
         let mut f = Fly::new(start());
-        f.pointer = [DEAD_ZONE * 0.5, 0.];
-        f.tick(0.1);
-        assert_eq!(f.yaw, 0.);
-        let mut near = Fly::new(start());
-        near.pointer = [0.4, 0.];
-        near.tick(0.1);
-        let mut far = Fly::new(start());
-        far.pointer = [0.9, 0.];
-        far.tick(0.1);
-        // Right of centre turns right (yaw decreases), further turns faster.
-        assert!(near.yaw < 0. && far.yaw < near.yaw, "{} {}", near.yaw, far.yaw);
+        f.look(20., 10.);
+        let (yaw_after, pitch_after) = (f.yaw, f.pitch);
+        assert!(yaw_after < 0. && pitch_after < 0.);
+        // Ticking without further mouse motion never drifts yaw or pitch.
+        assert!(!f.tick(0.1));
+        assert_eq!(f.yaw, yaw_after);
+        assert_eq!(f.pitch, pitch_after);
     }
     #[test]
-    fn shift_is_faster_and_option_slower() {
+    fn shift_is_faster_and_option_slower_and_scroll_adjusts_speed() {
         let mut a = Fly::new(start());
         let mut b = a.clone();
         let mut c = a.clone();
-        for f in [&mut a, &mut b, &mut c] {
-            f.accelerate(1.);
-        }
+        let mut d = a.clone();
         b.fast = true;
         c.slow = true;
-        for f in [&mut a, &mut b, &mut c] {
+        d.adjust_speed(3.);
+        for f in [&mut a, &mut b, &mut c, &mut d] {
+            f.held.set("w", true);
             f.tick(0.1);
         }
         let moved = |f: &Fly| 10. - f.position[2];
-        assert!(moved(&b) > moved(&a) && moved(&a) > moved(&c));
-    }
-
-    #[test]
-    fn releasing_one_alias_keeps_the_other_held() {
-        let mut held = Held::default();
-        held.set("a", true);
-        held.set("left", true);
-        held.set("a", false);
-        assert_eq!(held.active(0b0011), 1.);
-        held.set("left", false);
-        assert_eq!(held.active(0b0011), 0.);
+        assert!(moved(&b) > moved(&a) * 2.5);
+        assert!(moved(&c) < moved(&a) * 0.3);
+        assert!(moved(&d) > moved(&a) * 1.5);
     }
 }

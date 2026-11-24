@@ -310,8 +310,15 @@ fn local_usdz_round_trip() {
     let Model::Gltf(model) = super::load("converted.glb", &glb).unwrap() else {
         panic!("expected glTF model");
     };
+    let mtlx_materials: Vec<_> = doc["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["alphaMode"].as_str() == Some("BLEND"))
+        .map(|m| m["name"].as_str().unwrap_or(""))
+        .collect();
     eprintln!(
-        "bytes={} vertices={vertices} triangles={triangles} meshes={} primitives={primitives} nodes={} materials={} textures={} images={} loaded_drawables={}",
+        "bytes={} vertices={vertices} triangles={triangles} meshes={} primitives={primitives} nodes={} materials={} textures={} images={} loaded_drawables={} blend_materials={mtlx_materials:?}",
         glb.len(),
         len("meshes"),
         len("nodes"),
@@ -1062,6 +1069,91 @@ def Xform "Deck" {
     assert_eq!(coord(&pbr("MixedAlpha")["baseColorTexture"]), 0);
     assert_eq!(coord(&pbr("MixedPbr")["metallicRoughnessTexture"]), 0);
     assert_eq!(coord(&pbr("AgreedAlpha")["baseColorTexture"]), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn usdz_materialx_only_unlit_decal_resolves_texture_and_alpha() {
+    let mut png = Vec::new();
+    let mut img = image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 0, 0]));
+    for y in 4..12 {
+        for x in 4..12 {
+            img.put_pixel(x, y, image::Rgba([112, 112, 112, 180]));
+        }
+    }
+    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let usda = br#"#usda 1.0
+(
+    defaultPrim = "Root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+def Xform "Root" {
+    def Scope "Materials" {
+        def Material "LogoMat" {
+            token outputs:mtlx:surface.connect = </Root/Materials/LogoMat/Unlit.outputs:out>
+            def Shader "Tex" {
+                uniform token info:id = "ND_RealityKitTexture2D_color4"
+                asset inputs:file = @textures/logo.png@
+                bool inputs:no_flip_v = 1
+            }
+            def Shader "Sep" {
+                uniform token info:id = "ND_separate4_color4"
+                color4f inputs:in.connect = </Root/Materials/LogoMat/Tex.outputs:out>
+            }
+            def Shader "Comb" {
+                uniform token info:id = "ND_combine3_color3"
+                float inputs:in1.connect = </Root/Materials/LogoMat/Sep.outputs:outr>
+                float inputs:in2.connect = </Root/Materials/LogoMat/Sep.outputs:outg>
+                float inputs:in3.connect = </Root/Materials/LogoMat/Sep.outputs:outb>
+            }
+            def Shader "MulColor" {
+                uniform token info:id = "ND_multiply_color3FA"
+                color3f inputs:in1.connect = </Root/Materials/LogoMat/Comb.outputs:out>
+                float inputs:in2 = 2
+            }
+            def Shader "MulOp" {
+                uniform token info:id = "ND_multiply_float"
+                float inputs:in1.connect = </Root/Materials/LogoMat/Sep.outputs:outa>
+                float inputs:in2 = 0.75
+            }
+            def Shader "Unlit" {
+                uniform token info:id = "ND_realitykit_unlit_surfaceshader"
+                color3f inputs:color.connect = </Root/Materials/LogoMat/MulColor.outputs:out>
+                float inputs:opacity.connect = </Root/Materials/LogoMat/MulOp.outputs:out>
+            }
+        }
+    }
+    def Mesh "LogoQuad" (
+        apiSchemas = ["MaterialBindingAPI"]
+    ) {
+        uniform bool doubleSided = 1
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </Root/Materials/LogoMat>
+    }
+}
+"#;
+    let bytes = archive(
+        &[("decal.usda", usda), ("textures/logo.png", &png)],
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .with_alignment(64),
+    );
+    let prepared = prepare(vec![fixture("decal.usdz", &bytes)], None).unwrap();
+    let doc = pm_geom3d::model_import::json_of(&prepared.bytes).unwrap();
+    let materials = doc["materials"].as_array().unwrap();
+    let logo = materials
+        .iter()
+        .find(|m| m["name"].as_str() == Some("LogoMat"))
+        .unwrap_or_else(|| panic!("missing LogoMat fallback material: {materials:?}"));
+    assert_eq!(logo["alphaMode"].as_str(), Some("BLEND"));
+    assert_eq!(logo["doubleSided"].as_bool(), Some(true));
+    assert!(logo["pbrMetallicRoughness"]["baseColorTexture"].is_object());
+    assert!(logo["emissiveTexture"].is_object());
 }
 
 #[test]

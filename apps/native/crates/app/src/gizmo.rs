@@ -1927,7 +1927,7 @@ impl GizmoSurface {
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.studio_flying() {
-            self.studio_fly_pointer(event.position);
+            self.studio_fly_pointer(event.position, cx);
             return;
         }
         if self.effects_move(event, cx) { return; }

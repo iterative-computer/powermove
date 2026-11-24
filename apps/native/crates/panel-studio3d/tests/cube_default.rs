@@ -151,10 +151,10 @@ fn a_cube_in_an_empty_composition_has_no_floor_or_world() {
     assert_only_cube_and_key(&[], &layers(&a));
 }
 
-/// The default camera with no camera layer: at (3, 2, 6), aimed at the
+/// The default camera with no camera layer: at (0, 0, 6), aimed at the
 /// origin, 45° vertical field of view (pm_scene3d's camera defaults).
 fn projected_extent(cube: &Value) -> (f64, [f64; 2]) {
-    let eye = [3., 2., 6.];
+    let eye = [0., 0., 6.];
     let norm = |a: [f64; 3]| {
         let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
         a.map(|x| x / l)
@@ -259,14 +259,10 @@ fn the_cube_is_readable_centred_and_turned_three_quarters() {
         centre[0].abs() < 0.05 && centre[1].abs() < 0.05,
         "centred: {centre:?}"
     );
-    // Seen from the default camera, the cube is turned between 15° and 75°
-    // from face-on, so it reads as a solid rather than a square.
-    let azimuth = 3f64.atan2(6.).to_degrees();
-    let turn = (v(cube, "rotation.y") + v(cube, "orientation.y") - azimuth).rem_euclid(90.);
-    assert!(
-        (15.0..=75.0).contains(&turn),
-        "turned {turn:.1}° from face-on"
-    );
+    // Seen from the straight-on default camera at (0, 0, 6), the cube starts
+    // unrotated (0°), facing the viewer cleanly.
+    let turn = (v(cube, "rotation.y") + v(cube, "orientation.y")).rem_euclid(90.);
+    assert!(turn.abs() < 1e-6, "expected straight-on cube, got {turn:.1}°");
 }
 
 #[test]

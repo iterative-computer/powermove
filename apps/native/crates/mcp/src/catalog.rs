@@ -77,6 +77,9 @@ pub fn catalog() -> &'static Value {
                     "{description} Use add_marker only when requested or when a few sparse structural cues would help."
                 ));
             }
+            if tool["name"] == "render_frames" {
+                tool["inputSchema"]["properties"]["width"]["maximum"] = serde_json::json!(8192);
+            }
             let overlay = &speed_catalog()["overlays"][tool["name"].as_str().unwrap()];
             if let Some(note) = overlay["note"].as_str() {
                 let existing = tool["description"].as_str().unwrap();

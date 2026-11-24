@@ -16,6 +16,8 @@ mod stl;
 mod texture;
 mod three_ds;
 mod three_mf;
+#[cfg(target_os = "macos")]
+mod usd_mtlx;
 mod xml;
 use crate::{Error, Result, fail};
 pub use obj::ImportFile;

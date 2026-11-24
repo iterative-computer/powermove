@@ -2586,42 +2586,51 @@ impl PlatformWindow for MacWindow {
                 }
             }
         }
+        // Configure `presentsWithTransaction` and acquire/encode the Metal
+        // drawable BEFORE opening `CATransaction` or moving hosted AppKit
+        // views. That ensures:
+        // 1. `CAMetalLayer.presentsWithTransaction` is set before `nextDrawable`
+        //    and before `[CATransaction begin]`.
+        // 2. If Metal cannot acquire a drawable or encode `scene`, hosted
+        //    AppKit views stay in sync with the frozen Metal layer instead of
+        //    drifting ahead of it.
+        let now = std::time::Instant::now();
+        let continuous = this
+            .last_draw
+            .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
+        let direct = this.direct_moved.is_some();
+        let will_move = crate::composition::pending(view, this.painted);
+        let sync = direct
+            || forced
+            || will_move
+            || (continuous
+                && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none()
+                && this.ca_display_link.is_none());
+        this.renderer.set_presents_with_transaction(sync);
+        let Some(prepared) = this.renderer.prepare_draw(scene) else {
+            // No drawable or encoding error: leave `this.painted` intact and
+            // do not move hosted AppKit views; retry on the next update.
+            this.force_render_pending = true;
+            let acquire = this.renderer.acquire_seconds * 1000.;
+            drop(this);
+            return trace("skip", false, acquire);
+        };
         // A scene shown again (GPUI keeps presenting for a moment after fast
         // input) staged nothing new: hosted views stay as its paint put them.
         let painted = std::mem::take(&mut this.painted);
         let transaction = crate::composition::present(view, painted);
         let moved = transaction.as_ref().is_some_and(|t| t.moved());
-        let now = std::time::Instant::now();
-        let continuous = this
-            .last_draw
-            .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
         this.last_draw = Some(now);
-        let direct = this.direct_moved.is_some();
-        let sync = direct
-            || crate::composition::presents_with_transaction(
-                forced,
-                transaction.as_ref(),
-                continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
-                this.ca_display_link.is_some(),
-            );
-        this.renderer.set_presents_with_transaction(sync);
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) has moved its views by now, under a
-        // link. This one frame asks the layer on the main thread, as AppKit's
-        // synchronous paints do (the layer's timeout bounds the wait), and
-        // the window is direct from here on.
+        // link: switch to direct for subsequent frames.
         let late = !forced && !direct && moved && this.renderer.display_link_bound();
         if late {
             path = "late";
             this.renderer.set_display_link_drawable(None);
             this.release_display_link_for_sync_present();
         }
-        if !this.renderer.draw(scene) {
-            // No drawable (a link owns the layer and this draw is outside
-            // its update, or the layer gave none): the next update paints
-            // this scene.
-            this.force_render_pending = true;
-        }
+        prepared.present();
         if late {
             this.enter_direct();
         } else if direct {

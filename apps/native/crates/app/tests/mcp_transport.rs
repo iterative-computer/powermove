@@ -402,7 +402,7 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
     );
     // The width is a ceiling, as in Electron's snapshot: downscale large
     // compositions, but keep smaller ones on their original pixel grid.
-    for (width, expected) in [(160, (160, 90)), (1280, (320, 180))] {
+    for (width, expected) in [(160, (160, 90)), (1920, (320, 180))] {
         let frames = client.rpc(
             "tools/call",
             json!({"name":"render_frames","arguments":{"times":[0],"width":width}}),
@@ -418,6 +418,27 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
             .unwrap();
         assert_eq!((png.info().width, png.info().height), expected);
     }
+    // Full-HD compositions render at native 1920x1080 when requested instead of capping at 1280px.
+    client.tool(
+        "apply_commands",
+        json!({"commands":[{"type":"set_composition","patch":{"width":1920,"height":1080}}]}),
+    );
+    let hd = client.rpc(
+        "tools/call",
+        json!({"name":"render_frames","arguments":{"times":[0],"width":1920}}),
+    );
+    assert_eq!(hd["isError"], false, "{hd}");
+    let hd_bytes = base64::engine::general_purpose::STANDARD
+        .decode(hd["content"][1]["data"].as_str().unwrap())
+        .unwrap();
+    let hd_png = png::Decoder::new(std::io::Cursor::new(hd_bytes))
+        .read_info()
+        .unwrap();
+    assert_eq!((hd_png.info().width, hd_png.info().height), (1920, 1080));
+    client.tool(
+        "apply_commands",
+        json!({"commands":[{"type":"set_composition","patch":{"width":320,"height":180}}]}),
+    );
     let exported = client.tool("export_video", json!({"audio":false}));
     let path = std::path::Path::new(exported["path"].as_str().unwrap());
     assert!(path.starts_with(profile.join("exports")));

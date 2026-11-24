@@ -1266,8 +1266,14 @@ impl Controller {
                 .filter(|(l, k)| !l.is_empty() && !k.is_empty())
                 .map(|(l, k)| (l.to_owned(), k.to_owned()))
         };
+        let assets = target.as_ref().map(|_| -> Arc<dyn pm_scene3d::geometry::AssetGeometry> {
+            Arc::new(pm_scene3d::geometry::FileAssets::new(
+                self.media.originals.clone().into_iter().collect(),
+            ))
+        });
+        let time = self.time();
         if let Some(gizmos) = self.builtins.gizmos.clone() {
-            gizmos.update(cx, |g, cx| g.set_hovered_part(target, cx));
+            gizmos.update(cx, |g, cx| g.set_hovered_part(target, assets, time, cx));
         }
     }
     fn part_pick_mode(&mut self, layer: String, cx: &mut Context<Self>) {

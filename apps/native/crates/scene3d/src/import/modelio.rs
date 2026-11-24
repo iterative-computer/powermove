@@ -1,6 +1,7 @@
 use super::{
     mesh::{Alpha, Material, Mesh, Part, Sampler, Scene},
     texture,
+    usd_mtlx::{MtlxMaterial, UsdMtlxIndex},
 };
 use crate::{Error, Result, fail};
 use image::RgbaImage;
@@ -85,8 +86,17 @@ type EmitMesh = unsafe extern "C" fn(
 ) -> bool;
 type EmitNode = unsafe extern "C" fn(*mut c_void, usize, *const c_char, *const [f32; 16]) -> bool;
 
+type EmitImage = unsafe extern "C" fn(*mut c_void, *const u8, u32, u32) -> bool;
+
 unsafe extern "C" {
     fn pm_scene3d_modelio_supports(ext: *const c_char) -> bool;
+    fn pm_scene3d_modelio_decode_image(
+        data: *const u8,
+        len: usize,
+        color: bool,
+        context: *mut c_void,
+        emit: EmitImage,
+    ) -> bool;
     fn pm_scene3d_modelio_read_scene(
         path: *const c_char,
         context: *mut c_void,
@@ -94,6 +104,38 @@ unsafe extern "C" {
         mesh: EmitMesh,
         node: EmitNode,
     ) -> bool;
+}
+
+fn decode_native_image(bytes: &[u8], color: bool) -> Option<RgbaImage> {
+    let mut out: Option<RgbaImage> = None;
+    unsafe extern "C" fn capture(
+        context: *mut c_void,
+        pixels: *const u8,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if pixels.is_null() || width == 0 || height == 0 {
+            return false;
+        }
+        let len = width as usize * height as usize * 4;
+        let slice = unsafe { std::slice::from_raw_parts(pixels, len) };
+        if let Some(image) = RgbaImage::from_raw(width, height, slice.to_vec()) {
+            unsafe { *context.cast::<Option<RgbaImage>>() = Some(image) };
+            true
+        } else {
+            false
+        }
+    }
+    let ok = unsafe {
+        pm_scene3d_modelio_decode_image(
+            bytes.as_ptr(),
+            bytes.len(),
+            color,
+            (&mut out as *mut Option<RgbaImage>).cast(),
+            capture,
+        )
+    };
+    ok.then_some(out).flatten()
 }
 
 pub fn supports(ext: &str) -> bool {
@@ -112,13 +154,17 @@ pub fn convert(ext: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     std::fs::write(&path, bytes)
         .map_err(|e| Error(format!("Cannot stage Model I/O source: {e}")))?;
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|e| Error(e.to_string()))?;
-    let mut output = Output::default();
+    let mut output = Output {
+        source_ext: ext,
+        source_bytes: bytes,
+        ..Output::default()
+    };
     // The bridge invokes callbacks synchronously and owns the arrays for the
     // duration of each call.
     let ok = unsafe {
         pm_scene3d_modelio_read_scene(
             path.as_ptr(),
-            (&mut output as *mut Output).cast(),
+            (&mut output as *mut Output<'_>).cast(),
             emit_material,
             emit_mesh,
             emit_node,
@@ -137,21 +183,136 @@ pub fn convert(ext: &str, bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[derive(Default)]
-struct Output {
+struct Output<'a> {
     scene: Scene,
     roots: Vec<usize>,
     meshes: HashMap<usize, usize>,
     materials: HashMap<usize, usize>,
+    mtlx_materials: HashMap<String, usize>,
+    mtlx_index: Option<UsdMtlxIndex>,
+    source_ext: &'a str,
+    source_bytes: &'a [u8],
     error: Option<Error>,
 }
 
-impl Output {
+impl Output<'_> {
     fn record(&mut self, result: Result<()>) -> bool {
         if let Err(error) = result {
             self.error = Some(error);
             return false;
         }
         true
+    }
+
+    fn resolve_mtlx_material(&mut self, material_name: &str) -> Result<Option<usize>> {
+        if !matches!(
+            self.source_ext.to_ascii_lowercase().as_str(),
+            "usdz" | "usdc" | "usda" | "usd"
+        ) {
+            return Ok(None);
+        }
+        let key = format!("mat:{material_name}");
+        if let Some(&idx) = self.mtlx_materials.get(&key) {
+            return Ok(Some(idx));
+        }
+        let ext = self.source_ext;
+        let bytes = self.source_bytes;
+        let index = self
+            .mtlx_index
+            .get_or_insert_with(|| UsdMtlxIndex::parse(ext, bytes));
+        let Some(mtlx) = index.get_material(material_name).cloned() else {
+            return Ok(None);
+        };
+        let mat_index = self.install_mtlx_material(&mtlx)?;
+        self.mtlx_materials.insert(key, mat_index);
+        Ok(Some(mat_index))
+    }
+
+    fn resolve_mtlx_fallback(&mut self, mesh_name: &str) -> Result<Option<usize>> {
+        if !matches!(
+            self.source_ext.to_ascii_lowercase().as_str(),
+            "usdz" | "usdc" | "usda" | "usd"
+        ) {
+            return Ok(None);
+        }
+        if let Some(&idx) = self.mtlx_materials.get(mesh_name) {
+            return Ok(Some(idx));
+        }
+        let ext = self.source_ext;
+        let bytes = self.source_bytes;
+        let index = self
+            .mtlx_index
+            .get_or_insert_with(|| UsdMtlxIndex::parse(ext, bytes));
+        let Some(mtlx) = index.get(mesh_name).cloned() else {
+            return Ok(None);
+        };
+        let mat_index = self.install_mtlx_material(&mtlx)?;
+        self.mtlx_materials.insert(mesh_name.to_string(), mat_index);
+        Ok(Some(mat_index))
+    }
+
+    fn install_mtlx_material(&mut self, mtlx: &MtlxMaterial) -> Result<usize> {
+        let mut material = Material {
+            base_color: [
+                factor(mtlx.base_color[0]),
+                factor(mtlx.base_color[1]),
+                factor(mtlx.base_color[2]),
+                factor(mtlx.opacity),
+            ],
+            roughness: factor(mtlx.roughness),
+            metallic: factor(mtlx.metallic),
+            double_sided: mtlx.double_sided,
+            ..Material::default()
+        };
+        let mut has_alpha = material.base_color[3] < 1.;
+        if let Some(tex_bytes) = &mtlx.texture_bytes
+            && let Some(mut img) = decode_native_image(tex_bytes, true)
+        {
+            if !mtlx.no_flip_v {
+                image::imageops::flip_vertical_in_place(&mut img);
+            }
+            let scale = if mtlx.color_scale.is_finite() && mtlx.color_scale > 0. {
+                mtlx.color_scale
+            } else {
+                1.
+            };
+            // Apply linear color scaling (e.g. RealityKit unlit `multiply` node)
+            // and clear RGB on fully transparent pixels to prevent mip halos.
+            for px in img.pixels_mut() {
+                if px[3] == 0 {
+                    px[0] = 0;
+                    px[1] = 0;
+                    px[2] = 0;
+                    continue;
+                }
+                if (scale - 1.).abs() > 1e-4 {
+                    for c in 0..3 {
+                        let srgb = f32::from(px[c]) / 255.;
+                        let linear = srgb.powf(2.2) * scale;
+                        let out = linear.clamp(0., 1.).powf(1. / 2.2);
+                        px[c] = (out * 255.).round().clamp(0., 255.) as u8;
+                    }
+                }
+            }
+            has_alpha |= img.pixels().any(|p| p[3] < 255);
+            let sampler = Sampler {
+                wrap_s: 33071,
+                wrap_t: 33071,
+                ..Sampler::default()
+            };
+            let tex_id = self.scene.texture(img, true, sampler)?;
+            material.base_map = Some(tex_id);
+            if mtlx.unlit {
+                material.emissive_map = Some(tex_id);
+                material.emissive = [0.6, 0.6, 0.6];
+            }
+        }
+        material.alpha = if has_alpha {
+            Alpha::Blend
+        } else {
+            Alpha::Opaque
+        };
+        Ok(self.scene.pbr_material(&mtlx.name, material))
     }
 }
 
@@ -181,6 +342,16 @@ unsafe extern "C" fn emit_material(
     let label = unsafe { name(label, "Model I/O material") };
     let data = unsafe { &*data };
     let result = (|| {
+        // Model I/O emits an empty placeholder `MDLMaterial` (no maps) for USD
+        // materials that only author RealityKit MaterialX `outputs:mtlx:surface`.
+        if data.base.pixels.is_null()
+            && data.opacity.pixels.is_null()
+            && data.emission.pixels.is_null()
+            && let Some(index) = output.resolve_mtlx_material(&label)?
+        {
+            output.materials.insert(id, index);
+            return Ok(());
+        }
         let mut material = Material {
             base_color: data.rgba.map(factor),
             roughness: factor(data.roughness),
@@ -307,16 +478,30 @@ unsafe extern "C" fn emit_mesh(
         uv1: unsafe { copy_attribute(uv1, count) },
         ..Mesh::default()
     };
-    let parts = unsafe { std::slice::from_raw_parts(parts, num_parts) }
-        .iter()
-        .map(|part| Part {
+    let parts = unsafe { std::slice::from_raw_parts(parts, num_parts) };
+    let mut built_parts = Vec::with_capacity(parts.len());
+    for part in parts {
+        let material = if let Some(&idx) = output.materials.get(&part.material_id) {
+            Some(idx)
+        } else if part.material_id == 0 {
+            match output.resolve_mtlx_fallback(&label) {
+                Ok(found) => found,
+                Err(error) => {
+                    output.error = Some(error);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+        built_parts.push(Part {
             indices: unsafe { std::slice::from_raw_parts(part.indices, part.count) }.to_vec(),
-            material: output.materials.get(&part.material_id).copied(),
-        })
-        .collect();
+            material,
+        });
+    }
     let result = output
         .scene
-        .partitioned_mesh(&label, vertices, parts)
+        .partitioned_mesh(&label, vertices, built_parts)
         .map(|index| {
             output.meshes.insert(id, index);
         });

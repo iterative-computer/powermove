@@ -547,6 +547,9 @@ pub struct SurfaceView {
     /// Events sent to the script and not yet handled; an agent's action
     /// waits for its own (`wake_idle` asks for a notify when they finish).
     handling: usize,
+    /// In-flight `"input"` events per field so a fast click-off / re-publish
+    /// cannot overwrite newly typed text with a pre-input publication.
+    in_flight_inputs: HashMap<Id, usize>,
     pub(crate) wake_idle: bool,
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
@@ -753,6 +756,7 @@ impl SurfaceView {
             latest: 0,
             shown: 0,
             handling: 0,
+            in_flight_inputs: HashMap::new(),
             wake_idle: false,
             parked: None,
             outline_waiting: None,
@@ -1752,11 +1756,15 @@ impl SurfaceView {
     ) {
         let id = view.id;
         // Number fields read at their display precision, as when scrubbed.
-        let value = match (view.number, node.props.get("value")) {
-            (Some(number), _) => {
+        // Text fields read `node.input.displayed` so controlled inputs that
+        // echo native input without emitting a redundant `setProps` op retain
+        // the user's typed text across blur and re-publications.
+        let value = match (view.number, node.input.as_ref(), node.props.get("value")) {
+            (Some(number), _, _) => {
                 number.text(self.scrub_readout(id).unwrap_or(number.value))
             }
-            (_, value) => value.map(value_text).unwrap_or_default(),
+            (None, Some(input), _) => input.displayed.clone(),
+            (None, None, value) => value.map(value_text).unwrap_or_default(),
         };
         let placeholder = node
             .props
@@ -1786,11 +1794,17 @@ impl SurfaceView {
                 .and_then(|m| m.get("hostValue"))
                 .and_then(Value::as_u64);
             let ink = Self::ink(view);
+            let input_in_flight = self.in_flight_inputs.get(&id).copied().unwrap_or(0) > 0;
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_ink(ink);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
+                let epoch_advanced = composer_epoch
+                    .is_some_and(|epoch| f.composer_epoch().is_some_and(|prev| prev < epoch));
+                if input_in_flight && composer_sending.is_none() && host.is_none() && !epoch_advanced {
+                    return;
+                }
                 match (composer_epoch, host) {
                     (Some(epoch), _) => f.set_composer_value(&value, epoch, composer_sending, cx),
                     (None, Some(revision)) => f.set_value_from_host(&value, revision, cx),
@@ -2655,6 +2669,10 @@ impl SurfaceView {
         for field in self.fields.values() {
             field.update(cx, |f, cx| f.hold_changed(cx));
         }
+        // Panels wrapped in `.cached()` must repaint when scroll-picture hold
+        // begins or ends, otherwise stale SlotPicture bitmaps stay painted
+        // underneath newly unhidden live AppKit controls.
+        cx.notify();
     }
     /// Whether the controls show as pictures (a scroll is moving).
     pub fn pictures_held(&self) -> bool {
@@ -2756,6 +2774,10 @@ impl SurfaceView {
             detail,
             false,
         );
+        let is_input = event == "input";
+        if is_input {
+            *self.in_flight_inputs.entry(id).or_default() += 1;
+        }
         self.handling += 1;
         cx.spawn(async move |this, cx| {
             let error = match ticket {
@@ -2771,6 +2793,14 @@ impl SurfaceView {
                         serde_json::json!({"ui": "handled", "panel": v.publication.panel,
                         "ms": sent.elapsed().as_secs_f64() * 1000.}),
                     );
+                }
+                if is_input
+                    && let Some(count) = v.in_flight_inputs.get_mut(&id)
+                {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        v.in_flight_inputs.remove(&id);
+                    }
                 }
                 v.handling -= 1;
                 if v.disclosures.contains_key(&id) {

@@ -1642,7 +1642,7 @@ const FIRST_SHAPE: f64 = 0.37;
 fn first_shape_scale(kind: &str) -> Option<f64> {
     let shape = pm_geom3d::primitives::Primitive::from_parameters(kind, &Default::default())?;
     let positions = shape.geometry().positions;
-    let eye = [3., 2., 6.];
+    let eye = [0., 0., 6.];
     let len = |a: [f64; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
     let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     let f = [-eye[0] / len(eye), -eye[1] / len(eye), -eye[2] / len(eye)];
@@ -1683,16 +1683,16 @@ fn key_light(layers: &[Value], id: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The first object in an empty scene arrives lit (3d-studio.md's product
-/// film): a clear sky, a key softbox placed for a highlight, and a floor so
-/// it has a contact shadow and a reflection. Nothing is added
-/// when the composition already has a light or a sky.
+/// The first 3D model in a composition with no 3D layers yet arrives lit:
+/// a clear sky, a key softbox, and a floor (when no 2D layers are present).
+/// Once the composition already contains any 3D layer (model, light, camera,
+/// or world), importing another 3D model adds nothing extra.
 pub fn starter(layers: &[Value], id: &str) -> Vec<Value> {
-    let lit = layers.iter().any(|l| {
-        schema::role(l) == Some(Role::Light)
+    let has_3d = layers.iter().any(|l| {
+        schema::role(l).is_some()
             || fields::environment(&l["d"]["data"]) == Some("world")
     });
-    if lit {
+    if has_3d {
         return vec![];
     }
     // Among 2D layers the 3D layer composites in stack order over a clear
