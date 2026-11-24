@@ -293,7 +293,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         let unseen = hidden && state.wrapper.isHidden();
         // Into its region's container, or back out of one.
         let (adopted, frame) =
-            crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame);
+            crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame, !hidden);
         if adopted {
             moved = true;
             // In a region its container's clip fades, not its own mask.

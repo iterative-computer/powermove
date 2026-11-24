@@ -1385,7 +1385,7 @@ fn place(key: usize, apply: bool) -> bool {
         };
         if apply {
             let (adopted, placed) =
-                crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame);
+                crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame, !hidden);
             frame = placed;
             if adopted {
                 moved = true;

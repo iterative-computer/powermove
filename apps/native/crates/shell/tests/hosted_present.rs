@@ -25,6 +25,7 @@ fn main() {
     macos::leaving_a_region(mtm);
     macos::editing_across_regions(mtm);
     macos::scrolled_out(mtm);
+    macos::lazy_in_regions(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -47,6 +48,79 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// P-SLOT-LAZY in a scrolling region (PM-696 review): a long panel staged
+    /// at rest puts in the window only the controls its region's view shows
+    /// (not those staged for the rows a scroll layer records past its edges);
+    /// one joins when the scroll first reveals it.
+    pub fn lazy_in_regions(mtm: MainThreadMarker) {
+        use gpui::{Bounds, SlotRegionGeometry, point, px, size};
+        use gpui_macos::slot_region::probe as regions;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 600.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let button = || -> Retained<NSView> {
+            unsafe {
+                let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+                let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+                Retained::from_raw(raw).expect("a button")
+            }
+        };
+        let slots: Vec<_> = (0..60).map(|_| NativeControlSlot::new(&gpui, button())).collect();
+        let open = rect(-1.0e6, -1.0e6, 2.0e6, 2.0e6);
+        // A 300-point view over rows 40 points apart.
+        let at = |offset: f32, first: bool| {
+            regions::set(
+                &gpui,
+                &[SlotRegionGeometry {
+                    id: 1,
+                    parent: None,
+                    frame: Bounds::new(point(px(0.), px(50.)), size(px(200.), px(300.))),
+                    origin: point(px(0.), px(offset)),
+                    fade: [px(0.), px(0.)],
+                }],
+            );
+            for (i, slot) in slots.iter().enumerate() {
+                if first {
+                    slot.stage_in_region(1, rect(10., 40. * i as f64, 80., 20.), open);
+                } else {
+                    slot.keep();
+                }
+            }
+            probe::painted(&gpui);
+            probe::place(&gpui);
+        };
+        let joined = |slots: &[NativeControlSlot]| {
+            slots
+                .iter()
+                .map(|s| unsafe { s.wrapper().superview() }.is_some())
+                .collect::<Vec<_>>()
+        };
+        at(0., true);
+        let now = joined(&slots);
+        // Rows 0..7 show (0..300); row 8 starts at 320.
+        assert!(now[..8].iter().all(|&j| j), "the rows shown join");
+        assert!(now[8..].iter().all(|&j| !j), "rows staged but not shown stay out");
+        // Scrolled 200: rows up to 12 show; 13 on stay out.
+        at(-200., false);
+        let now = joined(&slots);
+        assert!(now[..13].iter().all(|&j| j), "revealed rows join");
+        assert!(now[13..].iter().all(|&j| !j), "the rest stay out");
+        drop(slots);
+        window.close();
+    }
 
     /// PM-696 review: a field scrolled wholly out of its region's view
     /// (the container clips it) hides, so it takes no keys (the shell's
@@ -438,7 +512,7 @@ mod macos {
         probe::painted(&gpui);
         assert!(probe::place(&gpui), "the first frame shows them");
         let clip = regions::clip(&gpui, 1).expect("one container for the region");
-        for (i, slot) in slots.iter().enumerate().take(12) {
+        for (i, slot) in slots.iter().enumerate().take(7) {
             assert_eq!(shown(slot), (10., 50. + 40. * i as f64), "slot {i} at rest");
             let parent = unsafe { slot.wrapper().superview() }.expect("in the window");
             assert!(parent.isDescendantOf(&clip), "slot {i} is in its region's container");
@@ -454,7 +528,11 @@ mod macos {
             probe::painted(&gpui);
             assert!(probe::pending(&gpui), "a moving region is a move, known before");
             assert!(probe::place(&gpui), "a moving region presents with the transaction");
+            // Those in the window (P-SLOT-LAZY keeps the rest out).
             for (i, slot) in slots.iter().enumerate().take(12) {
+                if unsafe { slot.wrapper().superview() }.is_none() {
+                    continue;
+                }
                 let y = 50. + 40. * i as f64 + f64::from(offset);
                 assert_eq!(shown(slot), (10., y), "slot {i} after a step of {dy}");
             }

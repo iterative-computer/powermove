@@ -148,11 +148,15 @@ pub(crate) fn misplaced(gpui: &NSView, wrapper: &NSView, parent: Option<&NSView>
 /// holds the window's first responder (a field being edited) stays in its
 /// parent until the edit ends, at the same place on screen: its frame comes
 /// back converted into that parent. Returns whether it changed parent.
+///
+/// P-SLOT-LAZY: a wrapper not in the window yet joins it only when `shown`
+/// (its region's view shows it); until then it stays out, its frame kept.
 pub(crate) fn reparent(
     gpui: &NSView,
     wrapper: &NSView,
     parent: Option<&NSView>,
     frame: NSRect,
+    shown: bool,
 ) -> (bool, NSRect) {
     let current = unsafe { wrapper.superview() };
     let home = unsafe { gpui.superview() };
@@ -166,7 +170,7 @@ pub(crate) fn reparent(
         }
         // A wrapper not in the window yet joins it where its paint shows it
         // (outside a region, `attach` decides when).
-        None if parent.is_none() => (false, frame),
+        None if parent.is_none() || !shown => (false, frame),
         _ => {
             adopt(target, wrapper, parent.is_none().then_some(gpui));
             (true, frame)
