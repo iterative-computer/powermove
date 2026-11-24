@@ -198,6 +198,45 @@ void mainImage(out vec4 c, in vec2 p) {
 }
 "#;
 
+#[test]
+fn a_padded_effect_keeps_the_same_bits_in_a_viewport_accumulator() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = renderer();
+    let (w, h) = (512, 288);
+    let mut front = layer(
+        "front",
+        "solid",
+        json!({"color":"#FF60B080","w":100,"h":67}),
+        117.25,
+        71.75,
+        2.0,
+    );
+    front["fx"] = json!([blur("soften", 8.0)]);
+    let back = layer(
+        "back",
+        "solid",
+        json!({"color":"#2060EF80","w":197,"h":122}),
+        170.75,
+        86.25,
+        2.0,
+    );
+    let doc = document(w, h, true, vec![front, back]);
+    r.set_main_effects_for_document(&doc).unwrap();
+    let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+    let crop = PixelRect {
+        x: 103,
+        y: 57,
+        width: 121,
+        height: 87,
+    };
+    request.region = Some(crop);
+    r.set_early_target_release(false);
+    let reference = render(&mut r, &doc, 0.5, &request);
+    r.set_early_target_release(true);
+    let candidate = render(&mut r, &doc, 0.5, &request);
+    assert_raw_equal(&reference, &candidate, crop.width, "padded effect viewport");
+}
+
 /// A certification probe for the default-off wrapper elision. Run the
 /// ignored test explicitly on each candidate GPU. A difference means the
 /// corresponding format/device/size cannot use the direct path.

@@ -18,10 +18,12 @@
 //! same draws in the same order with the same blending; a pass split or
 //! joined over the same attachment stores the same bits.
 //!
-//! A pass runs over the plan's region grown by the largest effect padding
-//! of its nodes (clamped to the frame); the region is cut from it at the
-//! end. A node that fails is reported and leaves the accumulator as it was
-//! (section 8, isolation).
+//! Effects run over the plan's region grown by the largest effect padding.
+//! When every node writes pointwise and no node samples the stack, a
+//! viewport accumulator can cut back the unused attachment edges while
+//! keeping the raster origin. Otherwise the accumulator shares the padded
+//! effect domain. A node that fails is reported and leaves the accumulator
+//! as it was (section 8, isolation).
 
 use pm_gpu::Target;
 use pm_protocol::color::{BlendMode, WorkingEncoding};
@@ -551,14 +553,39 @@ impl Exec<'_> {
                 _ => None,
             })
             .fold(Padding::NONE, Padding::max);
-        let mut rect = want.grow(padding, full);
+        let mut effect_rect = want.grow(padding, full);
         if padding > Padding::NONE {
-            rect = rect.align(EFFECT_GRID, full);
+            effect_rect = effect_rect.align(EFFECT_GRID, full);
         }
+        // Keep each effect on its original domain. The accumulator only
+        // needs to cover the visible destination of the source-over draws.
+        // Keep its GL pixel origin too: shifting the viewport can round the
+        // rasterizer's interpolants differently around sharp edges.
+        let rect = if effect_rect != want
+            && !self.final_frame
+            && self.recycle
+            && !matches!(plan.background, crate::plan::Background::Gradient(_))
+            && plan.draws.iter().all(|draw| match &draw.content {
+                Content::Composite(node) => {
+                    matches!(node.as_ref(), Node::Layer(n) if draws_over_the_stack(n))
+                }
+                _ => true,
+            }) {
+            Region {
+                x: effect_rect.x,
+                y: want.y,
+                width: want.x + want.width - effect_rect.x,
+                height: effect_rect.y + effect_rect.height - want.y,
+            }
+            .align(EFFECT_GRID, full)
+        } else {
+            effect_rect
+        };
+        let source_region = (effect_rect != Region::full(full.0, full.1)).then_some(effect_rect);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
-        // A layer image's bytes at most (it covers `rect` at most).
-        let image_bytes = u64::from(rect.width)
-            * u64::from(rect.height)
+        // Bound how many effect images can remain live before a flush.
+        let image_bytes = u64::from(effect_rect.width)
+            * u64::from(effect_rect.height)
             * u64::from(
                 pm_gpu::working_format(self.precision)
                     .block_copy_size(None)
@@ -591,7 +618,8 @@ impl Exec<'_> {
                 // Resolve adjacent draws together so their missing vector
                 // scenes can share a coverage pass. Nested targets stay
                 // live until the pending draws that read them are recorded.
-                let (resolved, groups) = self.resolve_draws_owned(encoder, plan, run, pass_region);
+                let (resolved, groups) =
+                    self.resolve_draws_owned(encoder, plan, run, source_region);
                 pending.draws.extend(resolved);
                 for target in groups {
                     pending.hold(target);
@@ -634,7 +662,7 @@ impl Exec<'_> {
             }
             match node.as_ref() {
                 Node::Layer(n) => {
-                    let Some(covered) = layer_rect(n, rect, full) else {
+                    let Some(covered) = layer_rect(n, effect_rect, full) else {
                         continue;
                     };
                     if !self.depth_id
