@@ -2038,6 +2038,11 @@ impl Editor {
     /// Where tab `id` (or a lone title) is drawn in its header, as last
     /// rendered. For headless recordings and tests.
     #[doc(hidden)]
+    /// The dividers as last laid out (benches drive their drags).
+    #[doc(hidden)]
+    pub fn dividers(&self) -> &[layout::Divider] {
+        &self.geometry.dividers
+    }
     pub fn tab_rect(&self, id: &str) -> Option<Rect> {
         let (dock, group, tab) = self.layout.find(id)?;
         let p = self

@@ -1755,9 +1755,22 @@ fn appkit_cases(out: &mut Vec<Case>) {
     }
 }
 
+#[path = "ui_latency_workspace.rs"]
+mod workspace;
+
 // ----------------------------------------------------------------- runner
 
+/// `PM_UI_LATENCY_GROUPS=workspace,timeline` runs only those groups.
+fn selected(group: &str) -> bool {
+    std::env::var("PM_UI_LATENCY_GROUPS")
+        .map(|groups| groups.split(',').any(|g| g.trim() == group))
+        .unwrap_or(true)
+}
+
 fn guarded(out: &mut Vec<Case>, group: &str, f: impl FnOnce(&mut Vec<Case>)) {
+    if !selected(group) {
+        return;
+    }
     let mut cases = vec![];
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut cases)));
     out.extend(cases);
@@ -1839,7 +1852,12 @@ fn ui_latency_catalogue(cx: &mut TestAppContext) {
     guarded(&mut cases, "timeline", |out| timeline_cases(cx, out));
     guarded(&mut cases, "panels", |out| panel_cases(cx, out));
     guarded(&mut cases, "shared", shared_cases);
-    appkit_cases(&mut cases);
+    guarded(&mut cases, "workspace", |out| {
+        workspace::workspace_cases(cx, out)
+    });
+    if selected("appkit") {
+        appkit_cases(&mut cases);
+    }
     print(&cases);
     if let Some(path) = std::env::var_os("PM_UI_LATENCY_OUT") {
         let text = serde_json::to_string_pretty(&report(&cases)).unwrap();
