@@ -878,48 +878,6 @@ impl ExportHandle {
             let reply = |message: &ParentMessage| {
                 let _ = send(&mut *child_input.lock().unwrap(), message);
             };
-            // Override asks are answered in order on a thread of their own:
-            // a frame asked ahead never holds back the grant the frame
-            // before needs, which this thread answers as it comes.
-            let asks = {
-                let (asks, asked) = std::sync::mpsc::channel::<(u64, Vec<CompatJobNeed>)>();
-                let (input, interactive, cancel, idle) = (
-                    child_input.clone(),
-                    interactive.clone(),
-                    cancel.clone(),
-                    idle.clone(),
-                );
-                let job = id.clone();
-                let answering = std::thread::Builder::new()
-                    .name("pm-export-asks".into())
-                    .spawn(move || {
-                        let mut seen = interactive.epoch();
-                        let mut active_at = None;
-                        for (ask, needs) in asked {
-                            // Background work runs extensions only while
-                            // the person is away, as it renders.
-                            let held = std::time::Instant::now();
-                            if let Some(delay) = &idle {
-                                interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
-                            }
-                            let deferred_us = held.elapsed().as_micros() as u64;
-                            let answered = match &overrides {
-                                Some(answer) => answer(&needs),
-                                None => Err("No window has this project's extensions open".into()),
-                            };
-                            let answers = wire_answers(job.as_str(), ask, answered);
-                            let _ = send(
-                                &mut *input.lock().unwrap(),
-                                &ParentMessage::Compat {
-                                    id: ask,
-                                    answers,
-                                    deferred_us,
-                                },
-                            );
-                        }
-                    });
-                answering.is_ok().then_some(asks)
-            };
             let mut lines = std::io::BufReader::new(output).lines();
             let broken = loop {
                 let message = match lines.next() {
@@ -947,16 +905,23 @@ impl ExportHandle {
                         reply(&ParentMessage::Faces { id: ask, agree });
                     }
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
-                        let sent = asks
-                            .as_ref()
-                            .is_some_and(|asks| asks.send((ask, needs)).is_ok());
-                        if !sent {
-                            reply(&ParentMessage::Compat {
-                                id: ask,
-                                answers: Err("The export's extension answers stopped".into()),
-                                deferred_us: 0,
-                            });
+                        // Background work runs extensions only while the
+                        // person is away, as it renders.
+                        let held = std::time::Instant::now();
+                        if let Some(delay) = &idle {
+                            interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
                         }
+                        let deferred_us = held.elapsed().as_micros() as u64;
+                        let answered = match &overrides {
+                            Some(answer) => answer(&needs),
+                            None => Err("No window has this project's extensions open".into()),
+                        };
+                        let answers = wire_answers(id.as_str(), ask, answered);
+                        reply(&ParentMessage::Compat {
+                            id: ask,
+                            answers,
+                            deferred_us,
+                        });
                     }
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
@@ -2137,12 +2102,10 @@ impl Drop for Finished {
     }
 }
 /// An export's raster override layers, asked of the parent (which asks the
-/// window's extensions); the frame waits (an export has no per-frame
-/// deadline). A need with no answer fails the frame. An export that renders
-/// a frame ahead probes the next frame for its layers and asks for all of
-/// them in one batch (`ask_ahead`) while this frame runs on the GPU and is
-/// read back; a layer no probe found is asked of its own as the frame
-/// reaches it.
+/// window's extensions) as the frame reaches each one; the frame waits (an
+/// export has no per-frame deadline). A need with no answer fails the frame.
+/// Asking a frame's layers in one batch measured slower: the realm's work
+/// then runs ahead of, not between, the frame's GPU work.
 #[derive(Default)]
 struct JobRasters {
     /// Cancellation or the parent's end: a frame waiting on an answer stops.
@@ -2159,27 +2122,8 @@ type Answers = std::result::Result<Vec<WireAnswer>, String>;
 type JobKey = (String, String, u64, u64);
 #[derive(Default)]
 struct JobAnswers {
-    /// Answers by need, with the frame ahead (`ahead`) they came in for.
-    map: std::collections::HashMap<JobKey, (u64, pm_render::compat::CompatAnswer)>,
-    /// Without asking ahead: the time whose answers `map` holds (an export
-    /// never comes back).
+    map: std::collections::HashMap<JobKey, pm_render::compat::CompatAnswer>,
     time: u64,
-    /// Frames asked ahead so far; answers more than a frame behind go.
-    ahead: u64,
-    /// Needs the probes since the last `ask_ahead` found, in plan order.
-    probed: Vec<CompatJobNeed>,
-    /// Requests asked ahead and not taken yet, by need.
-    asked: std::collections::HashMap<JobKey, u64>,
-    /// Each request asked ahead: its needs and where its answers arrive.
-    requests: std::collections::HashMap<u64, (Vec<JobKey>, std::sync::mpsc::Receiver<Answers>)>,
-}
-fn job_key(composition: &str, layer: &str, seconds: f64, scale: f64) -> JobKey {
-    (
-        composition.to_owned(),
-        layer.to_owned(),
-        seconds.to_bits(),
-        scale.to_bits(),
-    )
 }
 impl JobRasters {
     /// The parent's answers to request `id`. One for a request whose frame
@@ -2247,63 +2191,6 @@ impl JobRasters {
         ));
         None
     }
-    /// Asks the parent for `needs`; their answers arrive at the receiver.
-    fn ask(&self, needs: Vec<CompatJobNeed>) -> (u64, std::sync::mpsc::Receiver<Answers>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let id = {
-            let mut waiting = self.waiting.lock().unwrap();
-            let id = self.next.fetch_add(1, Ordering::AcqRel);
-            waiting.insert(id, tx);
-            id
-        };
-        if send(
-            &mut std::io::stdout().lock(),
-            &ChildMessage::Compat { id, needs },
-        )
-        .is_err()
-        {
-            // Never answered: the wait ends with the parent.
-            self.waiting.lock().unwrap().remove(&id);
-        }
-        (id, rx)
-    }
-    /// Waits for request `id`'s answers to `keys` and keeps them; a need
-    /// left unanswered is `Missing` (the frame fails with `error`).
-    fn take(&self, id: u64, keys: Vec<JobKey>, rx: &std::sync::mpsc::Receiver<Answers>) {
-        use pm_render::compat::CompatAnswer;
-        let answers = self.wait(rx);
-        self.waiting.lock().unwrap().remove(&id);
-        let items = match answers {
-            None => Vec::new(),
-            Some(Err(error)) => {
-                *self.error.lock().unwrap() = Some(error);
-                Vec::new()
-            }
-            Some(Ok(items)) if items.len() != keys.len() => {
-                *self.error.lock().unwrap() = Some(format!(
-                    "The app answered {} layers for {}",
-                    items.len(),
-                    keys.len()
-                ));
-                Vec::new()
-            }
-            Some(Ok(items)) => items,
-        };
-        let mut items = items.into_iter();
-        let mut answered = self.answered.lock().unwrap();
-        let ahead = answered.ahead;
-        for key in keys {
-            let answer = match items.next().map(Self::raster) {
-                Some(Ok(answer)) => answer,
-                Some(Err(error)) => {
-                    *self.error.lock().unwrap() = Some(error);
-                    CompatAnswer::Missing
-                }
-                None => CompatAnswer::Missing,
-            };
-            answered.map.insert(key, (ahead, answer));
-        }
-    }
 }
 impl pm_render::compat::CompatRasters for JobRasters {
     fn producing(&self, source: pm_protocol::snapshot::CompatSource) -> bool {
@@ -2322,115 +2209,84 @@ impl pm_render::compat::CompatRasters for JobRasters {
         if source != pm_protocol::snapshot::CompatSource::RasterOverride {
             return CompatAnswer::Native;
         }
-        let key = job_key(composition, layer, time, scale);
-        loop {
+        let key = (
+            composition.to_owned(),
+            layer.to_owned(),
+            time.to_bits(),
+            scale.to_bits(),
+        );
+        let needs = {
             let mut answered = self.answered.lock().unwrap();
-            if let Some((_, answer)) = answered.map.get(&key) {
+            if let Some(answer) = answered.map.get(&key) {
                 return answer.clone();
             }
-            // Asked ahead: its request's answers, all of them.
-            if let Some(id) = answered.asked.get(&key).copied() {
-                let Some((keys, rx)) = answered.requests.remove(&id) else {
-                    return CompatAnswer::Missing;
-                };
-                for asked in &keys {
-                    answered.asked.remove(asked);
-                }
-                drop(answered);
-                self.take(id, keys, &rx);
-                continue;
-            }
-            // Without asking ahead, only this frame's answers are kept.
-            if answered.ahead == 0 && answered.time != key.2 {
+            // A new frame: only its answers are kept (an export never comes back).
+            if answered.time != key.2 {
                 answered.map.clear();
                 answered.time = key.2;
             }
-            break;
-        }
-        let (id, rx) = self.ask(vec![CompatJobNeed {
-            composition: composition.to_owned(),
-            layer: layer.to_owned(),
-            seconds: time,
-            scale,
-        }]);
-        self.take(id, vec![key.clone()], &rx);
-        let answered = self.answered.lock().unwrap();
-        answered
-            .map
-            .get(&key)
-            .map_or(CompatAnswer::Missing, |(_, answer)| answer.clone())
-    }
-    fn answer_probed(
-        &self,
-        composition: &str,
-        layer: &str,
-        time: f64,
-        scale: f64,
-        source: pm_protocol::snapshot::CompatSource,
-        _crop: Option<pm_protocol::common::PixelRect>,
-    ) -> pm_render::compat::CompatAnswer {
-        use pm_render::compat::CompatAnswer;
-        if source != pm_protocol::snapshot::CompatSource::RasterOverride {
-            return CompatAnswer::Native;
-        }
-        let key = job_key(composition, layer, time, scale);
-        let mut answered = self.answered.lock().unwrap();
-        if let Some((_, answer)) = answered.map.get(&key) {
-            return answer.clone();
-        }
-        let need = CompatJobNeed {
-            composition: composition.to_owned(),
-            layer: layer.to_owned(),
-            seconds: time,
-            scale,
+            let needs = vec![CompatJobNeed {
+                composition: composition.to_owned(),
+                layer: layer.to_owned(),
+                seconds: time,
+                scale,
+            }];
+            needs
         };
-        if !answered.asked.contains_key(&key) && !answered.probed.contains(&need) {
-            answered.probed.push(need);
-        }
-        CompatAnswer::Missing
-    }
-    fn ask_ahead(&self) {
-        // A request asked ahead that its frame did not take: its answers
-        // come before the next request's, and are kept a frame.
-        let left: Vec<u64> = self
-            .answered
-            .lock()
-            .unwrap()
-            .requests
-            .keys()
-            .copied()
-            .collect();
-        for id in left {
-            let request = {
-                let mut answered = self.answered.lock().unwrap();
-                let request = answered.requests.remove(&id);
-                answered.asked.retain(|_, asked| *asked != id);
-                request
-            };
-            if let Some((keys, rx)) = request {
-                self.take(id, keys, &rx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            waiting.insert(id, tx);
+            id
+        };
+        let asked = send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Compat {
+                id,
+                needs: needs.clone(),
+            },
+        );
+        let answers = asked.ok().and_then(|()| self.wait(&rx));
+        self.waiting.lock().unwrap().remove(&id);
+        let items = match answers {
+            None => return CompatAnswer::Missing,
+            Some(Err(error)) => {
+                *self.error.lock().unwrap() = Some(error);
+                return CompatAnswer::Missing;
             }
-        }
-        let needs = {
-            let mut answered = self.answered.lock().unwrap();
-            answered.ahead += 1;
-            let ahead = answered.ahead;
-            answered.map.retain(|_, (at, _)| *at + 1 >= ahead);
-            std::mem::take(&mut answered.probed)
+            Some(Ok(items)) if items.len() != needs.len() => {
+                *self.error.lock().unwrap() = Some(format!(
+                    "The app answered {} layers for {}",
+                    items.len(),
+                    needs.len()
+                ));
+                return CompatAnswer::Missing;
+            }
+            Some(Ok(items)) => items,
         };
-        if needs.is_empty() {
-            return;
-        }
-        let keys: Vec<JobKey> = needs
-            .iter()
-            .map(|n| job_key(&n.composition, &n.layer, n.seconds, n.scale))
-            .collect();
-        let (id, rx) = self.ask(needs);
         let mut answered = self.answered.lock().unwrap();
-        for key in &keys {
-            answered.asked.insert(key.clone(), id);
+        let mut mine = CompatAnswer::Missing;
+        for (need, item) in needs.iter().zip(items) {
+            let answer = match Self::raster(item) {
+                Ok(answer) => answer,
+                Err(error) => {
+                    *self.error.lock().unwrap() = Some(error);
+                    continue;
+                }
+            };
+            let k = (
+                need.composition.clone(),
+                need.layer.clone(),
+                key.2,
+                need.scale.to_bits(),
+            );
+            if k == key {
+                mine = answer.clone();
+            }
+            answered.map.insert(k, answer);
         }
-        answered.requests.insert(id, (keys, rx));
+        mine
     }
 }
 /// Renders `fill`'s frames as the export draws them (its request, opaque, at
@@ -3338,51 +3194,6 @@ mod tests {
         rasters.next.store(1, Ordering::Release);
         assert_eq!(rasters.reply(0, Ok(vec![])), Ok(()));
         assert!(rasters.reply(7, Ok(vec![])).is_err());
-    }
-    /// A frame probed ahead is one request, its needs in plan order and
-    /// each once; the frame then takes every answer from it without asking,
-    /// and a frame later the answers before it go.
-    #[test]
-    fn a_frame_asked_ahead_is_one_request() {
-        use pm_protocol::snapshot::CompatSource;
-        use pm_render::compat::{CompatAnswer, CompatRasters};
-        let rasters = JobRasters::default();
-        let probe = |layer: &str, time: f64| {
-            rasters.answer_probed("c", layer, time, 1., CompatSource::RasterOverride, None)
-        };
-        assert!(matches!(probe("b", 1.), CompatAnswer::Missing));
-        assert!(matches!(probe("a", 1.), CompatAnswer::Missing));
-        assert!(matches!(probe("b", 1.), CompatAnswer::Missing));
-        rasters.ask_ahead();
-        assert_eq!(rasters.next.load(Ordering::Acquire), 1, "one request");
-        let asked: Vec<String> = rasters.answered.lock().unwrap().requests[&0]
-            .0
-            .iter()
-            .map(|k| k.1.clone())
-            .collect();
-        assert_eq!(asked, ["b", "a"], "in plan order, once each");
-        rasters
-            .reply(0, Ok(vec![WireAnswer::Native, WireAnswer::Hidden]))
-            .unwrap();
-        let answer = |layer: &str, time: f64| {
-            rasters.answer("c", layer, time, 1., CompatSource::RasterOverride, None)
-        };
-        assert!(matches!(answer("a", 1.), CompatAnswer::Raster(_)));
-        assert!(matches!(answer("b", 1.), CompatAnswer::Native));
-        assert_eq!(
-            rasters.next.load(Ordering::Acquire),
-            1,
-            "nothing asked again"
-        );
-        // Probed again: already answered, nothing to ask.
-        assert!(matches!(probe("b", 1.), CompatAnswer::Native));
-        rasters.ask_ahead();
-        assert_eq!(rasters.next.load(Ordering::Acquire), 1);
-        rasters.ask_ahead();
-        assert!(
-            rasters.answered.lock().unwrap().map.is_empty(),
-            "two frames on"
-        );
     }
     /// A layer answered with the wrong number of answers, or pixels that
     /// don't fill it, fails with the reason instead of drawing.
