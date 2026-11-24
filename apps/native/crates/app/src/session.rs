@@ -4722,23 +4722,27 @@ impl Controller {
                     self.request_close(crate::lifecycle::Intent::Project, cx);
                 }
             }
-            // ⌘W: a page showing (Settings, the Store) closes back to the
-            // project; else in separate-windows mode (or the last editor tab)
-            // the project closes and the window shows Home; otherwise the
-            // tab/window closes.
-            "closeTab" if self.pages.shown.is_some() => {
-                if let Some(id) = self.pages.shown.clone() {
-                    self.close_tab_page(&id, cx);
+            "closeTab" => match close_tab_target(
+                self.pages.shown.is_some(),
+                self.session.is_some(),
+                pm_shell::tabs_mode(),
+                crate::entry::editors(cx).len(),
+            ) {
+                CloseTab::Page => {
+                    if let Some(id) = self.pages.shown.clone() {
+                        self.close_tab_page(&id, cx);
+                    }
                 }
-            }
-            "closeTab"
-                if self.session.is_some()
-                    && (!pm_shell::tabs_mode() || crate::entry::editors(cx).len() <= 1) =>
-            {
-                gpui_macos::feel::note_now("tab.close");
-                self.request_close(crate::lifecycle::Intent::Project, cx)
-            }
-            "closeWindow" | "closeTab" => {
+                CloseTab::Project => {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Project, cx)
+                }
+                CloseTab::Window => {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Window, cx)
+                }
+            },
+            "closeWindow" => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Window, cx)
             }
@@ -5459,6 +5463,25 @@ pub(crate) fn stable_id(path: &std::path::Path) -> String {
         .hash(&mut h);
     format!("file-{:016x}", h.finish())
 }
+/// What ⌘W (closeTab) closes.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CloseTab {
+    Page,
+    Project,
+    Window,
+}
+/// A page showing (Settings, the Store) closes back to the project; else in
+/// separate-windows mode (or the last editor tab) the project closes and the
+/// window shows Home; otherwise, and on Home, the tab or window closes.
+pub(crate) fn close_tab_target(page: bool, project: bool, tabs: bool, editors: usize) -> CloseTab {
+    if page {
+        CloseTab::Page
+    } else if project && (!tabs || editors <= 1) {
+        CloseTab::Project
+    } else {
+        CloseTab::Window
+    }
+}
 impl Drop for Controller {
     fn drop(&mut self) {
         crate::diag::EDITORS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -5493,6 +5516,24 @@ pub(crate) fn sync_render_storage(
 pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
     let tick = (seconds * TICKS_PER_SECOND as f64).round() as i64;
     rate.frame_start(rate.frame_of(tick)).ok()
+}
+
+#[cfg(test)]
+mod close_tab_tests {
+    use super::{CloseTab, close_tab_target};
+    /// Separate Windows' ⌘W is closeTab too (w83 P1-3): a page closes
+    /// first, a project returns the window to Home, Home closes the window.
+    #[test]
+    fn command_w_closes_the_page_then_the_project_then_the_window() {
+        for tabs in [false, true] {
+            assert_eq!(close_tab_target(true, true, tabs, 2), CloseTab::Page);
+            assert_eq!(close_tab_target(true, false, tabs, 1), CloseTab::Page);
+            assert_eq!(close_tab_target(false, false, tabs, 1), CloseTab::Window);
+            assert_eq!(close_tab_target(false, true, tabs, 1), CloseTab::Project);
+        }
+        assert_eq!(close_tab_target(false, true, false, 3), CloseTab::Project);
+        assert_eq!(close_tab_target(false, true, true, 3), CloseTab::Window);
+    }
 }
 
 #[cfg(test)]

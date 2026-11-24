@@ -136,7 +136,6 @@ fn menu_matches_every_w1_equivalent_and_installs_every_command() {
             "hide" => "hide:",
             "hideOthers" => "hideOtherApplications:",
             "quit" => pm_shell::menu::QUIT_ACTION,
-            "closeTab" if !pm_shell::tabs_mode() => "closeProject",
             c => c,
         };
         assert!(
