@@ -50,6 +50,8 @@ mod file_coordination;
 mod first_run;
 #[cfg(debug_assertions)]
 mod stage_capture;
+mod demo_editor;
+mod film_script;
 mod stage_pictures;
 mod generated_panel;
 mod gizmo;

@@ -1,19 +1,17 @@
-//! What happens inside each scene, as functions of the scene's own time:
-//! the engine's compositions are keyed from these, and the stage's furniture
-//! (the clip strip, the composer, the readouts) reads the same values, so
-//! the picture and its instruments never drift apart.
-use super::cue::Reel;
+//! What happens inside each scene, as functions of the scene's own time.
+//! A beat: the request is typed into the composer, sent, the agent works,
+//! and the change lands on its surface under the wave.
+use super::cue::Change;
 
-/// How long each scene holds before its transition, as cut on the sheet.
-pub const REEL_SECONDS: f64 = 3.6;
-/// Cut: three shots of two beats each at 100 BPM (1.2 s).
-pub const SHOT_SECONDS: f64 = 1.2;
-pub const SHOTS: usize = 3;
-/// Ask: the request is typed, the agent answers, the effect builds.
-pub const ASK_PROMPT: &str = "Make the title glow";
-pub const ASK_TYPED: (f64, f64) = (0.15, 1.05);
-pub const ASK_BUILDING: f64 = 1.2;
-pub const ASK_BUILT: f64 = 2.2;
+/// How long each beat holds (a bar and a half at 100 BPM).
+pub const BEAT_SECONDS: f64 = 3.6;
+/// The request is typed over this span of the beat.
+pub const TYPED: (f64, f64) = (0.15, 1.2);
+/// Sent (the composer's send turns to working).
+pub const SENT: f64 = 1.3;
+/// The change is applied and its wave starts; the wave takes the sheet's
+/// `wave_seconds`.
+pub const LANDS: f64 = 1.9;
 
 pub fn smooth(x: f64) -> f64 {
     let x = x.clamp(0., 1.);
@@ -27,60 +25,44 @@ pub fn ease_out(x: f64) -> f64 {
 pub fn span(t: f64, from: f64, to: f64) -> f64 {
     smooth((t - from) / (to - from))
 }
-
-/// The shot showing at `t` in the Cut reel, and how far into it.
-pub fn shot(t: f64) -> (usize, f64) {
-    let t = t.clamp(0., REEL_SECONDS - 1e-9);
-    let index = ((t / SHOT_SECONDS) as usize).min(SHOTS - 1);
-    (index, t - index as f64 * SHOT_SECONDS)
-}
-/// How many characters of the request show at `t`.
-pub fn typed(t: f64) -> usize {
-    let n = ASK_PROMPT.chars().count();
-    let (a, b) = ASK_TYPED;
+/// How many characters of the request show at `t` into its beat.
+pub fn typed(change: Change, t: f64) -> usize {
+    let n = change.prompt().chars().count();
+    let (a, b) = TYPED;
     (((t - a) / (b - a)).clamp(0., 1.) * n as f64).round() as usize
 }
-/// The glow the agent builds: (intensity, radius) of the Glow effect.
-pub fn glow(t: f64) -> (f64, f64) {
-    let k = span(t, ASK_BUILDING, ASK_BUILT);
-    (k * 160., 30. + k * 90.)
+/// What the composer shows at `t` into a beat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Composing {
+    Typing(usize),
+    Working,
+    Done,
 }
-/// The Grade reel's look, as the Color effect's (temperature, saturation,
-/// contrast, exposure) over a flat, ungraded shot.
-pub const GRADE: [f64; 4] = [32., 60., 24., 0.1];
-/// How much of the shot the grade covers at `t`: a split sweeping across.
-pub fn split(t: f64) -> f64 {
-    span(t, 0.35, 2.9)
-}
-/// The camera's orbit in the Depth reel, in degrees around the subject.
-pub fn orbit(t: f64) -> f64 {
-    -28. + 56. * smooth(t / REEL_SECONDS)
-}
-
-/// What the caption under the screen says.
-pub fn caption(reel: Reel) -> &'static str {
-    // OWNER-COPY: one plain line per reel.
-    match reel {
-        Reel::Cut => "Cut on the beat.",
-        Reel::Ask => "Ask your agent for an effect.",
-        Reel::Grade => "Grade in real colour.",
-        Reel::Depth => "Move through 3D.",
+pub fn composing(change: Change, t: f64) -> Composing {
+    if t < SENT {
+        Composing::Typing(typed(change, t))
+    } else if t < LANDS + 0.6 {
+        Composing::Working
+    } else {
+        Composing::Done
     }
 }
+/// The final line on the card. OWNER-COPY: the closing line.
+pub const CLOSING: &str = "[Closing line — owner's words]";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn beats_land_inside_their_reel() {
-        assert_eq!(shot(0.).0, 0);
-        assert_eq!(shot(1.3).0, 1);
-        assert_eq!(shot(REEL_SECONDS).0, SHOTS - 1);
-        assert_eq!(typed(0.), 0);
-        assert_eq!(typed(2.), ASK_PROMPT.chars().count());
-        assert_eq!(glow(0.).0, 0.);
-        assert_eq!(glow(3.).0, 160.);
-        assert!(split(0.) == 0. && split(3.) == 1.);
-        assert!(orbit(0.) < 0. && orbit(REEL_SECONDS) > 0.);
+    fn a_beat_types_sends_and_lands_in_order() {
+        let change = Change::GlassTimeline;
+        assert_eq!(composing(change, 0.), Composing::Typing(0));
+        assert_eq!(
+            composing(change, SENT - 0.01),
+            Composing::Typing(change.prompt().chars().count())
+        );
+        assert_eq!(composing(change, SENT + 0.1), Composing::Working);
+        assert_eq!(composing(change, BEAT_SECONDS - 0.1), Composing::Done);
+        assert!(TYPED.1 < SENT && SENT < LANDS && LANDS + 1.1 < BEAT_SECONDS);
     }
 }

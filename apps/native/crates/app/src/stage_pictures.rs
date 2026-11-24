@@ -1,13 +1,11 @@
-//! The first-run stage's pictures, drawn by the engine: the room's light
-//! and the four reels are Powermove compositions built here, rendered live
-//! on a worker of their own (`Headless::draw_srgb`) into textures the stage
-//! paints. Nothing is read back; the stage's GPU waits on the worker's event.
-//!
-//! Every key of the reels comes from `pm_shell::stage::beats`, which the
-//! stage's furniture reads too.
+//! The first-run stage's pictures, drawn by the engine on a worker of their
+//! own (`Headless::draw_srgb`) into textures the stage paints: the room's
+//! light, a composition built here, and the film's project as the editor's
+//! viewer shows it. Nothing is read back; the stage's GPU waits on the
+//! worker's event.
 use pm_engine_service::{FrameSpec, Headless, Moment, Output, Scene};
 use pm_protocol::common::{TICKS_PER_SECOND, Ticks};
-use pm_shell::stage::{Picture, Pictures, Reel, beats};
+use pm_shell::stage::{Picture, Pictures};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -19,8 +17,6 @@ use std::{
     time::Duration,
 };
 
-/// The reels' composition size; the engine scales to the screen's pixels.
-const REEL: (f64, f64) = (1920., 1080.);
 /// The room's composition outlasts the film; the card holds its last frame.
 const ROOM_SECONDS: f64 = 26.;
 
@@ -210,243 +206,91 @@ pub fn room(w: f64, h: f64) -> Value {
     project(w, h, ROOM_SECONDS, vec![light, ground])
 }
 
-/// Cut: three shots of two beats each, hard cuts on the beat.
-pub fn cut() -> Value {
-    let (w, h) = REEL;
-    let s = beats::SHOT_SECONDS;
-    let shots: [(&str, &str, &str, &str); beats::SHOTS] = [
-        ("#24384c", "#0a0e13", "#f2eee6", "01"),
-        ("#5a2a1e", "#120908", "#ff8a5c", "02"),
-        ("#2b3a33", "#090c0b", "#d9f0e4", "03"),
-    ];
-    let mut layers = Vec::new();
-    for (i, (top, bottom, ink, figure)) in shots.iter().enumerate() {
-        let span = (i as f64 * s, s);
-        let id = |part: &str| format!("shot{i}-{part}");
-        let mut figure_layer = text(
-            &id("figure"),
-            figure,
-            560.,
-            800,
-            ink,
-            (w * 0.5, h * 0.62),
-            span,
-        );
-        // A slow push on each shot, the next one starting wider.
-        figure_layer["p"]["scale.x"] = keys(&[(span.0, 92.), (span.0 + s, 100.)]);
-        figure_layer["p"]["scale.y"] = keys(&[(span.0, 92.), (span.0 + s, 100.)]);
-        figure_layer["p"]["position.x"] = keys(&[
-            (span.0, w * if i % 2 == 0 { 0.46 } else { 0.54 }),
-            (span.0 + s, w * 0.5),
-        ]);
-        let mut bar = shape(
-            &id("bar"),
-            "rect",
-            ink,
-            (w * 0.42, 6.),
-            (w * 0.5, h * 0.82),
-            span,
-        );
-        bar["p"]["scale.x"] = keys(&[(span.0, 0.), (span.0 + s * 0.7, 100.)]);
-        bar["p"]["opacity"] = ch(json!(55));
-        let mut ground = solid(&id("ground"), "#000000", (w, h), span);
-        ground["fx"] = json!([
-            gradient(top, bottom, 160., false, (0., 0.), 100.),
-            grain(10., 1.3)
-        ]);
-        layers.extend([figure_layer, bar, ground]);
-    }
-    project(w, h, beats::REEL_SECONDS, layers)
-}
-
-/// Ask: a title, then the Glow the agent builds on it.
-pub fn ask() -> Value {
-    let (w, h) = REEL;
-    let all = (0., beats::REEL_SECONDS);
+/// The film's project: the one the editor opens and the agent changes. Two
+/// shots cut back to back (where the light leak goes), a title over the
+/// first, a few graphic layers: a timeline with something on it.
+pub fn film() -> Value {
+    let (w, h) = (1920., 1080.);
+    let dur = 8.;
+    let a = (0., 4.);
+    let b = (4., 4.);
+    let mut dusk = solid("Dusk", "#000000", (w, h), a);
+    dusk["fx"] = json!([
+        gradient("#5b2f22", "#120a0b", 160., false, (0., 0.), 100.),
+        grain(8., 1.3)
+    ]);
     let mut title = text(
-        "title",
+        "Title",
         "Night Drive",
         170.,
         700,
         "#f6efe6",
         (w / 2., h * 0.56),
-        all,
+        a,
     );
-    let end = beats::REEL_SECONDS;
-    title["fx"] = json!([fx(
-        "glow",
-        "glow",
-        json!({
-            "threshold": ch(json!(30)),
-            "radius": sampled(0., end, 0.1, |t| beats::glow(t).1),
-            "intensity": sampled(0., end, 0.1, |t| beats::glow(t).0),
-        })
-    )]);
-    let mut halo = shape(
-        "halo",
+    title["p"]["opacity"] = keys(&[(0., 0.), (0.8, 100.), (3.4, 100.), (4., 0.)]);
+    title["p"]["scale.x"] = keys(&[(0., 94.), (4., 100.)]);
+    title["p"]["scale.y"] = keys(&[(0., 94.), (4., 100.)]);
+    let mut sun = shape(
+        "Sun",
         "ellipse",
         "#ff9b5e",
-        (w * 0.62, h * 0.34),
-        (w / 2., h * 0.52),
-        all,
+        (260., 260.),
+        (w * 0.5, h * 0.78),
+        a,
     );
-    halo["fx"] = json!([fx("blur", "blur", json!({ "amount": ch(json!(140)) }))]);
-    halo["p"]["opacity"] = sampled(0., end, 0.1, |t| beats::glow(t).0 / 160. * 28.);
-    let mut ground = solid("ground", "#000000", (w, h), all);
-    ground["fx"] = json!([
-        gradient("#141722", "#05060a", 180., false, (0., 0.), 100.),
-        grain(8., 1.3)
-    ]);
-    project(w, h, end, vec![title, halo, ground])
-}
-
-/// Grade: a flat shot, and the grade sweeping across it behind a split.
-pub fn grade() -> Value {
-    let (w, h) = REEL;
-    let end = beats::REEL_SECONDS;
-    let all = (0., end);
-    let [temperature, saturation, contrast, exposure] = beats::GRADE;
-    let mut look = layer("grade", "adjustment", json!({}), (0., 0.), all);
-    look["fx"] = json!([fx(
-        "color",
-        "color",
+    sun["p"]["position.y"] = keys(&[(0., h * 0.86), (4., h * 0.74)]);
+    sun["fx"] = json!([fx(
+        "glow",
+        "glow",
         json!({
-            "exposure": ch(json!(exposure)), "contrast": ch(json!(contrast)),
-            "saturation": ch(json!(saturation)), "hue": ch(json!(0)),
-            "temperature": ch(json!(temperature))
+            "threshold": ch(json!(20)), "radius": ch(json!(120)), "intensity": ch(json!(90))
         })
     )]);
-    // The graded part grows from the left edge.
-    look["masks"] = json!([{ "id": "split", "shape": "rect", "mode": "add", "on": true, "p": {
-        "x": sampled(0., end, 0.05, |t| w * beats::split(t) / 2.),
-        "y": ch(json!(h / 2.)),
-        "w": sampled(0., end, 0.05, |t| w * beats::split(t)),
-        "h": ch(json!(h)), "rotation": ch(json!(0)), "feather": ch(json!(0))
-    } }]);
-    let mut line = solid("split-line", "#f2eee6", (2., h), all);
-    line["p"]["position.x"] = sampled(0., end, 0.05, |t| w * beats::split(t));
-    line["p"]["opacity"] = sampled(0., end, 0.05, |t| {
-        let s = beats::split(t);
-        if s <= 0. || s >= 1. { 0. } else { 80. }
-    });
-    // The shot: a dusk sky, the sun low over a far ridge, a near one.
-    let mut sky = solid("sky", "#000000", (w, h), all);
-    sky["fx"] = json!([
-        gradient("#8a8f95", "#c9b39c", 90., false, (0., 0.), 100.),
-        grain(7., 1.2)
+    let mut city = solid("City", "#000000", (w, h), b);
+    city["fx"] = json!([
+        gradient("#1b2b3f", "#06080c", 180., false, (0., 0.), 100.),
+        grain(8., 1.3)
     ]);
-    let mut sun = shape(
-        "sun",
-        "ellipse",
-        "#f4e4cc",
-        (150., 150.),
-        (w * 0.64, h * 0.6),
-        all,
-    );
-    sun["p"]["position.y"] = keys(&[(0., h * 0.6), (end, h * 0.63)]);
-    let far = shape(
-        "far",
-        "rect",
-        "#6f6c69",
-        (w * 1.2, h * 0.3),
-        (w * 0.5, h * 0.78),
-        all,
-    );
-    let mut near = shape(
-        "near",
-        "rect",
-        "#3d3a38",
-        (w * 1.2, h * 0.24),
-        (w * 0.5, h * 0.94),
-        all,
-    );
-    near["p"]["rotation"] = ch(json!(-2.5));
-    project(w, h, end, vec![line, look, near, far, sun, sky])
-}
-
-/// Depth: three objects under a sun, the camera orbiting them.
-pub fn depth() -> Value {
-    let (w, h) = REEL;
-    let end = beats::REEL_SECONDS;
-    let all = (0., end);
-    let ext = |id: &str, def: &str, data: Value| {
-        let mut l = layer(
-            id,
-            "extension",
-            json!({ "definition": def, "version": 1, "w": 0, "h": 0, "params": {}, "data": data }),
-            (0., 0.),
-            all,
+    let mut towers = Vec::new();
+    for (i, (x, height, colour)) in [
+        (0.18, 0.46, "#2c3e56"),
+        (0.33, 0.62, "#364b66"),
+        (0.5, 0.38, "#24344a"),
+        (0.66, 0.7, "#3d5574"),
+        (0.82, 0.5, "#2a3b52"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut tower = shape(
+            &format!("Tower {}", i + 1),
+            "rect",
+            colour,
+            (w * 0.12, h * height),
+            (w * x, h * (1. - height / 2.)),
+            b,
         );
-        l["threeD"] = json!(true);
-        l
-    };
-    let object = |id: &str, size: [f64; 3], color: &str, at: [f64; 3], turn: f64| {
-        let mut l = ext(
-            id,
-            "powermove.3d.object",
-            json!({ "object": {
-                "source": { "primitive": "box", "parameters": { "width": size[0], "height": size[1], "depth": size[2] } },
-                "material": { "p": {
-                    "color": ch(json!(color)), "roughness": ch(json!(0.35)), "metalness": ch(json!(0.15)),
-                    "emissive": ch(json!("#000000")), "emissiveIntensity": ch(json!(1)), "opacity": ch(json!(1))
-                }, "maps": {}, "doubleSided": true },
-                "useSourceMaterials": false, "slots": [], "castShadow": true, "receiveShadow": true
-            } }),
-        );
-        l["d"]["w"] = json!(w);
-        l["d"]["h"] = json!(h);
-        l["p"]["position.x"] = ch(json!(at[0]));
-        l["p"]["position.y"] = ch(json!(at[1]));
-        l["p"]["position.z"] = ch(json!(at[2]));
-        l["p"]["rotation.y"] = keys(&[(0., turn), (end, turn + 24.)]);
-        l
-    };
-    let radius = 6.4;
-    let mut camera = ext(
-        "camera",
-        "powermove.3d.camera",
-        json!({
-            "camera": { "projection": "perspective", "p": {
-                "targetX": ch(json!(0)), "targetY": ch(json!(0.2)), "targetZ": ch(json!(0)),
-                "fov": ch(json!(38)), "zoom": ch(json!(1)), "near": ch(json!(0.01)), "far": ch(json!(1000))
-            } },
-            "environment": { "p": {
-                "ambient": ch(json!(0.35)), "ambientColor": ch(json!("#dfe6ee")), "exposure": ch(json!(1))
-            }, "background": null, "shadows": true }
-        }),
+        tower["p"]["position.x"] = keys(&[(4., w * x + 40.), (8., w * x - 40.)]);
+        towers.push(tower);
+    }
+    let mut lights = text(
+        "Lights",
+        "· · · · · · · · ·",
+        90.,
+        700,
+        "#ffd28a",
+        (w / 2., h * 0.3),
+        b,
     );
-    camera["p"]["position.x"] = sampled(0., end, 0.1, |t| {
-        radius * beats::orbit(t).to_radians().sin()
-    });
-    camera["p"]["position.y"] = ch(json!(1.6));
-    camera["p"]["position.z"] = sampled(0., end, 0.1, |t| {
-        radius * beats::orbit(t).to_radians().cos()
-    });
-    let mut sun = ext(
-        "sun",
-        "powermove.3d.light",
-        json!({ "light": { "type": "sun", "castShadow": true, "p": {
-            "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
-            "color": ch(json!("#fff1de")), "intensity": ch(json!(3.2)), "distance": ch(json!(0)),
-            "decay": ch(json!(2)), "angle": ch(json!(45)), "penumbra": ch(json!(0.4)),
-            "width": ch(json!(1)), "height": ch(json!(1))
-        } } }),
-    );
-    sun["p"]["position.x"] = ch(json!(-3.5));
-    sun["p"]["position.y"] = ch(json!(5.));
-    sun["p"]["position.z"] = ch(json!(3.));
-    let floor = object("floor", [14., 0.1, 14.], "#2a2b2d", [0., -1.05, 0.], 0.);
-    let tall = object("tall", [0.9, 2.1, 0.9], "#e8dccb", [-1.25, 0.05, -0.3], 18.);
-    let wide = object("wide", [1.8, 0.7, 1.1], "#d06a43", [0.9, -0.65, 0.4], -12.);
-    let cube = object("cube", [0.8, 0.8, 0.8], "#9fb4c4", [0.35, 0.45, -1.4], 40.);
-    let mut ground = solid("ground", "#000000", (w, h), all);
-    ground["fx"] = json!([gradient("#202327", "#08090a", 180., false, (0., 0.), 100.)]);
-    project(
-        w,
-        h,
-        end,
-        vec![camera, sun, tall, wide, cube, floor, ground],
-    )
+    lights["p"]["opacity"] = keys(&[(4., 0.), (5., 80.)]);
+    let mut layers = vec![title, sun, dusk, lights];
+    layers.extend(towers);
+    layers.push(city);
+    let mut project = project(w, h, dur, layers);
+    project["name"] = json!("Night Drive");
+    project["compName"] = json!("Night Drive");
+    project
 }
 
 fn scene(project: Value) -> anyhow::Result<Scene> {
@@ -461,13 +305,10 @@ fn scene(project: Value) -> anyhow::Result<Scene> {
         content: snapshot.doc_id,
     })
 }
-fn scenes(room_size: (f64, f64)) -> anyhow::Result<HashMap<Picture, Scene>> {
+fn scenes(room_size: (f64, f64), film: &Value) -> anyhow::Result<HashMap<Picture, Scene>> {
     Ok(HashMap::from([
         (Picture::Backdrop, scene(room(room_size.0, room_size.1))?),
-        (Picture::Reel(Reel::Cut), scene(cut())?),
-        (Picture::Reel(Reel::Ask), scene(ask())?),
-        (Picture::Reel(Reel::Grade), scene(grade())?),
-        (Picture::Reel(Reel::Depth), scene(depth())?),
+        (Picture::Viewer, scene(film.clone())?),
     ]))
 }
 
@@ -542,10 +383,12 @@ pub struct EnginePictures {
 impl EnginePictures {
     /// Starts the worker; its engine is made there, off the main thread.
     /// `room` is the stage's size in points.
+    /// `film` is the film's project, as the editor's viewer shows it.
     pub fn start(
         fonts: pm_render::text::host::RenderFonts,
         shader_cache: Option<std::path::PathBuf>,
         room: (f64, f64),
+        film: Value,
     ) -> Self {
         let (tx, requests) = mpsc::channel::<Request>();
         let (replies, rx) = mpsc::channel();
@@ -553,7 +396,7 @@ impl EnginePictures {
             .name("stage-pictures".into())
             .spawn(move || {
                 let setup = Headless::for_surfaces(fonts, shader_cache)
-                    .and_then(|engine| Ok((engine, scenes(room)?)));
+                    .and_then(|engine| Ok((engine, scenes(room, &film)?)));
                 let (mut engine, scenes) = match setup {
                     Ok(v) => v,
                     Err(error) => {
@@ -778,7 +621,7 @@ impl Pictures for EnginePictures {
     }
     fn rest(&mut self) {
         self.drain();
-        // The reels are over: their textures go; the room keeps its last frame.
+        // The editor is gone: its textures go; the room keeps its last frame.
         self.streams.retain(|what, _| *what == Picture::Backdrop);
     }
 }

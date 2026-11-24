@@ -1,18 +1,24 @@
 //! The first-run stage: one borderless window over the whole display that
-//! dims the desktop, runs the film on the cue sheet (`cue`), and ends on the
-//! Welcome card, where the first-run steps play out. Pictures (the room's
-//! light and the reels) are the engine's, painted as GPUI textures through
-//! `Pictures`, so the distortion wave carries the real rendered scene from
-//! one cue into the next. The card's buttons are AppKit's; during a wave
-//! they paint their own snapshot so the wave distorts them too.
+//! dims the desktop and runs the film on the cue sheet (`cue`). The mark
+//! arrives out of light and folds into the agent's composer, which stays on
+//! stage for the whole film: the real editor arrives around it, and each
+//! request typed into it is applied to the editor through the agent's own
+//! path (`Demo`), the wave carrying the change from the editor as it was
+//! into the editor as it is now. The film ends on the Welcome card, where
+//! the first-run steps play out. The room's light is the engine's
+//! (`Pictures`), painted as a GPUI texture. AppKit buttons on the card
+//! paint their own snapshot while a wave carries them.
 pub mod beats;
 pub mod cue;
+mod freeze;
 mod furniture;
 
 use crate::native_control::{BuildSnapshot, ControlSpec, Kind, NativeControl};
 use crate::wave::{DistortionWave, Palette, ReducedMotion, WaveRect, WaveState, WaveStyle};
 use crate::welcome_view::WelcomeView;
-pub use cue::{CueSheet, Reel, Scene, Transition};
+pub use beats::Composing;
+pub use cue::{Change, CueSheet, Scene, Transition};
+pub use freeze::{Frozen, freeze};
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use std::{rc::Rc, sync::Arc, time::Instant};
@@ -22,7 +28,8 @@ use std::{rc::Rc, sync::Arc, time::Instant};
 pub enum Picture {
     /// The room: its light, grain and falloff, the whole display.
     Backdrop,
-    Reel(Reel),
+    /// The film's project, as the editor's viewer shows it.
+    Viewer,
 }
 /// The engine's side of the stage (the app's `stage_pictures`).
 pub trait Pictures {
@@ -33,18 +40,45 @@ pub trait Pictures {
     /// The film needs no more pictures: the engine may let go.
     fn rest(&mut self) {}
 }
+/// What the composer shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Composer {
+    pub text: String,
+    pub composing: Composing,
+}
+/// The editor the film changes, and the agent's composer: the app's real
+/// ones (`demo_editor`), on the film's own project and kernel.
+pub trait Demo {
+    /// The live editor, filling the stage.
+    fn editor(&mut self, window: &mut Window, cx: &mut App) -> AnyElement;
+    /// The agent's composer showing `composer`.
+    fn composer(&mut self, composer: &Composer, window: &mut Window, cx: &mut App) -> AnyElement;
+    /// The composer's place in the editor (window points).
+    fn composer_home(&self, area: Size<Pixels>) -> Bounds<Pixels>;
+    /// Applies `change` through the agent's own path.
+    fn apply(&mut self, change: Change, cx: &mut App);
+    /// Whether `change` has reached the editor on screen.
+    fn landed(&self, change: Change, cx: &App) -> bool;
+    /// Where the changed surface sits, for the wave's source.
+    fn site(&self, change: Change, area: Size<Pixels>) -> Bounds<Pixels>;
+    /// Recordings: waits until everything asked for has landed.
+    fn settle(&mut self, _cx: &mut App) {}
+    /// The film's clock, each frame (the editor's own playhead follows it).
+    fn at(&mut self, _t: f64) {}
+}
 /// A sound cue (`cue::Sound::id`) reached.
 pub type OnSound = Rc<dyn Fn(&str, &mut App)>;
 
 /// Seconds the room takes to fade in after a Skip, and out after the hand-off.
 const SKIP_FADE: f64 = 0.35;
 const LIGHTS_UP: f64 = 0.45;
-/// How long before a wave the next scene's first picture is asked for.
-const PREROLL: f64 = 0.5;
+/// A change that hasn't landed this long after it was applied waves anyway.
+const LAND_PATIENCE: f64 = 0.8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WaveKey {
     Cue(usize),
+    Change(Change),
     Step(u64),
     HandOff,
 }
@@ -54,11 +88,19 @@ struct HandOff {
     picture: Option<(Arc<RenderImage>, Bounds<Pixels>)>,
     done: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
 }
+/// A change on its way: frozen, applied, landing.
+struct Landing {
+    change: Change,
+    frozen: Frozen,
+    applied: Option<f64>,
+    landed: Option<f64>,
+}
 
 pub struct Stage {
     pub sheet: CueSheet,
     pub tokens: Tokens,
     pictures: Box<dyn Pictures>,
+    demo: Option<Box<dyn Demo>>,
     opened: Instant,
     /// Tests and recordings pin the film's clock (seconds).
     pub clock: Option<f64>,
@@ -68,27 +110,25 @@ pub struct Stage {
     card: Option<Entity<WelcomeView>>,
     /// The card as it was before a step changed it, for the step's wave.
     leaving_card: Option<(Entity<WelcomeView>, f64)>,
-    wave: Entity<WaveState>,
-    /// Which transition the wave holds.
-    wave_for: Option<WaveKey>,
-    /// Counts the card's steps, so each step's wave is armed once.
     steps: u64,
+    wave: Entity<WaveState>,
+    wave_for: Option<WaveKey>,
+    landing: Option<Landing>,
     last_t: f64,
     on_sound: Option<OnSound>,
     focus: FocusHandle,
     skip: Option<Entity<NativeControl>>,
     on_skip: Option<Rc<dyn Fn(&mut App)>>,
     hand_off: Option<HandOff>,
-    /// The scene VoiceOver last heard.
-    spoken: Option<usize>,
 }
 
 impl Stage {
+    /// `demo` None (or `film` false): the card alone, no film.
     pub fn new(
         tokens: Tokens,
         sheet: CueSheet,
         pictures: Box<dyn Pictures>,
-        film: bool,
+        demo: Option<Box<dyn Demo>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let wave = cx.new(|_| {
@@ -103,27 +143,28 @@ impl Stage {
             )
             .expect("the stage's wave style is valid")
         });
-        let offset = if film { 0. } else { sheet.length() };
+        let offset = if demo.is_some() { 0. } else { sheet.length() };
         Self {
             sheet,
             tokens,
             pictures,
+            demo,
             opened: Instant::now(),
             clock: None,
             offset,
             skipped_at: None,
             card: None,
             leaving_card: None,
+            steps: 0,
             wave,
             wave_for: None,
-            steps: 0,
+            landing: None,
             last_t: -1.,
             on_sound: None,
             focus: cx.focus_handle(),
             skip: None,
             on_skip: None,
             hand_off: None,
-            spoken: None,
         }
     }
     pub fn on_sound(&mut self, sound: OnSound) {
@@ -145,21 +186,23 @@ impl Stage {
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
+    /// Recordings: lets the film's editor finish what it was asked.
+    pub fn settle(&mut self, cx: &mut App) {
+        if let Some(demo) = self.demo.as_mut() {
+            demo.settle(cx);
+        }
+    }
     /// The Welcome card the film ends on; a later card (the next step)
     /// arrives with a wave from the one before.
     pub fn set_card(&mut self, card: Entity<WelcomeView>, cx: &mut Context<Self>) {
         let t = self.now();
         if let Some(previous) = self.card.replace(card)
-            && self.on_card(t)
+            && self.sheet.at(t).scene == Scene::Card
         {
             self.steps += 1;
             self.leaving_card = Some((previous, t));
         }
         cx.notify();
-    }
-    /// Whether the film is over and the card is the scene.
-    pub fn on_card(&self, t: f64) -> bool {
-        self.sheet.at(t).scene == Scene::Card
     }
     /// Esc or Skip: straight to the card, with a short fade from black.
     pub fn skip(&mut self, cx: &mut Context<Self>) {
@@ -170,6 +213,7 @@ impl Stage {
         }
         self.offset += card - t;
         self.skipped_at = Some(card);
+        self.landing = None;
         self.release_wave(cx);
         if let Some(skip) = &self.on_skip {
             let skip = skip.clone();
@@ -208,10 +252,9 @@ impl Stage {
         if self.tokens.accessibility.reduce_transparency {
             return 1.;
         }
-        let dim = beats::span(t, 0., self.sheet.cues[1].at);
-        (0.94 * dim) as f32
+        (0.94 * beats::span(t, 0., self.sheet.cues[1].at)) as f32
     }
-    /// The room itself fades up over the veil once the house lights are down.
+    /// The room fades up over the veil once the house lights are down.
     fn room(&self, t: f64) -> f32 {
         let lit = self.sheet.cues[1].at;
         beats::span(t, lit, lit + 0.8) as f32
@@ -235,23 +278,27 @@ impl Stage {
         }
         self.last_t = t;
     }
-    /// The picture rectangle the reels play on: 16:9, a little above centre.
-    pub fn screen(bounds: Size<Pixels>) -> Bounds<Pixels> {
-        let (w, h) = (f32::from(bounds.width), f32::from(bounds.height));
-        let width = (w * 0.62).min(h * 0.56 * 16. / 9.);
-        let height = width * 9. / 16.;
+    /// The composer alone on the stage: centred, a little low.
+    fn composer_alone(area: Size<Pixels>, home: Bounds<Pixels>) -> Bounds<Pixels> {
         Bounds::new(
-            point(px((w - width) / 2.), px((h - height) / 2. - h * 0.035)),
-            size(px(width), px(height)),
+            point(
+                (area.width - home.size.width) / 2.,
+                (area.height - home.size.height) / 2. + area.height * 0.06,
+            ),
+            home.size,
         )
     }
-    fn device(size: Size<Pixels>, scale: f32, k: f32) -> (u32, u32) {
-        (
-            ((f32::from(size.width) * scale * k).round() as u32).max(1),
-            ((f32::from(size.height) * scale * k).round() as u32).max(1),
-        )
+    fn room_picture(&mut self, t: f64, area: Size<Pixels>, scale: f32) -> AnyElement {
+        // The grain moves at film's 24 frames a second.
+        let room_t = (t.min(self.sheet.length() + 1.5) * 24.).floor() / 24.;
+        let size = (
+            ((f32::from(area.width) * scale * 0.5).round() as u32).max(1),
+            ((f32::from(area.height) * scale * 0.5).round() as u32).max(1),
+        );
+        texture_fill(self.pictures.picture(Picture::Backdrop, room_t, size)).into_any_element()
     }
-    /// One scene as a picture at `local` seconds into it.
+    /// One scene as a picture at `local` seconds into it (the composer is
+    /// drawn over it separately: it stays live through every wave).
     fn scene(
         &mut self,
         index: usize,
@@ -259,38 +306,40 @@ impl Stage {
         t: f64,
         area: Size<Pixels>,
         scale: f32,
+        capture: Option<Frozen>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let scene = self.sheet.cues[index].scene;
-        // The room's grain moves at film's 24 frames a second, which also
-        // leaves the engine most display frames for the reels.
-        let room_t = (t.min(self.sheet.length() + 1.5) * 24.).floor() / 24.;
-        let backdrop =
-            self.pictures
-                .picture(Picture::Backdrop, room_t, Self::device(area, scale, 0.5));
+        let motion = !self.reduce_motion();
         let mut root = div()
             .id(("stage-scene", index))
             .relative()
             .size_full()
             .overflow_hidden()
             .bg(rgb(0x000000))
-            .child(texture_fill(backdrop));
-        let t_ = self.tokens.clone();
-        let motion = !self.reduce_motion();
+            .child(self.room_picture(t, area, scale));
         root = match scene {
-            Scene::HouseLights => root,
-            Scene::TitleCard => root.child(furniture::slate(local, &t_, motion)),
-            Scene::Mark => root.child(furniture::mark(local, &t_, motion)),
-            Scene::Reel(reel) => {
-                let screen = Self::screen(area);
-                let picture = self.pictures.picture(
-                    Picture::Reel(reel),
-                    local.min(beats::REEL_SECONDS),
-                    Self::device(screen.size, scale, 1.),
-                );
-                root.child(furniture::reel(reel, local, screen, picture, &t_, window))
+            Scene::HouseLights | Scene::Composer => root,
+            Scene::Mark => {
+                let fold = match self.sheet.at(t).leaving {
+                    Some((Transition::Fold { .. }, p)) if self.sheet.at(t).index == index => p,
+                    _ => 0.,
+                };
+                root.child(furniture::mark(local, fold, &self.tokens, motion))
             }
+            Scene::Beat(_) => match self.demo.as_mut() {
+                Some(demo) => {
+                    let editor = demo.editor(window, cx);
+                    let frozen = capture.clone().unwrap_or_default();
+                    root.child(div().absolute().inset_0().child(freeze(
+                        editor,
+                        frozen,
+                        capture.is_some(),
+                    )))
+                }
+                None => root,
+            },
             Scene::Card => match &self.card {
                 Some(card) => root.child(
                     div()
@@ -304,8 +353,88 @@ impl Stage {
                 None => root,
             },
         };
-        let _ = cx;
         root.into_any_element()
+    }
+    /// The composer, where it stands at `t`: grown out of the folded mark,
+    /// centred alone, then at home in the editor; gone on the card.
+    fn composer(
+        &mut self,
+        t: f64,
+        area: Size<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let position = self.sheet.at(t);
+        let demo = self.demo.as_mut()?;
+        let home = demo.composer_home(area);
+        let alone = Self::composer_alone(area, home);
+        let (bounds, opacity, composer) = match position.scene {
+            Scene::Mark => {
+                let Some((Transition::Fold { .. }, p)) = position.leaving else {
+                    return None;
+                };
+                let grow = beats::span(p, 0.35, 1.);
+                let width = alone.size.width * (0.12 + 0.88 * grow as f32);
+                let b = Bounds::new(
+                    point((area.width - width) / 2., alone.origin.y),
+                    size(width, alone.size.height),
+                );
+                (
+                    b,
+                    grow as f32,
+                    Composer {
+                        text: String::new(),
+                        composing: Composing::Typing(0),
+                    },
+                )
+            }
+            Scene::Composer => {
+                // The composer travels home under the wave into the editor.
+                let travel = match position.leaving {
+                    Some((Transition::Wave(_), p)) => beats::smooth(p) as f32,
+                    _ => 0.,
+                };
+                let b = Bounds::new(
+                    alone.origin + (home.origin - alone.origin) * travel,
+                    alone.size,
+                );
+                (
+                    b,
+                    1.,
+                    Composer {
+                        text: String::new(),
+                        composing: Composing::Typing(0),
+                    },
+                )
+            }
+            Scene::Beat(change) => {
+                let fade = match position.leaving {
+                    Some((Transition::Wave(_), p)) => 1. - beats::span(p, 0., 0.5) as f32,
+                    _ => 1.,
+                };
+                let composing = beats::composing(change, position.local);
+                let text = match composing {
+                    Composing::Typing(n) => change.prompt().chars().take(n).collect(),
+                    _ => change.prompt().to_owned(),
+                };
+                (home, fade, Composer { text, composing })
+            }
+            _ => return None,
+        };
+        if opacity <= 0. {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .left(bounds.origin.x)
+                .top(bounds.origin.y)
+                .w(bounds.size.width)
+                .h(bounds.size.height)
+                .opacity(opacity)
+                .child(demo.composer(&composer, window, cx))
+                .into_any_element(),
+        )
     }
     /// The room with the app's first window drawn where it sits: where the
     /// hand-off's wave arrives.
@@ -320,7 +449,7 @@ impl Stage {
                         let _ = window.paint_image(
                             at,
                             at,
-                            Corners::all(px(0.)),
+                            Corners::default(),
                             0.,
                             image.clone(),
                             0,
@@ -359,6 +488,85 @@ impl Stage {
             w.set_reduced_motion(ReducedMotion::System, window);
         });
         self.wave_for = Some(key);
+    }
+    fn waved(
+        &mut self,
+        p: f64,
+        from: AnyElement,
+        to: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let _ = self.wave.update(cx, |w, _| w.seek(p.max(1e-4)));
+        DistortionWave::new(self.wave.clone(), from)
+            .revealed_content(to)
+            .size_full()
+            .into_any_element()
+    }
+    /// A beat's change: hold the editor as it was, apply the change, and
+    /// once it has landed wave from the held picture into the live editor.
+    fn beat(
+        &mut self,
+        change: Change,
+        index: usize,
+        local: f64,
+        t: f64,
+        area: Size<Pixels>,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if local < beats::LANDS {
+            self.landing = None;
+            return self.scene(index, local, t, area, scale, None, window, cx);
+        }
+        if self.landing.as_ref().is_none_or(|l| l.change != change) {
+            // This frame pictures the editor as it was; the change goes in
+            // after the frame.
+            let frozen = Frozen::default();
+            self.landing = Some(Landing {
+                change,
+                frozen: frozen.clone(),
+                applied: None,
+                landed: None,
+            });
+            return self.scene(index, local, t, area, scale, Some(frozen), window, cx);
+        }
+        let landing = self.landing.as_mut().unwrap();
+        if landing.applied.is_none() {
+            landing.applied = Some(t);
+            if let Some(demo) = self.demo.as_mut() {
+                demo.apply(change, cx);
+            }
+        }
+        let landing = self.landing.as_mut().unwrap();
+        if landing.landed.is_none() {
+            let arrived = self.demo.as_ref().is_some_and(|d| d.landed(change, cx));
+            let applied = landing.applied.unwrap();
+            if arrived || t - applied > LAND_PATIENCE {
+                landing.landed = Some(t);
+            }
+        }
+        let landing = self.landing.as_ref().unwrap();
+        let held = landing.frozen.get();
+        let Some(landed) = landing.landed else {
+            // Not there yet: the editor as it was, held.
+            return still(held);
+        };
+        let p = (t - landed) / self.sheet.wave_seconds;
+        if p >= 1. || held.is_none() {
+            self.release_wave(cx);
+            return self.scene(index, local, t, area, scale, None, window, cx);
+        }
+        let source = self
+            .demo
+            .as_ref()
+            .map_or(Bounds::new(point(px(0.), px(0.)), area), |d| {
+                d.site(change, area)
+            });
+        self.arm_wave(WaveKey::Change(change), cue::STEP_WAVE, source, window, cx);
+        let from = still(held);
+        let to = self.scene(index, local, t, area, scale, None, window, cx);
+        self.waved(p, from, to, cx)
     }
     fn skip_button(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if crate::text::available(window) {
@@ -441,11 +649,42 @@ fn texture_fill(texture: Option<Arc<NativeTexture>>) -> impl IntoElement {
     .absolute()
     .inset_0()
 }
+/// A held picture filling its parent.
+fn still(image: Option<Arc<RenderImage>>) -> AnyElement {
+    div()
+        .relative()
+        .size_full()
+        .bg(rgb(0x000000))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if let Some(image) = image {
+                        let _ = window.paint_image(
+                            bounds,
+                            bounds,
+                            Corners::default(),
+                            0.,
+                            image,
+                            0,
+                            false,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .into_any_element()
+}
 
 impl Render for Stage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.now();
         self.sounds(t, cx);
+        if let Some(demo) = self.demo.as_mut() {
+            demo.at(t);
+        }
         let area = window.bounds().size;
         let scale = window.scale_factor();
         let position = self.sheet.at(t);
@@ -459,23 +698,13 @@ impl Render for Stage {
         } else if self.clock.is_none() {
             window.request_animation_frame();
         }
-        // The next scene's first picture, ahead of the wave that shows it.
-        if let Some(next) = self.sheet.cues.get(position.index + 1)
-            && let Scene::Reel(reel) = next.scene
-            && position.length - position.local < PREROLL + self.sheet.wave_seconds
-        {
-            let screen = Self::screen(area);
-            let _ = self.pictures.picture(
-                Picture::Reel(reel),
-                0.,
-                Self::device(screen.size, scale, 1.),
-            );
-        }
         let mut stage_alpha = self.room(t);
         let mut veil = self.veil(t);
-        let picture: AnyElement = if let Some(hand_off) = self.hand_off.as_ref() {
-            let p = ((t - hand_off.start) / self.sheet.wave_seconds).clamp(0., 1.);
-            let up = ((t - hand_off.start - self.sheet.wave_seconds) / LIGHTS_UP).clamp(0., 1.);
+        let card_index = self.sheet.cues.len() - 1;
+        let picture: AnyElement = if self.hand_off.is_some() {
+            let start = self.hand_off.as_ref().unwrap().start;
+            let p = ((t - start) / self.sheet.wave_seconds).clamp(0., 1.);
+            let up = ((t - start - self.sheet.wave_seconds) / LIGHTS_UP).clamp(0., 1.);
             stage_alpha = 1. - beats::smooth(up) as f32;
             veil *= stage_alpha;
             if up >= 1. {
@@ -488,19 +717,14 @@ impl Render for Stage {
                     .hand_off
                     .as_ref()
                     .and_then(|h| h.picture.as_ref().map(|(_, at)| *at))
-                    .unwrap_or_else(|| Self::screen(area));
+                    .unwrap_or_else(|| Bounds::new(point(px(0.), px(0.)), area));
                 self.arm_wave(WaveKey::HandOff, cue::STEP_WAVE, source, window, cx);
-                let _ = self.wave.update(cx, |w, _| w.seek(p));
-                let card = self.sheet.cues.len() - 1;
                 if let Some(card) = &self.card {
                     card.update(cx, |c, cx| c.set_snapshot(true, cx));
                 }
-                let from = self.scene(card, t - card_at, t, area, scale, window, cx);
+                let from = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
                 let to = self.arrival(self.hand_off.as_ref().unwrap());
-                DistortionWave::new(self.wave.clone(), from)
-                    .revealed_content(to)
-                    .size_full()
-                    .into_any_element()
+                self.waved(p, from, to, cx)
             } else {
                 self.release_wave(cx);
                 self.arrival(self.hand_off.as_ref().unwrap())
@@ -510,56 +734,59 @@ impl Render for Stage {
         {
             let next = position.index + 1;
             let source = match self.sheet.cues[position.index].scene {
-                Scene::Reel(_) | Scene::Mark => Self::screen(area),
+                Scene::Composer => {
+                    let home = self.demo.as_ref().map(|d| d.composer_home(area));
+                    home.map_or(Bounds::new(point(px(0.), px(0.)), area), |h| {
+                        Self::composer_alone(area, h)
+                    })
+                }
                 _ => Bounds::new(point(px(0.), px(0.)), area),
             };
             self.arm_wave(WaveKey::Cue(position.index), kind, source, window, cx);
-            let _ = self.wave.update(cx, |w, _| w.seek(p));
-            let started = position.length - self.sheet.wave_seconds;
             if self.sheet.cues[next].scene == Scene::Card
                 && let Some(card) = &self.card
             {
                 card.update(cx, |c, cx| c.set_snapshot(true, cx));
             }
-            let from = self.scene(position.index, started, t, area, scale, window, cx);
-            let to = self.scene(next, 0., t, area, scale, window, cx);
-            DistortionWave::new(self.wave.clone(), from)
-                .revealed_content(to)
-                .size_full()
-                .into_any_element()
+            let started = position.length - self.sheet.wave_seconds;
+            let from = self.scene(position.index, started, t, area, scale, None, window, cx);
+            let to = self.scene(next, 0., t, area, scale, None, window, cx);
+            self.waved(p, from, to, cx)
         } else if let Some((previous, began)) = self.leaving_card.clone() {
             // A step on the card: the wave from the card before.
             let p = (t - began) / self.sheet.wave_seconds;
-            let card = self.sheet.cues.len() - 1;
             if p >= 1. {
                 self.leaving_card = None;
                 self.release_wave(cx);
                 if let Some(card) = &self.card {
                     card.update(cx, |c, cx| c.set_snapshot(false, cx));
                 }
-                self.scene(card, t - card_at, t, area, scale, window, cx)
+                self.scene(card_index, t - card_at, t, area, scale, None, window, cx)
             } else {
-                self.arm_wave(
-                    WaveKey::Step(self.steps),
-                    cue::STEP_WAVE,
-                    Self::screen(area),
-                    window,
-                    cx,
-                );
-                let _ = self.wave.update(cx, |w, _| w.seek(p.max(1e-4)));
+                let key = WaveKey::Step(self.steps);
+                let card_bounds = Bounds::new(point(px(0.), px(0.)), area);
+                self.arm_wave(key, cue::STEP_WAVE, card_bounds, window, cx);
                 previous.update(cx, |c, cx| c.set_snapshot(true, cx));
                 if let Some(card) = &self.card {
                     card.update(cx, |c, cx| c.set_snapshot(true, cx));
                 }
                 let current = self.card.replace(previous);
-                let from = self.scene(card, t - card_at, t, area, scale, window, cx);
+                let from = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
                 self.card = current;
-                let to = self.scene(card, t - card_at, t, area, scale, window, cx);
-                DistortionWave::new(self.wave.clone(), from)
-                    .revealed_content(to)
-                    .size_full()
-                    .into_any_element()
+                let to = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
+                self.waved(p, from, to, cx)
             }
+        } else if let Scene::Beat(change) = position.scene {
+            self.beat(
+                change,
+                position.index,
+                position.local,
+                t,
+                area,
+                scale,
+                window,
+                cx,
+            )
         } else {
             self.release_wave(cx);
             if position.scene == Scene::Card
@@ -568,33 +795,33 @@ impl Render for Stage {
                 card.update(cx, |c, cx| c.set_snapshot(false, cx));
             }
             let mut fade = 1.;
-            // In from black after a dip, and after a Skip.
-            if let Some(previous) = position.index.checked_sub(1)
-                && let Some(Transition::Dip { seconds }) = self.sheet.cues[previous].out
-            {
-                fade = beats::smooth(position.local / seconds);
-            }
             if let Some(at) = self.skipped_at
                 && t - at < SKIP_FADE
             {
                 fade = beats::smooth((t - at) / SKIP_FADE);
             }
-            if let Some((Transition::Dip { seconds }, p)) = position.leaving {
-                let _ = seconds;
-                fade = 1. - beats::smooth(p);
-            }
-            let scene = self.scene(position.index, position.local, t, area, scale, window, cx);
+            let scene = self.scene(
+                position.index,
+                position.local,
+                t,
+                area,
+                scale,
+                None,
+                window,
+                cx,
+            );
             div()
                 .size_full()
                 .bg(rgb(0x000000))
                 .child(div().size_full().opacity(fade as f32).child(scene))
                 .into_any_element()
         };
-        // VoiceOver hears each scene's title as it starts.
+        let composer = if self.hand_off.is_none() {
+            self.composer(t, area, window, cx)
+        } else {
+            None
+        };
         let title = self.sheet.cues[position.index].title;
-        if self.spoken != Some(position.index) {
-            self.spoken = Some(position.index);
-        }
         let skippable = position.scene != Scene::Card && self.hand_off.is_none();
         let mut root = div()
             .id("stage")
@@ -620,7 +847,9 @@ impl Render for Stage {
                     .opacity(stage_alpha)
                     .child(picture),
             )
+            .children(composer.map(|c| div().absolute().inset_0().opacity(stage_alpha).child(c)))
             .child(
+                // VoiceOver hears each scene's title (each request) as it starts.
                 div()
                     .id("stage-scene-title")
                     .absolute()

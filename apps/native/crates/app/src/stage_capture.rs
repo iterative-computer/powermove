@@ -8,7 +8,7 @@ use crate::stage_pictures::EnginePictures;
 use gpui::{prelude::*, *};
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
-    stage::{CueSheet, Picture, Pictures, Reel, Stage},
+    stage::{Change, CueSheet, Picture, Pictures, Scene, Stage},
     welcome::{Button, Frame},
     welcome_view::WelcomeView,
 };
@@ -41,6 +41,7 @@ pub(crate) fn pictures(room: (f32, f32)) -> EnginePictures {
         fonts,
         Some(std::env::temp_dir().join("pm-stage-shader-cache")),
         (f64::from(room.0), f64::from(room.1)),
+        crate::stage_pictures::film(),
     );
     pictures.exact = Some(pump);
     pictures
@@ -83,15 +84,24 @@ pub(crate) fn headless() -> HeadlessAppContext {
     cx.allow_parking();
     cx
 }
-pub(crate) fn open(cx: &mut HeadlessAppContext, tokens: Tokens) -> WindowHandle<Stage> {
+/// The stage with the film: `film` false shows the card alone.
+pub(crate) fn open(cx: &mut HeadlessAppContext, tokens: Tokens, film: bool) -> WindowHandle<Stage> {
     cx.open_window(size(px(ROOM.0), px(ROOM.1)), move |_, cx| {
-        let pictures = pictures(ROOM);
+        let shared =
+            crate::demo_editor::SharedPictures(Rc::new(std::cell::RefCell::new(pictures(ROOM))));
+        let demo: Option<Box<dyn pm_shell::stage::Demo>> = film.then(|| {
+            Box::new(crate::demo_editor::FilmDemo::start(
+                crate::stage_pictures::film(),
+                tokens.clone(),
+                shared.clone(),
+            )) as Box<dyn pm_shell::stage::Demo>
+        });
         let stage = cx.new(|cx| {
             let mut stage = Stage::new(
                 tokens.clone(),
                 CueSheet::default(),
-                Box::new(pictures),
-                true,
+                Box::new(shared),
+                demo,
                 cx,
             );
             stage.clock = Some(0.);
@@ -114,7 +124,10 @@ pub(crate) fn frame_at(
 ) -> image::RgbaImage {
     cx.update_window(window.into(), |view, w, cx| {
         let stage = view.downcast::<Stage>().unwrap();
-        stage.update(cx, |s, _| s.clock = Some(t));
+        stage.update(cx, |s, cx| {
+            s.clock = Some(t);
+            s.settle(cx);
+        });
         w.refresh();
         w.draw(cx).clear(cx);
     })
@@ -147,67 +160,61 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
     }
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut cx = headless();
-    let window = open(&mut cx, tokens.clone());
+    let window = open(&mut cx, tokens.clone(), true);
     let sheet = CueSheet::default();
-    // One still per scene, mid-scene, and mid-wave for each wave.
-    let mut stills = vec![
-        ("0-house-lights", 1.0),
-        ("1-title-card", 3.2),
-        ("2-mark", 6.4),
+    // Named stills along the run, in film order (a beat's change happens
+    // across frames, so the film is never jumped through).
+    let mut stills: Vec<(String, f64)> = vec![
+        ("00-house-lights".into(), 1.0),
+        ("01-mark".into(), 3.0),
+        ("02-fold".into(), 3.7),
+        ("03-composer".into(), 4.6),
+        ("04-editor-arrives".into(), 5.3),
     ];
-    for (i, reel) in Reel::ALL.iter().enumerate() {
-        let at = sheet.start_of(pm_shell::stage::Scene::Reel(*reel)).unwrap();
-        stills.push((
-            ["3-reel-cut", "4-reel-ask", "5-reel-grade", "6-reel-depth"][i],
-            at + 2.2,
-        ));
-        stills.push((
-            [
-                "w1-wave-into-cut",
-                "w2-wave-into-ask",
-                "w3-wave-into-grade",
-                "w4-wave-into-depth",
-            ][i],
-            at - 0.45,
-        ));
+    for (i, change) in Change::ALL.iter().enumerate() {
+        let at = sheet.start_of(Scene::Beat(*change)).unwrap();
+        for (k, (what, dt)) in [
+            ("typing", 0.9),
+            ("working", 1.7),
+            ("wave", 2.4),
+            ("landed", 3.4),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            stills.push((format!("{}{k}-{change:?}-{what}", i + 1), at + dt));
+        }
     }
-    stills.push(("w5-wave-into-card", sheet.length() - 0.45));
-    stills.push(("7-card", sheet.length() + 1.5));
-    for (name, t) in &stills {
-        frame_at(&mut cx, window, t - 1. / 60.);
-        let image = frame_at(&mut cx, window, *t);
-        image.save(out.join(format!("{name}.png"))).unwrap();
-    }
-    if stills_only {
-        return Ok(());
-    }
-    // The whole run at 30 fps, then a step on the card and the hand-off.
-    let fps = 30.;
+    stills.push(("9-card".into(), sheet.length() + 1.5));
+    let fps = if stills_only { 10. } else { 30. };
     let end = sheet.length() + 2.5;
     let first = frame_at(&mut cx, window, 0.);
     let (w, h) = (first.width(), first.height());
-    let mut ffmpeg = std::process::Command::new("ffmpeg")
-        .args([
-            "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
-        ])
-        .arg(format!("{w}x{h}"))
-        .args([
-            "-r", "30", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
-        ])
-        .arg(out.join("stage-run.mp4"))
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .expect("ffmpeg encodes the recording");
-    let mut stdin = ffmpeg.stdin.take().unwrap();
+    let mut ffmpeg = (!stills_only).then(|| {
+        std::process::Command::new("ffmpeg")
+            .args([
+                "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
+            ])
+            .arg(format!("{w}x{h}"))
+            .args([
+                "-r", "30", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            ])
+            .arg(out.join("stage-run.mp4"))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("ffmpeg encodes the recording")
+    });
+    let mut stdin = ffmpeg.as_mut().map(|f| f.stdin.take().unwrap());
     let mut costs = Vec::new();
     let mut n = 0;
     let mut stepped = false;
+    let mut next_still = 0;
     loop {
         let t = n as f64 / fps;
         if t > end + 3. {
             break;
         }
-        if t >= sheet.length() + 1.2 && !stepped {
+        if !stills_only && t >= sheet.length() + 1.2 && !stepped {
             stepped = true;
             cx.update_window(window.into(), |view, _, cx| {
                 let stage = view.downcast::<Stage>().unwrap();
@@ -224,7 +231,7 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
             })
             .unwrap();
         }
-        if (t - end).abs() < 0.5 / fps {
+        if !stills_only && (t - end).abs() < 0.5 / fps {
             cx.update_window(window.into(), |view, _, cx| {
                 let stage = view.downcast::<Stage>().unwrap();
                 stage.update(cx, |s, cx| {
@@ -237,18 +244,28 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
         let started = Instant::now();
         let image = frame_at(&mut cx, window, t);
         costs.push(started.elapsed().as_secs_f64() * 1e3);
-        use std::io::Write;
-        stdin.write_all(image.as_raw()).unwrap();
+        while next_still < stills.len() && stills[next_still].1 <= t + 0.5 / fps {
+            image.save(out.join(format!("{}.png", stills[next_still].0)))?;
+            next_still += 1;
+        }
+        if let Some(stdin) = stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(image.as_raw())?;
+        }
         n += 1;
+        if stills_only && next_still >= stills.len() {
+            break;
+        }
     }
     drop(stdin);
-    assert!(ffmpeg.wait().unwrap().success());
+    if let Some(mut ffmpeg) = ffmpeg {
+        anyhow::ensure!(ffmpeg.wait()?.success(), "ffmpeg failed");
+    }
     costs.sort_by(f64::total_cmp);
     eprintln!(
-        "recorded {n} frames; offscreen frame incl. exact engine wait and readback: p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms",
+        "{n} frames; offscreen frame incl. exact waits and readback: p50 {:.1} ms, p95 {:.1} ms",
         costs[costs.len() / 2],
         costs[costs.len() * 95 / 100],
-        costs[costs.len() - 1]
     );
     Ok(())
 }
@@ -258,15 +275,8 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
 fn time_the_stage_pictures() {
     let mut pictures = pictures(ROOM);
     pictures.measure = true;
-    let screen = Stage::screen(size(px(ROOM.0), px(ROOM.1)));
-    let reel_px = (
-        (f32::from(screen.size.width) * 2.) as u32,
-        (f32::from(screen.size.height) * 2.) as u32,
-    );
     let room_px = ((ROOM.0 * 2. * 0.5) as u32, (ROOM.1 * 2. * 0.5) as u32);
-    let what: Vec<(Picture, (u32, u32))> = std::iter::once((Picture::Backdrop, room_px))
-        .chain(Reel::ALL.iter().map(|r| (Picture::Reel(*r), reel_px)))
-        .collect();
+    let what = [(Picture::Backdrop, room_px), (Picture::Viewer, (1280, 720))];
     for (picture, px_) in what {
         for i in 0..90 {
             let _ = pictures.picture(picture, i as f64 / 120. * 3., px_);

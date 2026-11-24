@@ -3,8 +3,8 @@
 //! else for timing. Pure data, so the film is tested without a screen.
 //!
 //! Music: `CueSheet::music` names the licensed track's slot; the default is
-//! silent. The sheet is cut for a 22 s piece at 100 BPM in 4/4 (one bar is
-//! 2.4 s); `retimed` scales it to another tempo.
+//! silent. The sheet is cut for a 20 s piece at 100 BPM in 4/4 (one bar is
+//! 2.4 s; each change takes a bar and a half); `retimed` scales it.
 use pm_wave::WaveType;
 
 /// One picture on the stage, in film order.
@@ -12,30 +12,51 @@ use pm_wave::WaveType;
 pub enum Scene {
     /// The desktop dims under a black veil; nothing else yet.
     HouseLights,
-    /// Crop marks draw out from the centre, the timecode starts, one line.
-    TitleCard,
     /// Light gathers and the mark resolves out of it.
     Mark,
-    /// The engine's reels, each a composition rendered live.
-    Reel(Reel),
+    /// The mark folds into the agent's composer, alone on the stage.
+    Composer,
+    /// The real editor, and one change asked for in the composer: typed,
+    /// sent, and carried onto the surface it changes by the wave.
+    Beat(Change),
     /// The calm card with one primary action; the first-run steps live here.
     Card,
 }
+/// The changes the film asks the agent for, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Reel {
-    Cut,
-    Ask,
-    Grade,
-    Depth,
+pub enum Change {
+    GlassTimeline,
+    LightLeak,
+    BeatMarkers,
+    ClassicLayout,
 }
-impl Reel {
-    pub const ALL: [Reel; 4] = [Reel::Cut, Reel::Ask, Reel::Grade, Reel::Depth];
+impl Change {
+    pub const ALL: [Change; 4] = [
+        Change::GlassTimeline,
+        Change::LightLeak,
+        Change::BeatMarkers,
+        Change::ClassicLayout,
+    ];
+    /// What is typed into the composer. OWNER-COPY: the prompts.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Change::GlassTimeline => "Make the timeline feel like glass",
+            Change::LightLeak => "Write me a light-leak transition",
+            Change::BeatMarkers => "Build me a beat-markers panel",
+            Change::ClassicLayout => "Put my tools where After Effects had them",
+        }
+    }
+    /// How many changes come before this one.
+    pub fn index(self) -> usize {
+        Change::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    }
 }
 /// How a scene leaves for the next.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transition {
-    /// Light falls and rises again: the picture fades through black.
-    Dip { seconds: f64 },
+    /// The mark folds into the composer over `seconds` (drawn, no wave:
+    /// one object changing shape).
+    Fold { seconds: f64 },
     /// The distortion wave across the whole picture, from the frozen
     /// outgoing frame into the first frame of the next scene.
     Wave(WaveType),
@@ -68,7 +89,7 @@ pub struct Music {
 pub struct CueSheet {
     pub cues: Vec<Cue>,
     pub sounds: Vec<Sound>,
-    /// OWNER: a licensed track goes here (22 s at 100 BPM, 4/4, with a bed
+    /// OWNER: a licensed track goes here (20 s at 100 BPM, 4/4, with a bed
     /// that can loop under the card). `None` is the silent default.
     pub music: Option<Music>,
     /// The tempo the times below are cut to.
@@ -92,36 +113,36 @@ impl Default for CueSheet {
         Self {
             cues: vec![
                 cue(0.0, HouseLights, None, "Powermove"),
-                cue(1.4, TitleCard, Some(Dip { seconds: 0.6 }), "Powermove"),
-                cue(4.4, Mark, Some(Wave(WaveType::Center)), "Powermove"),
+                cue(1.4, Mark, Some(Fold { seconds: 0.8 }), "Powermove"),
+                cue(4.0, Composer, Some(Wave(WaveType::Center)), "Your agent"),
                 cue(
-                    7.6,
-                    Reel(self::Reel::Cut),
-                    Some(Wave(WaveType::Vertical)),
-                    "Cut on the beat",
+                    5.6,
+                    Beat(Change::GlassTimeline),
+                    None,
+                    Change::GlassTimeline.prompt(),
                 ),
                 cue(
-                    11.2,
-                    Reel(self::Reel::Ask),
-                    Some(Wave(WaveType::Horizontal)),
-                    "Ask for an effect",
+                    9.2,
+                    Beat(Change::LightLeak),
+                    None,
+                    Change::LightLeak.prompt(),
                 ),
                 cue(
-                    14.8,
-                    Reel(self::Reel::Grade),
-                    Some(Wave(WaveType::Vertical)),
-                    "Grade the picture",
+                    12.8,
+                    Beat(Change::BeatMarkers),
+                    None,
+                    Change::BeatMarkers.prompt(),
                 ),
                 cue(
-                    18.4,
-                    Reel(self::Reel::Depth),
+                    16.4,
+                    Beat(Change::ClassicLayout),
                     Some(Wave(WaveType::Center)),
-                    "Move in depth",
+                    Change::ClassicLayout.prompt(),
                 ),
-                cue(22.0, Card, None, "Welcome to Powermove"),
+                cue(20.0, Card, None, "Welcome to Powermove"),
             ],
             sounds: vec![Sound {
-                at: 4.4,
+                at: 1.4,
                 id: "chime",
             }],
             music: None,
@@ -171,7 +192,7 @@ impl CueSheet {
     /// How long a transition runs before the next cue.
     pub fn span(&self, out: Transition) -> f64 {
         match out {
-            Transition::Dip { seconds } => seconds,
+            Transition::Fold { seconds } => seconds,
             Transition::Wave(_) => self.wave_seconds,
         }
     }
@@ -185,7 +206,7 @@ impl CueSheet {
         let mut sheet = self.clone();
         for cue in &mut sheet.cues {
             cue.at *= k;
-            if let Some(Transition::Dip { seconds }) = &mut cue.out {
+            if let Some(Transition::Fold { seconds }) = &mut cue.out {
                 *seconds *= k;
             }
         }
@@ -212,11 +233,10 @@ mod tests {
         let sheet = CueSheet::default();
         assert!(sheet.cues.windows(2).all(|w| w[0].at < w[1].at));
         assert_eq!(sheet.cues.last().unwrap().scene, Scene::Card);
-        assert_eq!(sheet.length(), 22.);
-        for reel in Reel::ALL {
-            assert!(sheet.start_of(Scene::Reel(reel)).is_some());
+        assert_eq!(sheet.length(), 20.);
+        for change in Change::ALL {
+            assert!(sheet.start_of(Scene::Beat(change)).is_some());
         }
-        // Every transition fits inside its scene.
         for pair in sheet.cues.windows(2) {
             if let Some(out) = pair[0].out {
                 assert!(sheet.span(out) < pair[1].at - pair[0].at);
@@ -226,13 +246,11 @@ mod tests {
     #[test]
     fn positions_report_the_transition_running_out_of_a_scene() {
         let sheet = CueSheet::default();
-        let p = sheet.at(9.0);
-        assert_eq!(p.scene, Scene::Reel(Reel::Cut));
+        let p = sheet.at(4.5);
+        assert_eq!(p.scene, Scene::Composer);
         assert!(p.leaving.is_none());
-        // The Cut reel's wave starts 1.1 s before the Ask reel's cue.
-        let p = sheet.at(11.2 - 0.55);
-        let (out, progress) = p.leaving.unwrap();
-        assert_eq!(out, Transition::Wave(WaveType::Vertical));
+        let (out, progress) = sheet.at(5.6 - 0.55).leaving.unwrap();
+        assert_eq!(out, Transition::Wave(WaveType::Center));
         assert!((progress - 0.5).abs() < 1e-9);
         let p = sheet.at(100.);
         assert_eq!(p.scene, Scene::Card);
@@ -244,14 +262,13 @@ mod tests {
         let sheet = CueSheet::default();
         assert!(sheet.music.is_none());
         let fast = sheet.retimed(120.);
-        assert!((fast.length() - 22. * 100. / 120.).abs() < 1e-9);
-        assert!((fast.sounds[0].at - 4.4 * 100. / 120.).abs() < 1e-9);
-        assert_eq!(fast.cues.len(), sheet.cues.len());
+        assert!((fast.length() - 20. * 100. / 120.).abs() < 1e-9);
+        assert!((fast.sounds[0].at - 1.4 * 100. / 120.).abs() < 1e-9);
     }
     #[test]
     fn sounds_fire_once_between_two_frames() {
         let sheet = CueSheet::default();
-        assert_eq!(sheet.sounds_between(4.39, 4.41).count(), 1);
-        assert_eq!(sheet.sounds_between(4.41, 4.42).count(), 0);
+        assert_eq!(sheet.sounds_between(1.39, 1.41).count(), 1);
+        assert_eq!(sheet.sounds_between(1.41, 1.42).count(), 0);
     }
 }
