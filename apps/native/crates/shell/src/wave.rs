@@ -172,19 +172,28 @@ impl WaveState {
         self.set_revealed(false, window);
     }
     pub fn reset(&mut self, window: &mut Window) {
-        self.clock.reset();
-        self.release();
-        self.prepare = false;
+        self.clear();
         window.refresh();
     }
     pub fn scrub(&mut self, progress: f64, window: &mut Window) -> Result<(), ValidationError> {
+        self.seek(progress)?;
+        window.refresh();
+        Ok(())
+    }
+    /// `scrub` from inside a render: the caller is drawing this frame.
+    pub fn seek(&mut self, progress: f64) -> Result<(), ValidationError> {
         self.clock.scrub(progress)?;
         self.last_tick = None;
         if self.progress() <= 0. || self.progress() >= 1. {
             self.release();
         }
-        window.refresh();
         Ok(())
+    }
+    /// `reset` from inside a render.
+    pub fn clear(&mut self) {
+        self.clock.reset();
+        self.release();
+        self.prepare = false;
     }
     /// Captures both children on the next paint, even while idle.
     pub fn prepare(&mut self, window: &mut Window) {
