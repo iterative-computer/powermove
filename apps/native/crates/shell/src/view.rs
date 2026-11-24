@@ -4742,6 +4742,7 @@ impl Editor {
                 let id = self.layout.docks[p.dock].groups[p.group]
                     .active()
                     .to_string();
+                let panel_hover = self.area_hover.as_ref().is_some_and(|(h, _)| h == &id);
                 for (i, corner) in crate::area::Corner::ALL.into_iter().enumerate() {
                     let corner_rect = self.geometry.side_docks.get(&p.dock)
                         .map_or(corner.rect(p.rect), |clip| corner.rect(p.rect).intersection(*clip));
@@ -4750,7 +4751,13 @@ impl Editor {
                         .area_hover
                         .as_ref()
                         .is_some_and(|(h, c)| h == &id && *c == Some(corner));
-                    let goal = if active { 1. } else { 0. };
+                    let goal = if active {
+                        1.
+                    } else if panel_hover {
+                        0.7
+                    } else {
+                        0.
+                    };
                     let fade = w
                         .use_keyed_transition(
                             format!("area-fade-{id}-{i}"),
@@ -4761,13 +4768,11 @@ impl Editor {
                         .with_easing(|p| 1. - (1. - p).powi(3));
                     fade.update(cx, |value, _| *value = goal);
                     let opacity = *fade.evaluate(w, cx);
-                    let ink = tint(c.accent, opacity);
-                    let panel_rect = p.rect;
-                    let panel_radius = pm_design::corner::fit(
-                        f64::from(m.panel_radius),
-                        f64::from(panel_rect.w),
-                        f64::from(panel_rect.h),
-                    );
+                    let ink = if active {
+                        tint(c.accent, opacity)
+                    } else {
+                        tint(c.text, 0.34 * opacity)
+                    };
                     let id_down = id.clone();
                     root = root.child(
                         positioned(corner_rect)
@@ -4777,44 +4782,24 @@ impl Editor {
                             .child(
                                 canvas(
                                     move |_, _, _| (),
-                                    move |_, _, window, _| {
-                                        if opacity <= 0.001 {
-                                            return;
-                                        }
-                                        // Trace an accent arc inside the panel's continuous
-                                        // rounded corner so the grip never pokes outside the
-                                        // panel silhouette into the dock gutter.
-                                        let inset = 1.5_f64;
-                                        let r = (panel_radius - inset).max(2.0);
-                                        let cx = if corner.left() {
-                                            f64::from(panel_rect.x) + inset
-                                        } else {
-                                            f64::from(panel_rect.x + panel_rect.w) - inset
-                                        };
-                                        let cy = if corner.top() {
-                                            f64::from(panel_rect.y) + inset
-                                        } else {
-                                            f64::from(panel_rect.y + panel_rect.h) - inset
-                                        };
-                                        let ax = if corner.left() { 1.0 } else { -1.0 };
-                                        let by = if corner.top() { 1.0 } else { -1.0 };
-                                        let (_, curves) = pm_design::corner::continuous_corner(
-                                            (cx, cy),
-                                            (ax, 0.0),
-                                            (0.0, by),
-                                            r,
-                                        );
-                                        // Draw the curved middle segment hugging the corner.
-                                        let at = |(px_x, px_y): (f64, f64)| {
-                                            point(px(px_x as f32), px(px_y as f32))
-                                        };
-                                        let mut path = PathBuilder::stroke(px(2.));
-                                        path.move_to(at(curves[0][2]));
-                                        path.cubic_bezier_to(
-                                            at(curves[1][2]),
-                                            at(curves[1][0]),
-                                            at(curves[1][1]),
-                                        );
+                                    move |b, _, window, _| {
+                                        let x = f32::from(b.origin.x) + 2.;
+                                        let y = f32::from(b.origin.y) + 2.;
+                                        // CSS 7px square with a diagonal 30% (34% on hover) stop.
+                                        let leg = 7. * 2. * if active { 0.34 } else { 0.30 };
+                                        let x = if corner.left() { x } else { x + 7. };
+                                        let y = if corner.top() { y } else { y + 7. };
+                                        let mut path = PathBuilder::fill();
+                                        path.move_to(point(px(x), px(y)));
+                                        path.line_to(point(
+                                            px(x + if corner.left() { leg } else { -leg }),
+                                            px(y),
+                                        ));
+                                        path.line_to(point(
+                                            px(x),
+                                            px(y + if corner.top() { leg } else { -leg }),
+                                        ));
+                                        path.close();
                                         if let Ok(path) = path.build() {
                                             window.paint_path(path, ink);
                                         }
