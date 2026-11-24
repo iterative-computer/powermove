@@ -6497,7 +6497,9 @@ impl Render for SurfaceView {
                             "natural": height, "demand": demand, "fit": fit}));
                     }
                     if changed || column_changed {
-                        window.refresh();
+                        // Prepaint is still drawing. Refresh the whole window
+                        // on the next frame so the shell can use the new demand.
+                        window.on_next_frame(|window, _| window.refresh());
                     }
                 })
         } else {

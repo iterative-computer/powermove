@@ -824,7 +824,7 @@ impl Panel {
                 pm_agents::Event::Progress { text, .. } => Some(Update::Progress(text.clone())),
                 pm_agents::Event::Completed { result, .. } => Some(match result {
                     pm_agents::RunResult::Success { text, .. } => Update::Complete {
-                        text: pm_agents::launch::reply_text(text),
+                        text: text.clone(),
                         error: false,
                         cancelled: false,
                     },
@@ -1634,21 +1634,14 @@ impl Panel {
                 } else {
                     Value::Null
                 };
-                // The reply is shown once: a run that streamed it (the app
-                // server) already has it in its trail; a run that only
-                // returns it at the end (Codex exec in Auto/Supervised) has
-                // only its earlier notes there, so the reply is appended.
+                // Use the same settled prose here and in the archived trail
+                // so escaping and hidden placement metadata cannot duplicate it.
+                let text = if error { text } else { pm_agents::launch::reply_text(&text) };
+                let reply = crate::placement::split(&text, false).text;
                 let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
-                let streamed = flat(
-                    &s.trace
-                        .rows
-                        .values()
-                        .filter(|v| v["kind"] == "text")
-                        .filter_map(|v| v["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
-                let spoke = !flat(&text).is_empty() && streamed.contains(&flat(&text))
+                let streamed = flat(&s.trace.settled_answers().collect::<Vec<_>>().join(" "));
+                let final_answer = flat(&reply);
+                let spoke = !final_answer.is_empty() && streamed.contains(&final_answer)
                     || text.trim().is_empty() && !streamed.is_empty();
                 s.archive_trace(now, false)?;
                 let held: Vec<_> = s

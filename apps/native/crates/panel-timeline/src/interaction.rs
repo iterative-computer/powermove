@@ -1147,6 +1147,12 @@ pub enum DragKind {
         edge: crate::render::Edge,
     },
 }
+impl DragKind {
+    pub fn is_strip_trim(&self) -> bool {
+        matches!(self, Self::TrimIn { .. } | Self::TrimOut { .. })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DragSample {
     pub time_delta: f64,

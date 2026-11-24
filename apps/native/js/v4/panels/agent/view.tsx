@@ -862,6 +862,7 @@ function Trigger({
   open,
   tone = "colors.secondary",
   fixed,
+  compact = false,
 }: {
   id: string;
   label: string;
@@ -871,6 +872,7 @@ function Trigger({
   tone?: string;
   /** A short label (an effort) keeps its width; the model's name gives way. */
   fixed?: boolean;
+  compact?: boolean;
 }) {
   return (
     <UI.ToolbarItem
@@ -885,8 +887,8 @@ function Trigger({
         ...row,
         ...(fixed ? { flexShrink: 0 } : shrink),
         gap: t("metrics.pill_inset"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: t(compact ? "metrics.pill_inset" : "metrics.gap"),
+        paddingRight: t(compact ? "metrics.pill_inset" : "metrics.gap"),
         borderRadius: t("metrics.inner_radius"),
         color: t(tone),
       }}
@@ -922,6 +924,7 @@ function Picker({
   icon,
   title,
   open,
+  flexible = false,
 }: {
   id: string;
   label: string;
@@ -929,6 +932,7 @@ function Picker({
   disabled: boolean;
   opened: boolean;
   icon?: string;
+  flexible?: boolean;
   title: string;
   open: (anchor: number) => void;
 }) {
@@ -956,20 +960,27 @@ function Picker({
       style={{
         ...target,
         ...row,
-        ...shrink,
+        ...(flexible ? shrink : { flexShrink: 0 }),
         gap: t("metrics.pill_inset"),
         height: t("metrics.control"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: t("metrics.pill_inset"),
+        paddingRight: t("metrics.pill_inset"),
         ...(opened || !icon ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
-        borderRadius: t("metrics.control_radius"),
+        borderRadius: t("metrics.panel_radius"),
         color: ink,
       }}
     >
       {icon && <div metadata={{ symbol: icon }} style={{
         flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
       }} />}
-      <text metadata={{ wordEllipsis: true }} style={{ ...quiet, ...shrink, color: ink, whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+      <text
+        style={{
+          ...quiet,
+          ...(flexible ? { ...shrink, textOverflow: "ellipsis" } : { flexShrink: 0 }),
+          color: ink,
+          whiteSpace: "nowrap",
+        }}
+      >
         {text}
       </text>
       <div metadata={{ symbol: "chevron.up.chevron.down" }} style={{
@@ -1006,8 +1017,10 @@ function Header({
         flexShrink: 0,
         gap: t("metrics.pill_inset"),
         height: t("metrics.header"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        ...(popover ? {
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        } : {}),
       }}
     >
       <Trigger
@@ -1019,6 +1032,8 @@ function Header({
         }
         // Docked, the trigger names the list and the tab keeps its name.
         text={popover ? title : "Threads"}
+        compact={!popover}
+        fixed={!popover}
         tone="colors.text"
         disabled={!menu || blocked}
         open={(anchor) => {
@@ -1058,7 +1073,7 @@ function Header({
           });
         }}
       />
-      <div style={{ flexGrow: 1 }} />
+      {popover && <div style={{ flexGrow: 1 }} />}
       <UI.ToolbarItem
         id="agent-new"
         label="New Thread"
@@ -3109,14 +3124,15 @@ function Composer({
         id="agent-options"
         style={{
           ...row,
-          gap: t("metrics.gap"),
+          gap: t("metrics.pill_inset"),
           height: t("metrics.control"),
-          paddingLeft: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
+          paddingLeft: t("metrics.pill_inset"),
+          paddingRight: t("metrics.pill_inset"),
         }}
       >
         <Picker
           id="agent-model"
+          flexible
           title="Model"
           label={`Model, ${modelName}`}
           text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}

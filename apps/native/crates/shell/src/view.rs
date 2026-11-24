@@ -182,6 +182,7 @@ pub struct Editor {
     resize_live: bool,
     resize_geometry: Option<Geometry>,
     tab_scrolls: HashMap<String, TabScroll>,
+    header_tools_widths: Rc<RefCell<HashMap<String, f32>>>,
     #[cfg(test)]
     rendered_tab_labels: HashMap<(usize, usize), Vec<RenderedTabLabel>>,
     deferred_panel_commands: Vec<String>,
@@ -337,6 +338,7 @@ impl Editor {
             resize_live: false,
             resize_geometry: None,
             tab_scrolls: HashMap::new(),
+            header_tools_widths: Rc::default(),
             #[cfg(test)]
             rendered_tab_labels: HashMap::new(),
             deferred_panel_commands: Vec::new(),
@@ -1820,6 +1822,8 @@ impl Editor {
             // This window was brought forward in its tab group: draw again,
             // which publishes the strip for the new selection.
             "shellTabShown" => {}
+            // AppKit may move the full-screen toolbar without a window resize.
+            "shellFullscreenChanged" => {}
             // A theme from the theme pipeline: args[0] is its JSON output.
             "shellTheme" => {
                 let json = cmd.args.first().map(|v| match v {
@@ -2810,6 +2814,19 @@ fn measure_tab_text(text: &str, size: f32, weight: FontWeight, window: &Window) 
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
+// The docked trigger has a label, a chevron and two insets; the new-thread
+// button keeps its whole hit target. Round up for the native text layout.
+fn agent_header_width(label: f32, m: &pm_design::Metrics) -> f32 {
+    label.ceil() + m.symbol_inline + 4. * m.pill_inset + m.hit
+}
+
+fn tab_viewport_width(width: f32, tools: f32, restore: bool, t: &Tokens) -> f32 {
+    let m = &t.metrics;
+    let gaps = 1 + usize::from(tools > 0.) + usize::from(restore);
+    let reserved = tools + m.hit + if restore { m.symbol_inline } else { 0. };
+    (width - reserved - t.space.xs * gaps as f32 - t.space.hair).max(0.)
+}
+
 /// Measure the string that will actually paint so adjacent labels can keep
 /// the same gap even when a tab has room left over after truncation.
 fn tab_label(title: &str, natural: f32, room: f32, measure: impl Fn(&str) -> f32) -> (String, f32) {
@@ -3815,6 +3832,9 @@ impl Editor {
                 .flex_none()
                 .pl(px(m.inset))
                 .pr(px(m.gap))
+                .rounded_t(px(m.panel_radius))
+                .rounded_smoothing(t.radius.smoothing)
+                .overflow_hidden()
                 // The native viewer body has no panel fill, and the timeline paints
                 // its own ground: their headers carry the material.
                 .when(
@@ -3863,12 +3883,31 @@ impl Editor {
                 // Quiet text tabs (language §9): the active title in `text`, the
                 // rest in `muted`; a pill appears only on hover. The whole tab is
                 // the drag handle. A single panel shows its title the same way.
-                let tools = if custom.is_some() { 2. * m.hit + m.gap }
-                    else if is_viewer { 0. } else { m.hit };
-                let restore = self.maximized_panel.is_some();
-                let controls = 1 + usize::from(tools > 0.) + usize::from(restore);
-                let reserved = tools + m.hit + if restore { m.symbol_inline } else { 0. };
-                let viewport = (p.rect.w - reserved - t.space.xs * controls as f32 - t.space.hair).max(0.);
+                let tools = if custom.is_some() {
+                    self.header_tools_widths
+                        .borrow()
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            if id == "agent" {
+                                let label = measure_tab_text(
+                                    "Threads",
+                                    t.typography.body,
+                                    FontWeight::NORMAL,
+                                    w,
+                                );
+                                agent_header_width(label, &m)
+                            } else {
+                                2. * m.hit + m.gap
+                            }
+                        })
+                } else if is_viewer {
+                    0.
+                } else {
+                    m.hit
+                };
+                let viewport =
+                    tab_viewport_width(p.rect.w, tools, self.maximized_panel.is_some(), &t);
                 let gaps = TAB_SPACING * tabs.len().saturating_sub(1) as f32;
                 let track = group.tab_track(viewport - gaps, &widths);
                 let scrolling = multi && track.scroll > 0.;
@@ -4094,7 +4133,9 @@ impl Editor {
                         .id(format!("tab-strip-{}-{}", p.dock, p.group))
                         .relative()
                         .w(px(viewport))
-                        .flex_none()
+                        .min_w(px(0.))
+                        .flex_shrink(1.)
+                        .overflow_hidden()
                         .h(px(m.hit))
                         .child(
                             div()
@@ -4206,7 +4247,20 @@ impl Editor {
             if let Some(custom) = custom {
                 header = header.child(
                     div()
-                        .when(multi, |d| d.flex_none())
+                        .when(multi, |d| {
+                            let widths = self.header_tools_widths.clone();
+                            let id = id.clone();
+                            d.flex_none()
+                                .ml_auto()
+                                .on_children_prepainted(move |children, w, _| {
+                                    if let Some(bounds) = children.first() {
+                                        let width = f32::from(bounds.size.width).ceil();
+                                        if widths.borrow_mut().insert(id.clone(), width) != Some(width) {
+                                            w.on_next_frame(|w, _| w.refresh());
+                                        }
+                                    }
+                                })
+                        })
                         .when(!multi, |d| d.flex_1().min_w(px(0.)))
                         .h_full()
                         .child(custom),
@@ -4427,6 +4481,9 @@ impl Editor {
         // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
         // momentum still move the column; no idle scrollbar timer is needed.
         self.tab_scrolls.retain(|id, _| self.layout.find(id).is_some());
+        self.header_tools_widths
+            .borrow_mut()
+            .retain(|id, _| self.layout.find(id).is_some());
         self.geometry.tabs = tab_spans;
         if !dragging && self.tab_slides.end() {
             w.request_animation_frame();
@@ -5582,7 +5639,7 @@ mod keyboard_tests {
             .update(&mut cx, |v, w, cx| {
                 assert_eq!(
                     v.panel_order,
-                    ["assets", "viewer", "inspector", "timeline", "fxbrowser"]
+                    ["assets", "viewer", "inspector", "fxbrowser", "timeline"]
                 );
                 let order = v.panel_order.clone();
                 for id in order.iter().chain(order.iter().take(1)) {
@@ -5605,7 +5662,7 @@ mod keyboard_tests {
             .update(&mut cx, |v, w, cx| {
                 assert!(!v.panel_order.iter().any(|id| id == "fxbrowser"));
                 v.command(command("shellPanelPrevious"), w, cx);
-                assert!(v.panel_focus["inspector"].is_focused(w));
+                assert!(v.panel_focus["easing"].is_focused(w));
             })
             .unwrap();
     }

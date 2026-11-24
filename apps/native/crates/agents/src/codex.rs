@@ -72,6 +72,76 @@ impl Project {
 fn empty_config() -> Value {
     json!({"mcp_servers":{}})
 }
+/// One App Server message can be plain prose or a schema-wrapped reply.
+#[derive(Clone)]
+enum ReplyStream {
+    Prefix { raw: String, matched: usize },
+    Plain,
+    Reply { escape: String },
+    Done,
+}
+
+impl Default for ReplyStream {
+    fn default() -> Self {
+        Self::Prefix { raw: String::new(), matched: 0 }
+    }
+}
+
+impl ReplyStream {
+    fn push(&mut self, delta: &str) -> String {
+        const PREFIX: &[u8] = b"{\"reply\":\"";
+        let mut output = String::new();
+        for (offset, ch) in delta.char_indices() {
+            match self {
+                Self::Prefix { raw, matched } => {
+                    if matches!(*matched, 0 | 1 | 8 | 9) && matches!(ch, ' ' | '\n' | '\r' | '\t') {
+                        raw.push(ch);
+                    } else if ch == char::from(PREFIX[*matched]) {
+                        raw.push(ch);
+                        *matched += 1;
+                        if *matched == PREFIX.len() {
+                            *self = Self::Reply { escape: String::new() };
+                        }
+                    } else {
+                        output.push_str(raw);
+                        output.push_str(&delta[offset..]);
+                        *self = Self::Plain;
+                        break;
+                    }
+                }
+                Self::Plain => {
+                    output.push_str(&delta[offset..]);
+                    break;
+                }
+                Self::Reply { escape } if !escape.is_empty() => {
+                    escape.push(ch);
+                    let digits = escape.strip_prefix("\\u");
+                    let ready = match digits {
+                        None => true,
+                        Some(digits) if digits.len() == 4 => !u16::from_str_radix(digits, 16)
+                            .is_ok_and(|code| (0xd800..=0xdbff).contains(&code)),
+                        Some(digits) => digits.len() >= 10,
+                    };
+                    if ready {
+                        // Let the JSON decoder handle the escape and UTF-16 pair.
+                        if let Ok(text) = serde_json::from_str::<String>(&format!("\"{escape}\"")) {
+                            output.push_str(&text);
+                        }
+                        escape.clear();
+                    }
+                }
+                Self::Reply { escape } => match ch {
+                    '\\' => escape.push(ch),
+                    '"' => *self = Self::Done,
+                    _ => output.push(ch),
+                },
+                Self::Done => break,
+            }
+        }
+        output
+    }
+}
+
 #[derive(Clone)]
 struct Turn {
     run: Run,
@@ -79,6 +149,7 @@ struct Turn {
     turn: Option<String>,
     final_text: String,
     streamed: BTreeSet<String>,
+    reply_streams: BTreeMap<String, ReplyStream>,
     unscoped: bool,
     question_messages: BTreeSet<String>,
     questions: BTreeMap<String, Value>,
@@ -165,6 +236,7 @@ impl Client {
                 turn: None,
                 final_text: String::new(),
                 streamed: BTreeSet::new(),
+                reply_streams: BTreeMap::new(),
                 unscoped: false,
                 question_messages: BTreeSet::new(),
                 questions: BTreeMap::new(),
@@ -687,16 +759,16 @@ impl Client {
             if t.question_messages.contains(&item) {
                 return;
             }
-            if item.is_empty() {
-                t.unscoped = true;
-            } else {
-                t.streamed.insert(item);
-            }
-            if p["delta"].is_string() {
-                e.trace(
-                    &id,
-                    json!({"kind":"answer","text":crate::trace::fragment(&p["delta"])}),
-                );
+            if let Some(delta) = p["delta"].as_str() {
+                let prose = t.reply_streams.entry(item.clone()).or_default().push(delta);
+                if !prose.is_empty() {
+                    if item.is_empty() {
+                        t.unscoped = true;
+                    } else {
+                        t.streamed.insert(item);
+                    }
+                    e.trace(&id, json!({"kind":"answer","text":prose}));
+                }
             }
             return;
         }
@@ -731,14 +803,15 @@ impl Client {
                     return;
                 }
                 if method_is(m, "item/completed") && item["text"].is_string() {
+                    t.reply_streams.remove(&iid);
                     if item["delivery"] != "async" {
                         t.final_text = text(item, "text");
                     }
                     if !t.unscoped && !t.streamed.contains(&iid) {
-                        e.trace(
-                            &id,
-                            json!({"kind":"answer","text":crate::trace::fragment(&item["text"])}),
-                        );
+                        let prose = crate::launch::reply_text(&text(item, "text"));
+                        if !prose.is_empty() {
+                            e.trace(&id, json!({"kind":"answer","text":prose}));
+                        }
                     }
                 }
             } else if let Some(trace) = tool_trace(item, method_is(m, "item/completed")) {
@@ -972,4 +1045,29 @@ fn approval_response(a: &Approval, allowed: bool) -> Value {
         (false, false) => json!({"decision":"decline"}),
     };
     json!({"id":a.rpc,"result":result})
+}
+
+
+#[cfg(test)]
+#[test]
+fn reply_stream_hides_the_envelope_and_decodes_escapes_at_every_chunk_boundary() {
+    let encoded = r#" { "reply" : "Hello\n\n\"PM\"\u2014\uD83D\uDE80\\\/\b\f\r\t日本" }"#;
+    let expected = "Hello\n\n\"PM\"—🚀\\/\u{8}\u{c}\r\t日本";
+    let mut stream = ReplyStream::default();
+    let output: String = encoded.chars().map(|ch| stream.push(ch.encode_utf8(&mut [0; 4]))).collect();
+    assert_eq!(output, expected);
+
+    let mut stream = ReplyStream::default();
+    assert_eq!(stream.push(r#"{"rep"#), "");
+    assert_eq!(stream.push(r#"ly":"Here \uD83D\"#), "Here ");
+    assert_eq!(stream.push(r#"uDE80"}"#), "🚀");
+}
+
+#[cfg(test)]
+#[test]
+fn reply_stream_passes_plain_text_without_losing_a_partial_prefix() {
+    let mut stream = ReplyStream::default();
+    assert_eq!(stream.push("  {"), "");
+    assert_eq!(stream.push("\"other\": 1}"), "  {\"other\": 1}");
+    assert_eq!(stream.push("\nPlain text"), "\nPlain text");
 }

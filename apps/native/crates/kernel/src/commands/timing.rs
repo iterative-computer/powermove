@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use pm_model::{Map, Value};
+use pm_model::{Document, Map, Node, Value};
 
 use super::{Cx, channels, comps, layers, new_id, track, values};
 use crate::error::CommandError;
@@ -513,15 +513,43 @@ fn duplicate_precomp_source(
     Ok(())
 }
 
+/// Apply one strip-trim sample in a private scratch document. Each command
+/// sees the earlier writes, including track pinning and legacy group spans.
+pub fn preview_strip_trim(
+    root: &Node,
+    revision: u64,
+    origin: super::Origin,
+    commands: &[super::Command],
+) -> Result<Document, CommandError> {
+    let mut cx = Cx::new_at(root, origin, revision);
+    for command in commands {
+        match command {
+            super::Command::Timing(
+                timing @ (TimingCommand::TrimIn { .. }
+                    | TimingCommand::TrimOut { .. }
+                    | TimingCommand::PinTracks { .. }),
+            ) => timing.plan(&mut cx)?,
+            _ => return Err(CommandError::Invalid("Expected a strip trim.".into())),
+        }
+    }
+    Ok(cx.into_document())
+}
+
 /// Trim only the requested layers at this time, skipping locked layers.
 fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
-    let mut targets = Vec::new();
+    let locations = (layer_ids.len() > 1).then(|| crate::model::find_layers(cx.root(), layer_ids));
+    let mut targets = Vec::with_capacity(layer_ids.len());
     for id in layer_ids {
-        let (loc, layer) = cx.layer(id)?;
+        let loc = match &locations {
+            Some(locations) => locations.get(id.as_str()).cloned()
+                .ok_or_else(|| CommandError::LayerNotFound(id.clone()))?,
+            None => cx.find(id)?,
+        };
         if cx.check_lock(&loc, id).is_err() {
             continue;
         }
+        let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = values::num(&layer, "dur").unwrap_or(0.0);
         let (from, dur) = if values::text(&layer, "type") == Some("group") && dur <= 0. {
@@ -539,27 +567,31 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
                 "Trim refused: the playhead must leave at least one frame in the clip.".into(),
             ));
         }
-        let mut next = layer.clone();
         if start {
             let mut nf = time.min(from + dur - 1.0 / fps);
             if is_timed(&layer) {
                 nf = nf.max(earliest_start(&layer));
             }
-            next = cut_head(&layer, next, nf);
+            let mut next = cut_head(&layer, layer.clone(), nf);
             values::obj(&mut next).insert("dur", Value::Number(from + dur - nf));
             preserve_source_time(cx, loc.comp_id.as_deref(), &layer, &mut next, nf)?;
+            cx.put_layer(&loc, next)?;
         } else {
             // Never past the media's end at the clip's speed.
             let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
-            let dur = (time - from).min(longest).max(1.0 / fps);
+            let duration = Value::Number((time - from).min(longest).max(1.0 / fps));
             if values::text(&layer, "type") == Some("group")
                 && values::num(&layer, "dur").unwrap_or(0.) <= 0.
             {
-                next = cut_head(&layer, next, from);
+                let mut next = cut_head(&layer, layer.clone(), from);
+                values::obj(&mut next).insert("dur", duration);
+                cx.put_layer(&loc, next)?;
+            } else {
+                let mut path = loc.path();
+                path.push("dur".into());
+                cx.set(path, duration)?;
             }
-            values::obj(&mut next).insert("dur", Value::Number(dur));
         }
-        cx.put_layer(&loc, next)?;
     }
     Ok(())
 }

@@ -164,6 +164,28 @@ test("focus order follows the thread bar, conversation and composer as the origi
   );
   root.dispose();
 });
+test("only the model gives up space in the docked composer", async () => {
+  const { root } = mount();
+  const p = states.selected();
+  p.native.presentation = "docked";
+  p.snapshot.catalog.efforts = ["high"];
+  p.snapshot.settings.effort = "high";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  const nodes = root.inspect().nodes;
+  const model = byId(root, "agent-model");
+  expect(model.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
+  for (const id of ["agent-effort", "agent-access"]) {
+    const picker = byId(root, id);
+    expect(picker.props.style).toMatchObject({ flexShrink: 0 });
+    const label = nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
+    expect(label?.props.style).toMatchObject({ flexShrink: 0 });
+    expect(label?.props.metadata).toBeUndefined();
+  }
+  expect(byId(root, "agent-threads")).toBeDefined();
+  expect(byId(root, "agent-new")).toBeDefined();
+  root.dispose();
+});
+
 test("new thread, send and stop use the model's commands; Send hides while working on an empty draft", async () => {
   const { root, commits } = mount();
   const actions: Action[] = [];

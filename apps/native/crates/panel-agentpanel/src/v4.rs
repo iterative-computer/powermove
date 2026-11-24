@@ -987,6 +987,38 @@ mod tests {
         );
     }
     #[test]
+    fn a_structured_stream_and_completion_archive_only_one_clean_reply() {
+        for chunks in [
+            [r#"{"reply":"Done\n\n"#, r#"A \"title\"."}"#],
+            ["Done\n\n", "A \"title\"."],
+        ] {
+            let mut p = panel();
+            draft(&mut p);
+            act(&mut p, json!({"type":"submit"})).unwrap();
+            for (index, text) in chunks.into_iter().enumerate() {
+                p.receive(
+                    "thread", "run", index as u64 + 1,
+                    Update::Trace(json!({"kind":"answer","text":text})), 11,
+                ).unwrap();
+            }
+            p.receive(
+                "thread", "run", 3,
+                Update::Complete {
+                    text: r#"{"reply":"Done\n\nA \"title\"."}"#.into(),
+                    error: false,
+                    cancelled: false,
+                },
+                20,
+            ).unwrap();
+            let snapshot = snapshot(&p);
+            let visible = snapshot["rows"]["items"].as_array().unwrap()
+                .iter().filter_map(|row| row["value"]["text"].as_str()).collect::<Vec<_>>();
+            assert_eq!(visible.iter().filter(|&&text| text == "Done\n\nA \"title\".").count(), 1);
+            assert!(visible.iter().all(|text| !text.contains(r#"{"reply""#)));
+        }
+    }
+
+    #[test]
     fn a_question_still_open_after_its_run_is_answered_through_its_archived_row() {
         // A message-transport question outlives its run (the agent asked and
         // finished); the card's choices act on its archived row.

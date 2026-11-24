@@ -4636,6 +4636,36 @@ impl Host {
             };
             host.borrow_mut().window_observers.push(observer);
         }
+        // Full-screen chrome can move without a content-view resize.
+        let sender = host.borrow().sender.clone();
+        let fullscreen_changed = block2::RcBlock::new(
+            move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                let _ = sender.try_send(Command {
+                    name: "shellFullscreenChanged".into(),
+                    args: vec![],
+                    token: None,
+                });
+            },
+        );
+        for name in unsafe {
+            [
+                NSWindowWillEnterFullScreenNotification,
+                NSWindowDidEnterFullScreenNotification,
+                NSWindowWillExitFullScreenNotification,
+                NSWindowDidExitFullScreenNotification,
+            ]
+        } {
+            let observer = unsafe {
+                objc2_foundation::NSNotificationCenter::defaultCenter()
+                    .addObserverForName_object_queue_usingBlock(
+                        Some(name),
+                        Some(&host.borrow().window),
+                        None,
+                        &fullscreen_changed,
+                    )
+            };
+            host.borrow_mut().window_observers.push(observer);
+        }
         (host, rx)
     }
     fn effects(&mut self, effects: Vec<Effect>) {
@@ -6345,8 +6375,12 @@ impl Host {
         (p.x as f32, y as f32)
     }
     pub fn toolbar_inset(&self) -> f32 {
-        (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height).max(0.)
-            as f32
+        toolbar_top_inset(
+            (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height) as f32,
+            self.is_fullscreen(),
+            self.window.toolbar().is_some_and(|tb| tb.isVisible()),
+            &self.tokens.metrics,
+        )
     }
     /// P-120: returns `Moved` only when the viewer slot's frame, layer frame,
     /// drawable size or visibility changed, so GPUI blocks on the composition
@@ -11565,4 +11599,23 @@ mod restore_tab_tests {
         // A tab there that was not restored: it joins at the end.
         assert_eq!(super::tab_insert_index(&[Some(0), None], 1), None);
     }
+}
+
+fn toolbar_top_inset(measured: f32, fullscreen: bool, visible: bool, m: &pm_design::Metrics) -> f32 {
+    if fullscreen && measured < 1. {
+        if visible { m.toolbar } else { m.dock_gap }
+    } else {
+        measured.max(0.)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn fullscreen_overlay_reserves_top_space_without_a_content_layout_inset() {
+    let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let m = &t.metrics;
+    assert_eq!(toolbar_top_inset(0., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(0.5, true, false, m), m.dock_gap);
+    assert_eq!(toolbar_top_inset(40., true, true, m), 40.);
+    assert_eq!(toolbar_top_inset(-1., false, false, m), 0.);
 }

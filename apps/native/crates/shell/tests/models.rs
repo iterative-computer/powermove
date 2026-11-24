@@ -620,7 +620,7 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
             .iter()
             .position(|dock| dock.id == "right")
             .unwrap();
-        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+        layout.docks[di].groups = ["project", "easing", "fxbrowser"]
             .into_iter()
             .enumerate()
             .map(|(i, id)| Group {
@@ -769,10 +769,9 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
     assert!(
         panels.last().unwrap().rect.y + panels.last().unwrap().rect.h > viewport.y + viewport.h
     );
-    for (p, usable_floor) in panels.iter().zip([360., 320., 400.]) {
-        assert!(p.rect.h >= usable_floor);
-        assert!(p.rect.h >= SIDE_FLUID_FLOOR);
-    }
+    assert_eq!(panels[0].rect.h, 150.);
+    assert!(panels[1].rect.h >= 320.);
+    assert!(panels[2].rect.h >= 400.);
     let natural = std::collections::BTreeMap::from([
         ("inspector".into(), 2000.),
         ("easing".into(), 360.),
@@ -780,7 +779,8 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
     ]);
     let measured = layout.geometry_with_panel_heights(bounds, &t, &natural);
     for p in measured.panels.iter().filter(|p| p.dock == di) {
-        assert!(p.rect.h >= SIDE_FLUID_FLOOR && p.rect.h <= 705. * 0.6 + 0.01);
+        let cap = if p.group == 0 { 0.8 } else { 0.6 };
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR && p.rect.h <= 705. * cap + 0.01);
     }
     // The splitter starts from the same measured geometry; a saved size wins
     // over automatic natural-content sizing and remains a fluid basis.
@@ -1038,7 +1038,7 @@ fn p1_resize_keeps_unrelated_fluid_group() {
     for delta in [40., 0.] {
         let mut layout = Layout::preset("design");
         let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
-        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+        layout.docks[di].groups = ["project", "easing", "fxbrowser"]
             .into_iter()
             .map(|id| Group {
                 tabs: vec![id.into()],
@@ -1048,7 +1048,7 @@ fn p1_resize_keeps_unrelated_fluid_group() {
             })
             .collect();
         let natural = [
-            ("inspector".into(), 200.),
+            ("project".into(), 200.),
             ("easing".into(), 200.),
             ("fxbrowser".into(), 200.),
         ]

@@ -63,6 +63,48 @@ impl crate::integration::Integration for DockFixture {
                 .into_any_element(),
         )
     }
+    fn header(
+        &self,
+        id: &str,
+        _: Rect,
+        tabbed: bool,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<AnyElement> {
+        if id != "agent" || !tabbed {
+            return None;
+        }
+        let probes = self.0.clone();
+        Some(
+            div()
+                .flex()
+                .h_full()
+                .children([("Threads", 94.), ("+", 26.)].map(|(label, width)| {
+                    let probes = probes.clone();
+                    div()
+                        .relative()
+                        .flex_none()
+                        .w(px(width))
+                        .h_full()
+                        .child(label)
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, _| {
+                                    probes.borrow_mut().push((
+                                        label.into(),
+                                        bounds,
+                                        window.content_mask().bounds,
+                                    ));
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                }))
+                .into_any_element(),
+        )
+    }
     fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
         [
             ("ext.logos", "Commons Logos"),
@@ -79,6 +121,41 @@ impl crate::integration::Integration for DockFixture {
         String::new()
     }
     fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+}
+
+#[gpui::test]
+fn narrow_agent_stack_keeps_both_header_controls_inside_the_panel(cx: &mut gpui::TestAppContext) {
+    let probes = Rc::new(RefCell::new(Vec::new()));
+    let recorded = probes.clone();
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let mut editor = Editor::new(tokens, None, cx);
+        editor.integration = Some(Rc::new(DockFixture(recorded)));
+        let right = editor
+            .layout
+            .docks
+            .iter_mut()
+            .find(|dock| dock.id == "right")
+            .unwrap();
+        right.size = Some(220.);
+        right.groups = vec![layout::Group {
+            tabs: vec!["agent".into(), "project".into()],
+            active: 0,
+            size: None,
+            collapsed: false,
+        }];
+        editor
+    });
+    cx.run_until_parked();
+    let panel = view.read_with(cx, |editor, _| editor.panel_rect("agent").unwrap());
+    assert!(panel.w <= 250.);
+    for label in ["Threads", "+"] {
+        let frames = probes.borrow();
+        let (_, frame, clip) = frames.iter().rev().find(|(id, _, _)| id == label).unwrap();
+        assert!(frame.size.width > px(0.));
+        assert!(frame.right() <= px(panel.x + panel.w));
+        assert!(frame.right() <= clip.right());
+    }
 }
 
 #[::core::prelude::v1::test]

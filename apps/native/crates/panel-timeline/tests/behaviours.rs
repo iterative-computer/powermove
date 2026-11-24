@@ -3053,6 +3053,102 @@ fn trim_spans(c: &TimelineClient, ids: &[&str]) -> Vec<(f64, f64)> {
 }
 
 #[test]
+fn strip_trim_previews_group_and_legacy_members_locally_until_one_commit() {
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        for legacy in [false, true] {
+            for trim_in in [false, true] {
+                let mut fixture = group_trim_fixture();
+                if legacy {
+                    let layers = fixture
+                        .as_object_mut()
+                        .unwrap()
+                        .get_mut("layers")
+                        .unwrap()
+                        .as_array_mut()
+                        .unwrap();
+                    layers[0]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("dur", Value::Number(0.));
+                }
+                let (_actor, mut c) = client_with(fixture);
+                c.model.mode = mode;
+                c.model.track_snap_disabled = true;
+                let before = c.kernel.published("P").unwrap();
+                let original = before.snapshot.root().unwrap().to_value();
+                let ids = strings(&["g"]);
+                let kind = if trim_in {
+                    DragKind::TrimIn { ids }
+                } else {
+                    DragKind::TrimOut { ids }
+                };
+                let span =
+                    |index: &TimelineIndex, id: &str| index.strip_span(index.layer(id).unwrap());
+                let (group_from, group_duration) = span(&c.model.index, "g");
+                let (leaf_from, leaf_duration) = span(&c.model.index, "leaf");
+                for commit in [false, true] {
+                    c.begin_preview_drag(kind.clone()).unwrap();
+                    for delta in [0.5, 0.8] {
+                        block_on(c.drag(sample(delta))).unwrap();
+                        let frame = c.layer_preview().unwrap();
+                        assert!(frame.trimmed);
+                        let shown = TimelineIndex::from_snapshot(&frame.snapshot);
+                        let wanted = |from, dur| {
+                            if trim_in {
+                                (from + delta, dur - delta)
+                            } else {
+                                (from, dur + delta)
+                            }
+                        };
+                        for (id, expected) in [
+                            ("g", wanted(group_from, group_duration)),
+                            ("leaf", wanted(leaf_from, leaf_duration)),
+                        ] {
+                            let actual = span(&shown, id);
+                            assert!((actual.0 - expected.0).abs() < 1e-9, "{id}: {actual:?}");
+                            assert!((actual.1 - expected.1).abs() < 1e-9, "{id}: {actual:?}");
+                        }
+                        assert_eq!(span(&shown, "locked"), span(&c.model.index, "locked"));
+                        let current = c.kernel.published("P").unwrap();
+                        assert_eq!(current.revision(), before.revision());
+                        assert_eq!(current.history.entries, before.history.entries);
+                    }
+                    let shown = c
+                        .layer_preview()
+                        .unwrap()
+                        .snapshot
+                        .root()
+                        .unwrap()
+                        .to_value();
+                    block_on(c.finish_drag(commit)).unwrap();
+                    assert!(c.layer_preview().is_none());
+                    let after = c.kernel.published("P").unwrap();
+                    assert_eq!(
+                        after.history.entries,
+                        before.history.entries + usize::from(commit)
+                    );
+                    assert_eq!(
+                        &after.snapshot.root().unwrap().to_value(),
+                        if commit { &shown } else { &original }
+                    );
+                }
+                undo(&mut c);
+                assert_eq!(
+                    c.kernel
+                        .published("P")
+                        .unwrap()
+                        .snapshot
+                        .root()
+                        .unwrap()
+                        .to_value(),
+                    original
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
     let ids = ["g", "n", "leaf", "locked"];
     for mode in [TimelineMode::Layers, TimelineMode::Tracks] {

@@ -65,6 +65,10 @@ pub struct Cx<'a> {
 
 impl<'a> Cx<'a> {
     pub(crate) fn new(root: &'a Node, origin: Origin) -> Cx<'a> {
+        Self::new_at(root, origin, 0)
+    }
+
+    pub(super) fn new_at(root: &'a Node, origin: Origin, revision: u64) -> Cx<'a> {
         Cx {
             base: root,
             selection: None,
@@ -72,9 +76,9 @@ impl<'a> Cx<'a> {
             state: None,
             text: None,
             origin,
-            doc: Document::from_root(Some(root.clone()), 0),
+            doc: Document::from_root(Some(root.clone()), revision),
             ops: Vec::new(),
-            revision: 0,
+            revision,
         }
     }
 
@@ -104,6 +108,10 @@ impl<'a> Cx<'a> {
     /// The operations written, in order.
     pub(crate) fn finish(self) -> Vec<Op> {
         self.ops
+    }
+
+    pub(super) fn into_document(self) -> Document {
+        self.doc
     }
 
     // ── writes ─────────────────────────────────────────────────────────────

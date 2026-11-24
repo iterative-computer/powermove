@@ -1520,10 +1520,10 @@ impl TimelineSurface {
                         .as_ref()
                         .ok()
                         .and_then(|_| client.layer_preview().cloned());
-                    let built = if let Some(gain) =
-                        preview.as_ref().filter(|p| p.gain_commands.is_some())
+                    let built = if let Some(frame) =
+                        preview.as_ref().filter(|p| p.gain_commands.is_some() || p.trimmed)
                     {
-                        build_with(&client, &tokens, offline, sources, Some(&gain.snapshot), None)
+                        build_with(&client, &tokens, offline, sources, Some(&frame.snapshot), None)
                     } else if preview_update
                         && preview.is_some()
                         && let Some((scene, model)) = previous_scene
@@ -1554,9 +1554,10 @@ impl TimelineSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                let shown_index = built.as_ref().map_or(&client.model.index, |b| &b.model.index);
                 s.snap_guide = client
                     .active_drag()
-                    .and_then(|d| d.snap_target_in(&client.model.index));
+                    .and_then(|d| d.snap_target_in(shown_index));
                 let gain_revision = client.model.index.revision;
                 s.client = Some(client);
                 s.busy = false;
@@ -5025,7 +5026,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Begin(spec, time) => {
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            if client.is_gain_drag(&kind)
+            if client.is_gain_drag(&kind) || kind.is_strip_trim()
                 || (matches!(&kind, DragKind::Layers { .. })
                     && client.model.mode == TimelineMode::Layers
                     && client.model.graph_display == GraphDisplay::DopeSheet)

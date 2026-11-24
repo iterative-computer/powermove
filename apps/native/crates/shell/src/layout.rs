@@ -726,6 +726,7 @@ impl Layout {
                 for (index, group) in d.groups.iter().enumerate() {
                     if !group.collapsed
                         && group.size.is_none()
+                        && (!is_properties(group.active()) || index == i || index == j)
                         && let Some(displayed) = height(divider.dock, index)
                     {
                         self.flex_bases.insert(group.tabs[0].clone(), displayed);
@@ -1978,8 +1979,16 @@ fn side_group_resize_floor(g: &Group, t: &Tokens, measured: Option<f32>) -> f32 
     if g.collapsed || g.size.is_some() || g.active() == "agent" {
         minimum
     } else {
-        minimum.max(SIDE_FLUID_FLOOR)
+        minimum.max(side_panel_floor(g.active()))
     }
+}
+
+fn is_properties(id: &str) -> bool {
+    matches!(id, "inspector" | "properties")
+}
+
+fn side_panel_floor(id: &str) -> f32 {
+    if is_properties(id) { 150. } else { SIDE_FLUID_FLOOR }
 }
 
 /// The automatic floor includes useful content space, capped before long lists
@@ -1993,18 +2002,17 @@ pub fn side_group_floor(g: &Group, window_height: f32, t: &Tokens, natural: Opti
         return size.max(minimum);
     }
     let initial = match g.active() {
-        "inspector" | "properties" => 360.,
+        id if is_properties(id) => side_panel_floor(id),
         "fxbrowser" | "effects" | "agent" | "threads" | "chat" => 400.,
         "easing" | "assets" | "project" | "layer-effects" => 320.,
         _ => SIDE_FLUID_FLOOR,
     };
     let preferred = natural.filter(|h| g.active() != "agent" && h.is_finite() && *h > 0.);
+    let floor = side_panel_floor(g.active());
+    let fraction = if is_properties(g.active()) { 0.8 } else { 0.6 };
     preferred
         .unwrap_or(initial)
-        .clamp(
-            SIDE_FLUID_FLOOR,
-            (window_height * 0.6).max(SIDE_FLUID_FLOOR),
-        )
+        .clamp(floor, (window_height * fraction).max(floor))
         .max(minimum)
 }
 
@@ -2029,16 +2037,16 @@ fn side_group_heights(
             }
         })
         .collect();
-    let flex = groups
-        .iter()
-        .filter(|g| !g.collapsed && g.size.is_none())
-        .count();
+    // Properties follows its content even when it is the only group in the
+    // column. Its saved splitter height also takes precedence over spare space.
+    let fills_column = |g: &Group| !g.collapsed && g.size.is_none() && !is_properties(g.active());
+    let flex = groups.iter().filter(|g| fills_column(g)).count();
     let gaps = t.metrics.dock_gap * groups.len().saturating_sub(1) as f32;
     if flex > 0 {
         let extra = (viewport_height - gaps - heights.iter().sum::<f32>()).max(0.);
         let each = extra / flex as f32;
         for (g, h) in groups.iter().zip(&mut heights) {
-            if !g.collapsed && g.size.is_none() {
+            if fills_column(g) {
                 *h += each;
             }
         }
@@ -2076,6 +2084,33 @@ fn agent_floor_follows_the_composer_even_after_resizing() {
     let natural = BTreeMap::from([("agent".to_owned(), tall)]);
     let bases = BTreeMap::from([("agent".to_owned(), 200.)]);
     assert_eq!(side_group_heights(&[group], 100., 600., &t, &natural, &bases), [tall]);
+}
+
+#[cfg(test)]
+#[test]
+fn properties_tracks_content_until_its_splitter_is_resized() {
+    let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let mut groups = [Group {
+        tabs: vec!["inspector".into()],
+        active: 0,
+        collapsed: false,
+        size: None,
+    }];
+    let height = |groups: &[Group], measured, bases| {
+        side_group_heights(
+            groups, 700., 800., &t,
+            &BTreeMap::from([("inspector".into(), measured)]), &bases,
+        )[0]
+    };
+    assert_eq!(height(&groups, 140., BTreeMap::new()), 150.);
+    assert_eq!(height(&groups, 450., BTreeMap::new()), 450.);
+    assert_eq!(height(&groups, 1000., BTreeMap::new()), 640.);
+    assert_eq!(height(&groups, 140., BTreeMap::new()), 150.);
+    let bases = BTreeMap::from([("inspector".into(), 290.)]);
+    assert_eq!(height(&groups, 500., bases.clone()), 290.);
+    assert_eq!(height(&groups, 140., bases), 290.);
+    groups[0].size = Some(310.);
+    assert_eq!(height(&groups, 500., BTreeMap::new()), 310.);
 }
 
 fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
