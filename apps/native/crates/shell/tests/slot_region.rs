@@ -307,3 +307,102 @@ fn a_slot_in_a_cached_view_follows_its_scroll_layer(cx: &mut TestAppContext) {
 fn a_slot_in_a_cached_view_follows_its_scroll_layer_while_playing(cx: &mut TestAppContext) {
     run(cx, Shape::CachedInLayer, true);
 }
+
+/// PM-696 review: a region nested behind a view that clips (a card with
+/// overflow hidden between the outer scroller and the inner one) gets that
+/// clip on its container. A row inside the inner scroller but below the card
+/// is clipped away by GPUI and must not show natively either; scrolled into
+/// the card, it shows.
+struct CardPanel {
+    outer: ScrollHandle,
+    inner: ScrollHandle,
+    staged: Rc<RefCell<Staged>>,
+}
+impl Render for CardPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("outer")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.outer)
+            .scroll_layer()
+            .children(rows(1))
+            .child(
+                div().flex_none().w_full().h(px(40.)).overflow_hidden().child(
+                    div()
+                        .id("inner")
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .h(px(120.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.inner)
+                        .children(rows(1))
+                        .child(marked_row(self.staged.clone()))
+                        .children(rows(4)),
+                ),
+            )
+            .children(rows(20))
+    }
+}
+
+#[gpui::test]
+fn a_nested_region_keeps_the_clip_of_a_view_between_it_and_its_parent(cx: &mut TestAppContext) {
+    let staged = Rc::new(RefCell::new(Staged::default()));
+    let (outer, inner) = (ScrollHandle::new(), ScrollHandle::new());
+    let (_, vcx) = cx.add_window_view(|_, _| CardPanel {
+        outer: outer.clone(),
+        inner: inner.clone(),
+        staged: staged.clone(),
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    // Whether the platform shows the slot: its staged content rect against its
+    // region's view, cut by the regions around it.
+    let shows = |vcx: &mut VisualTestContext| {
+        let s = staged.borrow();
+        let (region, bounds) = s.at.expect("painted");
+        let region = region.expect("in a region");
+        vcx.update(|window, _| {
+            let regions = window.slot_region_geometry();
+            let find = |id| *regions.iter().find(|r| r.id == id).expect("placed");
+            // The view of a region in its own content, then of its parent.
+            let mut view = {
+                let r = find(region.id);
+                Bounds::new(-r.origin, r.frame.size)
+            };
+            let mut r = find(region.id);
+            while let Some(parent) = r.parent {
+                let p = find(parent);
+                let pv = Bounds::new(-p.origin, p.frame.size);
+                let pv = Bounds::new(pv.origin - r.frame.origin - r.origin, pv.size);
+                view = view.intersect(&pv);
+                r = p;
+            }
+            let rect = Bounds::new(bounds.origin - region.content_origin, bounds.size);
+            let cut = view.intersect(&rect);
+            (cut.size.height > px(0.), find(region.id).frame.size.height)
+        })
+    };
+    // The row sits at 40..60 of the inner content; the card shows 0..40 of it.
+    assert_eq!(shows(&mut vcx), (false, px(40.)), "below the card: not shown");
+    // A step of the outer scroller (replayed) changes nothing of that.
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(10.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    assert_eq!(shows(&mut vcx), (false, px(40.)), "after an outer step");
+    // The inner scroller brings the row into the card.
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(45.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    assert_eq!(shows(&mut vcx).0, true, "scrolled into the card: shown");
+}

@@ -74,20 +74,20 @@ impl Window {
         let id = std::rc::Rc::as_ptr(cell) as usize;
         let mask = self.content_mask();
         let parent = self.slot_regions_open.last();
-        // The outermost region keeps its ancestors' clip (they do not scroll);
-        // a nested one only its own (its parent's container clips it, and
-        // the parent's clip moves in its content as it scrolls).
-        let (frame, parent_id) = match parent {
-            Some(p) => (
-                Bounds::new(own_clip.origin - p.content_origin, own_clip.size),
-                Some(p.id),
-            ),
+        // The outermost region keeps its ancestors' clip (they do not scroll).
+        // A nested one keeps its own and those of the views between it and its
+        // parent region (a card that clips, PM-696 review), but not the
+        // parent's view: the parent's container clips that, and it moves in
+        // the parent's content as it scrolls.
+        let (clip, parent_id) = match parent {
+            Some(p) => (own_clip.intersect(&within(mask.bounds, p.clip)), Some(p.id)),
             None => (mask.bounds, None),
         };
-        let window_frame_origin = match parent {
-            Some(_) => own_clip.origin,
-            None => mask.bounds.origin,
+        let frame = match parent {
+            Some(p) => Bounds::new(clip.origin - p.content_origin, clip.size),
+            None => clip,
         };
+        let window_frame_origin = clip.origin;
         let inset = bounds.origin - window_frame_origin;
         let fade = [mask.fade_out.top, mask.fade_out.bottom];
         self.slot_regions.insert(
@@ -159,4 +159,15 @@ impl Window {
     pub fn slot_region_geometry(&self) -> Vec<SlotRegionGeometry> {
         self.slot_regions.values().map(|r| r.geometry).collect()
     }
+}
+
+/// `mask` with each edge at or past `region`'s opened outwards on its side:
+/// what clips inside a region, apart from the region's own view.
+fn within(mask: Bounds<Pixels>, region: Bounds<Pixels>) -> Bounds<Pixels> {
+    let open = crate::px(1.0e6);
+    let left = if mask.left() > region.left() { mask.left() } else { -open };
+    let top = if mask.top() > region.top() { mask.top() } else { -open };
+    let right = if mask.right() < region.right() { mask.right() } else { open };
+    let bottom = if mask.bottom() < region.bottom() { mask.bottom() } else { open };
+    Bounds::from_corners(crate::point(left, top), crate::point(right, bottom))
 }
