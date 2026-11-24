@@ -102,6 +102,11 @@ impl LayerRasters {
                             match pm_gpu::Gpu::new("pm-layer-rasters") {
                                 Ok(gpu) => {
                                     let mut renderer = Renderer::new(gpu.device, gpu.queue);
+                                    // The app's translated shaders: without
+                                    // them every start translated each
+                                    // built-in effect again (seconds an
+                                    // export's extensions waited for).
+                                    renderer.set_program_cache_dir(crate::jobs::shader_cache());
                                     let _ = renderer
                                         .set_definitions(&pm_render::all_builtin_definitions());
                                     renderer.set_captions_hidden(false);

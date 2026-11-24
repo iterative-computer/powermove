@@ -1636,11 +1636,22 @@ fn worker(
     let notifier = Arc::downgrade(&mailbox);
     let _watchdog = WatchdogThread::new(&control, &config);
     let pressure_sender = notifier.clone();
+    // The governor tells every client its share at each rebalance (another
+    // client came or went) with the level as it stands. Collecting at every
+    // rebalance under a lasting warning cost an export's realm a fifth of its
+    // time; collecting only when the level rose left native canvas memory
+    // that wrappers hold growing through a long export. See `PressureTrims`.
+    let trims = Arc::new(std::sync::Mutex::new(PressureTrims::default()));
+    let serviced = trims.clone();
     let memory = pm_memory::Registration::new(1, move |_, level| {
-        if level != pm_memory::Pressure::Normal
+        let mut trims = trims.lock().unwrap_or_else(|e| e.into_inner());
+        if trims.wanted(level, Instant::now())
             && let Some(tx) = pressure_sender.upgrade()
+            && tx
+                .send(Command::MemoryPressure, Delivery::Immediate)
+                .is_ok()
         {
-            let _ = tx.send(Command::MemoryPressure, Delivery::Immediate);
+            trims.asked(level, Instant::now());
         }
     });
     let generation = Generation {
@@ -1734,6 +1745,10 @@ fn worker(
         };
         match command {
             Command::MemoryPressure => {
+                serviced
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .serviced();
                 if let Ok(live) = &mut current {
                     live.vm.trim();
                 }
@@ -1998,6 +2013,52 @@ fn worker(
 }
 /// How long an isolate that grew waits without work before it trims.
 const IDLE_TRIM: Duration = Duration::from_secs(5);
+/// How often a realm collects at most while memory pressure lasts.
+const SUSTAINED_TRIM: Duration = Duration::from_secs(5);
+/// Orders memory pressure levels (`pm_memory::Pressure` has no order).
+fn severity(level: pm_memory::Pressure) -> u8 {
+    match level {
+        pm_memory::Pressure::Normal => 0,
+        pm_memory::Pressure::Warning => 1,
+        pm_memory::Pressure::Critical => 2,
+    }
+}
+/// When a realm's worker is asked for a full collection at a governor
+/// rebalance: whenever the level rises, and while it stays raised again once
+/// the last one was serviced and [`SUSTAINED_TRIM`] has passed. A request the
+/// mailbox refused (full) is not remembered, so the next rebalance asks again.
+#[derive(Default)]
+pub(crate) struct PressureTrims {
+    /// The level of the last request the mailbox took.
+    level: Option<pm_memory::Pressure>,
+    asked_at: Option<Instant>,
+    /// Asked and not yet run by the worker.
+    pending: bool,
+}
+impl PressureTrims {
+    pub(crate) fn wanted(&mut self, level: pm_memory::Pressure, now: Instant) -> bool {
+        if level == pm_memory::Pressure::Normal {
+            self.level = None;
+            return false;
+        }
+        let rose = self
+            .level
+            .is_none_or(|last| severity(level) > severity(last));
+        let due = !self.pending
+            && self
+                .asked_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= SUSTAINED_TRIM);
+        rose || due
+    }
+    pub(crate) fn asked(&mut self, level: pm_memory::Pressure, now: Instant) {
+        self.level = Some(level);
+        self.asked_at = Some(now);
+        self.pending = true;
+    }
+    pub(crate) fn serviced(&mut self) {
+        self.pending = false;
+    }
+}
 fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
