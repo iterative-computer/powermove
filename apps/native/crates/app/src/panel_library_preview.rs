@@ -11,7 +11,30 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The stack a cover's render gets: the main thread's, where every panel
+/// is drawn in its window. A caller's thread may be a GCD worker (512 KiB),
+/// which a panel's render recursion overflowed (PM-669).
+const COVER_STACK: usize = 8 * 1024 * 1024;
+
 pub(super) fn capture(
+    kernel: pm_kernel::KernelHandle,
+    project: Option<String>,
+    cards: Vec<PanelCard>,
+    live: HashMap<String, Publication>,
+    tokens: pm_design::Tokens,
+    dir: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> HashMap<String, Vec<u8>> {
+    std::thread::Builder::new()
+        .name("panel-library-covers".into())
+        .stack_size(COVER_STACK)
+        .spawn(move || capture_covers(kernel, project, cards, live, tokens, dir, cancel))
+        .ok()
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default()
+}
+
+fn capture_covers(
     kernel: pm_kernel::KernelHandle,
     project: Option<String>,
     cards: Vec<PanelCard>,
