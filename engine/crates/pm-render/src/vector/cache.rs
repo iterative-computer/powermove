@@ -2323,7 +2323,14 @@ mod scene_pool_tests {
         };
         for (source, output) in [(&a, out_a), (&b, out_b)] {
             let (expected, _) = VectorCache::new()
-                .render_scene(&gpu.device, &gpu.queue, None, source, rect, Precision::Float16)
+                .render_scene(
+                    &gpu.device,
+                    &gpu.queue,
+                    None,
+                    source,
+                    rect,
+                    Precision::Float16,
+                )
                 .unwrap();
             assert_eq!(bits(&output), bits(&expected));
         }
