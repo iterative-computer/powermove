@@ -14,9 +14,15 @@ pub struct InfiniteDrag {
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos {
     use objc2_app_kit::{NSApplication, NSCursor, NSEventType};
-    use objc2_core_graphics::CGPoint;
     use objc2_foundation::MainThreadMarker;
     use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
 
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
@@ -66,7 +72,10 @@ mod macos {
 
     pub fn release(anchor: (f64, f64)) {
         unsafe {
-            let _ = CGWarpMouseCursorPosition(CGPoint::new(anchor.0, anchor.1));
+            let _ = CGWarpMouseCursorPosition(CGPoint {
+                x: anchor.0,
+                y: anchor.1,
+            });
             let _ = CGAssociateMouseAndMouseCursorPosition(1);
             NSCursor::unhide();
         }
