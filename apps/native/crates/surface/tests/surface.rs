@@ -697,3 +697,65 @@ fn a_commit_that_changes_nothing_is_no_change() {
             .is_err()
     );
 }
+
+/// PM-698 review: a move within the same parent changes the moved node's
+/// place, so an event planned before it is refused; inserting a node where
+/// it already stands changes nothing. A surface's first commit counts even
+/// when it is empty (it replaces an earlier realm's tree).
+#[test]
+fn a_move_changes_the_moved_node_and_a_first_commit_always_counts() {
+    let mut s = surface();
+    apply(
+        &mut s,
+        json!([{"op":"setListeners","id":3,"flags":{"click":{"bubble":true}}}]),
+    )
+    .unwrap();
+    let seen = s.revision();
+    // Already where it is (last child of 1): nothing changes.
+    apply(
+        &mut s,
+        json!([{"op":"insertBefore","parent":1,"id":3,"before":null}]),
+    )
+    .unwrap();
+    assert!(!s.last_commit_changed());
+    let mut interaction = Interaction::default();
+    assert!(
+        interaction
+            .drive(
+                &mut s,
+                1,
+                1,
+                seen,
+                3,
+                "click",
+                events::EventDetail::default()
+            )
+            .is_ok()
+    );
+    // Moved in front of its sibling: a click planned before is refused.
+    let before = s.revision();
+    apply(
+        &mut s,
+        json!([{"op":"insertBefore","parent":1,"id":3,"before":2}]),
+    )
+    .unwrap();
+    assert!(s.last_commit_changed());
+    assert!(
+        interaction
+            .drive(
+                &mut s,
+                1,
+                1,
+                before,
+                3,
+                "click",
+                events::EventDetail::default()
+            )
+            .is_err()
+    );
+    let mut empty = Surface::default();
+    apply(&mut empty, json!([])).unwrap();
+    assert!(empty.last_commit_changed(), "a first commit always counts");
+    apply(&mut empty, json!([])).unwrap();
+    assert!(!empty.last_commit_changed());
+}
