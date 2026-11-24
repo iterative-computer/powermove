@@ -4,6 +4,7 @@ use crate::welcome::{self, Frame, Progress, Severity};
 use crate::{
     kit::{Button, Kit, Recipes},
     motion::Motion,
+    native_control::{ControlSpec, Kind, NativeControl},
 };
 use gpui::{prelude::*, *};
 use pm_design::{Elevation, Tokens};
@@ -28,6 +29,14 @@ pub struct WelcomeView {
     body_extent: Option<Pixels>,
     /// Tests pin the clock (seconds since the view opened); the window uses wall time.
     pub clock: Option<f64>,
+    /// The card on the first-run stage: sized to its content on the
+    /// stage's room, its buttons AppKit's.
+    pub stage: bool,
+    /// The stage card's AppKit buttons, by id and label.
+    natives: std::collections::HashMap<(String, String), Entity<NativeControl>>,
+    /// While a wave carries the card: the snapshot its buttons paint.
+    snapshot: Option<u64>,
+    snapshots: u64,
 }
 impl WelcomeView {
     fn motion(&mut self) -> &mut Motion<u64> {
@@ -47,7 +56,80 @@ impl WelcomeView {
             body_scroll: ScrollHandle::new(),
             body_extent: None,
             clock: None,
+            stage: false,
+            natives: Default::default(),
+            snapshot: None,
+            snapshots: 0,
         }
+    }
+    /// A wave is carrying the card (`true`): its AppKit buttons paint their
+    /// own pictures in GPUI, so the wave distorts them with the card, and
+    /// come back live when it ends.
+    pub fn set_snapshot(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.snapshot.is_some() {
+            return;
+        }
+        self.snapshot = on.then(|| {
+            self.snapshots += 1;
+            self.snapshots
+        });
+        let build = self.snapshot.map(crate::stage::snapshot_build);
+        for control in self.natives.values() {
+            control.update(cx, |c, cx| {
+                if c.set_build_snapshot(build) {
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+    /// The stage card's AppKit button for `button`, made once per label.
+    fn native_button(
+        &mut self,
+        button: &welcome::Button,
+        primary: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<NativeControl> {
+        let key = (button.id.clone(), button.label.clone());
+        if let Some(control) = self.natives.get(&key) {
+            let disabled = !button.enabled;
+            control.update(cx, |c, cx| c.update(&serde_json::Value::Null, &[], disabled, cx));
+            return control.clone();
+        }
+        let tokens = self.tokens.clone();
+        let identifier = format!("welcome-{}", button.id);
+        let control = cx.new(|cx| {
+            let mut control = NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Push,
+                    label: &button.label,
+                    identifier: &identifier,
+                    value: &serde_json::Value::Null,
+                    options: vec![],
+                    disabled: !button.enabled,
+                    default: primary,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    pull: false,
+                    tint: None,
+                    symbol: None,
+                    glass: primary,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            );
+            control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
+            control
+        });
+        let id = button.id.clone();
+        cx.subscribe(&control, move |v: &mut Self, _, _: &serde_json::Value, cx| v.act(&id, cx))
+            .detach();
+        self.natives.insert(key, control.clone());
+        control
     }
     /// Gives the view the keys, and takes them back when the control that had
     /// them leaves with its step (Begin, Back): GPUI then leaves the window
@@ -104,10 +186,20 @@ impl WelcomeView {
             _ => {}
         }
     }
-    fn button(&self, button: &welcome::Button, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn button(
+        &mut self,
+        button: &welcome::Button,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let primary = self.frame.default.as_deref() == Some(&button.id);
+        if self.stage && crate::text::available(window) {
+            return self
+                .native_button(button, primary, window, cx)
+                .into_any_element();
+        }
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
-        let primary = self.frame.default.as_deref() == Some(&button.id);
         let enabled = button.enabled;
         let id = button.id.clone();
         let mut element = div()
@@ -135,7 +227,7 @@ impl WelcomeView {
             let id = button.id.clone();
             element = element.on_click(cx.listener(move |v, _, _, cx| v.act(&id, cx)));
         }
-        element
+        element.into_any_element()
     }
     /// A thin bar: filled to its fraction, or a sliding segment while the total
     /// is unknown (still under Reduce Motion).
@@ -536,7 +628,9 @@ impl Render for WelcomeView {
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let frame = self.frame.clone();
-        let time = (frame.animate && !t.accessibility.reduce_motion).then(|| self.time());
+        // On the stage the film is the animation.
+        let time = (frame.animate && !self.stage && !t.accessibility.reduce_motion)
+            .then(|| self.time());
         let spin = frame.spinner && !t.accessibility.reduce_motion;
         let sliding = !t.accessibility.reduce_motion
             && frame
@@ -589,7 +683,19 @@ impl Render for WelcomeView {
                             d.text_size(px(t.typography.heading))
                                 .font_weight(FontWeight(t.typography.display_weight))
                         },
-                        |d| d.text_size(px(t.typography.display)),
+                        |d| {
+                            // On the stage the welcome is a title card.
+                            let size = if self.stage && frame.centred {
+                                t.typography.display * 2.2
+                            } else {
+                                t.typography.display
+                            };
+                            d.text_size(px(size))
+                                .when(self.stage && frame.centred, |d| {
+                                    d.font_weight(FontWeight(t.typography.display_weight))
+                                        .line_height(relative(1.08))
+                                })
+                        },
                     )
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
@@ -753,7 +859,7 @@ impl Render for WelcomeView {
             .gap(px(m.gap))
             .pt(px(if frame.top { t.space.xl } else { m.inset }));
         for button in frame.buttons.iter().filter(|b| b.leading) {
-            footer = footer.child(self.button(button, cx));
+            footer = footer.child(self.button(button, window, cx));
         }
         footer = if frame.centred {
             footer.justify_center()
@@ -761,7 +867,7 @@ impl Render for WelcomeView {
             footer.child(div().flex_1())
         };
         for button in frame.buttons.iter().filter(|b| !b.leading) {
-            footer = footer.child(self.button(button, cx));
+            footer = footer.child(self.button(button, window, cx));
         }
         content = content.child(footer);
         // The accessibility tree hangs off an identified, labelled root, as in
@@ -772,7 +878,26 @@ impl Render for WelcomeView {
             .accessibility_id("shell.welcome")
             .aria_label(spoken)
             .relative()
-            .size_full()
+            .map(|d| {
+                if self.stage && frame.centred {
+                    // The welcome itself stands on the room, no card.
+                    d.w(px(m.welcome_width)).h(px(m.welcome_height))
+                } else if self.stage {
+                    // The window's content, as a card on the room: the same
+                    // size, its corners concentric with the groups inside.
+                    let mut ground = Rgba::from(rgb(c.window));
+                    ground.alpha = if t.accessibility.reduce_transparency { 1. } else { 0.94 };
+                    d.w(px(m.welcome_width))
+                        .h(px(m.welcome_height))
+                        .rounded(px(m.group_radius + m.sheet_inset))
+                        .border_1()
+                        .border_color(rgba((c.text << 8) | 0x14))
+                        .bg(ground)
+                        .elevated(&t, Elevation::Raised)
+                } else {
+                    d.size_full().bg(rgb(c.window))
+                }
+            })
             .flex()
             .flex_col()
             .items_center()
@@ -781,13 +906,12 @@ impl Render for WelcomeView {
                 if frame.top {
                     // Clear of the title bar, with the sheet's own air below.
                     d.justify_start()
-                        .pt(px(m.toolbar))
+                        .pt(px(if self.stage { m.sheet_inset + m.inset } else { m.toolbar }))
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
                     d.justify_center()
                 }
             })
-            .bg(rgb(c.window))
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key));
@@ -803,7 +927,7 @@ impl Render for WelcomeView {
                     .aria_label(frame.back.clone().unwrap_or_default())
                     .tab_index(0)
                     .absolute()
-                    .top(px(m.toolbar))
+                    .top(px(if self.stage { m.sheet_inset } else { m.toolbar }))
                     .left(px(m.sheet_inset))
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.text))
