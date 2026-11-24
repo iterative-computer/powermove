@@ -2623,6 +2623,7 @@ impl Renderer {
         );
         self.binds.end_frame();
         self.pool.end_submitted_frame(&self.queue, taken);
+        self.vector.end_frame();
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()

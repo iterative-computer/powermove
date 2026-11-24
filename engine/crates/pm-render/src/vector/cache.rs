@@ -908,6 +908,18 @@ impl VectorCache {
         self.own_pages = Vec::new();
     }
 
+    /// Standalone coverage submissions within one frame are ordered on the
+    /// same queue. Keep their shared scratch until the frame is submitted, so
+    /// its next scene can reuse pages that are already held by the GPU.
+    pub(crate) fn end_frame(&mut self) {
+        let in_frame =
+            self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>() + self.frame_slots.bytes();
+        let own = self.scene_scratch_bytes().saturating_sub(in_frame);
+        if own > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
+            self.clear_own_scratch();
+        }
+    }
+
     /// Evicts least recently used entries until at most `bytes` and
     /// `entries` stay; the current frame's entries stay unless `all`.
     fn evict(&mut self, bytes: u64, entries: usize, all: bool) {
@@ -1699,6 +1711,7 @@ impl VectorCache {
                 |p| p.growth(device, w, h, self.scene_batch.bytes()),
             );
         }
+        let recording_frame = frame.is_some();
         let frame = frame.filter(|_| self.frame_held() + adds <= self.frame_held_limit);
         let mut own = None;
         let in_frame = frame.is_some();
@@ -1851,14 +1864,10 @@ impl VectorCache {
             queue.submit([own.finish()]);
             self.own_slots.reset(SLOT_KEEP_BYTES);
         }
-        // Scratch past its cap goes; the frame's only once its encoder is
-        // submitted (its commands hold it until then).
-        // Everything but the frame's pages and slots, which its encoder holds.
-        let own = self.scene_scratch_bytes().saturating_sub(
-            self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>() + self.frame_slots.bytes(),
-        );
-        if own > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
-            self.clear_own_scratch();
+        // A direct resolve is its own submission. An enclosing frame can
+        // reuse these pages for any later standalone submissions it records.
+        if !recording_frame {
+            self.end_frame();
         }
         if self.frame_held() > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
             self.frame_scratch_over = true;
@@ -2262,6 +2271,62 @@ mod scene_pool_tests {
         assert_eq!(read(&out_a), read(&want_a));
         assert_eq!(read(&out_b), read(&want_b));
         assert_ne!(read(&want_a), read(&want_b), "the scenes differ");
+    }
+
+    #[test]
+    fn standalone_scenes_reuse_oversize_coverage_until_the_frame_ends() {
+        let gpu = pm_gpu::Gpu::new("oversize coverage reuse").expect("GPU");
+        let rect = PixelRect::new(0, 0, 64, 64);
+        let a = scene(2.25, 3.5, 30.0);
+        let mut b = a.clone();
+        b.items[0].color = [0.3, 0.1, 0.5, 0.7];
+        let mut cache = VectorCache::new();
+        cache.set_budget(1, DEFAULT_MAX_ENTRIES);
+        cache.limit_frame_scratch(0);
+        cache.begin_frame();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let (out_a, _) = cache
+            .render_scene(
+                &gpu.device,
+                &gpu.queue,
+                Some(&mut encoder),
+                &a,
+                rect,
+                Precision::Float16,
+            )
+            .unwrap();
+        let values = cache.own_pages[0].values.clone();
+        let atlas = cache.own_pages[0].texture.clone();
+        let (out_b, _) = cache
+            .render_scene(
+                &gpu.device,
+                &gpu.queue,
+                Some(&mut encoder),
+                &b,
+                rect,
+                Precision::Float16,
+            )
+            .unwrap();
+        assert!(values == cache.own_pages[0].values);
+        assert!(atlas == cache.own_pages[0].texture);
+        gpu.queue.submit([encoder.finish()]);
+        cache.end_frame();
+        assert!(cache.own_pages.is_empty());
+        assert!(cache.own_slots.inputs.is_empty());
+
+        let bits = |texture: &wgpu::Texture| {
+            pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        };
+        for (source, output) in [(&a, out_a), (&b, out_b)] {
+            let (expected, _) = VectorCache::new()
+                .render_scene(&gpu.device, &gpu.queue, None, source, rect, Precision::Float16)
+                .unwrap();
+            assert_eq!(bits(&output), bits(&expected));
+        }
     }
 
     #[test]
