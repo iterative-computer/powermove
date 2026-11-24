@@ -337,34 +337,42 @@ impl Controller {
             self.message = format!("{name} is audio: audio layers don't take effects");
             return cx.notify();
         }
-        let commands = self
-            .builtins
-            .runtime
-            .as_ref()
-            .ok_or_else(|| "The Effects panel closed.".to_owned())
-            .and_then(|r| {
-                r.effect_commands(
-                    &drop.panel,
-                    &layer,
-                    &drop.definition,
-                    drop.at.unwrap_or_else(|| self.time()),
-                )
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            self.message = "The Effects panel closed.".into();
+            return cx.notify();
+        };
+        // The Effects panel's backend builds the commands; its worker may
+        // hold it, so main never waits for it (PM-699).
+        let revision = self.published.as_ref().map(|p| p.revision());
+        let time = drop.at.unwrap_or_else(|| self.time());
+        let commands = {
+            let layer = layer.clone();
+            gpui::AppContext::background_spawn(cx, async move {
+                runtime
+                    .effect_commands(&drop.panel, &layer, &drop.definition, time)
+                    .map(|commands| (commands, drop.label))
+            })
+        };
+        cx.spawn(async move |this, cx| {
+            let commands = commands.await;
+            let _ = this.update(cx, |v, cx| match commands {
+                Ok((commands, label)) => v.run_layer_plan_at(
+                    crate::layer_commands::Plan {
+                        label: format!("Add {label}"),
+                        commands,
+                        select: Some(vec![layer]),
+                        count_keys: None,
+                    },
+                    revision,
+                    cx,
+                ),
+                Err(why) => {
+                    v.message = why;
+                    cx.notify();
+                }
             });
-        match commands {
-            Ok(commands) => self.run_layer_plan(
-                crate::layer_commands::Plan {
-                    label: format!("Add {}", drop.label),
-                    commands,
-                    select: Some(vec![layer]),
-                    count_keys: None,
-                },
-                cx,
-            ),
-            Err(why) => {
-                self.message = why;
-                cx.notify();
-            }
-        }
+        })
+        .detach();
     }
     /// A transition from the Effects panel on a clip's edge (v1's timeline
     /// drop: the nearer half); without a clip under it, the selected layer's

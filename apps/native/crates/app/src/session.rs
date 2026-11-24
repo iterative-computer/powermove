@@ -4264,8 +4264,8 @@ impl Controller {
         }
         if cmd.name == "palette.addEffect" {
             if let (Some(published), Some(runtime), Some(id)) = (
-                self.published.as_deref(),
-                self.builtins.runtime.as_ref(),
+                self.published.clone(),
+                self.builtins.runtime.clone(),
                 cmd.args.first().and_then(|a| a.as_str()),
             ) {
                 let state = self.kernel.state();
@@ -4273,18 +4273,26 @@ impl Controller {
                     .into_iter()
                     .find(|(key, _)| key == id)
                 {
-                    let plan =
-                        crate::layer_commands::palette_effect_plan(published, &label, |layer| {
-                            runtime.effect_commands("viewer", layer, id, self.time())
+                    // The Effects panel's backend builds the commands; its
+                    // worker may hold it, so main never waits for it (PM-699).
+                    let (id, time, revision) = (id.to_owned(), self.time(), published.revision());
+                    let plan = cx.background_spawn(async move {
+                        crate::layer_commands::palette_effect_plan(&published, &label, |layer| {
+                            runtime.effect_commands("viewer", layer, &id, time)
+                        })
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let plan = plan.await;
+                        let _ = this.update(cx, |v, cx| match plan {
+                            Ok(Some(plan)) => v.run_layer_plan_at(plan, Some(revision), cx),
+                            Ok(None) => {}
+                            Err(why) => {
+                                v.message = why;
+                                cx.notify();
+                            }
                         });
-                    match plan {
-                        Ok(Some(plan)) => self.run_layer_plan(plan, cx),
-                        Ok(None) => {}
-                        Err(why) => {
-                            self.message = why;
-                            cx.notify();
-                        }
-                    }
+                    })
+                    .detach();
                 }
             }
             return true;
