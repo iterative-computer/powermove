@@ -178,6 +178,7 @@ pub struct FrameRequest<'a> {
 }
 /// A layer's base raster (`render.raster`, today's `PM.raster` before any
 /// override): the layer by id, or the object an override passed.
+#[derive(Clone)]
 pub struct BaseRasterRequest {
     pub document: Arc<pm_model::Document>,
     pub composition: String,
@@ -187,6 +188,8 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
+    /// For an uncropped base, return geometry and defer painting the canvas.
+    pub geometry_only: bool,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -1131,12 +1134,22 @@ mod tests {
                 p.lock().unwrap().push(json!([
                     request.layer,
                     request.composition,
-                    request.content.is_some()
+                    request.content.is_some(),
+                    request.geometry_only
                 ]));
+                let height = if request.layer == "resized" && !request.geometry_only {
+                    3
+                } else {
+                    2
+                };
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
-                    height: 2,
-                    straight_rgba: [255, 0, 0, 255].repeat(4),
+                    height,
+                    straight_rgba: if request.geometry_only {
+                        Vec::new()
+                    } else {
+                        [255, 0, 0, 255].repeat(2 * height as usize)
+                    },
                     size: (2., 2.),
                     anchor: (1., 1.),
                     selection: None,
@@ -1224,7 +1237,7 @@ mod tests {
         // The pass-through layer was never painted; t1 painted in its composition.
         assert_eq!(
             *painted.lock().unwrap(),
-            vec![json!(["t1", "synthetic-comp", false])]
+            vec![json!(["t1", "synthetic-comp", false, false])]
         );
         runner.eval("dropRaster()").unwrap();
         // An extension that replaces PM.raster itself (variable-font-anchor) counts
@@ -1300,7 +1313,7 @@ mod tests {
         assert_eq!(answered[6][2], "broken wrapper");
         // The replacement painted as given; the nested layer in its composition.
         let painted = painted.lock().unwrap().clone();
-        assert!(painted.contains(&json!(["replaced", "synthetic-comp", true])));
+        assert!(painted.contains(&json!(["replaced", "synthetic-comp", true, false])));
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
     }
     /// A batch indexes each composition's layers once; it finds what a scan
@@ -1370,7 +1383,7 @@ mod tests {
             )
             .unwrap();
         runner
-            .eval("for(const id of ['dropped','measured','read','forwarded'])__compat.realm.PM.proj.layers.push({id,type:'shape',name:id,d:{}})")
+            .eval("for(const id of ['dropped','measured','read','forwarded'])__compat.realm.PM.proj.layers.push({id,type:'text',name:id,d:{}})")
             .unwrap();
         runner
             .eval("const ask=(layer,crop)=>({composition:'synthetic-comp',layer,seconds:0,scale:1,crop});
@@ -1384,11 +1397,48 @@ mod tests {
         assert_eq!(answered[3], json!([1, "native"]));
         assert_eq!(answered[4], json!([1, "native"]));
         assert_eq!(
-            painted.lock().unwrap().len(),
-            2,
-            "only the read and measured bases paint"
+            *painted.lock().unwrap(),
+            vec![
+                json!(["measured", "synthetic-comp", false, true]),
+                json!(["read", "synthetic-comp", false, true]),
+                json!(["read", "synthetic-comp", false, false]),
+            ],
+            "only the canvas returned by the override needs pixels"
         );
     }
+    #[test]
+    fn raster_replies_refuse_pixels_after_a_deferred_canvas_changes_size() {
+        let (runner, painted, answered, _) = raster_runner();
+        let manifest = json!({"id":"resize","name":"Resize","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api) { const base = api.services.get('raster');
+                 api.services.register('raster', (l,s,t) => {const r=base(l,s,t); void r.cv; return r;}); }",
+            )
+            .unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'resized',type:'text',name:'Title',d:{}});
+                   __compat.answerRasters(1,[{composition:'synthetic-comp',layer:'resized',seconds:0,scale:1,
+                                               crop:{x:0,y:0,width:1,height:1}}]);")
+            .unwrap();
+        assert_eq!(
+            *painted.lock().unwrap(),
+            [
+                json!(["resized", "synthetic-comp", false, true]),
+                json!(["resized", "synthetic-comp", false, false])
+            ]
+        );
+        let answered = answered.lock().unwrap();
+        assert_eq!(answered[0][1], "unavailable");
+        assert!(
+            answered[0][2]
+                .as_str()
+                .unwrap()
+                .contains("base raster changed")
+        );
+    }
+
     /// A runner whose 2 × 2 base rasters record the revision of the document
     /// they were painted from.
     fn revision_runner() -> (CompatRunner, Log<Value>, Log<Value>) {

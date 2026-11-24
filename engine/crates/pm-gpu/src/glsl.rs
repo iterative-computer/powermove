@@ -1343,6 +1343,7 @@ pub fn preprocess(stage: Stage, source: &str) -> Result<String> {
 
 /// Compiles a three.js program (vertex and fragment sources exactly as WebGL received them).
 pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
+    pm_perf::stall::stall(pm_perf::stall::Stage::Shader);
     let glslang = Glslang::get()?;
     let vs = glslang
         .preprocess(Stage::Vertex, &normalize(vertex_src))

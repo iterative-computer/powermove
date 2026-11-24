@@ -405,6 +405,7 @@ impl SessionGuard<'_> {
         n: usize,
         stop: &mut dyn FnMut(super::session::Progress) -> bool,
     ) -> Result<Option<DecodedFrame>> {
+        pm_perf::stall::stall(pm_perf::stall::Stage::Decode);
         let sample = self
             .source
             .index

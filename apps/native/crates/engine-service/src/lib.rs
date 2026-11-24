@@ -905,6 +905,8 @@ struct Shared {
     traffic: Arc<settle::Traffic>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
     /// Test record: each drawn frame's stamp, time and scale, in order.
     #[cfg(test)]
     drawn: Mutex<Vec<(Stamp, Ticks, f64)>>,
@@ -1703,15 +1705,13 @@ impl EngineService {
     ) -> Result<Self> {
         let device = metal_device(&gpu);
         let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
-        // Built-in definitions load first thing on the service thread
-        // (`run`): the app's window doesn't wait for a cold shader cache.
-        // Its jobs (exports, cache fills) read the same translated shaders.
+        // The first scene installs the pinned definitions it uses. Keep the
+        // same shader cache for the viewer and its jobs (exports, cache fills).
         jobs::set_shader_cache(shader_cache.clone());
         // Its jobs' fonts are compared with the viewer's registry.
         jobs::set_font_broker(Some(fonts.broker.clone()));
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
-        engine.builtins_pending = true;
         let mut service = Self::start_engine(device, engine)?;
         service.layer_rasters = Some(layer_rasters);
         Ok(service)
@@ -1760,6 +1760,8 @@ impl EngineService {
             traffic: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            first_picture: Mutex::new(None),
             #[cfg(test)]
             drawn: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -2610,13 +2612,6 @@ impl Drop for LoopPool {
 }
 
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
-    if std::mem::take(&mut engine.builtins_pending)
-        && let Err(error) = engine.load_builtin_definitions()
-    {
-        // Frames still draw; effects report the failure where they're used.
-        eprintln!("Built-in effect definitions failed to load: {error:#}");
-        engine.definition_failure = Some(error.to_string());
-    }
     // A stable observer survives cached sources; its work identity changes per frame.
     let progress_work = Arc::new(Mutex::new(None::<(u64, Stamp)>));
     let progress_context = progress_work.clone();
@@ -2782,6 +2777,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
         }
         // Completion is distinct from display. Never synthesize presentedTime.
+        let mut scrub_present_retry = f64::INFINITY;
         let mut i = 0;
         while i < flights.len() {
             // Retired once its completion handler has recorded the outcome:
@@ -2797,8 +2793,35 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 continue;
             }
             if flights[i].submission.drawable.is_some() {
-                let trace = flights[i].submission.trace.lock().unwrap();
-                if trace.display.is_none() && trace::now() - trace.commit < 0.25 {
+                let flight = &flights[i];
+                let trace = flight.submission.trace.lock().unwrap();
+                let now = trace::now();
+                if trace.display.is_none() && now - trace.commit < 0.25 {
+                    // An untimed scrub can finish on the GPU but miss the
+                    // display. Give its current picture one earlier retry;
+                    // retain the original flight so its callback still wins
+                    // if it does get to the glass. Timed playback is unchanged.
+                    if trace.gpu_ok
+                        && flight.spec.moment == Moment::Scrub
+                        && let Some(view) = state.views.get_mut(&flight.id)
+                        && view.stamp == flight.stamp
+                        && view.commands.is_empty()
+                        && !view.hidden
+                        && !view.dirty
+                        && let Some(r) = runtime.get_mut(&flight.id)
+                        && r.scrub
+                        && r.last == Some((flight.stamp, flight.spec.time))
+                        && r.represented != Some(flight.stamp)
+                    {
+                        let retry = trace.completed + (3. * r.interval).max(0.025);
+                        if now >= retry {
+                            r.represented = Some(flight.stamp);
+                            view.dirty = true;
+                            view.status.represented += 1;
+                        } else {
+                            scrub_present_retry = scrub_present_retry.min(retry);
+                        }
+                    }
                     i += 1;
                     continue;
                 }
@@ -2916,6 +2939,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
+                            "render_size": f.spec.render_size(),
+                            "drawable_size": [f.submission.width, f.submission.height],
                             "picture": traced_picture
                                 .then(|| format!("{:016x}", f.submission.picture_hash())),
                             // Traced runs only: the decode service's running
@@ -2940,6 +2965,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= captured;
                     continue;
+                }
+                #[cfg(test)]
+                if t.gpu_ok
+                    && let Some(first) = shared.first_picture.lock().unwrap().take()
+                    && let Some(picture) =
+                        Picture::copy(&f.submission.surface, f.stamp, f.spec.time)
+                {
+                    let _ = first.send(picture);
                 }
                 if represent && v.commands.is_empty() {
                     // Same stamp: an exact-cache re-present, not new content.
@@ -4350,7 +4383,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .flat_map(|r| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
                 .map(|at| (at - now).max(0.001))
-                .fold(f64::INFINITY, f64::min);
+                .fold((scrub_present_retry - now).max(0.001), f64::min);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             // Only back-offs pending, nothing playing: sleep until the first is due.
@@ -4667,6 +4700,65 @@ fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn the_first_viewer_picture_draws_current_and_saved_builtins() {
+        fn first_pixels(service: &EngineService, version: Option<(u32, &str)>) -> Vec<u8> {
+            let mut config = shapes_config(None);
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            if let Some((revision, _)) = version {
+                project["layers"][0]["fx"] = serde_json::json!([
+                    {"id":"probe-invert","type":"invert","version":revision,"on":true,"p":{}}
+                ]);
+            }
+            let project = pm_model::json::parse(&project.to_string()).unwrap();
+            let mut document = pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                config.snapshot.revision,
+            );
+            document.set_saving_app_version(version.map(|(_, saved)| saved.to_owned()));
+            config.snapshot.document = Arc::new(document);
+            let (first, pictures) = std::sync::mpsc::channel();
+            *service.shared.first_picture.lock().unwrap() = Some(first);
+            let viewer = service.viewer(config).unwrap();
+            let frame = pictures.recv_timeout(Duration::from_secs(25)).unwrap();
+            assert_eq!(
+                frame.stamp.sequence, 1,
+                "the first picture must be the original preview"
+            );
+            assert_eq!(frame.time, Ticks::ZERO);
+            assert!(viewer.status().layer_failures.is_empty());
+            frame
+                .bytes
+                .chunks_exact(frame.row)
+                .take(frame.height)
+                .flat_map(|row| row[..frame.width * 8].iter().copied())
+                .collect()
+        }
+
+        let eager =
+            || EngineService::start(pm_gpu::Gpu::new("first-picture-eager").unwrap()).unwrap();
+        let without_effect = first_pixels(&eager(), None);
+        for version in [(2, "1.3.0"), (1, "1.3.0")] {
+            let expected = first_pixels(&eager(), Some(version));
+            assert_ne!(
+                expected, without_effect,
+                "invert {version:?} must change the picture"
+            );
+            let app = EngineService::start_with_fonts(
+                pm_gpu::Gpu::new("first-picture-app").unwrap(),
+                pm_render::text::host::RenderFonts::new(pm_text::host::FontBroker::new()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                first_pixels(&app, Some(version)),
+                expected,
+                "invert {version:?}"
+            );
+        }
+    }
 
     #[test]
     fn pause_freezes_the_viewer_while_the_worker_is_busy() {
