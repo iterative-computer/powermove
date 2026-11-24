@@ -5346,6 +5346,104 @@ mod tests {
         assert_eq!(launch(RASTER), first, "unchanged code: the same identity");
         assert_ne!(launch(&RASTER.replace("c.width=1", "c.width=2")), first);
     }
+    /// Every answer of `batch`, once `count` arrived.
+    fn answers_of(answered: &Answers, batch: u64, count: usize) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let got: Vec<Value> = answered
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(b, _)| *b == batch)
+                .map(|(_, a)| a.clone())
+                .collect();
+            if got.len() >= count {
+                return got;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "batch {batch} was answered: {got:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// An export's batch of layers is drawn one layer per evaluation, as
+    /// serial frames ask them: `source`'s override answers two needs of one
+    /// batch, and the widths it answered are the ones it gives each need
+    /// asked on its own.
+    fn export_batch_widths(source: &str) -> Vec<Value> {
+        let (fixture, answered) = export_window(&[("counter", source)], "abc", None);
+        let frozen = fixture.kernel.published("window").unwrap();
+        let mut needs = needs(&fixture);
+        let mut second = needs[0].clone();
+        second["seconds"] = json!(1);
+        needs.as_array_mut().unwrap().push(second);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-b", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs, json!({"job":"job-b"}));
+        let widths = answers_of(&answered, 1, 2);
+        cancel.store(true, Ordering::Release);
+        widths
+    }
+    /// One canvas an override repaints for every layer: each layer's
+    /// answer holds the pixels painted for it, not the next layer's.
+    #[test]
+    fn an_export_batch_reads_a_shared_canvas_for_each_layer_before_the_next() {
+        const SHARED: &str = "export default function activate(api: any){
+           let c: any = null; let n = 0;
+           api.services.register('raster',(L: any)=>{
+             if (!c) c = document.createElement('canvas');
+             n += 1; c.width = n; c.height = 1;
+             return {cv:c,w:n,h:1,anchorX:0,anchorY:0};});}";
+        assert_eq!(export_batch_widths(SHARED), vec![json!(1), json!(2)]);
+    }
+    /// State an override advances in a promise reaches the next layer: the
+    /// realm's microtasks run between the layers of a batch.
+    #[test]
+    fn an_export_batch_runs_microtasks_between_layers() {
+        const LATER: &str = "export default function activate(api: any){
+           let n = 0;
+           api.services.register('raster',(L: any)=>{
+             const c = document.createElement('canvas'); c.width = n + 1; c.height = 1;
+             const w = n + 1;
+             Promise.resolve().then(()=>{ n += 1; });
+             return {cv:c,w,h:1,anchorX:0,anchorY:0};});}";
+        assert_eq!(export_batch_widths(LATER), vec![json!(1), json!(2)]);
+    }
+    /// A layer of a batch that fails ends the batch: the layers after it
+    /// are not drawn (the frame fails at the first, as serial frames do).
+    #[test]
+    fn an_export_batch_stops_at_its_first_failed_layer() {
+        const FIRST_THROWS: &str = "export default function activate(api: any){
+           let n = 0;
+           api.services.register('raster',(L: any)=>{
+             n += 1; if (n === 1) throw new Error('first');
+             const c = document.createElement('canvas'); c.width = n; c.height = 1;
+             return {cv:c,w:n,h:1,anchorX:0,anchorY:0};});}";
+        let (fixture, answered) = export_window(&[("throws", FIRST_THROWS)], "abc", None);
+        let frozen = fixture.kernel.published("window").unwrap();
+        let one = needs(&fixture);
+        let mut three = one.clone();
+        for t in [1, 2] {
+            let mut need = one[0].clone();
+            need["seconds"] = json!(t);
+            three.as_array_mut().unwrap().push(need);
+        }
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-f", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, three, json!({"job":"job-f"}));
+        let failed = answers_of(&answered, 1, 3);
+        assert!(failed.iter().all(Value::is_string), "{failed:?}");
+        inbox.ask(2, one, json!({"job":"job-f"}));
+        assert_eq!(
+            answers_of(&answered, 2, 1),
+            vec![json!(2)],
+            "two layers were never drawn"
+        );
+        cancel.store(true, Ordering::Release);
+    }
     #[test]
     fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {
         let (fixture, answered) = export_window(&[("spy", SPY)], "frozen", None);

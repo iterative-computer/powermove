@@ -19,8 +19,8 @@ use pm_compat_host::{AdmittedDomBatch, RemoteDomPanel};
 use pm_kernel::{KernelHandle, Published};
 use pm_remote_dom::protocol::Session;
 use pm_runtime_v8::{Realm, RealmKind, RuntimePool};
-use serde_json::Value;
-use std::collections::{BTreeSet, VecDeque};
+use serde_json::{Value, json};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -301,6 +301,8 @@ struct Run {
     /// Sources the realm's queue had no room for yet, in order.
     queue: VecDeque<String>,
     producing: Arc<AtomicBool>,
+    /// Batches of several needs being drawn one need at a time.
+    parts: Arc<Mutex<Parts>>,
     /// The script the realm ran last, for the progress it shows.
     last_execution: Option<u64>,
 }
@@ -334,6 +336,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         waiting: VecDeque::new(),
         queue: VecDeque::new(),
         producing: Arc::new(AtomicBool::new(false)),
+        parts: Arc::default(),
         last_execution: None,
     };
 
@@ -411,19 +414,29 @@ impl Run {
         // A batch answered after a layout read went unanswered is failed:
         // its pixels were laid out at a guessed place.
         let (producing, events) = (self.producing.clone(), self.events.clone());
+        let parts = self.parts.clone();
         host.set_rasters(self.start.rasters.clone().map(|hooks| {
             let answers = hooks.answers.clone();
             RasterHooks {
                 producing: Arc::new(move |on, _, _| producing.store(on, Ordering::Release)),
                 answers: Arc::new(move |batch, given: Vec<RasterAnswer>| {
-                    if events.layout_failed.load(Ordering::Acquire) {
-                        let failed = given
+                    let given = if events.layout_failed.load(Ordering::Acquire) {
+                        given
                             .iter()
                             .map(|_| RasterAnswer::Failed(LAYOUT.into()))
-                            .collect();
-                        return answers(batch, failed);
+                            .collect()
+                    } else {
+                        given
+                    };
+                    // One need of a batch drawn on its own: the batch is
+                    // answered once its last need is, or one failed.
+                    let step = parts.lock().unwrap().answered(batch, given);
+                    match step {
+                        Part::Whole(batch, given) => answers(batch, given),
+                        Part::Next(part, need) => {
+                            let _ = events.inbox.send(RunInput::Ask(part, json!([need])));
+                        }
                     }
-                    answers(batch, given)
                 }),
                 ..hooks
             }
@@ -557,7 +570,19 @@ impl Run {
         };
         progress.note(note);
     }
+    /// A batch of several needs is drawn one need per evaluation, each
+    /// answer's pixels read before the next need runs and the realm's
+    /// microtasks run in between, as serial frames ask them.
     fn ask(&mut self, batch: u64, needs: Value) {
+        let needs = match needs {
+            Value::Array(needs) if needs.len() > 1 => {
+                let (part, first) = self.parts.lock().unwrap().split(batch, needs);
+                self.waiting.push_back((part, json!([first])));
+                self.dispatch();
+                return;
+            }
+            needs => needs,
+        };
         self.waiting.push_back((batch, needs));
         self.dispatch();
     }
@@ -729,6 +754,65 @@ impl Run {
         }
         if !full {
             self.eval("__compat.flushCanvases?.()".into());
+        }
+    }
+}
+
+/// A batch's needs asked one at a time (`Run::ask`): their answers so far and
+/// the needs still to ask, by the part asked now.
+#[derive(Default)]
+struct Parts {
+    next: u64,
+    /// The part asked now, and its batch.
+    asked: HashMap<u64, u64>,
+    batches: HashMap<u64, (VecDeque<Value>, Vec<RasterAnswer>)>,
+}
+/// Part ids are far from any batch id the app gives, and exact as a JS
+/// number (they go through the realm).
+const PART_BASE: u64 = 1 << 50;
+enum Part {
+    /// The batch's answers, or a batch that was never split.
+    Whole(u64, Vec<RasterAnswer>),
+    /// Ask this need next, as this part.
+    Next(u64, Value),
+}
+impl Parts {
+    fn part(&mut self, batch: u64) -> u64 {
+        let part = PART_BASE + self.next;
+        self.next += 1;
+        self.asked.insert(part, batch);
+        part
+    }
+    /// Splits `batch`: its first need, to ask as the part returned.
+    fn split(&mut self, batch: u64, needs: Vec<Value>) -> (u64, Value) {
+        let mut rest: VecDeque<Value> = needs.into();
+        let first = rest.pop_front().unwrap_or(Value::Null);
+        self.batches.insert(batch, (rest, Vec::new()));
+        (self.part(batch), first)
+    }
+    fn answered(&mut self, part: u64, given: Vec<RasterAnswer>) -> Part {
+        let Some(batch) = self.asked.remove(&part) else {
+            return Part::Whole(part, given);
+        };
+        let Some((mut rest, mut got)) = self.batches.remove(&batch) else {
+            return Part::Whole(batch, given);
+        };
+        let failed = given.iter().find_map(|a| match a {
+            RasterAnswer::Failed(why) | RasterAnswer::Unavailable(why) => Some(why.clone()),
+            _ => None,
+        });
+        got.extend(given);
+        if let Some(why) = failed {
+            // The first failure ends the batch: its later needs are not drawn.
+            got.extend(rest.iter().map(|_| RasterAnswer::Failed(why.clone())));
+            return Part::Whole(batch, got);
+        }
+        match rest.pop_front() {
+            None => Part::Whole(batch, got),
+            Some(need) => {
+                self.batches.insert(batch, (rest, got));
+                Part::Next(self.part(batch), need)
+            }
         }
     }
 }
