@@ -623,26 +623,24 @@ pub(crate) fn expand_groups(layers: &[Value], ids: &HashSet<&str>) -> Vec<String
 
 /// `PM.normalizeGroupStack()`: every group directly above its members.
 pub(crate) fn normalize_group_stack(layers: Vec<Value>) -> Vec<Value> {
-    let mut children: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+    let mut children: std::collections::HashMap<Option<String>, Vec<usize>> =
+        std::collections::HashMap::with_capacity(layers.len() / 4 + 1);
     for (i, l) in layers.iter().enumerate() {
         let parent = values::text(l, "group")
             .filter(|g| !g.is_empty())
             .map(str::to_owned);
-        match children.iter_mut().find(|(p, _)| *p == parent) {
-            Some((_, list)) => list.push(i),
-            None => children.push((parent, vec![i])),
-        }
+        children.entry(parent).or_default().push(i);
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(layers.len());
     let mut order = Vec::with_capacity(layers.len());
     fn visit(
         parent: Option<&str>,
         layers: &[Value],
-        children: &[(Option<String>, Vec<usize>)],
+        children: &std::collections::HashMap<Option<String>, Vec<usize>>,
         seen: &mut HashSet<String>,
         order: &mut Vec<usize>,
     ) {
-        let Some((_, list)) = children.iter().find(|(p, _)| p.as_deref() == parent) else {
+        let Some(list) = children.get(&parent.map(str::to_owned)) else {
             return;
         };
         for &i in list {
@@ -659,14 +657,16 @@ pub(crate) fn normalize_group_stack(layers: Vec<Value>) -> Vec<Value> {
         }
     }
     visit(None, &layers, &children, &mut seen, &mut order);
-    let mut out: Vec<Value> = order.iter().map(|&i| layers[i].clone()).collect();
-    for l in &layers {
-        let id = values::text(l, "id").unwrap_or_default();
-        if !seen.contains(id) {
-            let mut l = l.clone();
-            values::obj(&mut l).insert("group", Value::Null);
-            out.push(l);
+    let mut slots: Vec<Option<Value>> = layers.into_iter().map(Some).collect();
+    let mut out: Vec<Value> = Vec::with_capacity(slots.len());
+    for i in order {
+        if let Some(layer) = slots[i].take() {
+            out.push(layer);
         }
+    }
+    for mut layer in slots.into_iter().flatten() {
+        values::obj(&mut layer).insert("group", Value::Null);
+        out.push(layer);
     }
     out
 }
@@ -1463,7 +1463,6 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
 
 /// `PM.cloneLayer(L)`: a deep copy with fresh key ids and a numbered name.
 pub(crate) fn clone_layer(layer: &Value, id: &str, siblings: &[Value]) -> Value {
-    let mut c = layer.clone();
     let name = values::text(layer, "name").unwrap_or_default();
     let base = strip_number(name, false);
     let count = siblings
@@ -1474,7 +1473,25 @@ pub(crate) fn clone_layer(layer: &Value, id: &str, siblings: &[Value]) -> Value 
                 .starts_with(base)
         })
         .count();
-    let renamed = format!("{} {}", strip_number(name, true), count + 1);
+    clone_layer_numbered(layer, id, count + 1)
+}
+
+/// Same as [`clone_layer`], using pre-collected sibling names so callers in
+/// loops (like splitting a large group) never clone `layers`.
+pub(crate) fn clone_layer_with_names(layer: &Value, id: &str, sibling_names: &[String]) -> Value {
+    let name = values::text(layer, "name").unwrap_or_default();
+    let base = strip_number(name, false);
+    let count = sibling_names
+        .iter()
+        .filter(|n| n.starts_with(base))
+        .count();
+    clone_layer_numbered(layer, id, count + 1)
+}
+
+fn clone_layer_numbered(layer: &Value, id: &str, number: usize) -> Value {
+    let mut c = layer.clone();
+    let name = values::text(layer, "name").unwrap_or_default();
+    let renamed = format!("{} {}", strip_number(name, true), number);
     let m = values::obj(&mut c);
     m.insert("id", values::s(id));
     m.insert("name", values::s(&renamed));

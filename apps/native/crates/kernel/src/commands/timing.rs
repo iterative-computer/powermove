@@ -706,11 +706,14 @@ fn cut_head(source: &Value, mut layer: Value, t: f64) -> Value {
 
 /// `splitLayerClone(PM, layer, tail, time)`: edits the head in place and
 /// returns the tail.
-fn split_pair(head: &mut Value, tail_id: &str, siblings: &[Value], t: f64) -> Value {
-    let source = head.clone();
-    let mut tail = cut_head(&source, layers::clone_layer(&source, tail_id, siblings), t);
-    let from = values::num(&source, "from").unwrap_or(0.0);
-    if values::text(&source, "type") == Some("captions")
+fn split_pair(head: &mut Value, tail_id: &str, sibling_names: &[String], t: f64) -> Value {
+    let mut tail = cut_head(
+        head,
+        layers::clone_layer_with_names(head, tail_id, sibling_names),
+        t,
+    );
+    let from = values::num(head, "from").unwrap_or(0.0);
+    if values::text(head, "type") == Some("captions")
         && let Some(cues) = cues_mut(head)
     {
         // `clipCuesToEnd`.
@@ -724,7 +727,7 @@ fn split_pair(head: &mut Value, tail_id: &str, siblings: &[Value], t: f64) -> Va
     }
     values::obj(head).insert("transitionOut", Value::Null);
     values::obj(&mut tail).insert("transitionIn", Value::Null);
-    if values::text(&source, "type") == Some("audio") {
+    if values::text(head, "type") == Some("audio") {
         set_content(head, "fadeOut", Value::Number(0.0));
         set_content(&mut tail, "fadeIn", Value::Number(0.0));
     }
@@ -739,6 +742,7 @@ fn split(
     t: f64,
     new_ids: &[String],
 ) -> Result<(), CommandError> {
+    use std::collections::HashMap;
     if layer_ids.len() != new_ids.len() {
         return Err(CommandError::Invalid(
             "new_ids must pair with layer_ids".into(),
@@ -752,35 +756,149 @@ fn split(
     let comp_dur = cx.duration(comp.as_deref());
     let mut layers = cx.layers(comp.as_deref());
     let explicit: HashSet<&str> = layer_ids.iter().map(String::as_str).collect();
-    let locked_in = |layers: &[Value], l: &Value, except: &HashSet<String>| {
-        values::flag(l, "lock")
-            || layers::ancestors(layers, l).iter().any(|g| {
-                values::flag(g, "lock")
-                    && !values::text(g, "id").is_some_and(|i| except.contains(i))
-            })
+    let mut index_by_id: HashMap<String, usize> = HashMap::with_capacity(layers.len() * 2);
+    for (i, l) in layers.iter().enumerate() {
+        if let Some(id) = values::text(l, "id") {
+            index_by_id.insert(id.to_owned(), i);
+        }
+    }
+    let is_locked = |layers: &[Value],
+                     index_by_id: &HashMap<String, usize>,
+                     l: &Value,
+                     except: &HashSet<String>| {
+        if values::flag(l, "lock") {
+            return true;
+        }
+        let mut cur = values::text(l, "group").filter(|g| !g.is_empty());
+        let mut seen = HashSet::new();
+        while let Some(gid) = cur {
+            if !seen.insert(gid) {
+                break;
+            }
+            let Some(&gi) = index_by_id.get(gid) else {
+                break;
+            };
+            let g = &layers[gi];
+            if values::flag(g, "lock") && !except.contains(gid) {
+                return true;
+            }
+            cur = values::text(g, "group").filter(|p| !p.is_empty());
+        }
+        false
     };
-    let tail_id_for = |id: &str| {
-        layer_ids
-            .iter()
-            .position(|x| x == id)
-            .map(|i| new_ids[i].clone())
+    let has_explicit_ancestor =
+        |layers: &[Value], index_by_id: &HashMap<String, usize>, l: &Value| {
+            let mut cur = values::text(l, "group").filter(|g| !g.is_empty());
+            let mut seen = HashSet::new();
+            while let Some(gid) = cur {
+                if !seen.insert(gid) {
+                    break;
+                }
+                if explicit.contains(gid) {
+                    return true;
+                }
+                let Some(&gi) = index_by_id.get(gid) else {
+                    break;
+                };
+                cur = values::text(&layers[gi], "group").filter(|p| !p.is_empty());
+            }
+            false
+        };
+    let tail_id_map: HashMap<&str, &str> = layer_ids
+        .iter()
+        .zip(new_ids.iter())
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let tail_id_for = |id: &str| tail_id_map.get(id).map(|s| (*s).to_owned());
+
+    // Precompute group spans once from the initial layer tree so large groups
+    // never rescan `layers` per child.
+    let mut group_children: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, l) in layers.iter().enumerate() {
+        if let Some(gid) = values::text(l, "group").filter(|g| !g.is_empty()) {
+            group_children.entry(gid.to_owned()).or_default().push(i);
+        }
+    }
+    let compute_span = |layers: &[Value],
+                        group_children: &HashMap<String, Vec<usize>>,
+                        layer: &Value|
+     -> (f64, f64) {
+        if values::text(layer, "type") != Some("group") {
+            return (
+                values::num(layer, "from").unwrap_or(f64::NAN),
+                values::num(layer, "dur").unwrap_or(f64::NAN),
+            );
+        }
+        let mut stack = vec![values::text(layer, "id").unwrap_or_default()];
+        let mut seen = HashSet::new();
+        let mut from = f64::INFINITY;
+        let mut end = f64::NEG_INFINITY;
+        let mut any = false;
+        while let Some(gid) = stack.pop() {
+            if !seen.insert(gid) {
+                continue;
+            }
+            let Some(children) = group_children.get(gid) else {
+                continue;
+            };
+            for &ci in children {
+                let child = &layers[ci];
+                if values::text(child, "type") == Some("group") {
+                    if let Some(cid) = values::text(child, "id") {
+                        stack.push(cid);
+                    }
+                } else {
+                    let f = values::num(child, "from").unwrap_or(0.0);
+                    let d = values::num(child, "dur").unwrap_or(0.0);
+                    from = from.min(f);
+                    end = end.max(f + d);
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            (0.0, comp_dur)
+        } else {
+            (from, end - from)
+        }
     };
+
     // Group roots: explicit groups not inside another explicit group.
     let roots: Vec<String> = layers
         .iter()
         .filter(|l| {
             values::text(l, "id").is_some_and(|i| explicit.contains(i))
                 && values::text(l, "type") == Some("group")
-                && !layers::ancestors(&layers, l)
-                    .iter()
-                    .any(|g| values::text(g, "id").is_some_and(|i| explicit.contains(i)))
+                && !has_explicit_ancestor(&layers, &index_by_id, l)
         })
         .filter_map(|l| values::text(l, "id").map(str::to_owned))
         .collect();
+    let expand_group_fast = |root: &str,
+                             layers: &[Value],
+                             group_children: &HashMap<String, Vec<usize>>|
+     -> HashSet<String> {
+        let mut ids = HashSet::new();
+        let mut stack = vec![root.to_owned()];
+        while let Some(id) = stack.pop() {
+            if !ids.insert(id.clone()) {
+                continue;
+            }
+            if let Some(children) = group_children.get(&id) {
+                for &ci in children {
+                    if let Some(cid) = values::text(&layers[ci], "id") {
+                        stack.push(cid.to_owned());
+                    }
+                }
+            }
+        }
+        ids
+    };
     let mut grouped: HashSet<String> = HashSet::new();
+    let mut root_sets: Vec<(String, HashSet<String>)> = Vec::with_capacity(roots.len());
     for r in &roots {
-        let one: HashSet<&str> = [r.as_str()].into_iter().collect();
-        grouped.extend(layers::expand_groups(&layers, &one));
+        let set = expand_group_fast(r, &layers, &group_children);
+        grouped.extend(set.iter().cloned());
+        root_sets.push((r.clone(), set));
     }
     let ordinary: Vec<String> = layers
         .iter()
@@ -790,78 +908,129 @@ fn split(
                 && values::text(l, "type") != Some("group")
                 && !grouped.contains(id)
                 && !values::flag(l, "lock")
-                && crosses(span(&layers, l, comp_dur), t)
+                && crosses(compute_span(&layers, &group_children, l), t)
         })
         .filter_map(|l| values::text(l, "id").map(str::to_owned))
         .collect();
+
+    let mut sibling_names: Vec<String> = layers
+        .iter()
+        .map(|l| values::text(l, "name").unwrap_or_default().to_owned())
+        .collect();
+    let mut tails_before: HashMap<usize, Vec<Value>> = HashMap::new();
     let mut changed = false;
     let mut transition_tails = Vec::new();
-    for root in &roots {
-        let one: HashSet<&str> = [root.as_str()].into_iter().collect();
-        let ids: HashSet<String> = layers::expand_groups(&layers, &one).into_iter().collect();
-        let hierarchy: Vec<Value> = layers
+    let mut root_rewires: Vec<(HashSet<String>, HashMap<String, String>, Vec<(String, String)>)> =
+        Vec::new();
+
+    for (root, ids) in root_sets {
+        let hierarchy_indices: Vec<usize> = layers
             .iter()
-            .filter(|l| values::text(l, "id").is_some_and(|i| ids.contains(i)))
-            .cloned()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                values::text(l, "id")
+                    .is_some_and(|id| ids.contains(id))
+                    .then_some(i)
+            })
             .collect();
-        let Some(root_layer) = layer_of(&layers, root) else {
+        let Some(&root_index) = index_by_id.get(&root) else {
             continue;
         };
-        if !crosses(span(&layers, root_layer, comp_dur), t)
-            || hierarchy.is_empty()
-            || hierarchy.iter().any(|l| locked_in(&layers, l, &ids))
+        if !crosses(
+            compute_span(&layers, &group_children, &layers[root_index]),
+            t,
+        ) || hierarchy_indices.is_empty()
+            || hierarchy_indices
+                .iter()
+                .any(|&i| is_locked(&layers, &index_by_id, &layers[i], &ids))
         {
             continue;
         }
         changed = true;
-        let mut tail_by: Vec<(String, String)> = Vec::new();
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for l in &hierarchy {
-            let id = values::text(l, "id").unwrap_or_default().to_owned();
-            let sp = span(&layers, l, comp_dur);
+        let mut tail_by: HashMap<String, String> = HashMap::with_capacity(hierarchy_indices.len());
+        let mut pairs: Vec<(String, String)> = Vec::with_capacity(hierarchy_indices.len());
+        for &index in &hierarchy_indices {
+            let id = values::text(&layers[index], "id")
+                .unwrap_or_default()
+                .to_owned();
+            let sp = compute_span(&layers, &group_children, &layers[index]);
             if !crosses(sp, t) {
                 if sp.0 >= t {
-                    tail_by.push((id.clone(), id));
+                    tail_by.insert(id.clone(), id);
                 }
                 continue;
             }
-            let Some(index) = layers
-                .iter()
-                .position(|x| values::text(x, "id") == Some(id.as_str()))
-            else {
-                continue;
-            };
-            let tail_id = if id == *root {
+            let tail_id = if id == root {
                 tail_id_for(&id).unwrap_or_else(|| new_id("L"))
             } else {
                 new_id("L")
             };
-            let siblings = layers.clone();
             let source = layers[index].clone();
-            let mut tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
+            let mut tail = split_pair(&mut layers[index], &tail_id, &sibling_names, t);
             preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
             duplicate_precomp_source(cx, &source, &mut tail)?;
-            layers.insert(index, tail);
-            tail_by.push((id.clone(), tail_id.clone()));
+            sibling_names.push(values::text(&tail, "name").unwrap_or_default().to_owned());
+            tails_before.entry(index).or_default().push(tail);
+            tail_by.insert(id.clone(), tail_id.clone());
             transition_tails.push((id.clone(), tail_id.clone()));
             pairs.push((id, tail_id));
         }
-        let tail_of = |id: Option<&str>| -> Option<String> {
-            let id = id?;
-            tail_by
-                .iter()
-                .find(|(s, _)| s == id)
-                .map(|(_, t)| t.clone())
+        root_rewires.push((ids, tail_by, pairs));
+    }
+    for id in &ordinary {
+        let Some(&index) = index_by_id.get(id) else {
+            continue;
         };
+        let tail_id = tail_id_for(id).unwrap_or_else(|| new_id("L"));
+        let source = layers[index].clone();
+        let mut tail = split_pair(&mut layers[index], &tail_id, &sibling_names, t);
+        preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
+        duplicate_precomp_source(cx, &source, &mut tail)?;
+        sibling_names.push(values::text(&tail, "name").unwrap_or_default().to_owned());
+        tails_before.entry(index).or_default().push(tail);
+        transition_tails.push((id.clone(), tail_id));
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+
+    // Materialize the combined layer list in one O(N) pass instead of repeated Vec::insert.
+    let extra: usize = tails_before.values().map(Vec::len).sum();
+    let mut combined = Vec::with_capacity(layers.len() + extra);
+    for (i, layer) in layers.into_iter().enumerate() {
+        if let Some(tails) = tails_before.remove(&i) {
+            // Multiple insertions at the same index previously pushed each new tail
+            // at the front (`insert(index, tail)`), so reverse matches that order.
+            for tail in tails.into_iter().rev() {
+                combined.push(tail);
+            }
+        }
+        combined.push(layer);
+    }
+    layers = combined;
+
+    // Reindex once and apply group/parent/matte rewiring in O(N).
+    index_by_id.clear();
+    for (i, l) in layers.iter().enumerate() {
+        if let Some(id) = values::text(l, "id") {
+            index_by_id.insert(id.to_owned(), i);
+        }
+    }
+    for (ids, tail_by, pairs) in root_rewires {
         // Rows wholly after the cut join the tail hierarchy.
-        for l in layers.iter_mut() {
-            let id = values::text(l, "id").unwrap_or_default().to_owned();
-            let is_after = tail_by.iter().any(|(s, t)| *s == id && *t == id);
-            if !is_after {
+        for (src_id, mapped_id) in &tail_by {
+            if src_id != mapped_id {
                 continue;
             }
+            let Some(&idx) = index_by_id.get(src_id) else {
+                continue;
+            };
+            let l = &mut layers[idx];
             for field in ["group", "parent", "matteSource"] {
-                let target = tail_of(values::text(l, field));
+                let target = values::text(l, field)
+                    .and_then(|v| tail_by.get(v))
+                    .cloned();
                 if let Some(target) = target.filter(|x| Some(x.as_str()) != values::text(l, field))
                 {
                     values::obj(l).insert(field, values::s(&target));
@@ -869,71 +1038,51 @@ fn split(
             }
         }
         for (source, tail_id) in &pairs {
-            let Some(src) = layer_of(&layers, source).cloned() else {
+            let Some(&src_idx) = index_by_id.get(source) else {
                 continue;
             };
-            let Some(tail) = layers
-                .iter_mut()
-                .find(|x| values::text(x, "id") == Some(tail_id.as_str()))
-            else {
+            let Some(&tail_idx) = index_by_id.get(tail_id) else {
                 continue;
             };
-            let group = values::text(&src, "group").filter(|g| !g.is_empty());
-            let tail_group = group.and_then(|g| {
-                tail_by
-                    .iter()
-                    .find(|(s, t)| s == g && s != t)
-                    .map(|(_, t)| t.clone())
-            });
-            let group_value = match (tail_group, group) {
+            let group = values::text(&layers[src_idx], "group")
+                .filter(|g| !g.is_empty())
+                .map(str::to_owned);
+            let parent = values::text(&layers[src_idx], "parent")
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned);
+            let matte = values::text(&layers[src_idx], "matteSource").map(str::to_owned);
+
+            let tail_group = group
+                .as_deref()
+                .and_then(|g| tail_by.get(g).filter(|t| t.as_str() != g).cloned());
+            let group_value = match (tail_group, group.as_deref()) {
                 (Some(tg), _) => values::s(&tg),
                 (None, Some(g)) if ids.contains(g) => Value::Null,
                 (None, Some(g)) => values::s(g),
                 (None, None) => Value::Null,
             };
-            values::obj(tail).insert("group", group_value);
-            let parent = values::text(&src, "parent").filter(|p| !p.is_empty());
             let tail_parent = parent
-                .and_then(|p| {
-                    tail_by
-                        .iter()
-                        .find(|(s, x)| s == p && s != x)
-                        .map(|(_, x)| x.clone())
-                })
-                .or(parent.map(str::to_owned));
+                .as_deref()
+                .and_then(|p| tail_by.get(p).filter(|x| x.as_str() != p).cloned())
+                .or(parent);
+            let tail_matte = matte.map(|m| {
+                tail_by
+                    .get(&m)
+                    .filter(|x| x.as_str() != m)
+                    .cloned()
+                    .unwrap_or(m)
+            });
+
+            let tail = &mut layers[tail_idx];
+            values::obj(tail).insert("group", group_value);
             values::obj(tail).insert(
                 "parent",
                 tail_parent.as_deref().map(values::s).unwrap_or(Value::Null),
             );
-            if let Some(m) = values::text(&src, "matteSource") {
-                let tm = tail_by
-                    .iter()
-                    .find(|(s, x)| s == m && s != x)
-                    .map(|(_, x)| x.clone())
-                    .unwrap_or_else(|| m.to_owned());
+            if let Some(tm) = tail_matte {
                 values::obj(tail).insert("matteSource", values::s(&tm));
             }
         }
-    }
-    for id in &ordinary {
-        let Some(index) = layers
-            .iter()
-            .position(|x| values::text(x, "id") == Some(id.as_str()))
-        else {
-            continue;
-        };
-        let tail_id = tail_id_for(id).unwrap_or_else(|| new_id("L"));
-        let siblings = layers.clone();
-        let source = layers[index].clone();
-        let mut tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
-        preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
-        duplicate_precomp_source(cx, &source, &mut tail)?;
-        layers.insert(index, tail);
-        transition_tails.push((id.clone(), tail_id));
-        changed = true;
-    }
-    if !changed {
-        return Ok(());
     }
     super::transition_edges::after_split(&mut layers, &transition_tails)?;
     let next = layers::normalize_group_stack(layers);
