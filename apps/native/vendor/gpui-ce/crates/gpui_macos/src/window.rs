@@ -2603,13 +2603,18 @@ impl PlatformWindow for MacWindow {
             .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
         this.last_draw = Some(now);
         let direct = this.direct_moved.is_some();
-        let sync = direct
-            || crate::composition::presents_with_transaction(
-                forced,
-                transaction.as_ref(),
-                continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
-                this.ca_display_link.is_some(),
-            );
+        // Only a frame that moves a hosted view (or AppKit's own synchronous
+        // paint) presents with the slot transaction and waits for its
+        // command buffer to be scheduled; the frames between moves of a
+        // direct stay present as soon as they are committed. A direct
+        // window's drawables come one at a time from the layer, so it is
+        // paced as a link's are.
+        let sync = crate::composition::presents_with_transaction(
+            forced,
+            transaction.as_ref(),
+            continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
+            this.ca_display_link.is_some() || direct,
+        );
         this.renderer.set_presents_with_transaction(sync);
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) has moved its views by now, under a
