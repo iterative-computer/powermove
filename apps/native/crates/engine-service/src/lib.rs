@@ -905,6 +905,8 @@ struct Shared {
     traffic: Arc<settle::Traffic>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
     /// Test record: each drawn frame's stamp, time and scale, in order.
     #[cfg(test)]
     drawn: Mutex<Vec<(Stamp, Ticks, f64)>>,
@@ -1758,6 +1760,8 @@ impl EngineService {
             traffic: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            first_picture: Mutex::new(None),
             #[cfg(test)]
             drawn: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -2931,6 +2935,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= captured;
                     continue;
+                }
+                #[cfg(test)]
+                if t.gpu_ok
+                    && let Some(first) = shared.first_picture.lock().unwrap().take()
+                    && let Some(picture) =
+                        Picture::copy(&f.submission.surface, f.stamp, f.spec.time)
+                {
+                    let _ = first.send(picture);
                 }
                 if represent && v.commands.is_empty() {
                     // Same stamp: an exact-cache re-present, not new content.
@@ -4649,6 +4661,65 @@ fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn the_first_viewer_picture_draws_current_and_saved_builtins() {
+        fn first_pixels(service: &EngineService, version: Option<(u32, &str)>) -> Vec<u8> {
+            let mut config = shapes_config(None);
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            if let Some((revision, _)) = version {
+                project["layers"][0]["fx"] = serde_json::json!([
+                    {"id":"probe-invert","type":"invert","version":revision,"on":true,"p":{}}
+                ]);
+            }
+            let project = pm_model::json::parse(&project.to_string()).unwrap();
+            let mut document = pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                config.snapshot.revision,
+            );
+            document.set_saving_app_version(version.map(|(_, saved)| saved.to_owned()));
+            config.snapshot.document = Arc::new(document);
+            let (first, pictures) = std::sync::mpsc::channel();
+            *service.shared.first_picture.lock().unwrap() = Some(first);
+            let viewer = service.viewer(config).unwrap();
+            let frame = pictures.recv_timeout(Duration::from_secs(25)).unwrap();
+            assert_eq!(
+                frame.stamp.sequence, 1,
+                "the first picture must be the original preview"
+            );
+            assert_eq!(frame.time, Ticks::ZERO);
+            assert!(viewer.status().layer_failures.is_empty());
+            frame
+                .bytes
+                .chunks_exact(frame.row)
+                .take(frame.height)
+                .flat_map(|row| row[..frame.width * 8].iter().copied())
+                .collect()
+        }
+
+        let eager =
+            || EngineService::start(pm_gpu::Gpu::new("first-picture-eager").unwrap()).unwrap();
+        let without_effect = first_pixels(&eager(), None);
+        for version in [(2, "1.3.0"), (1, "1.3.0")] {
+            let expected = first_pixels(&eager(), Some(version));
+            assert_ne!(
+                expected, without_effect,
+                "invert {version:?} must change the picture"
+            );
+            let app = EngineService::start_with_fonts(
+                pm_gpu::Gpu::new("first-picture-app").unwrap(),
+                pm_render::text::host::RenderFonts::new(pm_text::host::FontBroker::new()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                first_pixels(&app, Some(version)),
+                expected,
+                "invert {version:?}"
+            );
+        }
+    }
 
     #[test]
     fn pause_freezes_the_viewer_while_the_worker_is_busy() {
