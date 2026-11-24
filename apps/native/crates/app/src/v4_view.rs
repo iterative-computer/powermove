@@ -6895,6 +6895,10 @@ impl SurfaceView {
     /// and a tooltip would stand over the open menu).
     pub(crate) fn tooltip_title(&self, id: Id) -> Option<SharedString> {
         let node = self.prepared.node(id)?;
+        // Every answer below is the node's own title or none: most nodes
+        // have none, and the words they show (a walk and a join) are asked
+        // of every control on every render.
+        node.title.as_ref()?;
         let shown = self.shown_text(id, 3);
         let props = self.publication.surface.node(id).map(|n| &n.props);
         if props.is_some_and(|p| p.get("metadata").is_some_and(|m| m["menuAnchor"] == true)) {
