@@ -734,6 +734,8 @@ impl Flow {
                 animate: true,
                 // Two lines, as v1.2.0 (read as one sentence).
                 title: "Welcome to\nPowermove.".into(),
+                // The film's closing line (OWNER-COPY in `beats::CLOSING`).
+                line: pm_shell::stage::beats::CLOSING.into(),
                 centred: true,
                 buttons: vec![Button::new("begin", "Begin")],
                 default: Some("begin".into()),
@@ -1152,8 +1154,29 @@ struct Driver {
     activity: Arc<Activity>,
     running: Rc<std::cell::Cell<bool>>,
     flow: Rc<RefCell<Flow>>,
-    window: Rc<RefCell<Option<gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>>>>,
+    window: Rc<RefCell<Option<GateWindow>>>,
     tx: async_channel::Sender<Message>,
+}
+/// Where the first run shows: the stage on the launch that onboards (the
+/// film, then the steps on its card), else the Welcome window.
+#[derive(Clone)]
+enum GateWindow {
+    Welcome(gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>),
+    Stage(crate::first_run_stage::StageWindow),
+}
+impl GateWindow {
+    fn activate(&self, cx: &mut gpui::App) {
+        let _ = match self {
+            Self::Welcome(h) => h.update(cx, |_, window, _| window.activate()),
+            Self::Stage(s) => s.window.update(cx, |_, window, _| window.activate()),
+        };
+    }
+}
+/// A sound the film's cue sheet reached (`stage::OnSound`).
+pub fn play_sound(id: &str, _: &mut gpui::App) {
+    if id == "chime" {
+        play_chime();
+    }
 }
 impl Driver {
     fn begin(self, rx: async_channel::Receiver<Message>, cx: &mut gpui::App) {
@@ -1194,10 +1217,14 @@ impl Driver {
         if !frame.animate {
             stop_chime();
         }
-        let handle = *self.window.borrow();
+        let handle = self.window.borrow().clone();
         let animating = frame.animate;
         let began = match handle {
-            Some(handle) => handle
+            Some(GateWindow::Stage(stage)) => {
+                stage.set_frame(frame, cx);
+                false
+            }
+            Some(GateWindow::Welcome(handle)) => handle
                 .update(cx, |view, _, cx| {
                     let began = animating && !view.frame.animate;
                     view.set_frame(frame, cx);
@@ -1209,15 +1236,33 @@ impl Driver {
                     let driver = self.clone();
                     move |id, cx| driver.step(|flow| flow.action(id), cx)
                 });
-                let opened = pm_shell::welcome_view::open_welcome(
-                    pm_shell::tokens(),
-                    frame,
-                    on_action.clone(),
-                    cx,
-                );
+                // The launch that onboards plays on the stage; its cue
+                // sheet plays the chime.
+                let staged = self.flow.borrow().plan.onboard
+                    && crate::first_run_stage::open(
+                        frame.clone(),
+                        on_action.clone(),
+                        frame.animate,
+                        Rc::new(play_sound),
+                        cx,
+                    )
+                    .map(|stage| *self.window.borrow_mut() = Some(GateWindow::Stage(stage)))
+                    .inspect_err(|e| eprintln!("The first-run stage could not open: {e:#}"))
+                    .is_ok();
+                let opened = if staged {
+                    Err(anyhow::anyhow!("staged"))
+                } else {
+                    pm_shell::welcome_view::open_welcome(
+                        pm_shell::tokens(),
+                        frame,
+                        on_action.clone(),
+                        cx,
+                    )
+                };
                 match opened {
+                    Err(_) if staged => false,
                     Ok(handle) => {
-                        *self.window.borrow_mut() = Some(handle);
+                        *self.window.borrow_mut() = Some(GateWindow::Welcome(handle));
                         if self.flow.borrow().extensions.is_some() {
                             crate::extension_transfer::review(on_action.clone(), cx);
                         }
@@ -1270,7 +1315,7 @@ impl Driver {
                         if run == Run::WithConsent {
                             let (request, requested) = async_channel::bounded(1);
                             let (reply, response) = std::sync::mpsc::sync_channel(1);
-                            let window = *self.window.borrow();
+                            let window = self.window.borrow().clone();
                             // The worker asks only after validation and the durable
                             // AccessStarted checkpoint. This task runs on main.
                             cx.spawn(async move |cx| {
@@ -1278,8 +1323,7 @@ impl Driver {
                                     let result = cx.update(|cx| {
                                         cx.activate(true);
                                         if let Some(window) = window {
-                                            let _ =
-                                                window.update(cx, |_, window, _| window.activate());
+                                            window.activate(cx);
                                         }
                                         MacKeychain::read_on_main_thread()
                                     });
@@ -1420,8 +1464,13 @@ impl Driver {
         // The editor that opens next starts the transfer (`firstRunWorkspace`).
         note_workspace_request(opened.bring_workspace);
         (self.finish)(cx);
-        if let Some(handle) = self.window.borrow_mut().take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        match self.window.borrow_mut().take() {
+            Some(GateWindow::Welcome(handle)) => {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            // The wave carries the card away; the lights come up on the app.
+            Some(GateWindow::Stage(stage)) => stage.hand_off(cx),
+            None => {}
         }
         if opened.media {
             self.library.finish_media(log, cx);

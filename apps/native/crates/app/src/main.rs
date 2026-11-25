@@ -48,6 +48,7 @@ mod extensions;
 mod figma_paste;
 mod file_coordination;
 mod first_run;
+mod first_run_stage;
 #[cfg(debug_assertions)]
 mod stage_capture;
 mod demo_editor;
@@ -525,6 +526,10 @@ fn main() -> Result<()> {
     }));
     let fonts = RenderFonts::new(broker.clone());
     let text_fonts = fonts.clone();
+    first_run_stage::set_inputs(first_run_stage::FilmInputs {
+        fonts: fonts.clone(),
+        shader_cache: Some(profile.join("shader-cache")),
+    });
     let worker_profile = profile.clone();
     let (bridge, bridge_calls) = panel_bridge::channel();
     let bridge_windows = panel_bridge::Shared::default();
@@ -612,6 +617,12 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
+                    // Development builds: the first-run film again, over the
+                    // app (`--replay-onboarding 1`), as Help › Welcome Film.
+                    #[cfg(debug_assertions)]
+                    if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
+                        cx.defer(first_run_stage::replay);
+                    }
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     storage::install_cleanup(profile.clone(), cx);
@@ -764,6 +775,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         // Onboarding on an isolated profile (it runs only on the default one).
         "--review-onboarding" => Some("PM_NATIVE_REVIEW_ONBOARDING"),
+        // The first-run film again, over the app (Help › Welcome Film).
+        "--replay-onboarding" => Some("PM_NATIVE_REPLAY_ONBOARDING"),
         // Presses the extension step's buttons by id (extension_transfer::review).
         "--review-welcome" => Some("PM_NATIVE_REVIEW_WELCOME"),
         _ => None,
@@ -817,6 +830,7 @@ mod review_override_tests {
             "--cloud-fixture",
             "--electron-profile",
             "--review-onboarding",
+            "--replay-onboarding",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
