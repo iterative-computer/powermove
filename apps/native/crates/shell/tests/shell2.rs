@@ -397,7 +397,7 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
     // Workspace and panel menus exist (HIG placement), and v1's tab items
-    // (Open Projects In: Tabs, the default). The system's own tab bar stays
+    // (for Open Projects In: Tabs). The system's own tab bar stays
     // hidden behind the toolbar's tabs: no Show Tab Bar.
     for c in ["newTab", "mergeAllWindows", "nextTab", "moveTabToNewWindow", "panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");

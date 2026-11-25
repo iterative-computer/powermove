@@ -1,10 +1,9 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
 pub mod agent_launcher;
-/// Settings › General › "Open projects in": Tabs (the default, owner and
-/// co-founder 2026-11-14) or Separate windows (one project per window). The
-/// app sets it from the setting at launch and whenever it changes; the next
-/// project opened follows it.
-static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Settings › General › "Open projects in": Separate windows (the default,
+/// owner 2026-11-25) or Tabs. The app sets it from the setting at launch and
+/// whenever it changes; the next project opened follows it.
+static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Projects open as tabs of the window in use (else each in a window of its own).
 pub fn tabs_mode() -> bool {
     TABS_MODE.load(std::sync::atomic::Ordering::Relaxed)

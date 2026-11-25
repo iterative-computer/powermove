@@ -54,9 +54,9 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
   // Sharing usage data is on until it is turned off.
   expect(model.rows.find((r) => r.id === "share-usage-data")?.value).toBe(true);
-  // Projects open in tabs unless Separate Windows was chosen.
+  // Projects open in separate windows unless Tabs was chosen (PM-745).
   expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
-    "tabs",
+    "windows",
   );
 });
 test("preferences persist immediately through serialized v4 host acknowledgements", async () => {
