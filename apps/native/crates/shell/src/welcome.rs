@@ -137,6 +137,10 @@ pub struct Frame {
     pub top: bool,
     /// The Welcome's preview of the steps ahead.
     pub outline: Option<Outline>,
+    /// On the stage: the product picture beside the step (`welcome_view::
+    /// preview`): `workspace`, `timeline-layers`, `timeline-tracks`, `agent`
+    /// or `speech`.
+    pub preview: Option<String>,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.

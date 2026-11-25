@@ -9,6 +9,17 @@ use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
 use std::sync::Arc;
 
+/// `PM_PANEL_CAPTURE_SIZE=w,h` draws every panel at that size instead.
+fn capture_size(w: f32, h: f32) -> (f32, f32) {
+    std::env::var("PM_PANEL_CAPTURE_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((w, h))
+}
+
 fn wait_export_publication(ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
@@ -283,7 +294,7 @@ fn capture_builtin_panels() {
                 let panel_fill = tokens.colors.panel;
                 let timeline_tokens = tokens.clone();
                 let window = cx
-                    .open_window(size(px(w), px(h)), |window, cx| {
+                    .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                         let natives = Natives::default();
                         let outline = natives.outline.clone();
                         if capture_timeline {
@@ -730,7 +741,7 @@ fn capture_agent_states() {
                     tokens.colors.floating
                 };
                 let window = cx
-                    .open_window(size(px(w), px(h)), |window, cx| {
+                    .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                         let view = cx.new(|cx| {
                             let mut view = SurfaceView::new(
                                 runtime,
@@ -836,7 +847,7 @@ fn capture_colour_stack_states() {
                     );
                     let fill = tokens.colors.panel;
                     let window = cx
-                        .open_window(size(px(w), px(h)), |window, cx| {
+                        .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                             let view = cx.new(|cx| {
                                 let mut view = SurfaceView::new(
                                     runtime,
@@ -1165,7 +1176,7 @@ fn capture_threads_layout() {
                         surface,
                     };
                     let window = cx
-                        .open_window(size(px(w), px(h)), |window, cx| {
+                        .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                             let view = cx.new(|cx| {
                                 let mut view = SurfaceView::new(
                                     rig.runtime.clone(),

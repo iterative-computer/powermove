@@ -92,6 +92,7 @@ fn launch(
     }
     app.with_accessibility_forced().run(move |cx| {
         cx.set_global(SharedMetalDevice(device));
+        crate::welcome_view::register_fonts(cx);
         if let Some(open_urls) = open_urls {
             cx.spawn(async move |cx| {
                 while let Ok(urls) = urls_rx.recv().await {
@@ -150,6 +151,7 @@ pub fn capture_app(device: metal::Device, run: impl FnOnce(&mut App) + 'static) 
         .with_activation_policy(MacActivationPolicy::Prohibited)
         .run(move |cx| {
             cx.set_global(SharedMetalDevice(device));
+            crate::welcome_view::register_fonts(cx);
             run(cx);
         });
 }

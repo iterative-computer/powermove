@@ -54,6 +54,7 @@ pub(crate) fn open(
     intro: bool,
     exact: bool,
 ) -> WindowHandle<Stage> {
+    cx.update(|cx| pm_shell::welcome_view::register_fonts(cx));
     cx.open_window(size(px(ROOM.0), px(ROOM.1)), move |_, cx| {
         let stage = cx.new(|cx| {
             let mut stage = Stage::new(tokens.clone(), CueSheet::default(), intro, cx);
@@ -409,22 +410,27 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
                 );
             }
         });
+        // (still, step, the timeline chosen)
         let shots = [
-            ("1-welcome", None),
-            ("2-timeline", Some(Step::Timeline)),
-            ("3-agent", Some(Step::Agent)),
-            ("4-speech-model", Some(Step::Transcription)),
-            ("5-workspace", Some(Step::Workspace)),
+            ("1-welcome", None, "layers"),
+            ("2-timeline-layers", Some(Step::Timeline), "layers"),
+            ("2b-timeline-tracks", Some(Step::Timeline), "tracks"),
+            ("3-agent", Some(Step::Agent), "layers"),
+            ("4-speech-model", Some(Step::Transcription), "layers"),
+            ("5-workspace", Some(Step::Workspace), "layers"),
         ];
         cx.spawn(async move |cx| {
-            for (name, step) in shots {
+            for (name, step, timeline) in shots {
                 if let Some(step) = step {
                     let tokens = tokens.clone();
                     let _ = cx.update(|cx| {
                         let next = card(
                             step_frame(
                                 step,
-                                &crate::first_run::Choices::default(),
+                                &crate::first_run::Choices {
+                                    timeline: timeline.into(),
+                                    ..Default::default()
+                                },
                                 &Default::default(),
                                 None,
                             ),

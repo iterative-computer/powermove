@@ -1421,12 +1421,16 @@ impl NativeControl {
         self.height = v.fittingSize().height as f32;
         self.width = width;
     }
-    /// A push button at the small size: a row's own button.
+    /// A push button at the small size, a capsule: a row's own button.
     pub fn small(&mut self) {
         let Control::Button(v) = &self.control else {
             return;
         };
         v.setControlSize(NSControlSize::Small);
+        // A capsule (macOS 26 and later), the shape of a row's own button.
+        if v.respondsToSelector(objc2::sel!(setBorderShape:)) {
+            v.setBorderShape(NSControlBorderShape::Capsule);
+        }
         let fit = v.fittingSize();
         self.height = fit.height as f32;
         self.width = fit.width as f32;

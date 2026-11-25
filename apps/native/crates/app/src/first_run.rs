@@ -851,9 +851,11 @@ pub(crate) fn step_frame(
             line: "Work the way you already do. You can switch anytime from the timeline panel."
                 .into(),
             choices: vec![
-                row("layers", "Layers", "A layer for each element, as in After Effects."),
-                row("tracks", "Tracks", "Clips on tracks, as in Premiere Pro."),
+                row("layers", "Layers", "A row for each element, like After Effects."),
+                row("tracks", "Tracks", "Clips share tracks, like Premiere Pro."),
             ],
+            // The real timeline, in the mode chosen.
+            preview: Some(format!("timeline-{}", choices.timeline)),
             chosen: Some(choices.timeline.clone()),
             ..Frame::default()
         }),
@@ -870,22 +872,24 @@ pub(crate) fn step_frame(
                     ..agent(
                         "aero",
                         "Powermove",
-                        "Built for Powermove, on ChatGPT or an API key.",
+                        "Built for Powermove.",
                         "powermove",
                         "chatgpt",
                     )
                 },
-                agent("chatgpt", "Codex", "Uses your ChatGPT account.", "provider.chatgpt", "chatgpt"),
+                agent("chatgpt", "Codex", "Your ChatGPT account.", "provider.chatgpt", "chatgpt"),
+                // The installed Claude app's own icon, as Settings › Agents
+                // shows it (Anthropic's artwork is never bundled).
                 agent(
                     "claude",
                     "Claude Code",
-                    "Uses your Claude account or an Anthropic key.",
-                    "provider.claude",
+                    "Your Claude account.",
+                    "app:Claude",
                     "claude",
                 ),
             ],
             chosen: Some(choices.agent.clone()),
-            note: Some("Accounts stay in Settings › Providers.".into()),
+            preview: Some("agent".into()),
             ..Frame::default()
         }),
         Onboard::Transcription => {
@@ -901,7 +905,7 @@ pub(crate) fn step_frame(
                     ..row(
                         &model.id,
                         &model.name,
-                        &format!("{} Runs on this Mac.", model.description),
+                        &model.description,
                     )
                 });
             }
@@ -915,7 +919,8 @@ pub(crate) fn step_frame(
                 choices: rows,
                 // The model row shows its download, not a selection.
                 chosen: None,
-                note: Some("More models in Settings › Transcription.".into()),
+                note: Some("Runs on this Mac. More models in Settings › Transcription.".into()),
+                preview: Some("speech".into()),
                 ..Frame::default()
             })
         }
@@ -928,10 +933,11 @@ pub(crate) fn step_frame(
                 .into(),
             error,
             choices: vec![
-                row("import", "Bring my workspace", "Your After Effects panels and tools, unpacked here."),
-                row("fresh", "Start fresh", "Powermove’s own layout. Bring things in later."),
+                row("import", "Bring my workspace", "Your After Effects panels and tools."),
+                row("fresh", "Start fresh", "Powermove’s own layout."),
             ],
             chosen: Some(choices.workspace.clone()),
+            preview: Some("workspace".into()),
             ..Frame::default()
         }),
         Onboard::Starting | Onboard::Complete => Frame {
@@ -989,6 +995,7 @@ pub(crate) fn welcome_frame() -> Frame {
         line: "Four quick choices, then your editor.\nYou can change any of them later.".into(),
         outline: Some(steps_outline(None)),
         centred: true,
+        preview: Some("timeline-layers".into()),
         buttons: vec![Button::new("begin", "Begin")],
         default: Some("begin".into()),
         ..Frame::default()

@@ -199,8 +199,8 @@ pub fn replay(cx: &mut gpui::App) {
     });
     let frame = Frame {
         surface: "S107-replay".into(),
-        // The Welcome's look: the lit mark in the window, its title.
         animate: true,
+        preview: Some("timeline-layers".into()),
         title: "Welcome to Powermove".into(),
         centred: true,
         buttons: vec![Button::new("done", "Done")],

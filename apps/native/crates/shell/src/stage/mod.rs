@@ -40,10 +40,6 @@ const LIGHTS_UP: f64 = 0.55;
 const SLIDE_IN: f32 = 10.;
 const SLIDE_OUT: f32 = 6.;
 /// quiet-md's quick fade (critically damped) and its vanish.
-/// The mark in the Welcome window: its height (points) and centre (a
-/// fraction of the window's height).
-pub const WINDOW_MARK: f32 = 96.;
-pub const WINDOW_MARK_Y: f32 = 0.42;
 const ARRIVE: Spring = Spring::new(520., 46.);
 const LEAVE: Spring = Spring::new(900., 60.);
 
@@ -225,20 +221,12 @@ impl Stage {
     pub fn welcome_rect(&self, area: Size<Pixels>) -> Bounds<Pixels> {
         self.window_rect(area)
     }
-    /// The window's content for the real window: its lit ground and the
-    /// step (or a step change), filling `window`. Returns whether the
-    /// ground has drawn (the window is shown from then on).
+    /// The window's content for the real window: its ground and the step
+    /// (or a step change), filling `window`. Returns whether it has drawn
+    /// (the window is shown from then on).
     pub fn window_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, bool) {
         let t = self.now();
-        let size = window.bounds().size;
-        let scale = window.scale_factor();
-        self.light.warm(window);
         if self.step_springs(t, cx) {
-            window.request_animation_frame();
-        }
-        let lit = self.window_light(Bounds::new(Point::default(), size), scale, cx);
-        let drawn = lit.is_some();
-        if !drawn {
             window.request_animation_frame();
         }
         let mut ground = div()
@@ -246,25 +234,13 @@ impl Stage {
             .debug_selector(|| "stage-window".into())
             .relative()
             .size_full()
-            .bg(rgb(self.tokens.colors.window))
             .overflow_hidden()
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        if let Some(lit) = lit {
-                            window.paint_texture(bounds, lit);
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+            .child(crate::welcome_view::stage_ground());
         ground = match &self.pending {
             Some(card) => ground.child(div().absolute().inset_0().child(card.clone())),
             None => self.contents(ground),
         };
-        (ground.into_any_element(), drawn)
+        (ground.into_any_element(), true)
     }
     /// Esc or Skip: straight to the window, with a short fade.
     pub fn skip(&mut self, cx: &mut Context<Self>) {
@@ -385,81 +361,7 @@ impl Stage {
     }
     /// The window: its ground and the current step's content, with a
     /// leaving step's content fading over it.
-    /// The window's ground, lit by the same pass as the room: a light from
-    /// its top, and on the Welcome step the mark in it (still: the window
-    /// at rest draws no frames).
-    fn window_light(
-        &mut self,
-        rect: Bounds<Pixels>,
-        scale: f32,
-        cx: &App,
-    ) -> Option<std::sync::Arc<NativeTexture>> {
-        let (width, height) = (
-            (f32::from(rect.size.width) * scale).round(),
-            (f32::from(rect.size.height) * scale).round(),
-        );
-        // How much of the Welcome step is showing: its light follows it
-        // through a step's cross-fade.
-        let welcome = |card: &Entity<WelcomeView>| card.read(cx).frame.animate;
-        let mut w = match &self.pending {
-            // The step made for the real window, shown whole there.
-            Some(card) => {
-                if welcome(card) {
-                    1.
-                } else {
-                    0.
-                }
-            }
-            None => self
-                .card
-                .as_ref()
-                .filter(|c| welcome(c))
-                .map_or(0., |_| self.presence.get().clamp(0., 1.)),
-        };
-        if let Some(leaving) = self.leaving.as_ref().filter(|l| welcome(&l.card)) {
-            w = w.max(leaving.presence.get().clamp(0., 1.));
-        }
-        let mark = WINDOW_MARK * scale;
-        let ground = self.tokens.colors.window;
-        let linear = |shift: u32| {
-            let v = ((ground >> shift) & 255) as f32 / 255.;
-            if v <= 0.04045 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        let light = light::Light {
-            size: [width, height],
-            // In the right column's panel (`welcome_view::LEFT_COLUMN`).
-            centre: [
-                (crate::welcome_view::LEFT_COLUMN * scale + width) / 2.,
-                height * (-0.3 + (0.3 + WINDOW_MARK_Y) * w),
-            ],
-            scale: mark / 112.,
-            exposure: 1.,
-            bloom: 0.5 * w,
-            edge: 0.,
-            pool: 0.55 + 0.15 * w,
-            mark: w,
-            time: self.sheet.hold as f32,
-            density: scale,
-            reach: 0.45 * height + (mark * 1.2 - 0.45 * height) * w,
-            atmosphere: 0.,
-            soft: 0.,
-            iris: 1.,
-            field: 0.,
-            ground: [linear(16), linear(8), linear(0)],
-            domain: [0.; 4],
-        };
-        self.light.picture(light, self.wait)
-    }
-    fn window(
-        &self,
-        rect: Bounds<Pixels>,
-        shadow: f32,
-        lit: Option<std::sync::Arc<NativeTexture>>,
-    ) -> Stateful<Div> {
+    fn window(&self, rect: Bounds<Pixels>, shadow: f32) -> Stateful<Div> {
         let t = &self.tokens;
         let mut ground = div()
             .id("stage-window")
@@ -468,22 +370,10 @@ impl Stage {
             .w(rect.size.width)
             .h(rect.size.height)
             .corner(t, self.window_radius())
-            .bg(rgb(t.colors.window))
             .border_1()
             .border_color(rgba((t.colors.text << 8) | 0x16))
             .overflow_hidden()
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        if let Some(lit) = lit {
-                            window.paint_texture(bounds, lit);
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+            .child(crate::welcome_view::stage_ground());
         if shadow > 0. {
             // The shadow arrives with the window, not with its picture.
             ground = faded_shadow(ground.elevated(t, Elevation::Raised), shadow);
@@ -517,7 +407,6 @@ impl Stage {
         area: Size<Pixels>,
         scale: f32,
         out: f64,
-        cx: &App,
     ) -> AnyElement {
         let room = div()
             .relative()
@@ -529,10 +418,9 @@ impl Stage {
             return room.into_any_element();
         }
         let rect = self.window_rect(area);
-        let lit = self.window_light(rect, scale, cx);
         // Out: the window eases away, settling a few points as it goes.
         let w = self
-            .window(rect, 1., lit)
+            .window(rect, 1.)
             .top(px(8. * out as f32))
             .opacity(1. - out as f32);
         room.child(
@@ -611,8 +499,7 @@ impl Stage {
                     .child(self.intro(hold, area, scale)),
             );
         let radius = self.window_radius();
-        let lit = self.window_light(rect, scale, cx);
-        let to = self.window(rect, 0., lit);
+        let to = self.window(rect, 0.);
         let shadow = smooth((p - 0.2) / 0.3) as f32;
         let mut stage = div()
             .relative()
@@ -764,7 +651,7 @@ impl Render for Stage {
                 div().into_any_element()
             } else {
                 self.set_snapshots(true, cx);
-                self.window_scene(t, area, scale, out, cx)
+                self.window_scene(t, area, scale, out)
             }
         } else if phase == Phase::Window {
             // Live: the owner moves the Welcome into a real window (an app
@@ -786,7 +673,7 @@ impl Render for Stage {
             {
                 fade = smooth((t - at) / SKIP_FADE);
             }
-            let scene = self.window_scene(t, area, scale, 0., cx);
+            let scene = self.window_scene(t, area, scale, 0.);
             div()
                 .size_full()
                 .bg(rgb(0x000000))
