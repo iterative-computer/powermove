@@ -387,14 +387,17 @@ impl SurfaceView {
             || (self.cull.outer.is_some() && self.cull.wheeling.is_some())
     }
     /// A wheel step over the panel in a body that scrolls: the first of a
-    /// scroll draws the panel again with rows past each edge, for the body's
-    /// layer to replay the steps after; the panel rests once they stop.
+    /// scroll draws the panel again with rows past each edge (when it left
+    /// rows out), for the body's layer to replay the steps after; the panel
+    /// rests once they stop.
     pub(super) fn body_wheeled(&mut self, cx: &mut gpui::Context<Self>) {
         if self.cull.outer.is_none() {
             return;
         }
         let step = self.cull.wheeling.map_or(0, |n| n + 1);
-        if self.cull.wheeling.replace(step).is_none() {
+        // A panel that left no row out has every row built already: wider
+        // margins would build nothing more (PM-710).
+        if self.cull.wheeling.replace(step).is_none() && self.culls() {
             cx.notify();
         }
         cx.spawn(async move |this, cx| {

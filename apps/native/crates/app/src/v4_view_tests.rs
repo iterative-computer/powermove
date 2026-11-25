@@ -3707,12 +3707,14 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
         vcx.run_until_parked();
     };
     let rendered = renders(&vcx);
+    // PM-710: only a panel that left rows out has more to build.
+    let left_out = view.read_with(&vcx, |v, _| v.culls());
     wheel(&mut vcx, -20.);
     assert!(layered(&vcx));
     assert_eq!(
         renders(&vcx),
-        rendered + 1,
-        "the first step draws past each edge"
+        rendered + usize::from(left_out),
+        "the first step draws past each edge, when rows were left out"
     );
     // The rows it brought in are measured over the next frames.
     for _ in 0..4 {
@@ -3735,11 +3737,17 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     view.update(&mut vcx, |_, cx| cx.notify());
     vcx.run_until_parked();
     assert!(!layered(&vcx));
-    // Scrolling again, then the pointer moves on: at rest at once.
+    // Scrolling again, then the pointer moves on: at rest at once (the
+    // listener comes with the draw past each edge), else at the rest.
     wheel(&mut vcx, 20.);
     assert!(layered(&vcx));
     vcx.simulate_mouse_move(point(px(60.), px(40.)), None, Modifiers::none());
     vcx.run_until_parked();
+    if !left_out {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        vcx.run_until_parked();
+    }
     assert!(!layered(&vcx), "a pointer move ends the scroll");
 }
 
