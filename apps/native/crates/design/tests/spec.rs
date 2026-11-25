@@ -401,8 +401,12 @@ const ROLES: &[(&str, &str)] = &[
         "Agent composer grows to this many lines, then scrolls",
     ),
     (
-        "metrics.composer_tray",
-        "Agent composer's tray around its field",
+        "metrics.composer_radius",
+        "Agent composer corner, concentric in its panel",
+    ),
+    (
+        "metrics.composer_popover_radius",
+        "Agent composer corner, concentric in the popover",
     ),
     ("metrics.group_radius", "Settings grouped-form card corner"),
     ("metrics.form_row", "Minimum Settings row height"),
@@ -965,9 +969,14 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        // The composer sits `text_padding` inside its panel or popover.
         assert_eq!(
-            m.panel_radius,
-            t.radius.nested(m.popover_radius, m.composer_tray)
+            m.composer_radius,
+            t.radius.nested(m.panel_radius, m.text_padding)
+        );
+        assert_eq!(
+            m.composer_popover_radius,
+            t.radius.nested(m.popover_radius, m.text_padding)
         );
         assert_eq!(m.inner_radius, t.radius.nested(m.panel_radius, m.gap));
         assert_eq!(m.media_small_radius, m.inner_radius - m.pill_inset);
