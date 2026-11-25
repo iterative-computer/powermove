@@ -1,13 +1,18 @@
 //! Batch summaries with 90 % intervals, and DESIGN.md 8's bar for "Aero is
-//! better": a higher success rate than each other harness on the same model
-//! with non-overlapping 90 % intervals, and median wall time and tokens no
-//! worse.
+//! better": on the same model and effort, a higher success rate than every
+//! other harness with non-overlapping 90 % intervals, and median wall time
+//! and tokens no worse. The bar only compares like with like: live runs of
+//! the full harness (no ablation, no replay), the same tasks on both sides,
+//! at least [`MIN_RUNS_PER_TASK`] distinct runs per task per harness, and
+//! observed cost telemetry on every compared run.
 use crate::record::RunRecord;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// z for a two-sided 90 % interval.
 pub const Z90: f64 = 1.644_853_626_951_472_2;
+/// DESIGN.md 8: at least five runs per task per harness.
+pub const MIN_RUNS_PER_TASK: usize = 5;
 
 /// Wilson score interval for k successes in n trials.
 pub fn wilson(k: u32, n: u32, z: f64) -> Interval {
@@ -39,45 +44,72 @@ pub struct Interval {
     pub hi: f64,
 }
 
-/// Median with a distribution-free confidence interval from order statistics:
-/// [x(k), x(n−k+1)] with the largest k such that P(Bin(n, ½) < k) ≤ (1−level)/2.
-/// When even the sample range cannot reach the level (n ≤ 4 at 90 %), the
-/// interval is the sample range.
-pub fn median_interval(samples: &[f64], level: f64) -> Option<Interval> {
+/// A median with its distribution-free interval. The bounds are absent when
+/// too few samples exist for any order-statistic interval to reach the level
+/// (n ≤ 4 at 90 %); `coverage` is the interval's attained coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MedianInterval {
+    pub estimate: f64,
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
+    pub coverage: Option<f64>,
+}
+
+/// P(Bin(n, ½) ≤ j) for j = 0..n, summed in log space so it stays exact to
+/// rounding for any n (the coefficients never overflow).
+fn binomial_half_cdf(n: usize) -> Vec<f64> {
+    let ln_half_n = -(n as f64) * std::f64::consts::LN_2;
+    let mut ln_pmf = ln_half_n;
+    let mut cdf = Vec::with_capacity(n + 1);
+    let mut sum = 0.0;
+    for j in 0..=n {
+        if j > 0 {
+            ln_pmf += ((n - j + 1) as f64).ln() - (j as f64).ln();
+        }
+        sum += ln_pmf.exp();
+        cdf.push(sum.min(1.0));
+    }
+    cdf
+}
+
+/// Median with a distribution-free interval from order statistics:
+/// [x(k), x(n−k+1)] with the largest k whose coverage 1 − 2·P(Bin(n, ½) ≤ k−1)
+/// is at least `level`.
+pub fn median_interval(samples: &[f64], level: f64) -> Option<MedianInterval> {
     if samples.is_empty() {
         return None;
     }
     let mut s = samples.to_vec();
     s.sort_by(f64::total_cmp);
     let n = s.len();
-    let median = if n % 2 == 1 {
+    let estimate = if n % 2 == 1 {
         s[n / 2]
     } else {
         (s[n / 2 - 1] + s[n / 2]) / 2.0
     };
-    let alpha = (1.0 - level) / 2.0;
-    // cdf[j] = P(Bin(n, ½) ≤ j)
-    let mut k = 1usize;
-    let mut cdf = 0.0;
-    let mut coeff = 1.0f64; // C(n, j)
-    for j in 0..n {
-        if j > 0 {
-            coeff = coeff * (n - j + 1) as f64 / j as f64;
-        }
-        cdf += coeff / 2f64.powi(n as i32);
-        // Coverage of [x(k), x(n−k+1)] is 1 − 2·P(Bin ≤ k−1): k = j+1 is
-        // allowed while that tail is ≤ alpha.
-        if cdf <= alpha {
-            k = j + 1;
+    let cdf = binomial_half_cdf(n);
+    let coverage = |k: usize| 1.0 - 2.0 * cdf[k - 1];
+    let mut best = None;
+    for k in 1..=n.div_ceil(2) {
+        if coverage(k) >= level {
+            best = Some(k);
         } else {
             break;
         }
     }
-    let k = k.min(n.div_ceil(2));
-    Some(Interval {
-        estimate: median,
-        lo: s[k - 1],
-        hi: s[n - k],
+    Some(match best {
+        Some(k) => MedianInterval {
+            estimate,
+            lo: Some(s[k - 1]),
+            hi: Some(s[n - k]),
+            coverage: Some(coverage(k)),
+        },
+        None => MedianInterval {
+            estimate,
+            lo: None,
+            hi: None,
+            coverage: None,
+        },
     })
 }
 
@@ -86,18 +118,27 @@ pub struct Group {
     pub harness: String,
     pub model: String,
     pub effort: String,
+    /// `live`, `replay` or `none`: never pooled.
+    pub mode: String,
+    /// Switched-off subsystems; empty for the full harness. Never pooled.
+    pub ablation: Vec<String>,
     /// `all` for the pooled group, else the task id.
     pub task: String,
+    pub cohorts: Vec<String>,
     pub runs: u32,
     pub successes: u32,
     pub success: Interval,
     pub renders_correct: Option<Interval>,
     pub unavailable: u32,
-    pub wall_ms: Option<Interval>,
-    pub tokens_total: Option<Interval>,
-    pub tokens_input: Option<Interval>,
-    pub tokens_cached: Option<Interval>,
-    pub tokens_output: Option<Interval>,
+    /// Medians over runs that reported the value; the counts say how many
+    /// did not (an unobserved value is never a zero).
+    pub wall_ms: Option<MedianInterval>,
+    pub wall_unobserved: u32,
+    pub tokens_total: Option<MedianInterval>,
+    pub tokens_input: Option<MedianInterval>,
+    pub tokens_cached: Option<MedianInterval>,
+    pub tokens_output: Option<MedianInterval>,
+    pub tokens_unobserved: u32,
     pub tool_calls_mean: f64,
     pub retries_mean: f64,
     pub gate_continuations_mean: Option<f64>,
@@ -110,17 +151,37 @@ pub struct Summary {
     pub suite_version: u32,
     pub level: f64,
     pub groups: Vec<Group>,
-    pub bar: Vec<BarVerdict>,
-    /// Runs left out of the summary and why (another suite version, errors).
+    /// One verdict per model and effort Aero ran on live.
+    pub bar: Vec<ModelVerdict>,
+    /// Runs left out of the summary and why (another suite version, a
+    /// duplicate run id).
     pub excluded: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Bar {
+    /// Every required comparison passes.
+    Better,
+    /// The evidence is comparable and Aero does not clear the bar.
+    NotShown,
+    /// The evidence cannot decide (coverage, repeats or telemetry missing).
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BarVerdict {
+pub struct Comparison {
+    pub against: String,
+    pub verdict: Bar,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelVerdict {
     pub model: String,
     pub effort: String,
-    pub against: String,
-    pub better: bool,
+    pub verdict: Bar,
+    pub comparisons: Vec<Comparison>,
     pub reasons: Vec<String>,
 }
 
@@ -130,139 +191,280 @@ fn group(task: &str, runs: &[&RunRecord]) -> Group {
     let k = runs.iter().filter(|r| r.success).count() as u32;
     let rc: Vec<bool> = runs.iter().filter_map(|r| r.renders_correct).collect();
     let nf: Vec<bool> = runs.iter().filter_map(|r| r.needs_fix).collect();
-    let mi = |f: &dyn Fn(&RunRecord) -> f64| {
-        median_interval(&runs.iter().map(|r| f(r)).collect::<Vec<_>>(), 0.90)
-    };
+    let walls: Vec<f64> = runs
+        .iter()
+        .filter_map(|r| r.wall_ms)
+        .map(|w| w as f64)
+        .collect();
+    let usage: Vec<_> = runs.iter().filter_map(|r| r.tokens).collect();
+    let mi = |v: Vec<f64>| median_interval(&v, 0.90);
     let mean = |f: &dyn Fn(&RunRecord) -> f64| runs.iter().map(|r| f(r)).sum::<f64>() / n as f64;
     let gates: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.gate_continuations.map(f64::from))
         .collect();
+    let rate = |v: &[bool]| {
+        (!v.is_empty())
+            .then(|| wilson(v.iter().filter(|b| **b).count() as u32, v.len() as u32, Z90))
+    };
     Group {
         harness: r0.harness.clone(),
         model: r0.model.clone(),
         effort: r0.effort.clone(),
+        mode: r0.mode.clone(),
+        ablation: r0.ablation.clone(),
         task: task.into(),
+        cohorts: runs
+            .iter()
+            .map(|r| r.cohort.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         runs: n,
         successes: k,
         success: wilson(k, n, Z90),
-        renders_correct: (!rc.is_empty()).then(|| {
-            wilson(
-                rc.iter().filter(|b| **b).count() as u32,
-                rc.len() as u32,
-                Z90,
-            )
-        }),
+        renders_correct: rate(&rc),
         unavailable: runs.iter().filter(|r| r.unavailable).count() as u32,
-        wall_ms: mi(&|r| r.wall_ms as f64),
-        tokens_total: mi(&|r| r.tokens.total() as f64),
-        tokens_input: mi(&|r| r.tokens.input as f64),
-        tokens_cached: mi(&|r| r.tokens.cached as f64),
-        tokens_output: mi(&|r| r.tokens.output as f64),
+        wall_unobserved: n - walls.len() as u32,
+        wall_ms: mi(walls),
+        tokens_total: mi(usage.iter().map(|u| u.total() as f64).collect()),
+        tokens_input: mi(usage.iter().map(|u| u.input as f64).collect()),
+        tokens_cached: mi(usage.iter().map(|u| u.cached as f64).collect()),
+        tokens_output: mi(usage.iter().map(|u| u.output as f64).collect()),
+        tokens_unobserved: n - usage.len() as u32,
         tool_calls_mean: mean(&|r| r.tool_calls as f64),
         retries_mean: mean(&|r| r.retries as f64),
         gate_continuations_mean: (!gates.is_empty())
             .then(|| gates.iter().sum::<f64>() / gates.len() as f64),
-        needs_fix: (!nf.is_empty()).then(|| {
-            wilson(
-                nf.iter().filter(|b| **b).count() as u32,
-                nf.len() as u32,
-                Z90,
-            )
-        }),
+        needs_fix: rate(&nf),
     }
 }
 
-/// Summarise runs of one suite version; others are excluded and listed.
+/// The identity a group never pools across.
+type Key = (String, String, String, String, Vec<String>, String);
+
+fn key(r: &RunRecord, task: &str) -> Key {
+    (
+        r.harness.clone(),
+        r.model.clone(),
+        r.effort.clone(),
+        r.mode.clone(),
+        r.ablation.clone(),
+        task.to_owned(),
+    )
+}
+
+/// Summarise runs of one suite version; others (and duplicates) are excluded
+/// and listed.
 pub fn summarize(runs: &[RunRecord], suite_version: u32) -> Summary {
     let mut excluded = Vec::new();
     let mut keep: Vec<&RunRecord> = Vec::new();
+    let mut ids = BTreeSet::new();
     for r in runs {
         if r.suite_version != suite_version {
             excluded.push(format!(
                 "{} {} rep {}: suite version {}",
                 r.task, r.harness, r.rep, r.suite_version
             ));
+        } else if !ids.insert(r.run_id.as_str()) {
+            excluded.push(format!(
+                "{} {} rep {}: duplicate run id {}",
+                r.task, r.harness, r.rep, r.run_id
+            ));
         } else {
             keep.push(r);
         }
     }
-    let mut by: BTreeMap<(String, String, String, String), Vec<&RunRecord>> = BTreeMap::new();
+    let mut by: BTreeMap<Key, Vec<&RunRecord>> = BTreeMap::new();
     for r in &keep {
-        let key = (r.harness.clone(), r.model.clone(), r.effort.clone());
-        by.entry((key.0.clone(), key.1.clone(), key.2.clone(), "all".into()))
-            .or_default()
-            .push(r);
-        by.entry((key.0, key.1, key.2, r.task.clone()))
-            .or_default()
-            .push(r);
+        by.entry(key(r, "all")).or_default().push(r);
+        by.entry(key(r, &r.task)).or_default().push(r);
     }
-    let groups: Vec<Group> = by.iter().map(|(k, v)| group(&k.3, v)).collect();
-    let bar = bar(&groups);
+    let groups: Vec<Group> = by.iter().map(|(k, v)| group(&k.5, v)).collect();
     Summary {
         format: "aero-eval-summary".into(),
         suite_version,
         level: 0.90,
+        bar: bar(&keep),
         groups,
-        bar,
         excluded,
     }
 }
 
-/// Aero against every other harness on the same model and effort, pooled.
-pub fn bar(groups: &[Group]) -> Vec<BarVerdict> {
-    let pooled: Vec<&Group> = groups.iter().filter(|g| g.task == "all").collect();
+/// Runs that may enter the bar: live, full harness, a real harness.
+fn comparable(r: &RunRecord) -> bool {
+    r.mode == "live" && r.ablation.is_empty() && r.harness != "none"
+}
+
+/// One verdict per model and effort: Aero against every other harness that
+/// ran live on it, each comparison on matched coverage.
+pub fn bar(runs: &[&RunRecord]) -> Vec<ModelVerdict> {
+    let live: Vec<&RunRecord> = runs.iter().copied().filter(|r| comparable(r)).collect();
+    let mut models: BTreeSet<(String, String)> = BTreeSet::new();
+    for r in live.iter().filter(|r| r.harness == "aero") {
+        models.insert((r.model.clone(), r.effort.clone()));
+    }
     let mut out = Vec::new();
-    for a in pooled.iter().filter(|g| g.harness == "aero") {
-        for o in pooled
+    for (model, effort) in models {
+        let on: Vec<&RunRecord> = live
             .iter()
-            .filter(|g| g.harness != "aero" && g.model == a.model && g.effort == a.effort)
-        {
-            let mut reasons = Vec::new();
-            let higher = a.success.lo > o.success.hi;
-            reasons.push(format!(
-                "success {:.0}% [{:.0}, {:.0}] vs {:.0}% [{:.0}, {:.0}]: {}",
-                a.success.estimate * 100.0,
-                a.success.lo * 100.0,
-                a.success.hi * 100.0,
-                o.success.estimate * 100.0,
-                o.success.lo * 100.0,
-                o.success.hi * 100.0,
-                if higher {
-                    "higher, intervals apart"
-                } else {
-                    "not separated"
-                }
-            ));
-            let no_worse = |name: &str, x: &Option<Interval>, y: &Option<Interval>| match (x, y) {
-                (Some(x), Some(y)) => {
-                    let ok = x.estimate <= y.estimate;
-                    (
-                        ok,
-                        format!(
-                            "median {name} {:.0} vs {:.0}: {}",
-                            x.estimate,
-                            y.estimate,
-                            if ok { "no worse" } else { "worse" }
-                        ),
-                    )
-                }
-                _ => (false, format!("median {name}: no samples")),
-            };
-            let (w_ok, w) = no_worse("wall ms", &a.wall_ms, &o.wall_ms);
-            let (t_ok, t) = no_worse("tokens", &a.tokens_total, &o.tokens_total);
-            reasons.push(w);
-            reasons.push(t);
-            out.push(BarVerdict {
-                model: a.model.clone(),
-                effort: a.effort.clone(),
-                against: o.harness.clone(),
-                better: higher && w_ok && t_ok,
-                reasons,
-            });
-        }
+            .copied()
+            .filter(|r| r.model == model && r.effort == effort)
+            .collect();
+        let aero: Vec<&RunRecord> = on.iter().copied().filter(|r| r.harness == "aero").collect();
+        let others: BTreeSet<&str> = on
+            .iter()
+            .map(|r| r.harness.as_str())
+            .filter(|h| *h != "aero")
+            .collect();
+        let comparisons: Vec<Comparison> = others
+            .iter()
+            .map(|h| {
+                let o: Vec<&RunRecord> = on.iter().copied().filter(|r| r.harness == *h).collect();
+                compare(&aero, &o, h)
+            })
+            .collect();
+        let mut reasons = Vec::new();
+        let verdict = if comparisons.is_empty() {
+            reasons.push("no other harness ran live on this model and effort".into());
+            Bar::Unavailable
+        } else if comparisons.iter().any(|c| c.verdict == Bar::NotShown) {
+            Bar::NotShown
+        } else if comparisons.iter().any(|c| c.verdict == Bar::Unavailable) {
+            Bar::Unavailable
+        } else {
+            Bar::Better
+        };
+        out.push(ModelVerdict {
+            model,
+            effort,
+            verdict,
+            comparisons,
+            reasons,
+        });
     }
     out
+}
+
+fn by_task<'a>(runs: &[&'a RunRecord]) -> BTreeMap<&'a str, Vec<&'a RunRecord>> {
+    let mut m: BTreeMap<&str, Vec<&RunRecord>> = BTreeMap::new();
+    for r in runs {
+        m.entry(r.task.as_str()).or_default().push(r);
+    }
+    m
+}
+
+fn compare(a: &[&RunRecord], o: &[&RunRecord], against: &str) -> Comparison {
+    let mut reasons = Vec::new();
+    let (ta, to) = (by_task(a), by_task(o));
+    fn only(
+        x: &BTreeMap<&str, Vec<&RunRecord>>,
+        y: &BTreeMap<&str, Vec<&RunRecord>>,
+    ) -> Vec<String> {
+        x.keys()
+            .filter(|k| !y.contains_key(*k))
+            .map(|k| k.to_string())
+            .collect()
+    }
+    let (oa, oo) = (only(&ta, &to), only(&to, &ta));
+    let mut unavailable = false;
+    if !oa.is_empty() || !oo.is_empty() {
+        unavailable = true;
+        reasons.push(format!(
+            "coverage differs: only aero ran {oa:?}, only {against} ran {oo:?}"
+        ));
+    }
+    for (side, m) in [("aero", &ta), (against, &to)] {
+        let short: Vec<String> = m
+            .iter()
+            .filter(|(_, v)| v.len() < MIN_RUNS_PER_TASK)
+            .map(|(t, v)| format!("{t} ({})", v.len()))
+            .collect();
+        if !short.is_empty() {
+            unavailable = true;
+            reasons.push(format!(
+                "{side} has fewer than {MIN_RUNS_PER_TASK} runs on {}",
+                short.join(", ")
+            ));
+        }
+    }
+    let unobserved = a
+        .iter()
+        .chain(o)
+        .filter(|r| r.wall_ms.is_none() || r.tokens.is_none())
+        .count();
+    if unobserved > 0 {
+        unavailable = true;
+        reasons.push(format!(
+            "{unobserved} runs have no observed wall time or token usage"
+        ));
+    }
+    if unavailable {
+        return Comparison {
+            against: against.into(),
+            verdict: Bar::Unavailable,
+            reasons,
+        };
+    }
+    let rate = |v: &[&RunRecord]| {
+        wilson(
+            v.iter().filter(|r| r.success).count() as u32,
+            v.len() as u32,
+            Z90,
+        )
+    };
+    let (sa, so) = (rate(a), rate(o));
+    let higher = sa.lo > so.hi;
+    reasons.push(format!(
+        "success {:.0}% [{:.0}, {:.0}] vs {:.0}% [{:.0}, {:.0}] over {} tasks: {}",
+        sa.estimate * 100.0,
+        sa.lo * 100.0,
+        sa.hi * 100.0,
+        so.estimate * 100.0,
+        so.lo * 100.0,
+        so.hi * 100.0,
+        ta.len(),
+        if higher {
+            "higher, intervals apart"
+        } else {
+            "not separated"
+        }
+    ));
+    let median = |v: &[&RunRecord], f: &dyn Fn(&RunRecord) -> f64| {
+        median_interval(&v.iter().map(|r| f(r)).collect::<Vec<_>>(), 0.9)
+            .map_or(f64::NAN, |m| m.estimate)
+    };
+    let mut cost_ok = true;
+    for (name, f) in [
+        (
+            "wall ms",
+            &(|r: &RunRecord| r.wall_ms.unwrap_or(0) as f64) as &dyn Fn(&RunRecord) -> f64,
+        ),
+        ("tokens", &|r: &RunRecord| {
+            r.tokens.map_or(0.0, |u| u.total() as f64)
+        }),
+    ] {
+        let (x, y) = (median(a, f), median(o, f));
+        let ok = x <= y;
+        cost_ok &= ok;
+        reasons.push(format!(
+            "median {name} {x:.0} vs {y:.0}: {}",
+            if ok { "no worse" } else { "worse" }
+        ));
+    }
+    Comparison {
+        against: against.into(),
+        verdict: if higher && cost_ok {
+            Bar::Better
+        } else {
+            Bar::NotShown
+        },
+        reasons,
+    }
+}
+
+fn show_median(m: &Option<MedianInterval>, f: impl Fn(f64) -> String) -> String {
+    m.map(|i| f(i.estimate)).unwrap_or_else(|| "n/a".into())
 }
 
 /// Plain-text table for the terminal.
@@ -272,39 +474,50 @@ pub fn render(s: &Summary) -> String {
         s.suite_version,
         s.level * 100.0
     );
-    out.push_str("harness       model           effort  task                          runs  success            median wall   median tokens\n");
+    out.push_str("harness       model           effort  mode    task                          runs  success            median wall   median tokens\n");
     for g in &s.groups {
+        let harness = if g.ablation.is_empty() {
+            g.harness.clone()
+        } else {
+            format!("{}-{}", g.harness, g.ablation.join("+"))
+        };
         out.push_str(&format!(
-            "{:<13} {:<15} {:<7} {:<29} {:>4}  {:>3.0}% [{:>3.0},{:>3.0}]  {:>10}  {:>13}\n",
-            g.harness,
+            "{:<13} {:<15} {:<7} {:<7} {:<29} {:>4}  {:>3.0}% [{:>3.0},{:>3.0}]  {:>10}  {:>13}\n",
+            harness,
             g.model,
             g.effort,
+            g.mode,
             g.task,
             g.runs,
             g.success.estimate * 100.0,
             g.success.lo * 100.0,
             g.success.hi * 100.0,
-            g.wall_ms
-                .map(|i| format!("{:.1}s", i.estimate / 1000.0))
-                .unwrap_or_default(),
-            g.tokens_total
-                .map(|i| format!("{:.0}", i.estimate))
-                .unwrap_or_default(),
+            show_median(&g.wall_ms, |w| format!("{:.1}s", w / 1000.0)),
+            show_median(&g.tokens_total, |t| format!("{t:.0}")),
         ));
     }
     for b in &s.bar {
         out.push_str(&format!(
-            "aero vs {} on {} {}: {}\n  {}\n",
-            b.against,
+            "aero on {} {}: {}\n",
             b.model,
             b.effort,
-            if b.better {
-                "BETTER"
-            } else {
-                "not shown better"
-            },
-            b.reasons.join("\n  ")
+            match b.verdict {
+                Bar::Better => "BETTER",
+                Bar::NotShown => "not shown better",
+                Bar::Unavailable => "unavailable",
+            }
         ));
+        for r in &b.reasons {
+            out.push_str(&format!("  {r}\n"));
+        }
+        for c in &b.comparisons {
+            out.push_str(&format!(
+                "  vs {}: {:?}\n    {}\n",
+                c.against,
+                c.verdict,
+                c.reasons.join("\n    ")
+            ));
+        }
     }
     for e in &s.excluded {
         out.push_str(&format!("excluded: {e}\n"));
