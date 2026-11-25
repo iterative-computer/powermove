@@ -1,12 +1,14 @@
 //! Settings as a window of its own, framed by AppKit (PM-375): the
 //! sections in a real sidebar (`NSSplitViewItem(sidebarWithViewController:)`,
-//! a source-list `NSOutlineView` under an `NSSearchField`), back and forward
-//! as an `NSToolbarItemGroup` in a unified toolbar that shows the section's
-//! name as the window title, and an AppKit detail scroll view below the toolbar.
+//! a full-width `NSTableView` under an `NSSearchField`, the account on top,
+//! the pages in named groups), a page header (the section's tile and name)
+//! on the traffic lights' line, and an AppKit detail scroll view below it.
 //!
-//! The section icons are the one custom piece: a glass slab tile with its
-//! glyph as a layer that is either the drawn glyph or a real SF Symbol
-//! ([`GLYPHS`]), rendered once per backing scale.
+//! The selection is one view under the rows that glides between them with
+//! Radian's spring, its insets equal on every side of the row's tile and its
+//! corner concentric with the tile's. The tiles are drawn once per
+//! appearance and size from SVG: Pierre's glyphs (ours in its grammar where
+//! it has none) on a monochrome lit squircle ([`Tiles`]).
 
 use objc2::{
     AllocAnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class,
@@ -21,22 +23,40 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::cell::{Cell, RefCell};
 
 /// The sidebar's width (fixed; the sidebar does not collapse).
-pub const SIDEBAR_WIDTH: f64 = 216.;
-/// The window's default and minimum content sizes.
-pub const DEFAULT_SIZE: (f64, f64) = (820., 640.);
-pub const MIN_SIZE: (f64, f64) = (720., 520.);
-const ROW_HEIGHT: f64 = 30.;
-const ROW_SPACING: f64 = 2.;
-const LABEL_SIZE: f64 = 13.;
-const SIDEBAR_INSET: f64 = 10.;
-const ACCOUNT_HEIGHT: f64 = 52.;
-const ACCOUNT_GAP: f64 = 10.;
+pub const SIDEBAR_WIDTH: f64 = 224.;
+/// The window's default and minimum content sizes. The width is fixed (the
+/// maximum width is the minimum): the page fills it, never a centred column
+/// in a gutter. The height is the person's, and remembered.
+pub const DEFAULT_SIZE: (f64, f64) = (780., 640.);
+pub const MIN_SIZE: (f64, f64) = (780., 520.);
+/// A section row: its tile with an equal inset on all four sides inside the
+/// selection (Radian's 38 pt row holds a 22 pt tile 8 pt in on every side).
+const ROW_HEIGHT: f64 = 36.;
 /// The tile's side in a sidebar row.
-const TILE: f64 = 20.;
-const FRAME_NAME: &str = "PMSettingsWindow";
+const TILE: f64 = 22.;
+/// The inset around a tile inside the selected row, on every side.
+const TILE_INSET: f64 = (ROW_HEIGHT - TILE) / 2.;
+/// The tile's corner (the squircle's equivalent radius), and the selection's
+/// corner concentric with it (`Outer R = Inner R + Padding`).
+const TILE_RADIUS: f64 = 6.;
+const SELECTION_RADIUS: f64 = TILE_RADIUS + TILE_INSET;
+/// The selection's inset from the sidebar's sides.
+const SIDEBAR_INSET: f64 = 10.;
+const LABEL_SIZE: f64 = 13.;
+/// The account row: its avatar with the same equal inset as a tile's.
+const AVATAR: f64 = 32.;
+const ACCOUNT_HEIGHT: f64 = 52.;
+const AVATAR_INSET: f64 = (ACCOUNT_HEIGHT - AVATAR) / 2.;
+/// A group's header row ("Agents & Providers"): air above, its name low.
+const HEADER_HEIGHT: f64 = 32.;
+/// The page header's tile, on the traffic lights' line.
+const HEADER_TILE: f64 = 24.;
+/// The selection's glide, measured from Radian's (critically damped,
+/// settles in about 0.2 s): unit mass, stiffness and damping.
+const GLIDE: (f64, f64) = (900., 57.);
+const FRAME_NAME: &str = "PMSettingsWindow2";
 /// The Settings window's identifier (its title is the section's name).
 const IDENTIFIER: &str = "pm.settings";
-const NAV: &str = "pm.settings.navigation";
 
 /// Whether `window` is the Settings window.
 pub fn is_settings(window: &NSWindow) -> bool {
@@ -69,20 +89,21 @@ fn is_dark(appearance: &NSAppearance) -> bool {
         .is_some_and(|name| &*name == names[1])
 }
 
-/// What a section's glyph is drawn from: the drawn glyph on the glass tile,
-/// or a real SF Symbol on the same tile. One switch for the whole family;
-/// `PM_SETTINGS_GLYPHS=symbols` (or `drawn`) overrides it for a comparison.
+/// The tile family the sidebar and the page header draw: `Lit`, a dark
+/// (light in Aqua) squircle with a soft top light, an inner edge and a
+/// monochrome glyph; or `Flat`, one flat Powermove-orange tile with a white
+/// glyph. `PM_SETTINGS_ICONS=flat` draws the second for a comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Glyphs {
-    Drawn,
-    Symbols,
+pub enum Tiles {
+    Lit,
+    Flat,
 }
-pub const GLYPHS: Glyphs = Glyphs::Drawn;
-fn glyphs() -> Glyphs {
-    match std::env::var("PM_SETTINGS_GLYPHS").as_deref() {
-        Ok("symbols") => Glyphs::Symbols,
-        Ok("drawn") => Glyphs::Drawn,
-        _ => GLYPHS,
+pub const TILES: Tiles = Tiles::Lit;
+fn tiles() -> Tiles {
+    match std::env::var("PM_SETTINGS_ICONS").as_deref() {
+        Ok("flat") => Tiles::Flat,
+        Ok("lit") => Tiles::Lit,
+        _ => TILES,
     }
 }
 
@@ -106,9 +127,52 @@ pub enum Event {
     Forward,
 }
 
-struct Row {
-    section: Option<Section>,
-    item: Retained<NSNumber>,
+/// The sidebar's named groups. The app's own pages come first, unnamed
+/// (as Radian's); a section not listed here belongs with them.
+pub fn group_of(id: &str) -> Option<&'static str> {
+    match id {
+        "providers" | "agents" | "transcription" => Some("Agents & Providers"),
+        "extensions" | "privacy" | "about" => Some("Powermove"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Row {
+    Section(Section),
+    /// The air under the account row.
+    Gap,
+    /// A group's name.
+    Header(&'static str),
+}
+impl Row {
+    fn section(&self) -> Option<&Section> {
+        match self {
+            Row::Section(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// The rows the sidebar lists for `sections`: the account, then each group
+/// under its name.
+fn rows(sections: &[Section]) -> Vec<Row> {
+    let mut rows = vec![];
+    let mut group = None;
+    for (i, s) in sections.iter().enumerate() {
+        if i > 0 && sections[i - 1].id == "account" {
+            rows.push(Row::Gap);
+        }
+        if s.id != "account" {
+            let next = group_of(&s.id);
+            if next.is_some() && next != group {
+                rows.push(Row::Header(next.unwrap_or_default()));
+            }
+            group = next;
+        }
+        rows.push(Row::Section(s.clone()));
+    }
+    rows
 }
 
 define_class!(
@@ -123,17 +187,52 @@ define_class!(
             // Keep AppKit's unemphasized selection when the window becomes key.
             unsafe { let _: () = msg_send![super(self), setEmphasized: false]; }
         }
+        /// The selection is the one gliding view under the rows.
+        #[unsafe(method(drawSelectionInRect:))]
+        fn draw_selection(&self, _: NSRect) {}
+    }
+);
+
+define_class!(
+    /// The sidebar's list. Its cells span their rows edge to edge (AppKit
+    /// insets them otherwise), so a tile's place in its row is ours exactly.
+    #[unsafe(super(NSTableView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsSidebar"]
+    struct Sidebar;
+
+    impl Sidebar {
+        #[unsafe(method(frameOfCellAtColumn:row:))]
+        fn cell_frame(&self, _: NSInteger, row: NSInteger) -> NSRect {
+            self.rectOfRow(row)
+        }
+    }
+);
+
+define_class!(
+    /// The selected row's fill: one view under the rows that glides between
+    /// them. Clicks go through it to the rows.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsSelection"]
+    struct Selection;
+
+    impl Selection {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _: NSPoint) -> *mut NSView { std::ptr::null_mut() }
     }
 );
 
 pub struct State {
     sender: async_channel::Sender<Event>,
     rows: RefCell<Vec<Row>>,
-    outline: RefCell<Option<Retained<NSOutlineView>>>,
+    table: RefCell<Option<Retained<NSTableView>>>,
     search: RefCell<Option<Retained<NSSearchField>>>,
-    nav: RefCell<Option<Retained<NSToolbarItemGroup>>>,
-    can: Cell<(bool, bool)>,
-    /// The window's appearance: which icon set the rows show.
+    selection: RefCell<Option<Retained<NSView>>>,
+    /// The glide in flight: when it began and its curve (for the velocity a
+    /// new glide starts with).
+    glide: Cell<Option<(std::time::Instant, pm_design::motion::Analytic)>>,
+    /// The window's appearance: which tiles the rows show.
     dark: Cell<bool>,
     /// Set while the host changes the selection, so it is not sent back.
     quiet: Cell<bool>,
@@ -147,97 +246,210 @@ define_class!(
     pub struct Chrome;
     unsafe impl NSObjectProtocol for Chrome {}
     impl Chrome {
-        // NSOutlineViewDataSource: one flat level.
-        #[unsafe(method(outlineView:numberOfChildrenOfItem:))]
-        fn children(&self, _: &NSOutlineView, item: *mut AnyObject) -> NSInteger {
-            if item.is_null() { self.ivars().rows.borrow().len() as NSInteger } else { 0 }
+        // NSTableViewDataSource.
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn count(&self, _: &NSTableView) -> NSInteger {
+            self.ivars().rows.borrow().len() as NSInteger
         }
-        #[unsafe(method(outlineView:child:ofItem:))]
-        fn child(&self, _: &NSOutlineView, index: NSInteger, _: *mut AnyObject) -> *mut AnyObject {
-            self.ivars().rows.borrow().get(index as usize)
-                .map_or(std::ptr::null_mut(), |r| Retained::as_ptr(&r.item) as *mut AnyObject)
-        }
-        #[unsafe(method(outlineView:isItemExpandable:))]
-        fn expandable(&self, _: &NSOutlineView, _: *mut AnyObject) -> bool { false }
-        // NSOutlineViewDelegate.
-        #[unsafe(method(outlineView:heightOfRowByItem:))]
-        fn height(&self, _: &NSOutlineView, item: *mut AnyObject) -> f64 {
-            match self.row_of(item) {
-                Some(None) => ACCOUNT_GAP - 2. * ROW_SPACING,
-                Some(Some(section)) if section.id == "account" => ACCOUNT_HEIGHT,
+        // NSTableViewDelegate.
+        #[unsafe(method(tableView:heightOfRow:))]
+        fn height(&self, _: &NSTableView, row: NSInteger) -> f64 {
+            match self.ivars().rows.borrow().get(row as usize) {
+                Some(Row::Gap) => 8.,
+                Some(Row::Header(_)) => HEADER_HEIGHT,
+                Some(Row::Section(s)) if s.id == "account" => ACCOUNT_HEIGHT,
                 _ => ROW_HEIGHT,
             }
         }
-        #[unsafe(method(outlineView:shouldSelectItem:))]
-        fn selectable(&self, _: &NSOutlineView, item: *mut AnyObject) -> bool {
-            matches!(self.row_of(item), Some(Some(_)))
+        #[unsafe(method(tableView:shouldSelectRow:))]
+        fn selectable(&self, _: &NSTableView, row: NSInteger) -> bool {
+            matches!(self.ivars().rows.borrow().get(row as usize), Some(Row::Section(_)))
         }
-        #[unsafe(method_id(outlineView:rowViewForItem:))]
-        fn row_view(&self, _: &NSOutlineView, _: *mut AnyObject) -> Retained<NSTableRowView> {
+        #[unsafe(method_id(tableView:rowViewForRow:))]
+        fn row_view(&self, _: &NSTableView, _: NSInteger) -> Retained<NSTableRowView> {
             let row: Retained<SidebarRow> = unsafe {
                 msg_send![super(SidebarRow::alloc(MainThreadMarker::from(self)).set_ivars(())), initWithFrame: NSRect::ZERO]
             };
             row.setEmphasized(false);
             Retained::into_super(row)
         }
-        #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
-        fn cell(&self, _: &NSOutlineView, _: *mut AnyObject, item: *mut AnyObject) -> Option<Retained<NSView>> {
-            self.row_of(item).flatten().map(|section| cell(MainThreadMarker::from(self), &section, self.ivars().dark.get()))
+        #[unsafe(method_id(tableView:viewForTableColumn:row:))]
+        fn cell(&self, _: &NSTableView, _: *mut AnyObject, row: NSInteger) -> Option<Retained<NSView>> {
+            let mtm = MainThreadMarker::from(self);
+            match self.ivars().rows.borrow().get(row as usize) {
+                Some(Row::Section(section)) => Some(cell(mtm, section, self.ivars().dark.get())),
+                Some(Row::Header(name)) => Some(header_cell(mtm, name)),
+                _ => None,
+            }
         }
-        #[unsafe(method(outlineViewSelectionDidChange:))]
+        #[unsafe(method(tableViewSelectionDidChange:))]
         fn selection_changed(&self, _: &NSNotification) {
             if self.ivars().quiet.get() { return; }
-            let Some(outline) = self.ivars().outline.borrow().clone() else { return };
-            let row = outline.selectedRow();
+            self.place_selection(true);
+            let Some(table) = self.ivars().table.borrow().clone() else { return };
+            let row = table.selectedRow();
             if row < 0 { return; }
             let id = self.ivars().rows.borrow().get(row as usize)
-                .and_then(|r| r.section.as_ref().map(|s| s.id.clone()));
+                .and_then(|r| r.section().map(|s| s.id.clone()));
             if let Some(id) = id {
                 let _ = self.ivars().sender.try_send(Event::Select(id));
             }
         }
-        // NSToolbarDelegate.
+        // NSToolbarDelegate: the toolbar only sizes the title bar (the
+        // traffic lights and the page header share its line).
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
         fn default_items(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> { items() }
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed_items(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> { items() }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
-        fn toolbar_item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
-            let ours = id.to_string() == NAV;
-            self.ivars().nav.borrow().clone().filter(|_| ours).map(Retained::into_super)
+        fn toolbar_item(&self, _: &NSToolbar, _: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
+            None
         }
         // Actions.
-        #[unsafe(method(navigate:))]
-        fn navigate(&self, sender: &NSToolbarItemGroup) {
-            let _ = self.ivars().sender.try_send(if sender.selectedIndex() == 0 { Event::Back } else { Event::Forward });
-        }
         #[unsafe(method(searched:))]
         fn searched(&self, sender: &NSSearchField) {
             let _ = self.ivars().sender.try_send(Event::Search(sender.stringValue().to_string()));
-        }
-        /// The toolbar's items are enabled while there is somewhere to go.
-        #[unsafe(method(validateToolbarItem:))]
-        fn validate(&self, item: &NSToolbarItem) -> bool {
-            let (back, forward) = self.ivars().can.get();
-            match item.label().to_string().as_str() { "Back" => back, "Forward" => forward, _ => true }
         }
     }
 );
 
 fn items() -> Retained<NSArray<NSString>> {
     let separator: &NSString = unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier };
-    NSArray::from_slice(&[separator, &*NSString::from_str(NAV)])
+    NSArray::from_slice(&[separator])
 }
 
 impl Chrome {
-    /// `Some(None)` is the gap row; `None` is no row of ours.
-    fn row_of(&self, item: *mut AnyObject) -> Option<Option<Section>> {
-        self.ivars()
-            .rows
-            .borrow()
-            .iter()
-            .find(|r| Retained::as_ptr(&r.item) as *mut AnyObject == item)
-            .map(|r| r.section.clone())
+    /// Puts the selection's fill under the selected row: gliding there with
+    /// Radian's spring when `animate` (interrupted glides keep their speed),
+    /// at once otherwise; a cross-fade with Reduce Motion.
+    fn place_selection(&self, animate: bool) {
+        use objc2_quartz_core::{CAMediaTiming, CATransaction};
+        let state = self.ivars();
+        let (Some(table), Some(fill)) = (
+            state.table.borrow().clone(),
+            state.selection.borrow().clone(),
+        ) else {
+            return;
+        };
+        let row = table.selectedRow();
+        let kind = (row >= 0)
+            .then(|| {
+                state
+                    .rows
+                    .borrow()
+                    .get(row as usize)
+                    .and_then(Row::section)
+                    .map(|s| s.id == "account")
+            })
+            .flatten();
+        let Some(account) = kind else {
+            fill.setHidden(true);
+            return;
+        };
+        let rect = table.rectOfRow(row);
+        let target = NSRect::new(
+            NSPoint::new(SIDEBAR_INSET, rect.origin.y),
+            NSSize::new(
+                table.bounds().size.width - 2. * SIDEBAR_INSET,
+                rect.size.height,
+            ),
+        );
+        // The avatar is round: its selection is a capsule around it.
+        let radius = if account {
+            ACCOUNT_HEIGHT / 2.
+        } else {
+            SELECTION_RADIUS
+        };
+        let appeared = fill.isHidden();
+        fill.setHidden(false);
+        let Some(layer) = fill.layer() else {
+            fill.setFrame(target);
+            return;
+        };
+        // What is on screen now (mid-glide, the presentation).
+        let shown = unsafe { layer.presentationLayer() };
+        let from = shown.as_deref().unwrap_or(&layer);
+        let (from_y, from_h, from_r) = (
+            from.position().y,
+            from.bounds().size.height,
+            from.cornerRadius(),
+        );
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        fill.setFrame(target);
+        layer.setCornerRadius(radius);
+        CATransaction::commit();
+        let to_y = layer.position().y;
+        let moved = (from_y - to_y).abs() > 0.25 || (from_h - rect.size.height).abs() > 0.25;
+        if !animate || appeared || !moved {
+            layer.removeAllAnimations();
+            state.glide.set(None);
+            return;
+        }
+        let key = |k: &str| NSString::from_str(k);
+        let number = |v: f64| NSNumber::new_f64(v);
+        if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+            layer.removeAllAnimations();
+            state.glide.set(None);
+            let fade =
+                objc2_quartz_core::CABasicAnimation::animationWithKeyPath(Some(&key("opacity")));
+            unsafe {
+                fade.setFromValue(Some(&number(0.)));
+                fade.setToValue(Some(&number(1.)));
+            }
+            fade.setDuration(0.15);
+            layer.addAnimation_forKey(&fade, Some(&key("pm.settings.fade")));
+            return;
+        }
+        let (stiffness, damping) = GLIDE;
+        // The speed it moves at now carries into the new glide.
+        let velocity = state.glide.get().map_or(0., |(start, curve)| {
+            curve.sample(start.elapsed().as_secs_f64()).1
+        });
+        state.glide.set(Some((
+            std::time::Instant::now(),
+            pm_design::motion::Analytic {
+                from: from_y,
+                velocity,
+                target: to_y,
+                mass: 1.,
+                stiffness,
+                damping,
+            },
+        )));
+        for (path, from, to, speed) in [
+            ("position.y", from_y, to_y, velocity),
+            ("bounds.size.height", from_h, rect.size.height, 0.),
+            ("cornerRadius", from_r, radius, 0.),
+        ] {
+            if (from - to).abs() < 0.01 {
+                continue;
+            }
+            let spring =
+                objc2_quartz_core::CASpringAnimation::animationWithKeyPath(Some(&key(path)));
+            spring.setMass(1.);
+            spring.setStiffness(stiffness);
+            spring.setDamping(damping);
+            // Core Animation's initial velocity is in distances per second.
+            spring.setInitialVelocity(speed / (to - from));
+            unsafe {
+                spring.setFromValue(Some(&number(from)));
+                spring.setToValue(Some(&number(to)));
+            }
+            spring.setDuration(spring.settlingDuration());
+            layer.addAnimation_forKey(&spring, Some(&key(&format!("pm.settings.{path}"))));
+        }
+    }
+
+    /// The selection's fill in the window's appearance.
+    fn paint_selection(&self, appearance: &NSAppearance) {
+        let Some(fill) = self.ivars().selection.borrow().clone() else {
+            return;
+        };
+        let Some(layer) = fill.layer() else { return };
+        appearance.performAsCurrentDrawingAppearance(&block2::RcBlock::new(|| {
+            layer.setBackgroundColor(Some(&NSColor::quaternaryLabelColor().CGColor()));
+        }));
     }
 }
 
@@ -250,7 +462,11 @@ pub struct SettingsChrome {
     /// opaque sits under the sidebar's glass.
     ground: Retained<NSBox>,
     page: Retained<NSScrollView>,
-    /// The window's own keys (⌘F, typing in the sidebar).
+    /// The page's header on the traffic lights' line: its tile and name.
+    header_tile: Retained<NSImageView>,
+    header_title: Retained<NSTextField>,
+    header_id: RefCell<String>,
+    /// The window's own keys (⌘F, ⌘[ ⌘], typing in the sidebar).
     monitor: Option<Retained<AnyObject>>,
 }
 
@@ -264,20 +480,21 @@ impl Drop for SettingsChrome {
 
 /// Settings' own keys, as System Settings has them: ⌘F goes to the search
 /// field, and typing while the sidebar has the keyboard starts a search
-/// with what was typed (never the source list's jump to a row by name).
+/// with what was typed (never the list's jump to a row by name); ⌘[ and ⌘]
+/// go back and forward.
 fn keys(
     window: &NSWindow,
     search: &NSSearchField,
-    outline: &NSOutlineView,
+    table: &NSTableView,
     sender: async_channel::Sender<Event>,
 ) -> Option<Retained<AnyObject>> {
     let window = objc2::rc::Weak::from(window);
     let search = objc2::rc::Weak::from(search);
-    let outline = objc2::rc::Weak::from(outline);
+    let table = objc2::rc::Weak::from(table);
     let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
         let e = unsafe { event.as_ref() };
-        let (Some(window), Some(search), Some(outline)) =
-            (window.load(), search.load(), outline.load())
+        let (Some(window), Some(search), Some(table)) =
+            (window.load(), search.load(), table.load())
         else {
             return event.as_ptr();
         };
@@ -290,15 +507,24 @@ fn keys(
             .charactersIgnoringModifiers()
             .map(|c| c.to_string())
             .unwrap_or_default();
-        if command
-            && chars == "f"
+        let plain_command = command
             && !flags.intersects(
                 NSEventModifierFlags::Shift
                     | NSEventModifierFlags::Option
                     | NSEventModifierFlags::Control,
-            )
-        {
+            );
+        if plain_command && chars == "f" {
             window.makeFirstResponder(Some(&search));
+            return std::ptr::null_mut();
+        }
+        // Back and forward through the pages visited (the window has no
+        // toolbar buttons for them).
+        if plain_command && (chars == "[" || chars == "]") {
+            let _ = sender.try_send(if chars == "[" {
+                Event::Back
+            } else {
+                Event::Forward
+            });
             return std::ptr::null_mut();
         }
         if e.keyCode() == 53
@@ -313,7 +539,7 @@ fn keys(
         let sidebar = window.firstResponder().is_some_and(|r| {
             std::ptr::eq(
                 Retained::as_ptr(&r).cast::<AnyObject>(),
-                Retained::as_ptr(&outline).cast(),
+                Retained::as_ptr(&table).cast(),
             )
         });
         let printable = !typed.is_empty()
@@ -353,18 +579,19 @@ impl SettingsChrome {
             let this = Chrome::alloc(mtm).set_ivars(State {
                 sender,
                 rows: RefCell::new(vec![]),
-                outline: RefCell::new(None),
+                table: RefCell::new(None),
                 search: RefCell::new(None),
-                nav: RefCell::new(None),
-                can: Cell::new((false, false)),
+                selection: RefCell::new(None),
+                glide: Cell::new(None),
                 dark: Cell::new(true),
                 quiet: Cell::new(false),
             });
             unsafe { msg_send![super(this), init] }
         };
 
-        // The window: titled, resizable, its content under a unified
-        // toolbar that shows the section's name.
+        // The window: titled, its content under a unified title bar whose
+        // line the page's header shares with the traffic lights. The width
+        // is fixed; the height is the person's.
         window.setStyleMask(
             window.styleMask()
                 | NSWindowStyleMask::Titled
@@ -375,11 +602,12 @@ impl SettingsChrome {
         );
         window.setIdentifier(Some(&NSString::from_str(IDENTIFIER)));
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-        window.setTitlebarAppearsTransparent(false);
-        window.setTitleVisibility(NSWindowTitleVisibility::Visible);
-        let frame = window.frame();
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        let mut frame = window.frame();
+        frame.size.width = frame.size.width.max(DEFAULT_SIZE.0);
 
-        // The sidebar: the search field over the source list.
+        // The sidebar: the search field over the list.
         let sidebar = NSView::new(mtm);
         let search = NSSearchField::new(mtm);
         search.setControlSize(NSControlSize::Large);
@@ -391,29 +619,46 @@ impl SettingsChrome {
             search.setAction(Some(sel!(searched:)));
         }
         search.setTranslatesAutoresizingMaskIntoConstraints(false);
-        let outline = NSOutlineView::new(mtm);
-        outline.setFocusRingType(NSFocusRingType::None);
+        let table: Retained<Sidebar> = unsafe {
+            msg_send![super(Sidebar::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+        };
+        let table: Retained<NSTableView> = Retained::into_super(table);
+        table.setFocusRingType(NSFocusRingType::None);
         let column =
             NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("section"));
         column.setResizingMask(NSTableColumnResizingOptions::AutoresizingMask);
-        outline.addTableColumn(&column);
-        unsafe { outline.setOutlineTableColumn(Some(&column)) };
-        outline.setHeaderView(None);
-        outline.setStyle(NSTableViewStyle::SourceList);
-        outline.setColumnAutoresizingStyle(
+        table.addTableColumn(&column);
+        table.setHeaderView(None);
+        // Full width: rows run edge to edge, so the selection's insets are
+        // ours, equal on every side of the tile (AppKit's source-list
+        // selection was wider at the sides than above and below).
+        table.setStyle(NSTableViewStyle::FullWidth);
+        table.setBackgroundColor(&NSColor::clearColor());
+        table.setColumnAutoresizingStyle(
             NSTableViewColumnAutoresizingStyle::UniformColumnAutoresizingStyle,
         );
-        outline.setRowSizeStyle(NSTableViewRowSizeStyle::Custom);
-        outline.setIntercellSpacing(NSSize::new(0., ROW_SPACING));
-        outline.setIndentationPerLevel(0.);
-        outline.setFloatsGroupRows(false);
-        outline.setAllowsEmptySelection(false);
+        table.setRowSizeStyle(NSTableViewRowSizeStyle::Custom);
+        table.setIntercellSpacing(NSSize::new(0., 0.));
+        table.setAllowsEmptySelection(false);
+        table.setGridStyleMask(NSTableViewGridLineStyle::GridNone);
         unsafe {
-            let _: () = msg_send![&outline, setDataSource: &*chrome];
-            let _: () = msg_send![&outline, setDelegate: &*chrome];
+            let _: () = msg_send![&table, setDataSource: &*chrome];
+            let _: () = msg_send![&table, setDelegate: &*chrome];
         }
+        // The selected row's fill, under every row.
+        let selection: Retained<Selection> = unsafe {
+            msg_send![super(Selection::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+        };
+        let selection: Retained<NSView> = Retained::into_super(selection);
+        selection.setWantsLayer(true);
+        if let Some(layer) = selection.layer() {
+            layer.setCornerRadius(SELECTION_RADIUS);
+            layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+        }
+        selection.setHidden(true);
+        table.addSubview_positioned_relativeTo(&selection, NSWindowOrderingMode::Below, None);
         let scroll = NSScrollView::new(mtm);
-        scroll.setDocumentView(Some(&outline));
+        scroll.setDocumentView(Some(&table));
         scroll.setDrawsBackground(false);
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
@@ -434,7 +679,7 @@ impl SettingsChrome {
                 .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -SIDEBAR_INSET),
             scroll
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&search.bottomAnchor(), 12.),
+                .constraintEqualToAnchor_constant(&search.bottomAnchor(), 10.),
             scroll
                 .leadingAnchor()
                 .constraintEqualToAnchor(&sidebar.leadingAnchor()),
@@ -461,7 +706,23 @@ impl SettingsChrome {
         page.setAutohidesScrollers(true);
         page.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&page);
+        // The page's header: its tile and name on the traffic lights' line,
+        // in the title bar's band above the page.
+        let header_tile = NSImageView::new(mtm);
+        header_tile.setImageScaling(NSImageScaling::ScaleNone);
+        header_tile.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let header_title = NSTextField::labelWithString(ns_string!(""), mtm);
+        header_title.setFont(Some(&NSFont::systemFontOfSize_weight(15., unsafe {
+            NSFontWeightBold
+        })));
+        header_title.setTranslatesAutoresizingMaskIntoConstraints(false);
+        content.addSubview(&header_tile);
+        content.addSubview(&header_title);
         let safe = content.safeAreaLayoutGuide();
+        let band = NSLayoutGuide::new();
+        content.addLayoutGuide(&band);
+        let (tile_w, tile_h) = tile_size(HEADER_TILE);
+        let margin = tile_margin(HEADER_TILE);
         activate(&[
             ground
                 .topAnchor()
@@ -482,6 +743,32 @@ impl SettingsChrome {
                 .constraintEqualToAnchor(&content.trailingAnchor()),
             page.bottomAnchor()
                 .constraintEqualToAnchor(&content.bottomAnchor()),
+            band.topAnchor()
+                .constraintEqualToAnchor(&content.topAnchor()),
+            band.bottomAnchor()
+                .constraintEqualToAnchor(&safe.topAnchor()),
+            header_tile.widthAnchor().constraintEqualToConstant(tile_w),
+            header_tile.heightAnchor().constraintEqualToConstant(tile_h),
+            // The tile on the page's leading edge (the cards'), its centre on
+            // the band's (the image carries the shadow's margin below).
+            header_tile
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&safe.leadingAnchor(), PAGE_INSET - margin),
+            header_tile
+                .centerYAnchor()
+                .constraintEqualToAnchor_constant(
+                    &band.centerYAnchor(),
+                    tile_centre_offset(HEADER_TILE),
+                ),
+            header_title
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(
+                    &header_tile.leadingAnchor(),
+                    margin + HEADER_TILE + 8.,
+                ),
+            header_title
+                .centerYAnchor()
+                .constraintEqualToAnchor(&band.centerYAnchor()),
         ]);
         // The sidebar is the system's own material, blended with what is
         // behind the window: GPUI made the window opaque with an opaque
@@ -516,26 +803,8 @@ impl SettingsChrome {
         split.addSplitViewItem(&detail);
         window.setContentViewController(Some(&split));
 
-        // The toolbar: back and forward, over the detail.
-        let images = NSArray::from_retained_slice(&[
-            symbol("chevron.left", "Back")?,
-            symbol("chevron.right", "Forward")?,
-        ]);
-        let labels = NSArray::from_slice(&[ns_string!("Back"), ns_string!("Forward")]);
-        let nav = unsafe {
-            NSToolbarItemGroup::groupWithItemIdentifier_images_selectionMode_labels_target_action(
-                &NSString::from_str(NAV),
-                &images,
-                NSToolbarItemGroupSelectionMode::Momentary,
-                Some(&labels),
-                Some(&chrome),
-                Some(sel!(navigate:)),
-                mtm,
-            )
-        };
-        nav.setNavigational(true);
-        nav.setLabel(ns_string!("Back/Forward"));
-        *chrome.ivars().nav.borrow_mut() = Some(nav);
+        // A toolbar with no items: it gives the title bar its unified height,
+        // so the traffic lights, the search field and the page header line up.
         let toolbar =
             NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), ns_string!("PMSettings"));
         unsafe {
@@ -546,16 +815,19 @@ impl SettingsChrome {
         window.setToolbar(Some(&toolbar));
         window.setToolbarStyle(NSWindowToolbarStyle::Unified);
 
-        // Standard window behaviour: the size it was left at, a minimum.
+        // Standard window behaviour: the size it was left at, its limits.
         window.setContentMinSize(NSSize::new(MIN_SIZE.0, MIN_SIZE.1));
+        window.setContentMaxSize(NSSize::new(MIN_SIZE.0, f64::MAX));
         window.setFrame_display(frame, true);
         window.setFrameAutosaveName(&NSString::from_str(FRAME_NAME));
         window.setAutorecalculatesKeyViewLoop(true);
-        window.makeFirstResponder(Some(&outline));
-        let monitor = keys(&window, &search, &outline, chrome.ivars().sender.clone());
+        window.makeFirstResponder(Some(&table));
+        let monitor = keys(&window, &search, &table, chrome.ivars().sender.clone());
 
-        *chrome.ivars().outline.borrow_mut() = Some(outline);
+        *chrome.ivars().table.borrow_mut() = Some(table);
         *chrome.ivars().search.borrow_mut() = Some(search);
+        *chrome.ivars().selection.borrow_mut() = Some(selection);
+        chrome.paint_selection(&window.effectiveAppearance());
         // GPUI's view takes its place in the detail now, so GPUI lays the
         // page out at the detail's size from the first frame.
         if let Some(content) = window.contentView() {
@@ -566,67 +838,48 @@ impl SettingsChrome {
             window,
             ground,
             page,
+            header_tile,
+            header_title,
+            header_id: RefCell::default(),
             monitor,
         })
     }
 
-    /// The sidebar lists `sections` with `active` selected; the title names it.
+    /// The sidebar lists `sections` with `active` selected; the header and
+    /// the title name it.
     pub fn show(&self, sections: &[Section], active: &str) {
         let state = self.chrome.ivars();
-        let Some(outline) = state.outline.borrow().clone() else {
+        let Some(table) = state.table.borrow().clone() else {
             return;
         };
-        let same = {
-            let rows = state.rows.borrow();
-            rows.iter()
-                .filter_map(|r| r.section.as_ref())
-                .eq(sections.iter())
-        };
-        if !same {
-            let mut rows = vec![];
-            for (i, s) in sections.iter().enumerate() {
-                if i > 0 && sections[i - 1].id == "account" {
-                    rows.push(Row {
-                        section: None,
-                        item: NSNumber::new_isize(-1),
-                    });
-                }
-                rows.push(Row {
-                    section: Some(s.clone()),
-                    item: NSNumber::new_isize(i as isize),
-                });
-            }
+        let rows = rows(sections);
+        if *state.rows.borrow() != rows {
             *state.rows.borrow_mut() = rows;
             state.quiet.set(true);
-            outline.reloadData();
+            table.reloadData();
             state.quiet.set(false);
+            self.chrome.place_selection(false);
         }
         let row = state
             .rows
             .borrow()
             .iter()
-            .position(|r| r.section.as_ref().is_some_and(|s| s.id == active));
+            .position(|r| r.section().is_some_and(|s| s.id == active));
         if let Some(row) = row
-            && outline.selectedRow() != row as NSInteger
+            && table.selectedRow() != row as NSInteger
         {
             state.quiet.set(true);
-            outline
-                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
+            table.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
             state.quiet.set(false);
+            // Back, forward and a search's pick glide as a click does.
+            self.chrome.place_selection(true);
         }
         if let Some(title) = sections.iter().find(|s| s.id == active).map(|s| &s.title) {
             self.window.setTitle(&NSString::from_str(title));
-        }
-    }
-
-    /// Back and forward are enabled while there is somewhere to go.
-    pub fn set_history(&self, back: bool, forward: bool) {
-        let state = self.chrome.ivars();
-        state.can.set((back, forward));
-        if let Some(nav) = state.nav.borrow().as_ref() {
-            for (i, item) in nav.subitems().iter().enumerate() {
-                item.setEnabled(if i == 0 { back } else { forward });
-            }
+            self.header_title.setStringValue(&NSString::from_str(title));
+            *self.header_id.borrow_mut() = active.to_owned();
+            self.header_tile
+                .setImage(tile_image(active, state.dark.get(), HEADER_TILE).as_deref());
         }
     }
 
@@ -637,7 +890,8 @@ impl SettingsChrome {
     /// What the window is made of, for a check against any build (the test,
     /// and `PM_NATIVE_SETTINGS_PROBE=<file>` in a release bundle): whether
     /// the window is clear, whether the sidebar is inside the system's glass,
-    /// and whether anything under the sidebar is painted.
+    /// whether anything under the sidebar is painted, and the selection's
+    /// insets around the selected row's tile.
     pub fn report(&self) -> serde_json::Value {
         let alpha = |c: &NSColor| {
             c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
@@ -651,10 +905,11 @@ impl SettingsChrome {
         };
         let mut glass = false;
         let mut detail_painted = false;
-        if let Some(outline) = self.chrome.ivars().outline.borrow().as_ref()
+        let table = self.chrome.ivars().table.borrow().clone();
+        if let Some(table) = table.as_ref()
             && let Some(class) = objc2::runtime::AnyClass::get(c"NSGlassEffectView")
         {
-            let mut up = unsafe { outline.superview() };
+            let mut up = unsafe { table.superview() };
             while let Some(v) = up {
                 glass |= v.isKindOfClass(class);
                 up = unsafe { v.superview() };
@@ -664,6 +919,29 @@ impl SettingsChrome {
             detail_painted = painted(&detail);
         }
         let ground = self.ground.convertRect_toView(self.ground.bounds(), None);
+        // The selection's insets around the selected tile: left, top, bottom.
+        let insets = table.as_ref().and_then(|table| {
+            let fill = self.chrome.ivars().selection.borrow().clone()?;
+            let row = table.selectedRow();
+            // AppKit raises for a row out of range (nothing selected yet).
+            if row < 0 || row >= table.numberOfRows() {
+                return None;
+            }
+            let cell = table.viewAtColumn_row_makeIfNecessary(0, row, false)?;
+            let tile = cell
+                .subviews()
+                .iter()
+                .find_map(|v| v.downcast::<NSImageView>().ok())?;
+            let f = fill.frame();
+            let t = tile.convertRect_toView(tile.bounds(), Some(table));
+            let m = tile_margin(TILE);
+            let (tx, ty) = (t.origin.x + m, t.origin.y + tile_top_margin(TILE));
+            Some([
+                tx - f.origin.x,
+                ty - f.origin.y,
+                f.origin.y + f.size.height - (ty + TILE),
+            ])
+        });
         serde_json::json!({
             "opaque": self.window.isOpaque(),
             "backgroundAlpha": alpha(&self.window.backgroundColor()),
@@ -673,19 +951,26 @@ impl SettingsChrome {
             "groundX": ground.origin.x,
             "sidebarWidth": SIDEBAR_WIDTH,
             "searchHeight": self.chrome.ivars().search.borrow().as_ref().map(|search| search.frame().size.height),
+            "selectionInsets": insets,
+            "header": self.header_title.stringValue().to_string(),
         })
     }
     pub fn update_sidebar_appearance(&self) {
         let state = self.chrome.ivars();
-        let dark = is_dark(&self.window.effectiveAppearance());
+        let appearance = self.window.effectiveAppearance();
+        let dark = is_dark(&appearance);
+        self.chrome.paint_selection(&appearance);
         if state.dark.replace(dark) != dark
-            && let Some(outline) = state.outline.borrow().as_ref()
+            && let Some(table) = state.table.borrow().as_ref()
         {
-            let selected = outline.selectedRowIndexes();
+            let selected = table.selectedRowIndexes();
             state.quiet.set(true);
-            outline.reloadData();
-            outline.selectRowIndexes_byExtendingSelection(&selected, false);
+            table.reloadData();
+            table.selectRowIndexes_byExtendingSelection(&selected, false);
             state.quiet.set(false);
+            let id = self.header_id.borrow().clone();
+            self.header_tile
+                .setImage(tile_image(&id, dark, HEADER_TILE).as_deref());
         }
     }
 
@@ -710,6 +995,9 @@ impl SettingsChrome {
     }
 }
 
+/// The page's side inset: the header's tile and the cards start here.
+pub const PAGE_INSET: f64 = 20.;
+
 /// GPUI's view of window `w`.
 pub fn gpui_view(w: &gpui::Window) -> Option<Retained<NSView>> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).ok()?.as_raw() else {
@@ -722,23 +1010,15 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(constraints));
 }
 
-fn symbol(name: &str, label: &str) -> Option<Retained<NSImage>> {
-    NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str(name),
-        Some(&NSString::from_str(label)),
-    )
-}
-
-/// A sidebar row: the section's icon and its name.
+/// A sidebar row: the section's tile and its name. Rows run the table's
+/// full width; the tile sits `TILE_INSET` inside the selection on every side.
 fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView> {
     if section.id == "account" {
-        return account_cell(mtm, section);
+        return account_cell(mtm, section, dark);
     }
     let view = NSTableCellView::new(mtm);
     let icon = NSImageView::new(mtm);
-    if let Some(image) = icon_image(&section.id, dark) {
-        icon.setImage(Some(&image));
-    }
+    icon.setImage(tile_image(&section.id, dark, TILE).as_deref());
     icon.setImageScaling(NSImageScaling::ScaleNone);
     let label = NSTextField::labelWithString(&NSString::from_str(&section.title), mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
@@ -751,18 +1031,27 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     label.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.addSubview(&icon);
     view.addSubview(&label);
-    // The image carries the tile's shadow margin; the tile itself is
-    // `TILE` square at the row's leading padding.
-    let (w, h) = ICON_SIZE;
+    let (w, h) = tile_size(TILE);
+    let tile_x = SIDEBAR_INSET + TILE_INSET;
     activate(&[
         icon.widthAnchor().constraintEqualToConstant(w),
         icon.heightAnchor().constraintEqualToConstant(h),
-        icon.leadingAnchor().constraintEqualToAnchor_constant(&view.leadingAnchor(), 7. - MARGIN.0),
-        // The tile's centre on the row's: the image's is 2.8 − 1.2 = 0.8 pt lower.
-        icon.centerYAnchor().constraintEqualToAnchor_constant(&view.centerYAnchor(), (MARGIN.3 - MARGIN.1) / 2.),
-        label.leadingAnchor().constraintEqualToAnchor_constant(&view.leadingAnchor(), 7. + TILE + 8.),
-        label.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -7.),
-        label.centerYAnchor().constraintEqualToAnchor(&view.centerYAnchor()),
+        icon.leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), tile_x - tile_margin(TILE)),
+        icon.centerYAnchor()
+            .constraintEqualToAnchor_constant(&view.centerYAnchor(), tile_centre_offset(TILE)),
+        label
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), tile_x + TILE + 9.),
+        label
+            .trailingAnchor()
+            .constraintLessThanOrEqualToAnchor_constant(
+                &view.trailingAnchor(),
+                -SIDEBAR_INSET - 6.,
+            ),
+        label
+            .centerYAnchor()
+            .constraintEqualToAnchor(&view.centerYAnchor()),
     ]);
     unsafe {
         view.setImageView(Some(&icon));
@@ -771,7 +1060,31 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     Retained::into_super(view)
 }
 
-fn account_cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
+/// A group's name over its rows, on the tiles' leading edge.
+fn header_cell(mtm: MainThreadMarker, name: &str) -> Retained<NSView> {
+    let view = NSTableCellView::new(mtm);
+    let label = NSTextField::labelWithString(&NSString::from_str(name), mtm);
+    label.setFont(Some(&NSFont::systemFontOfSize_weight(12., unsafe {
+        NSFontWeightSemibold
+    })));
+    label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    label.setTranslatesAutoresizingMaskIntoConstraints(false);
+    view.addSubview(&label);
+    activate(&[
+        label
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), SIDEBAR_INSET + TILE_INSET),
+        label
+            .bottomAnchor()
+            .constraintEqualToAnchor_constant(&view.bottomAnchor(), -5.),
+    ]);
+    unsafe { view.setTextField(Some(&label)) };
+    Retained::into_super(view)
+}
+
+/// The account at the top of the sidebar: the avatar, the name and
+/// "Account"; signed out, the account glyph and "Sign In".
+fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView> {
     let view = NSTableCellView::new(mtm);
     let name = section.account_name.as_deref().unwrap_or("Sign In");
     let title = NSTextField::labelWithString(&NSString::from_str(name), mtm);
@@ -787,65 +1100,61 @@ fn account_cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
     let labels = NSStackView::new(mtm);
     labels.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     labels.setAlignment(NSLayoutAttribute::Leading);
-    labels.setSpacing(2.);
+    labels.setSpacing(1.);
     labels.addArrangedSubview(&title);
     if section.account_name.is_some() {
         labels.addArrangedSubview(&subtitle);
     }
-    let avatar: Retained<NSView> = if let Some(initial) = section
+    let initial = section
         .account_name
         .as_deref()
-        .and_then(|name| name.chars().find(|letter| letter.is_alphanumeric()))
-    {
-        let badge = NSBox::new(mtm);
-        badge.setBoxType(NSBoxType::Custom);
-        badge.setTitlePosition(NSTitlePosition::NoTitle);
-        badge.setBorderWidth(0.);
-        badge.setCornerRadius(16.);
-        badge.setFillColor(&NSColor::controlAccentColor());
-        let letter = NSTextField::labelWithString(
-            &NSString::from_str(&initial.to_uppercase().to_string()),
-            mtm,
-        );
-        letter.setTextColor(Some(&NSColor::alternateSelectedControlTextColor()));
-        letter.setTranslatesAutoresizingMaskIntoConstraints(false);
-        badge.addSubview(&letter);
-        activate(&[
-            letter
-                .centerXAnchor()
-                .constraintEqualToAnchor(&badge.centerXAnchor()),
-            letter
-                .centerYAnchor()
-                .constraintEqualToAnchor(&badge.centerYAnchor()),
-        ]);
-        Retained::into_super(badge)
-    } else {
-        let icon = NSImageView::new(mtm);
-        icon.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
-        icon.setImage(symbol("person.crop.circle.fill", "").as_deref());
-        icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-        Retained::into_super(Retained::into_super(icon))
-    };
+        .and_then(|name| name.chars().find(|letter| letter.is_alphanumeric()));
+    let avatar = NSImageView::new(mtm);
+    avatar.setImageScaling(NSImageScaling::ScaleNone);
+    avatar.setImage(avatar_image(initial.is_some(), dark).as_deref());
     avatar.setAccessibilityElement(false);
     avatar.setTranslatesAutoresizingMaskIntoConstraints(false);
     labels.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.addSubview(&avatar);
+    if let Some(initial) = initial {
+        let letter = NSTextField::labelWithString(
+            &NSString::from_str(&initial.to_uppercase().to_string()),
+            mtm,
+        );
+        letter.setFont(Some(&NSFont::systemFontOfSize_weight(15., unsafe {
+            NSFontWeightSemibold
+        })));
+        letter.setTextColor(Some(&NSColor::labelColor()));
+        letter.setTranslatesAutoresizingMaskIntoConstraints(false);
+        view.addSubview(&letter);
+        activate(&[
+            letter
+                .centerXAnchor()
+                .constraintEqualToAnchor(&avatar.centerXAnchor()),
+            letter
+                .centerYAnchor()
+                .constraintEqualToAnchor(&avatar.centerYAnchor()),
+        ]);
+    }
     view.addSubview(&labels);
     activate(&[
         avatar
             .leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), 7.),
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), SIDEBAR_INSET + AVATAR_INSET),
         avatar
             .centerYAnchor()
             .constraintEqualToAnchor(&view.centerYAnchor()),
-        avatar.widthAnchor().constraintEqualToConstant(32.),
-        avatar.heightAnchor().constraintEqualToConstant(32.),
+        avatar.widthAnchor().constraintEqualToConstant(AVATAR),
+        avatar.heightAnchor().constraintEqualToConstant(AVATAR),
         labels
             .leadingAnchor()
-            .constraintEqualToAnchor_constant(&avatar.trailingAnchor(), 8.),
+            .constraintEqualToAnchor_constant(&avatar.trailingAnchor(), 9.),
         labels
             .trailingAnchor()
-            .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -7.),
+            .constraintLessThanOrEqualToAnchor_constant(
+                &view.trailingAnchor(),
+                -SIDEBAR_INSET - 6.,
+            ),
         labels
             .centerYAnchor()
             .constraintEqualToAnchor(&view.centerYAnchor()),
@@ -854,160 +1163,240 @@ fn account_cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
     Retained::into_super(view)
 }
 
-/// The SVGs' view box is the tile (0…100) with room for its shadow:
-/// −8…108 across, −6…114 down. In points at `TILE`: (left, top, right, bottom).
-const MARGIN: (f64, f64, f64, f64) = (8. * TILE / 100., 6. * TILE / 100., 8. * TILE / 100., 14. * TILE / 100.);
-const ICON_SIZE: (f64, f64) = (116. * TILE / 100., 120. * TILE / 100.);
+// Tiles. One drawing for every place a section's tile shows (the sidebar,
+// the page header), rendered from SVG once per appearance and size.
 
-/// Where the fallback's SF Symbol is centred down the tile
-/// (`sf-symbols.json`: x 50 %, y 49 %). The drawn glyphs sit where their
-/// SVGs place them.
-const SYMBOL_CENTRE: f64 = 0.49;
-
-/// One section's art in one appearance: dark is the glass slab, light its
-/// pastel variant (the owner's choices). Glyphs are placed alike in both.
-struct Art {
-    drawn: Option<&'static str>,
-    tile: &'static str,
-    symbol: &'static str,
-    /// The fallback symbol's glyph, lit edge and deep copy (`#rrggbbaa`).
-    colours: [&'static str; 3],
+/// The SVG's room around the tile for its shadow, in tile units (22).
+const TILE_UNITS: f64 = 22.;
+const MARGIN_UNITS: f64 = 3.;
+fn tile_margin(side: f64) -> f64 {
+    MARGIN_UNITS * side / TILE_UNITS
+}
+fn tile_top_margin(side: f64) -> f64 {
+    tile_margin(side)
+}
+fn tile_size(side: f64) -> (f64, f64) {
+    let s = side + 2. * tile_margin(side);
+    (s, s)
+}
+/// The image is centred on the tile, so its centre is the tile's.
+fn tile_centre_offset(_side: f64) -> f64 {
+    0.
 }
 
-fn art(id: &str, dark: bool) -> Option<Art> {
-    macro_rules! art {
-        ($name:literal, $symbol:literal, [$($d:literal),*], [$($l:literal),*]) => {
-            if dark {
-                Art {
-                    drawn: Some(include_str!(concat!("../assets/settings/dark/", $name, ".svg"))),
-                    tile: include_str!(concat!("../assets/settings/dark/tiles/", $name, ".svg")),
-                    symbol: $symbol,
-                    colours: [$($d),*],
-                }
-            } else {
-                Art {
-                    drawn: Some(include_str!(concat!("../assets/settings/light/", $name, ".svg"))),
-                    tile: include_str!(concat!("../assets/settings/light/tiles/", $name, ".svg")),
-                    symbol: $symbol,
-                    colours: [$($l),*],
-                }
-            }
-        };
-    }
+macro_rules! pierre {
+    ($name:literal) => {
+        include_str!(concat!("../icons/pierre/Icon", $name, ".svg"))
+    };
+}
+macro_rules! drawn {
+    ($name:literal) => {
+        include_str!(concat!("../icons/powermove/", $name, ".svg"))
+    };
+}
+
+/// A section's glyph: Pierre's (filled where it has one), or ours drawn in
+/// its grammar where it has none (film, photos, keyboard).
+fn glyph(id: &str) -> Option<&'static str> {
     Some(match id {
-        "project" => art!(
-            "project",
-            "movieclapper.fill",
-            ["#ffeee2", "#ffe8d7", "#2606008c"],
-            ["#c05621", "#ffffff", "#7232138c"]
-        ),
-        "agents" => Art {
-            drawn: None,
-            ..art!(
-                "memory",
-                "sparkles",
-                ["#f9f0ff", "#f8ebff", "#1709278c"],
-                ["#8c61c3", "#ffffff", "#5238748c"]
-            )
-        },
-        "general" => art!(
-            "general",
-            "gearshape.fill",
-            ["#f7f5f3", "#f4f1ee", "#14110f8c"],
-            ["#817971", "#ffffff", "#4c47428c"]
-        ),
-        "shortcuts" => art!(
-            "shortcuts",
-            "command",
-            ["#f1f5fc", "#edf2fc", "#0e12198c"],
-            ["#6d7b94", "#ffffff", "#3f48578c"]
-        ),
-        "media" => art!(
-            "media",
-            "photo.on.rectangle.angled.fill",
-            ["#e6f7ff", "#dbf5ff", "#00122a8c"],
-            ["#2f7dcb", "#ffffff", "#1b49798c"]
-        ),
-        "storage" => art!(
-            "storage",
-            "externaldrive.fill",
-            ["#e5fcee", "#dbfbe7", "#0018088c"],
-            ["#1b905c", "#ffffff", "#1155368c"]
-        ),
-        "providers" => Art {
-            drawn: None,
-            ..art!(
-                "general",
-                "key.fill",
-                ["#f1f5fc", "#edf2fc", "#0e12198c"],
-                ["#6d7b94", "#ffffff", "#3f48578c"]
-            )
-        },
-        "privacy" => Art {
-            drawn: None,
-            ..art!(
-                "general",
-                "hand.raised.fill",
-                ["#f1f5fc", "#edf2fc", "#0e12198c"],
-                ["#6d7b94", "#ffffff", "#3f48578c"]
-            )
-        },
-        "about" => Art {
-            drawn: None,
-            ..art!(
-                "general",
-                "info.circle",
-                ["#f7f5f3", "#f4f1ee", "#14110f8c"],
-                ["#817971", "#ffffff", "#4c47428c"]
-            )
-        },
-        "transcription" => art!(
-            "transcription",
-            "captions.bubble.fill",
-            ["#ffecf1", "#ffe5ec", "#25040d8c"],
-            ["#be506a", "#ffffff", "#712e3e8c"]
-        ),
-        "extensions" => art!(
-            "extensions",
-            "puzzlepiece.extension.fill",
-            ["#fff4de", "#fff0d0", "#1d0e008c"],
-            ["#a17000", "#ffffff", "#6042008c"]
-        ),
+        "general" => pierre!("GearFill"),
+        "project" => drawn!("film"),
+        "media" => drawn!("photo-stack"),
+        "shortcuts" => drawn!("keyboard"),
+        "transcription" => pierre!("Microphone"),
+        "storage" => pierre!("Server"),
+        "providers" => pierre!("KeyFill"),
+        "agents" => pierre!("Sparkles"),
+        "extensions" => pierre!("Extensions"),
+        "privacy" => pierre!("ShieldFill"),
+        "about" => pierre!("InfoFill"),
+        "account" => drawn!("account"),
         _ => return None,
     })
 }
 
-thread_local! {
-    static ICONS: RefCell<std::collections::HashMap<(String, bool), Retained<NSImage>>> = RefCell::default();
+/// The inside of a 16-unit glyph file, painted with `paint`.
+fn glyph_body(svg: &str, paint: &str) -> String {
+    let start = svg
+        .find("<svg")
+        .and_then(|at| svg[at..].find('>').map(|end| at + end + 1));
+    let end = svg.rfind("</svg>");
+    let inner = match (start, end) {
+        (Some(start), Some(end)) if start < end => &svg[start..end],
+        _ => "",
+    };
+    inner
+        .replace("fill=\"black\"", &format!("fill=\"{paint}\""))
+        .replace("stroke=\"black\"", &format!("stroke=\"{paint}\""))
 }
 
-/// A section's icon for the dark or light appearance, rendered once at 1×
-/// and 2×.
-pub fn icon_image(id: &str, dark: bool) -> Option<Retained<NSImage>> {
-    let key = (id.to_owned(), dark);
-    if let Some(image) = ICONS.with(|icons| icons.borrow().get(&key).cloned()) {
+/// A continuous-corner square (a superellipse) of side `s` at the origin,
+/// inset by `inset`.
+fn squircle(s: f64, inset: f64) -> String {
+    let a = s / 2. - inset;
+    let n = 5.;
+    let steps = 120;
+    let mut d = String::new();
+    for i in 0..steps {
+        let t = std::f64::consts::TAU * i as f64 / steps as f64;
+        let (sin, cos) = t.sin_cos();
+        let x = s / 2. + a * cos.signum() * cos.abs().powf(2. / n);
+        let y = s / 2. + a * sin.signum() * sin.abs().powf(2. / n);
+        d.push_str(&format!("{}{x:.3} {y:.3}", if i == 0 { "M" } else { "L" }));
+    }
+    d.push('Z');
+    d
+}
+
+/// The colours of one tile family in one appearance.
+struct Look {
+    body: (&'static str, &'static str),
+    /// The inner edge: its colour and opacity at top and bottom.
+    edge: (&'static str, f64, f64),
+    /// The soft top light's opacity.
+    light: f64,
+    glyph: (&'static str, &'static str),
+    /// The tile's drop shadow: offset, blur, opacity.
+    shadow: (f64, f64, f64),
+    /// The glyph's own offset shadow (pressed in): colour and opacity.
+    press: (&'static str, f64),
+}
+fn look(tiles: Tiles, dark: bool) -> Look {
+    match (tiles, dark) {
+        (Tiles::Lit, true) => Look {
+            body: ("#45454b", "#25252a"),
+            edge: ("#ffffff", 0.3, 0.05),
+            light: 0.16,
+            glyph: ("#ffffff", "#c6c6cc"),
+            shadow: (0.6, 0.7, 0.55),
+            press: ("#000000", 0.5),
+        },
+        (Tiles::Lit, false) => Look {
+            body: ("#ffffff", "#e7e7ea"),
+            edge: ("#000000", 0.07, 0.17),
+            light: 0.8,
+            glyph: ("#5c5c62", "#2b2b2f"),
+            shadow: (0.5, 0.6, 0.16),
+            press: ("#ffffff", 0.9),
+        },
+        (Tiles::Flat, _) => Look {
+            body: ("#ff8a4c", "#f0621c"),
+            edge: ("#ffffff", 0.22, 0.),
+            light: 0.,
+            glyph: ("#ffffff", "#ffffff"),
+            shadow: (0.4, 0.5, 0.2),
+            press: ("#000000", 0.),
+        },
+    }
+}
+
+fn tile_svg(id: &str, dark: bool, tiles: Tiles) -> Option<String> {
+    let glyph = glyph_body(glyph(id)?, "url(#g)");
+    let Look {
+        body,
+        edge,
+        light,
+        glyph: ink,
+        shadow,
+        press,
+    } = look(tiles, dark);
+    let s = TILE_UNITS;
+    let m = MARGIN_UNITS;
+    let full = s + 2. * m;
+    // The glyph: 12.5 of the tile's 22 units, centred.
+    let k = 12.5 / 16.;
+    let at = (s - 16. * k) / 2.;
+    Some(format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{full}" height="{full}" viewBox="{nm} {nm} {full} {full}">
+<defs>
+<linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{b0}"/><stop offset="1" stop-color="{b1}"/></linearGradient>
+<linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{ec}" stop-opacity="{e0}"/><stop offset="1" stop-color="{ec}" stop-opacity="{e1}"/></linearGradient>
+<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#ffffff" stop-opacity="{light}"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="16"><stop offset="0" stop-color="{g0}"/><stop offset="1" stop-color="{g1}"/></linearGradient>
+<filter id="drop" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="#000000" flood-opacity="{so}"/></filter>
+<filter id="press" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0.55" stdDeviation="0.3" flood-color="{pc}" flood-opacity="{po}"/></filter>
+</defs>
+<path d="{outer}" fill="url(#body)" filter="url(#drop)"/>
+<path d="{outer}" fill="url(#light)"/>
+<path d="{inner}" fill="none" stroke="url(#edge)" stroke-width="0.5"/>
+<g filter="url(#press)"><g transform="translate({at} {at}) scale({k})">{glyph}</g></g>
+</svg>"##,
+        nm = -m,
+        b0 = body.0,
+        b1 = body.1,
+        ec = edge.0,
+        e0 = edge.1,
+        e1 = edge.2,
+        g0 = ink.0,
+        g1 = ink.1,
+        sd = shadow.0,
+        sb = shadow.1,
+        so = shadow.2,
+        pc = press.0,
+        po = press.1,
+        outer = squircle(s, 0.),
+        inner = squircle(s, 0.25),
+    ))
+}
+
+thread_local! {
+    static TILE_CACHE: RefCell<std::collections::HashMap<(String, bool, u32), Retained<NSImage>>> = RefCell::default();
+}
+
+/// A section's tile at `side` points for the dark or light appearance,
+/// rendered once at 1× and 2× (the image carries `tile_margin` around it).
+pub fn tile_image(id: &str, dark: bool, side: f64) -> Option<Retained<NSImage>> {
+    let key = (id.to_owned(), dark, (side * 100.) as u32);
+    if let Some(image) = TILE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         return Some(image);
     }
-    let art = art(id, dark)?;
-    let size = NSSize::new(ICON_SIZE.0, ICON_SIZE.1);
-    let image = match (glyphs(), art.drawn) {
-        (Glyphs::Drawn, Some(drawn)) => bitmaps(drawn, size)?,
-        _ => {
-            let tile = bitmaps(art.tile, size)?;
-            symbol_tile(tile, &art, size)?
-        }
-    };
-    ICONS.with(|icons| icons.borrow_mut().insert(key, image.clone()));
+    let svg = tile_svg(id, dark, tiles())?;
+    let (w, h) = tile_size(side);
+    let image = svg_image(&svg, NSSize::new(w, h))?;
+    TILE_CACHE.with(|cache| cache.borrow_mut().insert(key, image.clone()));
     Some(image)
 }
 
+/// The account's avatar: the tile's material as a disc (the initial is a
+/// label over it), or, signed out, the account glyph in the secondary grey.
+fn avatar_image(signed_in: bool, dark: bool) -> Option<Retained<NSImage>> {
+    let size = NSSize::new(AVATAR, AVATAR);
+    if !signed_in {
+        let grey = if dark { "#98989f" } else { "#6a6a70" };
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">{}</svg>"#,
+            glyph_body(glyph("account")?, grey)
+        );
+        return svg_image(&svg, size);
+    }
+    let Look {
+        body, edge, light, ..
+    } = look(Tiles::Lit, dark);
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+<defs>
+<linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{}"/><stop offset="1" stop-color="{}"/></linearGradient>
+<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#ffffff" stop-opacity="{light}"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+</defs>
+<circle cx="16" cy="16" r="15.5" fill="url(#body)"/>
+<circle cx="16" cy="16" r="15.5" fill="url(#light)"/>
+<circle cx="16" cy="16" r="15.25" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="0.5"/>
+</svg>"##,
+        body.0, body.1, edge.0, edge.1
+    );
+    svg_image(&svg, size)
+}
+
 /// `svg` rasterised at 1× and 2× into one image of `size` points.
-fn bitmaps(svg: &str, size: NSSize) -> Option<Retained<NSImage>> {
+pub fn svg_image(svg: &str, size: NSSize) -> Option<Retained<NSImage>> {
     use resvg::{tiny_skia, usvg};
     let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     for scale in [1., 2.] {
-        let (w, h) = ((size.width * scale).round() as u32, (size.height * scale).round() as u32);
+        let (w, h) = (
+            (size.width * scale).round() as u32,
+            (size.height * scale).round() as u32,
+        );
         let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
         let view = tree.size();
         resvg::render(
@@ -1043,49 +1432,6 @@ fn bitmaps(svg: &str, size: NSSize) -> Option<Retained<NSImage>> {
         image.addRepresentation(&rep);
     }
     Some(image)
-}
-
-/// The glyph-free tile with a real SF Symbol on it: the symbol at 0.46 of
-/// the tile, its box centred at `SYMBOL_CENTRE`, with a lit copy 1.2 %
-/// above and a deep copy 2.6 % below, both unblurred.
-fn symbol_tile(tile: Retained<NSImage>, art: &Art, size: NSSize) -> Option<Retained<NSImage>> {
-    let name = NSString::from_str(art.symbol);
-    let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
-    let tint = |hex: &str| {
-        let hex = hex.trim_start_matches('#');
-        let rgb = u32::from_str_radix(hex, 16).unwrap_or(u32::MAX);
-        let v = if hex.len() == 6 { (rgb << 8) | 0xff } else { rgb };
-        let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
-        NSColor::colorWithSRGBRed_green_blue_alpha(c(24), c(16), c(8), c(0))
-    };
-    let [glyph, light, deep] = art.colours.map(|hex| {
-        let colours = NSArray::from_retained_slice(&[tint(hex)]);
-        let config = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
-            TILE * 0.46,
-            unsafe { NSFontWeightSemibold },
-            NSImageSymbolScale::Medium,
-        )
-        .configurationByApplyingConfiguration(
-            &NSImageSymbolConfiguration::configurationWithPaletteColors(&colours),
-        );
-        base.imageWithSymbolConfiguration(&config)
-    });
-    let (glyph, light, deep) = (glyph?, light?, deep?);
-    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
-        tile.drawInRect(rect);
-        let s = glyph.size();
-        // Unflipped: the tile's bottom edge is `MARGIN.3` up.
-        let centre = NSPoint::new(MARGIN.0 + TILE * 0.5, MARGIN.3 + TILE * (1. - SYMBOL_CENTRE));
-        let at = |dy: f64| {
-            NSRect::new(NSPoint::new(centre.x - s.width / 2., centre.y - s.height / 2. + dy), s)
-        };
-        let over = NSCompositingOperation::SourceOver;
-        deep.drawInRect_fromRect_operation_fraction(at(-TILE * 0.026), NSRect::ZERO, over, 1.);
-        light.drawInRect_fromRect_operation_fraction(at(TILE * 0.012), NSRect::ZERO, over, 0.95);
-        glyph.drawInRect_fromRect_operation_fraction(at(0.), NSRect::ZERO, over, 1.);
-        objc2::runtime::Bool::YES
-    });
-    Some(NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw))
 }
 
 const SECTION_KEY: &str = "PMSettingsSection";
