@@ -38,7 +38,7 @@ Unavailable means the evidence was not collected; it never counts as success.
 | `frames` | A rendered frame against a reference (a PNG, a solid colour or the fixture's own frame) within a CIEDE2000 tolerance: mean and 95th percentile. |
 | `frame-stats` | Statistics of a region (L*, percentiles, warmth, chroma, share of pixels near a colour, ΔE and tone correlation against the fixture's frame, fine detail as mean Sobel magnitude, sideways red/blue channel displacement), absolute, relative or as a ratio to the fixture; at every time, or at any one (a transition's middle). |
 | `frame-time` | Milliseconds the new effect or transition adds per frame, at a percentile, under its budget (4 ms for effects, 3 ms for transitions at 1280x720), from paired enabled/disabled timings the host measures. |
-| `panel` | The panel opens, shows the text it should, and a scripted probe (select layers, seek, click a labelled control, type into a field) has the effect it should, judged against the state just before the probe: project, markers, playhead and frames rendered before and after the steps. |
+| `panel` | The panel opens, and every control the prompt names is exercised by its own probe (select layers, seek, click a labelled control, type into a field), run in order on the same panel. Each probe is judged against the state just before its steps: project, markers, playhead and frames rendered before and after them. Rows pair what belongs together: a marker with its time, a layer with its note. A row is an element of the panel naming its item and none of the probe's other items, and it must show its own time (read from `2.5`, `2.5s`, `0:02`, `0:02.5`, `1:02:03` or `00:00:02:15` at 24/25/30/60 fps; bare integers are not times) and no other item's. |
 | `theme` | The active theme comes from the run's extension; tokens meet hue, chroma and lightness ranges and WCAG contrast floors. A foreground is composited over its background before contrast is measured; a translucent background or a translucent token checked on its own fails. |
 | `rubric` | Subjective work: a fresh-context evaluator's scores against `rubrics/*.json` (every criterion needs evidence; hard criteria have floors). The owner's spot-check (`spot-check.json` in the run folder) decides the rubric whenever present; a disagreement with the evaluator is recorded for tuning the evaluator. |
 
@@ -90,20 +90,50 @@ completion-gate, self-check, evaluator); `--cohort` names the batch.
 - **Environment**: the host and the CLIs get exactly `PATH`, the locale, a
   home and a temp folder inside the run, and (CLIs) their config folders and,
   for replays, a loopback endpoint with a dummy key. Nothing else is inherited.
-- **Files**: the runner reads only inside the run folder, never through a
-  symlink; the path `save_project` names is read only if it is a regular file
-  in the run's `exports` or `work` folder.
+- **Files**: the runner opens the reserved run folder once and reaches every
+  file below it from that open folder, one component at a time, with
+  `openat(…, O_NOFOLLOW)` (`runner::paths::Anchor`): reads, walks (the
+  extension roots and every extension folder), frame and capture writes, the
+  saved project and the graders' frame reads. A component that is a link is
+  refused, never followed, and there is no check-then-open by name a run
+  could race. Files the runner creates directly in the run folder are
+  created exclusively (a link left there is never written through), and a
+  rewrite replaces the name. The path `save_project` names is read only if it
+  lies in the run's `exports` or `work` folder and every component from the
+  run folder down is a real folder or file.
 - **OS sandbox**: replays and `none` runs put every component (host, CLI and
   all their children) under a Seatbelt profile (`sandbox-exec`, the mechanism
   `pm-runtime-v8`'s Store sandbox uses): reads under `$HOME` and `/Users` are
   refused except the run folder and the binaries given (`--sandbox-read PATH`
   adds a CLI's install folder), writes go only to the run folder, the
-  Keychain daemons cannot be looked up, and the network reaches only this
-  machine: Seatbelt's one host filter, `localhost`, covers loopback and this
-  Mac's own addresses, and every other host is refused before a packet leaves
-  (no DNS either). On a platform without Seatbelt a replay is refused.
-  Canary tests prove each rule: an inherited canary variable, a canary file
-  outside the run, and a connection to another host are all refused.
+  Keychain daemons cannot be looked up, and the only outbound network is TCP
+  to the replay's port (a `none` run has none at all; no DNS, no UDP). On a
+  platform without Seatbelt, or when the profile does not apply (the runner
+  runs a trivial program under it first), the run is refused. Canary tests
+  prove each rule: an inherited canary variable, a canary file outside the
+  run, a connection to another host, to an unrelated loopback listener and to
+  a listener on this Mac's own address are all refused.
+- **Network boundary for replays** (decision of the harness engineer,
+  2026-11-24; no VM). Seatbelt's one host filter, `localhost`, matches
+  loopback and this Mac's own addresses alike, so a one-port rule alone still
+  reaches a host service listening on that port on any interface. The replay
+  server therefore picks a free port and holds it on every interface for the
+  whole run (`replay::hold::PortHold`): loopback, both wildcards and every
+  address of every interface, each bound without `SO_REUSEPORT`. A wildcard
+  alone is not enough on macOS: with `SO_REUSEADDR` or `SO_REUSEPORT` another
+  socket still binds the port on `127.0.0.1` or on a host address (measured
+  on this Mac). Before a replay starts the hold proves itself: binding the
+  port on loopback, both wildcards (a dual-stack socket included) and every
+  interface address, with no option, `SO_REUSEADDR`, `SO_REUSEPORT` and both,
+  must all be refused, or the replay is refused. While the run goes a
+  watchdog holds any address that appears (a VPN coming up) and marks the
+  replay failed when one cannot be held. Connections that reach a holder are
+  dropped at once; the replay serves loopback peers only. The Seatbelt
+  profile allows outbound TCP to that port only. Tests: a replay succeeds
+  through the held port; a confined run is refused an unrelated loopback
+  listener and a listener on this Mac's non-loopback address; no other
+  listener can bind the replay port on loopback, the wildcards or any host
+  address while the server holds it.
 
 ### Deadlines and steps
 
@@ -111,10 +141,18 @@ Every component runs in its own process group. At the wall-clock limit the
 whole group is killed and reaped, so no child is left holding a pipe; the
 group is also stopped when the harness exits by itself. Host start-up and
 `initialize`, each host call, and the baseline and the collection each have
-their own deadline (`runner::mcp::Deadlines`). One step is one tool call the
-model issued; every adapter counts steps from the stream as it arrives and
-stops the run the moment it passes the task's limit (Codex and Claude Code by
-stopping the CLI; Aero by `aero/cancel`). No turn cap is passed to a CLI.
+their own deadline (`runner::mcp::Deadlines`). The runner's host connection
+reads on one thread and writes on another, and the caller only waits on a
+channel with its own deadline, so a host that stops reading its input cannot
+hold a request, a notification or a cancel past its deadline: a write that
+misses it spends the connection (every later call fails at once) and the
+host is stopped. One step is one tool call the model issued, counted once
+per call id the moment the call starts (Codex `item.started`, Claude Code's
+`content_block_start` with `--include-partial-messages`, Aero `tool-started`),
+so a call that starts and stalls has used its step. Every adapter counts
+steps as the stream arrives and stops the run the moment it passes the
+task's limit (Codex and Claude Code by stopping the CLI; Aero by
+`aero/cancel`). No turn cap is passed to a CLI.
 
 ## Scoring
 
@@ -123,7 +161,9 @@ replay was consumed exactly, and the run stayed within its time and step
 limits. "Renders correctly" is the frame graders alone. Tokens are
 normalised: input counts every prompt token, cached ones included; cached is
 that subset. A run whose harness reported no usage has no tokens (never
-zero); wall time is absent when the harness never ran.
+zero), and so does a run with any usage report lacking real input and output
+counts (an empty `usage {}` is unavailable, not zero); wall time is absent
+when the harness never ran.
 
 Per harness, model, effort, mode (live, replay, none) and ablation, pooled
 and per task, the summary gives the success rate with a 90 % Wilson
@@ -136,12 +176,17 @@ and ablations are never pooled; duplicate run ids count once.
 
 **Aero is better** on a model and effort when, against every other harness
 that ran live on it (`none` never counts), its success interval lies wholly
-above the other's and its median wall time and tokens are no worse, on
-matched coverage: the same tasks on both sides, at least five distinct runs
-per task per harness, observed wall time and usage on every compared run, and
-live runs of the full harness only (no replays, no ablations). One verdict per
-model: better only when every comparison is; unavailable when the evidence
-cannot decide.
+above the other's and its median wall time and tokens are no worse. Runs
+compare only inside a cohort both harnesses ran in as one interleaved batch
+(distinct batch positions, start times and repeats in batch order, both
+harnesses in every repeat), and only on a balanced sample: the same tasks on
+both sides, and from every task the same number of repeats both harnesses
+ran, paired by repeat, at least five. Runs outside a shared cohort or beyond
+the balanced sample are left out and counted in the reasons. Every compared
+run has observed wall time and usage, and only live runs of the full
+harness count (no replays, no ablations). Each shared cohort must clear the
+bar on its own. One verdict per model: better only when every comparison is;
+unavailable when the evidence cannot decide.
 
 ## Replay
 
@@ -186,7 +231,7 @@ answer, `capabilities.experimental.powermoveEval`, and offers the tools:
 | Extension health | `extensionHealth` | `get_workspace_state` `extensions[].health` (`ok`, or the state and error) per window of the tested window set, after the run's extensions reload. |
 | Registration owners | `registrationOwners` | Every entry of `registeredEffects`, `registeredTransitions`, `registeredPanels` and `theme` names the extension that registered it (`extension`). No attribution by searching sources. |
 | Transitions, panels, themes | `transitions`, `panels`, `themes` | `registeredTransitions[]`, `registeredPanels[]` (`{id, extension, parameters}`), and `theme {active, extension, tokens}` with resolved CSS values. |
-| Panel probes | `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel` | As in the v1.2 catalog, on the eval connection. |
+| Panel probes | `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel` | As in the v1.2 catalog, on the eval connection. `get_panel_state` is a tree of the panel's elements, one JSON object (or list) per element, with its displayed strings as values: the runner reads each element's text as a row, so a list item's name and time must sit in the same element. `ref`, `id`, `role`, `type`, `kind`, `key`, `testId`, `className` and `style` are never read as displayed text. |
 | Seek | `set_playhead {time}` | Moves the playhead for the probe. |
 | Frame time | `measure_frame_time {target, times, samples, width}` | `{revision, enabledMs[], disabledMs[]}`: paired renders of the same revision with the target enabled and disabled, at active frames. (Subtracting a whole-render median credits unrelated edits that offset a slow effect.) |
 | Evaluator | `evaluator` flag and `evaluate_rubric {rubric, prompt, sees}` | A fresh-context evaluator session (never the generator's context) answering an `Evaluation` (`{evaluator, rubric, scores: {id: {score, evidence}}}`). |
@@ -205,10 +250,12 @@ product UI keeps the normal Action/Event path. The runner's client side is in
   model request to the loopback replay and never falls back to real auth;
   `{mode: "none"}` and `{mode: "live"}` are the others.
 - **Events** `aero/event` notifications `{runId, seq, event}`: run-scoped,
-  `seq` from 0 with no gaps, `event` one of `usage {input, cached, output}`,
-  `tool-call {name, ok}` (one step), `retry {reason}`,
-  `gate-continuation {failures}`. The runner refuses events of another run or
-  out of order.
+  `seq` from 0 with no gaps, `event` one of `usage {input, cached, output}`
+  (all three counts required), `tool-started {callId, name}` (one step,
+  counted once per `callId` when the call starts), `tool-finished {callId,
+  ok}` (only for a started call), `retry {reason}`,
+  `gate-continuation {failures}`. The runner refuses events of another run,
+  out of order, or finishing a call that never started.
 - **Result** `{runId, finalText, completed, reason}` with `reason` one of
   `completed`, `gate-exhausted`, `step-limit`, `deadline`, `cancelled`,
   `error`. Only `completed` with `completed: true` completes the turn.
@@ -221,6 +268,14 @@ product UI keeps the normal Action/Event path. The runner's client side is in
   in-flight call (today it has none).
 
 ## Not yet proved
+
+- **The host's `--listen` bridge under the replay profile.** The real host's
+  bridge for the harnesses' MCP proxies is a TCP port on IPv4 loopback that
+  the host picks itself. The replay profile allows outbound TCP to the
+  replay's port only, so a real CLI's proxy cannot reach that bridge. Lane B:
+  serve the bridge on a Unix socket inside the run folder (the profile
+  already allows those), or take a port the runner holds and passes in the
+  same way as the replay's.
 
 Everything above runs against a fake host and fake CLIs in the crate's
 tests, under the real OS sandbox. On the real `powermove-mcp` (first heavy
