@@ -171,6 +171,16 @@ pub(crate) fn materialize(layer: &mut Value, channel: &str) -> Option<Vec<Step>>
             wrap(layer, &path);
         }
     }
+    if matches!(channel, "dofBlur" | "dofFocus")
+        && super::values::flag(layer, "threeD")
+        && let Some(p) = layer.as_object_mut().and_then(|l| l.get_mut("p")).and_then(Value::as_object_mut)
+        && p.get(channel).is_none()
+    {
+        let mut prop = pm_model::Map::new();
+        prop.insert("v", Value::Number(0.0));
+        prop.insert("kf", Value::Array(Vec::new()));
+        p.insert(channel, Value::Object(prop));
+    }
     find(layer, channel)
 }
 

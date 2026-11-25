@@ -1279,8 +1279,14 @@ impl GizmoSurface {
             if drag.is_some() {
                 break;
             }
-            let b = self.studio.part.as_ref().and_then(|part| part.bounds).unwrap_or(item.bounds);
+            let part_bounds = self.studio.part.as_ref().and_then(|part| part.bounds);
+            let b = part_bounds.unwrap_or(item.bounds);
             let corner = |n: usize| -> Vec3 {
+                if part_bounds.is_none()
+                    && let Some(corners) = item.box_corners
+                {
+                    return corners[n];
+                }
                 std::array::from_fn(|i| {
                     if n & (1 << i) == 0 {
                         b.min[i]

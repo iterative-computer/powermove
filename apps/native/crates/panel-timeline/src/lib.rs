@@ -464,8 +464,9 @@ impl TimelineModel {
                 continue;
             }
             let mut properties = Vec::new();
-            let has_scale = layer.channels.iter().any(|c| c.path == "scale.x")
-                && layer.channels.iter().any(|c| c.path == "scale.y");
+            let scale = self.track_channels(&layer.id, "scale");
+            let joined_scale = scale.len() >= 2;
+            let first_scale = scale.first().map(|c| c.path.as_str());
             let position = self.track_channels(&layer.id, "position");
             let joined_position = !layer.separate_dimensions && position.len() >= 2;
             let first_position = position.first().map(|c| c.path.as_str());
@@ -473,7 +474,10 @@ impl TimelineModel {
                 if !layer.channel_available(&channel.path) {
                     continue;
                 }
-                if has_scale && channel.path == "scale.y" {
+                if joined_scale
+                    && channel.path.starts_with("scale.")
+                    && Some(channel.path.as_str()) != first_scale
+                {
                     continue;
                 }
                 if joined_position
@@ -486,18 +490,14 @@ impl TimelineModel {
                     && Some(channel.path.as_str()) == first_position
                     && position.iter().any(|c| self.property_visible(&layer.id, c)))
                     || self.property_visible(&layer.id, channel)
-                    || (has_scale
-                        && channel.path == "scale.x"
-                        && layer
-                            .channels
-                            .iter()
-                            .find(|c| c.path == "scale.y")
-                            .is_some_and(|c| self.property_visible(&layer.id, c)));
+                    || (joined_scale
+                        && Some(channel.path.as_str()) == first_scale
+                        && scale.iter().any(|c| self.property_visible(&layer.id, c)));
                 if visible {
                     properties.push(
                         if joined_position && Some(channel.path.as_str()) == first_position {
                             "position".to_owned()
-                        } else if has_scale && channel.path == "scale.x" {
+                        } else if joined_scale && Some(channel.path.as_str()) == first_scale {
                             "scale".to_owned()
                         } else {
                             channel.path.clone()
@@ -603,16 +603,27 @@ impl TimelineModel {
         self.rebuild_rows();
     }
     pub fn track_channels(&self, layer: &str, path: &str) -> Vec<&Channel> {
+        let three_d = self.index.layer(layer).is_some_and(|l| l.three_d);
         if path == "position" {
             ["position.x", "position.y", "position.z"]
                 .iter()
-                .filter(|p| {
-                    **p != "position.z" || self.index.layer(layer).is_some_and(|l| l.three_d)
-                })
+                .filter(|p| **p != "position.z" || three_d)
                 .filter_map(|p| self.index.channel(layer, p))
                 .collect()
         } else if path == "scale" {
-            ["scale.x", "scale.y"]
+            ["scale.x", "scale.y", "scale.z"]
+                .iter()
+                .filter(|p| **p != "scale.z" || three_d)
+                .filter_map(|c| self.index.channel(layer, c))
+                .collect()
+        } else if path == "anchor" {
+            ["anchor.x", "anchor.y", "anchor.z"]
+                .iter()
+                .filter(|p| **p != "anchor.z" || three_d)
+                .filter_map(|c| self.index.channel(layer, c))
+                .collect()
+        } else if path == "orientation" && three_d {
+            ["orientation.x", "orientation.y", "orientation.z"]
                 .iter()
                 .filter_map(|c| self.index.channel(layer, c))
                 .collect()
@@ -1129,11 +1140,19 @@ pub fn property_label(path: &str) -> String {
         "scale" => "Scale",
         "scale.x" => "Scale X",
         "scale.y" => "Scale Y",
+        "scale.z" => "Scale Z",
         "rotation" => "Rotation",
+        "rotation.x" => "X Rotation",
+        "rotation.y" => "Y Rotation",
+        "orientation" => "Orientation",
+        "orientation.x" => "Orientation X",
+        "orientation.y" => "Orientation Y",
+        "orientation.z" => "Orientation Z",
         "opacity" => "Opacity",
         "anchor" => "Anchor Point",
         "anchor.x" => "Anchor Point X",
         "anchor.y" => "Anchor Point Y",
+        "anchor.z" => "Anchor Point Z",
         "skew" => "Skew",
         _ => return pm_surface::humanize(path),
     }

@@ -75,16 +75,7 @@ impl FrameSpec {
     /// crop) and frames of other moments keep their scale. Bounded at 4×
     /// the drawable.
     pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
-        // A crop that is the whole canvas is no crop: at Fit the shell's
-        // window can come out a pixel narrower than its canvas by rounding
-        // (a 1265 × 712 drawable on a 1266 × 712 canvas).
-        let zoomed = output.crop.is_some_and(|c| {
-            c.x != 0
-                || c.y != 0
-                || c.canvas_width.abs_diff(output.width) > 1
-                || c.canvas_height.abs_diff(output.height) > 1
-        });
-        if zoomed || output.width == 0 || output.height == 0 {
+        if output.is_zoomed() || output.width == 0 || output.height == 0 {
             return 1.;
         }
         let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
@@ -723,6 +714,10 @@ pub struct Submission {
     /// presentation's SDR clip.
     #[cfg(test)]
     pub presented: Option<metal::Buffer>,
+    #[cfg(test)]
+    pub before_completed: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub fail_completion: bool,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -941,7 +936,8 @@ impl Engine {
             && std::env::var_os("PM_PLAYBACK_RETENTION").is_none_or(|v| v != "0");
         // A completed submission can return a surface for a turn before the
         // next needs it. Give that capacity back to the caches only after
-        // playback has lived without it for half a second.
+        // playback has lived without it for two seconds so surface counts
+        // oscillating 3<->4 never thrash cache trims mid-playback.
         if playback
             && self.budgeted_playback
             && share == self.budgeted_grant
@@ -949,7 +945,7 @@ impl Engine {
         {
             if surfaces >= self.budgeted_surfaces {
                 self.surface_budget_peak_at = Instant::now();
-            } else if self.surface_budget_peak_at.elapsed() < Duration::from_millis(500) {
+            } else if self.surface_budget_peak_at.elapsed() < Duration::from_millis(2000) {
                 surfaces = self.budgeted_surfaces;
             }
         } else {
@@ -992,8 +988,13 @@ impl Engine {
                 share.saturating_sub(surfaces)
             };
             // The settling renderer's kept caches have their part of the
-            // same grant ([`crate::settle`]); the worker's divide the rest.
-            let (cache, settling) = split_for_settling(cache);
+            // same grant ([`crate::settle`]); while playing, the live worker
+            // needs the full cache allowance and settling is paused.
+            let (cache, settling) = if playback {
+                (cache, 0)
+            } else {
+                split_for_settling(cache)
+            };
             self.settle_budget = settling;
             if let Some(settler) = &self.settler {
                 settler.budget(settling);
@@ -1002,14 +1003,15 @@ impl Engine {
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
             let shares = knob("PM_FIX_SHARES") == Some(1);
-            let (frame_part, image_part, decoder_part, vector_part, pool_part) = if playback {
-                // Playing frames need both the next decoded picture and hot
-                // rasters and targets. Keep these shares under the same grant.
-                (28, 5, 18, 20, 20)
+            let (frame_part, image_part, decoder_part, vector_part, pool_part, text_part) = if playback {
+                // Playing frames need enough decoded-frame lookahead (>=2 4K
+                // frames on 16 GiB Macs), warm text/vector rasters, and pooled
+                // intermediate targets under the same grant.
+                (26, 3, 20, 16, 21, 14)
             } else if shares {
-                (35, 10, 25, 5, 10)
+                (35, 10, 25, 5, 10, 10)
             } else {
-                (15, 20, 25, 5, 10)
+                (15, 20, 25, 5, 10, 10)
             };
             let images = cache * image_part / 100;
             let frames =
@@ -1042,6 +1044,12 @@ impl Engine {
             self.renderer.set_target_pool_budget(targets);
             self.renderer
                 .set_playback_retention(pool_limit, shader_limit);
+            let text_budget = if playback {
+                (cache * text_part / 100).max(pm_render::text::gpu::CACHE_BYTES)
+            } else {
+                pm_render::text::gpu::CACHE_BYTES
+            };
+            self.renderer.set_text_cache_budget(text_budget);
             let vectors = cache * vector_part / 100;
             self.renderer.set_vector_cache_budget(vectors, 512);
             if playback {
@@ -2391,6 +2399,10 @@ impl Engine {
             readback,
             #[cfg(test)]
             presented,
+            #[cfg(test)]
+            before_completed: None,
+            #[cfg(test)]
+            fail_completion: false,
             width: output.width,
             height: output.height,
             failures,
@@ -2941,9 +2953,17 @@ impl Submission {
         );
         let t = self.trace.clone();
         let lease = self.surface.clone();
+        #[cfg(test)]
+        let before_completed = self.before_completed.clone();
+        #[cfg(test)]
+        let fail_completion = self.fail_completion;
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                if let Some(hook) = &before_completed {
+                    hook();
+                }
                 #[cfg(test)]
                 std::thread::sleep(std::time::Duration::from_millis(
                     LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),
@@ -2952,7 +2972,10 @@ impl Submission {
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);
                 t.completed = now();
-                t.gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+                let gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+                #[cfg(test)]
+                let gpu_ok = gpu_ok && !fail_completion;
+                t.gpu_ok = gpu_ok;
                 drop(t);
                 if let Some(wake) = &wake {
                     wake();

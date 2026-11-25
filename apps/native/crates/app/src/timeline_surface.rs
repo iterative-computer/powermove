@@ -397,6 +397,7 @@ enum Gesture {
         keys: bool,
         work: Option<WorkDragMapping>,
         property_motion: Option<pm_surface::kit::NumericMotion>,
+        property_infinite: crate::infinite_drag::InfiniteDrag,
         quick: Option<(Point<Pixels>, f64, usize)>,
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
@@ -3625,6 +3626,7 @@ impl TimelineSurface {
             cx.notify();
             return true;
         }
+        let mut just_began_property = false;
         match &mut self.gesture {
             Gesture::Transition(_) => return true,
             Gesture::Idle => return false,
@@ -3719,8 +3721,11 @@ impl TimelineSurface {
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
                     self.cursor = CursorStyle::ClosedHand;
                 }
+                let mut property_infinite = crate::infinite_drag::InfiniteDrag::new();
                 if property_motion.is_some() {
                     self.cursor = CursorStyle::ResizeLeftRight;
+                    property_infinite.engage();
+                    just_began_property = true;
                     cx.notify();
                 }
                 let keys = matches!(spec, Spec::Keys | Spec::GraphKeys);
@@ -3751,6 +3756,7 @@ impl TimelineSurface {
                     keys,
                     work,
                     property_motion,
+                    property_infinite,
                     quick,
                     quick_limits,
                     handle,
@@ -3765,6 +3771,7 @@ impl TimelineSurface {
                 keys,
                 work,
                 property_motion,
+                property_infinite,
                 quick,
                 quick_limits,
                 handle,
@@ -3780,10 +3787,32 @@ impl TimelineSurface {
                     }
                     cx.notify();
                 }
-                let property_delta = property_motion.as_mut().and_then(|motion| motion.sample(
-                    f64::from(event.position.x), f64::from(self.tokens.metrics.drag_threshold),
-                    1., 0.5, event.modifiers.shift, event.modifiers.alt, (-f64::MAX, f64::MAX),
-                ));
+                let property_delta = property_motion.as_mut().and_then(|motion| {
+                    let threshold = f64::from(self.tokens.metrics.drag_threshold);
+                    if !just_began_property
+                        && let Some(dx) = property_infinite.take_delta_x()
+                    {
+                        motion.sample_delta(
+                            dx,
+                            threshold,
+                            1.,
+                            0.5,
+                            event.modifiers.shift,
+                            event.modifiers.alt,
+                            (-f64::MAX, f64::MAX),
+                        )
+                    } else {
+                        motion.sample(
+                            f64::from(event.position.x),
+                            threshold,
+                            1.,
+                            0.5,
+                            event.modifiers.shift,
+                            event.modifiers.alt,
+                            (-f64::MAX, f64::MAX),
+                        )
+                    }
+                });
                 let (origin, proedit, keys, work, handle) = (*origin, *proedit, *keys, *work, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
                 if let Some(work) = work {

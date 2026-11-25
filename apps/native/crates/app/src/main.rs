@@ -59,6 +59,7 @@ mod gizmo;
 mod gizmo_layer;
 #[cfg(all(test, target_os = "macos"))]
 mod gpui_memory_tests;
+mod infinite_drag;
 mod interpret_sheet;
 mod interaction_work;
 mod keyframe_sheets;

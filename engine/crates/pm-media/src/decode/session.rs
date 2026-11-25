@@ -18,7 +18,7 @@ use crate::frame::DecodedFrame;
 use crate::index::FrameIndex;
 use crate::vt::DecodePurpose;
 use pm_protocol::color::ColorDescription;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Counters for diagnosis and tests.
@@ -61,6 +61,9 @@ pub struct Session {
     run_start: Option<usize>,
     /// The next decode-order sample the run feeds.
     next: usize,
+    /// Decode-order samples already sent to the decoder in this run that have
+    /// not yet been emitted (B-frame reorder buffer inside the decoder).
+    in_flight: HashSet<usize>,
     drained: bool,
     /// Decoded frames by sample.
     window: BTreeMap<usize, DecodedFrame>,
@@ -144,6 +147,7 @@ impl Session {
             by_cts,
             run_start: None,
             next: 0,
+            in_flight: HashSet::new(),
             drained: false,
             window: BTreeMap::new(),
             window_limit: DEFAULT_WINDOW,
@@ -206,11 +210,17 @@ impl Session {
     /// See [`Decoder::invalidate_hardware`].
     #[doc(hidden)]
     pub fn invalidate_hardware(&mut self) -> bool {
-        self.decoder.invalidate_hardware()
+        if self.decoder.invalidate_hardware() {
+            self.in_flight.clear();
+            true
+        } else {
+            false
+        }
     }
 
     /// See [`super::Decoder::release_hardware`].
     pub(super) fn release_hardware(&mut self) {
+        self.in_flight.clear();
         self.decoder.release_hardware();
     }
 
@@ -242,9 +252,14 @@ impl Session {
     }
 
     /// Whether a request for sample `s` continues the current run (no seek):
-    /// the run has passed the random-access point `s` needs and not `s`.
+    /// the run has passed the random-access point `s` needs and has not passed `s`
+    /// (including samples already fed and still buffered inside the decoder's
+    /// reorder queue).
     fn continues(&self, s: usize) -> bool {
         if self.window.contains_key(&s) {
+            return true;
+        }
+        if !self.drained && self.in_flight.contains(&s) {
             return true;
         }
         let sync = self.index.sync_for(s);
@@ -260,7 +275,11 @@ impl Session {
     /// it is, and how many samples a seek back to it decodes again. `None`
     /// when continuing (or a forward seek) reaches it.
     pub(crate) fn passed(&self, s: usize) -> Option<(usize, usize)> {
-        if self.window.contains_key(&s) || self.run_start.is_none() || s >= self.next {
+        if self.window.contains_key(&s)
+            || self.run_start.is_none()
+            || s >= self.next
+            || (!self.drained && self.in_flight.contains(&s))
+        {
             return None;
         }
         Some((self.next - s, s + 1 - self.index.sync_for(s)))
@@ -294,6 +313,7 @@ impl Session {
             super::diag::bump(&super::diag::SEEKS, 1);
             self.decoder.reset()?;
             self.window.clear();
+            self.in_flight.clear();
             self.run_start = Some(sync);
             self.next = sync;
             self.drained = false;
@@ -317,6 +337,7 @@ impl Session {
         while !self.window.contains_key(&s) && !self.drained {
             if self.next >= self.index.samples.len() || extra >= MAX_LOOKAHEAD {
                 self.decoder.drain(&mut out)?;
+                self.in_flight.clear();
                 self.stats.drains += 1;
                 self.drained = true;
             } else {
@@ -396,6 +417,7 @@ impl Session {
                     continue;
                 }
                 self.decoder.send(p, out)?;
+                self.in_flight.insert(k);
                 self.stats.samples_fed += 1;
                 super::diag::bump(&super::diag::SAMPLES_FED, 1);
             }
@@ -417,6 +439,7 @@ impl Session {
                 ))
             })?;
             f.color = self.color;
+            self.in_flight.remove(&s);
             self.stats.frames_out += 1;
             self.window.insert(s, f);
         }

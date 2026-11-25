@@ -5,6 +5,7 @@
 //! An export already owns the destination, so decode mapped rows into it and
 //! keep one staging buffer for successive bands and frames.
 
+#[cfg(not(target_arch = "aarch64"))]
 use std::sync::OnceLock;
 
 use pm_gpu::readback::{Readback, ReadbackError, half_to_f32};
@@ -48,6 +49,7 @@ impl ExportReadback {
     }
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 fn half_table() -> &'static [f32; 1 << 16] {
     static TABLE: OnceLock<Box<[f32; 1 << 16]>> = OnceLock::new();
     TABLE.get_or_init(build_half_table)
@@ -57,6 +59,7 @@ fn half_table() -> &'static [f32; 1 << 16] {
 /// builds the 256 KiB array on the caller's stack first (more than once in a
 /// debug build): the first colour-picker readback on the viewer's worker
 /// thread (2 MiB stack) overflowed it.
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn build_half_table() -> Box<[f32; 1 << 16]> {
     (0..=u16::MAX)
         .map(half_to_f32)
@@ -103,10 +106,21 @@ fn decode_mapped_rows(
         wgpu::TextureFormat::Rgba32Float => 4,
         _ => unreachable!("read_into checked the texture format"),
     };
-    debug_assert_eq!(row % bytes_per_sample, 0);
-    debug_assert!(padded >= row && data.len() >= padded * height);
+    // Checked in release too: the decoders below trust this layout.
+    assert_eq!(row % bytes_per_sample, 0, "a partial sample per row");
+    assert!(
+        padded >= row
+            && padded
+                .checked_mul(height)
+                .is_some_and(|bytes| data.len() >= bytes),
+        "mapped rows shorter than their layout"
+    );
     let samples_per_row = row / bytes_per_sample;
-    debug_assert_eq!(destination.len(), samples_per_row * height);
+    assert_eq!(
+        Some(destination.len()),
+        samples_per_row.checked_mul(height),
+        "the destination must hold exactly the mapped rows"
+    );
     match format {
         // The unorm decode `pm_gpu::readback::read_f32` uses.
         wgpu::TextureFormat::Rgba8Unorm => {
@@ -118,29 +132,89 @@ fn decode_mapped_rows(
             });
         }
         wgpu::TextureFormat::Rgba16Float => {
-            let table = half_table();
             crate::par::rows(destination, samples_per_row, |y, output| {
                 let start = y * padded;
-                for (sample, bytes) in output
-                    .iter_mut()
-                    .zip(data[start..start + row].chunks_exact(2))
-                {
-                    *sample = table[u16::from_le_bytes([bytes[0], bytes[1]]) as usize];
-                }
+                decode_half_row(&data[start..start + row], output);
             });
         }
         wgpu::TextureFormat::Rgba32Float => {
             crate::par::rows(destination, samples_per_row, |y, output| {
                 let start = y * padded;
-                for (sample, bytes) in output
-                    .iter_mut()
-                    .zip(data[start..start + row].chunks_exact(4))
-                {
+                let input = &data[start..start + row];
+                #[cfg(target_endian = "little")]
+                // SAFETY: every 4-byte sequence is a valid f32 representation,
+                // and the byte view is exactly the destination row (the
+                // copy checks the source has as many bytes).
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output.as_mut_ptr().cast::<u8>(),
+                        std::mem::size_of_val(output),
+                    )
+                    .copy_from_slice(input);
+                }
+                #[cfg(not(target_endian = "little"))]
+                for (sample, bytes) in output.iter_mut().zip(input.chunks_exact(4)) {
                     *sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 }
             });
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn decode_half_row(input: &[u8], output: &mut [f32]) {
+    let table = half_table();
+    for (sample, bytes) in output.iter_mut().zip(input.chunks_exact(2)) {
+        *sample = table[u16::from_le_bytes([bytes[0], bytes[1]]) as usize];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn decode_half_row(input: &[u8], output: &mut [f32]) {
+    use std::arch::aarch64::*;
+
+    // Decode the same IEEE bits as half_to_f32 in four lanes at a time.
+    // Integer construction keeps signed zero and even signaling NaN payloads.
+    fn expand(bits: uint32x4_t) -> float32x4_t {
+        // SAFETY: Advanced SIMD is available on all arm64 Macs.
+        unsafe {
+            let sign = vshlq_n_u32::<16>(vandq_u32(bits, vdupq_n_u32(0x8000)));
+            let exponent = vandq_u32(vshrq_n_u32::<10>(bits), vdupq_n_u32(31));
+            let fraction = vandq_u32(bits, vdupq_n_u32(0x3ff));
+            let biased = vaddq_u32(exponent, vdupq_n_u32(112));
+            let biased = vbslq_u32(
+                vceqq_u32(exponent, vdupq_n_u32(31)),
+                vdupq_n_u32(255),
+                biased,
+            );
+            let normal = vorrq_u32(vshlq_n_u32::<23>(biased), vshlq_n_u32::<13>(fraction));
+            let small = vmulq_n_f32(vcvtq_f32_u32(fraction), f32::from_bits(103 << 23));
+            let magnitude = vbslq_u32(
+                vceqq_u32(exponent, vdupq_n_u32(0)),
+                vreinterpretq_u32_f32(small),
+                normal,
+            );
+            vreinterpretq_f32_u32(vorrq_u32(magnitude, sign))
+        }
+    }
+
+    let mut src = input.chunks_exact(16);
+    let mut dst = output.chunks_exact_mut(8);
+    for (bytes, pixels) in src.by_ref().zip(dst.by_ref()) {
+        // SAFETY: a 16-byte unaligned input load and two four-float stores.
+        unsafe {
+            let packed = vld1q_u16(bytes.as_ptr().cast::<u16>());
+            vst1q_f32(pixels.as_mut_ptr(), expand(vmovl_u16(vget_low_u16(packed))));
+            vst1q_f32(pixels.as_mut_ptr().add(4), expand(vmovl_high_u16(packed)));
+        }
+    }
+    for (sample, bytes) in dst
+        .into_remainder()
+        .iter_mut()
+        .zip(src.remainder().chunks_exact(2))
+    {
+        *sample = half_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
     }
 }
 

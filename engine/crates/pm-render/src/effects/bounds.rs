@@ -54,6 +54,13 @@ enum Kind {
     /// Levels v2: zero outside the layer; inside, a zero pixel maps through
     /// `level` (checked on the parameters).
     Levels2,
+    /// Legacy Drop Shadow (`shadow` v1): pass 0 shifts alpha, passes 1–2 blur
+    /// alpha, pass 2 composites `orig + (color * a, a) * (1 - orig.a)`.
+    Shadow1,
+    /// Main Drop Shadow (`shadow` v2): pass 0 shifts alpha via `samplePixel`
+    /// (zero outside source), passes 1–2 blur alpha via `samplePixel`, pass 2
+    /// composites `orig + shaded * (1 - orig.a)` (or `shaded` when shadowOnly).
+    Shadow2,
     /// A reviewed extension (`dot-matrix-resolve` 1.2.0: one pass, reading
     /// only its input, `u_tex`), pinned by its SHA-256. Reviewed properties,
     /// for finite parameters:
@@ -114,6 +121,18 @@ const REVIEWED: &[(&str, u64, &str, Kind)] = &[
         2,
         "29cef8b783bb856e0a199a2a3f20f74c1c3f0b5fba3b7b32f8b7f8e11fb2b3c0",
         Kind::Levels2,
+    ),
+    (
+        "shadow",
+        1,
+        "6e62e717d61823f806bb0d2728ce5ebbfcd513fd2566f0709248678b055b5ee9",
+        Kind::Shadow1,
+    ),
+    (
+        "shadow",
+        2,
+        "1ddde3c5afbb931867a44229a273e240087a697643f25a07a962909295d0cea1",
+        Kind::Shadow2,
     ),
 ];
 
@@ -265,7 +284,8 @@ fn levels2_keeps_zero(step: &EffectStep) -> bool {
 fn finite(step: &EffectStep) -> bool {
     step.params.iter().all(|p| match &p.value {
         Binding::Float(v) => v.is_finite(),
-        _ => true,
+        Binding::Color(rgb) => rgb.iter().all(|v| v.is_finite()),
+        Binding::Stops(_) => true,
     })
 }
 
@@ -293,6 +313,7 @@ fn keeps_zero(kind: Kind, step: &EffectStep) -> bool {
     }
     match kind {
         Kind::LegacyBlur | Kind::Glow1 | Kind::KeepsClear => true,
+        Kind::Shadow1 | Kind::Shadow2 => shadow_params(kind, step),
         Kind::Blur2 => value(step, "repeatEdgePixels").is_some_and(|v| v <= 0.5),
         Kind::Levels2 => levels2_keeps_zero(step),
         // Reviewed as one pass of its own input (the pin already excludes
@@ -317,6 +338,36 @@ fn keeps_zero(kind: Kind, step: &EffectStep) -> bool {
                 && deep_glow_params(step)
         }
     }
+}
+
+/// Drop Shadow's bindings, each within its catalog range. A saved or
+/// expression-driven value skips the UI's range and is narrowed to f32 at
+/// bind time: a finite `1e40` opacity becomes `+∞`, and the full pass shades
+/// a clear pixel `0 × ∞ = NaN`. Colours are hex (`0..=1`).
+fn shadow_params(kind: Kind, step: &EffectStep) -> bool {
+    const V1: &[(&str, f64, f64)] = &[
+        ("distance", 0., 400.),
+        ("angle", -360., 360.),
+        ("softness", 0., 300.),
+        ("opacity", 0., 100.),
+    ];
+    const V2: &[(&str, f64, f64)] = &[
+        ("opacity", 0., 100.),
+        ("angle", -360., 360.),
+        ("distance", 0., 400.),
+        ("softness", 0., 400.),
+        ("shadowOnly", 0., 1.),
+    ];
+    let numbers = if kind == Kind::Shadow1 { V1 } else { V2 };
+    step.params.len() == numbers.len() + 1
+        && numbers
+            .iter()
+            .all(|&(key, lo, hi)| value(step, key).is_some_and(|v| (lo..=hi).contains(&v)))
+        && step.params.iter().any(|p| {
+            p.key == "color"
+                && matches!(p.value, Binding::Color(rgb)
+                if rgb.iter().all(|v| (0.0..=1.0).contains(v)))
+        })
 }
 
 /// Keep the reviewed kernel and zero-preserving arithmetic within the
@@ -420,6 +471,12 @@ fn reach(kind: Kind, step: &EffectStep) -> Option<u32> {
             return dot_matrix_reach(step);
         }
         Kind::DeepGlow => return None,
+        // V2 shifts and blurs on its owner's plane; its padding is measured
+        // with the 2D `pixel_scale`, which a 2.5D/3D plane's perspective
+        // exceeds (a solid pushed back towards the camera magnifies its
+        // shadow's offset). Not bounded until the reach comes from the
+        // plane itself.
+        Kind::Shadow2 if step.owner.as_ref().is_some_and(|o| !o.planar) => return None,
         _ => {}
     }
     // Output-raster addressing is not covered for these kernels.
@@ -587,7 +644,7 @@ pub(crate) mod tests {
     #[test]
     fn legacy_builtins_are_reviewed_sources() {
         let set = crate::effects::builtin_definitions();
-        for id in ["blur", "glow", "color", "levels"] {
+        for id in ["blur", "glow", "color", "levels", "shadow"] {
             let def = set
                 .definitions
                 .iter()
@@ -596,12 +653,12 @@ pub(crate) mod tests {
             assert!(kind_of(def).is_some(), "{id}");
         }
         // Others are never bounded.
-        let shadow = set
+        let vignette = set
             .definitions
             .iter()
-            .find(|d| d.id.as_str() == "shadow")
+            .find(|d| d.id.as_str() == "vignette")
             .unwrap();
-        assert_eq!(kind_of(shadow), None);
+        assert_eq!(kind_of(vignette), None);
     }
 
     /// A synthetic stand-in for the wrapped source of a reviewed extension
@@ -715,6 +772,42 @@ pub(crate) mod tests {
 
     fn step(def: &DefinitionSnapshot) -> EffectStep {
         super::super::plan::effect_step(def, "fx", &[])
+    }
+
+    /// Both Drop Shadow revisions keep zero only with every binding in its
+    /// catalog range: a finite value past it (one that overflows f32 at
+    /// bind time) refuses the proof, and so the scissor and group elision.
+    #[test]
+    fn shadow_values_out_of_range_refuse_the_zero_proof() {
+        use pm_eval::JsValue;
+        let set = super::super::versions::builtin_snapshot();
+        for (id, opacity, distance) in [
+            ("pm.history.main.shadow.1", 3, 0),
+            ("pm.history.main.shadow.2", 1, 3),
+        ] {
+            let def = set
+                .definitions
+                .iter()
+                .find(|d| d.id.as_str() == id)
+                .unwrap();
+            assert!(kind_of(def).is_some(), "{id}");
+            let at = |i: usize, v: f64| {
+                let mut values = vec![None; def.params.len()];
+                values[i] = Some(JsValue::Number(v));
+                super::super::plan::effect_step(def, "fx", &values)
+            };
+            assert!(preserves_zero(&step(def), def), "{id} defaults");
+            assert!(preserves_zero(&at(opacity, 100.), def), "{id}");
+            for (what, s) in [
+                ("opacity 1e40", at(opacity, 1e40)),
+                ("opacity -1", at(opacity, -1.)),
+                ("distance 401", at(distance, 401.)),
+                ("distance f64::MAX", at(distance, f64::MAX)),
+            ] {
+                assert!(!preserves_zero(&s, def), "{id} {what}");
+                assert_eq!(reach(&s, def), None, "{id} {what}");
+            }
+        }
     }
 
     /// The committed digest pins the reviewed id and nothing else: a digest
@@ -1031,6 +1124,7 @@ pub(crate) mod tests {
             size: [10., 10.],
             bounds: [0., 0., 10., 10.],
             pixel_scale: [1.5, 1.5],
+            planar: true,
         }));
         assert_eq!(reach(&owned, &dots), Some(11));
         // A huge pitch saturates (the whole target, `grow`); one whose

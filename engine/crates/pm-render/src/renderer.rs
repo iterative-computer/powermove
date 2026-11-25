@@ -1516,6 +1516,11 @@ impl Renderer {
         self.text_gpu.cached_bytes()
     }
 
+    /// Standing budget for cached GPU text rasters.
+    pub fn set_text_cache_budget(&mut self, bytes: u64) {
+        self.text_gpu.set_cache_budget(bytes);
+    }
+
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
     /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
     /// processes; the engine host passes its shader cache folder.
@@ -1712,13 +1717,12 @@ impl Renderer {
     }
 
     /// Bounds the auxiliary caches while playback budgets are applied
-    /// individually to targets, bindings, video, images and vector rasters.
+    /// individually to targets, bindings, video, images, text and vector rasters.
     pub fn trim_playback_aux(&mut self, bytes: u64) {
         self.material.trim(bytes);
         let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
         self.release_frame_reuse();
         self.source_reuse.trim(bytes);
-        self.text_gpu.trim(bytes.saturating_sub(self.source_reuse.bytes()));
     }
 
     /// Frees idle intermediate targets and cached vector textures so that
@@ -2455,6 +2459,12 @@ impl Renderer {
                 final_frame: request.export
                     || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
+                allow_vector_trim: request.viewer
+                    && !request.export
+                    && !request.read_ahead
+                    && !scrub
+                    && region.is_some()
+                    && expanded_request.is_some(),
                 // The depth and id surface reads the frame's images after
                 // the frame: nothing it may read goes back early.
                 recycle: self.early_target_release && depth_id.is_none(),
@@ -2612,17 +2622,17 @@ impl Renderer {
         } else {
             false
         };
-        self.shaders.output.submitted(
-            &self.queue,
-            !abandoned
-                && !held
-                && pending.is_empty()
-                && unsupported.is_empty()
-                && !self.media.still_pending
-                && self.effects.fallback.fatal.is_none(),
-        );
+        let complete = !abandoned
+            && !held
+            && pending.is_empty()
+            && unsupported.is_empty()
+            && !self.media.still_pending
+            && self.effects.fallback.fatal.is_none();
+        self.shaders.output.submitted(&self.queue, complete);
         self.binds.end_frame();
         self.pool.end_submitted_frame(&self.queue, taken);
+        self.vector
+            .end_frame(complete && self.effects.watchdog.stopped().is_none());
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()

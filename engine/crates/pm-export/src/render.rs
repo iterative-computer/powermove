@@ -1557,8 +1557,9 @@ enum Rendered {
     Failed(JobError),
 }
 
-/// Runs a planned export into `sink`: renders on this thread, converts,
-/// mixes, and encodes on a second one. `progress` sees each encoded frame.
+/// Runs a planned export into `sink`. This thread renders, an encoder worker
+/// converts and encodes, and an audio worker mixes when there is sound.
+/// `progress` sees each encoded frame.
 #[allow(clippy::too_many_arguments)]
 pub fn run_export_into<S: Sink + Send>(
     renderer: &mut Renderer,
@@ -1628,7 +1629,7 @@ where
     let pass = pass_key(job.seed, request.output_size);
     let sound = spec.audio.map(|a| a.codec);
     let mut pipeline = Pipeline::new(spec, sink)?;
-    let mut mixer = audio.map(|a| {
+    let mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
         // The playback mixer: nested speed and remapped precompositions are
         // heard in the file as they play (today's exporter dropped both).
@@ -1659,6 +1660,44 @@ where
     let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
+        let (audio_rx, audio_worker) = mixer
+            .map(|(mut mixer, rate, last)| {
+                let (tx, rx) = std::sync::mpsc::sync_channel(3);
+                let worker = scope.spawn(move || {
+                    crate::par::apply_qos(qos);
+                    let _refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+                    for n in 0..frames {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        gate.sync_worker_qos();
+                        let (first, end) = timeline.samples(n, rate);
+                        let first = first.min(last);
+                        let end = if n + 1 == frames { last } else { end.min(last) };
+                        let mut block = Vec::new();
+                        let result =
+                            pm_audio::offline::render(&mut mixer, first, end, 8192, |_, inter| {
+                                block.extend_from_slice(inter);
+                                Ok(())
+                            })
+                            .map_err(|e| JobError::Audio(e.to_string()))
+                            .and_then(|summary| {
+                                match summary.errors.first() {
+                                    Some((voice, why)) => {
+                                        Err(JobError::Audio(format!("{voice}: {why}")))
+                                    }
+                                    None => Ok(block),
+                                }
+                            });
+                        let failed = result.is_err();
+                        if tx.send(result).is_err() || failed {
+                            break;
+                        }
+                    }
+                });
+                (rx, worker)
+            })
+            .unzip();
         let encoder_gate = gate;
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
             crate::par::apply_qos(qos);
@@ -1712,23 +1751,16 @@ where
                 preview_ns += started.map_or(0, |t| t.elapsed().as_nanos());
                 let _ = back_tx.send(rgba);
                 let started = profiling.then(Instant::now);
-                if let Some((mixer, rate, last)) = mixer.as_mut() {
-                    let (first, end) = timeline.samples(n, *rate);
-                    let first = first.min(*last);
-                    let end = if n + 1 == frames {
-                        *last
-                    } else {
-                        end.min(*last)
-                    };
-                    let mut block = Vec::new();
-                    let summary = pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
-                        block.extend_from_slice(inter);
-                        Ok(())
-                    })
-                    .map_err(|e| JobError::Audio(e.to_string()))?;
-                    if let Some((voice, why)) = summary.errors.first() {
-                        return Err(JobError::Audio(format!("{voice}: {why}")));
-                    }
+                if let Some(audio) = &audio_rx {
+                    let block = audio.recv().map_err(|_| {
+                        if cancel.load(Ordering::Relaxed) {
+                            JobError::Cancelled
+                        } else {
+                            JobError::Audio(
+                                "the offline mixer stopped before the last frame".into(),
+                            )
+                        }
+                    })??;
                     if !block.is_empty() {
                         levels.add(&block);
                         pipeline.push_audio(&block)?;
@@ -1740,7 +1772,7 @@ where
                     frames_done: n + 1,
                     frames,
                     preview,
-                    mix: mixer.is_some().then_some(levels),
+                    mix: audio_rx.is_some().then_some(levels),
                     checked: None,
                 });
                 progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
@@ -1759,7 +1791,7 @@ where
             // one tells how far the check is.
             let checked = Arc::new(std::sync::atomic::AtomicU64::new(0));
             pipeline.count_checked(checked.clone());
-            let mix = mixer.is_some().then_some(levels);
+            let mix = audio_rx.is_some().then_some(levels);
             std::thread::scope(|finishing| {
                 let finished = finishing.spawn(|| pipeline.finish_with_cancel(cancel));
                 let mut told = None;
@@ -1811,9 +1843,11 @@ where
         // one frame into the next (an extension's handler, its canvas): such
         // exports render each frame only after the one before is finished,
         // as serial frames do.
-        let overlap =
-            gate.overlaps() && frame_post.is_none() && job.settings.delivery.compat.is_empty();
-        let mut ring = pm_gpu::readback::ReadbackRing::default();
+        let overlap = gate.overlaps()
+            && frame_post.is_none()
+            && !request.depth_id
+            && job.settings.delivery.compat.is_empty();
+        let mut whole = WholeReadback::default();
         let mut sent = 0u64;
         // Three frames' pixels circulate.
         let mut pixels = |sent: u64| {
@@ -1939,11 +1973,11 @@ where
                         gate,
                         pass,
                         units,
-                        &mut ring,
+                        &mut whole,
                     )?;
                     return match flight.replace((n, next)) {
                         Some((m, prev)) => {
-                            let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+                            let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
                             deliver(renderer, m, read).map(Some)
                         }
                         None => Ok(None),
@@ -1951,7 +1985,7 @@ where
                 }
                 // Admitted in bands: the frame before goes first.
                 if let Some((m, prev)) = flight.take() {
-                    let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+                    let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
                     if !deliver(renderer, m, read)? {
                         return Ok(Some(false));
                     }
@@ -1987,9 +2021,9 @@ where
         if render_error.is_none()
             && let Some((m, prev)) = flight.take()
         {
-            // Every frame is judged before the last one's pixels go.
+            // Collect the watchdog's final timestamps before delivery.
             renderer.wait_idle();
-            let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+            let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
             if let Err(e) = deliver(renderer, m, read) {
                 render_error = Some(e);
             }
@@ -2012,9 +2046,21 @@ where
             let _ = tx.send(Rendered::Failed(e));
         }
         drop(tx);
-        encoder
+        let encoded = encoder
             .join()
-            .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())))
+            .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())));
+        // The encoder has dropped its audio receiver, so a mixer blocked
+        // sending wakes. Joined here, a panic in the mixer is the job's
+        // error rather than the scope's panic; an error of the render or
+        // encoder's own stands (the encoder's audio error only says the
+        // mixer stopped).
+        let mixed = audio_worker.map(|worker| worker.join());
+        match (encoded, mixed) {
+            (Ok(_) | Err(JobError::Audio(_)), Some(Err(_))) => {
+                Err(JobError::Audio("the offline mixer panicked".into()))
+            }
+            (encoded, _) => encoded,
+        }
     })
 }
 
@@ -2022,19 +2068,25 @@ where
 /// and encoder threads.
 const PIXEL_BUFFERS: u64 = 3;
 
-/// A frame submitted whole, its pixels being copied back
-/// ([`GpuGate::overlaps`]).
+/// Whole-frame staging stays separate from the renderer's band targets.
+#[derive(Default)]
+struct WholeReadback {
+    ring: pm_gpu::readback::ReadbackRing,
+    target: Option<pm_gpu::target::Target>,
+}
+
+/// A frame submitted whole, with readback in the render command buffer.
 struct InFlight<'g> {
-    frame: pm_render::Frame,
+    target: pm_gpu::target::Target,
+    rendered: pm_render::Rendered,
     ticket: pm_gpu::readback::ReadbackTicket,
-    index: wgpu::SubmissionIndex,
+    mapped: Arc<AtomicBool>,
     submitted: Instant,
     units: u32,
     admission: Admitted<'g>,
 }
 
-/// Renders an admitted whole frame and starts copying it back, without
-/// waiting for either.
+/// Renders an admitted whole frame and starts mapping its staging buffer.
 #[allow(clippy::too_many_arguments)]
 fn submit_whole<'g>(
     renderer: &mut Renderer,
@@ -2046,7 +2098,7 @@ fn submit_whole<'g>(
     gate: &'g dyn GpuGate,
     pass: u64,
     units: u32,
-    ring: &mut pm_gpu::readback::ReadbackRing,
+    readback: &mut WholeReadback,
 ) -> Result<InFlight<'g>, JobError> {
     gate.sync_worker_qos();
     let admission = Admitted {
@@ -2054,90 +2106,110 @@ fn submit_whole<'g>(
         pass,
         open: true,
     };
-    let frame = match renderer.render(document, composition, time, request, media) {
-        Ok(frame) => frame,
+    let target = readback.target.take().unwrap_or_else(|| {
+        let size = request.target_size();
+        pm_gpu::target::Target::new(
+            renderer.device(),
+            "pm export frame",
+            size.width,
+            size.height,
+            renderer.device_target_format(document, request),
+            pm_gpu::target::working_usage(),
+        )
+    });
+    let (ticket, copy) = readback
+        .ring
+        .reserve(renderer.device(), &target.texture, u64::MAX)
+        .map_err(|e| JobError::Render(e.to_string()))?
+        .ok_or_else(|| JobError::Render("no free export readback slot".into()))?;
+    let rendered = match renderer.render_viewer_snapshot_into_copy(
+        document,
+        composition,
+        time,
+        request,
+        media,
+        &target,
+        &copy,
+    ) {
+        Ok((frame, _)) => frame,
         Err(e) => {
             wait_idle(renderer);
-            drop(admission);
+            readback.ring.cancel(ticket, u64::MAX);
             return Err(e.into());
         }
     };
     let submitted = Instant::now();
-    let (ticket, copy) = ring
-        .reserve(renderer.device(), &frame.color.texture, u64::MAX)
-        .map_err(|e| JobError::Render(e.to_string()))?
-        .ok_or_else(|| JobError::Render("no free export readback slot".into()))?;
-    let mut encoder = renderer
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pm export readback"),
-        });
-    copy.record(&mut encoder, &frame.color.texture);
-    let index = renderer.queue().submit([encoder.finish()]);
-    ring.start_map(ticket, || {});
+    let mapped = Arc::new(AtomicBool::new(false));
+    let ready = mapped.clone();
+    readback
+        .ring
+        .start_map(ticket, move || ready.store(true, Ordering::Release));
     Ok(InFlight {
-        frame,
+        target,
+        rendered,
         ticket,
-        index,
+        mapped,
         submitted,
         units,
         admission,
     })
 }
 
-/// Waits for `flight`'s commands (the watchdog looking on) and reads its
-/// pixels into `rgba`.
+/// Waits for this frame's map callback while newer GPU commands can run.
 fn finish_whole(
     renderer: &mut Renderer,
     flight: InFlight<'_>,
-    ring: &mut pm_gpu::readback::ReadbackRing,
+    readback: &mut WholeReadback,
     mut rgba: Vec<f32>,
     width: u32,
     height: u32,
 ) -> Result<ReadFrame, JobError> {
     let InFlight {
-        mut frame,
+        target,
+        rendered,
         ticket,
-        index,
+        mapped,
         submitted,
         units,
         admission,
     } = flight;
-    renderer.wait_submission(index);
-    // A program ran away in this frame: its pixels are not delivered.
+    let _ = renderer.device().poll(wgpu::PollType::Poll);
+    while !mapped.load(Ordering::Acquire) {
+        // A wait on the entire queue could hold this frame behind the next
+        // one. Bound the wait while polling for this slot's callback.
+        let _ = renderer.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_millis(1)),
+        });
+        renderer.watchdog_watch();
+    }
+    renderer.watchdog_watch();
     if let Some(why) = renderer.watchdog_stopped() {
-        drop(admission);
+        readback.ring.cancel(ticket, u64::MAX);
         return Err(pm_render::RenderError::Watchdog(why.to_owned()).into());
     }
     admission.finish(units, submitted.elapsed().as_secs_f64() * 1e6, false);
-    let format = frame.color.texture.format();
+    let format = target.format();
     rgba.resize(width as usize * height as usize * 4, 0.0);
-    let read = loop {
-        let decoded = ring.try_with_mapped_rows(
+    readback
+        .ring
+        .try_with_mapped_rows(
             ticket,
             |data, row, padded, rows| {
                 crate::readback::decode_rows(format, data, row, padded, rows, &mut rgba)
             },
             u64::MAX,
-        );
-        match decoded {
-            Some(result) => break result,
-            None => {
-                let _ = renderer.device().poll(wgpu::PollType::wait_indefinitely());
-            }
-        }
-    };
-    read.map_err(|e| JobError::Render(e.to_string()))?
+        )
+        .expect("the map callback has completed")
+        .map_err(|e| JobError::Render(e.to_string()))?
         .map_err(|e| JobError::Render(e.to_string()))?;
-    let failures = std::mem::take(&mut frame.failures);
-    let footage = std::mem::take(&mut frame.footage);
-    renderer.recycle(frame);
+    readback.target = Some(target);
     Ok(ReadFrame {
         rgba,
         width,
         height,
-        failures,
-        footage,
+        failures: rendered.failures,
+        footage: rendered.footage,
     })
 }
 

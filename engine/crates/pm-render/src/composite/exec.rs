@@ -18,10 +18,12 @@
 //! same draws in the same order with the same blending; a pass split or
 //! joined over the same attachment stores the same bits.
 //!
-//! A pass runs over the plan's region grown by the largest effect padding
-//! of its nodes (clamped to the frame); the region is cut from it at the
-//! end. A node that fails is reported and leaves the accumulator as it was
-//! (section 8, isolation).
+//! Effects run over the plan's region grown by the largest effect padding.
+//! When every node writes pointwise and no node samples the stack, a
+//! viewport accumulator can cut back the unused attachment edges while
+//! keeping the raster origin. Otherwise the accumulator shares the padded
+//! effect domain. A node that fails is reported and leaves the accumulator
+//! as it was (section 8, isolation).
 
 use pm_gpu::Target;
 use pm_protocol::color::{BlendMode, WorkingEncoding};
@@ -171,9 +173,13 @@ fn full_quad(full: (u32, u32)) -> [[f32; 4]; 3] {
     ]
 }
 
-/// No intermediate mask/effect target owns the layer image.
+/// No intermediate mask/effect/DOF target owns the layer image.
 fn unmasked(n: &LayerNode) -> bool {
-    n.masks.is_none() && n.matte.is_none() && n.effects.is_none() && n.transition.is_none()
+    n.masks.is_none()
+        && n.matte.is_none()
+        && n.effects.is_none()
+        && n.transition.is_none()
+        && n.dof.is_none()
 }
 
 /// A quad whose pixels have unit area coverage even with analytic solid
@@ -193,7 +199,7 @@ fn full_pixel_solid(matrix: [f64; 6]) -> bool {
 /// Effects and transitions retain the complete pass: their programs may generate
 /// pixels outside the input or read the backdrop at arbitrary coordinates.
 fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
-    if n.effects.is_some() || n.transition.is_some() {
+    if n.effects.is_some() || n.transition.is_some() || n.dof.is_some() {
         return Some(rect);
     }
     let Ok(bounds) = placed_bounds(n) else {
@@ -551,14 +557,39 @@ impl Exec<'_> {
                 _ => None,
             })
             .fold(Padding::NONE, Padding::max);
-        let mut rect = want.grow(padding, full);
+        let mut effect_rect = want.grow(padding, full);
         if padding > Padding::NONE {
-            rect = rect.align(EFFECT_GRID, full);
+            effect_rect = effect_rect.align(EFFECT_GRID, full);
         }
+        // Keep each effect on its original domain. The accumulator only
+        // needs to cover the visible destination of the source-over draws.
+        // Keep its GL pixel origin too: shifting the viewport can round the
+        // rasterizer's interpolants differently around sharp edges.
+        let rect = if effect_rect != want
+            && !self.final_frame
+            && self.recycle
+            && !matches!(plan.background, crate::plan::Background::Gradient(_))
+            && plan.draws.iter().all(|draw| match &draw.content {
+                Content::Composite(node) => {
+                    matches!(node.as_ref(), Node::Layer(n) if draws_over_the_stack(n))
+                }
+                _ => true,
+            }) {
+            Region {
+                x: effect_rect.x,
+                y: want.y,
+                width: want.x + want.width - effect_rect.x,
+                height: effect_rect.y + effect_rect.height - want.y,
+            }
+            .align(EFFECT_GRID, full)
+        } else {
+            effect_rect
+        };
+        let source_region = (effect_rect != Region::full(full.0, full.1)).then_some(effect_rect);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
-        // A layer image's bytes at most (it covers `rect` at most).
-        let image_bytes = u64::from(rect.width)
-            * u64::from(rect.height)
+        // Bound how many effect images can remain live before a flush.
+        let image_bytes = u64::from(effect_rect.width)
+            * u64::from(effect_rect.height)
             * u64::from(
                 pm_gpu::working_format(self.precision)
                     .block_copy_size(None)
@@ -591,7 +622,8 @@ impl Exec<'_> {
                 // Resolve adjacent draws together so their missing vector
                 // scenes can share a coverage pass. Nested targets stay
                 // live until the pending draws that read them are recorded.
-                let (resolved, groups) = self.resolve_draws_owned(encoder, plan, run, pass_region);
+                let (resolved, groups) =
+                    self.resolve_draws_owned(encoder, plan, run, source_region);
                 pending.draws.extend(resolved);
                 for target in groups {
                     pending.hold(target);
@@ -634,7 +666,7 @@ impl Exec<'_> {
             }
             match node.as_ref() {
                 Node::Layer(n) => {
-                    let Some(covered) = layer_rect(n, rect, full) else {
+                    let Some(covered) = layer_rect(n, effect_rect, full) else {
                         continue;
                     };
                     if !self.depth_id
@@ -664,6 +696,12 @@ impl Exec<'_> {
                     // reads no backdrop (`draws_over_the_stack`), and the
                     // stack beneath it is not drawn yet.
                     let backdrop = (!deferred).then_some(&acc);
+                    if !deferred && n.effects.is_some() {
+                        // The stack's draws have recorded all their reads.
+                        // Give back their rasters before taking the layer's
+                        // own large input, as well as the later pass targets.
+                        self.trim_vector_before_effect(encoder, covered);
+                    }
                     let Some((res, depth, res_owned, output_bounds)) =
                         self.layer_node(encoder, plan, n, covered, backdrop)
                     else {
@@ -1045,6 +1083,40 @@ impl Exec<'_> {
         out
     }
 
+    // Submit the draws that already recorded their reads of the rasters
+    // before allocating the effect's pass targets. The queue retains every
+    // resource still in use, including inputs to the rest of the frame.
+    fn trim_vector_before_effect(&mut self, encoder: &mut wgpu::CommandEncoder, rect: Region) {
+        const LARGE_EFFECT_PIXELS: u64 = 12 << 20;
+        const LARGE_VECTOR_BYTES: u64 = 192 << 20;
+        if !self.allow_vector_trim
+            || self.final_frame
+            || !self.recycle
+            || self.effects.slices.is_some()
+            || u64::from(rect.width) * u64::from(rect.height) < LARGE_EFFECT_PIXELS
+            || self.vector.bytes() < LARGE_VECTOR_BYTES
+        {
+            return;
+        }
+        self.allow_vector_trim = false;
+        let completed = std::mem::replace(
+            encoder,
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm frame after oversized vector draws"),
+            }),
+        );
+        self.effects.uniforms.flush(self.queue);
+        let submission = self.queue.submit([completed.finish()]);
+        self.vector.trim(0);
+        self.binds.clear();
+        // Let completed draws give back their GPU references. A slow
+        // submission still goes through the frame's usual hang handling.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(std::time::Duration::from_millis(250)),
+        });
+    }
+
     /// `content`: where `input` can be non-zero ([`effect_input_bounds`]).
     #[allow(clippy::too_many_arguments)]
     fn run_effects(
@@ -1058,6 +1130,7 @@ impl Exec<'_> {
         view: Option<crate::plan::OutputView>,
         content: Option<(u32, u32, u32, u32)>,
     ) -> Result<Option<EffectOutput>, String> {
+        self.trim_vector_before_effect(encoder, rect);
         let mut ready = vec![];
         for producer in effects.passes.input_plans() {
             if ready
@@ -1108,6 +1181,7 @@ impl Exec<'_> {
                     size: [asset.width as f64, asset.height as f64],
                     bounds: [0., 0., asset.width as f64, asset.height as f64],
                     pixel_scale: [1., 1.],
+                    planar: true,
                 },
                 origin: [0., 0.],
             });
@@ -1357,6 +1431,38 @@ impl Exec<'_> {
         {
             self.release(t);
         }
+        if let Some(dof) = n.dof {
+            output_bounds = None;
+            let two_pass = dof.max_radius > 10.0;
+            let passes: &[(f32, f32)] = if two_pass {
+                &[(0.75, 0.0), (0.55, std::f32::consts::FRAC_PI_8)]
+            } else {
+                &[(1.0, 0.0)]
+            };
+            for &(scale, angle) in passes {
+                let mut u = self.op_uniform(full);
+                u.inv[0] = [
+                    dof.inv_w[0] as f32,
+                    dof.inv_w[1] as f32,
+                    dof.inv_w[2] as f32,
+                    0.0,
+                ];
+                u.inv[1] = [rect.width as f32, rect.height as f32, scale, 0.0];
+                u.f = [
+                    dof.focus_w as f32,
+                    dof.blur_px as f32,
+                    dof.max_radius as f32,
+                    angle,
+                ];
+                let out = if scoped {
+                    self.take_scoped(rect)
+                } else {
+                    self.take_rect(rect)
+                };
+                self.run_op(encoder, Op::Dof, &u, &res, None, &out, rect, full);
+                self.replace_res(&mut res, &mut owned, out, scoped);
+            }
+        }
         Some((res, depth, owned, output_bounds))
     }
 
@@ -1577,6 +1683,7 @@ mod tests {
             blend: BlendMode::Normal,
             alpha: 1.0,
             transition: None,
+            dof: None,
         }
     }
 

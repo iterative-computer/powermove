@@ -1,0 +1,19 @@
+[package]
+name = "pm-aero-eval"
+description = "Aero eval suite: tasks, fixtures, graders, the runner and model-stream replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+png = "0.18"
+base64 = "0.22"
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+
+[dev-dependencies]
+tempfile = "3"

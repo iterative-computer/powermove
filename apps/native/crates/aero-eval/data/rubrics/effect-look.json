@@ -1,0 +1,57 @@
+{
+ "id": "effect-look",
+ "title": "A new stylised effect",
+ "scale": 2,
+ "pass_mean": 1.25,
+ "evaluator_sees": [
+  "the prompt",
+  "frames with the effect at default and at two parameter values",
+  "the effect's parameter list"
+ ],
+ "criteria": [
+  {
+   "id": "reads-as-asked",
+   "question": "Would an editor recognise the look they asked for?",
+   "weight": 2,
+   "hard": true,
+   "anchors": {
+    "0": "No",
+    "1": "Somewhat",
+    "2": "Immediately"
+   }
+  },
+  {
+   "id": "controls",
+   "question": "Do the parameters change the look in the way their names promise, across their range?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "No or broken",
+    "1": "Partly",
+    "2": "Yes, smoothly"
+   }
+  },
+  {
+   "id": "quality",
+   "question": "Is the image clean: no aliasing crawl, stretching, seams or NaN/black areas?",
+   "weight": 1,
+   "hard": true,
+   "anchors": {
+    "0": "Visible defects",
+    "1": "Minor defects",
+    "2": "Clean"
+   }
+  },
+  {
+   "id": "tones",
+   "question": "Does it keep the picture's tones and alpha where it should?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Destroys them",
+    "1": "Shifts them",
+    "2": "Keeps them"
+   }
+  }
+ ]
+}

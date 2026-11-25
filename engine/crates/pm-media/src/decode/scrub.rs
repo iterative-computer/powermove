@@ -912,8 +912,18 @@ impl Shared {
             // (60 fps on a 24 fps timeline steps +3, +2) the frame one
             // stride ahead can pass the next request, and decoding it can
             // evict the frame that request needs (w84 review P0-1).
+            // When the cache share only fits ~1 B-frame pyramid (e.g. 4K on
+            // a 16 GB machine), cap forward look-ahead to at most 1 step so
+            // decoding the next pyramid does not evict the imminent frame.
             let free_slot = st.playing && stride == 1;
-            AHEAD.min(self.cache_frames(st).max(usize::from(free_slot)))
+            let base = self.cache_frames(st).max(usize::from(free_slot));
+            let total_frames = self.cache_share() / st.frame_bytes.max(1);
+            let max_ahead = if total_frames <= 6 {
+                base.min(1)
+            } else {
+                base
+            };
+            AHEAD.min(max_ahead)
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
@@ -937,7 +947,7 @@ impl Shared {
                 break;
             }
             if !st.latest.as_ref().is_some_and(|(shown, _)| *shown == m)
-                && !cache.contains(&self.key(m))
+                && cache.get(&self.key(m)).is_none()
             {
                 return Some(m);
             }

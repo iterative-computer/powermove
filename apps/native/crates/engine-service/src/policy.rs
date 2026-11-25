@@ -18,6 +18,16 @@ pub struct Crop {
     pub canvas_height: u32,
 }
 impl Output {
+    /// At Fit, the shell's rounded drawable can be one pixel smaller than
+    /// the whole canvas. Only a crop beyond that rounding is zoomed.
+    pub(crate) fn is_zoomed(self) -> bool {
+        self.crop.is_some_and(|crop| {
+            crop.x != 0
+                || crop.y != 0
+                || crop.canvas_width.abs_diff(self.width) > 1
+                || crop.canvas_height.abs_diff(self.height) > 1
+        })
+    }
     /// This output drawn into a `width`×`height` drawable. A crop keeps its
     /// place on the canvas, scaled with the drawable, and stays inside it.
     pub fn resized(self, width: u32, height: u32) -> Output {

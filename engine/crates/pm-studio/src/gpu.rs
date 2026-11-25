@@ -142,6 +142,10 @@ struct PostParams {
     backdrop: [f32; 4],
     /// Current and previous cameras for Live's reprojection (unused here).
     cameras: [[f32; 4]; 8],
+    /// Live DOF: [lens_radius, focus_dist, max_coc_px, enabled].
+    dof: [f32; 4],
+    /// Iris shape: [blades, rotation_rad, roundness, aspect].
+    iris: [f32; 4],
 }
 
 /// One resident native acceleration structure per mesh.
@@ -162,6 +166,7 @@ pub struct Renderer {
     trace: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     compose: wgpu::ComputePipeline,
+    dof: wgpu::ComputePipeline,
     atrous: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
     temporal: wgpu::ComputePipeline,
@@ -364,6 +369,7 @@ impl Renderer {
         let trace = pipeline(&trace_src, &trace_layout, "main");
         let resolve = pipeline(&post_src, &post_layout, "resolve");
         let compose = pipeline(&post_src, &post_layout, "compose");
+        let dof = pipeline(&post_src, &post_layout, "dof");
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
         let temporal = pipeline(&post_src, &post_layout, "temporal");
@@ -449,7 +455,7 @@ impl Renderer {
             adapter,
             timings: Default::default(), sampling_policy: Default::default(),
             params: buf("params", std::mem::size_of::<Params>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
-            post_params: (0..9).map(|_| buf("post params", std::mem::size_of::<PostParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)).collect(),
+            post_params: (0..10).map(|_| buf("post params", std::mem::size_of::<PostParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)).collect(),
             accum: buf("accum", pixels * 16, rw),
             bgsum: buf("bgsum", pixels * 16, rw),
             gbuf: buf("gbuf", pixels * 16, rw),
@@ -470,6 +476,7 @@ impl Renderer {
             trace,
             resolve,
             compose,
+            dof,
             atrous,
             pack,
             temporal,
@@ -1157,7 +1164,7 @@ impl Renderer {
     /// Linear scene radiance before exposure and tone mapping.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
-        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8], dof: [0.0; 4], iris: self.base.iris };
         self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
         let group = self.post_group(0, 1, 0);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -1241,8 +1248,15 @@ impl Renderer {
         let groups = (w.div_ceil(8), h.div_ceil(8));
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
+        let live_dof = self.live && self.base.cam_pos[3] > 0.0 && (self.base.opts[3] & 1) == 0;
+        let max_coc_px = (h as f32 * 0.03).clamp(16.0, 36.0);
+        let dof_vec = if live_dof {
+            [self.base.cam_pos[3], self.base.cam_fwd[3], max_coc_px, 1.0]
+        } else {
+            [0.0; 4]
+        };
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[self.base.cam_pos[0],self.base.cam_pos[1],self.base.cam_pos[2],self.base.ground[3]],self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
+            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[self.base.cam_pos[0],self.base.cam_pos[1],self.base.cam_pos[2],self.base.ground[3]],self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]], dof: dof_vec, iris: self.base.iris };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;
@@ -1316,6 +1330,10 @@ impl Renderer {
         }
         run(&mut enc, &self.compose, cur, 1 - cur, 1, &mut slot);
         cur = 1 - cur;
+        if live_dof {
+            run(&mut enc, &self.dof, cur, 1 - cur, 1, &mut slot);
+            cur = 1 - cur;
+        }
         if let (Some(t), Some(p)) = (present, self.present.as_ref()) {
             let flags = u32::from(t.flip_y) | (u32::from(t.include_void) << 1);
             self.queue.write_buffer(&p.params, 0, bytemuck::cast_slice(&[w, h, t.layer.map_or(0, |l| l + 1), flags]));
@@ -1379,7 +1397,7 @@ impl Renderer {
     /// Repack a different layer from the same finished trace (no tracing/denoising).
     pub fn frame_pixels(&mut self) -> (Vec<u8>,f64) {
         let start=Instant::now();let(w,h)=(self.width,self.height);
-        let params=PostParams { dims:[w,h,1,0], k:[self.exposure,1.6,self.output_layer.map_or(0.,|l|(l+1) as f32),(u32::from(self.output_include_void)|(u32::from(self.straight_output)<<1)) as f32],backdrop:self.backdrop,cameras:[[0.;4];8] };
+        let params=PostParams { dims:[w,h,1,0], k:[self.exposure,1.6,self.output_layer.map_or(0.,|l|(l+1) as f32),(u32::from(self.output_include_void)|(u32::from(self.straight_output)<<1)) as f32],backdrop:self.backdrop,cameras:[[0.;4];8],dof:[0.;4],iris:self.base.iris };
         self.queue.write_buffer(&self.post_params[0],0,bytemuck::bytes_of(&params));
         let group=self.post_group(0,self.last_display,1-self.last_display);
         let mut enc=self.device.create_command_encoder(&Default::default());

@@ -1970,9 +1970,14 @@ impl Controller {
         }
         // Alone in its row: cached, drawn again only when its panel changes
         // (it observes the panel), not with every frame the window draws.
+        let agent_pad = (id == "agent").then(|| {
+            let m = self.host.borrow().tokens.metrics;
+            ((m.agent_gap - m.pill_inset).max(0.), m.gap)
+        });
         Some(
             div()
                 .w_full()
+                .when_some(agent_pad, |d, (left, right)| d.pl(px(left)).pr(px(right)))
                 .child(header.cached(StyleRefinement::default().w_full()))
                 .into_any_element(),
         )

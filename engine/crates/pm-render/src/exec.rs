@@ -224,6 +224,8 @@ pub(crate) struct Exec<'a> {
     /// Final output (an export, a cached frame, an agent capture): its
     /// regions equal the whole frame bit for bit.
     pub final_frame: bool,
+    /// Allow one vector cache trim before a wide effect in a paused viewport.
+    pub allow_vector_trim: bool,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,

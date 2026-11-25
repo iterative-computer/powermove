@@ -332,18 +332,19 @@ pub(super) fn after_split(
 ) -> Result<(), crate::error::CommandError> {
     use super::{layers, values};
     use crate::error::CommandError;
+    let index_by_id: std::collections::HashMap<String, usize> = clips
+        .iter()
+        .enumerate()
+        .filter_map(|(i, clip)| values::text(clip, "id").map(|id| (id.to_owned(), i)))
+        .collect();
     for (source, tail) in splits {
-        let peer = clips
-            .iter()
-            .find(|clip| values::text(clip, "id") == Some(tail.as_str()))
-            .and_then(|clip| clip.get("transitionOut"))
+        let peer = index_by_id
+            .get(tail)
+            .and_then(|&ti| clips[ti].get("transitionOut"))
             .and_then(|edge| values::text(edge, "paired"))
             .map(str::to_owned);
         let Some(peer) = peer else { continue };
-        let Some(index) = clips
-            .iter()
-            .position(|clip| values::text(clip, "id") == Some(peer.as_str()))
-        else {
+        let Some(&index) = index_by_id.get(&peer) else {
             continue;
         };
         if clips[index]

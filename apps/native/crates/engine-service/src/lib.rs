@@ -906,6 +906,12 @@ struct Shared {
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    before_completed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    fail_next_completion: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    paused_flight_peak: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
     /// Test record: each drawn frame's stamp, time and scale, in order.
     #[cfg(test)]
@@ -1761,6 +1767,12 @@ impl EngineService {
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
+            before_completed: Mutex::new(None),
+            #[cfg(test)]
+            fail_next_completion: Default::default(),
+            #[cfg(test)]
+            paused_flight_peak: Default::default(),
+            #[cfg(test)]
             first_picture: Mutex::new(None),
             #[cfg(test)]
             drawn: Mutex::new(Vec::new()),
@@ -2206,6 +2218,8 @@ struct Flight {
     /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
     settled: bool,
     submission: render::Submission,
+    /// The completion callback has run, even if the drawable has yet to present.
+    gpu_done: bool,
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
@@ -2217,6 +2231,61 @@ struct Flight {
     /// Read back only for the trace's picture hash, not asked as a capture.
     picture_only: bool,
 }
+#[derive(Clone, Copy)]
+struct FlightSlot {
+    viewer: u64,
+    done: bool,
+    small_drag: bool,
+}
+
+impl Flight {
+    fn slot(&self) -> FlightSlot {
+        FlightSlot {
+            viewer: self.id,
+            done: self.gpu_done,
+            small_drag: self.spec.moment == Moment::Scrub
+                && !self.spec.exact
+                && small_drag_output(self.spec.output),
+        }
+    }
+}
+
+fn small_drag_output(output: Output) -> bool {
+    // A small uncropped output bounds the screen-sized working attachments.
+    // An effect in a zoomed crop can still allocate at the logical canvas's
+    // density. Keep that path serial, including a transition back from zoom.
+    !output.is_zoomed() && u64::from(output.width) * u64::from(output.height) <= 1920 * 1080
+}
+
+fn pipeline_layer_drag(view: &View, runtime: &Runtime, now: f64) -> bool {
+    view.editing
+        && !view.edit_rested
+        && !view.capture
+        && runtime.refine_at.is_none_or(|at| at > now)
+        && small_drag_output(view.config.output)
+}
+
+/// A small layer drag can start recording its next frame while the prior
+/// one renders. Leave only one such frame ahead, and wait out any remaining
+/// large or playing frame of this viewer before admitting it.
+fn has_render_slot(
+    flights: impl ExactSizeIterator<Item = FlightSlot>,
+    view: u64,
+    playing: bool,
+    pipeline_drag: bool,
+) -> bool {
+    if flights.len() >= 3 {
+        return false;
+    }
+    if playing {
+        return true;
+    }
+    let mut unfinished = flights.filter(|f| f.viewer == view && !f.done);
+    unfinished
+        .next()
+        .is_none_or(|first| pipeline_drag && first.small_drag && unfinished.next().is_none())
+}
+
 /// A settled picture asked of the engine and not handed over yet.
 struct Settling {
     id: u64,
@@ -2784,15 +2853,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // Metal reports the status before that handler runs on its own
             // queue, and a frame read in between looked failed (gpu_ok still
             // false) and was never drawn again.
-            if !matches!(
-                flights[i].submission.command.status(),
-                metal::MTLCommandBufferStatus::Completed | metal::MTLCommandBufferStatus::Error
-            ) || flights[i].submission.trace.lock().unwrap().completed == 0.
-            {
-                i += 1;
-                continue;
-            }
-            if flights[i].submission.drawable.is_some() {
+            let gpu_ok = {
+                let trace = flights[i].submission.trace.lock().unwrap();
+                if trace.completed == 0. {
+                    i += 1;
+                    continue;
+                }
+                trace.gpu_ok
+            };
+            flights[i].gpu_done = true;
+            if gpu_ok && flights[i].submission.drawable.is_some() {
                 let flight = &flights[i];
                 let trace = flight.submission.trace.lock().unwrap();
                 let now = trace::now();
@@ -2801,8 +2871,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // display. Give its current picture one earlier retry;
                     // retain the original flight so its callback still wins
                     // if it does get to the glass. Timed playback is unchanged.
-                    if trace.gpu_ok
-                        && flight.spec.moment == Moment::Scrub
+                    if flight.spec.moment == Moment::Scrub
                         && let Some(view) = state.views.get_mut(&flight.id)
                         && view.stamp == flight.stamp
                         && view.commands.is_empty()
@@ -2827,7 +2896,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
             }
             let f = flights.remove(i).unwrap();
-            if f.submission.command.status() == metal::MTLCommandBufferStatus::Error {
+            if !gpu_ok {
                 engine.clear_cache();
             }
             let mut represent = false;
@@ -3017,8 +3086,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     stand_ins: f.submission.stand_ins,
                     settled: (f.settled || t.disk == 2) && !f.submission.stand_ins,
                     cache_hit: t.cache_hit,
-                    gpu_ok: f.submission.command.status()
-                        == metal::MTLCommandBufferStatus::Completed,
+                    gpu_ok,
                     display_host_seconds: t.display.filter(|t| *t > 0.),
                     completion_host_seconds: (t.completed > 0.).then_some(t.completed),
                     worker_to_completion_ms: (t.completed > 0.)
@@ -3164,7 +3232,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
         }
         pass.mark("settled");
-        if !last_was_surface_query && state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty())) {
+        if !last_was_surface_query
+            && state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty())
+        {
             drop(state);
             surface::run_one(&mut engine, &shared);
             picker_sample::run_one(&mut engine, &shared);
@@ -3392,6 +3465,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }));
             }
             let mut pause_at = v.pause_requested_at.take();
+            let mut scrub_cmd = false;
             while let Some(cmd) = v.commands.pop_front() {
                 // Any command (a seek, play) drops a pending settled picture,
                 // and one being drawn gives way.
@@ -3401,6 +3475,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    scrub_cmd = r.scrub;
                     r.refine_at = None;
                 }
                 let now = (now * 1e6) as i64;
@@ -3409,6 +3484,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     r.transport.command(cmd, now);
                 }
+            }
+            // The exact frame of a stop: clear scrub only when stopping
+            // playback without an accompanying scrub seek (and do this before
+            // the in-flight flight cap so a later scrub does not see a stale
+            // was_playing=true and lose its Moment::Scrub).
+            let playing_now = r.transport.clock.is_playing();
+            if std::mem::replace(&mut r.was_playing, playing_now) && !playing_now {
+                if !scrub_cmd {
+                    r.scrub = false;
+                }
+                v.dirty = true;
             }
             // Nobody watches a hidden viewer: it does not play (its frames,
             // audio and deadlines would hold exports, stills and the
@@ -3503,7 +3589,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 None
             };
-            if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 3 {
+            let playing = r.transport.clock.is_playing();
+            if !has_render_slot(
+                flights.iter().map(Flight::slot),
+                id,
+                playing,
+                pipeline_layer_drag(v, r, now),
+            ) {
                 continue;
             }
             // A playing frame starts a whole content frame before its vsync
@@ -3526,12 +3618,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 1.
             };
-            let playing = r.transport.clock.is_playing();
-            // The exact frame of a stop, and of a stand-in whose decode landed.
-            if std::mem::replace(&mut r.was_playing, playing) && !playing {
-                r.scrub = false;
-                v.dirty = true;
-            }
+            // The exact frame of a stand-in whose decode landed.
             if r.stand_in.is_some_and(|at| at != landed) {
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
@@ -4151,6 +4238,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 }
                             }
                         }
+                        #[cfg(test)]
+                        {
+                            s.before_completed = shared.before_completed.lock().unwrap().take();
+                            s.fail_completion = shared
+                                .fail_next_completion
+                                .swap(false, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
                             plan.map(|p| p.requested),
@@ -4175,6 +4269,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             spec,
                             settled: spec.final_picture(&scene),
                             submission: s,
+                            gpu_done: false,
                             input,
                             audio_host,
                             pipeline,
@@ -4182,6 +4277,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             late_layers,
                             picture_only,
                         });
+                        #[cfg(test)]
+                        if spec.moment != Moment::Playing {
+                            let unfinished =
+                                flights.iter().filter(|f| f.id == id && !f.gpu_done).count();
+                            shared
+                                .paused_flight_peak
+                                .fetch_max(unfinished, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     Ok(None) => {
                         v.capture |= capture;
@@ -4369,9 +4472,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .values()
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
             // A dragged frame waiting to be drawn exact wakes the loop then.
+            // A viewer without a slot is woken by completion. An expired
+            // settle deadline cannot make it drawable before that wake.
             let settle = runtime
-                .values()
-                .flat_map(|r| [r.refine_at, r.settle_at.map(|(_, at)| at)])
+                .iter()
+                .filter(|(id, r)| {
+                    has_render_slot(
+                        flights.iter().map(Flight::slot),
+                        **id,
+                        r.transport.clock.is_playing(),
+                        state
+                            .views
+                            .get(id)
+                            .is_some_and(|v| pipeline_layer_drag(v, r, now)),
+                    )
+                })
+                .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
                 .map(|at| (at - now).max(0.001))
                 .fold((scrub_present_retry - now).max(0.001), f64::min);
@@ -4397,11 +4513,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else if busy {
                 let now = trace::now();
                 let next = runtime
-                    .iter()
-                    .filter_map(|(id, r)| {
-                        let room =
-                            flights.len() < 3 && flights.iter().filter(|f| f.id == *id).count() < 3;
-                        if r.transport.clock.is_playing() && room {
+                    .values()
+                    .filter_map(|r| {
+                        if r.transport.clock.is_playing() && flights.len() < 3 {
                             Some((r.next - r.ahead * r.interval - now).max(0.0001))
                         } else if r.transport.running() && !r.transport.clock.is_playing() {
                             Some(0.001) // waiting for the first audio epoch
@@ -4414,7 +4528,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Duration::from_secs(3600)
             };
-            let surface_query_waiting = state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty()));
+            let surface_query_waiting = state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty());
             drop(state);
             let tap = shared.scopes.lock().unwrap().clone();
             let timeout = engine
@@ -4750,6 +4867,38 @@ fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn a_paused_view_limits_gpu_work_without_waiting_for_the_display() {
+        let slot = |viewer, done| FlightSlot {
+            viewer,
+            done,
+            small_drag: false,
+        };
+        let first = slot(1, false);
+        assert!(!has_render_slot([first].into_iter(), 1, false, false));
+        assert!(!has_render_slot([first].into_iter(), 1, false, true));
+        let small = FlightSlot {
+            small_drag: true,
+            ..first
+        };
+        assert!(has_render_slot([small].into_iter(), 1, false, true));
+        assert!(!has_render_slot([small, small].into_iter(), 1, false, true));
+        assert!(has_render_slot(
+            [slot(1, true)].into_iter(),
+            1,
+            false,
+            false
+        ));
+        assert!(has_render_slot([first].into_iter(), 2, false, false));
+        assert!(has_render_slot([first, first].into_iter(), 1, true, false));
+        assert!(!has_render_slot(
+            [first, slot(1, true), slot(2, false)].into_iter(),
+            1,
+            true,
+            false,
+        ));
+    }
 
     #[test]
     fn the_first_viewer_picture_draws_current_and_saved_builtins() {
@@ -6021,6 +6170,174 @@ mod worker_tests {
             }
         }
         crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
+    }
+
+    fn hold_next_completion(
+        service: &EngineService,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, hold) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let release = Mutex::new(release);
+        *service.shared.before_completed.lock().unwrap() = Some(Arc::new(move || {
+            let _ = entered.send(());
+            let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }));
+        (hold, resume)
+    }
+
+    fn wait_for_pose(v: &Viewer, at: Ticks) {
+        wait_for(v, "scrub pose", |status| {
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+            status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.gpu_ok && f.completion_host_seconds.is_some())
+        });
+    }
+
+    #[test]
+    fn a_small_layer_drag_can_pipeline_one_more_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-drag-pipeline").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        v.editing(true).unwrap();
+        wait_for(&v, "drag preview", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Scrub)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        v.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        v.scrub(seconds(0.4)).unwrap();
+        wait_for(&v, "second drag frame submitted", |_| {
+            service.shared.paused_flight_peak.load(Ordering::Acquire) == 2
+        });
+        v.scrub(seconds(0.6)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.6));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 2);
+        v.retire();
+    }
+
+    #[test]
+    fn an_unsuccessful_completion_admits_the_queued_pose() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("failed-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        service
+            .shared
+            .fail_next_completion
+            .store(true, Ordering::Relaxed);
+        v.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        v.scrub(seconds(0.4)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.4));
+        assert!(!service.shared.fail_next_completion.load(Ordering::Relaxed));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
+        v.retire();
+    }
+
+    #[test]
+    fn a_pause_waits_for_its_playing_flight_and_then_draws_the_seek() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("pause-with-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Playing)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        service
+            .shared
+            .paused_flight_peak
+            .store(0, Ordering::Release);
+        v.command(TransportCommand::Pause).unwrap();
+        let at = seconds(0.2);
+        v.command(TransportCommand::Seek {
+            time: at,
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        wait_for(&v, "worker checked the paused request", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 0);
+        resume.send(()).unwrap();
+        wait_for(&v, "paused seek", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Paused && f.time == at)
+        });
+        v.retire();
+    }
+
+    #[test]
+    fn an_unfinished_paused_view_does_not_block_another_view() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("independent-flights").unwrap()).unwrap();
+        let first = shapes_viewer(&service, None);
+        let second = shapes_viewer(&service, None);
+        wait_for_pose(&first, seconds(0.));
+        wait_for_pose(&second, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        first.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        let at = seconds(0.6);
+        second.scrub(at).unwrap();
+        wait_for(&second, "other view recorded its frame", |_| {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, time, _)| *time == at)
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(&second, at);
+        first.retire();
+        second.retire();
+    }
+
+    #[test]
+    fn the_latest_scrub_reaches_the_viewer_after_one_unfinished_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("queued-scrub-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        v.scrub(seconds(0.25)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        for i in 2..=8 {
+            v.scrub(seconds(f64::from(i) * 0.25)).unwrap();
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+        }
+        wait_for(&v, "worker polled the queued scrubs", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(2.));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
         v.retire();
     }
 

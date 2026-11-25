@@ -1643,7 +1643,7 @@ fn worker(
     // that wrappers hold growing through a long export. See `PressureTrims`.
     let trims = Arc::new(std::sync::Mutex::new(PressureTrims::default()));
     let serviced = trims.clone();
-    let memory = pm_memory::Registration::new(1, move |_, level| {
+    let memory = pm_memory::Registration::pressure_only(move |_, level| {
         let mut trims = trims.lock().unwrap_or_else(|e| e.into_inner());
         if trims.wanted(level, Instant::now())
             && let Some(tx) = pressure_sender.upgrade()

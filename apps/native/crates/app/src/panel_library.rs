@@ -1521,6 +1521,36 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{Origin, WorkspaceCard, panel_cards, shown_panels, shown_workspaces};
+    /// The library draws its covers from a background-executor task, which
+    /// runs on a GCD worker thread with a 512 KiB stack. Every built-in
+    /// panel's cover renders from such a thread: the panel render's
+    /// recursion overflowed it and the app ended when Panels was pressed
+    /// (PM-669).
+    #[test]
+    fn covers_draw_from_a_dispatch_worker_sized_thread() {
+        let rig = crate::v4_view_tests::rig("timeline", 8);
+        let kernel = rig.kernel.clone();
+        let cards = panel_cards(&pm_shell::layout::Panels::new(Vec::new()), &[], |_| false);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("covers");
+        let images = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                crate::panel_library_preview::capture(
+                    kernel,
+                    Some(crate::v4_view_tests::PROJECT.into()),
+                    cards,
+                    Default::default(),
+                    pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                    cache,
+                    Default::default(),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(images.contains_key("timeline"), "timeline cover drawn: {:?}", images.keys());
+    }
     #[test]
     fn panel_feedback_goes_from_add_to_added_to_show() {
         use std::time::Duration;

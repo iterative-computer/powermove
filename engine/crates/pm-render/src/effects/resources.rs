@@ -301,6 +301,7 @@ mod owner_inverse_tests {
             size: [100., 50.],
             bounds: [0., 0., 100., 50.],
             pixel_scale: [1., 1.],
+            planar: false,
         };
         let inverse = super::from_uv(&owner);
         let project = |m: [f32; 9], p: [f32; 2]| {
