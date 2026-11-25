@@ -943,6 +943,11 @@ fn drive(
         let pending_before = pending.len();
         for event in runtime.events.drain().map_err(err)? {
             match event {
+                // After a request failed in words the edge wrote, the core's own
+                // account of it ("HTTP 529: …", an auth notice) is not the
+                // reply; the turn ends with the edge's words (P1-6). A request
+                // sent again clears them before it streams.
+                Core::TextDelta { .. } if options.model.failure_pending() => {}
                 Core::TextDelta { text: delta, .. } => {
                     text.push_str(delta);
                     trace(json!({"kind":"answer","text":delta}))?;

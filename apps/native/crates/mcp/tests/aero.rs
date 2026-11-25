@@ -336,6 +336,135 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
     }
 }
 
+/// A provider error inside a streamed (HTTP 200) reply, at once or after
+/// some text, reaches the person only in Powermove's words: never the
+/// provider's message, a key it echoes, or its JSON, in the panel's result,
+/// the trace, the run's reports or the session's files (PM-746, Sol P1-1).
+#[test]
+fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
+    use pm_agents::edge::{Chunk, MemorySecrets, Net, NetRequest, Secrets};
+    use std::sync::atomic::AtomicBool;
+    const KEY: &str = "sk-ant-fake-leak-7f3a9c";
+    #[derive(Debug, Clone, Copy)]
+    struct Erroring {
+        mid: bool,
+    }
+    impl Net for Erroring {
+        fn stream(
+            &self,
+            _: &NetRequest<'_>,
+            _: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            on(Chunk::Status(200))?;
+            let mut sse = String::new();
+            let mut event = |name: &str, data: Value| {
+                sse.push_str(&format!("event: {name}\ndata: {data}\n\n"));
+            };
+            if self.mid {
+                event(
+                    "message_start",
+                    json!({"type":"message_start","message":{"id":"msg_1",
+                    "type":"message","role":"assistant","content":[],"model":"claude-opus-5-5",
+                    "usage":{"input_tokens":1,"output_tokens":0}}}),
+                );
+                event(
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":0,
+                    "content_block":{"type":"text","text":""}}),
+                );
+                event(
+                    "content_block_delta",
+                    json!({"type":"content_block_delta","index":0,
+                    "delta":{"type":"text_delta","text":"Starting"}}),
+                );
+            }
+            let echoed = format!(
+                "bad header x-api-key: {KEY}; request {}",
+                json!({"internal_trace":{"prompt":"secret prompt"}})
+            );
+            let kind = if self.mid {
+                "permission_error"
+            } else {
+                "invalid_request_error"
+            };
+            event(
+                "error",
+                json!({"type":"error","error":{"type":kind,"message":echoed}}),
+            );
+            // In two pieces, so an event arrives split.
+            let (a, b) = sse.as_bytes().split_at(sse.len() / 2);
+            on(Chunk::Data(a))?;
+            on(Chunk::Data(b))
+        }
+    }
+    for (mid, words) in [
+        (false, "The provider refused the request as invalid."),
+        (
+            true,
+            "The provider refused the credential. Check Settings › Providers.",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let secrets = Arc::new(MemorySecrets::default());
+        let env = pm_agents::launch::Environment {
+            profile: fixture.profile.path().join("app"),
+            keychain_prefix: "pm-leak-test".into(),
+            secrets: Some(secrets.clone()),
+            net: Some(Arc::new(Erroring { mid })),
+            ..Default::default()
+        };
+        secrets
+            .write(
+                &pm_agents::sources::anthropic_service(&env),
+                "api-key",
+                KEY.as_bytes(),
+            )
+            .unwrap();
+        let live = pm_agents::sources::live(&env, "anthropic/claude-opus-5-5", "high").unwrap();
+        let scope = fixture.profile.path().join("aero/sessions/leak");
+        let (turn, notes) = fixture.start_choice(
+            "leak",
+            scope.clone(),
+            "Say hello.",
+            (Some("anthropic/claude-opus-5-5"), Some("high")),
+            Model::live(live),
+            |tools| Box::new(tools),
+        );
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            match turn.try_event() {
+                Ok(Event::Completed { result, .. }) => break result,
+                Ok(Event::Trace { value, .. }) => seen.push(value.to_string()),
+                Ok(_) | Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(3))
+                }
+                other => panic!("the turn did not finish: {other:?}"),
+            }
+        };
+        assert_eq!(result, RunResult::failure(words, false), "mid={mid}");
+        seen.extend(notes.try_iter().map(|note| note.to_string()));
+        fn files(dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files(&path, out);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    out.push(String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
+        }
+        files(&scope, &mut seen);
+        assert!(!seen.is_empty());
+        for text in &seen {
+            for leak in [KEY, "internal_trace", "secret prompt", "x-api-key"] {
+                assert!(!text.contains(leak), "mid={mid}: {leak} reached {text}");
+            }
+        }
+    }
+}
+
 #[test]
 fn stale_revisions_and_read_access_leave_the_project_untouched() {
     let fixture = Fixture::new();
