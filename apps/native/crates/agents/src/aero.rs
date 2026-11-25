@@ -849,6 +849,10 @@ fn drive(
                     model_call_id,
                     ..
                 } => {
+                    // Text before a tool call narrates that step (the panel
+                    // already shows it); the turn's answer is what the model
+                    // says after its last tool call, as with Codex and Claude.
+                    text.clear();
                     let id = format!("{turn}/{model_call_id}");
                     if opened.insert(id.clone()) {
                         report(json!({"type":"tool-started","callId":id,"name":name}));

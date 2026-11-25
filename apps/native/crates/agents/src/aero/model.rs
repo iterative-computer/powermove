@@ -42,6 +42,9 @@ pub struct Live {
 pub enum Reply {
     Text(String),
     Tool { name: String, args: Value },
+    /// Text the model streams before its reply in the same step (a tool
+    /// call's narration).
+    Said(String, Box<Reply>),
     Hold,
 }
 
@@ -393,7 +396,13 @@ fn response(reply: Reply, request: &[u8]) -> Option<String> {
         out.push_str(&value.to_string());
         out.push_str("\n\n");
     };
+    let mut reply = reply;
+    while let Reply::Said(text, then) = reply {
+        sse(json!({"type":"text-delta","id":"0","delta":text}));
+        reply = *then;
+    }
     let reason = match reply {
+        Reply::Said(..) => unreachable!("narration was streamed above"),
         Reply::Hold => return None,
         Reply::Text(text) => {
             sse(json!({"type":"text-delta","id":"0","delta":text}));

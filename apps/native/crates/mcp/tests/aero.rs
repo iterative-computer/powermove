@@ -221,6 +221,38 @@ fn fake_model_cuts_through_the_real_kernel_and_reports_usage() {
     assert!(notes.iter().any(|note| note["type"] == "usage"));
 }
 
+/// A model that narrates before each tool call (as real models do) ends with
+/// its last answer, not every step's text run together: the Agent panel
+/// showed "Reading the layer first.Renaming it…" after the reply (2026-11-25).
+#[test]
+fn a_turn_that_narrates_before_its_tool_calls_ends_with_its_last_answer_alone() {
+    let fixture = Fixture::new();
+    let rev = fixture.revision;
+    let (turn, _notes) = fixture.start(
+        scripted(move |step, _| match step {
+            0 => Reply::Said(
+                "Reading the project first.".into(),
+                Box::new(call("project", "summary", None, json!({}))),
+            ),
+            1 => Reply::Said(
+                "Cutting the flubbed take.".into(),
+                Box::new(call(
+                    "edit",
+                    "commands",
+                    Some(rev),
+                    json!({"commands":[{"type":"delete_layers","targets":["flub"]}]}),
+                )),
+            ),
+            _ => Reply::Text("Cut the flubbed take.".into()),
+        }),
+        |tools| Box::new(tools),
+    );
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Cut the flubbed take.".into(), Access::Project)
+    );
+}
+
 #[test]
 fn stale_revisions_and_read_access_leave_the_project_untouched() {
     let fixture = Fixture::new();
