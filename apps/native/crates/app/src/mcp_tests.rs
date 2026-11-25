@@ -2122,3 +2122,121 @@ fn reopening_the_project_during_a_run_never_edits_the_new_document() {
     let document = document(&fixture.host.kernel.published("test").unwrap());
     assert_ne!(document["layers"][0]["name"], "Old run");
 }
+
+/// PM-724: a project made while another project with media is open starts
+/// with no media, in its Project panel and in its saved file, whichever way it
+/// is made: MCP `create_project` or File › New Project (the library's Create).
+#[test]
+fn a_new_project_never_lists_another_open_projects_media() {
+    use crate::library_surface::{
+        controller::{Command, Outcome},
+        form::NewProjectForm,
+        kernel::KernelLibrary,
+    };
+    let f = Fixture::new();
+    // Window 1 shows the open project; window 2 is empty, as a new window is.
+    let _first = f.host.attach_window(1);
+    f.host.bind_window(1, f.host.current());
+    let _second = f.host.attach_window(2);
+    // The open project has a real imported clip and is saved with it.
+    let still = f.host.profile.join("other-project.png");
+    std::fs::write(
+        &still,
+        crate::mcp_services::png(&[20, 40, 60, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let panels = pm_builtins::Builtins::new(f.host.kernel.clone(), "test", || {}).unwrap();
+    let open = f.host.kernel.published("test").unwrap();
+    let outcome = panels
+        .import_media(
+            open.snapshot.doc_id,
+            &f.host.profile,
+            pm_builtins::media_import::ImportRequest {
+                paths: vec![still],
+                ..Default::default()
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.imported, ["other-project.png"]);
+    let test = f.host.session_of("test").unwrap();
+    f.host.save(test.clone(), None).unwrap();
+    let open = f.host.kernel.published("test").unwrap();
+    assert_eq!(
+        pm_panel_media::Catalog::published(&open)
+            .unwrap()
+            .assets
+            .len(),
+        1
+    );
+    // MCP create_project.
+    let mut c = f.connection();
+    let by_mcp = c
+        .dispatch("create_project", &json!({"name":"By MCP"}))
+        .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // File › New Project from the open project's window (its format seeds the form).
+    let form = NewProjectForm::new(
+        "test".into(),
+        crate::project_library::current_format(Some(&open)).as_ref(),
+        &crate::project_library::default_format(),
+        &["Synthetic".into(), "By MCP".into()],
+    );
+    let mut library = KernelLibrary {
+        kernel: f.host.kernel.clone(),
+        profile: f.host.profile.clone(),
+    };
+    let Outcome::Opened(ShellReply::Opened { session, .. }) = library
+        .execute(Command::Create(form.values().unwrap()))
+        .unwrap()
+    else {
+        panic!("a new project opens without recovery");
+    };
+    let by_menu = session.project.clone();
+    f.host
+        .kernel
+        .shell(ShellCall::Save(session))
+        .wait()
+        .unwrap()
+        .unwrap();
+    for project in [&by_mcp, &by_menu] {
+        let published = f.host.kernel.published(project).unwrap();
+        let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+        assert!(
+            catalog.assets.is_empty(),
+            "{project}: {:?}",
+            catalog.assets.keys()
+        );
+        // The Project panel lists the new project's composition and nothing else.
+        let mut panel = pm_panel_media::MediaPanel::default();
+        panel.refresh(&catalog, &pm_panel_media::UnknownRuntime);
+        let page = panel
+            .page(&catalog, &pm_panel_media::UnknownRuntime, 0, 100)
+            .unwrap();
+        assert!(
+            page.rows
+                .iter()
+                .all(|row| matches!(row.data, pm_panel_media::RowData::Composition(_))),
+            "{project}: {:?}",
+            page.rows
+        );
+        // Its saved file has no media either.
+        let saved = pm_kernel::LibraryStore::open(&f.host.profile)
+            .load(project)
+            .unwrap()
+            .expect("saved in the library")
+            .project;
+        let assets = saved.get("assets").and_then(|a| a.as_object());
+        assert!(assets.is_none_or(|a| a.is_empty()), "{project}: {saved:?}");
+    }
+    // The open project keeps its own clip.
+    assert_eq!(
+        pm_panel_media::Catalog::published(&f.host.kernel.published("test").unwrap())
+            .unwrap()
+            .assets
+            .len(),
+        1
+    );
+}
