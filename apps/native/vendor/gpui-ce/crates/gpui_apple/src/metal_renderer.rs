@@ -1125,6 +1125,30 @@ impl MetalRenderer {
             .copy();
             drawable.add_presented_handler(&handler);
         }
+        if crate::feel::frames() {
+            let n = crate::feel::next_frame();
+            let path = match mode {
+                PresentMode::Transaction => "transaction",
+                PresentMode::Link => "link",
+                PresentMode::Queued => "queued",
+            };
+            let presented = ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                crate::feel::write(&format!(
+                    r#"{{"frame":{n},"mode":"{path}","presented":{:.6}}}"#,
+                    d.presented_time()
+                ));
+            })
+            .copy();
+            drawable.add_presented_handler(&presented);
+            let completed = ConcreteBlock::new(move |_: &metal::CommandBufferRef| {
+                crate::feel::write(&format!(
+                    r#"{{"frame":{n},"completed":{:.6}}}"#,
+                    crate::feel::now()
+                ));
+            })
+            .copy();
+            command_buffer.add_completed_handler(&completed);
+        }
         match mode {
             PresentMode::Transaction => {
                 command_buffer.commit();

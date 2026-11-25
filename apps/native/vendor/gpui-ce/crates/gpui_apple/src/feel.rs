@@ -71,6 +71,23 @@ pub fn write(line: &str) {
     }
 }
 
+/// Powermove P-FEEL-FRAMES: with the trace on and `PM_FEEL_FRAMES=1`, every
+/// presented frame writes `{"frame":n,...}` lines too: how it was presented,
+/// when its commands completed and when it reached the glass, so a picture
+/// shown after a later frame's hosted views moved can be found (PM-696).
+pub fn frames() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| enabled() && std::env::var_os("PM_FEEL_FRAMES").is_some_and(|v| v == "1"))
+}
+static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The serial of the frame submitted last (P-FEEL-FRAMES).
+pub fn frame() -> u64 {
+    FRAME.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub(crate) fn next_frame() -> u64 {
+    FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// The oldest input not yet painted, and what it was. One per process: the
 /// window an input changes is the one that paints next.
 static PENDING: Mutex<Option<(f64, &'static str)>> = Mutex::new(None);

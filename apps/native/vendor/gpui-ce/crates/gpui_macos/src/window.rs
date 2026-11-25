@@ -2542,7 +2542,19 @@ impl PlatformWindow for MacWindow {
         use crate::composition::{Pace, Step};
         let mut this = self.0.lock();
         let traced = gpui_apple::metal_renderer::present_trace().then(std::time::Instant::now);
+        let view = this.native_view.as_ptr() as usize;
         let trace = |path: &str, moved: bool, acquire: f64| {
+            // P-FEEL-FRAMES: every draw's decision, the frame it submitted (if
+            // any) and where its slot regions' content then sits.
+            if gpui_apple::feel::frames() {
+                let presented = !matches!(path, "defer" | "enter" | "wait" | "unprepared");
+                gpui_apple::feel::write(&format!(
+                    r#"{{"draw":{:.6},"path":"{path}","moved":{moved},"frame":{},"regions":[{}]}}"#,
+                    gpui_apple::feel::now(),
+                    if presented { gpui_apple::feel::frame() } else { 0 },
+                    crate::slot_region::summary(view),
+                ));
+            }
             if let Some(at) = traced {
                 eprintln!(
                     r#"PM_GPUI_DRAW {{"at":{:.4},"path":"{path}","moved":{moved},"ms":{:.3},"acquire_ms":{acquire:.3}}}"#,
@@ -2551,7 +2563,6 @@ impl PlatformWindow for MacWindow {
                 );
             }
         };
-        let view = this.native_view.as_ptr() as usize;
         let size = this.renderer.drawable_size();
         // AppKit's own synchronous paints (live resize, a tab coming forward)
         // must show now: they keep asking the layer, with its timeout.

@@ -399,6 +399,28 @@ pub(crate) fn pending(view: usize) -> bool {
     })
 }
 
+/// Each shown container's content origin (`id:x,y`) as placed now
+/// (P-FEEL-FRAMES).
+pub(crate) fn summary(view: usize) -> String {
+    HOSTS.with_borrow(|hosts| {
+        let Some(host) = hosts.get(&view) else {
+            return String::new();
+        };
+        let mut shown: Vec<_> = host
+            .containers
+            .iter()
+            .filter(|(_, c)| !c.clip.isHidden())
+            .filter_map(|(id, c)| Some((*id, c.applied?.origin)))
+            .collect();
+        shown.sort_by_key(|(id, _)| *id);
+        shown
+            .iter()
+            .map(|(id, o)| format!(r#""{id}:{:.2},{:.2}""#, o.x, o.y))
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
 /// The window closes (its views go with it; nothing is touched here, as the
 /// window's lock is held).
 pub(crate) fn forget(view: usize) {
