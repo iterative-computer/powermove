@@ -716,11 +716,26 @@ pub struct Project {
     agent_turns: HashSet<Writer>,
     /// History-only finalization waits for the person's current entry to end.
     pending_squashes: HashMap<Writer, (ActorHistoryMark, String)>,
+    /// Undo and Redo calls that arrived while another writer's edit was
+    /// applying (PM-718), in arrival order; they run when it has ended.
+    waiting: VecDeque<Waiting>,
+    /// The ticket a waiting call already answers to, reused by the deferred
+    /// step it runs (an external undo in another realm).
+    reuse_ticket: Option<u64>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
     notices: Vec<Notice>,
     extensions: crate::extensions::Extensions,
+}
+
+/// A history call held until another writer's edit has finished applying.
+#[derive(Clone, Debug)]
+struct Waiting {
+    ticket: u64,
+    caller: Caller,
+    txid: Option<u64>,
+    call: HistoryCall,
 }
 
 #[derive(Clone, Debug)]
@@ -750,6 +765,8 @@ impl Project {
             record_writers: HashMap::new(),
             agent_turns: HashSet::new(),
             pending_squashes: HashMap::new(),
+            waiting: VecDeque::new(),
+            reuse_ticket: None,
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -861,6 +878,27 @@ impl Project {
                 None,
                 Reply::Throw(KernelError::StaleGeneration),
             ));
+        }
+        if let Call::History(
+            history @ (HistoryCall::Undo | HistoryCall::Redo | HistoryCall::UndoIfTop { .. }),
+        ) = &call
+            && (self.applying_for(caller.writer) || !self.waiting.is_empty())
+        {
+            // Never inside an edit that is still applying: it is not yet a
+            // step, and the step below it is not the one meant. The call
+            // runs, in order, once the edit has ended.
+            let ticket = self.next();
+            self.waiting.push_back(Waiting {
+                ticket,
+                caller,
+                txid: txid.map(|t| t.txid),
+                call: history.clone(),
+            });
+            return Handled {
+                reply: None,
+                deferred: Some(ticket),
+                resolved: Vec::new(),
+            };
         }
         let tracks_mutation = !matches!(
             &call,
@@ -1018,6 +1056,8 @@ impl Project {
                 self.squash_turn(&mark, &label);
             }
         }
+        let mut handled = handled;
+        self.run_waiting(&mut handled);
         self.collect_retired();
         if let (Some(key), Some(ack)) = (txid, &handled.reply) {
             self.remember(key, ack.clone());
@@ -1031,6 +1071,58 @@ impl Project {
             self.notices.push(notice);
         }
         handled
+    }
+
+    /// Whether an edit of a writer other than `writer` is applying: a live
+    /// mutation lease (an agent's or extension's structural edit), which
+    /// always ends by itself within its owner's call sequence.
+    fn applying_for(&self, writer: Writer) -> bool {
+        self.entry.as_ref().is_some_and(|e| {
+            e.leases
+                .iter()
+                .any(|l| l.kind == LeaseKind::Mutation && l.owner != writer)
+        })
+    }
+
+    /// Whether any structural edit is applying (published for the editor:
+    /// such an entry is never one its owner left open).
+    pub fn edit_applying(&self) -> bool {
+        self.entry
+            .as_ref()
+            .is_some_and(|e| e.leases.iter().any(|l| l.kind == LeaseKind::Mutation))
+    }
+
+    /// Runs the waiting history calls once no edit holds them back, in
+    /// arrival order, each as its own call; their answers resolve the
+    /// tickets they waited on.
+    fn run_waiting(&mut self, handled: &mut Handled) {
+        if self
+            .waiting
+            .front()
+            .is_none_or(|head| self.applying_for(head.caller.writer))
+        {
+            return;
+        }
+        // Undo and Redo never open an edit, so none of these waits again.
+        for waiting in std::mem::take(&mut self.waiting) {
+            let Waiting {
+                ticket,
+                caller,
+                txid,
+                call,
+            } = waiting;
+            let mut request = Request::new(caller, call);
+            if let Some(txid) = txid {
+                request = request.with_txid(txid);
+            }
+            self.reuse_ticket = Some(ticket);
+            let ran = self.handle(request);
+            self.reuse_ticket = None;
+            handled.resolved.extend(ran.resolved);
+            if let Some(ack) = ran.reply {
+                handled.resolved.push((ticket, ack));
+            }
+        }
     }
 
     fn squash_turn(&mut self, mark: &ActorHistoryMark, label: &str) -> Option<u64> {
@@ -1910,7 +2002,7 @@ impl Project {
                         Reply::Bool(false),
                     ));
                 }
-                let ticket = self.next();
+                let ticket = self.reuse_ticket.take().unwrap_or_else(|| self.next());
                 let continuation = Continuation {
                     ticket,
                     handle: external.handle,

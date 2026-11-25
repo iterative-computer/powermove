@@ -1,6 +1,16 @@
 //! Panic injection on the transaction path, for the tests that prove a
-//! contained panic never leaves a half-applied project behind. Compiled to
-//! nothing outside tests and the `fault-injection` feature.
+//! contained panic never leaves a half-applied project behind, and holds
+//! there, for the tests that race other callers against a call caught
+//! mid-way. Compiled to nothing outside tests and the `fault-injection`
+//! feature.
+
+/// A call held at a stage: `reached` is told when the actor gets there, and
+/// the actor waits there until `release` answers (or is dropped).
+#[cfg(any(test, feature = "fault-injection"))]
+pub struct Hold {
+    pub reached: std::sync::mpsc::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+}
 
 /// Where on the transaction path a panic is injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,21 +37,21 @@ pub enum Stage {
 
 #[cfg(any(test, feature = "fault-injection"))]
 mod armed {
-    use super::Stage;
+    use super::{Hold, Stage};
     use std::cell::RefCell;
 
     // Both live on the kernel actor's own thread: a panic armed for one
     // actor (`KernelHandle::arm_fault`) is never taken by another actor in
     // the same process that happens to edit a project of the same id.
     thread_local! {
-        static ARMED: RefCell<Vec<(Stage, String)>> = const { RefCell::new(Vec::new()) };
+        static ARMED: RefCell<Vec<(Stage, String, Option<Hold>)>> = const { RefCell::new(Vec::new()) };
         static CURRENT: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
     /// On the actor thread: its next call on `project` that reaches `stage`
-    /// panics (once).
-    pub(crate) fn arm(stage: Stage, project: String) {
-        ARMED.with(|a| a.borrow_mut().push((stage, project)));
+    /// panics, or with a `hold` waits there (once).
+    pub(crate) fn arm(stage: Stage, project: String, hold: Option<Hold>) {
+        ARMED.with(|a| a.borrow_mut().push((stage, project, hold)));
     }
 
     pub(crate) fn enter(project: Option<&str>) {
@@ -75,11 +85,18 @@ mod armed {
         }
         let armed = ARMED.with(|a| {
             let mut a = a.borrow_mut();
-            let i = a.iter().position(|(s, p)| *s == stage && *p == project)?;
+            let i = a
+                .iter()
+                .position(|(s, p, _)| *s == stage && *p == project)?;
             Some(a.remove(i))
         });
-        if armed.is_some() {
-            panic!("injected fault at {stage:?}");
+        match armed {
+            Some((_, _, Some(hold))) => {
+                let _ = hold.reached.send(());
+                let _ = hold.release.recv();
+            }
+            Some((_, _, None)) => panic!("injected fault at {stage:?}"),
+            None => {}
         }
     }
 }

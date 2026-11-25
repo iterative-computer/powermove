@@ -234,6 +234,9 @@ pub struct OpenEntryInfo {
     pub label: String,
     pub depth: u32,
     pub source_edit_live: bool,
+    /// An agent's or extension's structural edit is applying: it ends by
+    /// itself, so it is never an edit left open, and Undo waits for it.
+    pub applying: bool,
 }
 
 /// One project's published state: immutable, swapped after every call.
@@ -444,6 +447,7 @@ enum Msg {
     ArmFault {
         stage: crate::fault_injection::Stage,
         project: String,
+        hold: Option<crate::fault_injection::Hold>,
     },
     /// `KernelHandle::set_history_budget_later`.
     #[cfg(any(test, feature = "fault-injection"))]
@@ -712,7 +716,27 @@ impl KernelHandle {
         self.send(Msg::ArmFault {
             stage,
             project: project.to_owned(),
+            hold: None,
         });
+    }
+
+    /// Tests: this actor's next call on `project` that reaches `stage` waits
+    /// there. The first receiver hears when it got there; sending on (or
+    /// dropping) the second sender lets it go on.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn hold_at(
+        &self,
+        stage: crate::fault_injection::Stage,
+        project: &str,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, at) = std::sync::mpsc::channel();
+        let (go, release) = std::sync::mpsc::channel();
+        self.send(Msg::ArmFault {
+            stage,
+            project: project.to_owned(),
+            hold: Some(crate::fault_injection::Hold { reached, release }),
+        });
+        (at, go)
     }
 
     /// Tests: the shared undo budget in entries, applied by the next call
@@ -932,6 +956,7 @@ fn publish_timed(
             label: label.to_owned(),
             depth,
             source_edit_live: p.source_edit_live(),
+            applying: p.edit_applying(),
         }),
         selection: store.selection().clone(),
         workspace: p.workspace().clone(),
@@ -1786,7 +1811,11 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply(());
         }
         #[cfg(any(test, feature = "fault-injection"))]
-        Msg::ArmFault { stage, project } => crate::fault_injection::arm(stage, project),
+        Msg::ArmFault {
+            stage,
+            project,
+            hold,
+        } => crate::fault_injection::arm(stage, project, hold),
         #[cfg(any(test, feature = "fault-injection"))]
         Msg::HistoryBudget(max_entries) => kernel.set_history_budget_later(max_entries),
         Msg::DurabilityErrors => {
@@ -1803,6 +1832,10 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
 #[cfg(test)]
 #[path = "actor_fault_tests.rs"]
 mod fault_tests;
+
+#[cfg(test)]
+#[path = "actor_undo_race_tests.rs"]
+mod undo_race_tests;
 
 // ── the UI's synchronous query mirror ───────────────────────────────────────
 
