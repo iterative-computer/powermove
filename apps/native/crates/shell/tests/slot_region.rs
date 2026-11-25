@@ -1000,3 +1000,98 @@ fn an_upward_flick_replays_missing_media_tiles_as_drawn(cx: &mut TestAppContext)
         );
     }
 }
+
+/// Rows reporting the pointer entering them, in a scroll layer its owner
+/// steps (driven, as the timeline's) or the wheel steps.
+struct HoverRows {
+    handle: ScrollHandle,
+    driven: bool,
+    entered: Rc<RefCell<Vec<usize>>>,
+}
+impl Render for HoverRows {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let rows = (0..20).map(|i| {
+            let entered = self.entered.clone();
+            div()
+                .id(("hover-row", i))
+                .flex_none()
+                .h(px(20.))
+                .w_full()
+                .on_hover(move |hovered, _, _| {
+                    if *hovered {
+                        entered.borrow_mut().push(i);
+                    }
+                })
+        });
+        let list = div()
+            .id("hover-rows")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle);
+        if self.driven {
+            list.scroll_layer_driven().children(rows)
+        } else {
+            list.scroll_layer().children(rows)
+        }
+    }
+}
+
+/// PM-710 on screen: a wheel-stepped layer's rows take the hover at once as
+/// they move under a still pointer (it was held until the layer settled, and
+/// a stop showed no hover); a driven layer's (the timeline's) keep waiting
+/// for the settle, as their owner draws its hover then.
+#[gpui::test]
+fn the_hover_follows_a_wheeled_layer_at_once_and_a_driven_one_once_settled(
+    cx: &mut TestAppContext,
+) {
+    for driven in [false, true] {
+        let entered = Rc::new(RefCell::new(Vec::new()));
+        let handle = ScrollHandle::new();
+        let (_, vcx) = cx.add_window_view(|_, cx| {
+            let panel = cx.new(|_| HoverRows {
+                handle: handle.clone(),
+                driven,
+                entered: entered.clone(),
+            });
+            Root {
+                panel: panel.into(),
+                ticker: cx.new(|_| Ticker(0)),
+            }
+        });
+        let mut vcx: VisualTestContext = vcx.clone();
+        vcx.run_until_parked();
+        let at = point(px(50.), px(50.));
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        assert_eq!(entered.borrow().last(), Some(&2), "row 2 under the pointer");
+        // The next row comes under the still pointer.
+        if driven {
+            let stepped = vcx.update(|window, cx| {
+                window.step_scroll_layer(&handle, point(px(0.), px(-20.)), cx)
+            });
+            assert!(stepped);
+        } else {
+            vcx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(0.), px(-20.))),
+                ..Default::default()
+            });
+        }
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        let now = entered.borrow().last().copied();
+        if driven {
+            assert_eq!(now, Some(2), "a driven layer's hover waits for its settle");
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(400));
+            vcx.run_until_parked();
+            assert_eq!(entered.borrow().last(), Some(&3), "settled: row 3 hovered");
+        } else {
+            assert_eq!(now, Some(3), "a wheeled layer's hover follows at once");
+        }
+    }
+}

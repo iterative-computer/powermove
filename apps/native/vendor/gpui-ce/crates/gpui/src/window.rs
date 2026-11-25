@@ -1364,6 +1364,9 @@ pub struct Window {
     /// waits until the steps stop (as AppKit's tracking areas do), or every
     /// row passing under a still pointer would draw its view again.
     pub(crate) scroll_layer_moving: bool,
+    /// A driven layer (one its owner steps) is moving: the hover waits for
+    /// its settle.
+    pub(crate) scroll_layer_driven_moving: bool,
     /// The extent the last scrolling div computed (a layer reads it for its own).
     pub(crate) last_scroll_max: Point<Pixels>,
     scroll_layer_pending_deferred: Vec<usize>,
@@ -2174,6 +2177,7 @@ impl Window {
             scroll_layer_depth: 0,
             scroll_layer_frame: 0,
             scroll_layer_moving: false,
+            scroll_layer_driven_moving: false,
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
             scroll_layer_rest: FxHashMap::default(),
@@ -3633,8 +3637,11 @@ impl Window {
         // Replayed scroll steps too: the hover follows the rows a scroll
         // moves under a still pointer, so it is right the moment the scroll
         // stops (PM-710 on screen: waiting for the layer's settle showed no
-        // hover for 150 ms and more after a stop).
-        self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        // hover for 150 ms and more after a stop). A driven layer's owner
+        // (the timeline) draws its own hover once its steps settle.
+        if !self.scroll_layer_driven_moving {
+            self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        }
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -4408,7 +4415,9 @@ impl Window {
             }
             return false;
         };
-        self.scroll_layer_step(key, view, false, cx)
+        let stepped = self.scroll_layer_step(key, view, false, cx);
+        self.scroll_layer_driven_moving |= stepped;
+        stepped
     }
 
     /// A wheel step on a scroll layer that only moves its offset: when the
@@ -4465,6 +4474,7 @@ impl Window {
                     .is_none_or(|l| l.generation == generation);
                 if settled {
                     window.scroll_layer_moving = false;
+                    window.scroll_layer_driven_moving = false;
                     cx.notify(view);
                 }
             })
