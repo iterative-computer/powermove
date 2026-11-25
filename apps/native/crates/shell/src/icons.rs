@@ -91,7 +91,15 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             // its square): drawn at the sparkle's size.
             size: 2.,
         }),
-        "provider.claude" | "provider.compatible" => g(pierre!("Sparkle")),
+        // The Claude logo (`app/assets/settings-agent-icons`, see its
+        // attribution).
+        "provider.claude" => Some(Glyph {
+            svg: include_str!("../../app/assets/settings-agent-icons/claude.svg"),
+            turns: 0,
+            mirror: false,
+            size: 1.,
+        }),
+        "provider.compatible" => g(pierre!("Sparkle")),
         "minus" => g(pierre!("Minus")),
         "xmark" => g(pierre!("X")),
         "ellipsis" => g(pierre!("Ellipsis")),

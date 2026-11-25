@@ -22,8 +22,8 @@ pub(crate) fn timeline_frame() -> Frame {
     Frame {
         surface: "S108".into(),
         back: Some("Back to Welcome".into()),
-        title: "Pick Your Timeline.".into(),
-        line: "Work the way you already do. You can switch anytime from the timeline panel.".into(),
+        title: "Choose your timeline".into(),
+        line: "Work the way you already do. Switch anytime.".into(),
         buttons: vec![Button::new("continue", "Continue")],
         default: Some("continue".into()),
         ..Frame::default()

@@ -129,9 +129,9 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     flow.action("continue");
     flow.action("choose:claude");
     flow.action("continue");
-    titled(&flow.frame(), "Choose your speech model");
+    titled(&flow.frame(), "Speech to text");
     flow.action("continue");
-    titled(&flow.frame(), "Grab your suitcase");
+    titled(&flow.frame(), "Bring your workspace");
     let effects = flow.action("fresh");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");

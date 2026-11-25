@@ -200,7 +200,7 @@ pub fn replay(cx: &mut gpui::App) {
     let frame = Frame {
         surface: "S107-replay".into(),
         animate: true,
-        preview: Some("timeline-layers".into()),
+        preview: Some("welcome".into()),
         title: "Welcome to Powermove".into(),
         centred: true,
         buttons: vec![Button::new("done", "Done")],

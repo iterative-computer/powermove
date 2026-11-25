@@ -20,6 +20,10 @@ const OPENAI: Mark = Mark {
     // The official SVG already contains clear space around the mark.
     scale: 1.,
 };
+const CLAUDE: Mark = Mark {
+    svg: include_bytes!("../../../assets/settings-agent-icons/claude.svg"),
+    scale: 2. / 3.,
+};
 const OPENCODE: Mark = Mark {
     svg: include_bytes!("../../../assets/settings-agent-icons/opencode.svg"),
     scale: 2. / 3.,
@@ -33,7 +37,8 @@ fn resolve<T>(
 ) -> Option<T> {
     // See the asset attribution for the product marks that require prior approval.
     let (apps, mark, fallback): (&[&str], Option<&Mark>, _) = match id {
-        "claude-code" | "claude-desktop" => (&["Claude"], None, "terminal"),
+        // The bundled Claude logo, ahead of the installed app's icon.
+        "claude-code" | "claude-desktop" => (&[], Some(&CLAUDE), "terminal"),
         "codex" => (&["Codex", "ChatGPT"], Some(&OPENAI), "terminal"),
         "gemini-cli" => (&["Gemini"], None, "terminal"),
         "opencode" => (&["OpenCode"], Some(&OPENCODE), "terminal"),
@@ -190,13 +195,24 @@ pub(super) fn capture_app_icon(name: &str) -> Option<Retained<NSImage>> {
 mod tests {
     use super::*;
 
-    const CLIENTS: [(&str, &str); 5] = [
-        ("claude-code", "Claude"),
+    const CLIENTS: [(&str, &str); 3] = [
         ("codex", "Codex"),
-        ("claude-desktop", "Claude"),
         ("gemini-cli", "Gemini"),
         ("opencode", "OpenCode"),
     ];
+
+    #[test]
+    fn claude_clients_show_the_claude_logo() {
+        for id in ["claude-code", "claude-desktop"] {
+            let image = resolve(
+                id,
+                |_| panic!("Claude shows its logo, not the installed app's icon"),
+                |mark| Some(mark.svg),
+                |_| panic!("the logo comes before the symbol"),
+            );
+            assert!(image.is_some_and(|image| image == CLAUDE.svg), "{id}");
+        }
+    }
 
     #[test]
     fn installed_app_icon_wins_for_each_known_client() {
@@ -253,11 +269,7 @@ mod tests {
 
     #[test]
     fn clients_without_a_bundled_mark_use_a_neutral_symbol() {
-        for (id, bundle) in [
-            ("claude-code", "Claude"),
-            ("claude-desktop", "Claude"),
-            ("gemini-cli", "Gemini"),
-        ] {
+        for (id, bundle) in [("gemini-cli", "Gemini")] {
             let image = resolve(
                 id,
                 |name| {

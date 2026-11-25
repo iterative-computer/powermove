@@ -848,8 +848,7 @@ pub(crate) fn step_frame(
             back: Some("Back to Welcome".into()),
             title: "Choose your timeline".into(),
             outline: Some(steps_outline(Some(0))),
-            line: "Work the way you already do. You can switch anytime from the timeline panel."
-                .into(),
+            line: "Work the way you already do. Switch anytime.".into(),
             choices: vec![
                 row("layers", "Layers", "A row for each element, like After Effects."),
                 row("tracks", "Tracks", "Clips share tracks, like Premiere Pro."),
@@ -864,27 +863,21 @@ pub(crate) fn step_frame(
             back: Some("Back to Timeline Choice".into()),
             title: "Choose your agent".into(),
             outline: Some(steps_outline(Some(1))),
-            line: "It builds what you ask for, right in the editor. You can switch anytime from the agent’s composer."
-                .into(),
+            line: "It builds what you ask for, in the editor.".into(),
             choices: vec![
+                // The tag stands in for the detail: one short line under the
+                // name, clear of the row's Connect.
                 Choice {
                     badge: Some("Recommended".into()),
-                    ..agent(
-                        "aero",
-                        "Powermove",
-                        "Built for Powermove.",
-                        "powermove",
-                        "chatgpt",
-                    )
+                    detail: None,
+                    ..agent("aero", "Powermove", "", "powermove", "chatgpt")
                 },
-                agent("chatgpt", "Codex", "Your ChatGPT account.", "provider.chatgpt", "chatgpt"),
-                // The installed Claude app's own icon, as Settings › Agents
-                // shows it (Anthropic's artwork is never bundled).
+                agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
                 agent(
                     "claude",
                     "Claude Code",
-                    "Your Claude account.",
-                    "app:Claude",
+                    "With your Claude account.",
+                    "provider.claude",
                     "claude",
                 ),
             ],
@@ -900,26 +893,23 @@ pub(crate) fn step_frame(
                 rows.push(Choice {
                     mark: Some("waveform".into()),
                     pill: (!queued).then(|| "Download".into()),
-                    status: queued.then(|| format!("Downloads once you’re in · {size}")),
-                    meta: (!queued).then_some(size),
+                    status: queued.then(|| "Downloads once you’re in".into()),
                     ..row(
                         &model.id,
                         &model.name,
-                        &model.description,
+                        &format!("{} · {size}", model.description.trim_end_matches('.')),
                     )
                 });
             }
             continuing(Frame {
                 surface: "S109".into(),
                 back: Some("Back to Agent Choice".into()),
-                title: "Choose your speech model".into(),
+                title: "Speech to text".into(),
                 outline: Some(steps_outline(Some(2))),
-                line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
-                    .into(),
+                line: "Transcribe speech for captions, on this Mac.".into(),
                 choices: rows,
                 // The model row shows its download, not a selection.
                 chosen: None,
-                note: Some("Runs on this Mac. More models in Settings › Transcription.".into()),
                 preview: Some("speech".into()),
                 ..Frame::default()
             })
@@ -927,10 +917,9 @@ pub(crate) fn step_frame(
         Onboard::Workspace => continuing(Frame {
             surface: "S110".into(),
             back: Some("Back to Speech Model Choice".into()),
-            title: "Grab your suitcase".into(),
+            title: "Bring your workspace".into(),
             outline: Some(steps_outline(Some(3))),
-            line: "Bring your panels and tools along. Your agent will unpack them in Powermove."
-                .into(),
+            line: "Bring your panels and tools along.".into(),
             error,
             choices: vec![
                 row("import", "Bring my workspace", "Your After Effects panels and tools."),
@@ -942,7 +931,7 @@ pub(crate) fn step_frame(
         }),
         Onboard::Starting | Onboard::Complete => Frame {
             surface: "S110".into(),
-            title: "Grab your suitcase".into(),
+            title: "Bring your workspace".into(),
             outline: Some(steps_outline(Some(4))),
             status: Some("Opening Powermove…".into()),
             spinner: true,
@@ -995,7 +984,7 @@ pub(crate) fn welcome_frame() -> Frame {
         line: "Four quick choices, then your editor.\nYou can change any of them later.".into(),
         outline: Some(steps_outline(None)),
         centred: true,
-        preview: Some("timeline-layers".into()),
+        preview: Some("welcome".into()),
         buttons: vec![Button::new("begin", "Begin")],
         default: Some("begin".into()),
         ..Frame::default()

@@ -129,7 +129,7 @@ impl WelcomeView {
             );
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
             match size {
-                Size::Primary if self.stage => control.prominent(COLUMN),
+                Size::Primary if self.stage => control.prominent(PRIMARY_WIDTH),
                 Size::Pill => control.small(),
                 _ => {}
             }
@@ -238,10 +238,10 @@ impl WelcomeView {
         // Headless (no AppKit): the stage's accent button, drawn.
         element = if self.stage && primary {
             element
-                .w(px(COLUMN))
+                .w(px(PRIMARY_WIDTH))
                 .h(px(PRIMARY_HEIGHT))
                 .rounded_full()
-                .text_size(px(14.))
+                .text_size(px(13.))
                 .font_weight(FontWeight::MEDIUM)
         } else {
             element
@@ -384,17 +384,16 @@ impl WelcomeView {
         }
         card
     }
-    /// The step's choices on the stage: one grouped list, its rows cut apart
-    /// by the half's own ground. A row has its mark, its name and one quiet
-    /// line, and at its end a size, what it says of itself or a capsule
-    /// button (Connect, Download). A list of plain options marks the chosen
-    /// one with the accent's check; a list with buttons (the agents) shows
-    /// the chosen row raised instead, so a row never has both.
+    /// The step's choices on the stage: one grouped list, its rows parted by
+    /// hairlines inset from the leading edge. A row has its mark (one size,
+    /// in a tile), its name and one quiet line, and at its end a capsule
+    /// button (Connect, Download) or what the row says of itself. A list of
+    /// plain options marks the chosen one with the accent's check, nothing
+    /// else; a list with buttons (the agents) has no check.
     fn choice_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.tokens.clone();
         let c = &t.colors;
         let choices = self.frame.choices.clone();
-        let count = choices.len();
         let actions = choices
             .iter()
             .any(|c| c.pill.is_some() || c.status.is_some());
@@ -404,44 +403,40 @@ impl WelcomeView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(LIST_CUT));
+            .rounded(px(LIST_RADIUS))
+            .rounded_smoothing(t.radius.smoothing)
+            .overflow_hidden()
+            .bg(rgba((c.text << 8) | 0x0c));
         for (index, choice) in choices.iter().enumerate() {
             let selected = self.frame.chosen.as_ref() == Some(&choice.id);
             let id = choice.id.clone();
-            let (first, last) = (index == 0, index + 1 == count);
+            if index > 0 {
+                group = group.child(
+                    div()
+                        .ml(px(LIST_INSET))
+                        .h(px(0.5))
+                        .bg(rgba((c.text << 8) | 0x1f)),
+                );
+            }
             let mark = choice.mark.clone().map(|name| {
                 let glyph = if name == "powermove" {
-                    mark_glyph(13., c.accent).into_any_element()
-                } else if let Some(app) = name.strip_prefix("app:") {
-                    // An agent app's own icon, as Settings › Agents shows it.
-                    match crate::symbol::app_icon(app, 20., window.scale_factor()) {
-                        Some(icon) => img(ImageSource::Render(icon))
-                            .size(px(20.))
-                            .into_any_element(),
-                        None => crate::symbol::symbol(
-                            "terminal",
-                            14.,
-                            crate::symbol::Weight::Regular,
-                            c.text,
-                            window,
-                        )
-                        .into_any_element(),
-                    }
+                    mark_glyph(17., c.accent).into_any_element()
                 } else {
-                    crate::symbol::symbol(
-                        &name,
-                        14.,
-                        crate::symbol::Weight::Regular,
-                        c.text,
-                        window,
-                    )
-                    .into_any_element()
+                    // A mark in its own colour (Claude's orange); others in
+                    // the text's ink.
+                    let ink = if name == "provider.claude" {
+                        CLAUDE_ORANGE
+                    } else {
+                        c.text
+                    };
+                    crate::symbol::symbol(&name, 20., crate::symbol::Weight::Regular, ink, window)
+                        .into_any_element()
                 };
                 div()
                     .flex_none()
-                    .size(px(28.))
-                    .rounded(px(t.radius.nested(LIST_RADIUS, LIST_INSET - 4.)))
-                    .bg(rgba((c.text << 8) | 0x10))
+                    .size(px(ICON_TILE))
+                    .rounded(px(t.radius.nested(LIST_RADIUS, 6.)))
+                    .bg(rgba((c.text << 8) | 0x0f))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -451,14 +446,32 @@ impl WelcomeView {
                 .pill
                 .clone()
                 .map(|label| self.pill(&format!("pill:{}", choice.id), &label, window, cx));
-            let quiet = |text: String| {
-                div()
-                    .flex_none()
-                    .text_size(px(12.))
-                    .text_color(rgb(c.secondary))
-                    .child(text)
-            };
-            let raised = actions && selected;
+            // The detail wraps inside the text column rather than run under
+            // the row's pill; the tag sits on its own line start.
+            let subtitle = div()
+                .min_w(px(0.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .text_color(rgb(c.secondary))
+                .children(choice.badge.clone().map(|badge| {
+                    div()
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .bg(rgba((c.accent << 8) | 0x26))
+                        .text_color(rgb(c.accent))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(badge)
+                }))
+                .children(
+                    choice
+                        .detail
+                        .clone()
+                        .map(|detail| div().flex_1().min_w(px(0.)).child(detail)),
+                );
             let row = div()
                 .id(SharedString::from(format!("choice-{}", choice.id)))
                 .debug_selector(|| format!("choice-{id}", id = id.clone()))
@@ -468,19 +481,11 @@ impl WelcomeView {
                 .tab_index(0)
                 .min_h(px(LIST_ROW))
                 .px(px(LIST_INSET))
-                .py(px(9.))
+                .py(px(8.))
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .bg(rgba((c.text << 8) | if raised { 0x17 } else { 0x0b }))
-                .hover_style(|s| s.bg(rgba((c.text << 8) | 0x14)))
-                .when(first, |d| {
-                    d.rounded_tl(px(LIST_RADIUS)).rounded_tr(px(LIST_RADIUS))
-                })
-                .when(last, |d| {
-                    d.rounded_bl(px(LIST_RADIUS)).rounded_br(px(LIST_RADIUS))
-                })
-                .rounded_smoothing(t.radius.smoothing)
+                .hover_style(|s| s.bg(rgba((c.text << 8) | 0x08)))
                 .children(mark)
                 .child(
                     div()
@@ -488,34 +493,23 @@ impl WelcomeView {
                         .min_w(px(0.))
                         .flex()
                         .flex_col()
-                        .gap(px(1.))
+                        .gap(px(2.))
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(14.))
+                                .text_size(px(13.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(c.text))
-                                .child(choice.label.clone())
-                                .children(choice.badge.clone().map(|badge| {
-                                    div()
-                                        .text_size(px(11.))
-                                        .font_weight(FontWeight::NORMAL)
-                                        .text_color(rgb(c.accent))
-                                        .child(badge)
-                                })),
+                                .child(choice.label.clone()),
                         )
-                        .children(choice.detail.clone().map(|detail| {
-                            div()
-                                .text_size(px(12.))
-                                .line_height(relative(1.35))
-                                .text_color(rgb(c.secondary))
-                                .child(detail)
-                        })),
+                        .child(subtitle),
                 )
-                .children(choice.meta.clone().map(quiet))
-                .children(choice.status.clone().map(quiet))
+                .children(choice.status.clone().map(|status| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(rgb(c.secondary))
+                        .child(status)
+                }))
                 .children(pill)
                 .when(selected && !actions, |d| {
                     d.child(crate::symbol::symbol(
@@ -594,34 +588,7 @@ impl WelcomeView {
             .flex_col()
             .items_center()
             .text_center()
-            .child(mark_glyph(24., c.accent));
-        if let Some(at) = frame
-            .outline
-            .as_ref()
-            .and_then(|o| o.current.map(|at| (at, o.steps.len())))
-        {
-            // How far along: a dot a step, the one under way in the accent.
-            let (at, count) = at;
-            column = column.child(
-                div()
-                    .id("welcome-outline")
-                    .debug_selector(|| "welcome-outline".into())
-                    .role(Role::ProgressIndicator)
-                    .aria_label(format!("Step {} of {count}", (at + 1).min(count)))
-                    .mt(px(16.))
-                    .flex()
-                    .gap(px(6.))
-                    .children((0..count).map(|i| {
-                        div().size(px(6.)).rounded_full().bg(if i == at {
-                            rgb(c.accent)
-                        } else if i < at {
-                            rgba((c.text << 8) | 0x8c)
-                        } else {
-                            rgba((c.text << 8) | 0x33)
-                        })
-                    })),
-            );
-        }
+            .child(mark_glyph(26., c.accent));
         column = column
             .child(
                 div()
@@ -629,11 +596,11 @@ impl WelcomeView {
                     .debug_selector(|| "welcome-title".into())
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
-                    .mt(px(14.))
+                    .mt(px(24.))
                     .text_size(px(TITLE_SIZE))
-                    .font_weight(FontWeight::BOLD)
-                    .line_height(relative(1.12))
-                    .letter_spacing(px(-TITLE_SIZE * 0.01))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(relative(1.15))
+                    .letter_spacing(px(-0.4))
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
             )
@@ -642,9 +609,9 @@ impl WelcomeView {
                     .id("welcome-line")
                     .role(Role::Label)
                     .aria_label(frame.line.replace('\n', " "))
-                    .mt(px(10.))
-                    .text_size(px(14.))
-                    .line_height(relative(1.5))
+                    .mt(px(8.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
                     .text_color(rgb(c.secondary))
                     .child(frame.line.clone()),
             );
@@ -753,7 +720,7 @@ impl WelcomeView {
             || frame.note.is_some()
             || frame.details.is_some();
         if has_controls {
-            column = column.child(controls.mt(px(24.)));
+            column = column.child(controls.mt(px(22.)));
         }
         // One primary action, the column's width; the others, and Back, as
         // quiet links under it.
@@ -765,8 +732,9 @@ impl WelcomeView {
         if let Some(button) = primary.cloned() {
             column = column.child(
                 div()
-                    .mt(px(24.))
-                    .w_full()
+                    .mt(px(22.))
+                    .flex()
+                    .justify_center()
                     .child(self.button(&button, window, cx)),
             );
         }
@@ -782,7 +750,7 @@ impl WelcomeView {
         if !links.is_empty() {
             column = column.child(
                 div()
-                    .mt(px(14.))
+                    .mt(px(12.))
                     .flex()
                     .justify_center()
                     .gap(px(18.))
@@ -795,7 +763,6 @@ impl WelcomeView {
                             .aria_label(label.clone())
                             .tab_index(0)
                             .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(c.secondary))
                             .hover_style(|s| s.text_color(rgb(c.text)))
                             .child(label)
@@ -812,8 +779,8 @@ impl WelcomeView {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
-            .pt(px(28.))
+            // The mark at one height on every step; the step under it.
+            .pt(px(LOGO_TOP))
             .child(column);
         let right = div()
             .absolute()
@@ -1425,18 +1392,23 @@ const HALF: f32 = 450.;
 const LEFT_GROUND: u32 = 0x131212;
 const FIELD_LIGHT: u32 = 0xff7a2e;
 const FIELD_DEEP: u32 = 0xa3301a;
-const COLUMN: f32 = 300.;
-const TITLE_SIZE: f32 = 27.;
-const PREVIEW_TOP: f32 = 82.;
-const PREVIEW_HEIGHT: f32 = 476.;
+const COLUMN: f32 = 330.;
+const TITLE_SIZE: f32 = 26.;
+const PREVIEW_LEFT: f32 = 56.;
+const PREVIEW_TOP: f32 = 140.;
 /// The stage's grouped list: its corner (continuous), the row's least
-/// height and side inset, and the cut between rows (the half's ground).
-const LIST_RADIUS: f32 = 16.;
-const LIST_ROW: f32 = 52.;
-const LIST_INSET: f32 = 14.;
-const LIST_CUT: f32 = 2.;
-/// The stage's primary action's height (drawn, headless).
-const PRIMARY_HEIGHT: f32 = 40.;
+/// height and side inset (where the hairlines start), the icons' tile.
+const LIST_RADIUS: f32 = 12.;
+const LIST_ROW: f32 = 50.;
+const LIST_INSET: f32 = 16.;
+const ICON_TILE: f32 = 32.;
+/// The Claude logo's own colour.
+const CLAUDE_ORANGE: u32 = 0xd97757;
+/// The stage's one primary action: an orange capsule, its width and
+/// (drawn, headless) height; the mark's height from the window's top.
+const PRIMARY_WIDTH: f32 = 280.;
+const PRIMARY_HEIGHT: f32 = 36.;
+const LOGO_TOP: f32 = 104.;
 
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
 /// under Reduce Motion. Also the kit's indeterminate progress row.
@@ -1511,6 +1483,7 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
         static IMAGES: RefCell<HashMap<String, Option<(std::sync::Arc<RenderImage>, (u32, u32))>>> = RefCell::default();
     }
     let bytes: &'static [u8] = match id {
+        "welcome" => include_bytes!("../assets/onboarding/welcome.png"),
         "workspace" => include_bytes!("../assets/onboarding/workspace.png"),
         "timeline-layers" => include_bytes!("../assets/onboarding/timeline-layers.png"),
         "timeline-tracks" => include_bytes!("../assets/onboarding/timeline-tracks.png"),
@@ -1538,35 +1511,29 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
             .or_insert_with(decode)
             .clone()
     })?;
-    // The pictures are drawn at two pixels a point. Each is shown at a
-    // height that keeps what it is about inside the field: the agent panel
-    // whole, a timeline's names and the clips beside them, the workspace's
-    // first panels.
+    // The pictures are drawn at two pixels a point and shown at that size,
+    // the product at its own scale, running off the field's right and
+    // bottom edges as Arc's browser does.
     let (w, h) = (w as f32 / 2., h as f32 / 2.);
     let _ = window;
-    let (shown, left) = match id {
-        "agent" => (PREVIEW_HEIGHT, 72.),
-        "workspace" => (330., 36.),
-        _ => (300., 36.),
-    };
-    let scale = shown / h;
-    let (dw, dh) = (w * scale, h * scale);
-    let top = (PREVIEW_TOP + (PREVIEW_HEIGHT - dh) / 2.).max(PREVIEW_TOP);
     Some(
         div()
             .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(dw))
-            .h(px(dh))
-            .rounded(px(12.))
+            // A timeline starts further left: its names and its clips.
+            .left(px(if id.starts_with("timeline") || id == "agent" {
+                24.
+            } else {
+                PREVIEW_LEFT
+            }))
+            .top(px(PREVIEW_TOP))
+            .w(px(w))
+            .h(px(h))
+            .rounded_tl(px(10.))
             .overflow_hidden()
-            .border_1()
-            .border_color(rgba(0xffffff_2e))
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.45).into(),
-                offset: point(px(0.), px(18.)),
-                blur_radius: px(48.),
+                color: hsla(0., 0., 0., 0.4).into(),
+                offset: point(px(0.), px(12.)),
+                blur_radius: px(40.),
                 spread_radius: px(0.),
                 inset: false,
             }])

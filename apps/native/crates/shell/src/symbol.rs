@@ -154,65 +154,6 @@ fn draw(
     Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
 }
 
-/// The icon of the installed app `name` (`Claude` for Claude.app), as the
-/// Finder shows it, `points` square at `scale`. `None` when it isn't
-/// installed. Settings › Agents shows agent apps the same way: their artwork
-/// is the installed app's own, never bundled.
-pub fn app_icon(name: &str, points: f32, scale: f32) -> Option<Arc<RenderImage>> {
-    thread_local! {
-        static ICONS: RefCell<HashMap<(String, u32, u32), Option<Arc<RenderImage>>>> = RefCell::default();
-    }
-    let key = (name.to_owned(), points.to_bits(), scale.to_bits());
-    if let Some(hit) = ICONS.with(|c| c.borrow().get(&key).cloned()) {
-        return hit;
-    }
-    let draw = || {
-        let workspace = NSWorkspace::sharedWorkspace();
-        #[allow(deprecated)]
-        let path = workspace.fullPathForApplication(&NSString::from_str(&format!("{name}.app")))?;
-        // A missing bundle would give the generic app icon.
-        objc2_foundation::NSBundle::bundleWithPath(&path)?.bundleIdentifier()?;
-        let icon = workspace.iconForFile(&path);
-        let side = (points * scale).ceil().max(1.) as isize;
-        let rep = unsafe {
-            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-                NSBitmapImageRep::alloc(), std::ptr::null_mut(), side, side, 8, 4, true, false,
-                NSDeviceRGBColorSpace, side * 4, 32,
-            )?
-        };
-        let rep = rep.bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())?;
-        let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
-        NSGraphicsContext::saveGraphicsState_class();
-        NSGraphicsContext::setCurrentContext(Some(&ctx));
-        icon.drawInRect(NSRect::new(
-            NSPoint::ZERO,
-            NSSize::new(side as f64, side as f64),
-        ));
-        ctx.flushGraphics();
-        NSGraphicsContext::restoreGraphicsState_class();
-        let data = rep.bitmapData();
-        if data.is_null() {
-            return None;
-        }
-        let mut pixels =
-            unsafe { std::slice::from_raw_parts(data, (side * side * 4) as usize) }.to_vec();
-        for p in pixels.chunks_exact_mut(4) {
-            let a = p[3];
-            if a > 0 && a < 255 {
-                for c in &mut p[..3] {
-                    *c = ((*c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
-                }
-            }
-            p.swap(0, 2);
-        }
-        let buffer = image::RgbaImage::from_raw(side as u32, side as u32, pixels)?;
-        Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
-    };
-    let image = draw();
-    ICONS.with(|c| c.borrow_mut().insert(key, image.clone()));
-    image
-}
-
 /// An SF Symbol element `points` square, tinted `color`. Draws nothing (but
 /// keeps its size) when the symbol is unavailable.
 pub fn symbol(name: &str, points: f32, weight: Weight, color: u32, window: &Window) -> AnyElement {
