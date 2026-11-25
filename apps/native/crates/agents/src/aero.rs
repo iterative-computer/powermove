@@ -38,10 +38,49 @@ pub trait Session: Send {
         input: &str,
         approve: &mut dyn FnMut(&str) -> bool,
     ) -> Result<ToolResult, String>;
-    fn failures(&mut self) -> Vec<String>;
+    fn failures(&mut self) -> Vec<Failure>;
     fn finish(&mut self) -> Result<(), String>;
     /// The flag Stop sets: the session starts no new mutation once it is set.
     fn halt(&mut self, _flag: Arc<AtomicBool>) {}
+    /// A fresh prompt starts in this session (a queued one after a finished
+    /// turn): what the last turn's own edits introduced is no longer this
+    /// turn's to repair. Gate continuations are the same turn.
+    fn begin(&mut self) {}
+}
+
+/// Why the completion gate still fails. The person is told only `kind`,
+/// counted; `detail` goes to the model, never to the panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Failure {
+    pub kind: Failing,
+    pub detail: String,
+}
+
+/// The fixed categories a person sees when the gate gives up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Failing {
+    HiddenLayer,
+    BlankFrames,
+    ProjectProblem,
+    PlanCheck,
+    Drafts,
+    Extension,
+    Unchecked,
+}
+
+impl Failing {
+    fn named(self, count: usize) -> &'static str {
+        let (one, many) = match self {
+            Failing::HiddenLayer => ("hidden layer", "hidden layers"),
+            Failing::BlankFrames => ("blank range", "blank ranges"),
+            Failing::ProjectProblem => ("project problem", "project problems"),
+            Failing::PlanCheck => ("plan check", "plan checks"),
+            Failing::Drafts => ("unpublished draft", "unpublished drafts"),
+            Failing::Extension => ("extension that didn't load", "extensions that didn't load"),
+            Failing::Unchecked => ("check that couldn't run", "checks that couldn't run"),
+        };
+        if count == 1 { one } else { many }
+    }
 }
 
 pub struct ToolResult {
@@ -261,6 +300,31 @@ fn plain(message: &str) -> String {
     }
 }
 
+/// The end of a turn whose completion checks still fail after the last
+/// repair round, for the panel and Details: a fixed sentence with counts
+/// of fixed categories. No check text, layer name or plan wording reaches
+/// it, so nothing a project or model wrote can.
+fn unfinished(failures: &[Failure]) -> String {
+    let mut counts = BTreeMap::new();
+    for failure in failures {
+        *counts.entry(failure.kind).or_insert(0usize) += 1;
+    }
+    let kinds = counts
+        .iter()
+        .map(|(kind, count)| format!("{count} {}", kind.named(*count)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let total = failures.len();
+    format!(
+        "Powermove stopped before its checks passed: {total} {} ({kinds}). Review the result before you continue.",
+        if total == 1 {
+            "problem remains"
+        } else {
+            "problems remain"
+        }
+    )
+}
+
 enum Callback {
     Tool(ToolLease),
     Hook(HookLease),
@@ -352,6 +416,7 @@ type WorkerAnswer = (ToolLease, Result<ToolResult, String>);
 enum Work {
     Tool(ToolLease),
     Check,
+    Begin,
 }
 
 /// What a session open found: a turn the last host left open, and the
@@ -576,18 +641,25 @@ fn drive(
         use sha2::{Digest, Sha256};
         let mut captures = BTreeMap::new();
         while let Ok(work) = tool_rx.recv() {
-            let Work::Tool(tool) = work else {
-                if checks_tx
-                    .send(if skip_gate {
-                        Vec::new()
-                    } else {
-                        session.failures()
-                    })
-                    .is_err()
-                {
-                    break;
+            let tool = match work {
+                Work::Tool(tool) => tool,
+                Work::Begin => {
+                    session.begin();
+                    continue;
                 }
-                continue;
+                Work::Check => {
+                    if checks_tx
+                        .send(if skip_gate {
+                            Vec::new()
+                        } else {
+                            session.failures()
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
             };
             let name = tool.name();
             let item = format!("aero-approval-{}", tool.call());
@@ -971,6 +1043,9 @@ fn drive(
         // or the person's prompt after a resumed turn.
         if completed && let Some((message, next)) = pending.pop_front() {
             text.clear();
+            tool_tx
+                .send(Work::Begin)
+                .map_err(|_| "Powermove's tool worker stopped.")?;
             turn = runtime.prompt(&next, &message).map_err(err)?;
             current = message;
             outcome = None;
@@ -979,18 +1054,18 @@ fn drive(
             journal.save_pending(&pending)?;
         }
         if let Ok(failures) = checks.try_recv() {
+            let details: Vec<_> = failures.iter().map(|f| f.detail.as_str()).collect();
             let prompt = || {
                 format!(
-                    "Completion checks failed. Repair the following issues before finishing:\n{}",
-                    failures.join("\n")
+                    "Completion checks failed. Your own work in this turn left these problems. Adjust your own edits within the request; if a fix would change something the person did not ask about, ask them instead:\n- {}",
+                    details.join("\n- ")
                 )
             };
-            let not_done = || format!("Not done: {}", failures.join(" "));
             if let Some(question) = stop_hook.take() {
                 if failures.is_empty() || stopped.is_some() {
                     answer_hook(question, HookAnswer::Allow)?;
                 } else if question.continuations() < options.continuations {
-                    report(json!({"type":"gate-continuation","failures":failures}));
+                    report(json!({"type":"gate-continuation","failures":details}));
                     emit(Event::Progress {
                         run: run.clone(),
                         text: "Checking and repairing the result…".into(),
@@ -1000,7 +1075,7 @@ fn drive(
                 } else {
                     // The core asks once more after the last continuation;
                     // that ask can only end the turn.
-                    gate_exhausted = Some(not_done());
+                    gate_exhausted = Some(unfinished(&failures));
                     answer_hook(question, HookAnswer::Allow)?;
                 }
             }

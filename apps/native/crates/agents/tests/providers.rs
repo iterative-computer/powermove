@@ -943,7 +943,7 @@ impl aero::Session for Quiet {
     ) -> Result<aero::ToolResult, String> {
         Ok(aero::ToolResult::text("ok"))
     }
-    fn failures(&mut self) -> Vec<String> {
+    fn failures(&mut self) -> Vec<aero::Failure> {
         vec![]
     }
     fn finish(&mut self) -> Result<(), String> {

@@ -22,6 +22,8 @@ pub use settings::{RESOLUTIONS, set_notification_status};
 /// their next tick; the panic itself was reported where it happened.
 pub(crate) trait LockShared<T: ?Sized> {
     fn shared(&self) -> std::sync::MutexGuard<'_, T>;
+    /// [`Self::shared`] without waiting: None while another holder has it.
+    fn try_shared(&self) -> Option<std::sync::MutexGuard<'_, T>>;
 }
 impl<T: ?Sized> LockShared<T> for std::sync::Mutex<T> {
     fn shared(&self) -> std::sync::MutexGuard<'_, T> {
@@ -29,6 +31,16 @@ impl<T: ?Sized> LockShared<T> for std::sync::Mutex<T> {
             self.clear_poison();
             poisoned.into_inner()
         })
+    }
+    fn try_shared(&self) -> Option<std::sync::MutexGuard<'_, T>> {
+        match self.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                self.clear_poison();
+                Some(poisoned.into_inner())
+            }
+        }
     }
 }
 #[cfg(test)]
@@ -1074,15 +1086,37 @@ impl Builtins {
         self.agent_status();
         self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.clone()
     }
-    pub fn agent_launcher_switch(&self, id: &str) -> std::result::Result<(), String> {
-        let (agent, link) = self.agent_state()?;
+    /// The launcher's task switch, for the main thread: it never waits.
+    /// `Ok(false)` while the Agent panel's state is busy (a launch can hold
+    /// it while its completion waits on the shared tool host behind an
+    /// agent's project check); the caller tries again on a later frame.
+    pub fn agent_launcher_try_switch(&self, id: &str) -> std::result::Result<bool, String> {
+        let closed = || "The Agent panel closed.".to_owned();
+        let Some(entries) = self.broker.entries.try_shared() else {
+            return Ok(false);
+        };
+        let entry = entries.get("agent").cloned().ok_or_else(closed)?;
+        drop(entries);
+        let Some(backend) = entry.try_shared().map(|entry| entry.backend.clone()) else {
+            return Ok(false);
+        };
+        let Some(backend) = backend.try_shared() else {
+            return Ok(false);
+        };
+        let agent = backend.native.agent.clone().ok_or_else(closed)?;
+        let link = backend.native.agent_link.clone();
+        drop(backend);
         {
-            let mut state = agent.shared();
-            if state.panel.active_id() == id { return Ok(()); }
+            let Some(mut state) = agent.try_shared() else {
+                return Ok(false);
+            };
+            if state.panel.active_id() == id {
+                return Ok(true);
+            }
             state.panel.switch(id).map_err(|e| e.to_string())?;
         }
         link.publish_now();
-        Ok(())
+        Ok(true)
     }
     /// Adding the effect `definition` to `layer` at `time` as the Effects
     /// panel `panel` adds one (its definitions, extensions' included): the
