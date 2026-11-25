@@ -1,12 +1,13 @@
 //! AppKit presentation of the Settings panel's semantic tree. The panel
 //! still owns its values, search results, actions and change listeners.
 mod agent_app_icons;
+mod previews;
 
 use crate::{session::Controller, v4_compile::number_facts};
 use gpui::Context;
 use gpui_macos::native_text::{NativeTextSlot, TextEvent};
 use objc2::{
-    AllocAnyThread, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
+    AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
     runtime::ProtocolObject,
 };
 use objc2_app_kit::*;
@@ -23,12 +24,17 @@ use std::{
     rc::Rc,
 };
 
-const PAGE_INSET: f64 = 20.;
+/// The page's side inset (the header's tile starts on the same line).
+const PAGE_INSET: f64 = pm_shell::settings_window::PAGE_INSET;
+/// Air above the first card (the header sits in the title bar's band) and
+/// under the last.
+const PAGE_TOP: f64 = 4.;
+const PAGE_BOTTOM: f64 = 24.;
 const PAGE_MAX_WIDTH: f64 = 640.;
-const SECTION_SPACING: f64 = 20.;
-const ROW_INSET: f64 = 18.;
-const ROW_PADDING: f64 = 8.;
-const ROW_HEIGHT: f64 = 44.;
+const SECTION_SPACING: f64 = 18.;
+const ROW_INSET: f64 = 14.;
+const ROW_PADDING: f64 = 7.;
+const ROW_HEIGHT: f64 = 40.;
 const GROUP_RADIUS: f64 = 12.;
 const LABEL_SIZE: f64 = 13.;
 const FOOTER_SIZE: f64 = 11.;
@@ -53,7 +59,13 @@ impl Form {
             unsafe { msg_send![SettingsDocument::alloc(mtm), init] };
         wrapper.setTranslatesAutoresizingMaskIntoConstraints(false);
         set_document(scroll, &wrapper);
-        let document = Pile::new(mtm, false, SECTION_SPACING, 0., PAGE_INSET);
+        let document = Pile::new(mtm, false, SECTION_SPACING, 0., 0.);
+        document.stack.setEdgeInsets(NSEdgeInsets {
+            top: PAGE_TOP,
+            left: 0.,
+            bottom: PAGE_BOTTOM,
+            right: 0.,
+        });
         wrapper.addSubview(&document.stack);
         let available = -2. * PAGE_INSET;
         let fill = document
@@ -144,7 +156,9 @@ impl Form {
             tokens,
             tx,
         );
-        reload.view().setTranslatesAutoresizingMaskIntoConstraints(false);
+        reload
+            .view()
+            .setTranslatesAutoresizingMaskIntoConstraints(false);
         self.document.set(&[label, reload.view().retain()]);
         self.memory_reload = Some(reload);
         cx.spawn(async move |owner, cx| {
@@ -242,7 +256,7 @@ impl Form {
         self.document.stack.layoutSubtreeIfNeeded();
         let clip = self.scroll.contentView();
         let rect = view.convertRect_toView(view.bounds(), Some(&clip));
-        clip.scrollToPoint(NSPoint::new(0., rect.origin.y - PAGE_INSET));
+        clip.scrollToPoint(NSPoint::new(0., (rect.origin.y - PAGE_TOP).max(0.)));
         self.scroll.reflectScrolledClipView(&clip);
         self.reveal = None;
     }
@@ -311,7 +325,9 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                         && Component::of(node) == Some(Component::SegmentedControl)
                 }) {
                     let form = form.borrow();
-                    let control = form.widgets.get(&filter.id)
+                    let control = form
+                        .widgets
+                        .get(&filter.id)
                         .and_then(|widget| widget.view().downcast_ref::<NSSegmentedControl>())
                         .context("Settings status filter needs the system segmented control")?;
                     let (_, selected, _) = control_value(
@@ -324,7 +340,13 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                         "Settings status filter lost its selected segment",
                     );
                 }
-                capture_row_titles(&form.borrow(), &publication.surface, &name, theme, "initial");
+                capture_row_titles(
+                    &form.borrow(),
+                    &publication.surface,
+                    &name,
+                    theme,
+                    "initial",
+                );
                 appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
                     scroll.setNeedsLayout(true);
                     scroll.layoutSubtreeIfNeeded();
@@ -350,24 +372,38 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                     )
                 }
                 .context("encode Settings bitmap")?;
-                std::fs::write(output.join(format!("settings-{name}-{theme}.png")), unsafe {
-                    png.as_bytes_unchecked()
-                })?;
+                std::fs::write(
+                    output.join(format!("settings-{name}-{theme}.png")),
+                    unsafe { png.as_bytes_unchecked() },
+                )?;
                 Ok(())
             })?;
         }
     }
-    anyhow::ensure!(hidden_titles == 0, "Settings review found {hidden_titles} unusable row titles");
+    anyhow::ensure!(
+        hidden_titles == 0,
+        "Settings review found {hidden_titles} unusable row titles"
+    );
     Ok(())
 }
 
 /// Regresses the leading labels on the same AppKit view tree the capture paints.
 #[cfg(debug_assertions)]
-fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str, pass: &str) -> usize {
+fn capture_row_titles(
+    form: &Form,
+    surface: &Surface,
+    fixture: &str,
+    theme: &str,
+    pass: &str,
+) -> usize {
     let mut unusable = 0;
     for expected in ["Sign-Ins from the Original App", "Powermove Store"] {
         let field = form.widgets.iter().find_map(|(id, widget)| match widget {
-            Widget::Label(field) if surface.node(*id).is_some_and(|node| text(surface, node) == expected) => {
+            Widget::Label(field)
+                if surface
+                    .node(*id)
+                    .is_some_and(|node| text(surface, node) == expected) =>
+            {
                 Some(field)
             }
             _ => None,
@@ -391,12 +427,20 @@ fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str
                 ancestor = unsafe { view.superview() };
             }
             record["stringValue"] = json!(value);
-            record["frame"] = json!([frame.origin.x,frame.origin.y,frame.size.width,frame.size.height]);
+            record["frame"] = json!([
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height
+            ]);
             record["hidden"] = json!(hidden);
             record["alpha"] = json!(alpha);
             record["requiredWidth"] = json!(required_width);
-            value == expected && !hidden && alpha > 0.
-                && frame.size.width + 1. >= required_width && frame.size.height > 1.
+            value == expected
+                && !hidden
+                && alpha > 0.
+                && frame.size.width + 1. >= required_width
+                && frame.size.height > 1.
         });
         record["usable"] = json!(visible);
         eprintln!("SETTINGS_ROW_TITLE {record}");
@@ -636,6 +680,10 @@ fn flexible_space(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
 struct Row {
     body: Pile,
     line: Pile,
+    /// The title with its ⓘ, when the row has help, held to the leading
+    /// edge by a space after them.
+    title_line: Pile,
+    title_space: Retained<NSView>,
     space: Retained<NSView>,
     app: Option<agent_app_icons::LeadingIcon>,
     app_copy: Option<Pile>,
@@ -665,6 +713,8 @@ impl Row {
         Self {
             body,
             line,
+            title_line: Pile::new(mtm, true, 5., 0., 0.),
+            title_space: flexible_space(mtm),
             space: flexible_space(mtm),
             app,
             app_copy: agent_app.map(|_| Pile::new(mtm, false, 2., 0., 0.)),
@@ -709,7 +759,8 @@ impl Row {
             }
             views.extend(trailing);
             self.line.set(&views);
-            self.body.set(&[Retained::into_super(self.line.stack.clone())]);
+            self.body
+                .set(&[Retained::into_super(self.line.stack.clone())]);
             return;
         }
         views.push(self.space.clone());
@@ -875,6 +926,10 @@ enum Widget {
         resource: Rc<std::cell::RefCell<Option<String>>>,
     },
     Secure(Retained<NSSecureTextField>),
+    /// ⓘ beside a row's title: its explanation as a help tag and, clicked,
+    /// in a popover.
+    Help(Retained<NSButton>),
+    Picker(Picker),
 }
 
 impl Widget {
@@ -891,6 +946,8 @@ impl Widget {
             Self::Progress(value) => value,
             Self::Image { view, .. } => view,
             Self::Secure(value) => value,
+            Self::Help(value) => value,
+            Self::Picker(value) => &value.stack,
         }
     }
 }
@@ -933,10 +990,38 @@ impl Render<'_, '_> {
                 for child in node.children.iter().filter_map(|id| self.surface.node(*id)) {
                     match self::layout(child) {
                         "copy" => {
-                            let mut contents = self.children(&child.children).into_iter();
-                            leading = contents.next();
-                            footers.extend(contents);
+                            let mut title = None;
+                            let mut help = vec![];
+                            for (i, &part) in child.children.iter().enumerate() {
+                                let help_part = self
+                                    .surface
+                                    .node(part)
+                                    .is_some_and(|n| self::layout(n) == "help");
+                                let Some(view) = self.node(part) else {
+                                    continue;
+                                };
+                                if i == 0 {
+                                    title = Some(view);
+                                } else if help_part {
+                                    help.push(view);
+                                } else {
+                                    footers.push(view);
+                                }
+                            }
+                            leading = match title {
+                                Some(title) if !help.is_empty() => {
+                                    let line = std::iter::once(title)
+                                        .chain(help)
+                                        .chain([row.title_space.clone()])
+                                        .collect::<Vec<_>>();
+                                    row.title_line.set(&line);
+                                    Some(Retained::into_super(row.title_line.stack.clone()))
+                                }
+                                title => title,
+                            };
                         }
+                        // A visual picker runs the card's width under the title.
+                        _ if has_picker(self.surface, child) => footers.extend(self.node(child.id)),
                         "nameButton" => leading = self.node(child.id),
                         "error" => footers.extend(self.node(child.id)),
                         _ => trailing.extend(self.node(child.id)),
@@ -1003,6 +1088,17 @@ impl Render<'_, '_> {
                 }
             }
             Widget::Secure(field) => field.setEnabled(!disabled(node)),
+            Widget::Help(button) => {
+                let help = NSString::from_str(&text(self.surface, node));
+                if button.toolTip().as_deref() != Some(&*help) {
+                    button.setToolTip(Some(&help));
+                    button.setAccessibilityHelp(Some(&help));
+                }
+            }
+            Widget::Picker(picker) => {
+                let (_, value, _) = control_value(self.surface, node, component);
+                picker.update(value.as_u64().map(|v| v as usize), disabled(node));
+            }
             Widget::Image { view, resource } => {
                 let key = node.props.get("resource").and_then(Value::as_str);
                 if let Some(key) = key.filter(|key| resource.borrow().as_deref() != Some(*key))
@@ -1031,35 +1127,42 @@ impl Render<'_, '_> {
             let (tx, rx) = async_channel::unbounded();
             let (id, generation) = (node.id, self.generation);
             if let Some(cx) = self.cx.as_deref_mut() {
-                cx
-                    .spawn(async move |owner, cx| {
-                        while let Ok(mut range) = rx.recv().await {
-                            while let Ok(latest) = rx.try_recv() {
-                                range = latest;
-                            }
-                            if owner
-                                .update(cx, |owner, cx| {
-                                    if owner.settings_node(generation, id).is_some() {
-                                        owner.settings_event(
-                                            id,
-                                            "rangechange",
-                                            EventDetail {
-                                                range: Some(range),
-                                                ..Default::default()
-                                            },
-                                            cx,
-                                        );
-                                    }
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
+                cx.spawn(async move |owner, cx| {
+                    while let Ok(mut range) = rx.recv().await {
+                        while let Ok(latest) = rx.try_recv() {
+                            range = latest;
                         }
-                    })
-                    .detach();
+                        if owner
+                            .update(cx, |owner, cx| {
+                                if owner.settings_node(generation, id).is_some() {
+                                    owner.settings_event(
+                                        id,
+                                        "rangechange",
+                                        EventDetail {
+                                            range: Some(range),
+                                            ..Default::default()
+                                        },
+                                        cx,
+                                    );
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
             }
             return Widget::Virtual(VirtualList::new(mtm, tx));
+        }
+        if layout(node) == "help" {
+            return Widget::Help(help_button(mtm, &text(self.surface, node)));
+        }
+        if component == Some(Component::SegmentedControl)
+            && let Some(kind) = metadata(node)["picker"].as_str()
+        {
+            return self.picker(node, kind);
         }
         match component {
             Some(Component::FormGroup) => return Widget::Group(Group::new(mtm)),
@@ -1226,20 +1329,19 @@ impl Render<'_, '_> {
         }
         let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
-            cx
-                .spawn(async move |owner, cx| {
-                    while let Ok(value) = rx.recv().await {
-                        if owner
-                            .update(cx, |owner, cx| {
-                                owner.settings_control(generation, id, kind, value, cx);
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
+            cx.spawn(async move |owner, cx| {
+                while let Ok(value) = rx.recv().await {
+                    if owner
+                        .update(cx, |owner, cx| {
+                            owner.settings_control(generation, id, kind, value, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
-                })
-                .detach();
+                }
+            })
+            .detach();
         }
         Widget::Control(control)
     }
@@ -1268,23 +1370,22 @@ impl Render<'_, '_> {
         let weak = Rc::downgrade(&slot);
         let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
-            cx
-                .spawn(async move |owner, cx| {
-                    while rx.recv().await.is_ok() {
-                        let Some(slot) = weak.upgrade() else { break };
-                        for event in slot.take_events() {
-                            if owner
-                                .update(cx, |owner, cx| {
-                                    owner.settings_text(generation, id, &slot, event, cx);
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
+            cx.spawn(async move |owner, cx| {
+                while rx.recv().await.is_ok() {
+                    let Some(slot) = weak.upgrade() else { break };
+                    for event in slot.take_events() {
+                        if owner
+                            .update(cx, |owner, cx| {
+                                owner.settings_text(generation, id, &slot, event, cx);
+                            })
+                            .is_err()
+                        {
+                            return;
                         }
                     }
-                })
-                .detach();
+                }
+            })
+            .detach();
         }
         let container = if let Some(unit) = node.props.get("unit").and_then(Value::as_str) {
             let label = NSTextField::labelWithString(&NSString::from_str(unit), field.mtm());
@@ -1369,7 +1470,11 @@ fn control_value(
     (Some(kind), value, options)
 }
 
-fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> Retained<NSTextField> {
+fn text_label(
+    mtm: objc2::MainThreadMarker,
+    surface: &Surface,
+    node: &Node,
+) -> Retained<NSTextField> {
     let heading = node.props.get("role").and_then(Value::as_str) == Some("heading");
     let style = layout(node);
     let title = NSString::from_str(&node.text);
@@ -1377,14 +1482,21 @@ fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> R
         .props
         .get("style")
         .and_then(|style| style.get("whiteSpace"))
-        .and_then(Value::as_str) == Some("nowrap");
+        .and_then(Value::as_str)
+        == Some("nowrap");
     // Row titles sit beside controls. A wrapping label has no intrinsic
     // width, so the spacer can take all its drawable width on a later pass.
-    let row_title = node.parent.and_then(|id| surface.node(id)).is_some_and(|copy| {
-        layout(copy) == "copy"
-            && copy.children.first() == Some(&node.id)
-            && copy.parent.and_then(|id| surface.node(id)).is_some_and(|row| layout(row) == "row")
-    });
+    let row_title = node
+        .parent
+        .and_then(|id| surface.node(id))
+        .is_some_and(|copy| {
+            layout(copy) == "copy"
+                && copy.children.first() == Some(&node.id)
+                && copy
+                    .parent
+                    .and_then(|id| surface.node(id))
+                    .is_some_and(|row| layout(row) == "row")
+        });
     let field = if nowrap || row_title {
         let field = NSTextField::labelWithString(&title, mtm);
         field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
@@ -1413,7 +1525,8 @@ fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> R
     }
     if style == "error" {
         field.setTextColor(Some(&NSColor::systemRedColor()));
-    } else if matches!(style, "footer" | "secondary" | "mutedHeading") {
+    } else if heading || matches!(style, "footer" | "secondary" | "mutedHeading") {
+        // A group's name over its card stays quiet: the rows carry the page.
         field.setTextColor(Some(&NSColor::secondaryLabelColor()));
     }
     field
@@ -1435,8 +1548,12 @@ fn settings_image(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImage
     image_view.setImage(image.as_deref());
     image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     constraints(&[
-        image_view.widthAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 100. }),
-        image_view.heightAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 56. }),
+        image_view
+            .widthAnchor()
+            .constraintEqualToConstant(if glyph { LABEL_SIZE } else { 100. }),
+        image_view
+            .heightAnchor()
+            .constraintEqualToConstant(if glyph { LABEL_SIZE } else { 56. }),
     ]);
     image_view
 }
@@ -1584,11 +1701,7 @@ impl Controller {
         let Some(node) = p.surface.node(id).filter(|node| !disabled(node)) else {
             return;
         };
-        let (generation, revision, semantic) = (
-            p.generation,
-            p.surface.revision(),
-            semantic(node),
-        );
+        let (generation, revision, semantic) = (p.generation, p.surface.revision(), semantic(node));
         let listen = node.listeners.contains_key(event);
         let binding = node
             .props
@@ -1615,5 +1728,268 @@ impl Controller {
             }
         })
         .detach();
+    }
+}
+
+/// Whether `node` (a row's trailing part) holds a visual picker.
+fn has_picker(surface: &Surface, node: &Node) -> bool {
+    metadata(node)["picker"].is_string()
+        || node
+            .children
+            .iter()
+            .filter_map(|id| surface.node(*id))
+            .any(|child| has_picker(surface, child))
+}
+
+define_class!(
+    /// Shows a row's explanation in a popover from its ⓘ.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsHelp"]
+    struct HelpTarget;
+
+    impl HelpTarget {
+        #[unsafe(method(show:))]
+        fn show(&self, sender: &NSButton) {
+            if let Some(text) = sender.toolTip() {
+                show_help(sender, &text);
+            }
+        }
+    }
+);
+
+thread_local! {
+    static HELP: Retained<HelpTarget> = {
+        let mtm = objc2::MainThreadMarker::new().expect("Settings runs on the main thread");
+        unsafe { msg_send![super(HelpTarget::alloc(mtm).set_ivars(())), init] }
+    };
+}
+
+/// ⓘ: a borderless button with the system's info symbol (AppKit draws it in
+/// a real control), its explanation as the help tag.
+fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("info.circle"),
+        Some(&NSString::from_str("More Info")),
+    )
+    .and_then(|image| {
+        image.imageWithSymbolConfiguration(
+            &NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
+                12.,
+                unsafe { NSFontWeightRegular },
+                NSImageSymbolScale::Medium,
+            ),
+        )
+    });
+    let button = HELP.with(|target| unsafe {
+        NSButton::buttonWithImage_target_action(
+            &image.unwrap_or_else(NSImage::new),
+            Some(target),
+            Some(objc2::sel!(show:)),
+            mtm,
+        )
+    });
+    button.setBordered(false);
+    button.setContentTintColor(Some(&NSColor::tertiaryLabelColor()));
+    button.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let help = NSString::from_str(help);
+    button.setToolTip(Some(&help));
+    button.setAccessibilityLabel(Some(&NSString::from_str("More Info")));
+    button.setAccessibilityHelp(Some(&help));
+    button
+}
+
+/// The explanation in a transient popover under its ⓘ.
+fn show_help(anchor: &NSButton, text: &NSString) {
+    let mtm = anchor.mtm();
+    let label = NSTextField::wrappingLabelWithString(text, mtm);
+    label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE - 1.)));
+    label.setPreferredMaxLayoutWidth(260.);
+    label.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let content = NSView::new(mtm);
+    content.addSubview(&label);
+    constraints(&[
+        label
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.),
+        label
+            .trailingAnchor()
+            .constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.),
+        label
+            .topAnchor()
+            .constraintEqualToAnchor_constant(&content.topAnchor(), 10.),
+        label
+            .bottomAnchor()
+            .constraintEqualToAnchor_constant(&content.bottomAnchor(), -10.),
+        label
+            .widthAnchor()
+            .constraintLessThanOrEqualToConstant(260.),
+    ]);
+    let controller = NSViewController::new(mtm);
+    controller.setView(&content);
+    let popover = NSPopover::new(mtm);
+    popover.setBehavior(NSPopoverBehavior::Transient);
+    popover.setContentViewController(Some(&controller));
+    popover.setContentSize(content.fittingSize());
+    popover.showRelativeToRect_ofView_preferredEdge(
+        anchor.bounds(),
+        anchor,
+        objc2_foundation::NSRectEdge::MaxY,
+    );
+}
+
+define_class!(
+    /// Sends the picked option's index.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsPicker"]
+    #[ivars = async_channel::Sender<Value>]
+    struct PickerTarget;
+
+    impl PickerTarget {
+        #[unsafe(method(choose:))]
+        fn choose(&self, sender: &NSButton) {
+            let _ = self.ivars().try_send(json!(sender.tag()));
+        }
+    }
+);
+
+/// A visual picker: each option its picture over its name; the chosen one
+/// ringed, its name in the label colour.
+struct Picker {
+    stack: Retained<NSStackView>,
+    buttons: Vec<Retained<NSButton>>,
+    kind: String,
+    options: Vec<String>,
+    names: Vec<String>,
+    selected: Option<Option<usize>>,
+    _target: Retained<PickerTarget>,
+}
+
+impl Picker {
+    fn update(&mut self, selected: Option<usize>, disabled: bool) {
+        for button in &self.buttons {
+            button.setEnabled(!disabled);
+        }
+        if self.selected == Some(selected) {
+            return;
+        }
+        self.selected = Some(selected);
+        for (i, button) in self.buttons.iter().enumerate() {
+            let on = selected == Some(i);
+            button.setImage(previews::image(&self.kind, &self.options[i], on).as_deref());
+            let font = if on {
+                NSFont::systemFontOfSize_weight(FOOTER_SIZE + 1., unsafe { NSFontWeightSemibold })
+            } else {
+                NSFont::systemFontOfSize(FOOTER_SIZE + 1.)
+            };
+            let colour = if on {
+                NSColor::labelColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            let attributes =
+                objc2_foundation::NSDictionary::<NSString, objc2::runtime::AnyObject>::from_slices(
+                    &[unsafe { NSFontAttributeName }, unsafe {
+                        NSForegroundColorAttributeName
+                    }],
+                    &[font.as_ref(), colour.as_ref()],
+                );
+            // The attributes are a font and a colour, as AppKit expects.
+            let title = unsafe {
+                objc2_foundation::NSAttributedString::new_with_attributes(
+                    &NSString::from_str(&self.names[i]),
+                    &attributes,
+                )
+            };
+            button.setAttributedTitle(&title);
+            // A radio button's value is a number: 1 chosen, 0 not.
+            unsafe {
+                button.setAccessibilityValue(Some(&objc2_foundation::NSNumber::new_bool(on)))
+            };
+        }
+    }
+}
+
+impl Render<'_, '_> {
+    fn picker(&mut self, node: &Node, kind: &str) -> Widget {
+        let mtm = self.scroll.mtm();
+        let (tx, rx) = async_channel::unbounded();
+        let target: Retained<PickerTarget> =
+            unsafe { msg_send![super(PickerTarget::alloc(mtm).set_ivars(tx)), init] };
+        let stack = NSStackView::new(mtm);
+        stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        stack.setAlignment(NSLayoutAttribute::Top);
+        stack.setSpacing(10.);
+        stack.setEdgeInsets(NSEdgeInsets {
+            top: 6.,
+            left: 0.,
+            bottom: 2.,
+            right: 0.,
+        });
+        stack.setTranslatesAutoresizingMaskIntoConstraints(false);
+        stack.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioGroupRole }));
+        stack.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
+        let mut buttons = vec![];
+        let mut options = vec![];
+        let mut names = vec![];
+        for (i, child) in node
+            .children
+            .iter()
+            .filter_map(|id| self.surface.node(*id))
+            .enumerate()
+        {
+            // A segment's id ends with its option's ("…:dark").
+            let option = semantic(child)
+                .and_then(|id| id.rsplit(':').next())
+                .unwrap_or_default();
+            let name = label(child).to_owned();
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(&name),
+                    Some(&target),
+                    Some(objc2::sel!(choose:)),
+                    mtm,
+                )
+            };
+            button.setBordered(false);
+            button.setImagePosition(NSCellImagePosition::ImageAbove);
+            button.setImageScaling(NSImageScaling::ScaleNone);
+            button.setTag(i as isize);
+            button.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
+            button.setAccessibilityLabel(Some(&NSString::from_str(&name)));
+            stack.addArrangedSubview(&button);
+            buttons.push(button);
+            options.push(option.to_owned());
+            names.push(name);
+        }
+        let (id, generation) = (node.id, self.generation);
+        if let Some(cx) = self.cx.as_deref_mut() {
+            cx.spawn(async move |owner, cx| {
+                while let Ok(value) = rx.recv().await {
+                    if owner
+                        .update(cx, |owner, cx| {
+                            owner.settings_control(generation, id, Kind::Segmented, value, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        let mut picker = Picker {
+            stack,
+            buttons,
+            kind: kind.to_owned(),
+            options,
+            names,
+            selected: None,
+            _target: target,
+        };
+        let (_, value, _) = control_value(self.surface, node, Some(Component::SegmentedControl));
+        picker.update(value.as_u64().map(|v| v as usize), disabled(node));
+        Widget::Picker(picker)
     }
 }

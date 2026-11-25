@@ -6,9 +6,6 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -76,9 +73,6 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -218,9 +212,6 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -288,9 +279,6 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -358,9 +346,6 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -428,9 +413,6 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -498,9 +480,6 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -580,9 +559,6 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -650,9 +626,6 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -720,9 +693,6 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          div
-            text heading
-              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"

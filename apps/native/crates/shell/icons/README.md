@@ -37,6 +37,8 @@ bars, knockouts by mask, no thinner strokes or outlines.
   with 1 px gaps and read as one block at 1x.
 - `solo.svg` / `solo-off.svg`: After Effects' solo switch, a dot: larger and in the accent
   while on, small and dim while off (the timeline tints them).
+- `keyboard.svg`: Settings › Shortcuts' tile glyph, a filled key block with the keys knocked out
+  (Pierre has no keyboard or command glyph).
 - `pen.svg`: the Pen tool's nib (filled, with its slit and point); Pierre's pencil means
   rename.
 - `plus.svg`: drawn full size in a 2 px line; Pierre's plus (10 of 16 px, 1.5 px) reads

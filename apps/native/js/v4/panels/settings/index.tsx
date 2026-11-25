@@ -103,6 +103,12 @@ const SEGMENTED = new Set([
   "appearance",
   "open-projects-in",
 ]);
+/** Visual choices the window shows as rendered previews (Settings' visual
+ *  picker), named by what each option previews. */
+const PICKERS: Record<string, string> = {
+  appearance: "appearance",
+  "open-projects-in": "projects",
+};
 function RowControl({
   row,
   model,
@@ -212,6 +218,7 @@ function RowControl({
         label={row.label}
         disabled={common.disabled}
         attr={common.attr}
+        {...(PICKERS[row.id] && { metadata: { picker: PICKERS[row.id] } })}
         value={String(row.value)}
         options={options.map((o) => ({ id: String(o.v), label: o.label }))}
         onChange={(id) => {
@@ -234,16 +241,24 @@ function RowControl({
 function RowCopy({
   title,
   detail,
+  help,
   children,
 }: {
   title: string;
   detail?: string;
+  /** The detail explains the row: the window shows it on request (ⓘ)
+   *  rather than under the title. */
+  help?: boolean;
   children?: ComponentChildren;
 }) {
   return (
     <div metadata={{ settingsLayout: "copy" }}>
       <text>{title}</text>
-      {detail && <text metadata={{ settingsLayout: "footer" }}>{detail}</text>}
+      {detail && (
+        <text metadata={{ settingsLayout: help ? "help" : "footer" }}>
+          {detail}
+        </text>
+      )}
       {children}
     </div>
   );
@@ -252,11 +267,14 @@ function Group({
   title,
   symbol,
   muted,
+  untitled,
   children,
 }: {
   title: string;
   symbol?: string;
   muted?: boolean;
+  /** The card's one row says what the title would (Appearance). */
+  untitled?: boolean;
   children: ComponentChildren;
   key?: string;
 }) {
@@ -270,14 +288,14 @@ function Group({
   );
   return (
     <div role="group" label={title} metadata={{ settingsLayout: "group" }}>
-      <div metadata={{ settingsLayout: "headingLine" }}>
+      {untitled ? null : <div metadata={{ settingsLayout: "headingLine" }}>
         {symbol ? (
           <div metadata={{ settingsLayout: "line" }}>
             <img metadata={{ settingsLayout: "glyph", symbol }} alt="" />
             {heading}
           </div>
         ) : heading}
-      </div>
+      </div>}
       <UI.FormGroup label={title}>{children}</UI.FormGroup>
     </div>
   );
@@ -303,6 +321,9 @@ function SettingRow({
       <RowCopy
         title={row.label}
         detail={row.id === "media.location" ? undefined : row.detail}
+        // A provider's detail is its state (signed in as…, not added), not
+        // an explanation: it stays in view.
+        help={row.section !== "providers"}
       >
         {row.error && (
           <div
@@ -1152,7 +1173,14 @@ function SectionContent({
         <ProjectHeader model={model} bindings={bindings} window={window} />
       ) : null}
       {groups.map((group) => (
-        <Group key={group} title={group}>
+        <Group
+          key={group}
+          title={group}
+          untitled={
+            rows.filter((row) => row.group === group).length === 1 &&
+            rows.find((row) => row.group === group)?.label === group
+          }
+        >
           {keysCard(
             rows.filter((row) => row.group === group),
             model,
