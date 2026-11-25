@@ -66,6 +66,9 @@ pub struct KernelConfig {
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
     pub idle_memory_relief: Option<fn()>,
+    /// How long Undo, Redo and Seal wait for another writer's structural
+    /// edit before it is ended for them. `None`: [`crate::tx::UNDO_WAIT_LIMIT`].
+    pub undo_wait_limit: Option<std::time::Duration>,
 }
 
 /// Where an opened project comes from.
@@ -633,6 +636,15 @@ impl Kernel {
         }
     }
 
+    /// The earliest moment a project's waiting history call reaches its
+    /// limit, and that project.
+    pub(crate) fn wait_deadline(&self) -> Option<(std::time::Instant, String)> {
+        self.slots
+            .iter()
+            .filter_map(|(id, slot)| Some((slot.project.wait_deadline()?, id.clone())))
+            .min()
+    }
+
     /// Tests: the shared budget, not applied until the next call that
     /// maintains it (so a test chooses which call trims).
     #[cfg(any(test, feature = "fault-injection"))]
@@ -705,6 +717,11 @@ impl Kernel {
         slot.project
             .store_mut()
             .set_project_runtime_state(&self.state, id, self.config.text.clone());
+        slot.project.set_wait_limit(
+            self.config
+                .undo_wait_limit
+                .unwrap_or(crate::tx::UNDO_WAIT_LIMIT),
+        );
         let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
         if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
             return Err(KernelFailure::Storage(
