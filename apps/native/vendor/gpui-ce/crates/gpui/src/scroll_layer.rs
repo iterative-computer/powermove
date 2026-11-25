@@ -13,7 +13,7 @@
 //! glyph inside it, or the gesture ending notifies the view as before, which
 //! records the content again.
 use crate::{
-    Bounds, ContentMask, Edges, EntityId, Hitbox, Pixels, Point, ScaledPixels,
+    Bounds, ContentMask, Edges, EntityId, Hitbox, Pixels, Point, ScaledPixels, point,
     scene::{PaintOperation, Primitive, TransformationMatrix},
 };
 use std::{cell::RefCell, ops::Range, rc::Rc};
@@ -46,6 +46,29 @@ pub(crate) const REACH: f32 = 1.0;
 /// (hover, accessibility and text input positions follow the content then).
 pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// A layer whose div fades its content at the scroll edges it can still
+/// scroll past: the masks its clip is made from, so a step that reaches or
+/// leaves an edge moves the fades instead of drawing the view again.
+#[derive(Clone)]
+pub(crate) struct EdgeFades {
+    /// The layer it is for.
+    pub key: ScrollLayerKey,
+    /// The clip the div is drawn in (its ancestors').
+    pub parent: ContentMask<Pixels>,
+    /// The div's own overflow clip, without the edge fades.
+    pub own: ContentMask<Pixels>,
+    /// How far the fade at an edge reaches.
+    pub fade: Pixels,
+}
+
+/// Whether content lies past the top and the bottom edge at `offset`.
+pub(crate) fn vertical_edges(offset: Pixels, maximum: Pixels) -> (bool, bool) {
+    (
+        maximum > crate::px(1.) && -offset > crate::px(1.),
+        maximum > crate::px(1.) && maximum + offset > crate::px(1.),
+    )
+}
+
 pub(crate) struct ScrollLayer {
     /// The view whose cached frame holds the layer.
     pub view: EntityId,
@@ -58,6 +81,12 @@ pub(crate) struct ScrollLayer {
     pub max: Point<Pixels>,
     /// The div's own clip, where the content shows.
     pub clip: ContentMask<Pixels>,
+    /// How `clip` follows the edges, for a div that fades at them.
+    pub edges: Option<EdgeFades>,
+    /// The element offset of the div's content less its scroll offset, as
+    /// recorded: a plain draw places the content at this plus the offset,
+    /// snapped to device pixels (`Window::layout_bounds`).
+    pub base: Point<Pixels>,
     /// The content as drawn, clipped only to the recording's reach.
     pub ops: Vec<PaintOperation>,
     pub hitboxes: Vec<Hitbox>,
@@ -84,6 +113,39 @@ impl ScrollLayer {
         *self.offset.borrow()
     }
 
+    /// The clip at the current offset: the edge fades where content lies
+    /// past an edge, as the div draws them. False when the edges changed
+    /// and the layer cannot follow them.
+    pub fn fit_edges(&mut self, changed: bool) -> bool {
+        let Some(edges) = &self.edges else {
+            return !changed;
+        };
+        let (top, bottom) = vertical_edges(self.current().y, self.max.y);
+        let mut own = edges.own.clone();
+        if top {
+            own.fade_out.top = edges.fade;
+        }
+        if bottom {
+            own.fade_out.bottom = edges.fade;
+        }
+        self.clip = own.intersect(&edges.parent);
+        true
+    }
+
+    /// How far the content moved since it was recorded, in device pixels:
+    /// exactly as far as a plain draw at the current offset places it from
+    /// where it was recorded (each snaps its whole element offset to device
+    /// pixels), so a fractional step replays what a full draw draws.
+    fn moved(&self, scale_factor: f32) -> Point<ScaledPixels> {
+        let at = |o: Pixels, base: Pixels| {
+            crate::util::round_to_device_pixel((base + o).0, scale_factor)
+        };
+        point(
+            ScaledPixels(at(self.current().x, self.base.x) - at(self.recorded.x, self.base.x)),
+            ScaledPixels(at(self.current().y, self.base.y) - at(self.recorded.y, self.base.y)),
+        )
+    }
+
     /// Whether `offset` keeps the visible content inside the recording.
     pub fn covers(&self, offset: Point<Pixels>) -> bool {
         (offset.x - self.recorded.x).abs() <= self.reach.x
@@ -91,8 +153,12 @@ impl ScrollLayer {
     }
 
     /// The recorded hitboxes shifted to the current offset and clipped.
-    pub fn shifted_hitboxes(&self) -> impl Iterator<Item = Hitbox> + '_ {
-        let delta = self.current() - self.recorded;
+    pub fn shifted_hitboxes(&self, scale_factor: f32) -> impl Iterator<Item = Hitbox> + '_ {
+        let moved = self.moved(scale_factor);
+        let delta = point(
+            crate::px(moved.x.0 / scale_factor),
+            crate::px(moved.y.0 / scale_factor),
+        );
         self.hitboxes.iter().map(move |hitbox| {
             let mut hitbox = hitbox.clone();
             hitbox.bounds.origin += delta;
@@ -105,6 +171,7 @@ impl ScrollLayer {
                 );
             }
             hitbox.content_mask.bounds.origin += delta;
+            hitbox.content_mask.shape.origin += delta;
             hitbox.content_mask = hitbox.content_mask.intersect(&self.clip);
             hitbox
         })
@@ -113,8 +180,21 @@ impl ScrollLayer {
     /// The recorded content shifted to the current offset and clipped to the
     /// div, ready to insert into a scene.
     pub fn shifted_ops(&self, scale_factor: f32) -> impl Iterator<Item = PaintOperation> + '_ {
-        let delta = (self.current() - self.recorded).scale(scale_factor);
-        let clip = self.clip.scale(scale_factor);
+        let delta = self.moved(scale_factor);
+        // Covered to device pixels as a full draw covers a content mask
+        // (`Window::snapped_content_mask`).
+        let mut clip = self.clip.scale(scale_factor);
+        let b = self.clip.bounds;
+        clip.bounds = Bounds::from_corners(
+            point(
+                ScaledPixels(crate::util::floor_to_device_pixel(b.left().0, scale_factor)),
+                ScaledPixels(crate::util::floor_to_device_pixel(b.top().0, scale_factor)),
+            ),
+            point(
+                ScaledPixels(crate::util::ceil_to_device_pixel(b.right().0, scale_factor)),
+                ScaledPixels(crate::util::ceil_to_device_pixel(b.bottom().0, scale_factor)),
+            ),
+        );
         self.ops.iter().filter_map(move |op| match op {
             PaintOperation::Primitive(primitive) => {
                 let mut primitive = primitive.clone();
@@ -152,53 +232,61 @@ fn shift_bounds(bounds: &mut Bounds<ScaledPixels>, delta: Point<ScaledPixels>) {
     bounds.origin.y += delta.y;
 }
 
+/// A recorded clip moves with what it clips: its rectangle and its rounded
+/// shape (PM-710 review: a rounded thumbnail kept its shape at the recorded
+/// place and was sliced or hidden after a replayed step).
+fn shift_mask(mask: &mut ContentMask<ScaledPixels>, delta: Point<ScaledPixels>) {
+    shift_bounds(&mut mask.bounds, delta);
+    shift_bounds(&mut mask.shape, delta);
+}
+
 fn shift(primitive: &mut Primitive, delta: Point<ScaledPixels>) {
     match primitive {
         Primitive::Shadow(s) => {
             shift_bounds(&mut s.bounds, delta);
             shift_bounds(&mut s.element_bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::Quad(q) => {
             shift_bounds(&mut q.bounds, delta);
-            shift_bounds(&mut q.content_mask.bounds, delta);
+            shift_mask(&mut q.content_mask, delta);
         }
         Primitive::Path(p) => {
             shift_bounds(&mut p.bounds, delta);
-            shift_bounds(&mut p.content_mask.bounds, delta);
+            shift_mask(&mut p.content_mask, delta);
             for v in &mut p.vertices {
                 v.xy_position.x += delta.x;
                 v.xy_position.y += delta.y;
-                shift_bounds(&mut v.content_mask.bounds, delta);
+                shift_mask(&mut v.content_mask, delta);
             }
         }
         Primitive::Underline(u) => {
             shift_bounds(&mut u.bounds, delta);
-            shift_bounds(&mut u.content_mask.bounds, delta);
+            shift_mask(&mut u.content_mask, delta);
         }
         Primitive::MonochromeSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::SubpixelSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::PolychromeSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::Surface(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::BackdropFilter(f) => {
             shift_bounds(&mut f.bounds, delta);
-            shift_bounds(&mut f.content_mask.bounds, delta);
+            shift_mask(&mut f.content_mask, delta);
         }
         Primitive::FilterBoundary(b) => {
             shift_bounds(&mut b.bounds, delta);
-            shift_bounds(&mut b.content_mask.bounds, delta);
+            shift_mask(&mut b.content_mask, delta);
         }
     }
 }
@@ -243,7 +331,10 @@ pub(crate) fn intersect(
     };
     let (ab, bb) = (&a.bounds, &b.bounds);
     // `b` is the clip the recording shows through, `a` a recorded mask inside it.
-    let (shape, corner_radii, corner_smoothing) = b.shape_within(a);
+    // As a plain draw chooses: the element's own mask within its parent's
+    // (`ContentMask::intersect`), so a rounded thumbnail partly outside a
+    // rounded viewport keeps its own corners (PM-710 review).
+    let (shape, corner_radii, corner_smoothing) = a.shape_within(b);
     ContentMask {
         bounds: ab.intersect(bb),
         shape,

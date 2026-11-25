@@ -147,6 +147,7 @@ impl Window {
                 && layer.shiftable
             {
                 record.offset = layer.current();
+                record.geometry.fade = [layer.clip.fade_out.top, layer.clip.fade_out.bottom];
             }
             record.geometry.origin = record.inset + record.offset;
             true

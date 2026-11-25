@@ -103,8 +103,27 @@ fn panel_scroll_body(
         )
         .into_any_element()
 }
+/// A panel body's scroll thumb while it shows: for `SCROLL_THUMB_HOLD` after
+/// the last scroll (`scrolled_at`), or always where the system shows
+/// scrollbars (the UI-latency bench draws it through this too).
+pub(crate) fn body_thumb(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    scrolled_at: Option<std::time::Instant>,
+    t: &pm_design::Tokens,
+    cx: &App,
+) -> Option<AnyElement> {
+    // On the executor's clock, which the hold's timer runs on (a test's
+    // fake clock included): the thumb goes when the timer redraws it.
+    let now = cx.background_executor().now();
+    let shown = scrolled_at.is_some_and(|at| now.saturating_duration_since(at) < SCROLL_THUMB_HOLD);
+    (shown || !cx.should_auto_hide_scrollbars())
+        .then(|| scroll_thumb(handle, width, height, t))
+        .flatten()
+}
 /// How long a panel's scroll thumb stays after the last scroll.
-const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+pub(crate) const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
 const SCROLL_BAR: f32 = 9.;
 const SCROLL_THUMB_INSET: f32 = 2.;
@@ -1938,14 +1957,14 @@ impl Controller {
             );
         }
         let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
-        let shown = self
-            .builtins
-            .scrolled_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = (shown || !cx.should_auto_hide_scrollbars())
-            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
-            .flatten();
+        let thumb = body_thumb(
+            &handle,
+            bounds.w,
+            body,
+            self.builtins.scrolled_at.get(id).copied(),
+            &t,
+            cx,
+        );
         let panel = id.to_owned();
         view.update(cx, |v, _| v.scrolls_in(&handle));
         let on_wheel = {
@@ -1953,7 +1972,7 @@ impl Controller {
             cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
                 v.builtins
                     .scrolled_at
-                    .insert(panel.clone(), std::time::Instant::now());
+                    .insert(panel.clone(), cx.background_executor().now());
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -1968,28 +1987,7 @@ impl Controller {
         // render or layout of the panel; its AppKit controls sit in the
         // body's slot region and move with it (P-SLOT-REGION, PM-696).
         // As tall as its content, at least its slot.
-        let height = view.read(cx).body_height(body);
-        let panel_body = self
-            .builtins
-            .bodies
-            .entry(id.into())
-            .or_insert_with(|| {
-                cx.new(|_| PanelBody {
-                    id: SharedString::from(format!("panel-body-{id}")),
-                    view: view.clone(),
-                    handle: handle.clone(),
-                    height,
-                })
-            })
-            .clone();
-        panel_body.update(cx, |b, cx| {
-            // Half a point: the content's height is measured again every frame.
-            if (b.height - height).abs() > 0.5 || b.view != view {
-                b.height = height;
-                b.view = view.clone();
-                cx.notify();
-            }
-        });
+        let panel_body = PanelBody::sync(&mut self.builtins.bodies, id, &view, &handle, body, cx);
         Some(
             div()
                 .relative()
@@ -5071,6 +5069,41 @@ pub(crate) struct PanelBody {
     handle: ScrollHandle,
     /// The panel's height: its content, at least the slot.
     height: f32,
+}
+impl PanelBody {
+    /// Panel `id`'s body view in `bodies`, made on first use, as tall as
+    /// the panel's content and at least its slot of `body` points (the
+    /// UI-latency bench draws its panels through this too).
+    pub(crate) fn sync(
+        bodies: &mut BTreeMap<String, Entity<PanelBody>>,
+        id: &str,
+        view: &Entity<crate::v4_view::SurfaceView>,
+        handle: &ScrollHandle,
+        body: f32,
+        cx: &mut App,
+    ) -> Entity<PanelBody> {
+        let height = view.read(cx).body_height(body);
+        let panel_body = bodies
+            .entry(id.into())
+            .or_insert_with(|| {
+                cx.new(|_| PanelBody {
+                    id: SharedString::from(format!("panel-body-{id}")),
+                    view: view.clone(),
+                    handle: handle.clone(),
+                    height,
+                })
+            })
+            .clone();
+        panel_body.update(cx, |b, cx| {
+            // Half a point: the content's height is measured again every frame.
+            if (b.height - height).abs() > 0.5 || &b.view != view {
+                b.height = height;
+                b.view = view.clone();
+                cx.notify();
+            }
+        });
+        panel_body
+    }
 }
 impl Render for PanelBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

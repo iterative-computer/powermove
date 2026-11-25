@@ -3690,6 +3690,8 @@ fn a_retheme_while_a_tree_compiles_shows_that_tree(cx: &mut TestAppContext) {
 struct Body {
     child: Entity<SurfaceView>,
     handle: gpui::ScrollHandle,
+    /// The panel's height: 400 scrolls the body (100 high), 100 fits it.
+    height: f32,
 }
 impl Render for Body {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3705,7 +3707,7 @@ impl Render for Body {
                 .child(
                     self.child
                         .clone()
-                        .cached(StyleRefinement::default().w(px(100.)).h(px(400.))),
+                        .cached(StyleRefinement::default().w(px(100.)).h(px(self.height))),
                 ),
         )
     }
@@ -3755,6 +3757,7 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
         let body = cx.new(|_| Body {
             child,
             handle: Default::default(),
+            height: 400.,
         });
         BodyHolder { body }
     });
@@ -3775,12 +3778,14 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
         vcx.run_until_parked();
     };
     let rendered = renders(&vcx);
+    // PM-710: only a panel that left rows out has more to build.
+    let left_out = view.read_with(&vcx, |v, _| v.culls());
     wheel(&mut vcx, -20.);
     assert!(layered(&vcx));
     assert_eq!(
         renders(&vcx),
-        rendered + 1,
-        "the first step draws past each edge"
+        rendered + usize::from(left_out),
+        "the first step draws past each edge, when rows were left out"
     );
     // The rows it brought in are measured over the next frames.
     for _ in 0..4 {
@@ -3803,12 +3808,226 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     view.update(&mut vcx, |_, cx| cx.notify());
     vcx.run_until_parked();
     assert!(!layered(&vcx));
-    // Scrolling again, then the pointer moves on: at rest at once.
+    // Scrolling again, then the pointer moves on: at rest at once (the
+    // listener comes with the draw past each edge), else at the rest.
     wheel(&mut vcx, 20.);
     assert!(layered(&vcx));
     vcx.simulate_mouse_move(point(px(60.), px(40.)), None, Modifiers::none());
     vcx.run_until_parked();
+    if !left_out {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        vcx.run_until_parked();
+    }
     assert!(!layered(&vcx), "a pointer move ends the scroll");
+}
+
+/// PM-710 review: a panel that left rows out draws them on its body's first
+/// wheel step (for the body's layer to record them), then replays.
+#[gpui::test]
+fn a_panel_that_left_rows_out_builds_them_on_the_first_wheel_step(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    // A header over the panel's own scroller: a wheel over the header moves
+    // only the body around the panel.
+    let column = json!({"display":"flex","flexDirection":"column","width":100});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id": "header", "style":{"width":100,"height":50,"flexShrink":0}}),
+        &[],
+    ));
+    let list =
+        json!({"display":"flex","flexDirection":"column","width":100,"height":350,"flexShrink":0});
+    ops.extend(node_ops(3, 1, "scroll", json!({ "style": list }), &[]));
+    for i in 0..40u64 {
+        ops.extend(node_ops(
+            4 + i,
+            3,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+            height: 400.,
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    // Laid out once, the panel culls on its next draw. Not more draws: a
+    // layer recorded three times in a row with no step rests (draws plainly).
+    for _ in 0..2 {
+        view.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    let left_out = view.read_with(&vcx, |v, _| v.rows_left_out());
+    assert!(left_out > 0, "rows far below are left out");
+    let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
+    let rendered = renders(&vcx);
+    let list = view.read_with(&vcx, |v, _| v.scroll_offsets());
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(20.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.scroll_offsets()),
+        list,
+        "the body scrolled, not the panel's list"
+    );
+    assert!(
+        renders(&vcx) > rendered,
+        "the first step builds the rows past each edge"
+    );
+    assert!(
+        view.read_with(&vcx, |v, _| v.rows_left_out()) < left_out,
+        "rows it had left out are built again"
+    );
+}
+
+/// PM-732: a panel whose own list takes the wheel (Properties) knows it is
+/// being scrolled, so the list replays its steps as a layer; and rows with a
+/// hover moving under the still pointer draw nothing until the scroll ends.
+/// The list stopped the wheel before the panel saw it, and each hover the
+/// rows crossed drew Properties again: three full draws a step.
+#[gpui::test]
+fn a_panel_scrolled_by_its_own_list_replays_the_steps(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","width":100});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    let list =
+        json!({"display":"flex","flexDirection":"column","width":100,"height":90,"flexShrink":0});
+    ops.extend(node_ops(2, 1, "scroll", json!({ "style": list }), &[]));
+    // Rows that wash under the pointer (buttons) and hover groups.
+    for i in 0..40u64 {
+        let (kind, props, events): (_, _, &[&str]) = if i % 2 == 0 {
+            (
+                "button",
+                json!({"id": format!("row-{i}"), "role": "button",
+                "style":{"width":100,"height":20,"flexShrink":0}}),
+                &["click"],
+            )
+        } else {
+            (
+                "div",
+                json!({"id": format!("row-{i}"), "metadata": {"hoverGroup": true},
+                "style":{"width":100,"height":20,"flexShrink":0}}),
+                &[],
+            )
+        };
+        ops.extend(node_ops(3 + i, 2, kind, props, events));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        // As Properties: the panel fits its body and scrolls in its list.
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+            height: 100.,
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    for _ in 0..2 {
+        view.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    let at = point(px(50.), px(50.));
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.run_until_parked();
+    // The wash under the pointer springs in (on the wall clock) and the rows
+    // are measured, a few a frame: frames until both rest.
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(16));
+        vcx.simulate_frame();
+    }
+    let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
+    let list = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.scroll_offsets());
+    let wheel = |vcx: &mut VisualTestContext| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+        vcx.simulate_frame();
+    };
+    wheel(&mut vcx);
+    assert!(list(&vcx) > 0., "the panel's list took the step");
+    assert!(
+        view.read_with(&vcx, |v, _| v.scrolling()),
+        "the panel knows it is scrolled"
+    );
+    let rendered = renders(&vcx);
+    for step in 1..5 {
+        let before = list(&vcx);
+        wheel(&mut vcx);
+        assert!(list(&vcx) > before, "step {step} moved the list");
+        assert_eq!(
+            renders(&vcx),
+            rendered,
+            "step {step} replayed, no draw of the panel"
+        );
+    }
+}
+
+/// PM-732: a list in a scroller of its own panel (`scrollOwner: "parent"`,
+/// Properties' Effects) is no scroller; one that owns its scroll is.
+#[gpui::test]
+fn a_list_whose_parent_scrolls_is_no_scroller(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"style":{"width":100,"height":100}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"parent"}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"self"}}),
+        &[],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    let scrolls = |id: u64| view.read_with(&vcx, |v, _| v.prepared.nodes[&id].scroll_y);
+    assert!(scrolls(1), "the panel's scroller");
+    assert!(!scrolls(2), "a list in it whose parent scrolls");
+    assert!(scrolls(3), "a list that owns its scroll");
 }
 
 /// PM-702: evaluating a transition at rest (the workspace's corner fades)

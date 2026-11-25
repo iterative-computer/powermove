@@ -387,14 +387,22 @@ impl SurfaceView {
             || (self.cull.outer.is_some() && self.cull.wheeling.is_some())
     }
     /// A wheel step over the panel in a body that scrolls: the first of a
-    /// scroll draws the panel again with rows past each edge, for the body's
-    /// layer to replay the steps after; the panel rests once they stop.
+    /// scroll draws the panel again with rows past each edge (when it left
+    /// rows out), for the body's layer to replay the steps after; the panel
+    /// rests once they stop.
     pub(super) fn body_wheeled(&mut self, cx: &mut gpui::Context<Self>) {
         if self.cull.outer.is_none() {
             return;
         }
         let step = self.cull.wheeling.map_or(0, |n| n + 1);
-        if self.cull.wheeling.replace(step).is_none() {
+        if self.cull.wheeling.is_none() {
+            // The scroll moves the rows under the pointer: washes stop where
+            // they head (PM-732: one fading out drew the panel every frame).
+            self.motion.hovers.finish();
+        }
+        // A panel that left no row out has every row built already: wider
+        // margins would build nothing more (PM-710).
+        if self.cull.wheeling.replace(step).is_none() && self.culls() {
             cx.notify();
         }
         cx.spawn(async move |this, cx| {
@@ -406,6 +414,31 @@ impl SurfaceView {
             });
         })
         .detach();
+    }
+    /// Wheel steps over the panel, seen before any of its own scrollers
+    /// takes them (one that scrolls stops the event there, PM-732: the
+    /// panel never knew it was being scrolled, so its scrollers never became
+    /// layers and Properties drew again on every step).
+    pub(super) fn body_wheel_watch(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        self.cull.outer.as_ref()?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let shown = window.content_mask().bounds.intersect(&bounds);
+                    let view = view.clone();
+                    window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Capture && shown.contains(&e.position) {
+                            let _ = view.update(cx, |v, cx| v.body_wheeled(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        )
     }
     /// While its body is being scrolled: the pointer moving anywhere in the
     /// window ends the scroll for the panel (a person scrolls, then moves on),
@@ -430,10 +463,20 @@ impl SurfaceView {
             .into_any_element(),
         )
     }
+    /// Whether the panel is being scrolled (its body or its own scrollers),
+    /// until the steps rest or the pointer moves.
+    pub(crate) fn scrolling(&self) -> bool {
+        self.cull.wheeling.is_some()
+    }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.
     pub(crate) fn culls(&self) -> bool {
         !self.cull.culled.is_empty()
+    }
+    /// How many rows the last frame left out.
+    #[cfg(test)]
+    pub(crate) fn rows_left_out(&self) -> usize {
+        self.cull.culled.len()
     }
     /// Whether node `id` or one of its ancestors is left out this frame.
     pub(super) fn left_out(&self, mut id: Id) -> bool {

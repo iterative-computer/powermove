@@ -17,7 +17,7 @@ use crate::timeline_surface::TimelineSurface;
 use crate::timeline_tests::{Recorder, Recording};
 use gpui::{
     AnyElement, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Styled, TouchPhase, div, size,
+    StyleRefinement, Styled, TouchPhase, div, size,
 };
 use pm_builtins::{Builtins, Publication};
 use pm_shell::view::Editor;
@@ -61,6 +61,8 @@ struct Dock {
     pending: RefCell<HashMap<String, Publication>>,
     views: RefCell<HashMap<String, Entity<SurfaceView>>>,
     scrolls: RefCell<HashMap<String, ScrollHandle>>,
+    bodies: RefCell<std::collections::BTreeMap<String, Entity<crate::builtins::PanelBody>>>,
+    scrolled_at: Rc<RefCell<HashMap<String, Instant>>>,
 }
 
 impl pm_shell::integration::Integration for Dock {
@@ -131,21 +133,60 @@ impl pm_shell::integration::Integration for Dock {
             .or_default()
             .clone();
         view.update(cx, |v, _| v.scrolls_in(&handle));
-        let content = view.read(cx).in_body(body);
+        // As `Controller::builtin_panel` draws a side panel: its body view, a
+        // scroll layer (`PanelBody`), its scroll thumb, and a wheel listener
+        // that redraws the workspace for the thumb and hides it once the
+        // scroll stops.
+        let panel_body = crate::builtins::PanelBody::sync(
+            &mut self.bodies.borrow_mut(),
+            id,
+            &view,
+            &handle,
+            body,
+            cx,
+        );
+        let thumb = crate::builtins::body_thumb(
+            &handle,
+            rect.w,
+            body,
+            self.scrolled_at.borrow().get(id).copied(),
+            &self.tokens,
+            cx,
+        );
+        let scrolled_at = self.scrolled_at.clone();
+        let panel = id.to_owned();
+        let workspace = window.current_view();
+        let keep = {
+            let view = view.clone();
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, _, window, cx| view.read(cx).keep_native_slots(window, cx),
+            )
+            .absolute()
+            .size_0()
+        };
         Some(
             div()
                 .relative()
                 .w_full()
                 .h(px(body))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("panel-body-{id}")))
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&handle)
-                        .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
-                        .child(view.clone().cached(content)),
-                )
+                .on_scroll_wheel(move |_, window, cx| {
+                    scrolled_at
+                        .borrow_mut()
+                        .insert(panel.clone(), cx.background_executor().now());
+                    window
+                        .spawn(cx, async move |cx| {
+                            cx.background_executor()
+                                .timer(crate::builtins::SCROLL_THUMB_HOLD)
+                                .await;
+                            let _ = cx.update(|_, cx| cx.notify(workspace));
+                        })
+                        .detach();
+                    cx.notify(workspace);
+                })
+                .child(panel_body.cached(StyleRefinement::default().size_full()))
+                .child(keep)
+                .children(thumb)
                 .into_any_element(),
         )
     }
@@ -324,6 +365,8 @@ fn workspace(cx: &mut TestAppContext) -> Result<Workspace, String> {
         pending: RefCell::new(pending),
         views: RefCell::default(),
         scrolls: RefCell::default(),
+        bodies: RefCell::default(),
+        scrolled_at: Rc::default(),
     });
     cx.executor().allow_parking();
     let integration = dock.clone();
@@ -789,6 +832,36 @@ fn scroll_position(ws: &Workspace, panel: &str, horizontal: bool) -> f64 {
     body + inner + column.unwrap_or(0.)
 }
 
+/// A person's pause between two gestures, untimed: the app's rest timers (a
+/// panel's wheel rest, a scroll layer's settle, 120 and 150 ms) run as they
+/// would, so no case inherits the scrolling state of the gesture before it.
+/// The bench's clock moves only when told (a fake clock), so without this
+/// those states lasted from one case into the next and the later cases
+/// measured whatever the earlier ones left (PM-710). Shorter than a tooltip's
+/// delay (500 ms), so none opens. Then the display link runs for that long on
+/// the wall clock: the panels' springs (a hover wash the settle started) step
+/// a frame at a time on it and rest before the next case, and playing,
+/// Properties follows the playhead meanwhile (PM-732).
+const PAUSE: Duration = Duration::from_millis(200);
+
+fn pause(ws: &mut Workspace, playback: &mut Option<Playback>) {
+    ws.vcx.executor().advance_clock(PAUSE);
+    let mut probe = Probe::start();
+    ws.settle(&mut probe, playback.as_mut());
+    ws.drain(&mut probe);
+    draw(&mut ws.vcx, &mut probe);
+    let until = Instant::now() + PAUSE;
+    while Instant::now() < until {
+        match playback.as_mut() {
+            Some(p) => p.pace(ws),
+            None => {
+                std::thread::sleep(VSYNC);
+                draw(&mut ws.vcx, &mut probe);
+            }
+        }
+    }
+}
+
 fn scroll_case(
     ws: &mut Workspace,
     playback: &mut Option<Playback>,
@@ -802,6 +875,8 @@ fn scroll_case(
     let Some(at) = scroll_target(ws, panel, horizontal) else {
         return case.skip(format!("no point of {panel} scrolls"));
     };
+    // The probe's steps were a gesture of their own.
+    pause(ws, playback);
     let events: Vec<ScrollWheelEvent> = if momentum {
         let mut e = momentum_events(at, horizontal, 1.);
         e.extend(momentum_events(at, horizontal, -1.));
@@ -1122,6 +1197,7 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
             continue;
         }
         ws.show_tab(panel);
+        pause(ws, playback);
         ws.published.clear();
         let case = hover_case(
             ws,
@@ -1133,6 +1209,7 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
         push(case, ws, playback);
     }
     if wanted(&format!("K1{tag}")) {
+        pause(ws, playback);
         ws.published.clear();
         let case = select_case(
             ws,
@@ -1143,6 +1220,7 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
         push(case, ws, playback);
     }
     if wanted(&format!("K2{tag}")) {
+        pause(ws, playback);
         ws.published.clear();
         let case = tabs_case(
             ws,
@@ -1153,6 +1231,7 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
         push(case, ws, playback);
     }
     if wanted(&format!("K3{tag}")) {
+        pause(ws, playback);
         ws.published.clear();
         let case = toggle_case(
             ws,
@@ -1163,6 +1242,7 @@ fn run_all(ws: &mut Workspace, playback: &mut Option<Playback>, out: &mut Vec<Ca
         push(case, ws, playback);
     }
     if wanted(&format!("K4{tag}")) {
+        pause(ws, playback);
         ws.published.clear();
         let case = resize_case(
             ws,
