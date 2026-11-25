@@ -1,19 +1,21 @@
 //! Seeding a clean profile and collecting evidence over the host's MCP tools.
-//! Anything the host cannot report yet becomes a note, and the graders that
-//! needed it answer Unavailable: nothing is guessed into a pass.
+//! Anything the host cannot report becomes a note (or a lacking capability),
+//! and the graders that needed it answer Unavailable: nothing is guessed into
+//! a pass. Files are only read inside the run folder, never through a
+//! symlink, and a path the host names is checked before it is read.
 use super::mcp::McpClient;
+use super::paths;
 use crate::artifacts::{
-    Artifacts, ChangedExtension, ExtensionHealth, Frame, FrameTiming, PanelObservation,
+    Artifacts, ChangedExtension, Evaluation, ExtensionHealth, Frame, FrameTiming, PanelObservation,
     Registration, ThemeObservation,
 };
 use crate::graders::panel::Step;
 use crate::graders::{Context, GraderSpec};
 use crate::suite::{Task, tree_hash};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 /// The host has one window when headless.
 pub const HEADLESS_WINDOW: &str = "headless";
@@ -25,11 +27,13 @@ pub struct RunDirs {
     pub exports: PathBuf,
     pub work: PathBuf,
     pub home: PathBuf,
+    pub tmp: PathBuf,
     pub frames: PathBuf,
     pub host_log: PathBuf,
 }
 
 impl RunDirs {
+    /// The folders of a run inside its (already reserved, empty) root.
     pub fn create(root: &Path) -> Result<Self, String> {
         let root = std::path::absolute(root).map_err(|e| e.to_string())?;
         let d = RunDirs {
@@ -37,26 +41,25 @@ impl RunDirs {
             exports: root.join("exports"),
             work: root.join("work"),
             home: super::harness::home_in(&root),
+            tmp: root.join("tmp"),
             frames: root.join("frames"),
             host_log: root.join("host.log"),
             root,
         };
-        for p in [&d.profile, &d.exports, &d.work, &d.home, &d.frames] {
-            std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        for p in [&d.profile, &d.exports, &d.work, &d.home, &d.tmp, &d.frames] {
+            std::fs::create_dir(p).map_err(|e| format!("{}: {e}", p.display()))?;
         }
         Ok(d)
     }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    if from.is_file() {
-        std::fs::copy(from, to).map_err(|e| format!("{}: {e}", from.display()))?;
-        return Ok(());
-    }
-    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
-        let e = e.map_err(|e| e.to_string())?;
-        copy_tree(&e.path(), &to.join(e.file_name()))?;
+    for rel in paths::files(from)? {
+        let dest = to.join(&rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(from.join(&rel), &dest).map_err(|e| format!("{}: {e}", rel.display()))?;
     }
     Ok(())
 }
@@ -72,7 +75,7 @@ pub fn seed_profile(task: &Task, data_root: &Path, d: &RunDirs) -> Result<String
         .work
         .join(src.file_name().ok_or("fixture has no file name")?);
     std::fs::copy(&src, &file).map_err(|e| format!("{}: {e}", src.display()))?;
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let bytes = paths::read(&[&d.work], &file)?;
     let doc = crate::pmv::read_document(&bytes)?;
     let project = crate::pmv::project_of(&doc);
     let id = project["id"]
@@ -103,22 +106,25 @@ pub fn seed_profile(task: &Task, data_root: &Path, d: &RunDirs) -> Result<String
 /// What the baseline step learned, for comparison after the run.
 #[derive(Default)]
 pub struct Baseline {
-    pub extension_hashes: BTreeMap<String, String>,
-    pub registered: BTreeSet<(String, String)>,
-    pub render_ms: Vec<f64>,
-    pub timing_time: Option<f64>,
+    /// Tree hash of each extension folder, or why it was not read.
+    pub extension_hashes: BTreeMap<String, Result<String, String>>,
+    /// The project's revision once opened (Aero's run is bound to it).
+    pub revision: Option<u64>,
 }
 
-fn extension_hashes(profile: &Path) -> BTreeMap<String, String> {
+fn extension_hashes(profile: &Path) -> BTreeMap<String, Result<String, String>> {
     let mut out = BTreeMap::new();
     for root in ["extensions", "extensions-shared"] {
-        if let Ok(rd) = std::fs::read_dir(profile.join(root)) {
-            for e in rd.flatten() {
-                if e.path().is_dir()
-                    && let Ok(h) = tree_hash(&e.path())
-                {
-                    out.insert(e.file_name().to_string_lossy().into_owned(), h);
-                }
+        let Ok(rd) = std::fs::read_dir(profile.join(root)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            let name = e.file_name().to_string_lossy().into_owned();
+            if t.is_symlink() {
+                out.insert(name, Err("the extension folder is a symlink".into()));
+            } else if t.is_dir() {
+                out.insert(name, tree_hash(&e.path()));
             }
         }
     }
@@ -136,8 +142,8 @@ fn frame_times(task: &Task) -> Vec<f64> {
     t
 }
 
-fn render<R: Read, W: Write>(
-    c: &mut McpClient<R, W>,
+fn render<W: Write>(
+    c: &mut McpClient<W>,
     times: &[f64],
     dir: &Path,
     prefix: &str,
@@ -170,61 +176,12 @@ fn render<R: Read, W: Write>(
     Ok(out)
 }
 
-fn time_renders<R: Read, W: Write>(c: &mut McpClient<R, W>, t: f64) -> Result<Vec<f64>, String> {
-    // One warm-up render, then the samples.
-    c.call("render_frames", json!({"times": [t], "width": 1280}))?;
-    let mut ms = Vec::new();
-    for _ in 0..TIMING_SAMPLES {
-        let s = Instant::now();
-        c.call("render_frames", json!({"times": [t], "width": 1280}))?;
-        ms.push(s.elapsed().as_secs_f64() * 1000.0);
-    }
-    Ok(ms)
-}
-
-fn registered_effects(workspace: &Value) -> Vec<(String, usize)> {
-    workspace["registeredEffects"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| {
-            Some((
-                e["id"].as_str()?.to_owned(),
-                e["parameters"].as_array().map_or(0, Vec::len),
-            ))
-        })
-        .collect()
-}
-
-fn registered_panels(layout: &Value) -> Vec<String> {
-    // Any object in the layout with an `id` and a `title` is a registered panel.
-    let mut out = Vec::new();
-    fn walk(v: &Value, out: &mut Vec<String>) {
-        match v {
-            Value::Object(m) => {
-                if let (Some(id), true) =
-                    (m.get("id").and_then(Value::as_str), m.contains_key("title"))
-                {
-                    out.push(id.to_owned());
-                }
-                m.values().for_each(|x| walk(x, out));
-            }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
-            _ => {}
-        }
-    }
-    walk(layout, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
 /// Open the seeded project, then capture the fixture's state and frames.
-pub fn baseline<R: Read, W: Write>(
+pub fn baseline<W: Write>(
     task: &Task,
     project_id: &str,
     d: &RunDirs,
-    c: &mut McpClient<R, W>,
+    c: &mut McpClient<W>,
     a: &mut Artifacts,
 ) -> Result<Baseline, String> {
     let listed = c.call("list_projects", json!({}))?;
@@ -241,48 +198,24 @@ pub fn baseline<R: Read, W: Write>(
         .map(|e| e.path())
         .find(|p| p.extension().is_some_and(|x| x == "pmv"))
         .ok_or("no working project file")?;
-    a.project_before = Some(crate::pmv::read_document(
-        &std::fs::read(&file).map_err(|e| e.to_string())?,
-    )?);
-    let mut b = Baseline {
+    let before = crate::pmv::read_document(&paths::read(&[&d.work], &file)?)?;
+    let b = Baseline {
         extension_hashes: extension_hashes(&d.profile),
-        ..Default::default()
+        revision: crate::pmv::project_of(&before)["revision"].as_u64(),
     };
-    match c.call("get_workspace_state", json!({})).map(|r| r.json()) {
-        Ok(Some(w)) => {
-            for (id, _) in registered_effects(&w) {
-                b.registered.insert(("effect".into(), id));
-            }
-        }
-        _ => a
-            .notes
-            .push("get_workspace_state unavailable before the run".into()),
-    }
-    if let Ok(Some(l)) = c.call("get_panel_layout", json!({})).map(|r| r.json()) {
-        for id in registered_panels(&l) {
-            b.registered.insert(("panel".into(), id));
-        }
-    }
+    a.project_before = Some(before);
     let times = frame_times(task);
-    if !times.is_empty() {
+    if !times.is_empty() && !lacks(a, super::capabilities::FRAMES) {
         match render(c, &times, &d.frames, "baseline") {
             Ok(f) => a.baseline_frames = f,
             Err(e) => a.notes.push(format!("baseline frames: {e}")),
         }
     }
-    if task
-        .graders
-        .iter()
-        .any(|g| matches!(g, GraderSpec::FrameTime(_)))
-    {
-        let t = times.first().copied().unwrap_or(0.0);
-        b.timing_time = Some(t);
-        match time_renders(c, t) {
-            Ok(ms) => b.render_ms = ms,
-            Err(e) => a.notes.push(format!("baseline frame timing: {e}")),
-        }
-    }
     Ok(b)
+}
+
+fn lacks(a: &Artifacts, cap: &str) -> bool {
+    a.host_lacks.iter().any(|l| l == cap)
 }
 
 /// The host's answer to save_project names the saved file.
@@ -295,7 +228,9 @@ fn saved_path(r: &Value) -> Option<PathBuf> {
     }
 }
 
-fn read_saved<R: Read, W: Write>(c: &mut McpClient<R, W>) -> Result<Value, String> {
+/// Save and read the project back. The path the host names is read only if
+/// it is a regular file in the run's exports or work folder.
+fn read_saved<W: Write>(c: &mut McpClient<W>, d: &RunDirs) -> Result<Value, String> {
     let r = c.call("save_project", json!({}))?;
     let path = r
         .json()
@@ -303,51 +238,245 @@ fn read_saved<R: Read, W: Write>(c: &mut McpClient<R, W>) -> Result<Value, Strin
         .and_then(saved_path)
         .or_else(|| saved_path(&Value::String(r.text())))
         .ok_or_else(|| format!("save_project did not name a file: {}", r.text()))?;
-    crate::pmv::read_document(
-        &std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?,
-    )
+    crate::pmv::read_document(&paths::read(&[&d.exports, &d.work], &path)?)
 }
 
-/// Extensions in the profile whose source mentions `id` (attribution until
-/// the host reports each registration's owner).
-fn owner_of(profile: &Path, changed: &[ChangedExtension], id: &str) -> Option<String> {
-    changed.iter().map(|c| c.id.clone()).find(|ext| {
-        let dir = profile.join("extensions").join(ext);
-        let mut hit = false;
-        let _ = visit(&dir, &mut |p| {
-            if let Ok(s) = std::fs::read_to_string(p) {
-                hit |= s.contains(id);
-            }
+fn texts(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if !s.trim().is_empty() => out.push(s.clone()),
+        Value::Object(m) => m.values().for_each(|x| texts(x, out)),
+        Value::Array(a) => a.iter().for_each(|x| texts(x, out)),
+        _ => {}
+    }
+}
+
+fn playhead(v: &Value) -> Option<f64> {
+    match v {
+        Value::Object(m) => ["playhead", "time", "currentTime"]
+            .iter()
+            .find_map(|k| m.get(*k).and_then(Value::as_f64))
+            .or_else(|| m.values().find_map(playhead)),
+        _ => None,
+    }
+}
+
+/// Registrations the host reports with their owning extension.
+fn registrations(w: &Value) -> Vec<Registration> {
+    let mut out = Vec::new();
+    for (key, kind) in [
+        ("registeredEffects", "effect"),
+        ("registeredTransitions", "transition"),
+        ("registeredPanels", "panel"),
+    ] {
+        for e in w[key].as_array().into_iter().flatten() {
+            let Some(id) = e["id"].as_str() else { continue };
+            out.push(Registration {
+                kind: kind.into(),
+                id: id.into(),
+                extension: e["extension"].as_str().unwrap_or("?").into(),
+                params: e["parameters"].as_array().map_or(0, Vec::len),
+            });
+        }
+    }
+    out
+}
+
+/// After the harness: save and read the project back, render, and report
+/// extensions, frame times, panel probes, the active theme and the
+/// evaluator's scores. Stops early when the collection budget runs out.
+pub fn after<W: Write>(
+    task: &Task,
+    d: &RunDirs,
+    b: &Baseline,
+    c: &mut McpClient<W>,
+    a: &mut Artifacts,
+    data_root: &Path,
+) {
+    match read_saved(c, d) {
+        Ok(p) => a.project_after = Some(p),
+        Err(e) => a.notes.push(format!("project after the run: {e}")),
+    }
+    let times = frame_times(task);
+    if !times.is_empty() && !lacks(a, super::capabilities::FRAMES) {
+        match render(c, &times, &d.frames, "after") {
+            Ok(f) => a.frames = f,
+            Err(e) => a.notes.push(format!("frames after the run: {e}")),
+        }
+    }
+    // Extensions: changed by tree hash; a symlinked one is refused, unread.
+    let now = extension_hashes(&d.profile);
+    let mut changed = Vec::new();
+    for (id, h) in &now {
+        let action = match (h, b.extension_hashes.get(id)) {
+            (Err(_), _) => "refused",
+            (Ok(_), None) => "created",
+            (Ok(h), Some(Ok(old))) if old == h => continue,
+            (Ok(_), Some(_)) => "updated",
+        };
+        changed.push(ChangedExtension {
+            id: id.clone(),
+            action: action.into(),
         });
-        hit
+    }
+    for id in b.extension_hashes.keys().filter(|k| !now.contains_key(*k)) {
+        changed.push(ChangedExtension {
+            id: id.clone(),
+            action: "removed".into(),
+        });
+    }
+    a.extensions.changed = changed;
+    a.extensions.windows = vec![HEADLESS_WINDOW.into()];
+    match c.call("get_workspace_state", json!({})).map(|r| r.json()) {
+        Ok(Some(w)) => {
+            for e in w["extensions"].as_array().into_iter().flatten() {
+                let Some(id) = e["id"].as_str() else { continue };
+                let state = match &e["health"] {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Object(h) => h.get("state").and_then(Value::as_str).map(str::to_owned),
+                    _ => None,
+                };
+                if let Some(state) = state {
+                    a.extensions.health.push(ExtensionHealth {
+                        id: id.into(),
+                        window: HEADLESS_WINDOW.into(),
+                        state,
+                        error: e["health"]["error"].as_str().map(str::to_owned),
+                    });
+                }
+            }
+            a.extensions.registered = registrations(&w);
+            if let Some(t) = w.get("theme").filter(|t| t.is_object()) {
+                let theme = ThemeObservation {
+                    active: t["active"].as_str().unwrap_or("").into(),
+                    extension: t["extension"].as_str().map(str::to_owned),
+                    tokens: t["tokens"]
+                        .as_object()
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                };
+                a.extensions.registered.push(Registration {
+                    kind: "theme".into(),
+                    id: theme.active.clone(),
+                    extension: theme.extension.clone().unwrap_or_else(|| "?".into()),
+                    params: 0,
+                });
+                a.theme = Some(theme);
+            }
+        }
+        Ok(None) => a.notes.push("get_workspace_state answered no JSON".into()),
+        Err(e) => a.notes.push(format!("get_workspace_state: {e}")),
+    }
+    for g in &task.graders {
+        match g {
+            GraderSpec::FrameTime(s) if !lacks(a, super::capabilities::TIMING) => {
+                let ids = Context {
+                    artifacts: a,
+                    run_dir: &d.root,
+                    data_root: Path::new(""),
+                }
+                .resolve(&s.target);
+                for id in ids {
+                    match measure(c, &id, &times) {
+                        Ok(t) => a.frame_times.push(t),
+                        Err(e) => a.notes.push(format!("frame time of {id}: {e}")),
+                    }
+                }
+            }
+            GraderSpec::Panel(s) => {
+                let ids = Context {
+                    artifacts: a,
+                    run_dir: &d.root,
+                    data_root: Path::new(""),
+                }
+                .resolve(&s.panel);
+                if let Some(id) = ids.first().cloned()
+                    && !lacks(a, super::capabilities::PROBES)
+                {
+                    let obs = probe(c, &id, s, a.project_after.as_ref(), d);
+                    a.panels.push(obs);
+                }
+            }
+            GraderSpec::Rubric(r) if !lacks(a, super::capabilities::EVALUATOR) => {
+                match evaluate(c, task, &data_root.join(&r.rubric), a) {
+                    Ok(e) => a.evaluation = Some(e),
+                    Err(e) => a.notes.push(format!("evaluator: {e}")),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Paired timings of one target at active frames: the same revision rendered
+/// with the target enabled and disabled; each sample is their difference.
+fn measure<W: Write>(
+    c: &mut McpClient<W>,
+    target: &str,
+    times: &[f64],
+) -> Result<FrameTiming, String> {
+    let r = c
+        .call(
+            "measure_frame_time",
+            json!({"target": target, "times": times, "samples": TIMING_SAMPLES, "width": 1280}),
+        )?
+        .json()
+        .ok_or("measure_frame_time answered no JSON")?;
+    let list = |k: &str| -> Vec<f64> {
+        r[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .collect()
+    };
+    let (on, off) = (list("enabledMs"), list("disabledMs"));
+    if on.len() != off.len() || on.is_empty() {
+        return Err(format!(
+            "{} enabled and {} disabled samples are not pairs",
+            on.len(),
+            off.len()
+        ));
+    }
+    Ok(FrameTiming {
+        target: target.into(),
+        ms: on.iter().zip(&off).map(|(x, y)| x - y).collect(),
+        method: format!(
+            "paired enabled/disabled renders at revision {}, active frames {times:?}",
+            r["revision"]
+        ),
     })
 }
 
-fn visit(dir: &Path, f: &mut dyn FnMut(&Path)) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let p = e?.path();
-        if p.is_dir() {
-            visit(&p, f)?;
-        } else {
-            f(&p);
-        }
-    }
-    Ok(())
-}
-
-/// Who registered a contribution: present before the run means it was not
-/// the run's (`existing`); otherwise the changed extension that mentions it.
-fn owner(
-    b: &Baseline,
-    kind: &str,
-    id: &str,
-    profile: &Path,
-    changed: &[ChangedExtension],
-) -> String {
-    if b.registered.contains(&(kind.to_owned(), id.to_owned())) {
-        return "existing".into();
-    }
-    owner_of(profile, changed, id).unwrap_or_else(|| "?".into())
+/// A fresh evaluator session's scores for one rubric (never the generator's
+/// context): the rubric, the prompt and the run's frames and captures.
+fn evaluate<W: Write>(
+    c: &mut McpClient<W>,
+    task: &Task,
+    rubric: &Path,
+    a: &Artifacts,
+) -> Result<Evaluation, String> {
+    let r = crate::graders::rubric::Rubric::load(rubric)?;
+    let mut sees: Vec<String> = a
+        .frames
+        .iter()
+        .map(|f| f.png.display().to_string())
+        .collect();
+    sees.extend(
+        a.panels
+            .iter()
+            .filter_map(|p| p.capture.as_ref().map(|c| c.display().to_string())),
+    );
+    let v = c
+        .call(
+            "evaluate_rubric",
+            json!({"rubric": r, "prompt": task.prompt, "sees": sees}),
+        )?
+        .json()
+        .ok_or("evaluate_rubric answered no JSON")?;
+    serde_json::from_value(v).map_err(|e| format!("evaluate_rubric answer: {e}"))
 }
 
 /// Find the ref of a control by its label anywhere in a panel state: an exact
@@ -377,203 +506,11 @@ fn control_ref_by(state: &Value, label: &str, exact: bool) -> Option<String> {
     }
 }
 
-fn texts(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::String(s) if !s.trim().is_empty() => out.push(s.clone()),
-        Value::Object(m) => m.values().for_each(|x| texts(x, out)),
-        Value::Array(a) => a.iter().for_each(|x| texts(x, out)),
-        _ => {}
-    }
-}
-
-fn playhead(v: &Value) -> Option<f64> {
-    match v {
-        Value::Object(m) => ["playhead", "time", "currentTime"]
-            .iter()
-            .find_map(|k| m.get(*k).and_then(Value::as_f64))
-            .or_else(|| m.values().find_map(playhead)),
-        _ => None,
-    }
-}
-
-/// After the harness: save and read the project back, render, and report
-/// extensions, frame times, panel probes and the active theme.
-pub fn after<R: Read, W: Write>(
-    task: &Task,
-    _project_id: &str,
-    d: &RunDirs,
-    b: &Baseline,
-    c: &mut McpClient<R, W>,
-    a: &mut Artifacts,
-) {
-    match read_saved(c) {
-        Ok(p) => a.project_after = Some(p),
-        Err(e) => a.notes.push(format!("project after the run: {e}")),
-    }
-    let times = frame_times(task);
-    if !times.is_empty() {
-        match render(c, &times, &d.frames, "after") {
-            Ok(f) => a.frames = f,
-            Err(e) => a.notes.push(format!("frames after the run: {e}")),
-        }
-    }
-    // Extensions: changed by tree hash.
-    let now = extension_hashes(&d.profile);
-    let mut changed = Vec::new();
-    for (id, h) in &now {
-        match b.extension_hashes.get(id) {
-            None => changed.push(ChangedExtension {
-                id: id.clone(),
-                action: "created".into(),
-            }),
-            Some(old) if old != h => changed.push(ChangedExtension {
-                id: id.clone(),
-                action: "updated".into(),
-            }),
-            _ => {}
-        }
-    }
-    for id in b.extension_hashes.keys().filter(|k| !now.contains_key(*k)) {
-        changed.push(ChangedExtension {
-            id: id.clone(),
-            action: "removed".into(),
-        });
-    }
-    a.extensions.changed = changed;
-    a.extensions.windows = vec![HEADLESS_WINDOW.into()];
-    let workspace = c
-        .call("get_workspace_state", json!({}))
-        .ok()
-        .and_then(|r| r.json());
-    match &workspace {
-        None => a
-            .notes
-            .push("get_workspace_state unavailable after the run".into()),
-        Some(w) => {
-            for e in w["extensions"].as_array().into_iter().flatten() {
-                let Some(id) = e["id"].as_str() else { continue };
-                let state = match &e["health"] {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Object(h) => h.get("state").and_then(Value::as_str).map(str::to_owned),
-                    _ => None,
-                };
-                if let Some(state) = state {
-                    a.extensions.health.push(ExtensionHealth {
-                        id: id.into(),
-                        window: HEADLESS_WINDOW.into(),
-                        state,
-                        error: e["health"]["error"].as_str().map(str::to_owned),
-                    });
-                }
-            }
-            if a.extensions.health.is_empty() {
-                a.notes
-                    .push("the host reports no extension health (headless health is null)".into());
-            }
-            for (id, params) in registered_effects(w) {
-                let ext = owner(b, "effect", &id, &d.profile, &a.extensions.changed);
-                a.extensions.registered.push(Registration {
-                    kind: "effect".into(),
-                    id,
-                    extension: ext,
-                    params,
-                });
-            }
-            if let Some(t) = w.get("theme").filter(|t| t.is_object()) {
-                a.theme = Some(ThemeObservation {
-                    active: t["active"].as_str().unwrap_or("").into(),
-                    extension: t["extension"].as_str().map(str::to_owned),
-                    tokens: t["tokens"]
-                        .as_object()
-                        .map(|m| {
-                            m.iter()
-                                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                });
-                if let Some(theme) = &a.theme {
-                    a.extensions.registered.push(Registration {
-                        kind: "theme".into(),
-                        id: theme.active.clone(),
-                        extension: theme.extension.clone().unwrap_or_else(|| {
-                            owner_of(&d.profile, &a.extensions.changed, &theme.active)
-                                .unwrap_or_else(|| "?".into())
-                        }),
-                        params: 0,
-                    });
-                }
-            }
-        }
-    }
-    if let Ok(Some(l)) = c.call("get_panel_layout", json!({})).map(|r| r.json()) {
-        for id in registered_panels(&l) {
-            let ext = owner(b, "panel", &id, &d.profile, &a.extensions.changed);
-            a.extensions.registered.push(Registration {
-                kind: "panel".into(),
-                id,
-                extension: ext,
-                params: 0,
-            });
-        }
-    }
-    if task
-        .graders
-        .iter()
-        .any(|g| matches!(g, GraderSpec::Theme(_)))
-        && a.theme.is_none()
-    {
-        a.notes
-            .push("the host does not report the active theme and its tokens yet".into());
-    }
-    // Frame time of each budgeted target, against the baseline renders.
-    for g in &task.graders {
-        let GraderSpec::FrameTime(s) = g else {
-            continue;
-        };
-        let ids = Context {
-            artifacts: a,
-            run_dir: &d.root,
-            data_root: Path::new(""),
-        }
-        .resolve(&s.target);
-        let (Some(t), false) = (b.timing_time, b.render_ms.is_empty()) else {
-            continue;
-        };
-        let base = crate::image::percentile(&b.render_ms, 50.0);
-        match time_renders(c, t) {
-            Ok(ms) => {
-                for id in ids {
-                    a.frame_times.push(FrameTiming {
-                        target: id,
-                        ms: ms.iter().map(|m| (m - base).max(0.0)).collect(),
-                        method: format!(
-                            "render_frames at {t}s, 1280 wide, {TIMING_SAMPLES} samples minus the fixture's median {base:.2} ms (includes every change the run made)"
-                        ),
-                    })
-                }
-            }
-            Err(e) => a.notes.push(format!("frame timing: {e}")),
-        }
-    }
-    for g in &task.graders {
-        let GraderSpec::Panel(s) = g else { continue };
-        let ids = Context {
-            artifacts: a,
-            run_dir: &d.root,
-            data_root: Path::new(""),
-        }
-        .resolve(&s.panel);
-        let Some(id) = ids.first().cloned() else {
-            continue;
-        };
-        let obs = probe(c, &id, s, a.project_after.as_ref(), d);
-        a.panels.push(obs);
-    }
-}
-
-fn probe<R: Read, W: Write>(
-    c: &mut McpClient<R, W>,
+/// Run a panel's probe: open it, select, snapshot the project and frames,
+/// run the steps, then read the panel, the playhead, the project and the
+/// frames again.
+fn probe<W: Write>(
+    c: &mut McpClient<W>,
     panel: &str,
     s: &crate::graders::panel::PanelSpec,
     project: Option<&Value>,
@@ -605,16 +542,31 @@ fn probe<R: Read, W: Write>(
             .collect();
         let _ = c.call("select_layers", json!({"layerIds": ids}));
     }
+    let times = s.frame_times();
+    let tag = panel.replace('/', "_");
+    o.project_before = read_saved(c, d).ok();
+    if !times.is_empty() {
+        o.baseline_frames =
+            render(c, &times, &d.frames, &format!("panel-{tag}-before")).unwrap_or_default();
+    }
     for step in &s.probe.steps {
+        let (label, args) = match step {
+            Step::Seek(t) => {
+                o.steps
+                    .push(match c.call("set_playhead", json!({"time": t})) {
+                        Ok(_) => "ok".into(),
+                        Err(e) => e,
+                    });
+                continue;
+            }
+            Step::Click(l) => (l, json!({"action": "click"})),
+            Step::Type { field, text } => (field, json!({"action": "fill", "value": text})),
+        };
         let state = c
             .call("get_panel_state", json!({"panelId": panel}))
             .ok()
             .and_then(|r| r.json())
             .unwrap_or(Value::Null);
-        let (label, args) = match step {
-            Step::Click(l) => (l, json!({"action": "click"})),
-            Step::Type { field, text } => (field, json!({"action": "fill", "value": text})),
-        };
         let Some(r) = control_ref(&state, label) else {
             o.steps.push(format!("no control labelled \"{label}\""));
             continue;
@@ -639,13 +591,14 @@ fn probe<R: Read, W: Write>(
         .and_then(|r| r.json())
         .as_ref()
         .and_then(playhead);
-    o.project_after = read_saved(c).ok();
+    o.project_after = read_saved(c, d).ok();
+    if !times.is_empty() {
+        o.frames = render(c, &times, &d.frames, &format!("panel-{tag}-after")).unwrap_or_default();
+    }
     if let Ok(r) = c.call("capture_panel", json!({"panelId": panel}))
         && let Some((_, bytes)) = r.images().into_iter().next()
     {
-        let p = d
-            .frames
-            .join(format!("panel-{}.png", panel.replace('/', "_")));
+        let p = d.frames.join(format!("panel-{tag}.png"));
         if std::fs::write(&p, bytes).is_ok() {
             o.capture = Some(PathBuf::from("frames").join(p.file_name().unwrap()));
         }

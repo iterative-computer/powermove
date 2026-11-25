@@ -296,44 +296,36 @@ pub fn load_pins(data_root: &Path) -> Result<BTreeMap<String, String>, String> {
 
 /// SHA-256 of a file, or of a folder as sorted `path\0sha\n` lines (the same
 /// rule `generate.py` and the runner's extension change detection use).
+/// Symlinks are refused, never followed.
 pub fn tree_hash(path: &Path) -> Result<String, String> {
-    if path.is_file() {
+    let m = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if m.file_type().is_symlink() {
+        return Err(format!("{} is a symlink", path.display()));
+    }
+    if m.is_file() {
         return std::fs::read(path)
             .map(|b| crate::sha256_hex(&b))
             .map_err(|e| format!("{}: {e}", path.display()));
     }
-    let mut files = Vec::new();
-    walk(path, path, &mut files)?;
-    files.sort();
-    let mut text = String::new();
-    for (rel, sha) in files {
-        text.push_str(&format!("{rel}\0{sha}\n"));
-    }
-    Ok(crate::sha256_hex(text.as_bytes()))
-}
-
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for entry in rd {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let p = entry.path();
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
+    let mut lines = Vec::new();
+    for rel in crate::runner::paths::files(path)? {
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
             continue;
         }
-        if p.is_dir() {
-            walk(root, &p, out)?;
-        } else {
-            let rel = p
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            out.push((rel, crate::sha256_hex(&bytes)));
-        }
+        let p = path.join(&rel);
+        let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        lines.push((
+            rel.to_string_lossy().replace('\\', "/"),
+            crate::sha256_hex(&bytes),
+        ));
     }
-    Ok(())
+    // Sorted as strings, as generate.py sorts them.
+    lines.sort();
+    let text: String = lines.iter().map(|(r, s)| format!("{r}\0{s}\n")).collect();
+    Ok(crate::sha256_hex(text.as_bytes()))
 }
 
 /// Tool names from the MCP catalog fixture (what Codex and Claude Code see)

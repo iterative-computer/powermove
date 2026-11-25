@@ -12,6 +12,7 @@ serde_json = "1"
 sha2 = "0.10"
 png = "0.18"
 base64 = "0.22"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

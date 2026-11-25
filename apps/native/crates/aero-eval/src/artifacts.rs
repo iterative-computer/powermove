@@ -27,6 +27,9 @@ pub struct Artifacts {
     /// Collection problems (a tool the host does not offer yet, a failed
     /// render). Graders that needed the evidence report Unavailable.
     pub notes: Vec<String>,
+    /// Evidence the host cannot supply at all (the runner's capability
+    /// check); graders that need it answer "unavailable: host lacks …".
+    pub host_lacks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -97,8 +100,13 @@ pub struct PanelObservation {
     pub steps: Vec<String>,
     /// Playhead time after the steps, when the host reports it.
     pub playhead: Option<f64>,
+    /// Project document just before the probe's steps.
+    pub project_before: Option<Value>,
     /// Project document after the probe's steps.
     pub project_after: Option<Value>,
+    /// Frames rendered just before and after the steps.
+    pub baseline_frames: Vec<Frame>,
+    pub frames: Vec<Frame>,
     pub capture: Option<PathBuf>,
 }
 
@@ -156,6 +164,7 @@ impl Artifacts {
     }
     pub fn save(&self, run_dir: &Path) -> Result<(), String> {
         let text = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(run_dir.join("artifacts.json"), text).map_err(|e| e.to_string())
+        let path = run_dir.join("artifacts.json");
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
