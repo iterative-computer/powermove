@@ -4321,14 +4321,11 @@ impl SurfaceView {
         // A scroll moves the rows under a still pointer: the draw that ends
         // it finds the group (PM-732).
         let scrolling = self.scrolling();
-        let stale = self.cull.hover_stale.clone();
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
             move |_, hitbox, window, cx| {
                 painted.borrow_mut().insert(id, hitbox.id);
-                if scrolling && hitbox.is_hovered(window) != rendered {
-                    stale.set(true);
-                } else if hitbox.is_hovered(window) != rendered {
+                if !scrolling && hitbox.is_hovered(window) != rendered {
                     let view = view.clone();
                     cx.defer(move |cx| {
                         let _ = view.update(cx, |_, cx| cx.notify());
@@ -5904,9 +5901,6 @@ impl SurfaceView {
                 if v.scrolling() {
                     if wash {
                         v.motion.hovers.set(id, *hovered);
-                    }
-                    if wash || group {
-                        v.cull.hover_stale.set(true);
                     }
                 } else {
                     // The pointer crossed a group: draw again, which finds
