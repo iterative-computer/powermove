@@ -234,3 +234,67 @@ pub fn upstream(script: Vec<Vec<Event>>) -> Upstream {
     });
     Upstream { origin, requests }
 }
+
+/// The cut the fake CLIs and the fake Aero apply when the stream says so.
+pub fn correct_cut() -> Value {
+    json!([{"op": "delete", "name": "Take 2"},
+           {"op": "set", "name": "B-roll", "path": "/from", "value": 2},
+           {"op": "set", "name": "Take 3", "path": "/from", "value": 4},
+           {"op": "set", "name": "Take 4", "path": "/from", "value": 6}])
+}
+
+/// A synthetic recording for the fake harnesses: turn 0 streams the cut,
+/// turn 1 streams the final answer with usage. Built for one slot.
+pub fn fake_recording(
+    harness: &str,
+    task: &str,
+    model: &str,
+    effort: &str,
+    prompt: &str,
+) -> pm_aero_eval::replay::Recording {
+    use pm_aero_eval::replay::{Exchange, Normalise, Recording, Request, Response};
+    let (provider, path) = match harness {
+        "claude-code" => ("anthropic-messages", "/v1/messages"),
+        _ => ("openai-responses", "/v1/responses"),
+    };
+    let turn = |n: u32, events: Vec<Event>| Exchange {
+        request: Request {
+            method: "POST".into(),
+            path: path.into(),
+            body: json!({"model": model, "prompt": prompt, "turn": n}),
+        },
+        response: Response {
+            status: 200,
+            events,
+            body: None,
+        },
+    };
+    Recording {
+        format: pm_aero_eval::replay::FORMAT.into(),
+        version: 1,
+        synthetic: true,
+        provider: provider.into(),
+        harness: harness.into(),
+        model: model.into(),
+        effort: effort.into(),
+        task: task.into(),
+        normalise: Normalise::default(),
+        exchanges: vec![
+            turn(
+                0,
+                vec![Event::json(
+                    Some("fake.commands"),
+                    json!({"commands": correct_cut()}),
+                )],
+            ),
+            turn(
+                1,
+                vec![Event::json(
+                    Some("fake.done"),
+                    json!({"text": "Cut done.", "usage": {"input": 1000, "cached": 400, "output": 50}}),
+                )],
+            ),
+        ],
+        review: None,
+    }
+}

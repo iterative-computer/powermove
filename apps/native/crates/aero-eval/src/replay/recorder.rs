@@ -28,6 +28,8 @@ pub struct Recorder {
     folders: Vec<String>,
     normalise: Normalise,
     exchanges: Vec<Exchange>,
+    /// Anything that could not be recorded faithfully; `finish` fails on it.
+    errors: Vec<String>,
 }
 
 impl Recorder {
@@ -39,9 +41,19 @@ impl Recorder {
             folders,
             normalise: Normalise { volatile },
             exchanges: Vec::new(),
+            errors: Vec::new(),
         }
     }
+    /// Record one exchange. Only the provider's known paths and query keys
+    /// are kept; a request to any other path makes the recording fail.
     pub fn push(&mut self, mut request: Request, mut response: Response) {
+        match super::recorded_path(&self.meta.provider, &request.path) {
+            Ok(p) => request.path = p,
+            Err(e) => {
+                self.errors.push(e);
+                return;
+            }
+        }
         normalise_paths(&mut request.body, &self.folders);
         // Stored masked, so a re-recording of the same run is byte-identical.
         super::mask_volatile(&mut request.body, &self.normalise.volatile);
@@ -55,7 +67,14 @@ impl Recorder {
         }
         self.exchanges.push(Exchange { request, response });
     }
+    /// A stream that could not be captured exactly fails the recording.
+    pub fn error(&mut self, e: String) {
+        self.errors.push(e);
+    }
     pub fn finish(self) -> Result<Recording, String> {
+        if let Some(e) = self.errors.first() {
+            return Err(format!("the recording is incomplete: {e}"));
+        }
         let r = Recording {
             format: FORMAT.into(),
             version: 1,
@@ -67,6 +86,7 @@ impl Recorder {
             task: self.meta.task,
             normalise: self.normalise,
             exchanges: self.exchanges,
+            review: None,
         };
         r.validate()?;
         Ok(r)
@@ -107,7 +127,13 @@ impl RecordingProxy {
                     break;
                 }
                 let Ok(mut stream) = conn else { continue };
-                if let Err(e) = forward(&mut stream, &up, &rec) {
+                let deadline = Some(super::replayer::SOCKET_DEADLINE);
+                if let Err(e) = stream
+                    .set_read_timeout(deadline)
+                    .and_then(|()| stream.set_write_timeout(deadline))
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| forward(&mut stream, &up, &rec))
+                {
                     errs.lock().unwrap().push(e);
                 }
             }
@@ -138,7 +164,7 @@ impl RecordingProxy {
     }
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = std::net::TcpStream::connect(self.addr);
+        let _ = std::net::TcpStream::connect_timeout(&self.addr, super::replayer::SOCKET_DEADLINE);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -178,6 +204,11 @@ fn forward(
             Ok(())
         })?;
         events.extend(parser.finish());
+        if let Some(e) = parser.errors.first()
+            && let Some(r) = recorder.lock().unwrap().as_mut()
+        {
+            r.error(e.clone());
+        }
         Response {
             status,
             events,

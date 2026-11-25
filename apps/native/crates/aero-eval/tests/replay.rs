@@ -182,7 +182,7 @@ fn volatile_fields_compare_by_presence_only() {
 fn recordings_refuse_paths_and_keys() {
     let mut rec = Recording::load(&committed()).unwrap();
     rec.exchanges[0].request.body["leak"] = json!("/Users/someone/project.pmv");
-    assert!(rec.validate().unwrap_err().contains("/Users/"));
+    assert!(rec.validate().unwrap_err().contains("/users/"));
     let mut rec = Recording::load(&committed()).unwrap();
     rec.exchanges[0].request.body["leak"] = json!("sk-abcdefghijklmnopqrstuvwxyz0123");
     assert!(rec.validate().unwrap_err().contains("API key"));
@@ -245,4 +245,235 @@ fn the_in_process_replayer_serves_aero_without_http() {
         assert_eq!(resp, e.response);
     }
     assert!(r.report().passed);
+}
+
+fn raw(origin: &str, bytes: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(origin.trim_start_matches("http://")).unwrap();
+    s.write_all(bytes).unwrap();
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out
+}
+
+#[test]
+fn the_first_replay_error_of_any_kind_is_latched() {
+    // Review scenario: a malformed request got 409, then three valid requests
+    // got 200 and the report passed.
+    let rec = Recording::load(&committed()).unwrap();
+    let (_t, folder) = folder();
+    let server = ReplayServer::start(Replayer::new(rec.clone(), vec![folder.clone()])).unwrap();
+    let answer = raw(&server.origin(), b"NONSENSE\r\n\r\n");
+    assert!(answer.contains("409"), "{answer}");
+    let out = Toy::new(&folder).run(&server.origin());
+    assert!(out.error.unwrap().contains("malformed-request"));
+    let report = server.finish();
+    assert!(!report.passed);
+    assert_eq!(report.consumed, 0);
+    assert_eq!(report.divergence.unwrap().kind, "malformed-request");
+
+    // A body that is not JSON after a divergence does not replace it.
+    let server = ReplayServer::start(Replayer::new(rec, vec![folder.clone()])).unwrap();
+    let mut toy = Toy::new(&folder);
+    toy.system = "changed".into();
+    toy.run(&server.origin());
+    let bad = b"POST /v1/responses HTTP/1.1\r\ncontent-length: 3\r\n\r\n{x}";
+    assert!(raw(&server.origin(), bad).contains("request-differs"));
+    let d = server.finish().divergence.unwrap();
+    assert_eq!(
+        (d.kind.as_str(), d.differences[0].path.as_str()),
+        ("request-differs", "/instructions")
+    );
+}
+
+#[test]
+fn an_unfinished_request_cannot_hold_the_replay_server() {
+    use std::io::Write;
+    let rec = Recording::load(&committed()).unwrap();
+    let server = ReplayServer::start_with_deadline(
+        Replayer::new(rec, vec![]),
+        std::time::Duration::from_millis(300),
+    )
+    .unwrap();
+    // Half a request, then silence.
+    let mut s =
+        std::net::TcpStream::connect(server.origin().trim_start_matches("http://")).unwrap();
+    s.write_all(b"POST /v1/responses HTTP/1.1\r\ncontent-length: 100\r\n\r\n{")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    let report = server.finish();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!report.passed);
+    assert_eq!(report.divergence.unwrap().kind, "malformed-request");
+    drop(s);
+}
+
+#[test]
+fn sse_text_survives_a_multibyte_character_split_across_reads() {
+    // Review scenario: lossy decoding per chunk changed split characters.
+    let e = sse::Event::json(Some("delta"), json!({"delta": "naïve — 日本語 ✓"}));
+    let mut bytes = Vec::new();
+    e.write(&mut bytes);
+    let mut p = sse::Parser::default();
+    let mut got = Vec::new();
+    for b in &bytes {
+        got.extend(p.feed(std::slice::from_ref(b)));
+    }
+    assert_eq!(got, vec![e]);
+    assert!(p.errors.is_empty());
+    // A line that is not UTF-8 is an error, never rewritten.
+    let mut p = sse::Parser::default();
+    assert!(p.feed(b"data: \xff\xfe\n\n").is_empty());
+    assert_eq!(p.errors.len(), 1);
+}
+
+#[test]
+fn recordings_refuse_credentials_query_keys_and_any_home_path() {
+    let base = Recording::load(&committed()).unwrap();
+    let with = |f: &dyn Fn(&mut Recording)| {
+        let mut r = base.clone();
+        f(&mut r);
+        r.validate()
+    };
+    // Review scenarios: a credential field, a credential query parameter and
+    // a Windows home path were accepted.
+    for (name, edit) in [
+        (
+            "api_key field",
+            Box::new(|r: &mut Recording| r.exchanges[0].request.body["api_key"] = json!("abc123"))
+                as Box<dyn Fn(&mut Recording)>,
+        ),
+        (
+            "nested Authorization",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.body["meta"] = json!({"Authorization": "x"})
+            }),
+        ),
+        (
+            "x-api-key",
+            Box::new(|r: &mut Recording| r.exchanges[1].request.body["x-api-key"] = json!("x")),
+        ),
+        (
+            "query key",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.path = "/v1/responses?key=abc".into()
+            }),
+        ),
+        (
+            "unknown path",
+            Box::new(|r: &mut Recording| r.exchanges[0].request.path = "/v1/files".into()),
+        ),
+        (
+            "windows home",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.body["f"] = json!("C:\\Users\\someone\\a.pmv")
+            }),
+        ),
+        (
+            "forward-slash windows home",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.body["f"] = json!("c:/Users/someone")
+            }),
+        ),
+        (
+            "temp folder",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.body["f"] = json!("/var/folders/x/T/run")
+            }),
+        ),
+        (
+            "key in a response",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].response.events[0].text =
+                    Some(format!("{}{}", "AKIA", "Q".repeat(16)))
+            }),
+        ),
+        (
+            "bearer in a response",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[2]
+                    .response
+                    .events
+                    .push(sse::Event::json(None, json!({"h": "Bearer abc"})))
+            }),
+        ),
+        (
+            "account id",
+            Box::new(|r: &mut Recording| {
+                r.exchanges[0].request.body["metadata"] = json!({"user_id": "u-1"})
+            }),
+        ),
+    ] {
+        assert!(with(&*edit).is_err(), "{name} was accepted");
+    }
+    // Ordinary text and empty credential-named fields are fine.
+    with(&|r| r.exchanges[0].request.body["note"] = json!("a basic task-list, risk-free")).unwrap();
+    with(&|r| r.exchanges[0].request.body["api_key"] = json!(null)).unwrap();
+}
+
+#[test]
+fn saving_validates_and_the_recorder_drops_unrecorded_query_keys() {
+    let mut rec = Recording::load(&committed()).unwrap();
+    rec.exchanges[0].request.body["leak"] = json!("/Users/someone/x");
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().join("r.json");
+    assert!(rec.save(&path).unwrap_err().contains("not saved"));
+    assert!(!path.exists());
+
+    let mut r = Recorder::new(meta(), vec![], vec![]);
+    let resp = rec.exchanges[0].response.clone();
+    r.push(
+        Request {
+            method: "POST".into(),
+            path: "/v1/responses?api-version=2&key=secret".into(),
+            body: json!({}),
+        },
+        resp.clone(),
+    );
+    let done = r.finish().unwrap();
+    assert_eq!(done.exchanges[0].request.path, "/v1/responses");
+    let mut r = Recorder::new(meta(), vec![], vec![]);
+    r.push(
+        Request {
+            method: "POST".into(),
+            path: "/v1/files".into(),
+            body: json!({}),
+        },
+        resp,
+    );
+    assert!(r.finish().unwrap_err().contains("never records the path"));
+    // The replayer compares a live path the way it would have been recorded.
+    let mut rp = Replayer::new(Recording::load(&committed()).unwrap(), vec![]);
+    let mut req = rec.exchanges[0].request.clone();
+    req.body = Recording::load(&committed()).unwrap().exchanges[0]
+        .request
+        .body
+        .clone();
+    req.path = "/v1/responses?key=secret".into();
+    assert!(rp.respond(&req).is_ok());
+}
+
+#[test]
+fn committed_recordings_are_synthetic_or_reviewed() {
+    for e in std::fs::read_dir(pm_aero_eval::data_root().join("replay")).unwrap() {
+        let p = e.unwrap().path();
+        let r = Recording::load(&p).unwrap();
+        r.validate_for_repo()
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    }
+    let mut real = Recording::load(&committed()).unwrap();
+    real.synthetic = false;
+    assert!(real.validate_for_repo().unwrap_err().contains("review"));
+    real.review = Some(pm_aero_eval::replay::Review {
+        by: "the Chief".into(),
+        at: "2026-11-24".into(),
+        note: "read every exchange".into(),
+    });
+    real.validate_for_repo().unwrap();
 }

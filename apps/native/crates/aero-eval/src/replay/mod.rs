@@ -5,7 +5,11 @@
 //! insignificant, and everything else (ids, array order, text, null versus
 //! absent) stays exact. The few volatile fields a provider protocol carries
 //! (a per-run cache key) are listed by pointer in the recording itself, so
-//! nothing is dropped silently. Credentials and headers are never recorded.
+//! nothing is dropped silently. Headers are never recorded; only the
+//! provider's known paths and query keys are; and a recording is validated
+//! for credential fields, key-shaped strings and home paths whenever it is
+//! loaded, finished or saved. A real recording also needs an explicit
+//! [`Review`] before it may enter the public repo ([`Recording::validate_for_repo`]).
 pub mod http;
 pub mod recorder;
 pub mod replayer;
@@ -36,6 +40,58 @@ pub struct Recording {
     #[serde(default)]
     pub normalise: Normalise,
     pub exchanges: Vec<Exchange>,
+    /// Who read a real recording line by line before it was committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    pub by: String,
+    /// ISO date.
+    pub at: String,
+    pub note: String,
+}
+
+/// Wire protocols a recording may hold, with the request paths and query
+/// keys each one may record. Anything else is refused.
+pub const PROVIDERS: [(&str, &[&str], &[&str]); 2] = [
+    ("openai-responses", &["/v1/responses", "/responses"], &[]),
+    (
+        "anthropic-messages",
+        &["/v1/messages", "/v1/messages/count_tokens"],
+        &["beta"],
+    ),
+];
+
+/// The path as it may be recorded: a known path of the provider, with only
+/// its allowed query keys (short plain values), in order. Every other query
+/// pair is dropped, so a credential in a query string is never written.
+pub fn recorded_path(provider: &str, path: &str) -> Result<String, String> {
+    let (_, paths, keys) = PROVIDERS
+        .iter()
+        .find(|(p, _, _)| *p == provider)
+        .ok_or_else(|| format!("unknown provider {provider}"))?;
+    let (base, query) = path.split_once('?').unwrap_or((path, ""));
+    if !paths.contains(&base) {
+        return Err(format!("{provider} never records the path {base}"));
+    }
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            keys.contains(&k)
+                && v.len() <= 32
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        })
+        .collect();
+    Ok(if kept.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -83,7 +139,10 @@ impl Recording {
             .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(r)
     }
+    /// Validates first: an unvalidated recording is never written.
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        self.validate()
+            .map_err(|e| format!("{}: not saved: {e}", path.display()))?;
         let mut text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         text.push('\n');
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
@@ -103,33 +162,153 @@ impl Recording {
                 return Err(format!("volatile entry {p} is not a JSON pointer"));
             }
         }
-        let text = serde_json::to_string(self).unwrap_or_default();
-        for leak in ["/Users/", "/home/", "/private/var/", "Bearer "] {
-            if text.contains(leak) {
-                return Err(format!(
-                    "recording contains \"{leak}\": normalise paths and never record credentials"
-                ));
+        if let Some(r) = &self.review
+            && (r.by.trim().is_empty() || r.at.trim().is_empty())
+        {
+            return Err("a review names who read the recording and when".into());
+        }
+        for (i, e) in self.exchanges.iter().enumerate() {
+            let at = |m: String| format!("exchange {i}: {m}");
+            if !matches!(e.request.method.as_str(), "POST" | "GET") {
+                return Err(at(format!("method {} is not recorded", e.request.method)));
+            }
+            let allowed = recorded_path(&self.provider, &e.request.path).map_err(at)?;
+            if allowed != e.request.path {
+                return Err(at(format!(
+                    "path {} carries query keys the provider never records",
+                    e.request.path
+                )));
+            }
+            scan(&e.request.body, &format!("/exchanges/{i}/request/body")).map_err(at)?;
+            for (j, ev) in e.response.events.iter().enumerate() {
+                let p = format!("/exchanges/{i}/response/events/{j}");
+                for s in [&ev.event, &ev.text].into_iter().flatten() {
+                    scan(&Value::String(s.clone()), &p).map_err(at)?;
+                }
+                if let Some(d) = &ev.data {
+                    scan(d, &p).map_err(at)?;
+                }
+            }
+            if let Some(b) = &e.response.body {
+                scan(b, &format!("/exchanges/{i}/response/body")).map_err(at)?;
             }
         }
-        if looks_like_key(&text) {
-            return Err("recording contains something shaped like an API key".into());
+        for s in [&self.harness, &self.model, &self.effort, &self.task] {
+            scan(&Value::String(s.clone()), "/").map_err(|e| format!("metadata: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The rule for `data/replay/` in the public repo: synthetic, or a real
+    /// recording someone reviewed.
+    pub fn validate_for_repo(&self) -> Result<(), String> {
+        self.validate()?;
+        if !self.synthetic && self.review.is_none() {
+            return Err("a real recording needs an explicit review before it is committed".into());
         }
         Ok(())
     }
 }
 
-/// `sk-…` / `sk-ant-…` style secrets: the prefix at a token start followed by
-/// at least 20 key characters.
+/// Object keys that carry credentials, compared without case, `-` or `_`.
+const CREDENTIAL_KEYS: [&str; 20] = [
+    "apikey",
+    "xapikey",
+    "authorization",
+    "proxyauthorization",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "sessiontoken",
+    "authtoken",
+    "bearer",
+    "password",
+    "passwd",
+    "secret",
+    "clientsecret",
+    "cookie",
+    "setcookie",
+    "userid",
+    "accountid",
+    "organizationid",
+    "email",
+];
+
+/// Text that must never appear in a recording: home and temp folders on
+/// every platform, auth schemes and private keys.
+const LEAKS: [&str; 11] = [
+    "/users/",
+    "/home/",
+    "/private/var/",
+    "/var/folders/",
+    "c:\\users\\",
+    "c:/users/",
+    "\\users\\",
+    "%userprofile%",
+    "bearer ",
+    "-----begin",
+    "/root/",
+];
+
+fn scan(v: &Value, at: &str) -> Result<(), String> {
+    match v {
+        Value::String(s) => {
+            let lower = s.to_lowercase();
+            if let Some(leak) = LEAKS.iter().find(|l| lower.contains(*l)) {
+                return Err(format!(
+                    "{at} contains \"{}\": normalise paths and never record credentials",
+                    leak.trim()
+                ));
+            }
+            if looks_like_key(s) {
+                return Err(format!("{at} contains something shaped like an API key"));
+            }
+            Ok(())
+        }
+        Value::Array(a) => a
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, x)| scan(x, &format!("{at}/{i}"))),
+        Value::Object(m) => m.iter().try_for_each(|(k, x)| {
+            let norm: String = k
+                .to_lowercase()
+                .chars()
+                .filter(|c| !matches!(c, '-' | '_'))
+                .collect();
+            let filled = !matches!(x, Value::Null) && x.as_str() != Some("");
+            if filled && CREDENTIAL_KEYS.contains(&norm.as_str()) {
+                return Err(format!("{at}/{k} is a credential field"));
+            }
+            scan(&Value::String(k.clone()), at)?;
+            scan(x, &format!("{at}/{k}"))
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Provider secrets by shape: `sk-…`/`sk-ant-…`, AWS, GitHub, Slack and
+/// Google keys, at a token start, followed by enough key characters.
 fn looks_like_key(text: &str) -> bool {
     let b = text.as_bytes();
-    text.match_indices("sk-").any(|(i, _)| {
-        let starts_token = i == 0 || !b[i - 1].is_ascii_alphanumeric();
-        let run = b[i + 3..]
+    let key_run = |from: usize| {
+        b[from..]
             .iter()
             .take_while(|c| c.is_ascii_alphanumeric() || **c == b'-' || **c == b'_')
-            .count();
-        starts_token && run >= 20
-    })
+            .count()
+    };
+    let prefixed = |prefix: &str, min: usize| {
+        text.match_indices(prefix).any(|(i, _)| {
+            (i == 0 || !b[i - 1].is_ascii_alphanumeric()) && key_run(i + prefix.len()) >= min
+        })
+    };
+    prefixed("sk-", 20)
+        || prefixed("AKIA", 16)
+        || prefixed("ghp_", 30)
+        || prefixed("gho_", 30)
+        || prefixed("github_pat_", 30)
+        || prefixed("xoxb-", 20)
+        || prefixed("xoxp-", 20)
+        || prefixed("AIza", 30)
 }
 
 /// Rewrite every occurrence of the given working folders in strings to

@@ -224,6 +224,12 @@ pub fn send(
     })?;
     let host = host.trim_end_matches('/');
     let mut stream = TcpStream::connect(host).map_err(|e| format!("{host}: {e}"))?;
+    // A stalled upstream fails the exchange instead of hanging the caller.
+    let deadline = Some(std::time::Duration::from_secs(120));
+    stream
+        .set_read_timeout(deadline)
+        .and_then(|()| stream.set_write_timeout(deadline))
+        .map_err(|e| e.to_string())?;
     let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n");
     for (k, v) in headers {
         if !matches!(

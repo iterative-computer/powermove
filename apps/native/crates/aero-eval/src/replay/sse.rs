@@ -55,20 +55,31 @@ impl Event {
     }
 }
 
-/// Incremental parser: feed bytes, take complete events.
+/// Incremental parser: feed bytes, take complete events. Bytes are held
+/// until a whole line arrives, so a multibyte character split across reads
+/// decodes intact; a line that is not UTF-8 is an error, never rewritten.
 #[derive(Default)]
 pub struct Parser {
-    buf: String,
+    buf: Vec<u8>,
     event: Option<String>,
     data: Vec<String>,
+    /// Lines that were not UTF-8 (the stream cannot be recorded faithfully).
+    pub errors: Vec<String>,
 }
 
 impl Parser {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
-        self.buf.push_str(&String::from_utf8_lossy(bytes));
+        self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some(i) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=i).collect();
+        while let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
+            let raw: Vec<u8> = self.buf.drain(..=i).collect();
+            let line = match String::from_utf8(raw) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.errors.push(format!("SSE line is not UTF-8: {e}"));
+                    continue;
+                }
+            };
             let line = line.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
                 if !self.data.is_empty() || self.event.is_some() {
@@ -89,8 +100,7 @@ impl Parser {
     }
     /// An unterminated final event, if the stream ended without a blank line.
     pub fn finish(&mut self) -> Option<Event> {
-        let rest = std::mem::take(&mut self.buf);
-        let mut tail = self.feed(format!("{rest}\n\n").as_bytes());
+        let mut tail = self.feed(b"\n\n");
         tail.pop()
     }
 }
