@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-TOOLS): Config gains
+// host_tool_bridge (core/tooling/host_tool_bridge.zig).
 const std = @import("std");
 const config_runtime = @import("../config/config_runtime.zig");
 const process_provider = @import("../execution/process_provider.zig");
@@ -74,6 +76,9 @@ pub const Config = struct {
     /// Raw prompt image and checkpoint bytes from a libfx host. Null for
     /// hosts that only speak standard ACP, such as `fx acp`.
     host_attachments: ?host_attachments.Store = null,
+    /// Powermove (P-TOOLS): host tool calls go to this executor directly
+    /// instead of as `libfx/tool_call` requests. Null keeps the ACP path.
+    host_tool_bridge: ?@import("../tooling/host_tool_bridge.zig").Bridge = null,
 };
 
 pub const RunFn = *const fn (?*anyopaque, Allocator, Config) anyerror!void;

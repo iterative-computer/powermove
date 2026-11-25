@@ -6,9 +6,7 @@ src/acp/libfx_hooks.zig
 src/acp/libfx_journal.zig
 src/acp/libfx_steering.zig
 src/acp/mcp_servers.zig
-src/acp/prompt.zig
 src/acp/prompt_test_controls.zig
-src/acp/server.zig
 src/acp/sessions.zig
 src/acp/tool_call_presentation.zig
 src/acp/types.zig
@@ -39,7 +37,6 @@ src/core/agent/question_answer.zig
 src/core/agent/question_prompt.zig
 src/core/agent/runtime/agent.zig
 src/core/agent/runtime/assistant_stream.zig
-src/core/agent/runtime/cache_warmer.zig
 src/core/agent/runtime/cache_warming.zig
 src/core/agent/runtime/checkpoint.zig
 src/core/agent/runtime/config.zig
@@ -56,10 +53,8 @@ src/core/agent/runtime/model_call_record.zig
 src/core/agent/runtime/observation.zig
 src/core/agent/runtime/observation_testing.zig
 src/core/agent/runtime/orchestrator.zig
-src/core/agent/runtime/parallel_execution.zig
 src/core/agent/runtime/prompt_context.zig
 src/core/agent/runtime/request_image_budget.zig
-src/core/agent/runtime/request_recovery.zig
 src/core/agent/runtime/resend_strategy.zig
 src/core/agent/runtime/response_language.zig
 src/core/agent/runtime/runtime_context.zig
@@ -145,7 +140,6 @@ src/core/auth/session_presence.zig
 src/core/auth/stored_login_testing.zig
 src/core/auth/subscription_logout.zig
 src/core/auth/subscription_session.zig
-src/core/cli/acp_runner.zig
 src/core/cli/cli_config.zig
 src/core/cli/cli_flags.zig
 src/core/cli/cli_replay.zig

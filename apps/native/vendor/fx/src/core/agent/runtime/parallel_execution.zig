@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-PANIC): parallel tool
+// workers start in their runtime's panic context (core/shared/panic_context.zig).
 const std = @import("std");
 const builtin = @import("builtin");
 const testing_allocator = @import("../../shared/testing_allocator.zig");
@@ -265,7 +267,7 @@ pub fn runParallelCalls(
 
     var started: usize = 0;
     for (calls, 0..) |call, index| {
-        slots[index].thread = std.Thread.spawn(.{}, parallelWorkerMain, .{ &completion_state, &slots[index], options, call, index }) catch |err| {
+        slots[index].thread = @import("../../shared/panic_context.zig").spawn(.{}, parallelWorkerMain, .{ &completion_state, &slots[index], options, call, index }) catch |err| {
             for (slots[0..started]) |*slot| {
                 if (slot.thread) |thread| thread.join();
                 slot.thread = null;

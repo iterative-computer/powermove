@@ -1,13 +1,40 @@
 //! Test support: the vendored fake inference server
-//! (`vendor/fx/test-support/fake-inference-server.zig`, built by build.rs)
-//! and a minimal HTTP/1.1 client the tests use as the host's fetch edge. No
-//! real model, no credentials.
+//! (`vendor/fx/test-support/fake-inference-server.zig`, built by build.rs),
+//! a minimal HTTP/1.1 client the tests use as the host's fetch edge, and a
+//! Rust fake model that answers model requests inside the fetch edge (Gateway
+//! SSE), so a test can script tool calls. No real model, no credentials.
 
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use pm_aero_core::{
+    Config, Disposition, Error, Event, Outcome, Purpose, Remote, Runtime, State, Steered,
+    StopReason,
+};
+
+/// Runs `body` on a fresh thread: the core is never called on the main
+/// thread, and a test harness may run tests on it.
+pub fn on_worker(body: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(body).join().expect("test thread");
+}
+
+pub fn config<'a>(endpoint: &'a str, tools: &'a [pm_aero_core::Tool<'a>]) -> Config<'a> {
+    Config {
+        endpoint_url: endpoint,
+        model: "fake/model",
+        instructions: "Reply with five x characters.",
+        home: "/nonexistent/aero-home",
+        workspace_root: "/nonexistent/aero-workspace",
+        tools,
+        ..Config::default()
+    }
+}
 
 /// The fake server, killed (by the pid this test started) when dropped.
 pub struct FakeServer {
@@ -49,7 +76,7 @@ impl Drop for FakeServer {
 }
 
 /// Sends one request and streams the response body to `on_body` as it
-/// arrives (chunked encoding decoded). Returns the status.
+/// arrives (chunked encoding decoded).
 pub fn http(
     url: &str,
     method: &str,
@@ -134,7 +161,13 @@ pub fn http(
 }
 
 /// Waits until `fd` is readable or `timeout_ms` passes, then empties it.
-pub fn wait_ready(fd: i32, timeout_ms: i32) {
+pub fn wait_ready(runtime: &Runtime, timeout_ms: i32) {
+    use std::os::fd::AsRawFd;
+    let Some(fd) = runtime.ready_fd() else {
+        std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+        return;
+    };
+    let fd = fd.as_raw_fd();
     let mut poll = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -145,4 +178,448 @@ pub fn wait_ready(fd: i32, timeout_ms: i32) {
     let mut sink = [0u8; 64];
     // SAFETY: non-blocking read into a local buffer; wake bytes carry no state.
     while unsafe { libc::read(fd, sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+}
+
+// ---------------------------------------------------------------------------
+// The Rust fake model
+// ---------------------------------------------------------------------------
+
+/// One model request, as the fake model sees it.
+#[derive(Clone, Debug)]
+pub struct ModelCall {
+    pub index: usize,
+    pub url: String,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// How the fake model answers.
+pub enum Reply {
+    /// A 200 with this Gateway SSE body.
+    Sse(String),
+    /// Never send the status line: the request hangs until the core retires it.
+    Hold,
+    /// The loopback fake server answers (the smoke test's path).
+    Server,
+}
+
+pub type Model = Arc<dyn Fn(&ModelCall) -> Reply + Send + Sync>;
+
+/// Gateway SSE: a text reply.
+pub fn sse_text(text: &str) -> String {
+    format!(
+        "data: {{\"type\":\"text-delta\",\"id\":\"0\",\"delta\":{}}}\n\n\
+         data: {{\"type\":\"finish\",\"finishReason\":{{\"unified\":\"stop\",\"raw\":\"stop\"}},\"usage\":{{\"inputTokens\":{{\"total\":1}},\"outputTokens\":{{\"total\":1}}}}}}\n\n\
+         data: [DONE]\n\n",
+        json_string(text)
+    )
+}
+
+/// Gateway SSE: calls to `tool` with each input JSON, in parallel.
+pub fn sse_tool_calls(tool: &str, inputs: &[&str]) -> String {
+    let mut out = String::new();
+    for (index, input) in inputs.iter().enumerate() {
+        let id = format!("call_{index}");
+        out.push_str(&format!(
+            "data: {{\"type\":\"tool-input-start\",\"id\":\"{id}\",\"toolName\":\"{tool}\"}}\n\n\
+             data: {{\"type\":\"tool-input-delta\",\"id\":\"{id}\",\"delta\":{}}}\n\n\
+             data: {{\"type\":\"tool-call\",\"toolCallId\":\"{id}\",\"toolName\":\"{tool}\",\"input\":{}}}\n\n",
+            json_string(input),
+            json_string(input)
+        ));
+    }
+    out.push_str(
+        "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\",\"raw\":\"tool_calls\"},\"usage\":{\"inputTokens\":{\"total\":1},\"outputTokens\":{\"total\":1}}}\n\n\
+         data: [DONE]\n\n",
+    );
+    out
+}
+
+pub fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A model that replies `text` to everything.
+pub fn text_model(text: &'static str) -> Model {
+    Arc::new(move |_| Reply::Sse(sse_text(text)))
+}
+
+/// An owned copy of an event, for assertions after the drain.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Seen {
+    Opened {
+        request: u64,
+        session: String,
+    },
+    RequestDone {
+        request: u64,
+        outcome: Result<Outcome, Error>,
+        message: String,
+    },
+    TurnStart {
+        turn: u64,
+        message_id: String,
+    },
+    Text {
+        turn: u64,
+        text: String,
+    },
+    ToolStart {
+        turn: u64,
+        name: String,
+    },
+    ToolEnd {
+        turn: u64,
+        name: String,
+        failed: bool,
+    },
+    SteerJoined {
+        turn: u64,
+        request: u64,
+        message_id: String,
+    },
+    SteerReturned {
+        turn: u64,
+        request: u64,
+        message_id: String,
+    },
+    TurnEnd {
+        turn: u64,
+        reason: StopReason,
+    },
+    Error {
+        turn: u64,
+        message: String,
+    },
+    Exited {
+        state: State,
+        message: String,
+        events_lost: bool,
+    },
+    Other(String),
+}
+
+impl Seen {
+    fn of(event: &Event<'_>) -> Seen {
+        match *event {
+            Event::SessionOpened {
+                request,
+                session_id,
+                ..
+            } => Seen::Opened {
+                request,
+                session: session_id.to_string(),
+            },
+            Event::RequestDone {
+                request,
+                outcome,
+                message,
+            } => Seen::RequestDone {
+                request,
+                outcome,
+                message: message.to_string(),
+            },
+            Event::TurnStart {
+                turn, message_id, ..
+            } => Seen::TurnStart {
+                turn,
+                message_id: message_id.to_string(),
+            },
+            Event::TextDelta { turn, text } => Seen::Text {
+                turn,
+                text: text.to_string(),
+            },
+            Event::ToolStart { turn, name, .. } => Seen::ToolStart {
+                turn,
+                name: name.to_string(),
+            },
+            Event::ToolEnd {
+                turn, name, failed, ..
+            } => Seen::ToolEnd {
+                turn,
+                name: name.to_string(),
+                failed,
+            },
+            Event::SteerJoined {
+                turn,
+                request,
+                message_id,
+                ..
+            } => Seen::SteerJoined {
+                turn,
+                request,
+                message_id: message_id.to_string(),
+            },
+            Event::SteerReturned {
+                turn,
+                request,
+                message_id,
+            } => Seen::SteerReturned {
+                turn,
+                request,
+                message_id: message_id.to_string(),
+            },
+            Event::TurnEnd { turn, reason, .. } => Seen::TurnEnd { turn, reason },
+            Event::Error { turn, message, .. } => Seen::Error {
+                turn,
+                message: message.to_string(),
+            },
+            Event::Exited {
+                state,
+                message,
+                events_lost,
+            } => Seen::Exited {
+                state,
+                message: message.to_string(),
+                events_lost,
+            },
+            other => Seen::Other(format!("{other:?}")),
+        }
+    }
+}
+
+/// Fetches the driver has seen, by id.
+#[derive(Clone, Debug)]
+pub struct FetchSeen {
+    pub fetch: u64,
+    pub turn: u64,
+    pub purpose: Purpose,
+    pub provider: String,
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    /// What the edge sends with SYNTHETIC_CREDENTIALS (FetchRequest::outgoing_headers).
+    pub outgoing: Vec<(String, String)>,
+}
+
+/// Synthetic values only: the lane never uses a real credential.
+pub const GATEWAY_KEY: &str = "Bearer synthetic-gateway-key";
+pub const CODEX_KEY: &str = "Bearer synthetic-codex-key";
+pub const SYNTHETIC_CREDENTIALS: [pm_aero_core::Credential<'static>; 2] = [
+    pm_aero_core::Credential {
+        provider: "gateway",
+        origin: "https://ai-gateway.vercel.sh",
+        header: "authorization",
+        value: GATEWAY_KEY,
+    },
+    pm_aero_core::Credential {
+        provider: "codex",
+        origin: "https://chatgpt.com",
+        header: "authorization",
+        value: CODEX_KEY,
+    },
+];
+
+/// Drives one runtime: waits on its ready fd, drains its events and serves
+/// its fetches with the fake model (one thread per fetch, as the app's HTTP
+/// client would).
+pub struct Driver {
+    pub runtime: Runtime,
+    pub model: Model,
+    pub endpoint: String,
+    calls: Arc<AtomicUsize>,
+    pub seen: Vec<Seen>,
+    pub fetches: Arc<Mutex<Vec<FetchSeen>>>,
+}
+
+impl Driver {
+    pub fn new(runtime: Runtime, model: Model, endpoint: &str) -> Driver {
+        Driver {
+            runtime,
+            model,
+            endpoint: endpoint.to_string(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            seen: Vec::new(),
+            fetches: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn remote(&self) -> Remote {
+        self.runtime.remote()
+    }
+
+    /// One round: wait up to `wait_ms`, drain, serve. Returns what was new.
+    pub fn pump(&mut self, wait_ms: i32) -> Vec<Seen> {
+        wait_ready(&self.runtime, wait_ms);
+        let mut new = Vec::new();
+        match self.runtime.events.drain() {
+            Ok(events) => new.extend(events.map(|event| Seen::of(&event))),
+            Err(Error::Busy) => {}
+            Err(error) => panic!("drain: {error}"),
+        }
+        let remote = self.runtime.remote();
+        loop {
+            let request = match self.runtime.fetches.take() {
+                Ok(Some(request)) => request,
+                Ok(None) | Err(Error::Failed) | Err(Error::Busy) => break,
+                Err(error) => panic!("take fetch: {error}"),
+            };
+            let seen = FetchSeen {
+                fetch: request.fetch,
+                turn: request.turn,
+                purpose: request.purpose,
+                provider: request.provider.to_string(),
+                method: request.method.to_string(),
+                url: request.url.to_string(),
+                headers: request
+                    .headers()
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect(),
+                outgoing: request.outgoing_headers(&SYNTHETIC_CREDENTIALS),
+            };
+            let body = String::from_utf8_lossy(request.body).into_owned();
+            self.fetches.lock().unwrap().push(seen.clone());
+            serve(
+                remote,
+                seen,
+                body,
+                self.model.clone(),
+                self.calls.clone(),
+                &self.endpoint,
+            );
+        }
+        self.seen.extend(new.iter().cloned());
+        new
+    }
+
+    /// Pumps until `done` holds for an event, or panics after `secs`.
+    pub fn until(&mut self, secs: u64, mut done: impl FnMut(&Seen) -> bool) -> Seen {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            for event in self.pump(20) {
+                if done(&event) {
+                    return event;
+                }
+            }
+            assert!(Instant::now() < deadline, "timed out; saw {:#?}", self.seen);
+        }
+    }
+
+    /// Opens the session and waits for it.
+    pub fn open(&mut self) -> String {
+        let request = self.runtime.open_session("").expect("open the session");
+        match self.until(20, |e| {
+            matches!(
+                e,
+                Seen::Opened { .. } | Seen::RequestDone { .. } | Seen::Exited { .. }
+            )
+        }) {
+            Seen::Opened {
+                request: r,
+                session,
+            } => {
+                assert_eq!(r, request);
+                session
+            }
+            other => panic!("open failed: {other:?}"),
+        }
+    }
+
+    /// Prompts and pumps to the turn's end; returns the turn id.
+    pub fn turn(&mut self, prompt: &str, message_id: &str) -> (u64, StopReason) {
+        let turn = self.runtime.prompt(prompt, message_id).expect("prompt");
+        match self.until(30, |e| {
+            matches!(e, Seen::TurnEnd { turn: t, .. } if *t == turn)
+                || matches!(e, Seen::Exited { .. })
+        }) {
+            Seen::TurnEnd { reason, .. } => (turn, reason),
+            other => panic!("turn ended with {other:?}"),
+        }
+    }
+
+    pub fn text_of(&self, turn: u64) -> String {
+        self.seen
+            .iter()
+            .filter_map(|event| match event {
+                Seen::Text { turn: t, text } if *t == turn => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Serves one fetch on its own thread.
+fn serve(
+    remote: Remote,
+    seen: FetchSeen,
+    body: String,
+    model: Model,
+    calls: Arc<AtomicUsize>,
+    endpoint: &str,
+) {
+    let endpoint = endpoint.to_string();
+    std::thread::spawn(move || {
+        // The model catalog (a GET to the provider's canonical URL) and
+        // anything but the model route: answered here, Not Found. Tests
+        // never reach the network.
+        if seen.purpose == Purpose::Catalog || seen.url != endpoint {
+            let _ = remote.fetch_status(seen.fetch, 404, None);
+            let _ = remote.fetch_finish(seen.fetch, true);
+            return;
+        }
+        let call = ModelCall {
+            index: calls.fetch_add(1, Ordering::SeqCst),
+            url: seen.url.clone(),
+            body,
+            headers: seen.headers.clone(),
+        };
+        match model(&call) {
+            Reply::Hold => {}
+            Reply::Sse(text) => {
+                if remote.fetch_status(seen.fetch, 200, None) != Ok(Outcome::Applied) {
+                    return;
+                }
+                push_all(remote, seen.fetch, text.as_bytes());
+                let _ = remote.fetch_finish(seen.fetch, true);
+            }
+            Reply::Server => {
+                let live = std::cell::Cell::new(true);
+                let result = http(
+                    &seen.url,
+                    &seen.method,
+                    &seen.outgoing,
+                    call.body.as_bytes(),
+                    |status| {
+                        live.set(
+                            remote.fetch_status(seen.fetch, status, None) == Ok(Outcome::Applied),
+                        )
+                    },
+                    |chunk| {
+                        if live.get() && remote.fetch_disposition(seen.fetch) == Disposition::Active
+                        {
+                            push_all(remote, seen.fetch, chunk);
+                        } else {
+                            live.set(false);
+                        }
+                    },
+                );
+                let _ = remote.fetch_finish(seen.fetch, result.is_ok());
+            }
+        }
+    });
+}
+
+pub fn push_all(remote: Remote, fetch: u64, bytes: &[u8]) {
+    loop {
+        match remote.fetch_push(fetch, bytes) {
+            Ok(Outcome::Backpressure) => std::thread::sleep(Duration::from_millis(1)),
+            _ => return,
+        }
+    }
+}
+
+/// Steers, asserting the outcome kind.
+pub fn steer(runtime: &mut Runtime, turn: u64, text: &str, id: &str) -> Steered {
+    runtime.steer(turn, text, id).expect("steer")
 }

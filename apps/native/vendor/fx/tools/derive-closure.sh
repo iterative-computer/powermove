@@ -41,9 +41,24 @@ done
 (cd "$work" && ZIG_GLOBAL_CACHE_DIR="$zig_home/zig-cache" "$zig" build capi fake-server \
   -Dtarget=aarch64-macos.13.0 --cache-dir "$work/.zig-cache" --prefix "$work/zig-out" --summary none)
 
-manifest=$(grep -l -a 'src/capi_core_main.zig' "$work"/.zig-cache/h/* | head -n 1)
-[ -n "$manifest" ] || { echo "derive-closure: no cache manifest names src/capi_core_main.zig" >&2; exit 1; }
-grep -aoE 'src/[A-Za-z0-9_./-]+' "$manifest" | sort -u > "$work/closure.txt"
+# Every manifest of the fresh cache that names the C entry is a candidate
+# (the library's compile, and any step that re-reads its sources). They must
+# list the same sources; the closure is that one set, whatever order the
+# cache's files come in.
+candidates=$(grep -l -a 'src/capi_core_main.zig' "$work"/.zig-cache/h/* | LC_ALL=C sort)
+[ -n "$candidates" ] || { echo "derive-closure: no cache manifest names src/capi_core_main.zig" >&2; exit 1; }
+first=""
+for manifest in $candidates; do
+  grep -aoE 'src/[A-Za-z0-9_./-]+' "$manifest" | LC_ALL=C sort -u > "$work/candidate.txt"
+  if [ -z "$first" ]; then
+    first=$manifest
+    cp "$work/candidate.txt" "$work/closure.txt"
+  elif ! cmp -s "$work/candidate.txt" "$work/closure.txt"; then
+    echo "derive-closure: manifests $first and $manifest list different sources" >&2
+    diff "$work/closure.txt" "$work/candidate.txt" >&2 || true
+    exit 1
+  fi
+done
 while read -r file; do
   [ -f "$work/$file" ] || { echo "derive-closure: manifest names $file, which the build tree lacks" >&2; exit 1; }
 done < "$work/closure.txt"

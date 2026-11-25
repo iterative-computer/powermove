@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-TOOLS): a host tool
+// call goes to Config.host_tool_bridge when the embedder installed one.
 const std = @import("std");
 const observation = @import("../core/agent/runtime/observation.zig");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
@@ -919,6 +921,10 @@ fn callHostTool(
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const state: *server.ServerState = @ptrCast(@alignCast(raw_state));
     if (cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
+    // Powermove (P-TOOLS): the embedder's executor, with the input in place.
+    if (state.cfg.host_tool_bridge) |bridge| {
+        return bridge.call_fn(bridge.context, alloc, name, call_id, arguments_json, max_result_bytes, cancel_flag);
+    }
     const outbound_id = (server.beginOutboundRequest(state, .host_tool) catch
         return .{ .failure = try alloc.dupe(u8, "Host tool request failed") }) orelse
         return .{ .failure = try alloc.dupe(u8, "Host tool request limit reached") };

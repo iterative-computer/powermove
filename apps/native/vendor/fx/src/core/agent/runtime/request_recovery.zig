@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-PANIC): the status
+// ticker starts in its runtime's panic context (core/shared/panic_context.zig).
 //! Carries out `src/core/recovery/` plans for one model request.
 //!
 //! The recovery module decides and this file acts. The turn loop reports what
@@ -474,7 +476,7 @@ pub const RequestRecovery = struct {
         }
         if (!self.ticker_enabled or self.ticker != null) return;
         self.ticker_stop = false;
-        self.ticker = std.Thread.spawn(.{}, tickerMain, .{self}) catch |err| {
+        self.ticker = @import("../../shared/panic_context.zig").spawn(.{}, tickerMain, .{self}) catch |err| {
             // The status then refreshes at the next event instead.
             debug_trace.logf("recovery", "status ticker unavailable err={s}", .{@errorName(err)});
             return;

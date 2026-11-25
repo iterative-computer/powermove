@@ -1,18 +1,30 @@
-//! Powermove notice: new file, not in upstream fx (patch P-CAPI). The C ABI
-//! entry of the libfx core, beside upstream's N-API and WebAssembly entries.
-//! It implements include/fx_core.h. The runtime, input queue, attachment
-//! table, fetch bridge and runtime slots are the N-API entry's, extracted
-//! verbatim into libfx_core_runtime.zig; only the Node-API surface is
-//! replaced. The host is Rust (crate pm-aero-core), which takes the place of
-//! sdk/engine.js.
+//! Powermove notice: new file, not in upstream fx (patches P-CAPI, P-PANIC,
+//! P-TOOLS). The C ABI entry of the libfx core, beside upstream's N-API and
+//! WebAssembly entries. It implements include/fx_core.h (ABI 2). The
+//! runtime, input queue, attachment table, fetch bridge and runtime slots are
+//! the N-API entry's, extracted verbatim into libfx_core_runtime.zig; the
+//! Node-API surface is replaced. The host is Rust (crate pm-aero-core), which
+//! takes the place of sdk/engine.js.
 //!
-//! Milestone 1: the core still speaks ACP JSON-RPC on its transport. The C
-//! entry is that transport: the host's calls become ACP frames on the input
-//! queue, and the frames the core writes are turned into typed events and
-//! host callbacks on the core's own thread, inside its writer callback. Patch
-//! P-EVENTS replaces that frame parse with a typed sink in prompt.zig.
+//! The core still speaks ACP JSON-RPC for sessions, turns and their updates:
+//! the host's calls become frames on the input queue, and the frames the
+//! core writes become typed events inside its writer callback (patch
+//! P-EVENTS replaces that parse in milestone 2b). Host tool calls bypass ACP
+//! (P-TOOLS): the core calls `bridgeToolCall` with the model's input in
+//! place, and the host's answer is copied once into the call's record.
+//!
+//! Liveness (header rules 2 and 12). Host calls take the locks core threads
+//! share only through `hostLock`, which gives up when the runtime panics or
+//! after the busy bound. Every host call runs inside `guardedCall`, so a panic
+//! on the host's thread unwinds to the export and returns FX_E_FAILED. A
+//! panic on a core thread marks the runtime PANICKED and parks the thread;
+//! the runtime's other threads park at their next boundary with the host.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("libfx_core_runtime.zig");
+const panic_context = @import("core/shared/panic_context.zig");
+const host_tool_bridge = @import("core/tooling/host_tool_bridge.zig");
+const tool_dispatch = @import("core/tooling/tool_dispatch.zig");
 const acp_server = core.acp_server;
 const jsonrpc = core.jsonrpc;
 const io_mod = core.io_mod;
@@ -26,7 +38,11 @@ const model_provider = core.model_provider;
 const Allocator = std.mem.Allocator;
 const alloc_c = std.heap.c_allocator;
 
-pub const abi_version: u32 = 1;
+pub const abi_version: u32 = 2;
+
+/// The root's panic handler (P-PANIC): every safety panic of the core comes
+/// here instead of aborting the process.
+pub const panic = std.debug.FullPanic(onPanic);
 
 // ---------------------------------------------------------------------------
 // C types (must match include/fx_core.h)
@@ -37,6 +53,7 @@ const FX_OK: Status = 0;
 const FX_EMPTY: Status = 1;
 const FX_STALE: Status = 2;
 const FX_BACKPRESSURE: Status = 3;
+const FX_BUSY: Status = 4;
 const FX_E_INVALID: Status = -1;
 const FX_E_CLOSED: Status = -2;
 const FX_E_FAILED: Status = -3;
@@ -46,6 +63,7 @@ const FX_E_THREAD: Status = -6;
 const FX_E_IO: Status = -7;
 const FX_E_STATE: Status = -8;
 const FX_E_UNSUPPORTED: Status = -10;
+const FX_E_TOO_LARGE: Status = -11;
 
 pub const Str = extern struct {
     ptr: ?[*]const u8 = null,
@@ -81,14 +99,48 @@ pub const Bytes = extern struct {
 const FX_TOOL_IDEMPOTENT: u32 = 1 << 0;
 const FX_TOOL_WRITES: u32 = 1 << 1;
 
+pub const ToolCallInfo = extern struct {
+    struct_size: u32 = @sizeOf(ToolCallInfo),
+    flags: u32,
+    call: u64,
+    turn: u64,
+    name: Str,
+    input_json: Str,
+    model_call_id: Str,
+};
+
+const FX_APPEND_BARRIER: u32 = 1 << 0;
+
+pub const JournalAppendInfo = extern struct {
+    struct_size: u32 = @sizeOf(JournalAppendInfo),
+    flags: u32,
+    append: u64,
+    turn: u64,
+    first_seq: u64,
+    last_seq: u64,
+    events_json: Str,
+};
+
+pub const HookQuestion = extern struct {
+    struct_size: u32 = @sizeOf(HookQuestion),
+    kind: u32,
+    question: u64,
+    turn: u64,
+    call: u64,
+    name: Str,
+    input_json: Str,
+    final_text: Str,
+    continuations: u32,
+    reserved: u32,
+};
+
 pub const Host = extern struct {
     struct_size: u32 = 0,
     reserved: u32 = 0,
-    tool_call: ?*const fn (?*anyopaque, u64, Str, Str, Str, u32) callconv(.c) void = null,
-    tool_cancel: ?*const fn (?*anyopaque, u64) callconv(.c) void = null,
-    journal_append: ?*const fn (?*anyopaque, u64, Str, bool) callconv(.c) void = null,
-    pre_tool: ?*const fn (?*anyopaque, u64, u64, Str, Str) callconv(.c) i32 = null,
-    stop: ?*const fn (?*anyopaque, u64, Str, u32) callconv(.c) i32 = null,
+    tool_call: ?*const fn (?*anyopaque, *const ToolCallInfo) callconv(.c) void = null,
+    tool_cancel: ?*const fn (?*anyopaque, u64, u64) callconv(.c) void = null,
+    journal_append: ?*const fn (?*anyopaque, *const JournalAppendInfo) callconv(.c) void = null,
+    hook: ?*const fn (?*anyopaque, *const HookQuestion) callconv(.c) i32 = null,
 };
 
 pub const ToolDesc = extern struct {
@@ -117,12 +169,19 @@ pub const Config = extern struct {
     max_tool_result_bytes: u32,
     max_history_turns: u32,
     max_stop_continuations: u32,
-    reserved: u32,
+    flags: u32,
 };
 
+const FX_RUNTIME_RUNNING: i32 = 0;
+const FX_RUNTIME_EXITED: i32 = 1;
+const FX_RUNTIME_FAILED: i32 = 2;
+const FX_RUNTIME_PANICKED: i32 = 3;
+
 pub const RuntimeInfo = extern struct {
+    struct_size: u32,
     state: i32,
     exit_code: i32,
+    reserved: u32,
     message: Str,
 };
 
@@ -131,15 +190,15 @@ pub const NamedBytes = extern struct {
     bytes: Bytes,
 };
 
+const FX_OPEN_INPUTS_DURABLE: u32 = 1 << 0;
+const FX_OPEN_IMAGE_STORE: u32 = 1 << 1;
+
 pub const SessionOpenArgs = extern struct {
     struct_size: u32,
-    reserved: u32,
+    flags: u32,
     session_id: Str,
     journal_json: Str,
     checkpoint: Bytes,
-    images: ?[*]const NamedBytes,
-    image_count: usize,
-    inputs_durable: bool,
 };
 
 pub const Image = extern struct {
@@ -191,14 +250,38 @@ pub const Header = extern struct {
     value: Str,
 };
 
+const FX_FETCH_MODEL: u32 = 1;
+const FX_FETCH_CATALOG: u32 = 2;
+
 pub const FetchRequest = extern struct {
+    struct_size: u32,
+    purpose: u32,
     fetch: u64,
+    turn: u64,
+    provider: Str,
     method: Str,
     url: Str,
     headers: ?[*]const Header,
     header_count: usize,
     body: Bytes,
 };
+
+comptime {
+    // The header's FX_*_SIZE_V2 values.
+    std.debug.assert(@sizeOf(ToolCallInfo) == 72);
+    std.debug.assert(@sizeOf(JournalAppendInfo) == 56);
+    std.debug.assert(@sizeOf(HookQuestion) == 88);
+    std.debug.assert(@sizeOf(Host) == 40);
+    std.debug.assert(@sizeOf(Config) == 176);
+    std.debug.assert(@sizeOf(RuntimeInfo) == 32);
+    std.debug.assert(@sizeOf(SessionOpenArgs) == 56);
+    std.debug.assert(@sizeOf(Event) == 160);
+    std.debug.assert(@sizeOf(FetchRequest) == 104);
+    std.debug.assert(@sizeOf(ToolDesc) == 56);
+    std.debug.assert(@sizeOf(Image) == 32);
+    std.debug.assert(@sizeOf(Input) == 32);
+    std.debug.assert(@sizeOf(ToolOutput) == 40);
+}
 
 const EventKind = enum(u32) {
     session_opened = 1,
@@ -216,7 +299,13 @@ const EventKind = enum(u32) {
     checkpoint = 13,
     @"error" = 14,
     exited = 15,
+    steer_returned = 16,
+    recovery = 17,
 };
+
+const FX_OPENED_JOURNALED: u32 = 1 << 0;
+const FX_OPENED_RESUMABLE: u32 = 1 << 1;
+const FX_EXITED_EVENTS_LOST: u32 = 1 << 0;
 
 const StopReason = enum(i32) {
     end_turn = 0,
@@ -241,19 +330,244 @@ const StopReason = enum(i32) {
     }
 };
 
+const Fault = enum(u32) {
+    fetch_locked = 1,
+    event_locked = 2,
+    streaming = 3,
+    tool_result = 4,
+    journal_append = 5,
+    tool_call = 6,
+};
+const fault_count = 7;
+
 // ---------------------------------------------------------------------------
-// Limits
+// Limits (the header's FX_MAX_*)
 // ---------------------------------------------------------------------------
 
 const max_instructions_bytes = 1024 * 1024;
 const max_tools = 256;
 const max_tool_text_bytes = 64 * 1024;
 const max_schema_bytes = 256 * 1024;
+const max_session_id_bytes = 255;
 const max_message_id_bytes = 128;
 const max_prompt_text_bytes = 4 * 1024 * 1024;
-/// Queued event text the core may hold before its writer waits for a drain.
+const max_steer_text_bytes = 64 * 1024;
 const max_event_bytes = 16 * 1024 * 1024;
+const max_queued_events = 65536;
 const max_configured_providers_bytes = 1024 * 1024;
+const max_tool_result_limit = 16 * 1024 * 1024;
+const max_concurrent_tools_limit = 16;
+const busy_bound_ms = 250;
+/// How often a core thread waiting on the host re-checks cancellation and
+/// the runtime's state.
+const pulse: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } };
+
+// ---------------------------------------------------------------------------
+// Guarded host calls (P-PANIC): a panic on the host's thread unwinds here
+// ---------------------------------------------------------------------------
+
+/// Callee-saved state of a guarded call on aarch64: x19 to x30, sp, d8 to d15.
+const JumpBuffer = extern struct { regs: [21]u64 = @splat(0) };
+
+/// Calls `function(context)` and returns its result, or the code a later
+/// `unwind` on this thread passes back from anywhere inside that call. The
+/// saved state is the caller's at this call, so unwinding resumes the caller
+/// exactly as a normal return would.
+fn guardedCallImpl() callconv(.naked) noreturn {
+    // x0 = function, x1 = context, x2 = buffer.
+    asm volatile (
+        \\ stp x19, x20, [x2, #0]
+        \\ stp x21, x22, [x2, #16]
+        \\ stp x23, x24, [x2, #32]
+        \\ stp x25, x26, [x2, #48]
+        \\ stp x27, x28, [x2, #64]
+        \\ stp x29, x30, [x2, #80]
+        \\ mov x9, sp
+        \\ str x9, [x2, #96]
+        \\ stp d8, d9, [x2, #104]
+        \\ stp d10, d11, [x2, #120]
+        \\ stp d12, d13, [x2, #136]
+        \\ stp d14, d15, [x2, #152]
+        \\ mov x19, x2
+        \\ mov x9, x0
+        \\ mov x0, x1
+        \\ blr x9
+        \\ ldr x30, [x19, #88]
+        \\ ldr x19, [x19, #0]
+        \\ ret
+    );
+}
+
+/// Resumes the guarded call that saved `buffer`, returning `code` from it.
+fn unwindImpl() callconv(.naked) noreturn {
+    // x0 = buffer, x1 = code.
+    asm volatile (
+        \\ mov x9, x0
+        \\ ldp x19, x20, [x9, #0]
+        \\ ldp x21, x22, [x9, #16]
+        \\ ldp x23, x24, [x9, #32]
+        \\ ldp x25, x26, [x9, #48]
+        \\ ldp x27, x28, [x9, #64]
+        \\ ldp x29, x30, [x9, #80]
+        \\ ldr x10, [x9, #96]
+        \\ mov sp, x10
+        \\ ldp d8, d9, [x9, #104]
+        \\ ldp d10, d11, [x9, #120]
+        \\ ldp d12, d13, [x9, #136]
+        \\ ldp d14, d15, [x9, #152]
+        \\ mov w0, w1
+        \\ ret
+    );
+}
+
+const GuardedFn = *const fn (*anyopaque) callconv(.c) i32;
+const GuardedCallFn = *const fn (GuardedFn, *anyopaque, *JumpBuffer) callconv(.c) i32;
+
+/// Calls the naked `guardedCallImpl` as an opaque C function. The address
+/// goes through an empty asm so the optimiser cannot see the callee: it
+/// would otherwise call it directly with its declared `noreturn` type and
+/// drop the code after the call.
+fn guardedCall(function: GuardedFn, context: *anyopaque, buffer: *JumpBuffer) i32 {
+    const address = asm volatile (""
+        : [out] "=r" (-> usize),
+        : [in] "0" (@intFromPtr(&guardedCallImpl)),
+    );
+    const call: GuardedCallFn = @ptrFromInt(address);
+    return call(function, context, buffer);
+}
+
+fn unwind(buffer: *JumpBuffer, code: i32) noreturn {
+    const address = asm volatile (""
+        : [out] "=r" (-> usize),
+        : [in] "0" (@intFromPtr(&unwindImpl)),
+    );
+    const jump: *const fn (*JumpBuffer, i32) callconv(.c) noreturn = @ptrFromInt(address);
+    jump(buffer, code);
+}
+
+comptime {
+    if (builtin.cpu.arch != .aarch64) @compileError("the C ABI entry's panic guard is written for aarch64");
+}
+
+const Guard = struct {
+    buffer: JumpBuffer = .{},
+    runtime: ?*Runtime = null,
+};
+
+threadlocal var tl_guard: ?*Guard = null;
+threadlocal var tl_panicking: bool = false;
+
+/// Runs `body(runtime_or_null, args)` as a host call: inside a guard, with
+/// the handle entered for the call (when `handle` is not null). A panic in it
+/// fails the runtime and returns FX_E_FAILED here. `body` returns a status.
+fn hostCall(handle: ?u64, args: anytype, comptime body: anytype) Status {
+    const Args = @TypeOf(args);
+    const Context = struct {
+        guard: Guard = .{},
+        handle: ?u64,
+        args: Args,
+        entered: bool = false,
+
+        fn run(raw: *anyopaque) callconv(.c) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.handle) |value| {
+                const runtime = enter(value) orelse return FX_E_CLOSED;
+                self.entered = true;
+                self.guard.runtime = runtime;
+                return body(runtime, self.args);
+            }
+            return body(null, self.args);
+        }
+    };
+    var context: Context = .{ .handle = handle, .args = args };
+    const saved = tl_guard;
+    tl_guard = &context.guard;
+    const status = guardedCall(Context.run, &context, &context.guard.buffer);
+    tl_guard = saved;
+    if (context.entered) leave(handle.?);
+    return status;
+}
+
+fn onPanic(message: []const u8, first_trace_addr: ?usize) noreturn {
+    _ = first_trace_addr;
+    if (tl_guard) |guard| {
+        // A host call: fail its runtime and return to the export.
+        if (!tl_panicking) {
+            tl_panicking = true;
+            if (guard.runtime) |runtime| runtime.failPanic(message);
+            tl_panicking = false;
+        }
+        unwind(&guard.buffer, FX_E_FAILED);
+    }
+    if (!tl_panicking) {
+        tl_panicking = true;
+        if (panic_context.current) |raw| {
+            const runtime: *Runtime = @ptrCast(@alignCast(raw));
+            runtime.failPanic(message);
+        } else {
+            failEveryRuntime(message);
+        }
+    }
+    park();
+}
+
+/// A panic on a core thread with no runtime (none is known: every thread the
+/// core spawns for a runtime inherits its context). Every running runtime is
+/// failed, so none stalls without an answer; the process keeps running.
+fn failEveryRuntime(message: []const u8) void {
+    for (&slots, 0..) |*slot, index| {
+        const state = slot.state.load(.acquire);
+        if (state & occupied_bit == 0) continue;
+        const handle = handleOf(index, state >> gen_shift);
+        const runtime = enter(handle) orelse continue;
+        runtime.failPanic(message);
+        leave(handle);
+    }
+}
+
+/// Parks the calling core thread for good.
+fn park() noreturn {
+    while (true) {
+        const ts: std.c.timespec = .{ .sec = 3600, .nsec = 0 };
+        _ = std.c.nanosleep(&ts, null);
+    }
+}
+
+fn nowMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+const Acquire = enum { locked, failed, busy };
+
+/// Takes `mutex` for a host call: waits only while its holder runs, gives up
+/// when the runtime panics, and after the busy bound (header rule 2).
+fn hostLock(runtime: *Runtime, mutex: *std.Io.Mutex) Acquire {
+    if (mutex.tryLock()) return .locked;
+    var spins: usize = 0;
+    var started: u64 = 0;
+    while (true) {
+        if (runtime.panicked()) return .failed;
+        if (mutex.tryLock()) return .locked;
+        spins += 1;
+        if (spins < 64) {
+            std.atomic.spinLoopHint();
+        } else {
+            std.Thread.yield() catch {};
+            if (spins == 64) started = nowMs();
+            if (spins % 64 == 0 and nowMs() -| started > busy_bound_ms) return .busy;
+        }
+    }
+}
+
+fn acquireStatus(result: Acquire) Status {
+    return switch (result) {
+        .locked => FX_OK,
+        .failed => FX_E_FAILED,
+        .busy => FX_BUSY,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // The typed event queue
@@ -280,6 +594,24 @@ const QueuedEvent = struct {
     usage: Usage = .{},
 };
 
+const EventText = struct {
+    text: []const u8 = "",
+    text2: []const u8 = "",
+    bytes: []const u8 = "",
+    names: []const []const u8 = &.{},
+
+    fn total(self: EventText) usize {
+        var sum = self.text.len + self.text2.len + self.bytes.len;
+        for (self.names) |name| sum += name.len;
+        return sum;
+    }
+};
+
+/// How an event waits for room. Deltas wait for the host to drain (bytes and
+/// count are bounded); control events (starts, ends, answers) never wait and
+/// never meet the bound, because each answers a bounded piece of work.
+const EventMode = enum { delta, control };
+
 /// Events the core produced and the host has not drained. Text lives in one
 /// byte arena per side: the writer appends into `pending_bytes`; a drain that
 /// takes everything swaps the arenas, so what it hands out stays put until the
@@ -304,27 +636,19 @@ const EventQueue = struct {
         self.drained_name_strs.deinit(alloc_c);
     }
 
-    const Text = struct {
-        text: []const u8 = "",
-        text2: []const u8 = "",
-        bytes: []const u8 = "",
-        names: []const []const u8 = &.{},
-    };
+    fn full(self: *const EventQueue, total: usize) bool {
+        if (self.events.items.len == 0) return false;
+        return self.events.items.len >= max_queued_events or self.pending_bytes.items.len + total > max_event_bytes;
+    }
 
-    /// Queues `event` with its text copied once. Returns whether the queue was
-    /// empty before, so the caller wakes the host.
-    /// `wait`: the core's writer waits for space; a host call never does.
-    fn push(self: *EventQueue, event: QueuedEvent, data: Text, wait: bool) !bool {
-        const io = io_mod.getIo();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        var total = data.text.len + data.text2.len + data.bytes.len;
-        for (data.names) |name| total += name.len;
-        if (total > max_event_bytes) return error.EventTooLarge;
-        while (wait and !self.closed and self.events.items.len > 0 and self.pending_bytes.items.len + total > max_event_bytes) {
-            self.space.waitUncancelable(io, &self.mutex);
+    /// Appends with the lock held. Returns whether the queue was empty.
+    fn appendLocked(self: *EventQueue, event: QueuedEvent, data: EventText) error{OutOfMemory}!bool {
+        const mark_bytes = self.pending_bytes.items.len;
+        const mark_names = self.pending_names.items.len;
+        errdefer {
+            self.pending_bytes.items.len = mark_bytes;
+            self.pending_names.items.len = mark_names;
         }
-        if (self.closed) return error.EventQueueClosed;
         var queued = event;
         queued.text = try self.append(data.text);
         queued.text2 = try self.append(data.text2);
@@ -339,83 +663,11 @@ const EventQueue = struct {
         return was_empty;
     }
 
-    fn append(self: *EventQueue, bytes: []const u8) !Span {
+    fn append(self: *EventQueue, bytes: []const u8) error{OutOfMemory}!Span {
         if (bytes.len == 0) return .{};
         const off = self.pending_bytes.items.len;
         try self.pending_bytes.appendSlice(alloc_c, bytes);
         return .{ .off = @intCast(off), .len = @intCast(bytes.len) };
-    }
-
-    fn drain(self: *EventQueue, out: []Event) !usize {
-        const io = io_mod.getIo();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        const count = @min(out.len, self.events.items.len);
-        if (count == 0) {
-            // Nothing new: what the last drain handed out is released.
-            self.drained_bytes.clearRetainingCapacity();
-            self.drained_names.clearRetainingCapacity();
-            self.drained_name_strs.clearRetainingCapacity();
-            return 0;
-        }
-        const everything = count == self.events.items.len;
-        self.drained_bytes.clearRetainingCapacity();
-        self.drained_names.clearRetainingCapacity();
-        self.drained_name_strs.clearRetainingCapacity();
-        if (everything) {
-            std.mem.swap(std.ArrayList(u8), &self.pending_bytes, &self.drained_bytes);
-            std.mem.swap(std.ArrayList(Span), &self.pending_names, &self.drained_names);
-        } else {
-            // A partial drain copies what it hands out; the rest stays.
-            try self.drained_bytes.appendSlice(alloc_c, self.pending_bytes.items);
-            try self.drained_names.appendSlice(alloc_c, self.pending_names.items);
-        }
-        var name_total: usize = 0;
-        for (self.events.items[0..count]) |event| name_total += event.name_count;
-        try self.drained_name_strs.ensureTotalCapacity(alloc_c, name_total);
-        const arena = self.drained_bytes.items;
-        for (self.events.items[0..count], out[0..count]) |event, *slot| {
-            var names: ?[*]const Str = null;
-            if (event.name_count > 0) {
-                const first = self.drained_name_strs.items.len;
-                for (self.drained_names.items[event.names_start..][0..event.name_count]) |span| {
-                    self.drained_name_strs.appendAssumeCapacity(spanStr(arena, span));
-                }
-                names = self.drained_name_strs.items[first..].ptr;
-            }
-            slot.* = .{
-                .kind = @intFromEnum(event.kind),
-                .flags = event.flags,
-                .turn = event.turn,
-                .request = event.request,
-                .id = event.id,
-                .status = event.status,
-                .code = event.code,
-                .text = spanStr(arena, event.text),
-                .text2 = spanStr(arena, event.text2),
-                .bytes = .{ .ptr = if (event.bytes.len == 0) null else arena[event.bytes.off..].ptr, .len = event.bytes.len },
-                .names = names,
-                .name_count = event.name_count,
-                .usage = event.usage,
-            };
-        }
-        if (everything) {
-            self.events.clearRetainingCapacity();
-        } else {
-            const rest = self.events.items.len - count;
-            std.mem.copyForwards(QueuedEvent, self.events.items[0..rest], self.events.items[count..]);
-            self.events.items.len = rest;
-        }
-        self.space.broadcast(io);
-        return count;
-    }
-
-    fn close(self: *EventQueue) void {
-        const io = io_mod.getIo();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.closed = true;
-        self.space.broadcast(io);
     }
 
     fn spanStr(arena: []const u8, span: Span) Str {
@@ -432,29 +684,56 @@ const Pending = struct {
     kind: Kind,
     request: u64,
 
-    const Kind = enum { initialize, libfx_new, journal_open, prompt, steer, withdraw, checkpoint };
+    const Kind = enum { initialize, libfx_new, journal_open, prompt, steer, withdraw };
 };
 
-/// A host tool call the core is waiting on. `frame` owns the bytes the
-/// borrowed name, input and model call id point into.
-const Call = struct {
-    rpc_id: i64,
-    frame: []u8,
-    name: []const u8,
-    input: []const u8,
-    model_call_id: []const u8,
+/// A host tool call the core waits on; it lives on the stack of the core
+/// thread that made it, in `calls` until that thread is done with it.
+const ToolRecord = struct {
+    id: u64,
     turn: u64,
-    cancelled: bool = false,
+    writes: bool,
+    /// The host's answer: text copied once by fx_tool_result.
+    result: ?[]u8 = null,
+    is_error: bool = false,
+    answered: bool = false,
+    cancel_requested: bool = false,
 };
 
-const Flush = struct {
-    rpc_id: i64,
-    upto: u64,
+const Steer = struct {
+    request: u64,
+    message_id: []u8,
 };
 
 const Tool = struct {
     name: []u8,
     flags: u32,
+};
+
+const message_capacity = 1024;
+
+/// A message written once, by whichever writer claims it first, read without
+/// a lock after `len` is published.
+const Message = struct {
+    claimed: std.atomic.Value(bool) = .init(false),
+    len: std.atomic.Value(usize) = .init(0),
+    bytes: [message_capacity]u8 = undefined,
+
+    fn set(self: *Message, parts: []const []const u8) void {
+        if (self.claimed.swap(true, .acq_rel)) return;
+        var len: usize = 0;
+        for (parts) |part| {
+            const room = message_capacity - len;
+            const take = @min(room, part.len);
+            @memcpy(self.bytes[len..][0..take], part[0..take]);
+            len += take;
+        }
+        self.len.store(len, .release);
+    }
+
+    fn get(self: *const Message) []const u8 {
+        return self.bytes[0..self.len.load(.acquire)];
+    }
 };
 
 const Runtime = struct {
@@ -468,6 +747,7 @@ const Runtime = struct {
     custom_context: ?host_chat_completions.Context = null,
     input: core.InputQueue = .{},
     provider: ?model_provider.ProviderId,
+    provider_name: []u8,
     configured_providers: ?[]u8,
     model: ?[]u8,
     effort: ?[]u8,
@@ -475,12 +755,30 @@ const Runtime = struct {
     workspace_root: []u8,
     gateway_chat_url: []u8,
     max_agent_steps: usize,
+    max_concurrent_tools: usize,
     max_tool_result_bytes: usize,
     max_history_turns: usize,
+    max_stop_continuations: u32,
     ready: core.ReadyNotifier,
     thread: std.Thread = undefined,
-    exited: std.atomic.Value(bool) = .init(false),
-    exit_code: std.atomic.Value(u8) = .init(0),
+
+    // Lock-free state (header rules 2 and 12).
+    state: std.atomic.Value(i32) = .init(FX_RUNTIME_RUNNING),
+    exit_code: std.atomic.Value(i32) = .init(0),
+    fail_message: Message = .{},
+    panic_message: Message = .{},
+    /// fx_runtime_destroy has started: no callback starts any more.
+    closing: std.atomic.Value(bool) = .init(false),
+    /// Callbacks running now.
+    callbacks: std.atomic.Value(u32) = .init(0),
+    /// The core thread is done with the runtime and can be joined.
+    thread_done: std.atomic.Value(bool) = .init(false),
+    /// A host call met FX_BACKPRESSURE on the input queue or the fetch
+    /// response queue; the core wakes the host when it frees room.
+    input_blocked: std.atomic.Value(bool) = .init(false),
+    push_blocked: std.atomic.Value(bool) = .init(false),
+    exited_delivered: std.atomic.Value(bool) = .init(false),
+    faults: [fault_count]std.atomic.Value(i64) = @splat(.init(-1)),
 
     // The C entry's own.
     host: Host,
@@ -490,6 +788,8 @@ const Runtime = struct {
     events: EventQueue = .{},
     /// Guards everything below. Never held while a host callback runs.
     lock: std.Io.Mutex = .init,
+    /// Signalled when a tool call is answered, cancelled or done.
+    calls_changed: std.Io.Condition = .init,
     next_rpc_id: i64 = 1,
     next_request: u64 = 1,
     next_call: u64 = 1,
@@ -497,28 +797,217 @@ const Runtime = struct {
     session_id: ?[]u8 = null,
     session: enum { none, opening, open } = .none,
     journaled: bool = false,
-    /// The running turn, or 0.
+    /// The running turn, or 0. It stays set until the turn's TURN_END is
+    /// queued, so no later turn's events can come first.
     turn: u64 = 0,
-    calls: std.AutoHashMapUnmanaged(u64, Call) = .empty,
+    calls: std.AutoHashMapUnmanaged(u64, *ToolRecord) = .empty,
+    calls_outstanding: usize = 0,
+    writer_outstanding: bool = false,
+    steers: std.ArrayList(Steer) = .empty,
     journal_sent: u64 = 0,
     journal_acked: u64 = 0,
     journal_failed: ?[]u8 = null,
     flushes: std.ArrayList(Flush) = .empty,
+    /// The turn running when the core opened its current fetch.
+    fetch_turn: u64 = 0,
+    /// The running turn printed the core's step-limit notice: libfx ends
+    /// such a turn as a failed one ("refused"), which the header reports as
+    /// FX_STOP_MAX_STEPS.
+    step_limited: bool = false,
     /// Partial frame bytes, if the core's writer ever splits a frame.
     line: std.ArrayList(u8) = .empty,
     /// What the last fx_fetch_take handed out.
     taken: std.heap.ArenaAllocator = .init(alloc_c),
-    exited_event_sent: bool = false,
+
+    const Flush = struct {
+        rpc_id: i64,
+        upto: u64,
+    };
+
+    fn panicked(self: *const Runtime) bool {
+        return self.state.load(.acquire) == FX_RUNTIME_PANICKED;
+    }
+
+    fn running(self: *const Runtime) bool {
+        return self.state.load(.acquire) == FX_RUNTIME_RUNNING;
+    }
+
+    /// The panic handler's part, on any thread: no lock, no allocation.
+    fn failPanic(self: *Runtime, message: []const u8) void {
+        self.panic_message.set(&.{ "core panic: ", message });
+        self.state.store(FX_RUNTIME_PANICKED, .release);
+        // Wake the host and every core thread waiting on a pulse.
+        self.ready.notify();
+    }
+
+    /// The C entry stops the core: an event or frame could not be delivered,
+    /// or initialize failed. Core threads wind down; nothing parks.
+    fn failTransport(self: *Runtime, message: []const u8) void {
+        if (self.state.cmpxchgStrong(FX_RUNTIME_RUNNING, FX_RUNTIME_FAILED, .acq_rel, .acquire) != null) return;
+        self.fail_message.set(&.{message});
+        self.closeInput();
+        self.ready.notify();
+    }
+
+    /// Parks a core thread of a panicked runtime at a boundary with the host.
+    fn parkIfPanicked(self: *const Runtime) void {
+        if (self.panicked()) park();
+    }
+
+    fn fault(self: *Runtime, point: Fault) void {
+        const counter = &self.faults[@intFromEnum(point)];
+        if (counter.load(.monotonic) < 0) return;
+        if (counter.fetchSub(1, .acq_rel) == 0) {
+            std.debug.panic("fault injected at {s}", .{@tagName(point)});
+        }
+    }
+
+    // --- callbacks ------------------------------------------------------------
+
+    /// Enters a callback. False if destroy has started (the caller skips the
+    /// callback). Parks the thread if the runtime panicked: no callback
+    /// starts after the failure is published.
+    fn enterCallback(self: *Runtime) bool {
+        _ = self.callbacks.fetchAdd(1, .seq_cst);
+        if (self.panicked()) {
+            _ = self.callbacks.fetchSub(1, .seq_cst);
+            park();
+        }
+        if (self.closing.load(.seq_cst) or self.state.load(.seq_cst) != FX_RUNTIME_RUNNING) {
+            _ = self.callbacks.fetchSub(1, .seq_cst);
+            return false;
+        }
+        return true;
+    }
+
+    fn leaveCallback(self: *Runtime) void {
+        _ = self.callbacks.fetchSub(1, .seq_cst);
+    }
+
+    fn waitCallbacks(self: *Runtime) void {
+        while (self.callbacks.load(.seq_cst) != 0) std.Thread.yield() catch {};
+    }
+
+    // --- the input queue --------------------------------------------------------
 
     fn readInput(context: ?*anyopaque, destination: []u8) usize {
         const self: *Runtime = @ptrCast(@alignCast(context.?));
-        return self.input.read(self.alloc, destination);
+        self.parkIfPanicked();
+        const read = self.input.read(self.alloc, destination);
+        self.parkIfPanicked();
+        // Room freed after a host met FX_BACKPRESSURE: wake it.
+        if (read > 0 and self.input_blocked.swap(false, .acq_rel)) self.ready.notify();
+        return read;
     }
+
+    const InputMode = enum {
+        /// A host request: bounded; FX_BACKPRESSURE or FX_E_TOO_LARGE.
+        request,
+        /// A small answer to something the core asked (a journal flush, a
+        /// cancel): never refused for room, so an accepted answer is never
+        /// lost.
+        control,
+    };
+
+    /// Writes `bytes` to the core's input from a host call.
+    fn hostInput(self: *Runtime, bytes: []const u8, mode: InputMode) Status {
+        if (mode == .request and bytes.len > core.max_input_bytes) return FX_E_TOO_LARGE;
+        const got = hostLock(self, &self.input.mutex);
+        if (got != .locked) return acquireStatus(got);
+        defer self.input.mutex.unlock(io_mod.getIo());
+        return self.inputLocked(bytes, mode);
+    }
+
+    /// Writes `bytes` to the core's input from a core thread.
+    fn coreInput(self: *Runtime, bytes: []const u8) Status {
+        const io = io_mod.getIo();
+        self.input.mutex.lockUncancelable(io);
+        defer self.input.mutex.unlock(io);
+        return self.inputLocked(bytes, .control);
+    }
+
+    fn inputLocked(self: *Runtime, bytes: []const u8, mode: InputMode) Status {
+        const queue = &self.input;
+        if (queue.closed) return FX_E_FAILED;
+        const queued = queue.bytes.items.len - queue.offset;
+        if (mode == .request and queued > core.max_input_bytes - bytes.len) {
+            self.input_blocked.store(true, .release);
+            return FX_BACKPRESSURE;
+        }
+        if (queue.offset > 0) {
+            @memmove(queue.bytes.items[0..queued], queue.bytes.items[queue.offset..]);
+            queue.bytes.items.len = queued;
+            queue.offset = 0;
+        }
+        queue.bytes.appendSlice(self.alloc, bytes) catch return FX_E_OOM;
+        queue.wake.signal(io_mod.getIo());
+        return FX_OK;
+    }
+
+    fn closeInput(self: *Runtime) void {
+        // Called on core threads (failTransport) and by destroy; both may
+        // block briefly, since a panicked runtime never reaches here.
+        self.input.close();
+    }
+
+    // --- events ---------------------------------------------------------------
+
+    /// Queues an event from a core thread. Deltas wait for room; a control
+    /// event that cannot be queued (out of memory) fails the runtime, so the
+    /// host learns through FX_EVENT_EXITED instead of waiting for it.
+    fn queueEvent(self: *Runtime, event: QueuedEvent, data: EventText, mode: EventMode) void {
+        self.parkIfPanicked();
+        const io = io_mod.getIo();
+        const queue = &self.events;
+        const total = data.total();
+        if (total > max_event_bytes) {
+            if (mode == .control) self.failTransport("an event exceeded the event queue");
+            return;
+        }
+        queue.mutex.lockUncancelable(io);
+        self.fault(.event_locked);
+        if (mode == .delta) {
+            while (!queue.closed and queue.full(total)) {
+                queue.space.waitTimeout(io, &queue.mutex, pulse) catch {};
+                if (self.panicked()) {
+                    queue.mutex.unlock(io);
+                    park();
+                }
+            }
+        }
+        if (queue.closed) {
+            queue.mutex.unlock(io);
+            return;
+        }
+        const was_empty = queue.appendLocked(event, data) catch {
+            queue.mutex.unlock(io);
+            self.failTransport("the core could not queue an event (out of memory)");
+            return;
+        };
+        queue.mutex.unlock(io);
+        if (was_empty) self.ready.notify();
+    }
+
+    /// Queues a control event from a host call.
+    fn queueEventHost(self: *Runtime, event: QueuedEvent, data: EventText) Status {
+        const got = hostLock(self, &self.events.mutex);
+        if (got != .locked) return acquireStatus(got);
+        const was_empty = self.events.appendLocked(event, data) catch {
+            self.events.mutex.unlock(io_mod.getIo());
+            return FX_E_OOM;
+        };
+        self.events.mutex.unlock(io_mod.getIo());
+        if (was_empty) self.ready.notify();
+        return FX_OK;
+    }
+
+    // --- the core's thread --------------------------------------------------------
 
     /// The core's JSON-RPC writer: called on a core-owned thread with whole
     /// frames, serialised by the writer's own mutex.
     fn writeOutput(context: ?*anyopaque, bytes: []const u8) !void {
         const self: *Runtime = @ptrCast(@alignCast(context.?));
+        self.parkIfPanicked();
         var rest = bytes;
         while (std.mem.findScalar(u8, rest, '\n')) |end| {
             if (self.line.items.len > 0) {
@@ -534,6 +1023,7 @@ const Runtime = struct {
     }
 
     fn run(self: *Runtime) void {
+        panic_context.current = self;
         const provider = core.gateway_provider.Provider{
             .oauth_transport = core.oauth_transport.unavailable_provider,
             .chat_url = builtin_gateway.provider.chat_url,
@@ -587,7 +1077,7 @@ const Runtime = struct {
                 .mode_registry = core.builtin_modes.registry,
                 // Credentials never enter the core: the host adds them at its
                 // fetch edge. The Gateway path insists on a key, so it gets a
-                // placeholder the host replaces (P-CAPI).
+                // placeholder, which fx_fetch_take strips (rule 13).
                 .credential_override = host_managed_credential,
                 .provider_override = self.provider,
                 .provider_auth_mode = .host_managed,
@@ -602,33 +1092,36 @@ const Runtime = struct {
                 .allow_native_tools = false,
                 .minimal_kernel = true,
                 .host_attachments = self.attachments.store(),
+                .host_tool_bridge = if (self.host.tool_call != null) .{ .context = self, .call_fn = bridgeToolCall } else null,
             },
             jsonrpc.Reader.initCallback(self, Runtime.readInput),
             jsonrpc.Writer.initCallback(self, Runtime.writeOutput),
         ) catch {
-            self.exit_code.store(1, .seq_cst);
+            self.exit_code.store(1, .release);
         };
-        self.fetch.shutdown();
-        self.exited.store(true, .seq_cst);
-        self.queueEvent(.{ .kind = .exited, .code = self.exit_code.load(.seq_cst) }, .{});
+        self.parkIfPanicked();
+        self.coreShutdownFetch();
+        _ = self.state.cmpxchgStrong(FX_RUNTIME_RUNNING, FX_RUNTIME_EXITED, .acq_rel, .acquire);
         self.ready.notify();
+        self.thread_done.store(true, .release);
+    }
+
+    fn coreShutdownFetch(self: *Runtime) void {
+        self.fetch.shutdown();
     }
 
     fn deinit(self: *Runtime) void {
-        self.events.close();
-        self.input.close();
-        self.fetch.shutdown();
         self.thread.join();
         self.ready.deinit();
         self.fetch.deinit();
         self.attachments.deinit();
         self.input.deinit(self.alloc);
         self.events.deinit();
-        var calls = self.calls.valueIterator();
-        while (calls.next()) |call| alloc_c.free(call.frame);
         self.calls.deinit(alloc_c);
         self.pending.deinit(alloc_c);
         self.flushes.deinit(alloc_c);
+        for (self.steers.items) |steer| alloc_c.free(steer.message_id);
+        self.steers.deinit(alloc_c);
         self.line.deinit(alloc_c);
         self.taken.deinit();
         if (self.journal_failed) |reason| alloc_c.free(reason);
@@ -640,11 +1133,11 @@ const Runtime = struct {
         if (self.configured_providers) |json| self.alloc.free(json);
         if (self.model) |model| self.alloc.free(model);
         if (self.effort) |effort| self.alloc.free(effort);
+        self.alloc.free(self.provider_name);
         self.alloc.free(self.home);
         self.alloc.free(self.workspace_root);
         self.alloc.free(self.gateway_chat_url);
         self.alloc.destroy(self);
-        core.releaseRuntimeSlot();
     }
 
     // --- ids and frames -----------------------------------------------------
@@ -666,48 +1159,41 @@ const Runtime = struct {
         frame.writer.writeAll(",\"params\":") catch return FX_E_OOM;
         frame.writer.writeAll(params) catch return FX_E_OOM;
         frame.writer.writeAll("}\n") catch return FX_E_OOM;
+        if (frame.written().len > core.max_input_bytes) return FX_E_TOO_LARGE;
         self.pending.put(alloc_c, rpc_id, .{ .kind = kind, .request = request }) catch return FX_E_OOM;
-        self.input.write(self.alloc, frame.written()) catch |err| {
+        const status = self.hostInput(frame.written(), .request);
+        if (status != FX_OK) {
             _ = self.pending.remove(rpc_id);
-            return switch (err) {
-                error.InputClosed => FX_E_FAILED,
-                error.InputQueueFull => FX_BACKPRESSURE,
-                error.OutOfMemory => FX_E_OOM,
-            };
-        };
+            return status;
+        }
         self.next_rpc_id += 1;
         return FX_OK;
     }
 
-    /// Answers a request the core made (a tool call or a journal flush).
-    fn respond(self: *Runtime, rpc_id: i64, result_json: []const u8) void {
+    /// Answers a request the core made, from a core thread or a host call.
+    fn respond(self: *Runtime, rpc_id: i64, result_json: []const u8, on_host: bool) Status {
         var frame: std.Io.Writer.Allocating = .init(alloc_c);
         defer frame.deinit();
-        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":", .{rpc_id}) catch return;
-        frame.writer.writeAll(result_json) catch return;
-        frame.writer.writeAll("}\n") catch return;
-        self.input.write(self.alloc, frame.written()) catch {};
+        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":", .{rpc_id}) catch return FX_E_OOM;
+        frame.writer.writeAll(result_json) catch return FX_E_OOM;
+        frame.writer.writeAll("}\n") catch return FX_E_OOM;
+        return if (on_host) self.hostInput(frame.written(), .control) else self.coreInput(frame.written());
     }
 
-    fn respondError(self: *Runtime, rpc_id: i64, message: []const u8) void {
+    fn respondError(self: *Runtime, rpc_id: i64, message: []const u8, on_host: bool) Status {
         var frame: std.Io.Writer.Allocating = .init(alloc_c);
         defer frame.deinit();
-        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"error\":{{\"code\":-32000,\"message\":", .{rpc_id}) catch return;
-        jsonrpc.writeJsonStr(message, &frame.writer) catch return;
-        frame.writer.writeAll("}}\n") catch return;
-        self.input.write(self.alloc, frame.written()) catch {};
+        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"error\":{{\"code\":-32000,\"message\":", .{rpc_id}) catch return FX_E_OOM;
+        jsonrpc.writeJsonStr(message, &frame.writer) catch return FX_E_OOM;
+        frame.writer.writeAll("}}\n") catch return FX_E_OOM;
+        return if (on_host) self.hostInput(frame.written(), .control) else self.coreInput(frame.written());
     }
 
-    /// Queues an event from a core-owned thread, waiting for space.
-    fn queueEvent(self: *Runtime, event: QueuedEvent, data: EventQueue.Text) void {
-        const was_empty = self.events.push(event, data, true) catch return;
-        if (was_empty) self.ready.notify();
-    }
-
-    /// Queues an event from a host call, which never waits.
-    fn queueEventNow(self: *Runtime, event: QueuedEvent, data: EventQueue.Text) void {
-        const was_empty = self.events.push(event, data, false) catch return;
-        if (was_empty) self.ready.notify();
+    /// A control answer that must reach the core; failing to queue it fails
+    /// the runtime rather than leaving the core waiting for ever.
+    fn mustRespond(self: *Runtime, status: Status) void {
+        if (status == FX_OK or status == FX_E_FAILED) return;
+        self.failTransport("the core could not queue an answer (out of memory)");
     }
 
     // --- frames from the core (core-owned threads) ---------------------------
@@ -727,18 +1213,17 @@ const Runtime = struct {
         }
         if (std.mem.eql(u8, method, "session/update")) {
             if (params) |value| self.onUpdate(value);
-        } else if (std.mem.eql(u8, method, "libfx/tool_call")) {
-            if (id) |rpc_id| self.onToolCall(rpc_id, frame, params);
         } else if (std.mem.eql(u8, method, "libfx/journal_append")) {
             if (params) |value| self.onJournalAppend(arena.allocator(), value);
         } else if (std.mem.eql(u8, method, "libfx/journal_flush")) {
             if (id) |rpc_id| self.onJournalFlush(rpc_id);
         } else if (id) |rpc_id| {
-            // The minimal kernel asks nothing else of its host; refuse it.
+            // The minimal kernel asks nothing else of its host (host tools
+            // come through the bridge); refuse it.
             if (std.mem.eql(u8, method, "session/request_permission")) {
-                self.respond(rpc_id, "{\"outcome\":{\"outcome\":\"cancelled\"}}");
+                self.mustRespond(self.respond(rpc_id, "{\"outcome\":{\"outcome\":\"cancelled\"}}", false));
             } else {
-                self.respondError(rpc_id, "Method not supported by the host");
+                self.mustRespond(self.respondError(rpc_id, "Method not supported by the host", false));
             }
         }
     }
@@ -755,13 +1240,16 @@ const Runtime = struct {
         switch (pending.kind) {
             .initialize => {
                 self.lock.unlock(io);
-                if (err != null) self.queueEvent(.{ .kind = .@"error", .status = FX_E_FAILED }, .{ .text = message });
+                if (err != null) {
+                    // Every request made meanwhile ends with EXITED.
+                    self.failTransport(if (message.len > 0) message else "the core refused initialize");
+                }
             },
             .libfx_new => {
                 if (err != null) {
                     self.session = .none;
                     self.lock.unlock(io);
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message });
+                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message }, .control);
                     return;
                 }
                 const session_id = stringField(result, "sessionId") orelse "";
@@ -772,96 +1260,121 @@ const Runtime = struct {
                     params.writer.writeAll("{\"sessionId\":") catch {};
                     jsonrpc.writeJsonStr(session_id, &params.writer) catch {};
                     params.writer.writeAll("}") catch {};
-                    const status = self.sendRequest(.journal_open, pending.request, "libfx/journal_open", params.written());
+                    // The core asked for nothing: this request is ours, sent
+                    // from the core's thread, so it bypasses the bound.
+                    const status = self.sendCoreRequest(.journal_open, pending.request, "libfx/journal_open", params.written());
                     if (status != FX_OK) self.session = .none;
                     self.lock.unlock(io);
-                    if (status != FX_OK) self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = "could not open the journal" });
+                    if (status != FX_OK) self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = "could not open the journal" }, .control);
                     return;
                 }
                 self.session = .open;
                 self.lock.unlock(io);
-                self.queueEvent(.{ .kind = .session_opened, .request = pending.request }, .{ .text = session_id });
+                self.queueEvent(.{ .kind = .session_opened, .request = pending.request }, .{ .text = session_id }, .control);
             },
             .journal_open => {
                 if (err != null) {
                     self.session = .none;
                     self.lock.unlock(io);
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message });
+                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message }, .control);
                     return;
                 }
                 self.session = .open;
                 const session_id = arena.dupe(u8, self.session_id orelse "") catch "";
                 self.lock.unlock(io);
-                const resumable = boolField(result, "resumable");
+                var flags: u32 = FX_OPENED_JOURNALED;
+                if (boolField(result, "resumable")) flags |= FX_OPENED_RESUMABLE;
                 self.queueEvent(.{
                     .kind = .session_opened,
                     .request = pending.request,
-                    .flags = if (resumable) 1 else 0,
-                }, .{ .text = session_id });
+                    .flags = flags,
+                    .id = @intCast(@max(0, intField(result, "turns") orelse 0)),
+                }, .{ .text = session_id }, .control);
             },
             .prompt => {
                 const turn = pending.request;
-                if (self.turn == turn) self.turn = 0;
-                const cancels = self.endTurnCalls(arena, turn);
-                self.lock.unlock(io);
-                for (cancels) |call| if (self.host.tool_cancel) |cancel| cancel(self.host_ctx, call);
-                if (err != null) {
-                    self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message });
-                    self.queueEvent(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.@"error") }, .{});
-                    return;
+                // Steers still queued when the turn ends come back first.
+                var returned: std.ArrayList(Steer) = .empty;
+                while (self.steers.items.len > 0) {
+                    returned.append(arena, self.steers.items[0]) catch break;
+                    _ = self.steers.orderedRemove(0);
                 }
-                const reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
-                self.queueEvent(.{
-                    .kind = .turn_end,
-                    .turn = turn,
-                    .code = @intFromEnum(reason),
-                    .usage = promptUsage(result),
-                }, .{});
-            },
-            .steer, .checkpoint => {
                 self.lock.unlock(io);
+                for (returned.items) |steer| {
+                    self.queueEvent(.{ .kind = .steer_returned, .turn = turn, .request = steer.request }, .{ .text2 = steer.message_id }, .control);
+                    alloc_c.free(steer.message_id);
+                }
                 if (err != null) {
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message });
-                } else if (pending.kind == .steer) {
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_OK }, .{});
+                    self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
+                    self.queueEvent(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.@"error") }, .{}, .control);
                 } else {
-                    const attachment = intField(result, "checkpointAttachment") orelse 0;
-                    const bytes = if (attachment > 0 and attachment <= std.math.maxInt(u32))
-                        self.attachments.takeOutbound(@intCast(attachment))
-                    else
-                        null;
-                    if (bytes) |value| {
-                        defer alloc_c.free(value);
-                        self.queueEvent(.{ .kind = .checkpoint, .request = pending.request }, .{ .bytes = value });
-                    } else {
-                        self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = "the core published no checkpoint" });
-                    }
+                    var reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
+                    self.lock.lockUncancelable(io);
+                    if (reason == .refusal and self.step_limited) reason = .max_steps;
+                    self.step_limited = false;
+                    self.lock.unlock(io);
+                    self.queueEvent(.{
+                        .kind = .turn_end,
+                        .turn = turn,
+                        .code = @intFromEnum(reason),
+                        .usage = promptUsage(result),
+                    }, .{}, .control);
                 }
+                // Only now may a later turn start (its TURN_START comes after).
+                self.lock.lockUncancelable(io);
+                if (self.turn == turn) self.turn = 0;
+                self.lock.unlock(io);
+            },
+            .steer => {
+                var status: Status = FX_OK;
+                if (err != null) {
+                    // libfx answers a steer that arrived after its turn with
+                    // "No prompt is running": the turn ended first.
+                    status = if (std.mem.find(u8, message, "No prompt is running") != null) FX_STALE else FX_E_FAILED;
+                    self.dropSteer(pending.request);
+                }
+                self.lock.unlock(io);
+                self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
             },
             .withdraw => {
-                self.lock.unlock(io);
-                if (err != null) {
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message });
-                } else {
+                var status: Status = FX_E_FAILED;
+                if (err == null) {
                     const outcome = stringField(result, "result") orelse "";
-                    const status = if (std.mem.eql(u8, outcome, "withdrawn")) FX_OK else FX_STALE;
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{});
+                    status = if (std.mem.eql(u8, outcome, "withdrawn")) FX_OK else FX_STALE;
                 }
+                self.lock.unlock(io);
+                self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
             },
         }
     }
 
-    /// Marks the turn's outstanding calls cancelled and returns their ids, for
-    /// tool_cancel once `lock` is released. The caller holds `lock`.
-    fn endTurnCalls(self: *Runtime, arena: Allocator, turn: u64) []u64 {
-        var ids: std.ArrayList(u64) = .empty;
-        var it = self.calls.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.turn != turn or entry.value_ptr.cancelled) continue;
-            entry.value_ptr.cancelled = true;
-            ids.append(arena, entry.key_ptr.*) catch break;
+    /// Sends a request from a core thread. The caller holds `lock`.
+    fn sendCoreRequest(self: *Runtime, kind: Pending.Kind, request: u64, method: []const u8, params: []const u8) Status {
+        const rpc_id = self.next_rpc_id;
+        var frame: std.Io.Writer.Allocating = .init(alloc_c);
+        defer frame.deinit();
+        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":", .{rpc_id}) catch return FX_E_OOM;
+        jsonrpc.writeJsonStr(method, &frame.writer) catch return FX_E_OOM;
+        frame.writer.writeAll(",\"params\":") catch return FX_E_OOM;
+        frame.writer.writeAll(params) catch return FX_E_OOM;
+        frame.writer.writeAll("}\n") catch return FX_E_OOM;
+        self.pending.put(alloc_c, rpc_id, .{ .kind = kind, .request = request }) catch return FX_E_OOM;
+        const status = self.coreInput(frame.written());
+        if (status != FX_OK) {
+            _ = self.pending.remove(rpc_id);
+            return status;
         }
-        return ids.items;
+        self.next_rpc_id += 1;
+        return FX_OK;
+    }
+
+    /// Forgets the steer `request`. The caller holds `lock`.
+    fn dropSteer(self: *Runtime, request: u64) void {
+        for (self.steers.items, 0..) |steer, index| if (steer.request == request) {
+            alloc_c.free(steer.message_id);
+            _ = self.steers.orderedRemove(index);
+            return;
+        };
     }
 
     fn currentTurn(self: *Runtime) u64 {
@@ -884,17 +1397,36 @@ const Runtime = struct {
             const thought = kind[6] == 't';
             // engine.js drops the core's context notices from the reply.
             if (!thought and std.mem.startsWith(u8, text, "[context]")) return;
-            self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text });
+            self.fault(.streaming);
+            if (!thought and std.mem.find(u8, text, step_limit_notice) != null) {
+                const io = io_mod.getIo();
+                self.lock.lockUncancelable(io);
+                self.step_limited = true;
+                self.lock.unlock(io);
+            }
+            self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text }, .delta);
         } else if (std.mem.eql(u8, kind, "user_message_chunk")) {
             const content = update.object.get("content") orelse return;
             const text = stringField(content, "text") orelse return;
             const meta = update.object.get("_meta") orelse return;
             const fx = objectField(meta, "fx") orelse return;
             const steering = objectField(fx, "steering") orelse return;
-            self.queueEvent(.{ .kind = .steer_joined, .turn = turn }, .{ .text = text, .text2 = stringField(steering, "inputId") orelse "" });
+            const input_id = stringField(steering, "inputId") orelse "";
+            // The steer joined: it no longer comes back at the turn's end.
+            var request: u64 = 0;
+            const io = io_mod.getIo();
+            self.lock.lockUncancelable(io);
+            for (self.steers.items, 0..) |steer, index| if (std.mem.eql(u8, steer.message_id, input_id)) {
+                request = steer.request;
+                alloc_c.free(steer.message_id);
+                _ = self.steers.orderedRemove(index);
+                break;
+            };
+            self.lock.unlock(io);
+            self.queueEvent(.{ .kind = .steer_joined, .turn = turn, .request = request }, .{ .text = text, .text2 = input_id }, .control);
         } else if (std.mem.eql(u8, kind, "tool_call")) {
             const name = stringField(update, "name") orelse stringField(update, "toolName") orelse stringField(update, "title") orelse "tool";
-            self.queueEvent(.{ .kind = .tool_start, .turn = turn }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" });
+            self.queueEvent(.{ .kind = .tool_start, .turn = turn }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" }, .control);
         } else if (std.mem.eql(u8, kind, "tool_call_update")) {
             const status = stringField(update, "status") orelse return;
             const failed = std.mem.eql(u8, status, "failed");
@@ -904,94 +1436,280 @@ const Runtime = struct {
                 .kind = .tool_end,
                 .turn = turn,
                 .status = if (failed) FX_E_FAILED else FX_OK,
-            }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" });
+            }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" }, .control);
         } else if (std.mem.eql(u8, kind, "usage_update")) {
             self.queueEvent(.{ .kind = .usage, .turn = turn, .usage = .{
                 .context_used = @intCast(@max(0, intField(update, "used") orelse 0)),
                 .context_size = @intCast(@max(0, intField(update, "size") orelse 0)),
-            } }, .{});
+            } }, .{}, .delta);
         }
-    }
-
-    fn onToolCall(self: *Runtime, rpc_id: i64, frame: []const u8, params: ?std.json.Value) void {
-        const value = params orelse return self.respondError(rpc_id, "Invalid host tool request");
-        const name = stringField(value, "name") orelse return self.respondError(rpc_id, "Invalid host tool request");
-        const model_call_id = stringField(value, "toolCallId") orelse "";
-        const callback = self.host.tool_call orelse return self.respondError(rpc_id, "The host has no tools");
-        // The model's own input JSON, borrowed from the frame as the core
-        // wrote it: `input` is the last member of params.
-        const marker = ",\"input\":";
-        const owned = alloc_c.alloc(u8, frame.len + name.len + model_call_id.len) catch
-            return self.respondError(rpc_id, "Host tool request failed");
-        const input_start = std.mem.find(u8, frame, marker) orelse {
-            alloc_c.free(owned);
-            return self.respondError(rpc_id, "Invalid host tool request");
-        };
-        const raw_input = std.mem.trimEnd(u8, frame[input_start + marker.len ..], " \r\n");
-        const input = if (std.mem.endsWith(u8, raw_input, "}}")) raw_input[0 .. raw_input.len - 2] else raw_input;
-        @memcpy(owned[0..input.len], input);
-        @memcpy(owned[input.len..][0..name.len], name);
-        @memcpy(owned[input.len + name.len ..][0..model_call_id.len], model_call_id);
-        const call_input = owned[0..input.len];
-        const call_name = owned[input.len..][0..name.len];
-        const call_model_id = owned[input.len + name.len ..][0..model_call_id.len];
-        var flags: u32 = 0;
-        for (self.tools) |tool| if (std.mem.eql(u8, tool.name, name)) {
-            flags = tool.flags;
-            break;
-        };
-        const io = io_mod.getIo();
-        self.lock.lockUncancelable(io);
-        const call = self.next_call;
-        self.next_call += 1;
-        self.calls.put(alloc_c, call, .{
-            .rpc_id = rpc_id,
-            .frame = owned,
-            .name = call_name,
-            .input = call_input,
-            .model_call_id = call_model_id,
-            .turn = self.turn,
-        }) catch {
-            self.lock.unlock(io);
-            alloc_c.free(owned);
-            return self.respondError(rpc_id, "Host tool request failed");
-        };
-        self.lock.unlock(io);
-        callback(self.host_ctx, call, Str.of(call_name), Str.of(call_input), Str.of(call_model_id), flags);
     }
 
     fn onJournalAppend(self: *Runtime, arena: Allocator, params: std.json.Value) void {
         const callback = self.host.journal_append orelse return;
         const events = params.object.get("events") orelse return;
         const barrier = boolField(params, "barrier");
+        var first_seq: u64 = 0;
+        var last_seq: u64 = 0;
+        if (events == .array) for (events.array.items, 0..) |event, index| {
+            const seq: u64 = @intCast(@max(0, intField(event, "seq") orelse 0));
+            if (index == 0) first_seq = seq;
+            last_seq = seq;
+        };
         var out: std.Io.Writer.Allocating = .init(arena);
         std.json.Stringify.value(events, .{}, &out.writer) catch return;
         const io = io_mod.getIo();
         self.lock.lockUncancelable(io);
+        self.fault(.journal_append);
         if (self.journal_failed != null) {
             self.lock.unlock(io);
             return;
         }
         self.journal_sent += 1;
-        const append = self.journal_sent;
+        const info: JournalAppendInfo = .{
+            .flags = if (barrier) FX_APPEND_BARRIER else 0,
+            .append = self.journal_sent,
+            .turn = self.turn,
+            .first_seq = first_seq,
+            .last_seq = last_seq,
+            .events_json = Str.of(out.written()),
+        };
         self.lock.unlock(io);
-        callback(self.host_ctx, append, Str.of(out.written()), barrier);
+        if (!self.enterCallback()) return;
+        callback(self.host_ctx, &info);
+        self.leaveCallback();
     }
 
     fn onJournalFlush(self: *Runtime, rpc_id: i64) void {
         const io = io_mod.getIo();
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
-        if (self.journal_failed) |reason| return self.respondError(rpc_id, reason);
-        if (self.journal_acked >= self.journal_sent) return self.respond(rpc_id, "{}");
+        if (self.journal_failed) |reason| return self.mustRespond(self.respondError(rpc_id, reason, false));
+        if (self.journal_acked >= self.journal_sent) return self.mustRespond(self.respond(rpc_id, "{}", false));
         self.flushes.append(alloc_c, .{ .rpc_id = rpc_id, .upto = self.journal_sent }) catch
-            self.respondError(rpc_id, "Journal flush failed");
+            self.mustRespond(self.respondError(rpc_id, "Journal flush failed", false));
     }
 };
+
+/// What the core's agent loop says when the step limit ends a turn
+/// (core/agent/runtime/config.zig, default_step_limit_notice).
+const step_limit_notice = @import("core/agent/runtime/config.zig").Config.default_step_limit_notice;
 
 /// The Gateway credential the core is given, never a secret: the host sets
 /// the real authorization header at its fetch edge.
 const host_managed_credential = "host-managed";
+
+// ---------------------------------------------------------------------------
+// Host tool calls (P-TOOLS), on the core thread that makes them
+// ---------------------------------------------------------------------------
+
+fn bridgeToolCall(
+    raw: *anyopaque,
+    alloc: Allocator,
+    name: []const u8,
+    call_id: []const u8,
+    arguments_json: []const u8,
+    max_result_bytes: usize,
+    cancel_flag: ?*std.atomic.Value(bool),
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const self: *Runtime = @ptrCast(@alignCast(raw));
+    const callback = self.host.tool_call orelse return .{ .failure = try alloc.dupe(u8, "The host has no tools") };
+    const io = io_mod.getIo();
+    var flags: u32 = 0;
+    for (self.tools) |tool| if (std.mem.eql(u8, tool.name, name)) {
+        flags = tool.flags;
+        break;
+    };
+    const writes = flags & FX_TOOL_WRITES != 0;
+    var record: ToolRecord = .{ .id = 0, .turn = 0, .writes = writes };
+    self.lock.lockUncancelable(io);
+    // Writes run alone; idempotent calls run up to the configured limit.
+    while (true) {
+        if (self.panicked()) {
+            self.lock.unlock(io);
+            park();
+        }
+        if (self.closing.load(.acquire) or cancelled(cancel_flag)) {
+            self.lock.unlock(io);
+            return error.Cancelled;
+        }
+        const free = if (writes)
+            self.calls_outstanding == 0
+        else
+            !self.writer_outstanding and self.calls_outstanding < self.max_concurrent_tools;
+        if (free) break;
+        self.calls_changed.waitTimeout(io, &self.lock, pulse) catch {};
+    }
+    record.id = self.next_call;
+    record.turn = self.turn;
+    self.next_call += 1;
+    self.calls.put(alloc_c, record.id, &record) catch {
+        self.lock.unlock(io);
+        return error.OutOfMemory;
+    };
+    self.calls_outstanding += 1;
+    if (writes) self.writer_outstanding = true;
+    self.lock.unlock(io);
+    defer {
+        self.lock.lockUncancelable(io);
+        _ = self.calls.remove(record.id);
+        self.calls_outstanding -= 1;
+        if (writes) self.writer_outstanding = false;
+        self.calls_changed.broadcast(io);
+        self.lock.unlock(io);
+    }
+
+    self.fault(.tool_call);
+    // The input stays the core's until the host answers: this thread frees
+    // nothing it handed out before then (the lease, rule 9).
+    const info: ToolCallInfo = .{
+        .flags = flags,
+        .call = record.id,
+        .turn = record.turn,
+        .name = Str.of(name),
+        .input_json = Str.of(arguments_json),
+        .model_call_id = Str.of(call_id),
+    };
+    if (!self.enterCallback()) return error.Cancelled;
+    callback(self.host_ctx, &info);
+    self.leaveCallback();
+
+    var cancel_sent = false;
+    self.lock.lockUncancelable(io);
+    while (!record.answered) {
+        if (self.panicked()) {
+            self.lock.unlock(io);
+            park();
+        }
+        // Destroy ends leases without answers (rule 10).
+        if (self.closing.load(.acquire)) break;
+        if (!cancel_sent and (record.cancel_requested or cancelled(cancel_flag))) {
+            cancel_sent = true;
+            record.cancel_requested = true;
+            if (self.host.tool_cancel) |cancel| {
+                self.lock.unlock(io);
+                if (self.enterCallback()) {
+                    cancel(self.host_ctx, record.id, record.turn);
+                    self.leaveCallback();
+                }
+                self.lock.lockUncancelable(io);
+                continue;
+            }
+        }
+        self.calls_changed.waitTimeout(io, &self.lock, pulse) catch {};
+    }
+    const answered = record.answered;
+    const result = record.result;
+    record.result = null;
+    const is_error = record.is_error;
+    const cancel_requested = record.cancel_requested;
+    self.lock.unlock(io);
+
+    const text = result orelse return error.Cancelled;
+    if (!answered or cancel_requested or cancelled(cancel_flag)) {
+        alloc_c.free(text);
+        return error.Cancelled;
+    }
+    // The host's text was copied once into `text`; it becomes the result
+    // without another copy when the core's allocator is the C allocator.
+    const owned = if (alloc.vtable == alloc_c.vtable) text else owned: {
+        defer alloc_c.free(text);
+        break :owned try alloc.dupe(u8, text);
+    };
+    _ = max_result_bytes;
+    return if (is_error) .{ .failure = owned } else .{ .success = owned };
+}
+
+fn cancelled(flag: ?*std.atomic.Value(bool)) bool {
+    return if (flag) |value| value.load(.seq_cst) else false;
+}
+
+// ---------------------------------------------------------------------------
+// The fetch bridge's core side: the provider's transport
+// ---------------------------------------------------------------------------
+
+fn fetchOpen(raw: ?*anyopaque, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    const io = io_mod.getIo();
+    // Recorded before the request is published, so fx_fetch_take sees it.
+    self.lock.lockUncancelable(io);
+    self.fetch_turn = self.turn;
+    self.lock.unlock(io);
+    return core.FetchBridge.open(&self.fetch, method, url, headers, body);
+}
+
+/// The response status, waiting in pulses: 0 means "not yet", so the
+/// provider re-checks its cancel flag and deadline between waits instead of
+/// waiting for headers for ever (Sol's item 3).
+fn fetchStatus(raw: ?*anyopaque, handle: i32, status_out: *u16) i32 {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    const bridge = &self.fetch;
+    const io = io_mod.getIo();
+    bridge.mutex.lockUncancelable(io);
+    self.fault(.fetch_locked);
+    defer bridge.mutex.unlock(io);
+    switch (bridge.phase) {
+        .request_pending, .awaiting_response => |active| {
+            if (active != handle) return -2;
+            bridge.wake.waitTimeout(io, &bridge.mutex, pulse) catch {};
+            if (self.panicked()) {
+                bridge.mutex.unlock(io);
+                park();
+            }
+        },
+        else => {},
+    }
+    return switch (bridge.phase) {
+        .request_pending, .awaiting_response => |active| if (active == handle) 0 else -2,
+        .streaming => |active| if (active == handle) streaming: {
+            status_out.* = bridge.status;
+            break :streaming 1;
+        } else -2,
+        .terminal => |terminal| if (terminal.handle != handle) -2 else switch (terminal.kind) {
+            .success => success: {
+                status_out.* = bridge.status;
+                break :success 1;
+            },
+            .failure => -1,
+            .aborted => -2,
+        },
+        else => -2,
+    };
+}
+
+fn fetchNext(raw: ?*anyopaque, handle: i32, out: []u8) i32 {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    const read = core.FetchBridge.next(&self.fetch, handle, out);
+    self.parkIfPanicked();
+    // Room freed after a host met FX_BACKPRESSURE: wake it.
+    if (read > 0 and self.push_blocked.swap(false, .acq_rel)) self.ready.notify();
+    return read;
+}
+
+fn fetchClose(raw: ?*anyopaque, handle: i32) void {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    core.FetchBridge.close(&self.fetch, handle);
+}
+
+fn fetchConsumed(raw: ?*anyopaque, handle: i32) void {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    core.FetchBridge.markConsumed(&self.fetch, handle);
+}
+
+fn fetchRetryAfter(raw: ?*anyopaque, handle: i32) i32 {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    self.parkIfPanicked();
+    return core.FetchBridge.retryAfterFn(&self.fetch, handle);
+}
+
+// ---------------------------------------------------------------------------
+// JSON helpers
+// ---------------------------------------------------------------------------
 
 fn errorMessage(err: ?std.json.Value) []const u8 {
     const value = err orelse return "";
@@ -1046,22 +1764,30 @@ fn promptUsage(result: ?std.json.Value) Usage {
 // Generation-tagged handles
 // ---------------------------------------------------------------------------
 
-/// One slot per possible runtime. `state` packs the slot's generation (high
-/// 32 bits), a closing bit, and the number of API calls inside it, so a call
-/// enters and leaves without a lock and destroy waits for the calls inside.
+/// One slot per possible runtime. `state` packs the slot's generation (40
+/// bits), an occupied bit, a closing bit and the number of API calls inside
+/// it. Occupancy, generation and the runtime pointer are published with
+/// release and read with acquire, and only an occupied slot of the handle's
+/// generation can be entered, so a guessed or stale handle has no effect.
 const Slot = struct {
-    state: std.atomic.Value(u64) = .init(1 << 32),
-    runtime: ?*Runtime = null,
+    state: std.atomic.Value(u64) = .init(@as(u64, 1) << gen_shift),
+    runtime: std.atomic.Value(?*Runtime) = .init(null),
 };
 
-const closing_bit: u64 = 1 << 31;
+const gen_shift = 24;
+const occupied_bit: u64 = 1 << 23;
+const closing_bit: u64 = 1 << 22;
 const users_mask: u64 = closing_bit - 1;
+const max_generation: u64 = (1 << 40) - 1;
 
 var slots: [core.max_active_runtimes]Slot = @splat(.{});
+/// A set bit reserves its slot: between claim and publication, while in use,
+/// and for good once its generations run out.
 var slot_claim: std.atomic.Value(u64) = .init(0);
+var active_runtimes: std.atomic.Value(usize) = .init(0);
 
-fn handleOf(index: usize, generation: u32) u64 {
-    return (@as(u64, generation) << 8) | @as(u64, index + 1);
+fn handleOf(index: usize, generation: u64) u64 {
+    return (generation << 8) | @as(u64, index + 1);
 }
 
 fn slotIndex(handle: u64) ?usize {
@@ -1070,20 +1796,25 @@ fn slotIndex(handle: u64) ?usize {
     return @intCast(index - 1);
 }
 
+fn handleGeneration(handle: u64) ?u64 {
+    const generation = handle >> 8;
+    if (generation == 0 or generation > max_generation) return null;
+    return generation;
+}
+
 /// Enters `handle`: returns its runtime with the slot's user count raised, or
-/// null if it is closed. Pair with `leave`.
+/// null, changing nothing, if it is not an open runtime. Pair with `leave`.
 fn enter(handle: u64) ?*Runtime {
     const index = slotIndex(handle) orelse return null;
-    const generation: u64 = handle >> 8;
-    if (generation == 0 or generation > std.math.maxInt(u32)) return null;
+    const generation = handleGeneration(handle) orelse return null;
     const slot = &slots[index];
     var state = slot.state.load(.acquire);
     while (true) {
-        if (state >> 32 != generation or state & closing_bit != 0) return null;
+        if (state >> gen_shift != generation or state & occupied_bit == 0 or state & closing_bit != 0) return null;
         if (state & users_mask == users_mask) return null;
         state = slot.state.cmpxchgWeak(state, state + 1, .acq_rel, .acquire) orelse break;
     }
-    return slot.runtime;
+    return slot.runtime.load(.acquire);
 }
 
 fn leave(handle: u64) void {
@@ -1091,46 +1822,89 @@ fn leave(handle: u64) void {
     _ = slots[index].state.fetchSub(1, .acq_rel);
 }
 
-/// Claims a free slot for a new runtime and returns its handle.
+/// Claims a free slot for `runtime` and publishes it; returns its handle.
 fn claimSlot(runtime: *Runtime) ?u64 {
     for (&slots, 0..) |*slot, index| {
         const bit = @as(u64, 1) << @intCast(index);
         if (slot_claim.fetchOr(bit, .acq_rel) & bit != 0) continue;
-        slot.runtime = runtime;
-        const generation: u32 = @intCast(slot.state.load(.acquire) >> 32);
+        const generation = slot.state.load(.acquire) >> gen_shift;
+        slot.runtime.store(runtime, .release);
+        slot.state.store((generation << gen_shift) | occupied_bit, .release);
         return handleOf(index, generation);
     }
     return null;
 }
 
-/// Starts closing `handle`: no new call enters, and the caller waits for the
-/// calls inside to leave. Returns the runtime, or null if it was not open.
+/// Starts closing `handle`: no new call enters, and this waits for the calls
+/// inside to leave (each is bounded). Returns the runtime, or null, changing
+/// nothing, if the handle is not open.
 fn beginClose(handle: u64) ?*Runtime {
     const index = slotIndex(handle) orelse return null;
-    const generation: u64 = handle >> 8;
+    const generation = handleGeneration(handle) orelse return null;
     const slot = &slots[index];
     var state = slot.state.load(.acquire);
     while (true) {
-        if (state >> 32 != generation or state & closing_bit != 0) return null;
+        if (state >> gen_shift != generation or state & occupied_bit == 0 or state & closing_bit != 0) return null;
         state = slot.state.cmpxchgWeak(state, state | closing_bit, .acq_rel, .acquire) orelse break;
     }
     while (slot.state.load(.acquire) & users_mask != 0) std.Thread.yield() catch {};
-    return slot.runtime;
+    return slot.runtime.load(.acquire);
 }
 
-/// Retires the slot: a new generation, and the slot free for reuse.
+/// Retires `handle`'s slot: the next generation, or never again once the
+/// generations run out. Then the runtime no longer counts toward the limit.
 fn endClose(handle: u64) void {
     const index = slotIndex(handle).?;
     const slot = &slots[index];
-    const generation = slot.state.load(.acquire) >> 32;
-    const next = if (generation == std.math.maxInt(u32)) 1 else generation + 1;
-    slot.runtime = null;
-    slot.state.store(next << 32, .release);
-    _ = slot_claim.fetchAnd(~(@as(u64, 1) << @intCast(index)), .acq_rel);
+    const generation = slot.state.load(.acquire) >> gen_shift;
+    slot.runtime.store(null, .release);
+    if (generation >= max_generation) {
+        slot.state.store(0, .release);
+    } else {
+        slot.state.store((generation + 1) << gen_shift, .release);
+        _ = slot_claim.fetchAnd(~(@as(u64, 1) << @intCast(index)), .acq_rel);
+    }
+    _ = active_runtimes.fetchSub(1, .acq_rel);
+}
+
+fn claimRuntimeCount() bool {
+    var current = active_runtimes.load(.acquire);
+    while (current < core.max_active_runtimes) {
+        current = active_runtimes.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) orelse return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
-// Exports
+// Process-wide io
+// ---------------------------------------------------------------------------
+
+var io_state: std.atomic.Value(u8) = .init(0);
+
+/// Starts the core's process-wide io once. A waiter gives up after the busy
+/// bound, and a failed start (a panic in it) answers FX_E_FAILED for good.
+fn ensureIo() Status {
+    if (io_state.load(.acquire) == 2) return FX_OK;
+    if (io_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
+        core.threaded_io = std.Io.Threaded.init(std.heap.c_allocator, .{});
+        io_mod.setIo(core.threaded_io.?.io());
+        io_mod.setLibcEnviron();
+        io_state.store(2, .release);
+        return FX_OK;
+    }
+    const started = nowMs();
+    while (true) switch (io_state.load(.acquire)) {
+        2 => return FX_OK,
+        3 => return FX_E_FAILED,
+        else => {
+            if (nowMs() -| started > busy_bound_ms) return FX_BUSY;
+            std.Thread.yield() catch {};
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Argument helpers
 // ---------------------------------------------------------------------------
 
 fn isUtf8(bytes: []const u8) bool {
@@ -1157,26 +1931,81 @@ fn optionalCopy(value: Str, max: usize) error{ Invalid, OutOfMemory }!?[]u8 {
     return try alloc_c.dupe(u8, bytes);
 }
 
+fn aligned(comptime T: type, address: usize) bool {
+    return address != 0 and address % @alignOf(T) == 0;
+}
+
+/// Reads a struct the host passed in with its struct_size (header rule 6).
+fn readSized(comptime T: type, ptr: ?*align(1) const T, min_size: usize) error{ Invalid, Unsupported }!T {
+    const given = ptr orelse return error.Invalid;
+    if (!aligned(T, @intFromPtr(given))) return error.Invalid;
+    const raw: [*]const u8 = @ptrCast(given);
+    const size: usize = std.mem.readInt(u32, raw[0..4], .little);
+    if (size < min_size) return error.Invalid;
+    if (size > @sizeOf(T)) {
+        for (raw[@sizeOf(T)..size]) |byte| if (byte != 0) return error.Unsupported;
+    }
+    var value: T = std.mem.zeroes(T);
+    @memcpy(std.mem.asBytes(&value)[0..@min(size, @sizeOf(T))], raw[0..@min(size, @sizeOf(T))]);
+    return value;
+}
+
+fn sizedStatus(err: error{ Invalid, Unsupported }) Status {
+    return switch (err) {
+        error.Invalid => FX_E_INVALID,
+        error.Unsupported => FX_E_UNSUPPORTED,
+    };
+}
+
+/// Takes the runtime lock for a host call that needs a live core.
+fn lockLive(runtime: *Runtime) Status {
+    if (!runtime.running()) return FX_E_FAILED;
+    const got = hostLock(runtime, &runtime.lock);
+    if (got != .locked) return acquireStatus(got);
+    if (!runtime.running()) {
+        runtime.lock.unlock(io_mod.getIo());
+        return FX_E_FAILED;
+    }
+    return FX_OK;
+}
+
+fn unlock(runtime: *Runtime) void {
+    runtime.lock.unlock(io_mod.getIo());
+}
+
+// ---------------------------------------------------------------------------
+// Exports: version, runtimes
+// ---------------------------------------------------------------------------
+
 export fn fx_core_abi_version() callconv(.c) u32 {
     return abi_version;
 }
 
-export fn fx_runtime_create(cfg_ptr: ?*const Config, host_ptr: ?*const Host, host_ctx: ?*anyopaque, out: ?*u64) callconv(.c) Status {
-    const out_ptr = out orelse return FX_E_INVALID;
+export fn fx_runtime_create(cfg_ptr: ?*align(1) const Config, host_ptr: ?*align(1) const Host, host_ctx: ?*anyopaque, out: ?*align(1) u64) callconv(.c) Status {
+    const out_address = @intFromPtr(out);
+    if (!aligned(u64, out_address)) return FX_E_INVALID;
+    const out_ptr: *u64 = @ptrFromInt(out_address);
     out_ptr.* = 0;
-    const cfg = cfg_ptr orelse return FX_E_INVALID;
-    if (cfg.abi_version != abi_version or cfg.struct_size < @sizeOf(Config)) return FX_E_INVALID;
+    var initializing_io = false;
+    const status = hostCall(null, .{ cfg_ptr, host_ptr, host_ctx, out_ptr, &initializing_io }, createBody);
+    // A panic while starting the process-wide io leaves it failed for good.
+    if (status == FX_E_FAILED and initializing_io) io_state.store(3, .release);
+    return status;
+}
+
+fn createBody(_: ?*Runtime, args: anytype) Status {
+    const cfg = readSized(Config, args[0], @sizeOf(Config)) catch |err| return sizedStatus(err);
+    if (cfg.abi_version != abi_version) return FX_E_UNSUPPORTED;
+    if (cfg.flags != 0) return FX_E_UNSUPPORTED;
     var host: Host = .{};
-    if (host_ptr) |given| {
-        // Read only the fields the host compiled.
-        const size = @min(given.struct_size, @sizeOf(Host));
-        if (size < @offsetOf(Host, "tool_call")) return FX_E_INVALID;
-        @memcpy(std.mem.asBytes(&host)[0..size], std.mem.asBytes(given)[0..size]);
-    }
-    core.ensureThreadedIo();
-    if (!core.claimRuntimeSlot()) return FX_E_LIMIT;
-    const runtime = createRuntime(cfg, host, host_ctx) catch |err| {
-        core.releaseRuntimeSlot();
+    if (args[1] != null) host = readSized(Host, args[1], @sizeOf(Host)) catch |err| return sizedStatus(err);
+    if (io_state.load(.acquire) != 2) args[4].* = true;
+    const io_status = ensureIo();
+    args[4].* = false;
+    if (io_status != FX_OK) return io_status;
+    if (!claimRuntimeCount()) return FX_E_LIMIT;
+    const runtime = createRuntime(&cfg, host, args[2]) catch |err| {
+        _ = active_runtimes.fetchSub(1, .acq_rel);
         return switch (err) {
             error.Invalid => FX_E_INVALID,
             error.OutOfMemory => FX_E_OOM,
@@ -1185,32 +2014,40 @@ export fn fx_runtime_create(cfg_ptr: ?*const Config, host_ptr: ?*const Host, hos
         };
     };
     const handle = claimSlot(runtime) orelse {
-        // claimRuntimeSlot bounds runtimes by the slot count, so a free slot
-        // exists; this is only reached if that invariant breaks.
-        runtime.deinit();
+        // Slots whose generations ran out lower the limit.
+        stopHealthy(runtime);
+        _ = active_runtimes.fetchSub(1, .acq_rel);
         return FX_E_LIMIT;
     };
-    out_ptr.* = handle;
+    args[3].* = handle;
     return FX_OK;
 }
 
 const CreateError = error{ Invalid, OutOfMemory, ThreadFailed, ReadyChannelFailed };
 
+fn limit(value: u32, default: u32, max: u32) error{Invalid}!u32 {
+    if (value == 0) return default;
+    if (value > max) return error.Invalid;
+    return value;
+}
+
 fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateError!*Runtime {
     const alloc = alloc_c;
     // Provider.
-    const provider_name = cfg.provider.slice() orelse return error.Invalid;
-    const provider: ?model_provider.ProviderId = if (provider_name.len == 0 or std.mem.eql(u8, provider_name, "gateway"))
+    const provider_text = cfg.provider.slice() orelse return error.Invalid;
+    const provider: ?model_provider.ProviderId = if (provider_text.len == 0 or std.mem.eql(u8, provider_text, "gateway"))
         .gateway
-    else if (std.mem.eql(u8, provider_name, "codex"))
+    else if (std.mem.eql(u8, provider_text, "codex"))
         .codex
-    else if (std.mem.eql(u8, provider_name, "grok"))
+    else if (std.mem.eql(u8, provider_text, "grok"))
         .grok
     else configured: {
-        const parsed = model_provider.parse(provider_name) orelse return error.Invalid;
+        const parsed = model_provider.parse(provider_text) orelse return error.Invalid;
         if (parsed != .configured) return error.Invalid;
         break :configured parsed;
     };
+    const provider_name = try alloc.dupe(u8, if (provider_text.len == 0) "gateway" else provider_text);
+    errdefer alloc.free(provider_name);
     const configured_providers = try optionalCopy(cfg.configured_providers_json, max_configured_providers_bytes);
     errdefer if (configured_providers) |json| alloc.free(json);
     if ((provider.? == .configured) != (configured_providers != null)) return error.Invalid;
@@ -1222,19 +2059,30 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
     errdefer alloc.free(home);
     const workspace_root = (try optionalCopy(cfg.workspace_root, core.max_path_bytes)) orelse return error.Invalid;
     errdefer alloc.free(workspace_root);
-    const gateway_chat_url = (try optionalCopy(cfg.endpoint_url, core.max_url_bytes)) orelse
-        try alloc.dupe(u8, builtin_gateway.default_chat_url);
+    const endpoint = try optionalCopy(cfg.endpoint_url, core.max_url_bytes);
+    // endpoint_url is the Gateway's route only.
+    if (endpoint != null and provider.? != .gateway) {
+        alloc.free(endpoint.?);
+        return error.Invalid;
+    }
+    const gateway_chat_url = endpoint orelse try alloc.dupe(u8, builtin_gateway.default_chat_url);
     errdefer alloc.free(gateway_chat_url);
     core.http_config.validateEndpoint(gateway_chat_url) catch return error.Invalid;
     if (!std.mem.eql(u8, gateway_chat_url, builtin_gateway.default_chat_url)) {
         const uri = std.Uri.parse(gateway_chat_url) catch return error.Invalid;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.Invalid;
     }
+    const max_agent_steps = try limit(cfg.max_agent_steps, 64, 10000);
+    const max_concurrent_tools = try limit(cfg.max_concurrent_tools, max_concurrent_tools_limit, max_concurrent_tools_limit);
+    const max_tool_result_bytes = try limit(cfg.max_tool_result_bytes, 64 * 1024, max_tool_result_limit);
+    const max_history_turns = try limit(cfg.max_history_turns, 100, 10000);
+    const max_stop_continuations = try limit(cfg.max_stop_continuations, 3, 64);
 
     // Tools and instructions, as initialize's clientCapabilities.libfx.
     const instructions = cfg.instructions.slice() orelse return error.Invalid;
     if (instructions.len > max_instructions_bytes or !isUtf8(instructions)) return error.Invalid;
     if (cfg.tool_count > max_tools or (cfg.tool_count > 0 and cfg.tools == null)) return error.Invalid;
+    if (cfg.tool_count > 0 and !aligned(ToolDesc, @intFromPtr(cfg.tools.?))) return error.Invalid;
     const descs: []const ToolDesc = if (cfg.tool_count == 0) &.{} else cfg.tools.?[0..cfg.tool_count];
     const tools = try alloc.alloc(Tool, descs.len);
     var tools_made: usize = 0;
@@ -1253,6 +2101,7 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
             const description = desc.description.slice() orelse return error.Invalid;
             const schema = desc.input_schema_json.slice() orelse return error.Invalid;
             if (!validToolName(name)) return error.Invalid;
+            if (desc.reserved != 0 or desc.flags & ~(FX_TOOL_IDEMPOTENT | FX_TOOL_WRITES) != 0) return error.Invalid;
             for (tools[0..tools_made]) |tool| if (std.mem.eql(u8, tool.name, name)) return error.Invalid;
             if (description.len > max_tool_text_bytes or !isUtf8(description)) return error.Invalid;
             if (schema.len == 0 or schema.len > max_schema_bytes) return error.Invalid;
@@ -1293,15 +2142,18 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
     runtime.* = .{
         .alloc = alloc,
         .provider = provider,
+        .provider_name = provider_name,
         .configured_providers = configured_providers,
         .model = model,
         .effort = effort,
         .home = home,
         .workspace_root = workspace_root,
         .gateway_chat_url = gateway_chat_url,
-        .max_agent_steps = if (cfg.max_agent_steps == 0) core.agent_steps.default_max_agent_steps else cfg.max_agent_steps,
-        .max_tool_result_bytes = if (cfg.max_tool_result_bytes == 0) 64 * 1024 else cfg.max_tool_result_bytes,
-        .max_history_turns = if (cfg.max_history_turns == 0) 100 else cfg.max_history_turns,
+        .max_agent_steps = max_agent_steps,
+        .max_concurrent_tools = max_concurrent_tools,
+        .max_tool_result_bytes = max_tool_result_bytes,
+        .max_history_turns = max_history_turns,
+        .max_stop_continuations = max_stop_continuations,
         .ready = ready,
         .host = host,
         .host_ctx = host_ctx,
@@ -1311,13 +2163,13 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
     };
     runtime.fetch.ready = &runtime.ready;
     runtime.stream_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, .{ .fixed = runtime.gateway_chat_url }, .{
-        .context = &runtime.fetch,
-        .open_fn = core.FetchBridge.open,
-        .status_fn = core.FetchBridge.statusFn,
-        .next_fn = core.FetchBridge.next,
-        .close_fn = core.FetchBridge.close,
-        .consumed_fn = core.FetchBridge.markConsumed,
-        .retry_after_fn = core.FetchBridge.retryAfterFn,
+        .context = runtime,
+        .open_fn = fetchOpen,
+        .status_fn = fetchStatus,
+        .next_fn = fetchNext,
+        .close_fn = fetchClose,
+        .consumed_fn = fetchConsumed,
+        .retry_after_fn = fetchRetryAfter,
     });
     runtime.codex_context = .{ .transport = runtime.stream_context.transport };
     runtime.grok_context = .{ .transport = runtime.stream_context.transport };
@@ -1340,11 +2192,82 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
     return runtime;
 }
 
+/// Stops a runtime no handle names yet (create's last failure) and frees it.
+fn stopHealthy(runtime: *Runtime) void {
+    runtime.closing.store(true, .seq_cst);
+    runtime.events.mutex.lockUncancelable(io_mod.getIo());
+    runtime.events.closed = true;
+    runtime.events.space.broadcast(io_mod.getIo());
+    runtime.events.mutex.unlock(io_mod.getIo());
+    runtime.input.close();
+    runtime.fetch.shutdown();
+    runtime.deinit();
+}
+
 export fn fx_runtime_destroy(handle: u64) callconv(.c) Status {
+    return hostCall(null, .{handle}, destroyBody);
+}
+
+fn destroyBody(_: ?*Runtime, args: anytype) Status {
+    const handle: u64 = args[0];
     const runtime = beginClose(handle) orelse return FX_E_CLOSED;
+    // From here a panic on this thread still retires the handle: the guard
+    // records which runtime it serves.
+    tl_guard.?.runtime = runtime;
+    runtime.closing.store(true, .seq_cst);
+    // No callback starts after this; one already running finishes first.
+    runtime.waitCallbacks();
+    if (!runtime.panicked()) shutdown(runtime);
+    if (runtime.panicked()) {
+        // Abandoned: never joined, freed or closed (header, fx_runtime_destroy).
+        runtime.waitCallbacks();
+        endClose(handle);
+        return FX_OK;
+    }
     runtime.deinit();
     endClose(handle);
     return FX_OK;
+}
+
+/// Stops a healthy runtime's core and waits for its thread, giving up (and
+/// leaving the runtime abandoned) if it panics meanwhile.
+fn shutdown(runtime: *Runtime) void {
+    const io = io_mod.getIo();
+    var events_closed = false;
+    var input_closed = false;
+    var fetch_closed = false;
+    while (!runtime.thread_done.load(.acquire)) {
+        if (runtime.panicked()) return;
+        // Wake every core thread that waits on the host; retried until each
+        // lock is had (a contended lock is held only briefly, rule 2).
+        if (!events_closed and hostLock(runtime, &runtime.events.mutex) == .locked) {
+            runtime.events.closed = true;
+            runtime.events.space.broadcast(io);
+            runtime.events.mutex.unlock(io);
+            events_closed = true;
+        }
+        if (!input_closed and hostLock(runtime, &runtime.input.mutex) == .locked) {
+            runtime.input.closed = true;
+            runtime.input.wake.broadcast(io);
+            runtime.input.mutex.unlock(io);
+            input_closed = true;
+        }
+        if (!fetch_closed and hostLock(runtime, &runtime.fetch.mutex) == .locked) {
+            const decision = fetch_state.decide(runtime.fetch.phase, .shutdown);
+            runtime.fetch.clearPendingRequest();
+            runtime.fetch.phase = decision.phase;
+            runtime.fetch.wake.broadcast(io);
+            runtime.fetch.mutex.unlock(io);
+            fetch_closed = true;
+        }
+        if (hostLock(runtime, &runtime.lock) == .locked) {
+            runtime.calls_changed.broadcast(io);
+            runtime.lock.unlock(io);
+        }
+        if (runtime.thread_done.load(.acquire)) return;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 1_000_000 };
+        _ = std.c.nanosleep(&ts, null);
+    }
 }
 
 export fn fx_runtime_ready_fd(handle: u64) callconv(.c) c_int {
@@ -1353,47 +2276,58 @@ export fn fx_runtime_ready_fd(handle: u64) callconv(.c) c_int {
     return runtime.ready.reader orelse -1;
 }
 
-export fn fx_runtime_info_get(handle: u64, out: ?*RuntimeInfo) callconv(.c) Status {
-    const out_ptr = out orelse return FX_E_INVALID;
+export fn fx_runtime_info_get(handle: u64, out: ?*align(1) RuntimeInfo) callconv(.c) Status {
+    const address = @intFromPtr(out);
+    if (!aligned(RuntimeInfo, address)) return FX_E_INVALID;
+    const raw: [*]u8 = @ptrFromInt(address);
+    const size: usize = std.mem.readInt(u32, raw[0..4], .little);
+    if (size < @sizeOf(RuntimeInfo)) return FX_E_INVALID;
+    @memset(raw[4..size], 0);
     const runtime = enter(handle) orelse return FX_E_CLOSED;
     defer leave(handle);
-    const exited = runtime.exited.load(.seq_cst);
-    out_ptr.* = .{
-        .state = if (exited) 1 else 0,
-        .exit_code = runtime.exit_code.load(.seq_cst),
-        .message = .{},
+    const state = runtime.state.load(.acquire);
+    const message = switch (state) {
+        FX_RUNTIME_PANICKED => runtime.panic_message.get(),
+        FX_RUNTIME_FAILED => runtime.fail_message.get(),
+        else => "",
     };
+    const info: *RuntimeInfo = @ptrFromInt(address);
+    info.state = state;
+    info.exit_code = runtime.exit_code.load(.acquire);
+    info.message = Str.of(message);
     return FX_OK;
 }
 
-/// Enters a runtime for a call that needs a live core.
-fn enterLive(handle: u64) union(enum) { runtime: *Runtime, status: Status } {
-    const runtime = enter(handle) orelse return .{ .status = FX_E_CLOSED };
-    if (runtime.exited.load(.seq_cst)) {
-        leave(handle);
-        return .{ .status = FX_E_FAILED };
-    }
-    return .{ .runtime = runtime };
+// ---------------------------------------------------------------------------
+// Exports: sessions and turns
+// ---------------------------------------------------------------------------
+
+fn outU64(address: usize) ?*u64 {
+    if (!aligned(u64, address)) return null;
+    const ptr: *u64 = @ptrFromInt(address);
+    ptr.* = 0;
+    return ptr;
 }
 
-export fn fx_session_open(handle: u64, args_ptr: ?*const SessionOpenArgs, request_out: ?*u64) callconv(.c) Status {
-    const args = args_ptr orelse return FX_E_INVALID;
-    const request_ptr = request_out orelse return FX_E_INVALID;
-    if (args.struct_size < @sizeOf(SessionOpenArgs)) return FX_E_INVALID;
+export fn fx_session_open(handle: u64, args_ptr: ?*align(1) const SessionOpenArgs, request_out: ?*align(1) u64) callconv(.c) Status {
+    const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    const args = readSized(SessionOpenArgs, args_ptr, @sizeOf(SessionOpenArgs)) catch |err| return sizedStatus(err);
+    return hostCall(handle, .{ args, request }, sessionOpenBody);
+}
+
+fn sessionOpenBody(runtime: ?*Runtime, a: anytype) Status {
+    const self = runtime.?;
+    const args: SessionOpenArgs = a[0];
+    var status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
     const session_id = args.session_id.slice() orelse return FX_E_INVALID;
-    if (session_id.len > 255 or !isUtf8(session_id)) return FX_E_INVALID;
-    // Resume from a journal, a checkpoint or staged images lands with the
-    // durability work (milestone 2).
-    if (args.journal_json.len > 0 or args.checkpoint.len > 0 or args.image_count > 0) return FX_E_UNSUPPORTED;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    defer leave(handle);
-    const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    defer runtime.lock.unlock(io);
-    if (runtime.session != .none) return FX_E_STATE;
+    if (session_id.len > max_session_id_bytes or !isUtf8(session_id)) return FX_E_INVALID;
+    if (args.flags & ~(FX_OPEN_INPUTS_DURABLE | FX_OPEN_IMAGE_STORE) != 0) return FX_E_UNSUPPORTED;
+    if (args.journal_json.slice() == null or args.checkpoint.slice() == null) return FX_E_INVALID;
+    // Resume from a journal or checkpoint, and image stores: milestone 2b.
+    if (args.journal_json.len > 0 or args.checkpoint.len > 0 or args.flags & FX_OPEN_IMAGE_STORE != 0) return FX_E_UNSUPPORTED;
+    if (self.session != .none) return FX_E_STATE;
     var params: std.Io.Writer.Allocating = .init(alloc_c);
     defer params.deinit();
     if (session_id.len > 0) {
@@ -1403,44 +2337,59 @@ export fn fx_session_open(handle: u64, args_ptr: ?*const SessionOpenArgs, reques
     } else {
         params.writer.writeAll("{}") catch return FX_E_OOM;
     }
-    const request = runtime.nextRequest();
-    const status = runtime.sendRequest(.libfx_new, request, "libfx/new", params.written());
+    const id = self.nextRequest();
+    status = self.sendRequest(.libfx_new, id, "libfx/new", params.written());
     if (status != FX_OK) return status;
-    runtime.session = .opening;
-    request_ptr.* = request;
+    self.session = .opening;
+    a[1].* = id;
     return FX_OK;
 }
 
-export fn fx_turn_prompt(handle: u64, input_ptr: ?*const Input, message_id: Str, turn_out: ?*u64) callconv(.c) Status {
-    const input = input_ptr orelse return FX_E_INVALID;
-    const turn_ptr = turn_out orelse return FX_E_INVALID;
-    const text = input.text.slice() orelse return FX_E_INVALID;
-    if (text.len > max_prompt_text_bytes or !isUtf8(text)) return FX_E_INVALID;
-    const id = message_id.slice() orelse return FX_E_INVALID;
+export fn fx_session_stage_images(handle: u64, images: ?[*]align(1) const NamedBytes, count: usize, request_out: ?*align(1) u64) callconv(.c) Status {
+    const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    if (count > 0 and (images == null or !aligned(NamedBytes, @intFromPtr(images)))) return FX_E_INVALID;
+    _ = request;
+    return hostCall(handle, .{}, struct {
+        fn body(runtime: ?*Runtime, _: anytype) Status {
+            if (!runtime.?.running()) return FX_E_FAILED;
+            return FX_E_UNSUPPORTED;
+        }
+    }.body);
+}
+
+const PromptArgs = struct { input: *const Input, message_id: Str, turn: *u64 };
+
+export fn fx_turn_prompt(handle: u64, input_ptr: ?*align(1) const Input, message_id: Str, turn_out: ?*align(1) u64) callconv(.c) Status {
+    const turn = outU64(@intFromPtr(turn_out)) orelse return FX_E_INVALID;
+    if (input_ptr == null or !aligned(Input, @intFromPtr(input_ptr))) return FX_E_INVALID;
+    const args: PromptArgs = .{ .input = @ptrCast(@alignCast(input_ptr.?)), .message_id = message_id, .turn = turn };
+    return hostCall(handle, args, promptBody);
+}
+
+fn promptBody(runtime: ?*Runtime, args: PromptArgs) Status {
+    const self = runtime.?;
+    var status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    const text = args.input.text.slice() orelse return FX_E_INVALID;
+    if (!isUtf8(text)) return FX_E_INVALID;
+    if (text.len > max_prompt_text_bytes) return FX_E_TOO_LARGE;
+    const id = args.message_id.slice() orelse return FX_E_INVALID;
     if (!validMessageId(id)) return FX_E_INVALID;
-    // Prompt images cross with P-IMAGES (milestone 2).
-    if (input.image_count > 0) return FX_E_UNSUPPORTED;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    defer leave(handle);
-    const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    if (runtime.session != .open or runtime.turn != 0) {
-        runtime.lock.unlock(io);
-        return FX_E_STATE;
-    }
+    if (args.input.image_count > 0 and args.input.images == null) return FX_E_INVALID;
+    // Prompt images cross with P-IMAGES (milestone 2b).
+    if (args.input.image_count > 0) return FX_E_UNSUPPORTED;
+    if (self.session != .open or self.turn != 0 or self.journal_failed != null) return FX_E_STATE;
     var params: std.Io.Writer.Allocating = .init(alloc_c);
     defer params.deinit();
     const w = &params.writer;
     const built = build: {
         w.writeAll("{\"sessionId\":") catch break :build false;
-        jsonrpc.writeJsonStr(runtime.session_id orelse "", w) catch break :build false;
+        jsonrpc.writeJsonStr(self.session_id orelse "", w) catch break :build false;
         w.writeAll(",\"prompt\":[{\"type\":\"text\",\"text\":") catch break :build false;
         jsonrpc.writeJsonStr(text, w) catch break :build false;
         w.writeAll("}]") catch break :build false;
-        if (runtime.journaled) {
+        if (self.journaled) {
             w.writeAll(",\"_meta\":{\"fx\":{\"turnId\":") catch break :build false;
             jsonrpc.writeJsonStr(id, w) catch break :build false;
             w.writeAll("}}") catch break :build false;
@@ -1448,235 +2397,392 @@ export fn fx_turn_prompt(handle: u64, input_ptr: ?*const Input, message_id: Str,
         w.writeAll("}") catch break :build false;
         break :build true;
     };
-    if (!built) {
-        runtime.lock.unlock(io);
-        return FX_E_OOM;
-    }
-    const turn = runtime.nextRequest();
-    const status = runtime.sendRequest(.prompt, turn, "session/prompt", params.written());
-    if (status != FX_OK) {
-        runtime.lock.unlock(io);
-        return status;
-    }
-    runtime.turn = turn;
+    if (!built) return FX_E_OOM;
+    const turn = self.nextRequest();
+    status = self.sendRequest(.prompt, turn, "session/prompt", params.written());
+    if (status != FX_OK) return status;
+    self.turn = turn;
     // Queued before `lock` is released: the turn's first update waits for
     // `lock` to learn its turn, so TURN_START is always first.
-    runtime.queueEventNow(.{ .kind = .turn_start, .turn = turn }, .{ .text = id });
-    runtime.lock.unlock(io);
-    turn_ptr.* = turn;
+    status = self.queueEventHost(.{ .kind = .turn_start, .turn = turn }, .{ .text = id });
+    if (status != FX_OK) {
+        // The turn started but cannot be reported: the runtime fails, and
+        // FX_EVENT_EXITED ends it for the host.
+        self.failTransport("the core could not queue an event (out of memory)");
+        return FX_E_FAILED;
+    }
+    args.turn.* = turn;
     return FX_OK;
 }
 
-/// Sends a libfx request about the open session: `{"sessionId":…,<extra>}`.
-fn sessionRequest(handle: u64, kind: Pending.Kind, method: []const u8, extra: []const u8, request_out: ?*u64) Status {
-    const request_ptr = request_out orelse return FX_E_INVALID;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    defer leave(handle);
-    const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    defer runtime.lock.unlock(io);
-    if (runtime.session != .open) return FX_E_STATE;
-    var params: std.Io.Writer.Allocating = .init(alloc_c);
-    defer params.deinit();
-    params.writer.writeAll("{\"sessionId\":") catch return FX_E_OOM;
-    jsonrpc.writeJsonStr(runtime.session_id orelse "", &params.writer) catch return FX_E_OOM;
-    params.writer.writeAll(extra) catch return FX_E_OOM;
-    params.writer.writeAll("}") catch return FX_E_OOM;
-    const request = runtime.nextRequest();
-    const status = runtime.sendRequest(kind, request, method, params.written());
-    if (status == FX_OK) request_ptr.* = request;
-    return status;
+export fn fx_turn_resume(handle: u64, turn_out: ?*align(1) u64) callconv(.c) Status {
+    _ = outU64(@intFromPtr(turn_out)) orelse return FX_E_INVALID;
+    return hostCall(handle, .{}, struct {
+        fn body(runtime: ?*Runtime, _: anytype) Status {
+            if (!runtime.?.running()) return FX_E_FAILED;
+            return FX_E_UNSUPPORTED;
+        }
+    }.body);
 }
 
-export fn fx_turn_steer(handle: u64, text: Str, message_id: Str, request_out: ?*u64) callconv(.c) Status {
-    const bytes = text.slice() orelse return FX_E_INVALID;
-    if (bytes.len == 0 or bytes.len > max_prompt_text_bytes or !isUtf8(bytes)) return FX_E_INVALID;
-    const id = message_id.slice() orelse return FX_E_INVALID;
+const SteerArgs = struct { turn: u64, input: *const Input, message_id: Str, request: *u64 };
+
+export fn fx_turn_steer(handle: u64, turn: u64, input_ptr: ?*align(1) const Input, message_id: Str, request_out: ?*align(1) u64) callconv(.c) Status {
+    const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    if (input_ptr == null or !aligned(Input, @intFromPtr(input_ptr))) return FX_E_INVALID;
+    const args: SteerArgs = .{ .turn = turn, .input = @ptrCast(@alignCast(input_ptr.?)), .message_id = message_id, .request = request };
+    return hostCall(handle, args, steerBody);
+}
+
+fn steerBody(runtime: ?*Runtime, args: SteerArgs) Status {
+    const self = runtime.?;
+    var status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    const text = args.input.text.slice() orelse return FX_E_INVALID;
+    if (text.len == 0 or !isUtf8(text)) return FX_E_INVALID;
+    if (text.len > max_steer_text_bytes) return FX_E_TOO_LARGE;
+    const id = args.message_id.slice() orelse return FX_E_INVALID;
     if (!validMessageId(id)) return FX_E_INVALID;
+    if (args.input.image_count > 0 and args.input.images == null) return FX_E_INVALID;
+    if (args.input.image_count > 0) return FX_E_UNSUPPORTED;
+    if (self.session != .open) return FX_E_STATE;
+    // A steer for a turn that is not running reaches nothing (Sol's item 3).
+    if (args.turn == 0 or args.turn != self.turn) return FX_STALE;
+    const owned_id = alloc_c.dupe(u8, id) catch return FX_E_OOM;
+    self.steers.append(alloc_c, .{ .request = 0, .message_id = owned_id }) catch {
+        alloc_c.free(owned_id);
+        return FX_E_OOM;
+    };
     var extra: std.Io.Writer.Allocating = .init(alloc_c);
     defer extra.deinit();
-    extra.writer.writeAll(",\"text\":") catch return FX_E_OOM;
-    jsonrpc.writeJsonStr(bytes, &extra.writer) catch return FX_E_OOM;
-    extra.writer.writeAll(",\"id\":") catch return FX_E_OOM;
-    jsonrpc.writeJsonStr(id, &extra.writer) catch return FX_E_OOM;
-    return sessionRequest(handle, .steer, "libfx/steer", extra.written(), request_out);
+    const built = build: {
+        extra.writer.writeAll("{\"sessionId\":") catch break :build false;
+        jsonrpc.writeJsonStr(self.session_id orelse "", &extra.writer) catch break :build false;
+        extra.writer.writeAll(",\"text\":") catch break :build false;
+        jsonrpc.writeJsonStr(text, &extra.writer) catch break :build false;
+        extra.writer.writeAll(",\"id\":") catch break :build false;
+        jsonrpc.writeJsonStr(id, &extra.writer) catch break :build false;
+        extra.writer.writeAll("}") catch break :build false;
+        break :build true;
+    };
+    const request = self.nextRequest();
+    status = if (built) self.sendRequest(.steer, request, "libfx/steer", extra.written()) else FX_E_OOM;
+    if (status != FX_OK) {
+        _ = self.steers.pop();
+        alloc_c.free(owned_id);
+        return status;
+    }
+    self.steers.items[self.steers.items.len - 1].request = request;
+    args.request.* = request;
+    return FX_OK;
 }
 
-export fn fx_turn_withdraw(handle: u64, message_id: Str, request_out: ?*u64) callconv(.c) Status {
-    const id = message_id.slice() orelse return FX_E_INVALID;
+const WithdrawArgs = struct { turn: u64, message_id: Str, request: *u64 };
+
+export fn fx_turn_withdraw(handle: u64, turn: u64, message_id: Str, request_out: ?*align(1) u64) callconv(.c) Status {
+    const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    return hostCall(handle, WithdrawArgs{ .turn = turn, .message_id = message_id, .request = request }, withdrawBody);
+}
+
+fn withdrawBody(runtime: ?*Runtime, args: WithdrawArgs) Status {
+    const self = runtime.?;
+    var status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    const id = args.message_id.slice() orelse return FX_E_INVALID;
     if (!validMessageId(id)) return FX_E_INVALID;
+    if (self.session != .open) return FX_E_STATE;
+    if (args.turn == 0 or args.turn != self.turn) return FX_STALE;
     var extra: std.Io.Writer.Allocating = .init(alloc_c);
     defer extra.deinit();
+    extra.writer.writeAll("{\"sessionId\":") catch return FX_E_OOM;
+    jsonrpc.writeJsonStr(self.session_id orelse "", &extra.writer) catch return FX_E_OOM;
     extra.writer.writeAll(",\"id\":") catch return FX_E_OOM;
     jsonrpc.writeJsonStr(id, &extra.writer) catch return FX_E_OOM;
-    return sessionRequest(handle, .withdraw, "libfx/withdraw", extra.written(), request_out);
-}
-
-export fn fx_checkpoint(handle: u64, request_out: ?*u64) callconv(.c) Status {
-    return sessionRequest(handle, .checkpoint, "libfx/checkpoint", "", request_out);
-}
-
-export fn fx_turn_cancel(handle: u64) callconv(.c) Status {
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
+    extra.writer.writeAll("}") catch return FX_E_OOM;
+    const request = self.nextRequest();
+    status = self.sendRequest(.withdraw, request, "libfx/withdraw", extra.written());
+    if (status != FX_OK) return status;
+    // A withdrawn steer no longer comes back at the turn's end.
+    for (self.steers.items, 0..) |steer, index| if (std.mem.eql(u8, steer.message_id, id)) {
+        alloc_c.free(steer.message_id);
+        _ = self.steers.orderedRemove(index);
+        break;
     };
-    defer leave(handle);
+    args.request.* = request;
+    return FX_OK;
+}
+
+export fn fx_turn_cancel(handle: u64, turn: u64) callconv(.c) Status {
+    return hostCall(handle, .{turn}, cancelBody);
+}
+
+fn cancelBody(runtime: ?*Runtime, args: anytype) Status {
+    const self = runtime.?;
+    const turn: u64 = args[0];
+    const status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    if (turn == 0 or turn != self.turn or self.session_id == null) return FX_STALE;
     const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    defer runtime.lock.unlock(io);
-    if (runtime.turn == 0 or runtime.session_id == null) return FX_OK;
     var frame: std.Io.Writer.Allocating = .init(alloc_c);
     defer frame.deinit();
     frame.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":") catch return FX_E_OOM;
-    jsonrpc.writeJsonStr(runtime.session_id.?, &frame.writer) catch return FX_E_OOM;
+    jsonrpc.writeJsonStr(self.session_id.?, &frame.writer) catch return FX_E_OOM;
     frame.writer.writeAll("}}\n") catch return FX_E_OOM;
-    runtime.input.write(alloc_c, frame.written()) catch |err| return switch (err) {
-        error.InputClosed => FX_E_FAILED,
-        error.InputQueueFull => FX_BACKPRESSURE,
-        error.OutOfMemory => FX_E_OOM,
+    const sent = self.hostInput(frame.written(), .control);
+    if (sent != FX_OK) return sent;
+    // The turn's tool calls get tool_cancel from their threads.
+    var calls = self.calls.valueIterator();
+    while (calls.next()) |record| if (record.*.turn == turn) {
+        record.*.cancel_requested = true;
     };
+    self.calls_changed.broadcast(io);
+    // The turn's fetch is retired now, even while the core waits for its
+    // response headers; the host sees RETIRED after the wake.
+    if (self.fetch_turn == turn) {
+        const got = hostLock(self, &self.fetch.mutex);
+        if (got != .locked) return acquireStatus(got);
+        const bridge = &self.fetch;
+        const decision = fetch_state.decide(bridge.phase, .cancel);
+        if (decision.action == .applied) {
+            bridge.last_consumed_handle = fetch_state.consumed_after(bridge.phase, bridge.last_consumed_handle, .cancel);
+            bridge.clearPendingRequest();
+            bridge.phase = decision.phase;
+            bridge.wake.broadcast(io);
+        }
+        bridge.mutex.unlock(io);
+        if (decision.action == .applied) self.ready.notify();
+    }
     return FX_OK;
 }
 
-export fn fx_events_drain(handle: u64, buf: ?[*]Event, cap: usize, count: ?*usize) callconv(.c) Status {
-    const count_ptr = count orelse return FX_E_INVALID;
-    count_ptr.* = 0;
-    if (cap > 0 and buf == null) return FX_E_INVALID;
-    const runtime = enter(handle) orelse return FX_E_CLOSED;
-    defer leave(handle);
-    if (cap == 0) return FX_OK;
-    count_ptr.* = runtime.events.drain(buf.?[0..cap]) catch return FX_E_OOM;
-    return FX_OK;
+export fn fx_checkpoint(handle: u64, request_out: ?*align(1) u64) callconv(.c) Status {
+    _ = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    return hostCall(handle, .{}, struct {
+        fn body(runtime: ?*Runtime, _: anytype) Status {
+            if (!runtime.?.running()) return FX_E_FAILED;
+            return FX_E_UNSUPPORTED;
+        }
+    }.body);
 }
 
-export fn fx_tool_result(handle: u64, call: u64, out_ptr: ?*const ToolOutput) callconv(.c) Status {
-    const out = out_ptr orelse return FX_E_INVALID;
-    const text = out.text.slice() orelse return FX_E_INVALID;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
+// ---------------------------------------------------------------------------
+// Exports: events
+// ---------------------------------------------------------------------------
+
+const DrainArgs = struct { buf: [*]u8, cap: usize, stride: usize, count: *usize };
+
+export fn fx_events_drain(handle: u64, buf: ?*anyopaque, cap: usize, event_size: usize, count_out: ?*align(1) usize) callconv(.c) Status {
+    const count_address = @intFromPtr(count_out);
+    if (!aligned(usize, count_address)) return FX_E_INVALID;
+    const count: *usize = @ptrFromInt(count_address);
+    count.* = 0;
+    if (event_size < @sizeOf(Event) or event_size % 8 != 0) return FX_E_INVALID;
+    if (cap > 0 and !aligned(Event, @intFromPtr(buf))) return FX_E_INVALID;
+    if (cap > 0 and cap > std.math.maxInt(usize) / event_size) return FX_E_INVALID;
+    const base: [*]u8 = if (cap > 0) @ptrCast(buf.?) else @ptrFromInt(@alignOf(Event));
+    return hostCall(handle, DrainArgs{ .buf = base, .cap = cap, .stride = event_size, .count = count }, drainBody);
+}
+
+fn writeEvent(args: DrainArgs, index: usize, event: Event) void {
+    const slot = args.buf + index * args.stride;
+    @memset(slot[0..args.stride], 0);
+    const typed: *Event = @ptrCast(@alignCast(slot));
+    typed.* = event;
+}
+
+fn exitedEvent(self: *Runtime, flags: u32) Event {
+    const state = self.state.load(.acquire);
+    const message = switch (state) {
+        FX_RUNTIME_PANICKED => self.panic_message.get(),
+        FX_RUNTIME_FAILED => self.fail_message.get(),
+        else => "",
     };
-    defer leave(handle);
+    return .{
+        .kind = @intFromEnum(EventKind.exited),
+        .flags = flags,
+        .code = state,
+        .status = self.exit_code.load(.acquire),
+        .text = Str.of(message),
+    };
+}
+
+fn drainBody(runtime: ?*Runtime, args: DrainArgs) Status {
+    const self = runtime.?;
     const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    const entry = runtime.calls.fetchRemove(call) orelse {
-        runtime.lock.unlock(io);
-        return FX_E_INVALID;
-    };
-    runtime.lock.unlock(io);
-    const record = entry.value;
-    defer alloc_c.free(record.frame);
-    if (record.cancelled) return FX_STALE;
-    // Tool images cross with P-IMAGES (milestone 2).
-    if (out.image_count > 0) {
-        runtime.respondError(record.rpc_id, "Host tool images are not supported by this core yet");
-        return FX_E_UNSUPPORTED;
+    const queue = &self.events;
+    const got = hostLock(self, &queue.mutex);
+    switch (got) {
+        .locked => {},
+        .busy => return FX_BUSY,
+        .failed => {
+            // The core panicked holding the queue: what it held is lost.
+            if (args.cap > 0 and !self.exited_delivered.swap(true, .acq_rel)) {
+                writeEvent(args, 0, exitedEvent(self, FX_EXITED_EVENTS_LOST));
+                args.count.* = 1;
+            }
+            return FX_OK;
+        },
     }
-    if (!isUtf8(text) or text.len > runtime.max_tool_result_bytes) {
-        runtime.respond(record.rpc_id, "{\"content\":\"Host tool result exceeded the configured limit\",\"isError\":true}");
-        return FX_E_INVALID;
+    defer queue.mutex.unlock(io);
+    // Whatever the previous drain handed out is released now.
+    queue.drained_bytes.clearRetainingCapacity();
+    queue.drained_names.clearRetainingCapacity();
+    queue.drained_name_strs.clearRetainingCapacity();
+    const count = @min(args.cap, queue.events.items.len);
+    if (count > 0) {
+        const everything = count == queue.events.items.len;
+        if (everything) {
+            std.mem.swap(std.ArrayList(u8), &queue.pending_bytes, &queue.drained_bytes);
+            std.mem.swap(std.ArrayList(Span), &queue.pending_names, &queue.drained_names);
+        } else {
+            // A partial drain copies what it hands out; the rest stays.
+            queue.drained_bytes.appendSlice(alloc_c, queue.pending_bytes.items) catch return FX_E_OOM;
+            queue.drained_names.appendSlice(alloc_c, queue.pending_names.items) catch return FX_E_OOM;
+        }
+        var name_total: usize = 0;
+        for (queue.events.items[0..count]) |event| name_total += event.name_count;
+        queue.drained_name_strs.ensureTotalCapacity(alloc_c, name_total) catch return FX_E_OOM;
+        const arena = queue.drained_bytes.items;
+        for (queue.events.items[0..count], 0..) |event, index| {
+            var names: ?[*]const Str = null;
+            if (event.name_count > 0) {
+                const first = queue.drained_name_strs.items.len;
+                for (queue.drained_names.items[event.names_start..][0..event.name_count]) |span| {
+                    queue.drained_name_strs.appendAssumeCapacity(EventQueue.spanStr(arena, span));
+                }
+                names = queue.drained_name_strs.items[first..].ptr;
+            }
+            writeEvent(args, index, .{
+                .kind = @intFromEnum(event.kind),
+                .flags = event.flags,
+                .turn = event.turn,
+                .request = event.request,
+                .id = event.id,
+                .status = event.status,
+                .code = event.code,
+                .text = EventQueue.spanStr(arena, event.text),
+                .text2 = EventQueue.spanStr(arena, event.text2),
+                .bytes = .{ .ptr = if (event.bytes.len == 0) null else arena[event.bytes.off..].ptr, .len = event.bytes.len },
+                .names = names,
+                .name_count = event.name_count,
+                .usage = event.usage,
+            });
+        }
+        if (everything) {
+            queue.events.clearRetainingCapacity();
+        } else {
+            const rest = queue.events.items.len - count;
+            std.mem.copyForwards(QueuedEvent, queue.events.items[0..rest], queue.events.items[count..]);
+            queue.events.items.len = rest;
+        }
+        queue.space.broadcast(io);
     }
-    var result: std.Io.Writer.Allocating = .init(alloc_c);
-    defer result.deinit();
-    result.writer.writeAll("{\"content\":") catch return FX_E_OOM;
-    jsonrpc.writeJsonStr(text, &result.writer) catch return FX_E_OOM;
-    result.writer.writeAll(if (out.is_error) ",\"isError\":true}" else ",\"isError\":false}") catch return FX_E_OOM;
-    runtime.respond(record.rpc_id, result.written());
+    var written = count;
+    // Once the runtime stopped and everything before it is out: EXITED, once.
+    if (written < args.cap and queue.events.items.len == 0 and !self.running() and
+        (self.panicked() or self.thread_done.load(.acquire) or self.state.load(.acquire) == FX_RUNTIME_FAILED))
+    {
+        if (!self.exited_delivered.swap(true, .acq_rel)) {
+            writeEvent(args, written, exitedEvent(self, 0));
+            written += 1;
+            // EXITED is the last event: nothing queues after it.
+            queue.closed = true;
+            queue.space.broadcast(io);
+        }
+    }
+    args.count.* = written;
     return FX_OK;
 }
 
-export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    defer leave(handle);
-    const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    defer runtime.lock.unlock(io);
-    if (append == 0 or append > runtime.journal_sent) return FX_E_INVALID;
-    if (append <= runtime.journal_acked) return FX_STALE;
-    runtime.journal_acked = append;
-    var index: usize = 0;
-    while (index < runtime.flushes.items.len) {
-        const flush = runtime.flushes.items[index];
-        if (flush.upto <= append) {
-            runtime.respond(flush.rpc_id, "{}");
-            _ = runtime.flushes.orderedRemove(index);
-        } else index += 1;
-    }
-    return FX_OK;
+// ---------------------------------------------------------------------------
+// Exports: tool results
+// ---------------------------------------------------------------------------
+
+const ToolResultArgs = struct { call: u64, out: *const ToolOutput };
+
+export fn fx_tool_result(handle: u64, call: u64, out_ptr: ?*align(1) const ToolOutput) callconv(.c) Status {
+    if (out_ptr == null or !aligned(ToolOutput, @intFromPtr(out_ptr))) return FX_E_INVALID;
+    return hostCall(handle, ToolResultArgs{ .call = call, .out = @ptrCast(@alignCast(out_ptr.?)) }, toolResultBody);
 }
 
-export fn fx_journal_fail(handle: u64, append: u64, reason: Str, fenced: bool) callconv(.c) Status {
-    const text = reason.slice() orelse return FX_E_INVALID;
+fn toolResultBody(runtime: ?*Runtime, args: ToolResultArgs) Status {
+    const self = runtime.?;
+    const status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    self.fault(.tool_result);
+    const text = args.out.text.slice() orelse return FX_E_INVALID;
+    if (args.out.image_count > 0 and args.out.images == null) return FX_E_INVALID;
+    const record = self.calls.get(args.call) orelse
+        return if (args.call == 0 or args.call >= self.next_call) FX_E_INVALID else FX_STALE;
+    if (record.answered) return FX_STALE;
     if (!isUtf8(text)) return FX_E_INVALID;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
+    // Tool images cross with P-IMAGES (milestone 2b).
+    if (args.out.image_count > 0) return FX_E_UNSUPPORTED;
+    var outcome: Status = FX_OK;
+    const copy = if (text.len > self.max_tool_result_bytes) copy: {
+        outcome = FX_E_TOO_LARGE;
+        record.is_error = true;
+        break :copy alloc_c.dupe(u8, "Host tool result exceeded the configured limit") catch return FX_E_OOM;
+    } else copy: {
+        record.is_error = args.out.is_error;
+        // The one copy of the host's result (header rule 7).
+        break :copy alloc_c.dupe(u8, text) catch return FX_E_OOM;
     };
-    defer leave(handle);
-    const io = io_mod.getIo();
-    runtime.lock.lockUncancelable(io);
-    defer runtime.lock.unlock(io);
-    if (append == 0 or append > runtime.journal_sent) return FX_E_INVALID;
-    if (append <= runtime.journal_acked or runtime.journal_failed != null) return FX_STALE;
-    const message = if (fenced) "another writer holds this session's journal" else text;
-    runtime.journal_failed = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch return FX_E_OOM;
-    for (runtime.flushes.items) |flush| runtime.respondError(flush.rpc_id, runtime.journal_failed.?);
-    runtime.flushes.clearRetainingCapacity();
-    return FX_OK;
+    record.result = copy;
+    record.answered = true;
+    self.calls_changed.broadcast(io_mod.getIo());
+    return outcome;
 }
 
-export fn fx_hook_answer(handle: u64, question: u64, kind: i32, text: Str) callconv(.c) Status {
-    _ = question;
-    _ = kind;
-    if (text.slice() == null) return FX_E_INVALID;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    _ = runtime;
-    defer leave(handle);
-    // No question is asked until P-STOP and the pre_tool bridge land
-    // (milestone 2), so every id is unknown.
-    return FX_E_INVALID;
-}
-
-// --- the fetch bridge -------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Exports: the fetch bridge's host side
+// ---------------------------------------------------------------------------
 
 fn fetchHandle(fetch: u64) ?fetch_state.Handle {
     if (fetch == 0 or fetch > std.math.maxInt(fetch_state.Handle)) return null;
     return @intCast(fetch);
 }
 
-fn operationStatus(result: core.FetchOperationResult) Status {
-    return switch (result) {
-        .stale => FX_STALE,
-        .applied => FX_OK,
-        .backpressure => FX_BACKPRESSURE,
-    };
+/// Headers that carry credentials never leave the core (header rule 13).
+fn credentialHeader(name: []const u8) bool {
+    const names = [_][]const u8{ "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-goog-api-key" };
+    for (names) |candidate| if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+    return false;
 }
 
-export fn fx_fetch_take(handle: u64, out_ptr: ?*FetchRequest) callconv(.c) Status {
-    const out = out_ptr orelse return FX_E_INVALID;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |status| return status,
-    };
-    defer leave(handle);
+export fn fx_fetch_take(handle: u64, out_ptr: ?*align(1) FetchRequest) callconv(.c) Status {
+    const address = @intFromPtr(out_ptr);
+    if (!aligned(FetchRequest, address)) return FX_E_INVALID;
+    const raw: [*]u8 = @ptrFromInt(address);
+    const size: usize = std.mem.readInt(u32, raw[0..4], .little);
+    if (size < @sizeOf(FetchRequest)) return FX_E_INVALID;
+    @memset(raw[4..size], 0);
+    return hostCall(handle, .{@as(*FetchRequest, @ptrFromInt(address))}, fetchTakeBody);
+}
+
+fn fetchTakeBody(runtime: ?*Runtime, args: anytype) Status {
+    const self = runtime.?;
+    const out: *FetchRequest = args[0];
+    if (!self.running()) return FX_E_FAILED;
+    // The turn the fetch serves: recorded by the core before it published it.
+    const got_lock = hostLock(self, &self.lock);
+    if (got_lock != .locked) return acquireStatus(got_lock);
+    const turn = self.fetch_turn;
+    unlock(self);
     const io = io_mod.getIo();
-    const bridge = &runtime.fetch;
-    bridge.mutex.lockUncancelable(io);
+    const bridge = &self.fetch;
+    const got = hostLock(self, &bridge.mutex);
+    if (got != .locked) return acquireStatus(got);
     defer bridge.mutex.unlock(io);
     const decision = fetch_state.decide(bridge.phase, .take_request);
+    // Every FX_OK or FX_EMPTY ends the previous take's borrows.
+    _ = self.taken.reset(.retain_capacity);
     if (decision.action != .applied) return FX_EMPTY;
-    _ = runtime.taken.reset(.retain_capacity);
-    const arena = runtime.taken.allocator();
+    const arena = self.taken.allocator();
     const Metadata = struct {
         handle: fetch_state.Handle,
         method: []const u8,
@@ -1687,73 +2793,212 @@ export fn fx_fetch_take(handle: u64, out_ptr: ?*FetchRequest) callconv(.c) Statu
     const metadata = std.json.parseFromSliceLeaky(Metadata, arena, bridge.request.items, .{ .allocate = .alloc_always }) catch return FX_E_INVALID;
     const Pair = struct { name: []const u8, value: []const u8 };
     const pairs = std.json.parseFromSliceLeaky([]const Pair, arena, metadata.headers, .{ .allocate = .alloc_always }) catch return FX_E_INVALID;
-    const headers = arena.alloc(Header, pairs.len) catch return FX_E_OOM;
-    for (pairs, headers) |pair, *header| header.* = .{ .name = Str.of(pair.name), .value = Str.of(pair.value) };
+    var headers: std.ArrayList(Header) = .empty;
+    headers.ensureTotalCapacity(arena, pairs.len) catch return FX_E_OOM;
+    for (pairs) |pair| {
+        if (credentialHeader(pair.name)) continue;
+        headers.appendAssumeCapacity(.{ .name = Str.of(pair.name), .value = Str.of(pair.value) });
+    }
     const body = arena.dupe(u8, bridge.request_body.items) catch return FX_E_OOM;
-    out.* = .{
-        .fetch = @intCast(metadata.handle),
-        .method = Str.of(metadata.method),
-        .url = Str.of(metadata.url),
-        .headers = if (headers.len == 0) null else headers.ptr,
-        .header_count = headers.len,
-        .body = Bytes.of(body),
-    };
+    const provider = arena.dupe(u8, self.provider_name) catch return FX_E_OOM;
+    out.purpose = if (std.ascii.eqlIgnoreCase(metadata.method, "GET")) FX_FETCH_CATALOG else FX_FETCH_MODEL;
+    out.fetch = @intCast(metadata.handle);
+    out.turn = turn;
+    out.provider = Str.of(provider);
+    out.method = Str.of(metadata.method);
+    out.url = Str.of(metadata.url);
+    out.headers = if (headers.items.len == 0) null else headers.items.ptr;
+    out.header_count = headers.items.len;
+    out.body = Bytes.of(body);
     bridge.clearPendingRequest();
     bridge.phase = decision.phase;
     return FX_OK;
 }
 
+const FetchOp = union(enum) {
+    status: struct { code: u16, retry_after: i32 },
+    push: []const u8,
+    finish: bool,
+};
+
+fn fetchOp(self: *Runtime, fetch: u64, op: FetchOp) Status {
+    if (!self.running()) return FX_E_FAILED;
+    const handle = fetchHandle(fetch) orelse return FX_STALE;
+    const io = io_mod.getIo();
+    const bridge = &self.fetch;
+    const got = hostLock(self, &bridge.mutex);
+    if (got != .locked) return acquireStatus(got);
+    defer bridge.mutex.unlock(io);
+    switch (op) {
+        .status => |value| {
+            const decision = fetch_state.decide(bridge.phase, .{ .start = handle });
+            if (decision.action == .stale) {
+                return switch (bridge.phase) {
+                    .streaming => |active| if (active == handle) FX_E_STATE else FX_STALE,
+                    .terminal => |terminal| if (terminal.handle == handle and terminal.kind == .success) FX_E_STATE else FX_STALE,
+                    else => FX_STALE,
+                };
+            }
+            bridge.status = value.code;
+            bridge.retry_after_seconds = value.retry_after;
+            bridge.phase = decision.phase;
+        },
+        .push => |bytes| {
+            const decision = fetch_state.decide(bridge.phase, .{ .push = handle });
+            if (decision.action == .stale) {
+                return switch (bridge.phase) {
+                    .awaiting_response => |active| if (active == handle) FX_E_STATE else FX_STALE,
+                    else => FX_STALE,
+                };
+            }
+            const queued = bridge.response.items.len - bridge.response_offset;
+            if (queued > core.max_fetch_response_bytes - bytes.len) {
+                self.push_blocked.store(true, .release);
+                return FX_BACKPRESSURE;
+            }
+            if (bridge.response_offset > 0) {
+                @memmove(bridge.response.items[0..queued], bridge.response.items[bridge.response_offset..]);
+                bridge.response.items.len = queued;
+                bridge.response_offset = 0;
+            }
+            bridge.response.appendSlice(alloc_c, bytes) catch return FX_E_OOM;
+        },
+        .finish => |ok| {
+            const decision = fetch_state.decide(bridge.phase, if (ok) .{ .finish = handle } else .{ .fail = handle });
+            if (decision.action == .stale) return FX_STALE;
+            bridge.phase = decision.phase;
+        },
+    }
+    bridge.wake.broadcast(io);
+    return FX_OK;
+}
+
 export fn fx_fetch_status(handle: u64, fetch: u64, status: u16, retry_after_s: i32) callconv(.c) Status {
     if (retry_after_s < -1) return FX_E_INVALID;
-    const fetch_id = fetchHandle(fetch) orelse return FX_STALE;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |code| return code,
-    };
-    defer leave(handle);
-    return operationStatus(runtime.fetch.startResponse(fetch_id, status, retry_after_s));
+    return hostCall(handle, .{ fetch, status, retry_after_s }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            return fetchOp(runtime.?, a[0], .{ .status = .{ .code = a[1], .retry_after = a[2] } });
+        }
+    }.body);
 }
 
 export fn fx_fetch_push(handle: u64, fetch: u64, data: ?[*]const u8, len: usize) callconv(.c) Status {
     if (len > 0 and data == null) return FX_E_INVALID;
-    const fetch_id = fetchHandle(fetch) orelse return FX_STALE;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |code| return code,
-    };
-    defer leave(handle);
     const bytes: []const u8 = if (len == 0) "" else data.?[0..len];
-    const result = runtime.fetch.pushResponse(fetch_id, bytes) catch return FX_E_OOM;
-    return operationStatus(result);
+    return hostCall(handle, .{ fetch, bytes }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            if (!runtime.?.running()) return FX_E_FAILED;
+            if (a[1].len > core.max_fetch_response_bytes) return FX_E_TOO_LARGE;
+            return fetchOp(runtime.?, a[0], .{ .push = a[1] });
+        }
+    }.body);
 }
 
 export fn fx_fetch_finish(handle: u64, fetch: u64, ok: bool) callconv(.c) Status {
-    const fetch_id = fetchHandle(fetch) orelse return FX_STALE;
-    const runtime = switch (enterLive(handle)) {
-        .runtime => |value| value,
-        .status => |code| return code,
-    };
-    defer leave(handle);
-    return operationStatus(if (ok) runtime.fetch.finishResponse(fetch_id) else runtime.fetch.failResponse(fetch_id));
+    return hostCall(handle, .{ fetch, ok }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            return fetchOp(runtime.?, a[0], .{ .finish = a[1] });
+        }
+    }.body);
 }
 
 export fn fx_fetch_disposition_get(handle: u64, fetch: u64) callconv(.c) i32 {
-    const fetch_id = fetchHandle(fetch) orelse return 0;
-    const runtime = enter(handle) orelse return 0;
-    defer leave(handle);
-    if (runtime.exited.load(.seq_cst)) return 0;
-    return @intFromEnum(runtime.fetch.disposition(fetch_id));
+    const status = hostCall(handle, .{fetch}, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            const self = runtime.?;
+            if (!self.running()) return 0;
+            const id = fetchHandle(a[0]) orelse return 0;
+            const got = hostLock(self, &self.fetch.mutex);
+            if (got != .locked) return 0;
+            defer self.fetch.mutex.unlock(io_mod.getIo());
+            return @intFromEnum(fetch_state.disposition(self.fetch.phase, self.fetch.last_consumed_handle, id));
+        }
+    }.body);
+    return if (status < 0) 0 else status;
 }
 
-test "handles carry their slot and generation" {
-    const handle = handleOf(3, 7);
-    try std.testing.expectEqual(@as(?usize, 3), slotIndex(handle));
-    try std.testing.expectEqual(@as(u64, 7), handle >> 8);
-    try std.testing.expectEqual(@as(?usize, null), slotIndex(0));
+// ---------------------------------------------------------------------------
+// Exports: journal acknowledgements and hook answers
+// ---------------------------------------------------------------------------
+
+export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
+    return hostCall(handle, .{append}, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            const self = runtime.?;
+            const append_id: u64 = a[0];
+            const status = lockLive(self);
+            if (status != FX_OK) return status;
+            defer unlock(self);
+            if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
+            if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
+            self.journal_acked = append_id;
+            var index: usize = 0;
+            while (index < self.flushes.items.len) {
+                const flush = self.flushes.items[index];
+                if (flush.upto <= append_id) {
+                    self.mustRespond(self.respond(flush.rpc_id, "{}", true));
+                    _ = self.flushes.orderedRemove(index);
+                } else index += 1;
+            }
+            return FX_OK;
+        }
+    }.body);
 }
 
-test "a destroyed handle is closed" {
-    try std.testing.expect(enter(handleOf(0, 1)) == null or true);
-    try std.testing.expectEqual(FX_E_CLOSED, fx_runtime_destroy(handleOf(5, 99)));
-    try std.testing.expectEqual(@as(c_int, -1), fx_runtime_ready_fd(handleOf(5, 99)));
+export fn fx_journal_fail(handle: u64, append: u64, reason: Str, fenced: bool) callconv(.c) Status {
+    return hostCall(handle, .{ append, reason, fenced }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            const self = runtime.?;
+            const append_id: u64 = a[0];
+            const text = a[1].slice() orelse return FX_E_INVALID;
+            if (!isUtf8(text)) return FX_E_INVALID;
+            const status = lockLive(self);
+            if (status != FX_OK) return status;
+            defer unlock(self);
+            if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
+            if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
+            const message = if (a[2]) "another writer holds this session's journal" else text;
+            self.journal_failed = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch return FX_E_OOM;
+            for (self.flushes.items) |flush| self.mustRespond(self.respondError(flush.rpc_id, self.journal_failed.?, true));
+            self.flushes.clearRetainingCapacity();
+            return FX_OK;
+        }
+    }.body);
+}
+
+export fn fx_hook_answer(handle: u64, question: u64, kind: i32, text: Str) callconv(.c) Status {
+    return hostCall(handle, .{ question, kind, text }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            if (!runtime.?.running()) return FX_E_FAILED;
+            if (a[2].slice() == null) return FX_E_INVALID;
+            _ = a[0];
+            _ = a[1];
+            // No question is asked until P-STOP and P-PRETOOL land
+            // (milestone 2b), so every id is one never issued.
+            return FX_E_INVALID;
+        }
+    }.body);
+}
+
+// ---------------------------------------------------------------------------
+// Exports: testing only
+// ---------------------------------------------------------------------------
+
+export fn fx_test_arm_fault(handle: u64, point: u32, skip: u32) callconv(.c) Status {
+    if (point == 0 or point >= fault_count) return FX_E_INVALID;
+    return hostCall(handle, .{ point, skip }, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            runtime.?.faults[a[0]].store(@intCast(a[1]), .release);
+            return FX_OK;
+        }
+    }.body);
+}
+
+export fn fx_test_set_slot_generation(slot: u32, generation: u64) callconv(.c) Status {
+    if (slot >= slots.len or generation == 0 or generation > max_generation) return FX_E_INVALID;
+    const bit = @as(u64, 1) << @intCast(slot);
+    if (slot_claim.fetchOr(bit, .acq_rel) & bit != 0) return FX_E_INVALID;
+    slots[slot].state.store(generation << gen_shift, .release);
+    _ = slot_claim.fetchAnd(~bit, .acq_rel);
+    return FX_OK;
 }

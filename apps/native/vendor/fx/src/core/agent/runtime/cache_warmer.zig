@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-PANIC): the warmer's
+// task runs in its runtime's panic context (core/shared/panic_context.zig).
 //! Keeps one conversation's Claude prompt cache entry alive: holds a copy of
 //! the last real request, wakes when the planner in `cache_warming.zig` says
 //! to, and sends each ping, the same request with a one-token reply, from its
@@ -10,6 +12,7 @@
 //! when the conversation closes first.
 
 const std = @import("std");
+const panic_context = @import("../../shared/panic_context.zig");
 const builtin = @import("builtin");
 const cache_warming = @import("cache_warming.zig");
 const gateway_step = @import("gateway_step.zig");
@@ -164,7 +167,7 @@ pub const Warmer = struct {
             input.model, self.state.generation, input.body.len, input.started_ms, now_ms - input.started_ms,
         });
         if (self.task == null and self.state.armed) {
-            self.task = std.Io.concurrent(io, taskMain, .{self}) catch |err| spawn: {
+            self.task = std.Io.concurrent(io, panic_context.bound(taskMain), .{ panic_context.current, self }) catch |err| spawn: {
                 debug_trace.logf("cache_warming", "event=task_unavailable err={s}", .{@errorName(err)});
                 self.apply(.{ .disarmed = .{ .now_ms = now_ms } });
                 break :spawn null;

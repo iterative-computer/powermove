@@ -1,8 +1,9 @@
 //! Builds the vendored libfx core (apps/native/vendor/fx) with the pinned Zig
 //! and links it statically. Never downloads anything: the pinned Zig is
 //! installed by vendor/fx/install-zig.sh. Without it (or on a target the core
-//! is not built for) the crate compiles a stub whose every call returns
-//! `Unavailable`, with one cargo warning, so the workspace still builds.
+//! is not built for) the crate compiles a Rust stub (`src/sys.rs`; there is
+//! no C stub library) whose every call returns `Unavailable`, with one cargo
+//! warning, so the workspace still builds.
 
 use std::env;
 use std::fs;
@@ -50,6 +51,10 @@ fn main() {
         },
     };
     let zig = zig_home.join(format!("zig-{ZIG_TARGET}-{version}/zig"));
+    // Tracked whether or not it exists, so installing the pinned Zig into
+    // the same place after a stub build rebuilds the real core (Sol's item
+    // 10); see the missing case below for the folder.
+    println!("cargo::rerun-if-changed={}", zig.display());
     match Command::new(&zig).arg("version").output() {
         Ok(output)
             if output.status.success()
@@ -62,6 +67,11 @@ fn main() {
             ));
         }
         Err(_) => {
+            // The binary a later install brings keeps the tarball's old
+            // mtime, so its own path cannot tell cargo it arrived. The
+            // folder it lands in changes when it does (or, missing, keeps
+            // this script rerunning until it exists).
+            println!("cargo::rerun-if-changed={}", zig_home.display());
             return stub(&format!(
                 "the pinned Zig {version} is not at {} (run apps/native/vendor/fx/install-zig.sh)",
                 zig.display()

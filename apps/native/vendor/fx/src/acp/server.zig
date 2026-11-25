@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-PANIC): the prompt
+// worker starts in its runtime's panic context (core/shared/panic_context.zig).
 const std = @import("std");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const managed_execution = @import("../core/execution/managed_execution.zig");
@@ -2591,7 +2593,7 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
         jsonrpc.freeMessage(active.alloc, &active.msg);
         active.alloc.destroy(active);
     } else {
-        active.thread = try std.Thread.spawn(.{}, promptWorkerMain, .{active});
+        active.thread = try @import("../core/shared/panic_context.zig").spawn(.{}, promptWorkerMain, .{active});
         state.active_prompt = active;
     }
 }

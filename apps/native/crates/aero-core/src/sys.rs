@@ -1,21 +1,25 @@
-//! The C ABI of `apps/native/vendor/fx/include/fx_core.h`, declared by hand.
-//! Every type here is `repr(C)` and matches the header field for field; the
-//! header is the contract, with its threading and ownership rules.
+//! The C ABI of `apps/native/vendor/fx/include/fx_core.h` (ABI 2), declared
+//! by hand. Every type here is `repr(C)` and matches the header field for
+//! field (the layout test in `lib.rs` pins each size); the header is the
+//! contract, with its threading, ownership and lease rules.
 //!
 //! Built without the core (`cfg(aero_core = "unavailable")`), the functions
-//! are Rust stubs that return `FX_E_UNAVAILABLE`.
+//! are Rust stubs that return `FX_E_UNAVAILABLE` or the function's sentinel.
+//! The stub is Rust only: there is no C stub library.
 
 #![allow(non_camel_case_types, dead_code)]
 
 use std::ffi::c_void;
 
-pub const FX_CORE_ABI_VERSION: u32 = 1;
+pub const FX_CORE_ABI_VERSION: u32 = 2;
+pub const FX_BUSY_BOUND_MS: u32 = 250;
 
 pub type fx_status = i32;
 pub const FX_OK: fx_status = 0;
 pub const FX_EMPTY: fx_status = 1;
 pub const FX_STALE: fx_status = 2;
 pub const FX_BACKPRESSURE: fx_status = 3;
+pub const FX_BUSY: fx_status = 4;
 pub const FX_E_INVALID: fx_status = -1;
 pub const FX_E_CLOSED: fx_status = -2;
 pub const FX_E_FAILED: fx_status = -3;
@@ -26,6 +30,7 @@ pub const FX_E_IO: fx_status = -7;
 pub const FX_E_STATE: fx_status = -8;
 pub const FX_E_UNAVAILABLE: fx_status = -9;
 pub const FX_E_UNSUPPORTED: fx_status = -10;
+pub const FX_E_TOO_LARGE: fx_status = -11;
 
 pub type fx_runtime = u64;
 
@@ -71,8 +76,60 @@ impl fx_bytes {
     }
 }
 
+pub const FX_MAX_RUNTIMES: u32 = 64;
+pub const FX_MAX_PROMPT_TEXT: usize = 4 << 20;
+pub const FX_MAX_STEER_TEXT: usize = 64 << 10;
+pub const FX_MAX_INPUT_QUEUE: usize = 8 << 20;
+pub const FX_MAX_FETCH_CHUNK: usize = 8 << 20;
+pub const FX_MAX_CONCURRENT_TOOLS: u32 = 16;
+
 pub const FX_TOOL_IDEMPOTENT: u32 = 1 << 0;
 pub const FX_TOOL_WRITES: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct fx_tool_call {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub call: u64,
+    pub turn: u64,
+    pub name: fx_str,
+    pub input_json: fx_str,
+    pub model_call_id: fx_str,
+}
+
+pub const FX_APPEND_BARRIER: u32 = 1 << 0;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct fx_journal_append {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub append: u64,
+    pub turn: u64,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub events_json: fx_str,
+}
+
+pub type fx_hook_kind = u32;
+pub const FX_HOOK_PRE_TOOL: fx_hook_kind = 1;
+pub const FX_HOOK_STOP: fx_hook_kind = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct fx_hook_question {
+    pub struct_size: u32,
+    pub kind: fx_hook_kind,
+    pub question: u64,
+    pub turn: u64,
+    pub call: u64,
+    pub name: fx_str,
+    pub input_json: fx_str,
+    pub final_text: fx_str,
+    pub continuations: u32,
+    pub reserved: u32,
+}
 
 pub type fx_hook_verdict = i32;
 pub const FX_HOOK_ALLOW: fx_hook_verdict = 0;
@@ -84,11 +141,10 @@ pub const FX_ANSWER_BLOCK: fx_hook_answer_kind = 1;
 pub const FX_ANSWER_REWRITE: fx_hook_answer_kind = 2;
 pub const FX_ANSWER_CONTINUE: fx_hook_answer_kind = 3;
 
-pub type ToolCallFn = unsafe extern "C" fn(*mut c_void, u64, fx_str, fx_str, fx_str, u32);
-pub type ToolCancelFn = unsafe extern "C" fn(*mut c_void, u64);
-pub type JournalAppendFn = unsafe extern "C" fn(*mut c_void, u64, fx_str, bool);
-pub type PreToolFn = unsafe extern "C" fn(*mut c_void, u64, u64, fx_str, fx_str) -> fx_hook_verdict;
-pub type StopFn = unsafe extern "C" fn(*mut c_void, u64, fx_str, u32) -> fx_hook_verdict;
+pub type ToolCallFn = unsafe extern "C" fn(*mut c_void, *const fx_tool_call);
+pub type ToolCancelFn = unsafe extern "C" fn(*mut c_void, u64, u64);
+pub type JournalAppendFn = unsafe extern "C" fn(*mut c_void, *const fx_journal_append);
+pub type HookFn = unsafe extern "C" fn(*mut c_void, *const fx_hook_question) -> fx_hook_verdict;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -98,8 +154,7 @@ pub struct fx_host {
     pub tool_call: Option<ToolCallFn>,
     pub tool_cancel: Option<ToolCancelFn>,
     pub journal_append: Option<JournalAppendFn>,
-    pub pre_tool: Option<PreToolFn>,
-    pub stop: Option<StopFn>,
+    pub hook: Option<HookFn>,
 }
 
 #[repr(C)]
@@ -132,19 +187,22 @@ pub struct fx_config {
     pub max_tool_result_bytes: u32,
     pub max_history_turns: u32,
     pub max_stop_continuations: u32,
-    pub reserved: u32,
+    pub flags: u32,
 }
 
 pub type fx_runtime_state = i32;
 pub const FX_RUNTIME_RUNNING: fx_runtime_state = 0;
 pub const FX_RUNTIME_EXITED: fx_runtime_state = 1;
 pub const FX_RUNTIME_FAILED: fx_runtime_state = 2;
+pub const FX_RUNTIME_PANICKED: fx_runtime_state = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct fx_runtime_info {
+    pub struct_size: u32,
     pub state: fx_runtime_state,
     pub exit_code: i32,
+    pub reserved: u32,
     pub message: fx_str,
 }
 
@@ -155,17 +213,17 @@ pub struct fx_named_bytes {
     pub bytes: fx_bytes,
 }
 
+pub const FX_OPEN_INPUTS_DURABLE: u32 = 1 << 0;
+pub const FX_OPEN_IMAGE_STORE: u32 = 1 << 1;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct fx_session_open_args {
     pub struct_size: u32,
-    pub reserved: u32,
+    pub flags: u32,
     pub session_id: fx_str,
     pub journal_json: fx_str,
     pub checkpoint: fx_bytes,
-    pub images: *const fx_named_bytes,
-    pub image_count: usize,
-    pub inputs_durable: bool,
 }
 
 #[repr(C)]
@@ -199,8 +257,20 @@ pub const FX_EVENT_TURN_END: fx_event_kind = 12;
 pub const FX_EVENT_CHECKPOINT: fx_event_kind = 13;
 pub const FX_EVENT_ERROR: fx_event_kind = 14;
 pub const FX_EVENT_EXITED: fx_event_kind = 15;
+pub const FX_EVENT_STEER_RETURNED: fx_event_kind = 16;
+pub const FX_EVENT_RECOVERY: fx_event_kind = 17;
 
-pub const FX_OPENED_RESUMABLE: u32 = 1 << 0;
+pub const FX_OPENED_JOURNALED: u32 = 1 << 0;
+pub const FX_OPENED_RESUMABLE: u32 = 1 << 1;
+pub const FX_OPENED_YIELDED: u32 = 1 << 2;
+pub const FX_TURN_REPEATED: u32 = 1 << 0;
+pub const FX_TURN_RESUMED: u32 = 1 << 1;
+pub const FX_EXITED_EVENTS_LOST: u32 = 1 << 0;
+
+pub const FX_RECOVERY_OPEN_TURN: i32 = 1;
+pub const FX_RECOVERY_LAST_TURN: i32 = 2;
+pub const FX_RECOVERY_CALL: i32 = 3;
+pub const FX_RECOVERY_FOLLOW_UP: i32 = 4;
 
 pub type fx_stop_reason = i32;
 pub const FX_STOP_END_TURN: fx_stop_reason = 0;
@@ -241,32 +311,6 @@ pub struct fx_event {
     pub usage: fx_usage,
 }
 
-impl fx_event {
-    pub const ZERO: fx_event = fx_event {
-        kind: 0,
-        flags: 0,
-        turn: 0,
-        request: 0,
-        id: 0,
-        status: 0,
-        code: 0,
-        text: fx_str::EMPTY,
-        text2: fx_str::EMPTY,
-        bytes: fx_bytes::EMPTY,
-        names: std::ptr::null(),
-        name_count: 0,
-        usage: fx_usage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            context_used: 0,
-            context_size: 0,
-        },
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct fx_tool_output {
@@ -283,10 +327,18 @@ pub struct fx_header {
     pub value: fx_str,
 }
 
+pub type fx_fetch_purpose = u32;
+pub const FX_FETCH_MODEL: fx_fetch_purpose = 1;
+pub const FX_FETCH_CATALOG: fx_fetch_purpose = 2;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct fx_fetch_request {
+    pub struct_size: u32,
+    pub purpose: fx_fetch_purpose,
     pub fetch: u64,
+    pub turn: u64,
+    pub provider: fx_str,
     pub method: fx_str,
     pub url: fx_str,
     pub headers: *const fx_header,
@@ -298,6 +350,13 @@ pub type fx_fetch_disposition = i32;
 pub const FX_FETCH_RETIRED: fx_fetch_disposition = 0;
 pub const FX_FETCH_ACTIVE: fx_fetch_disposition = 1;
 pub const FX_FETCH_CONSUMED: fx_fetch_disposition = 2;
+
+pub const FX_FAULT_FETCH_LOCKED: u32 = 1;
+pub const FX_FAULT_EVENT_LOCKED: u32 = 2;
+pub const FX_FAULT_STREAMING: u32 = 3;
+pub const FX_FAULT_TOOL_RESULT: u32 = 4;
+pub const FX_FAULT_JOURNAL_APPEND: u32 = 5;
+pub const FX_FAULT_TOOL_CALL: u32 = 6;
 
 /// Declares the C functions, or (without the core) stubs of them.
 macro_rules! abi {
@@ -321,12 +380,14 @@ abi! {
     fn fx_runtime_ready_fd(rt: fx_runtime) -> i32 = -1;
     fn fx_runtime_info_get(rt: fx_runtime, out: *mut fx_runtime_info) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_session_open(rt: fx_runtime, args: *const fx_session_open_args, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_session_stage_images(rt: fx_runtime, images: *const fx_named_bytes, count: usize, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_turn_prompt(rt: fx_runtime, input: *const fx_input, message_id: fx_str, turn: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
-    fn fx_turn_steer(rt: fx_runtime, text: fx_str, message_id: fx_str, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
-    fn fx_turn_withdraw(rt: fx_runtime, message_id: fx_str, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
-    fn fx_turn_cancel(rt: fx_runtime) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_turn_resume(rt: fx_runtime, turn: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_turn_steer(rt: fx_runtime, turn: u64, input: *const fx_input, message_id: fx_str, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_turn_withdraw(rt: fx_runtime, turn: u64, message_id: fx_str, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_turn_cancel(rt: fx_runtime, turn: u64) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_checkpoint(rt: fx_runtime, request: *mut u64) -> fx_status = FX_E_UNAVAILABLE;
-    fn fx_events_drain(rt: fx_runtime, buf: *mut fx_event, cap: usize, count: *mut usize) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_events_drain(rt: fx_runtime, buf: *mut fx_event, cap: usize, event_size: usize, count: *mut usize) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_tool_result(rt: fx_runtime, call: u64, out: *const fx_tool_output) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_fetch_take(rt: fx_runtime, out: *mut fx_fetch_request) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_fetch_status(rt: fx_runtime, fetch: u64, status: u16, retry_after_s: i32) -> fx_status = FX_E_UNAVAILABLE;
@@ -336,4 +397,6 @@ abi! {
     fn fx_journal_ack(rt: fx_runtime, append: u64) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_journal_fail(rt: fx_runtime, append: u64, reason: fx_str, fenced: bool) -> fx_status = FX_E_UNAVAILABLE;
     fn fx_hook_answer(rt: fx_runtime, question: u64, kind: fx_hook_answer_kind, text: fx_str) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_test_arm_fault(rt: fx_runtime, point: u32, skip: u32) -> fx_status = FX_E_UNAVAILABLE;
+    fn fx_test_set_slot_generation(slot: u32, generation: u64) -> fx_status = FX_E_UNAVAILABLE;
 }
