@@ -312,3 +312,419 @@ fn stop_retires_a_turn_while_an_in_flight_tool_holds_its_lease() {
     assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
     release.send(()).unwrap();
 }
+
+/// A loopback replay server: each POST gets the next scripted SSE body. A
+/// `None` body holds the request open until the test releases it.
+struct ReplayServer {
+    url: String,
+    release: mpsc::Sender<()>,
+}
+
+fn sse(events: &[Value]) -> String {
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&format!("data: {event}\n\n"));
+    }
+    out + "data: [DONE]\n\n"
+}
+
+fn finish(reason: &str) -> Value {
+    json!({"type":"finish","finishReason":{"unified":reason,"raw":reason},
+        "usage":{"inputTokens":{"total":7},"outputTokens":{"total":3}}})
+}
+
+fn tool_body(id: &str, name: &str, input: Value) -> Option<String> {
+    let input = input.to_string();
+    Some(sse(&[
+        json!({"type":"tool-input-start","id":id,"toolName":name}),
+        json!({"type":"tool-input-delta","id":id,"delta":input}),
+        json!({"type":"tool-call","toolCallId":id,"toolName":name,"input":input}),
+        finish("tool-calls"),
+    ]))
+}
+
+fn text_body(text: &str) -> Option<String> {
+    Some(sse(&[
+        json!({"type":"text-delta","id":"0","delta":text}),
+        finish("stop"),
+    ]))
+}
+
+impl ReplayServer {
+    fn start(bodies: Vec<Option<String>>) -> Self {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/v1/stream",
+            listener.local_addr().unwrap().port()
+        );
+        let (release, released) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for body in bodies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                let Some(body) = body else {
+                    let _ = released.recv_timeout(Duration::from_secs(20));
+                    return;
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+                );
+            }
+        });
+        Self { url, release }
+    }
+}
+
+/// The eval runner's side of `aero_rpc::serve`: newline JSON both ways.
+struct Wire {
+    input: std::io::PipeWriter,
+    output: mpsc::Receiver<Value>,
+    served: std::thread::JoinHandle<pm_mcp::Result<()>>,
+}
+
+struct Lines(Vec<u8>, mpsc::Sender<Value>);
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        while let Some(end) = self.0.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.0.drain(..=end).collect();
+            let _ = self.1.send(serde_json::from_slice(&line).unwrap());
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Wire {
+    fn open(fixture: &Fixture) -> Self {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (sender, output) = mpsc::channel();
+        let host = fixture.host.clone();
+        let profile = fixture.profile.path().to_owned();
+        let served = std::thread::spawn(move || {
+            pm_mcp::aero_rpc::serve(
+                std::io::BufReader::new(reader),
+                Lines(Vec::new(), sender),
+                host,
+                profile,
+            )
+        });
+        let mut wire = Self {
+            input,
+            output,
+            served,
+        };
+        wire.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}));
+        let init = wire.next();
+        assert_eq!(
+            init["result"]["capabilities"]["experimental"]["powermoveEval"].is_object(),
+            true
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"open_project","arguments":{"projectId":fixture.project}}}));
+        assert_eq!(wire.next()["result"]["isError"], false);
+        wire
+    }
+
+    fn send(&mut self, message: Value) {
+        use std::io::Write;
+        writeln!(self.input, "{message}").unwrap();
+    }
+
+    fn next(&self) -> Value {
+        self.output
+            .recv_timeout(Duration::from_secs(20))
+            .expect("eval host answered")
+    }
+
+    fn run(&mut self, fixture: &Fixture, id: &str, url: &str) {
+        self.send(
+            json!({"jsonrpc":"2.0","id":id,"method":"aero/run","params":{
+            "runId":id,"projectId":fixture.project,"revision":fixture.revision,
+            "prompt":"Cut the flubbed take.","model":"fake/model","effort":"high","wallSecs":30,
+            "maxSteps":8,"maxGateContinuations":2,"provider":{"mode":"replay","baseUrl":url}}}),
+        );
+    }
+
+    /// Notifications until the run's answer, which is returned last.
+    fn collect(&self, id: &str) -> (Vec<Value>, Value) {
+        let mut events = Vec::new();
+        loop {
+            let message = self.next();
+            if message["id"] == id {
+                return (events, message);
+            }
+            assert_eq!(message["method"], "aero/event", "{message}");
+            assert_eq!(message["params"]["runId"], id);
+            events.push(message["params"].clone());
+        }
+    }
+
+    fn close(self) {
+        drop(self.input);
+        self.served.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn aero_run_streams_sequenced_events_and_answers_the_eval_runner() {
+    let fixture = Fixture::new();
+    let replay = ReplayServer::start(vec![
+        tool_body(
+            "call-1",
+            "edit",
+            json!({"op":"commands","revision":fixture.revision,
+                "args":{"commands":[{"type":"delete_layers","targets":["flub"]}]}}),
+        ),
+        text_body("Cut the flubbed take."),
+    ]);
+    let mut wire = Wire::open(&fixture);
+    wire.run(&fixture, "eval-cut", &replay.url);
+    let (events, answer) = wire.collect("eval-cut");
+    assert_eq!(
+        answer["result"],
+        json!({"runId":"eval-cut","finalText":"Cut the flubbed take.","completed":true,"reason":"completed"})
+    );
+    for (seq, event) in events.iter().enumerate() {
+        assert_eq!(event["seq"], seq as u64, "{events:?}");
+    }
+    let kinds: Vec<_> = events
+        .iter()
+        .map(|event| event["event"]["type"].clone())
+        .collect();
+    let started = events
+        .iter()
+        .find(|e| e["event"]["type"] == "tool-started")
+        .unwrap();
+    assert_eq!(started["event"]["name"], "edit");
+    let call = &started["event"]["callId"];
+    assert!(
+        events.iter().any(|e| e["event"]["type"] == "tool-finished"
+            && e["event"]["callId"] == *call
+            && e["event"]["ok"] == true),
+        "{kinds:?}"
+    );
+    let usage = events
+        .iter()
+        .find(|e| e["event"]["type"] == "usage")
+        .unwrap();
+    for key in ["input", "cached", "output"] {
+        assert!(usage["event"][key].is_u64(), "{usage}");
+    }
+    let project = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap();
+    assert_eq!(project["layers"].as_array().unwrap().len(), 1);
+    // A second run on the same connection starts from the new revision only.
+    wire.run(&fixture, "eval-stale", &replay.url);
+    assert!(
+        wire.next()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revision")
+    );
+    wire.close();
+}
+
+#[test]
+fn aero_cancel_answers_the_pending_run_while_the_model_is_streaming() {
+    let fixture = Fixture::new();
+    let replay = ReplayServer::start(vec![None]);
+    let mut wire = Wire::open(&fixture);
+    wire.run(&fixture, "eval-hold", &replay.url);
+    // Another request while the run is in flight is refused, not queued.
+    wire.send(json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}));
+    assert_eq!(wire.next()["error"]["code"], -32000);
+    // A cancel for another run is ignored.
+    wire.send(json!({"jsonrpc":"2.0","method":"aero/cancel","params":{"runId":"other","reason":"deadline"}}));
+    wire.send(json!({"jsonrpc":"2.0","method":"aero/cancel","params":{"runId":"eval-hold","reason":"deadline"}}));
+    let started = Instant::now();
+    let (_, answer) = wire.collect("eval-hold");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(answer["result"]["reason"], "cancelled");
+    assert_eq!(answer["result"]["completed"], false);
+    assert_eq!(
+        fixture
+            .host
+            .lock()
+            .unwrap()
+            .revision(&fixture.project)
+            .unwrap(),
+        fixture.revision
+    );
+    let _ = replay.release.send(());
+    wire.close();
+}
+
+fn keeper_name(fixture: &Fixture) -> Value {
+    let project = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap();
+    project["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|layer| layer["id"] == "keeper")
+        .unwrap()["name"]
+        .clone()
+}
+
+fn undo_once(fixture: &Fixture) {
+    fixture
+        .host
+        .lock()
+        .unwrap()
+        .undo(&fixture.project, pm_kernel::Origin::Interface, 0)
+        .unwrap();
+}
+
+#[test]
+fn a_failed_edit_rolls_back_without_leaving_an_undo_entry() {
+    let fixture = Fixture::new();
+    let mut tools = fixture.tools(Access::Project);
+    let rename = |revision: u64, target: &str, name: &str| {
+        json!({"op":"commands","revision":revision,"args":{"commands":[
+            {"type":"set_layer","target":target,"patch":{"name":name}}
+        ]}})
+        .to_string()
+    };
+    let renamed = tools
+        .call(
+            "edit",
+            &rename(fixture.revision, "keeper", "Renamed"),
+            &mut |_| false,
+        )
+        .unwrap();
+    let revision = renamed["revision"].as_u64().unwrap();
+    // A batch whose second command fails applies nothing.
+    let failing = json!({"op":"commands","revision":revision,"args":{"commands":[
+        {"type":"set_layer","target":"keeper","patch":{"name":"Half applied"}},
+        {"type":"set_layer","target":"no-such-layer","patch":{"name":"Missing"}}
+    ]}})
+    .to_string();
+    let error = tools
+        .call("edit", &failing, &mut |_| false)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.is_empty());
+    assert_eq!(keeper_name(&fixture), "Renamed");
+    assert_eq!(
+        fixture
+            .host
+            .lock()
+            .unwrap()
+            .revision(&fixture.project)
+            .unwrap(),
+        revision,
+        "a rolled-back edit keeps the revision"
+    );
+    tools.finish().unwrap();
+    // One Undo, as a person presses it, reverts the successful edit: the
+    // failed one left no empty entry in front of it.
+    undo_once(&fixture);
+    assert_eq!(keeper_name(&fixture), "Keep");
+}
+
+#[test]
+fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
+    struct Delayed {
+        tools: Tools,
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    impl aero::Session for Delayed {
+        fn context(&mut self) -> Result<Value, String> {
+            aero::Session::context(&mut self.tools)
+        }
+        fn call(
+            &mut self,
+            tool: &str,
+            input: &str,
+            approve: &mut dyn FnMut(&str) -> bool,
+        ) -> Result<aero::ToolResult, String> {
+            let _ = self.started.send(());
+            let _ = self.release.recv();
+            aero::Session::call(&mut self.tools, tool, input, approve)
+        }
+        fn failures(&mut self) -> Vec<String> {
+            Vec::new()
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            aero::Session::finish(&mut self.tools)
+        }
+    }
+    let fixture = Fixture::new();
+    let revision = fixture.revision;
+    let (started, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (turn, _) = fixture.start(
+        Model::fake(move |_| {
+            call(
+                "edit",
+                "commands",
+                Some(revision),
+                json!({"commands":[
+                    {"type":"set_layer","target":"keeper","patch":{"name":"Stopped edit"}},
+                    {"type":"delete_layers","targets":["flub"]}
+                ]}),
+            )
+        }),
+        move |tools| {
+            Box::new(Delayed {
+                tools,
+                started,
+                release: held,
+            })
+        },
+    );
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    turn.send(Action::Cancel("cut".into())).unwrap();
+    assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
+    // The tool already holds its lease: it finishes as one transaction.
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while keeper_name(&fixture) != "Stopped edit" {
+        assert!(Instant::now() < deadline, "the leased edit never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let layers = |fixture: &Fixture| {
+        fixture
+            .host
+            .lock()
+            .unwrap()
+            .read_document(&fixture.project)
+            .unwrap()["layers"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(layers(&fixture), 1);
+    drop(turn);
+    undo_once(&fixture);
+    assert_eq!(keeper_name(&fixture), "Keep");
+    assert_eq!(layers(&fixture), 2, "both commands undo as one step");
+}

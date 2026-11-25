@@ -466,7 +466,9 @@ pub fn serve(
                 if let Some(mut response) = rpc.handle(message) {
                     if init && response.get("result").is_some() {
                         response["result"]["capabilities"]["experimental"] = json!({
-                            "powermoveEval": {"evaluator":true,
+                            // The evaluator needs a model stream, which only an
+                            // aero/run supplies, so it is not advertised up front.
+                            "powermoveEval": {"evaluator":false,
                                 "extensionHealth":host.lock().map(|host| host.extensions.is_some()).unwrap_or(false),
                                 "transitions":host.lock().map(|host| host.engine.is_some()).unwrap_or(false)}
                         });

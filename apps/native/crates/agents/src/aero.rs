@@ -275,7 +275,16 @@ enum Work {
 }
 
 fn wait_open(runtime: &mut Runtime, deadline: Instant) -> Result<(), String> {
+    let remote = runtime.remote();
     while Instant::now() < deadline {
+        // Opening with an effort looks the model up in the provider's
+        // catalog. A 404 makes the core use its built-in capabilities.
+        if let Some(fetch) = runtime.fetches.take().map_err(|e| e.to_string())? {
+            if fetch.purpose != pm_aero_core::Purpose::Catalog {
+                return Err("Aero's core asked for the model before its session opened.".into());
+            }
+            model::refuse_catalog(remote, fetch.fetch);
+        }
         for event in runtime.events.drain().map_err(|e| e.to_string())? {
             match event {
                 pm_aero_core::Event::SessionOpened { .. } => return Ok(()),

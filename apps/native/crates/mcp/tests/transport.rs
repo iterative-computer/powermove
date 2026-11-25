@@ -357,3 +357,70 @@ fn running_stdio_proxy_reconnects_new_descriptor_without_replaying_or_inheriting
     assert!(process.wait().unwrap().success());
     replacement.shutdown();
 }
+
+/// The eval host's bridge: a socket in the profile's mcp folder, which the
+/// replay sandbox allows, reached by the same proxy Codex and Claude Code run.
+#[test]
+fn unix_bridge_serves_the_stock_proxy_and_removes_its_socket() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+    };
+    struct Named;
+    impl ToolConnection for Named {
+        fn list(&mut self) -> Result<Value> {
+            Ok(json!([{"name":"probe"}]))
+        }
+        fn invoke(&mut self, name: &str, _: Value) -> Result<Value> {
+            Ok(pm_mcp::success(json!({"called":name})))
+        }
+        fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    let profile = Profile::new();
+    let mut server = LoopbackServer::start_unix_with(&profile.0, || Named).unwrap();
+    let published: Value =
+        serde_json::from_slice(&fs::read(profile.descriptor()).unwrap()).unwrap();
+    assert!(published.get("port").is_none(), "{published}");
+    let socket = profile
+        .0
+        .join("mcp")
+        .join(published["socket"].as_str().unwrap());
+    use std::os::unix::fs::FileTypeExt;
+    assert!(fs::metadata(&socket).unwrap().file_type().is_socket());
+    let mut process = Command::new(env!("CARGO_BIN_EXE_powermove-mcp"))
+        .arg("--profile")
+        .arg(&profile.0)
+        .arg("--powermove-mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap());
+    let mut call = |id: u64, method: &str, params: Value| -> Value {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    };
+    call(1, "initialize", json!({}));
+    assert_eq!(
+        call(2, "tools/list", json!({}))["result"]["tools"][0]["name"],
+        "probe"
+    );
+    let answer = call(3, "tools/call", json!({"name":"probe","arguments":{}}));
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    drop(input);
+    assert!(process.wait().unwrap().success());
+    server.shutdown();
+    assert!(!socket.exists());
+    assert!(!profile.descriptor().exists());
+}
