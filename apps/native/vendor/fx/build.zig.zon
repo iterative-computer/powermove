@@ -1,0 +1,20 @@
+// Powermove notice: the package manifest of Powermove's vendored fork of fx
+// (see POWERMOVE.md). Renamed from upstream's `.fx` with a new fingerprint,
+// as Zig asks of a fork of a maintained project.
+.{
+    .name = .fx_powermove,
+    .fingerprint = 0x75b23bb1f26d7bc6, // Changing this has security and trust implications.
+    .version = "0.0.18",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "POWERMOVE.md",
+        "include",
+        "src",
+        "test-support",
+    },
+}

@@ -1,0 +1,482 @@
+const std = @import("std");
+const observation = @import("../agent/runtime/observation.zig");
+const capability_retrieval = @import("capability_retrieval.zig");
+const types = @import("../shared/types.zig");
+const model_context_encoding = @import("../shared/model_context_encoding.zig");
+const context_limits = @import("../config/context_limits.zig");
+const elicitation = @import("../mcp/elicitation.zig");
+const mcp_contract = @import("../mcp/mcp_contract.zig");
+const access_policy = @import("../mcp/access_policy.zig");
+
+const Allocator = std.mem.Allocator;
+
+pub const HasToolFn = *const fn (*anyopaque, []const u8, Access) bool;
+/// Whether `access` is a subagent's view of servers that have changed since it was given, which allows nothing now.
+pub const AccessChangedFn = *const fn (*anyopaque, Access) bool;
+/// Why a subagent's lookup of an MCP tool, server or search finds nothing after
+/// the session's servers changed under it, in the words every such answer ends with.
+pub const servers_changed_reason = "the session's MCP servers changed after it began. Work that starts later sees the current servers.";
+pub const ValidateToolFn = *const fn (*anyopaque, Allocator, []const u8, []const u8, Access) anyerror!ValidationResult;
+pub const CallToolFn = *const fn (*anyopaque, Allocator, []const u8, []const u8, usize, CallOptions) anyerror!?CallResult;
+pub const SearchRequest = capability_retrieval.Request;
+pub const SearchToolsFn = *const fn (*anyopaque, Allocator, SearchRequest, types.PermissionRuleSet, context_limits.Values, Access, ?*std.atomic.Value(bool)) anyerror!SearchResult;
+pub const ToolSchemaFn = *const fn (*anyopaque, Allocator, []const u8, types.PermissionRuleSet, context_limits.Values, Access, ?*std.atomic.Value(bool)) anyerror!?ToolSchemaResult;
+
+pub const Progress = mcp_contract.Progress;
+pub const ProgressSink = mcp_contract.ProgressSink;
+
+pub const ResolvedLiveView = struct {
+    /// Generation of the MCP-specific immutable view.
+    authority_generation: u64,
+    view: access_policy.View,
+    /// Full child authority generation for final action precommit.
+    action_authority_generation: u64 = 0,
+
+    pub fn deinit(self: *ResolvedLiveView, alloc: Allocator) void {
+        self.view.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+const LiveViewProvider = struct {
+    context: *anyopaque,
+    resolve_fn: *const fn (*anyopaque, Allocator) anyerror!ResolvedLiveView,
+
+    pub fn resolve(self: LiveViewProvider, alloc: Allocator) !ResolvedLiveView {
+        return self.resolve_fn(self.context, alloc);
+    }
+};
+
+/// The MCP servers an agent may use, by name: an instance's profile.
+pub const ServerFilter = struct {
+    context: *const anyopaque,
+    allows_fn: *const fn (*const anyopaque, []const u8) bool,
+
+    pub fn allows(self: ServerFilter, server: []const u8) bool {
+        return self.allows_fn(self.context, server);
+    }
+};
+
+pub const Access = union(enum) {
+    unrestricted,
+    disabled,
+    /// Every tool of a server the filter allows. The host, which knows each
+    /// tool's server, decides.
+    servers: ServerFilter,
+    scoped: struct {
+        captured: *const access_policy.View,
+        admission_authority_generation: u64,
+        live: LiveViewProvider,
+        action_authority_generation: u64 = 0,
+    },
+
+    pub fn allowsTool(self: Access, runtime_generation: u64, name: []const u8) bool {
+        return switch (self) {
+            .unrestricted, .servers => true,
+            .disabled => false,
+            .scoped => |scope| scope.captured.runtime_generation == runtime_generation and
+                scope.captured.tool(name) != null,
+        };
+    }
+};
+
+pub const DefinitionSnapshot = union(enum) {
+    current,
+    unavailable,
+    updated: SelectedTool,
+};
+
+pub const SnapshotToolFn = *const fn (*anyopaque, Allocator, []const u8, Binding, types.PermissionRuleSet, context_limits.Values, Access) anyerror!DefinitionSnapshot;
+
+pub const Binding = types.McpToolBinding;
+
+pub const CallOptions = struct {
+    observer: ?*observation.Observer = null,
+    call_id: ?[]const u8 = null,
+    mcp_observation: ?*observation.McpCall = null,
+    expected_binding: ?Binding = null,
+    expected_runtime_generation: ?u64 = null,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    progress: ?ProgressSink = null,
+    input_responder: ?InputResponder = null,
+    continuation: ?Continuation = null,
+    access: Access = .unrestricted,
+};
+
+pub const InputRequired = struct {
+    input_requests_json: []const u8,
+    request_state_json: ?[]const u8 = null,
+    legacy_retry_without_responses: bool = false,
+    legacy_url_phase: LegacyUrlPhase = .consent,
+    legacy_url_completion_signal: ?*const LegacyUrlCompletionSignal = null,
+};
+
+const LegacyUrlPhase = enum {
+    consent,
+    await_completion,
+};
+
+pub const LegacyUrlCompletionStatus = enum(u8) {
+    pending,
+    completed,
+    cancelled,
+};
+
+/// Borrowed wake state for one legacy URL-required interaction. The runtime
+/// owns its lifetime; product adapters may observe it only during a responder
+/// callback and must not retain either pointer.
+pub const LegacyUrlCompletionSignal = struct {
+    wake: std.atomic.Value(bool) = .init(false),
+    status: std.atomic.Value(LegacyUrlCompletionStatus) = .init(.pending),
+};
+
+pub const InputOrigin = struct {
+    wire: elicitation.Wire,
+    server_name: []const u8,
+    operation: elicitation.Operation,
+    runtime_generation: u64 = 0,
+    connection_generation: u64,
+    client_generation: u64,
+    catalog_generation: u64,
+    request_generation: u64,
+    auth_generation: u64,
+    deadline_ms: i64,
+    lifecycle_cancel_flag: ?*const std.atomic.Value(bool) = null,
+};
+
+pub const InputIdentityWitness = struct {
+    runtime_generation: u64 = 0,
+    connection_generation: u64,
+    client_generation: u64,
+    catalog_generation: u64,
+    auth_generation: u64,
+};
+
+pub const InputResponder = struct {
+    context: *anyopaque,
+    capabilities: elicitation.Capabilities = .{},
+    legacy_url_manual_completion: bool = false,
+    callback: *const fn (*anyopaque, Allocator, InputOrigin, InputRequired) anyerror![]const u8,
+    continuation_terminal: ?*const fn (*anyopaque, Allocator, InputOrigin, ContinuationTerminal) void = null,
+
+    pub fn finish(self: InputResponder, alloc: Allocator, origin: InputOrigin, outcome: ContinuationTerminal) void {
+        const callback = self.continuation_terminal orelse return;
+        callback(self.context, alloc, origin, outcome);
+    }
+};
+
+pub const InputCompletion = struct {
+    responder: InputResponder,
+    origin: InputOrigin,
+
+    pub fn finish(self: InputCompletion, alloc: Allocator, outcome: ContinuationTerminal) void {
+        self.responder.finish(alloc, self.origin, outcome);
+    }
+};
+
+pub const LegacyUrlCompletion = struct {
+    server_name: []const u8,
+    elicitation_id: []const u8,
+    runtime_generation: u64 = 0,
+    connection_generation: u64,
+    client_generation: u64,
+    auth_generation: u64,
+};
+
+pub const LegacyUrlCompletionSink = struct {
+    context: *anyopaque,
+    /// Accepts the unique outbound ACP elicitation id. The legacy wire id is
+    /// not unique across recovered connections and cannot own cleanup.
+    accept: *const fn (*anyopaque, InputOrigin, []const u8) LegacyUrlAcceptTransition,
+    consume: *const fn (*anyopaque, LegacyUrlCompletion) LegacyUrlConsumeTransition,
+    publish: *const fn (*anyopaque, []u8) void,
+
+    /// Publishes a completion that came before the client's consent, and says
+    /// what is left; null when the sink no longer knows the elicitation.
+    pub fn settleAccept(sink: LegacyUrlCompletionSink, accepted: LegacyUrlAcceptTransition) ?LegacyUrlAcceptStatus {
+        return switch (accepted) {
+            .missing => null,
+            .awaiting_completion => .awaiting_completion,
+            .completed => |id| completed: {
+                sink.publish(sink.context, id);
+                break :completed .completed;
+            },
+        };
+    }
+
+    /// A server's completion, published once the client has consented.
+    pub fn complete(sink: LegacyUrlCompletionSink, completion: LegacyUrlCompletion) void {
+        switch (sink.consume(sink.context, completion)) {
+            .missing => {},
+            .consumed => |id| if (id) |owned| sink.publish(sink.context, owned),
+        }
+    }
+};
+
+pub const LegacyUrlConsumeTransition = union(enum) {
+    missing,
+    consumed: ?[]u8,
+};
+
+pub const LegacyUrlAcceptStatus = enum {
+    awaiting_completion,
+    completed,
+};
+
+pub const LegacyUrlAcceptTransition = union(enum) {
+    missing,
+    awaiting_completion,
+    completed: []u8,
+};
+
+pub const ContinuationTerminal = enum {
+    completed,
+    abandoned,
+};
+
+pub const Continuation = struct {
+    input_responses_json: []const u8,
+    request_state_json: ?[]const u8 = null,
+};
+
+pub const CallStatus = enum {
+    success,
+    tool_failure,
+    protocol_failure,
+    input_required,
+
+    pub fn observed(self: CallStatus) observation.McpStatus {
+        return switch (self) {
+            .success => .success,
+            .tool_failure, .protocol_failure => .failure,
+            .input_required => .input_required,
+        };
+    }
+};
+
+test "MCP hook statuses normalize tool and protocol failures" {
+    try std.testing.expectEqual(observation.McpStatus.success, CallStatus.success.observed());
+    try std.testing.expectEqual(observation.McpStatus.failure, CallStatus.tool_failure.observed());
+    try std.testing.expectEqual(observation.McpStatus.failure, CallStatus.protocol_failure.observed());
+    try std.testing.expectEqual(observation.McpStatus.input_required, CallStatus.input_required.observed());
+}
+
+pub const CallResult = struct {
+    model_output: []const u8,
+    images: []types.ToolImage = &.{},
+    status: CallStatus = .success,
+    input_required: ?InputRequired = null,
+
+    pub fn deinit(self: *CallResult, alloc: Allocator) void {
+        alloc.free(self.model_output);
+        types.freeToolImages(alloc, self.images);
+        self.deinitInputRequired(alloc);
+        self.* = undefined;
+    }
+
+    pub fn takeImages(self: *CallResult) []types.ToolImage {
+        const images = self.images;
+        self.images = &.{};
+        return images;
+    }
+
+    pub fn takeModelOutput(self: *CallResult, alloc: Allocator) []const u8 {
+        const model_output = self.model_output;
+        types.freeToolImages(alloc, self.images);
+        self.deinitInputRequired(alloc);
+        self.* = undefined;
+        return model_output;
+    }
+
+    fn deinitInputRequired(self: *CallResult, alloc: Allocator) void {
+        if (self.input_required) |required| {
+            alloc.free(required.input_requests_json);
+            if (required.request_state_json) |state| alloc.free(state);
+        }
+    }
+};
+
+pub const ValidationResult = union(enum) {
+    valid: u64,
+    invalid: []const u8,
+    not_available,
+};
+
+/// Owned by a search result, or borrowed from a tool execution arena.
+pub const SelectedTool = struct {
+    name: []const u8,
+    schema_json: []const u8,
+    mcp_binding: ?Binding = null,
+
+    pub fn deinit(self: SelectedTool, alloc: Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.schema_json);
+    }
+};
+
+pub fn freeSelectedTools(alloc: Allocator, tools: []const SelectedTool) void {
+    for (tools) |tool| tool.deinit(alloc);
+    alloc.free(tools);
+}
+
+pub const SearchResult = struct {
+    model_output: []u8,
+    notice: ?[]u8 = null,
+    selected_tools: []const SelectedTool = &.{},
+
+    pub fn deinit(self: *SearchResult, alloc: Allocator) void {
+        alloc.free(self.model_output);
+        freeSelectedTools(alloc, self.selected_tools);
+        if (self.notice) |notice| alloc.free(notice);
+        self.* = undefined;
+    }
+};
+
+pub const ToolSchemaResult = union(enum) {
+    selected: Payload,
+    rejected: Payload,
+
+    pub const Payload = struct {
+        model_output: []u8,
+        notice: ?[]u8 = null,
+        mcp_binding: ?Binding = null,
+    };
+
+    pub fn deinit(self: *ToolSchemaResult, alloc: Allocator) void {
+        const payload = switch (self.*) {
+            .selected => |value| value,
+            .rejected => |value| value,
+        };
+        alloc.free(payload.model_output);
+        if (payload.notice) |notice| alloc.free(notice);
+        self.* = undefined;
+    }
+};
+
+pub const RuntimeCapabilities = struct {
+    context: ?*anyopaque = null,
+    has_tool: ?HasToolFn = null,
+    validate_tool: ?ValidateToolFn = null,
+    call_tool: ?CallToolFn = null,
+    access: Access = .unrestricted,
+};
+
+pub fn validateAdvertisedDynamicTool(
+    input: AvailabilityInput,
+    arena: Allocator,
+    name: []const u8,
+    arguments_json: []const u8,
+) !ValidationResult {
+    if (input.is_registered_tool) return .not_available;
+    const context = input.runtime.context orelse return .not_available;
+    const validate_tool = input.runtime.validate_tool orelse return .not_available;
+    return try validate_tool(context, arena, name, arguments_json, input.runtime.access);
+}
+
+const AvailabilityInput = struct {
+    is_registered_tool: bool,
+    advertised_dynamic_tool_names: []const []const u8,
+    runtime: RuntimeCapabilities,
+};
+
+const CallInput = struct {
+    advertised_dynamic_tool_names: []const []const u8,
+    runtime: RuntimeCapabilities,
+    max_tool_result_bytes: usize,
+    options: CallOptions = .{},
+};
+pub fn isAdvertisedDynamicToolName(
+    advertised_dynamic_tool_names: []const []const u8,
+    name: []const u8,
+) bool {
+    for (advertised_dynamic_tool_names) |advertised| {
+        if (std.mem.eql(u8, advertised, name)) return true;
+    }
+    return false;
+}
+
+pub fn isAvailableDynamicTool(input: AvailabilityInput, name: []const u8) bool {
+    if (input.is_registered_tool) return false;
+    if (!isAdvertisedDynamicToolName(input.advertised_dynamic_tool_names, name)) return false;
+    const context = input.runtime.context orelse return false;
+    const has_tool = input.runtime.has_tool orelse return false;
+    return has_tool(context, name, input.runtime.access);
+}
+
+fn callAdvertisedDynamicTool(
+    input: CallInput,
+    arena: Allocator,
+    name: []const u8,
+    arguments_json: []const u8,
+) !?CallResult {
+    if (!isAdvertisedDynamicToolName(input.advertised_dynamic_tool_names, name)) return null;
+    const context = input.runtime.context orelse return null;
+    const call_tool = input.runtime.call_tool orelse return null;
+    return try call_tool(
+        context,
+        arena,
+        name,
+        arguments_json,
+        input.max_tool_result_bytes,
+        input.options,
+    );
+}
+/// The result of a direct call of an MCP tool the request didn't send. The
+/// name is the model's, so it is written as visible text.
+pub fn notSelectedOutput(arena: Allocator, name: []const u8) ![]const u8 {
+    const shown = model_context_encoding.scalar(name);
+    return arena.print(
+        "{f} is not one of the tools in this request. Open it with toolbox to see its arguments, then call toolbox with run: \"{f}\" and those arguments.",
+        .{ shown, shown },
+    );
+}
+
+test "a direct call of a tool the request didn't send names it as visible text" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try notSelectedOutput(arena_state.allocator(), "mcp_x\x00y");
+    try std.testing.expect(std.mem.find(u8, text, "mcp_x&#x00;y is not one of the tools") != null);
+    for (text) |byte| try std.testing.expect(byte >= 0x20);
+}
+test "MCP advertised dynamic tool executes only through its supplied capability" {
+    var fixture = Fixture.CountingContext{};
+    const advertised = [_][]const u8{"mcp_fs_read"};
+    const input = CallInput{
+        .advertised_dynamic_tool_names = &advertised,
+        .runtime = .{
+            .context = @ptrCast(&fixture),
+            .call_tool = Fixture.callCounting,
+        },
+        .max_tool_result_bytes = 1024,
+    };
+
+    const result = (try callAdvertisedDynamicTool(
+        input,
+        std.testing.allocator,
+        "mcp_fs_read",
+        "{}",
+    )).?;
+    defer std.testing.allocator.free(result.model_output);
+
+    try std.testing.expectEqualStrings("mcp ok", result.model_output);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expect((try callAdvertisedDynamicTool(
+        input,
+        std.testing.allocator,
+        "mcp_other",
+        "{}",
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+}
+
+const Fixture = struct {
+    const CountingContext = struct {
+        calls: usize = 0,
+    };
+
+    fn callCounting(raw_context: *anyopaque, arena: Allocator, _: []const u8, _: []const u8, _: usize, _: CallOptions) anyerror!?CallResult {
+        const context: *CountingContext = @ptrCast(@alignCast(raw_context));
+        context.calls += 1;
+        return .{ .model_output = try arena.dupe(u8, "mcp ok") };
+    }
+};
