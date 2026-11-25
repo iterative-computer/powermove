@@ -2023,51 +2023,117 @@ test("queued directions are marked on the user bubble", async () => {
   expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
   await root.dispose();
 });
-test("with the Powermove harness: a segmented harness control, then models grouped by provider, Aerolite disabled and Add a provider…", async () => {
+const harnessCatalog = (models: [string, string][], efforts: string[] = []) => ({
+  models,
+  providers: [
+    ["aero", "Powermove"],
+    ["chatgpt", "Codex"],
+    ["claude", "Claude Code"],
+  ] as [string, string][],
+  efforts,
+});
+const textOf = (root: ReturnType<typeof mount>["root"], at: any): string => {
+  const nodes = root.inspect().nodes;
+  const walk = (n: any): string =>
+    (n.text ?? "") + (n.children ?? []).map((id: number) => walk(nodes.find((m) => m.id === id))).join("");
+  return walk(at);
+};
+const segmented = (root: ReturnType<typeof mount>["root"]) =>
+  root.inspect().nodes.filter((n) => n.type === "segmented-control" || n.props.role === "radiogroup");
+test("with the Powermove harness the composer is one row: \"+\", one chooser pill (mark, model, effort, chevron) and Send; no segmented control", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["chatgpt/gpt-6-sol", "GPT-6 Sol"]], ["low", "high"]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "chatgpt/gpt-6-sol";
+  p.snapshot.settings.effort = "high";
+  await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+  expect(segmented(root)).toEqual([]);
+  const options = byId(root, "agent-options");
+  const kids = options.children.map((id: number) => root.inspect().nodes.find((n) => n.id === id)!);
+  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-model", null, "agent-send"]);
+  const pill = byId(root, "agent-model");
+  expect(pill.props.label).toBe("Model, GPT-6 Sol, High");
+  expect(pill.props["aria-haspopup"]).toBe("menu");
+  const inside = root.inspect().nodes.filter((n) => pill.children.includes(n.id));
+  expect(inside.map((n) => n.props.metadata?.symbol ?? textOf(root, n))).toEqual([
+    "provider.chatgpt",
+    "GPT-6 Sol",
+    "High",
+    "composer.chevron",
+  ]);
+  expect(has(root, "Harness")).toBe(false);
+  root.dispose();
+});
+test("with the Powermove harness one native menu holds the harness (checked), the models under their provider, Aerolite disabled, the effort and Add a provider…", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
-  p.snapshot.catalog = {
-    models: [
+  p.snapshot.catalog = harnessCatalog(
+    [
       ["chatgpt/gpt-6-sol", "GPT-6 Sol"],
       ["custom/llama-4", "llama-4"],
       ["anthropic/claude-opus-5-5", "Claude Opus 5.5"],
     ],
-    providers: [
-      ["aero", "Powermove"],
-      ["chatgpt", "Codex"],
-      ["claude", "Claude Code"],
-    ],
-    efforts: ["low", "high"],
-  };
+    ["low", "high"],
+  );
   p.snapshot.settings.provider = "aero";
   p.snapshot.settings.model = "chatgpt/gpt-6-sol";
-  const asked: MenuOption[][] = [];
-  const picks = ["model:anthropic/claude-opus-5-5", "providers:"];
+  p.snapshot.settings.effort = "high";
+  const asked: Parameters<Menu>[0][] = [];
+  const picks = ["model:anthropic/claude-opus-5-5", "effort:low", "providers:"];
   const menu: Menu = async (r) => {
-    asked.push(r.options);
+    asked.push(r);
     return picks.shift();
   };
   await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
-  const harness = byId(root, "agent-harness-choice");
-  expect(harness.props.label).toBe("Harness");
-  for (const _ of [0, 1]) {
+  for (const _ of [0, 1, 2]) {
     await root.drive(byId(root, "agent-model").id, "click");
     await Promise.resolve();
   }
-  const rows = asked[0]!;
-  expect(rows.map((o) => [o.category, o.label, o.informational ?? false])).toEqual([
-    ["OpenAI", "GPT-6 Sol", false],
-    ["Anthropic", "Claude Opus 5.5", false],
-    ["Powermove", "Aerolite · Coming later", true],
-    ["Custom", "llama-4", false],
-    [" ", "Add a provider…", false],
+  expect(asked[0]!.picker).toBe("model");
+  const rows = asked[0]!.options;
+  expect(rows.map((o) => [o.category, o.label, o.checked ?? null, o.informational ?? false])).toEqual([
+    ["Harness", "Powermove", true, false],
+    ["Harness", "Codex", false, false],
+    ["Harness", "Claude Code", false, false],
+    ["OpenAI", "GPT-6 Sol", true, false],
+    ["Anthropic", "Claude Opus 5.5", false, false],
+    ["Custom", "llama-4", false, false],
+    ["Powermove", "Aerolite · Coming later", null, true],
+    ["Effort", "Low", false, false],
+    ["Effort", "High", true, false],
+    ["", "Add a provider…", null, false],
   ]);
-  expect(rows.map((o) => o.provider)).toEqual(["openai", "anthropic", "powermove", "custom", undefined]);
+  // Plain sections, as a native menu's: no collapsible provider headers.
+  expect(rows.every((o) => o.provider === undefined)).toBe(true);
+  expect(rows.filter((o) => o.stays).map((o) => o.value)).toEqual(["provider:aero", "provider:chatgpt", "provider:claude"]);
   expect(actions).toEqual([
-    { type: "setModel", model: "anthropic/claude-opus-5-5", effort: p.snapshot.settings.effort },
+    { type: "setModel", model: "anthropic/claude-opus-5-5", effort: "high" },
+    { type: "setModel", model: "chatgpt/gpt-6-sol", effort: "low" },
     { type: "openSettings" },
   ]);
+  root.dispose();
+});
+test("with the Powermove harness a harness row keeps the menu open and switches the harness", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["chatgpt/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "";
+  let answered = false;
+  const menu: Menu = async () => {
+    if (answered) return null;
+    answered = true;
+    return "provider:claude";
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
+  // No model chosen: the pill shows the one Powermove runs.
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6 Sol");
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
   root.dispose();
 });
 test("with the Powermove harness, Codex lists only OpenAI models and Claude Code only Anthropic's; no Aerolite row", async () => {
@@ -2077,15 +2143,7 @@ test("with the Powermove harness, Codex lists only OpenAI models and Claude Code
   ] as const) {
     const { root } = mount();
     const p = fixture();
-    p.snapshot.catalog = {
-      models: [[model, model]],
-      providers: [
-        ["aero", "Powermove"],
-        ["chatgpt", "Codex"],
-        ["claude", "Claude Code"],
-      ],
-      efforts: [],
-    };
+    p.snapshot.catalog = harnessCatalog([[model, model]]);
     p.snapshot.settings.provider = harness;
     p.snapshot.settings.model = model;
     const asked: MenuOption[][] = [];
@@ -2096,10 +2154,50 @@ test("with the Powermove harness, Codex lists only OpenAI models and Claude Code
     await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
     await root.drive(byId(root, "agent-model").id, "click");
     await Promise.resolve();
-    expect(asked[0]!.map((o) => [o.category, o.label])).toEqual([
+    expect(asked[0]!.filter((o) => o.category !== "Harness").map((o) => [o.category, o.label])).toEqual([
       [group, model],
-      [" ", "Add a provider…"],
+      ["", "Add a provider…"],
     ]);
+    root.dispose();
+  }
+});
+test("with the Powermove harness signed out: no card and no segmented control; the pill reads Connect a provider and opens Settings, one quiet line per harness", async () => {
+  for (const [harness, line] of [
+    ["aero", "Sign in to a provider in Settings › Providers."],
+    ["chatgpt", "Sign in to ChatGPT in Settings › Providers to use Codex."],
+    ["claude", "Sign in to Claude or add an Anthropic key in Settings › Providers to use Claude Code."],
+  ] as const) {
+    const { root } = mount();
+    const actions: Action[] = [];
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["gpt-6-sol", "GPT-6 Sol"]]);
+    p.snapshot.settings.provider = harness;
+    p.native.connection = "unavailable";
+    p.native.signedOut = true;
+    let asked = 0;
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async () => {
+          asked++;
+          return null;
+        }}
+        send={(a) => actions.push(a)}
+      />,
+    );
+    expect(segmented(root)).toEqual([]);
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-connect")).toBe(false);
+    expect(root.inspect().nodes.some((n) => /Connect ChatGPT|power the/.test(n.text ?? ""))).toBe(false);
+    expect(byId(root, "agent-welcome")).toBeDefined();
+    const pill = byId(root, "agent-model");
+    expect(pill.props.label).toBe("Connect a provider");
+    expect(pill.props.disabled).toBeFalsy();
+    expect(byId(root, "agent-composer-text").props.disabled).toBeFalsy();
+    expect(byId(root, "agent-send").props.disabled).toBe(true);
+    expect(textOf(root, byId(root, "agent-sign-in"))).toBe(line);
+    await root.drive(pill.id, "click");
+    expect(asked).toBe(0);
+    expect(actions).toEqual([{ type: "openSettings" }]);
     root.dispose();
   }
 });
