@@ -840,10 +840,14 @@ impl Tokens {
     }
     /// Header, the idle composer (one line of draft over its row of
     /// controls, inside its edge and padding) and the bottom inset.
+    /// The Agent panel's header and its idle composer: the edge, one line
+    /// of draft (v1's 1.5 leading, 7 pt inset above and below: the shell's
+    /// composer text origin), `space.xl`, the control row and `space.md`
+    /// under it, the composer `text_padding` off the panel's bottom.
     pub fn agent_panel_minimum_height(&self) -> f32 {
         let m = &self.metrics;
-        let text = (self.typography.body * 1.5 + 6.).max(m.hit);
-        m.header + m.text_padding + 2. * m.border + 3. * m.gap + m.control + text
+        let draft = (self.typography.composer * 1.5 + 2. * 7.).max(m.hit);
+        m.header + m.text_padding + 2. * m.border + draft + self.space.xl + m.hit + self.space.md
     }
 
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
