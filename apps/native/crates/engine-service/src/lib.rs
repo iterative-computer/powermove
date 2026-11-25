@@ -908,6 +908,8 @@ struct Shared {
     #[cfg(test)]
     before_completed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
+    fail_next_completion: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     paused_flight_peak: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
@@ -1767,6 +1769,8 @@ impl EngineService {
             #[cfg(test)]
             before_completed: Mutex::new(None),
             #[cfg(test)]
+            fail_next_completion: Default::default(),
+            #[cfg(test)]
             paused_flight_peak: Default::default(),
             #[cfg(test)]
             first_picture: Mutex::new(None),
@@ -2227,15 +2231,59 @@ struct Flight {
     /// Read back only for the trace's picture hash, not asked as a capture.
     picture_only: bool,
 }
-/// Timed playback pipelines up to three presents. Paused views (including
-/// scrubs, layer drags, and zoom) can take the latest input as soon as their
-/// previous GPU work completes, without waiting for the display callback.
+#[derive(Clone, Copy)]
+struct FlightSlot {
+    viewer: u64,
+    done: bool,
+    small_drag: bool,
+}
+
+impl Flight {
+    fn slot(&self) -> FlightSlot {
+        FlightSlot {
+            viewer: self.id,
+            done: self.gpu_done,
+            small_drag: self.spec.moment == Moment::Scrub
+                && !self.spec.exact
+                && small_drag_output(self.spec.output),
+        }
+    }
+}
+
+fn small_drag_output(output: Output) -> bool {
+    // A small uncropped output bounds the screen-sized working attachments.
+    // An effect in a zoomed crop can still allocate at the logical canvas's
+    // density. Keep that path serial, including a transition back from zoom.
+    !output.is_zoomed() && u64::from(output.width) * u64::from(output.height) <= 1920 * 1080
+}
+
+fn pipeline_layer_drag(view: &View, runtime: &Runtime, now: f64) -> bool {
+    view.editing
+        && !view.edit_rested
+        && !view.capture
+        && runtime.refine_at.is_none_or(|at| at > now)
+        && small_drag_output(view.config.output)
+}
+
+/// A small layer drag can start recording its next frame while the prior
+/// one renders. Leave only one such frame ahead, and wait out any remaining
+/// large or playing frame of this viewer before admitting it.
 fn has_render_slot(
-    mut flights: impl ExactSizeIterator<Item = (u64, bool)>,
+    flights: impl ExactSizeIterator<Item = FlightSlot>,
     view: u64,
     playing: bool,
+    pipeline_drag: bool,
 ) -> bool {
-    flights.len() < 3 && (playing || !flights.any(|(id, gpu_done)| id == view && !gpu_done))
+    if flights.len() >= 3 {
+        return false;
+    }
+    if playing {
+        return true;
+    }
+    let mut unfinished = flights.filter(|f| f.viewer == view && !f.done);
+    unfinished
+        .next()
+        .is_none_or(|first| pipeline_drag && first.small_drag && unfinished.next().is_none())
 }
 
 /// A settled picture asked of the engine and not handed over yet.
@@ -2805,16 +2853,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // Metal reports the status before that handler runs on its own
             // queue, and a frame read in between looked failed (gpu_ok still
             // false) and was never drawn again.
-            if !matches!(
-                flights[i].submission.command.status(),
-                metal::MTLCommandBufferStatus::Completed | metal::MTLCommandBufferStatus::Error
-            ) || flights[i].submission.trace.lock().unwrap().completed == 0.
-            {
-                i += 1;
-                continue;
-            }
+            let gpu_ok = {
+                let trace = flights[i].submission.trace.lock().unwrap();
+                if trace.completed == 0. {
+                    i += 1;
+                    continue;
+                }
+                trace.gpu_ok
+            };
             flights[i].gpu_done = true;
-            if flights[i].submission.drawable.is_some() {
+            if gpu_ok && flights[i].submission.drawable.is_some() {
                 let flight = &flights[i];
                 let trace = flight.submission.trace.lock().unwrap();
                 let now = trace::now();
@@ -2823,8 +2871,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // display. Give its current picture one earlier retry;
                     // retain the original flight so its callback still wins
                     // if it does get to the glass. Timed playback is unchanged.
-                    if trace.gpu_ok
-                        && flight.spec.moment == Moment::Scrub
+                    if flight.spec.moment == Moment::Scrub
                         && let Some(view) = state.views.get_mut(&flight.id)
                         && view.stamp == flight.stamp
                         && view.commands.is_empty()
@@ -2849,7 +2896,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
             }
             let f = flights.remove(i).unwrap();
-            if f.submission.command.status() == metal::MTLCommandBufferStatus::Error {
+            if !gpu_ok {
                 engine.clear_cache();
             }
             let mut represent = false;
@@ -3039,8 +3086,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     stand_ins: f.submission.stand_ins,
                     settled: (f.settled || t.disk == 2) && !f.submission.stand_ins,
                     cache_hit: t.cache_hit,
-                    gpu_ok: f.submission.command.status()
-                        == metal::MTLCommandBufferStatus::Completed,
+                    gpu_ok,
                     display_host_seconds: t.display.filter(|t| *t > 0.),
                     completion_host_seconds: (t.completed > 0.).then_some(t.completed),
                     worker_to_completion_ms: (t.completed > 0.)
@@ -3544,7 +3590,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 None
             };
             let playing = r.transport.clock.is_playing();
-            if !has_render_slot(flights.iter().map(|f| (f.id, f.gpu_done)), id, playing) {
+            if !has_render_slot(
+                flights.iter().map(Flight::slot),
+                id,
+                playing,
+                pipeline_layer_drag(v, r, now),
+            ) {
                 continue;
             }
             // A playing frame starts a whole content frame before its vsync
@@ -4190,6 +4241,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         #[cfg(test)]
                         {
                             s.before_completed = shared.before_completed.lock().unwrap().take();
+                            s.fail_completion = shared
+                                .fail_next_completion
+                                .swap(false, std::sync::atomic::Ordering::Relaxed);
                         }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
@@ -4424,9 +4478,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .iter()
                 .filter(|(id, r)| {
                     has_render_slot(
-                        flights.iter().map(|f| (f.id, f.gpu_done)),
+                        flights.iter().map(Flight::slot),
                         **id,
                         r.transport.clock.is_playing(),
+                        state
+                            .views
+                            .get(id)
+                            .is_some_and(|v| pipeline_layer_drag(v, r, now)),
                     )
                 })
                 .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
@@ -4753,18 +4811,33 @@ mod worker_tests {
 
     #[test]
     fn a_paused_view_limits_gpu_work_without_waiting_for_the_display() {
-        assert!(!has_render_slot([(1, false)].into_iter(), 1, false));
-        assert!(has_render_slot([(1, true)].into_iter(), 1, false));
-        assert!(has_render_slot([(1, false)].into_iter(), 2, false));
+        let slot = |viewer, done| FlightSlot {
+            viewer,
+            done,
+            small_drag: false,
+        };
+        let first = slot(1, false);
+        assert!(!has_render_slot([first].into_iter(), 1, false, false));
+        assert!(!has_render_slot([first].into_iter(), 1, false, true));
+        let small = FlightSlot {
+            small_drag: true,
+            ..first
+        };
+        assert!(has_render_slot([small].into_iter(), 1, false, true));
+        assert!(!has_render_slot([small, small].into_iter(), 1, false, true));
         assert!(has_render_slot(
-            [(1, false), (1, false)].into_iter(),
+            [slot(1, true)].into_iter(),
             1,
-            true
+            false,
+            false
         ));
+        assert!(has_render_slot([first].into_iter(), 2, false, false));
+        assert!(has_render_slot([first, first].into_iter(), 1, true, false));
         assert!(!has_render_slot(
-            [(1, false), (1, true), (2, false)].into_iter(),
+            [first, slot(1, true), slot(2, false)].into_iter(),
             1,
-            true
+            true,
+            false,
         ));
     }
 
@@ -6041,21 +6114,9 @@ mod worker_tests {
         v.retire();
     }
 
-    #[test]
-    fn the_latest_scrub_reaches_the_viewer_after_one_unfinished_frame() {
-        use std::sync::atomic::Ordering;
-
-        let service = EngineService::start(pm_gpu::Gpu::new("queued-scrub-test").unwrap()).unwrap();
-        let v = shapes_viewer(&service, None);
-        let wait_for_pose = |at| {
-            wait_for(&v, "scrub pose", |status| {
-                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
-                status.frame.as_ref().is_some_and(|f| {
-                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
-                })
-            });
-        };
-        wait_for_pose(seconds(0.));
+    fn hold_next_completion(
+        service: &EngineService,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
         let (entered, hold) = std::sync::mpsc::channel();
         let (resume, release) = std::sync::mpsc::channel();
         let release = Mutex::new(release);
@@ -6063,6 +6124,147 @@ mod worker_tests {
             let _ = entered.send(());
             let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
         }));
+        (hold, resume)
+    }
+
+    fn wait_for_pose(v: &Viewer, at: Ticks) {
+        wait_for(v, "scrub pose", |status| {
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+            status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.gpu_ok && f.completion_host_seconds.is_some())
+        });
+    }
+
+    #[test]
+    fn a_small_layer_drag_can_pipeline_one_more_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-drag-pipeline").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        v.editing(true).unwrap();
+        wait_for(&v, "drag preview", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Scrub)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        v.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        v.scrub(seconds(0.4)).unwrap();
+        wait_for(&v, "second drag frame submitted", |_| {
+            service.shared.paused_flight_peak.load(Ordering::Acquire) == 2
+        });
+        v.scrub(seconds(0.6)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.6));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 2);
+        v.retire();
+    }
+
+    #[test]
+    fn an_unsuccessful_completion_admits_the_queued_pose() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("failed-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        service
+            .shared
+            .fail_next_completion
+            .store(true, Ordering::Relaxed);
+        v.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        v.scrub(seconds(0.4)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.4));
+        assert!(!service.shared.fail_next_completion.load(Ordering::Relaxed));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
+        v.retire();
+    }
+
+    #[test]
+    fn a_pause_waits_for_its_playing_flight_and_then_draws_the_seek() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("pause-with-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Playing)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        service
+            .shared
+            .paused_flight_peak
+            .store(0, Ordering::Release);
+        v.command(TransportCommand::Pause).unwrap();
+        let at = seconds(0.2);
+        v.command(TransportCommand::Seek {
+            time: at,
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        wait_for(&v, "worker checked the paused request", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 0);
+        resume.send(()).unwrap();
+        wait_for(&v, "paused seek", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Paused && f.time == at)
+        });
+        v.retire();
+    }
+
+    #[test]
+    fn an_unfinished_paused_view_does_not_block_another_view() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("independent-flights").unwrap()).unwrap();
+        let first = shapes_viewer(&service, None);
+        let second = shapes_viewer(&service, None);
+        wait_for_pose(&first, seconds(0.));
+        wait_for_pose(&second, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        first.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        let at = seconds(0.6);
+        second.scrub(at).unwrap();
+        wait_for(&second, "other view recorded its frame", |_| {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, time, _)| *time == at)
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(&second, at);
+        first.retire();
+        second.retire();
+    }
+
+    #[test]
+    fn the_latest_scrub_reaches_the_viewer_after_one_unfinished_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("queued-scrub-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
         v.scrub(seconds(0.25)).unwrap();
         hold.recv_timeout(Duration::from_secs(5)).unwrap();
 
@@ -6075,7 +6277,7 @@ mod worker_tests {
             service.shared.passes.load(Ordering::Acquire) >= passes + 2
         });
         resume.send(()).unwrap();
-        wait_for_pose(seconds(2.));
+        wait_for_pose(&v, seconds(2.));
         assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
         v.retire();
     }

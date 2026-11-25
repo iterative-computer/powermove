@@ -75,16 +75,7 @@ impl FrameSpec {
     /// crop) and frames of other moments keep their scale. Bounded at 4×
     /// the drawable.
     pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
-        // A crop that is the whole canvas is no crop: at Fit the shell's
-        // window can come out a pixel narrower than its canvas by rounding
-        // (a 1265 × 712 drawable on a 1266 × 712 canvas).
-        let zoomed = output.crop.is_some_and(|c| {
-            c.x != 0
-                || c.y != 0
-                || c.canvas_width.abs_diff(output.width) > 1
-                || c.canvas_height.abs_diff(output.height) > 1
-        });
-        if zoomed || output.width == 0 || output.height == 0 {
+        if output.is_zoomed() || output.width == 0 || output.height == 0 {
             return 1.;
         }
         let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
@@ -723,6 +714,8 @@ pub struct Submission {
     pub presented: Option<metal::Buffer>,
     #[cfg(test)]
     pub before_completed: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub fail_completion: bool,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -2405,6 +2398,8 @@ impl Engine {
             presented,
             #[cfg(test)]
             before_completed: None,
+            #[cfg(test)]
+            fail_completion: false,
             width: output.width,
             height: output.height,
             failures,
@@ -2889,6 +2884,8 @@ impl Submission {
         let lease = self.surface.clone();
         #[cfg(test)]
         let before_completed = self.before_completed.clone();
+        #[cfg(test)]
+        let fail_completion = self.fail_completion;
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
@@ -2904,7 +2901,10 @@ impl Submission {
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);
                 t.completed = now();
-                t.gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+                let gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+                #[cfg(test)]
+                let gpu_ok = gpu_ok && !fail_completion;
+                t.gpu_ok = gpu_ok;
                 drop(t);
                 if let Some(wake) = &wake {
                     wake();
