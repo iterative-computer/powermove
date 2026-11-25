@@ -186,7 +186,9 @@ impl Default for CueSheet {
             hold: 6.55,
             window: 6.7,
             wave_seconds: wave.duration(),
-            wave_visible: 0.5,
+            // Measured: the original's rim and hairline are gone at 0.72 of
+            // its run (mean difference to the window 0.17/255).
+            wave_visible: 0.72,
             sounds: vec![Sound {
                 at: 3.07,
                 id: "chime",
@@ -303,8 +305,18 @@ mod tests {
         // Dia's disc centre (fractions of the height) at measured times.
         let s = CueSheet::default();
         let y = |t: f64| 1.781 + (0.4997 - 1.781) * s.rise.at(t);
-        for (t, measured) in [(3.3, 1.6129), (3.6, 1.2467), (4.0, 0.8790), (4.5, 0.6522), (5.0, 0.5605)] {
-            assert!((y(t) - measured).abs() < 0.03, "{t}: {} vs {measured}", y(t));
+        for (t, measured) in [
+            (3.3, 1.6129),
+            (3.6, 1.2467),
+            (4.0, 0.8790),
+            (4.5, 0.6522),
+            (5.0, 0.5605),
+        ] {
+            assert!(
+                (y(t) - measured).abs() < 0.03,
+                "{t}: {} vs {measured}",
+                y(t)
+            );
         }
     }
     #[test]

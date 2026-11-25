@@ -698,10 +698,12 @@ impl Render for WelcomeView {
                         },
                         |d| {
                             // On the stage the welcome is a title card.
-                            let size = if self.stage && frame.centred {
-                                t.typography.display * 1.75
-                            } else {
-                                t.typography.display
+                            // On the stage the window is larger than the
+                            // Welcome window: its type steps up with it.
+                            let size = match (self.stage, frame.centred) {
+                                (true, true) => t.typography.display * 1.75,
+                                (true, false) => t.typography.display * 1.3,
+                                _ => t.typography.display,
                             };
                             d.text_size(px(size))
                                 .when(self.stage && frame.centred, |d| {
@@ -719,7 +721,11 @@ impl Render for WelcomeView {
                     .id("welcome-line")
                     .role(Role::Label)
                     .aria_label(frame.line.clone())
-                    .text_size(px(t.typography.reading))
+                    .text_size(px(if self.stage {
+                        t.typography.reading * 1.15
+                    } else {
+                        t.typography.reading
+                    }))
                     .line_height(relative(1.45))
                     .text_color(rgb(c.secondary))
                     .child(frame.line.clone()),
@@ -910,7 +916,7 @@ impl Render for WelcomeView {
             .flex()
             .flex_col()
             .items_center()
-            .p(px(m.sheet_inset))
+            .p(px(if self.stage { m.sheet_inset * 2. } else { m.sheet_inset }))
             .map(|d| {
                 if frame.top {
                     // Clear of the title bar, with the sheet's own air below.

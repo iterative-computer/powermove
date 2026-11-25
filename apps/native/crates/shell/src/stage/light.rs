@@ -28,9 +28,12 @@ pub struct Light {
     pub density: f32,
     /// The mark's resting height, device pixels: the size of its light.
     pub reach: f32,
+    /// The room's own light from above (0–1).
+    pub atmosphere: f32,
     /// A window's flat ground (linear RGB), lit from its top; zero for the
     /// room.
     pub ground: [f32; 3],
+    pub pad: [f32; 3],
     pub domain: [f32; 4],
 }
 
@@ -60,7 +63,8 @@ pub struct LightRenderer {
 impl LightRenderer {
     /// Compiles the shader and makes the mark's field (a worker's job).
     pub fn new(device: &DeviceRef) -> Result<Self, String> {
-        let library = device.new_library_with_source(include_str!("light.metal"), &CompileOptions::new())?;
+        let library =
+            device.new_library_with_source(include_str!("light.metal"), &CompileOptions::new())?;
         let d = RenderPipelineDescriptor::new();
         let vertex = library.get_function("light_vertex", None)?;
         let fragment = library.get_function("light_fragment", None)?;
@@ -114,9 +118,10 @@ impl LightRenderer {
             None if self.outputs.iter().filter(|(at, ..)| *at == size).count() < 3 => {
                 // Outputs of a size no longer drawn go first.
                 if self.outputs.len() >= 6
-                    && let Some(i) = self.outputs.iter().position(|(at, _, handle)| {
-                        *at != size && Arc::strong_count(handle) == 1
-                    })
+                    && let Some(i) = self
+                        .outputs
+                        .iter()
+                        .position(|(at, _, handle)| *at != size && Arc::strong_count(handle) == 1)
                 {
                     self.outputs.remove(i);
                 }
@@ -231,7 +236,12 @@ impl LightState {
 pub(crate) fn mark_field(w: usize, h: usize) -> Vec<f32> {
     let [x0, y0, x1, y1] = DOMAIN.map(f64::from);
     let unit = (x1 - x0) / w as f64;
-    let to_grid = |x: f64, y: f64| ((x - x0) / unit - 0.5, (y - y0) / ((y1 - y0) / h as f64) - 0.5);
+    let to_grid = |x: f64, y: f64| {
+        (
+            (x - x0) / unit - 0.5,
+            (y - y0) / ((y1 - y0) / h as f64) - 0.5,
+        )
+    };
     // The outline, flattened.
     let m = &welcome::MARK;
     let mut poly = Vec::new();
@@ -246,8 +256,14 @@ pub(crate) fn mark_field(w: usize, h: usize) -> Vec<f32> {
         for k in 0..48 {
             let t = k as f64 / 48.;
             let n = 1. - t;
-            let x = n * n * n * p[0].0 + 3. * n * n * t * p[1].0 + 3. * n * t * t * p[2].0 + t * t * t * p[3].0;
-            let y = n * n * n * p[0].1 + 3. * n * n * t * p[1].1 + 3. * n * t * t * p[2].1 + t * t * t * p[3].1;
+            let x = n * n * n * p[0].0
+                + 3. * n * n * t * p[1].0
+                + 3. * n * t * t * p[2].0
+                + t * t * t * p[3].0;
+            let y = n * n * n * p[0].1
+                + 3. * n * n * t * p[1].1
+                + 3. * n * t * t * p[2].1
+                + t * t * t * p[3].1;
             poly.push(to_grid(x, y));
         }
     }
@@ -336,17 +352,18 @@ fn edt(mask: &[bool], w: usize, h: usize, target: bool) -> Vec<f64> {
     let mut out = vec![0.; w.max(h)];
     let mut v = vec![0usize; w.max(h)];
     let mut z = vec![0.; w.max(h) + 1];
-    let mut pass = |f: &mut Vec<f64>, count: usize, len: usize, at: &dyn Fn(usize, usize) -> usize| {
-        for k in 0..count {
-            for i in 0..len {
-                line[i] = f[at(k, i)];
+    let mut pass =
+        |f: &mut Vec<f64>, count: usize, len: usize, at: &dyn Fn(usize, usize) -> usize| {
+            for k in 0..count {
+                for i in 0..len {
+                    line[i] = f[at(k, i)];
+                }
+                dt1(&line[..len], &mut out[..len], &mut v, &mut z);
+                for i in 0..len {
+                    f[at(k, i)] = out[i];
+                }
             }
-            dt1(&line[..len], &mut out[..len], &mut v, &mut z);
-            for i in 0..len {
-                f[at(k, i)] = out[i];
-            }
-        }
-    };
+        };
     pass(&mut f, h, w, &|row, col| row * w + col);
     pass(&mut f, w, h, &|col, row| row * w + col);
     f
@@ -362,7 +379,8 @@ fn dt1(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         let mut s;
         loop {
             let p = v[k];
-            s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2. * q as f64 - 2. * p as f64);
+            s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64))
+                / (2. * q as f64 - 2. * p as f64);
             if s <= z[k] {
                 k -= 1;
             } else {
@@ -388,9 +406,9 @@ fn dt1(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
 mod tests {
     #[test]
     fn the_uniforms_match_the_shaders_layout() {
-        // `light.metal`'s `Light`: 13 floats, a packed float3, a float4 at 64.
-        assert_eq!(std::mem::size_of::<super::Light>(), 80);
-        assert_eq!(std::mem::offset_of!(super::Light, domain), 64);
+        // `light.metal`'s `Light`: 14 floats, two packed float3s, a float4 at 80.
+        assert_eq!(std::mem::size_of::<super::Light>(), 96);
+        assert_eq!(std::mem::offset_of!(super::Light, domain), 80);
     }
     #[test]
     fn the_field_is_negative_inside_the_mark_and_grows_outside() {

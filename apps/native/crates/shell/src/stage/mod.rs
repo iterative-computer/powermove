@@ -14,8 +14,8 @@ use crate::kit::Recipes;
 use crate::native_control::{BuildSnapshot, ControlSpec, Kind, NativeControl};
 use crate::wave::{DistortionWave, ReducedMotion, WaveRect, WaveState};
 use crate::welcome_view::WelcomeView;
-pub use cue::{CueSheet, Phase};
 use cue::smooth;
+pub use cue::{CueSheet, Phase};
 use gpui::{prelude::*, *};
 use pm_design::{
     Elevation, Tokens,
@@ -30,6 +30,8 @@ type AfterHandOff = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 /// Seconds the room takes to fade in after a Skip.
 const SKIP_FADE: f64 = 0.35;
+/// The original's Reduce Motion cross-fade, seconds.
+const REDUCED_WAVE: f64 = 0.3;
 /// The hand-off: the window eases out while the lights come up.
 const WINDOW_OUT: f64 = 0.32;
 const LIGHTS_UP: f64 = 0.55;
@@ -96,6 +98,11 @@ impl Stage {
             )
             .expect("the original wave's defaults are valid")
         });
+        let mut sheet = sheet;
+        if tokens.accessibility.reduce_motion {
+            // Reduce Motion: the wave is the original's plain cross-fade.
+            sheet.wave_visible = REDUCED_WAVE / sheet.wave_seconds;
+        }
         let offset = if intro { 0. } else { sheet.length() };
         Self {
             sheet,
@@ -171,7 +178,11 @@ impl Stage {
     }
     /// The last step: the window eases out while the room's lights come up
     /// on the app's first window behind the stage, then `done` runs.
-    pub fn hand_off(&mut self, done: impl FnOnce(&mut Window, &mut App) + 'static, cx: &mut Context<Self>) {
+    pub fn hand_off(
+        &mut self,
+        done: impl FnOnce(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let start = self.now().max(self.sheet.length());
         self.offset += start - self.now();
         self.hand_off = Some(HandOff {
@@ -217,7 +228,14 @@ impl Stage {
             (f32::from(area.width) * scale).round(),
             (f32::from(area.height) * scale).round(),
         );
-        let light = intro::light_at(t, &self.sheet, self.motion(), size, scale);
+        let mut light = intro::light_at(t, &self.sheet, self.motion(), size, scale);
+        if t >= self.sheet.length() {
+            // The mark went into the window: the room keeps its own light.
+            light.mark = 0.;
+            light.bloom = 0.;
+            light.pool = 0.;
+            light.time = self.sheet.hold as f32;
+        }
         let texture = self.light.picture(light, self.wait);
         canvas(
             |_, _, _| (),
@@ -250,7 +268,10 @@ impl Stage {
         let m = &self.tokens.metrics;
         let size = size(px(m.welcome_width), px(m.welcome_height));
         Bounds::new(
-            point((area.width - size.width) / 2., (area.height - size.height) / 2.),
+            point(
+                (area.width - size.width) / 2.,
+                (area.height - size.height) / 2.,
+            ),
             size,
         )
     }
@@ -263,39 +284,62 @@ impl Stage {
     /// The window's ground, lit by the same pass as the room: a light from
     /// its top, and on the Welcome step the mark in it (still: the window
     /// at rest draws no frames).
-    fn window_light(&mut self, rect: Bounds<Pixels>, scale: f32, cx: &App) -> Option<std::sync::Arc<NativeTexture>> {
-        let (w, h) = (
+    fn window_light(
+        &mut self,
+        rect: Bounds<Pixels>,
+        scale: f32,
+        cx: &App,
+    ) -> Option<std::sync::Arc<NativeTexture>> {
+        let (width, height) = (
             (f32::from(rect.size.width) * scale).round(),
             (f32::from(rect.size.height) * scale).round(),
         );
-        let welcome = self
+        // How much of the Welcome step is showing: its light follows it
+        // through a step's cross-fade.
+        let welcome = |card: &Entity<WelcomeView>| card.read(cx).frame.animate;
+        let mut w = self
             .card
             .as_ref()
-            .is_some_and(|c| c.read(cx).frame.animate);
+            .filter(|c| welcome(c))
+            .map_or(0., |_| self.presence.get().clamp(0., 1.));
+        if let Some(leaving) = self.leaving.as_ref().filter(|l| welcome(&l.card)) {
+            w = w.max(leaving.presence.get().clamp(0., 1.));
+        }
         let mark = WINDOW_MARK * scale;
         let ground = self.tokens.colors.window;
         let linear = |shift: u32| {
             let v = ((ground >> shift) & 255) as f32 / 255.;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
         let light = light::Light {
-            size: [w, h],
-            centre: if welcome { [w / 2., h * WINDOW_MARK_Y] } else { [w / 2., -0.3 * h] },
+            size: [width, height],
+            centre: [width / 2., height * (-0.3 + (0.3 + WINDOW_MARK_Y) * w)],
             scale: mark / 112.,
             exposure: 1.,
-            bloom: if welcome { 0.5 } else { 0. },
+            bloom: 0.5 * w,
             edge: 0.,
-            pool: if welcome { 0.7 } else { 0.55 },
-            mark: if welcome { 1. } else { 0. },
+            pool: 0.55 + 0.15 * w,
+            mark: w,
             time: self.sheet.hold as f32,
             density: scale,
-            reach: if welcome { mark * 1.2 } else { 0.45 * h },
+            reach: 0.45 * height + (mark * 1.2 - 0.45 * height) * w,
+            atmosphere: 0.,
+            pad: [0.; 3],
             ground: [linear(16), linear(8), linear(0)],
             domain: [0.; 4],
         };
         self.light.picture(light, self.wait)
     }
-    fn window(&self, rect: Bounds<Pixels>, shadow: f32, lit: Option<std::sync::Arc<NativeTexture>>) -> Stateful<Div> {
+    fn window(
+        &self,
+        rect: Bounds<Pixels>,
+        shadow: f32,
+        lit: Option<std::sync::Arc<NativeTexture>>,
+    ) -> Stateful<Div> {
         let t = &self.tokens;
         let mut ground = div()
             .id("stage-window")
@@ -343,7 +387,14 @@ impl Stage {
         ground
     }
     /// The window standing in the room at `t`.
-    fn window_scene(&mut self, t: f64, area: Size<Pixels>, scale: f32, out: f64, cx: &App) -> AnyElement {
+    fn window_scene(
+        &mut self,
+        t: f64,
+        area: Size<Pixels>,
+        scale: f32,
+        out: f64,
+        cx: &App,
+    ) -> AnyElement {
         let rect = self.window_rect(area);
         let lit = self.window_light(rect, scale, cx);
         // Out: the window eases away, settling a few points as it goes.
@@ -369,11 +420,19 @@ impl Stage {
     }
     /// The wave on the window's rectangle: the intro under it becomes the
     /// window, rising out of the mark's light; the stage around it holds.
-    fn wave_scene(&mut self, t: f64, area: Size<Pixels>, scale: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn wave_scene(
+        &mut self,
+        t: f64,
+        area: Size<Pixels>,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let hold = self.sheet.hold;
         let rect = self.window_rect(area);
         if !self.prepared {
             self.prepared = true;
+            let reduced = !self.motion();
             // The wave starts from the mark: its rectangle in the window.
             let mark = intro::rest();
             let h = f64::from(area.height);
@@ -387,14 +446,25 @@ impl Stage {
             self.wave.update(cx, |w, _| {
                 w.clear();
                 let _ = w.set_source(source);
-                w.set_reduced_motion(ReducedMotion::System, window);
+                // The stage's own setting (the person's, or a capture's).
+                let motion = if reduced {
+                    ReducedMotion::Always
+                } else {
+                    ReducedMotion::System
+                };
+                w.set_reduced_motion(motion, window);
                 w.prepare_now();
             });
             if let Some(card) = &self.card {
                 card.update(cx, |c, cx| c.set_snapshot(true, cx));
             }
         }
-        let p = (t - self.sheet.window) / self.sheet.wave_seconds;
+        let run = if self.motion() {
+            self.sheet.wave_seconds
+        } else {
+            REDUCED_WAVE
+        };
+        let p = (t - self.sheet.window) / run;
         if p > 0. {
             let _ = self.wave.update(cx, |w, _| w.seek(p.min(1. - 1e-4)));
         }
@@ -450,7 +520,11 @@ impl Stage {
             .into_any_element()
     }
     fn set_snapshots(&self, on: bool, cx: &mut Context<Self>) {
-        for card in self.card.iter().chain(self.leaving.as_ref().map(|l| &l.card)) {
+        for card in self
+            .card
+            .iter()
+            .chain(self.leaving.as_ref().map(|l| &l.card))
+        {
             card.update(cx, |c, cx| c.set_snapshot(on, cx));
         }
     }
@@ -628,7 +702,9 @@ impl Render for Stage {
                     .aria_live(gpui::accesskit::Live::Polite)
                     .aria_label(title),
             );
-        if skippable && stage_alpha > 0. {
+        // Built from the first frame (the stage is still clear then), so its
+        // first layout never lands on a frame that moves.
+        if skippable {
             let m = &self.tokens.metrics;
             root = root.child(
                 div()

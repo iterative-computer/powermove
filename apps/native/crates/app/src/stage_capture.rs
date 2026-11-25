@@ -188,7 +188,7 @@ pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow:
             image.save(out.join(format!("{}.png", stills[next_still].0)))?;
             next_still += 1;
         }
-        if !stills_only && n % 15 == 0 && t <= 6.0 + 1e-9 {
+        if !stills_only && n.is_multiple_of(15) && t <= 6.0 + 1e-9 {
             image.save(out.join("quarter").join(format!("{:05.2}.png", t)))?;
         }
         if let Some(stdin) = stdin.as_mut() {

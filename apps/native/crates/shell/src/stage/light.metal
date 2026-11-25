@@ -18,7 +18,9 @@ struct Light {
     float time;        // seconds, for grain and breathing
     float density;     // device pixels per point
     float reach;       // the mark's resting height, device pixels: its light's size
+    float atmosphere;  // the room's own light from above (Dia's room light)
     packed_float3 ground; // a window's ground (linear); zero: the room
+    packed_float3 pad;
     float4 domain;     // the field's rectangle in mark units: min.xy, max.xy
 };
 
@@ -66,6 +68,11 @@ fragment float4 light_fragment(Out in [[stage_in]], constant Light &u [[buffer(0
         float2 q = (px - float2(u.size.x * 0.5, h * 0.42)) / h;
         c = mix(float3(0.0068, 0.0068, 0.0080), float3(0.0018, 0.0018, 0.0022),
                 smoothstep(0.0, 0.95, length(q * float2(0.8, 1.0))));
+        // The room's light from above: a broad soft wash, warm at its heart
+        // and cooler at its edge, that goes down as the house lights do.
+        float2 a = (px - float2(u.size.x * 0.5, -0.25 * h)) / float2(0.95 * u.size.x, 0.95 * h);
+        float wash = exp(-dot(a, a) * 2.2);
+        c += u.atmosphere * wash * mix(float3(0.030, 0.034, 0.048), float3(0.090, 0.062, 0.040), wash);
     }
 
     // Breathing: a slow swell of the light, never a pulse.
@@ -81,9 +88,9 @@ fragment float4 light_fragment(Out in [[stage_in]], constant Light &u [[buffer(0
 
     // The edge light: warm at the bottom, around where the mark comes up.
     float ex = (px.x - u.centre.x) / (0.46 * u.size.x);
-    float ey = (h - px.y) / (0.16 * h);
+    float ey = (h - px.y) / (0.11 * h);
     c += u.edge * exp(-ey - ex * ex) * float3(0.95, 0.30, 0.09);
-    c += u.edge * 0.22 * exp(-ey * 0.55 - ex * ex * 0.6) * float3(0.55, 0.16, 0.06);
+    c += u.edge * 0.12 * exp(-ey * 0.45 - ex * ex * 0.6) * float3(0.55, 0.16, 0.06);
 
     // Bloom: a tight glow and a wide one, warmer and whiter as the mark
     // burns; it falls off with the distance from the outline.
