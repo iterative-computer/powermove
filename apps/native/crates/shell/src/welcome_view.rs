@@ -4,6 +4,7 @@ use crate::welcome::{self, Frame, Progress, Severity};
 use crate::{
     kit::{Button, Kit, Recipes},
     motion::Motion,
+    native_control::{ControlSpec, Kind, NativeControl},
 };
 use gpui::{prelude::*, *};
 use pm_design::{Elevation, Tokens};
@@ -28,6 +29,14 @@ pub struct WelcomeView {
     body_extent: Option<Pixels>,
     /// Tests pin the clock (seconds since the view opened); the window uses wall time.
     pub clock: Option<f64>,
+    /// The card on the first-run stage: sized to its content on the
+    /// stage's room, its buttons AppKit's.
+    pub stage: bool,
+    /// The stage card's AppKit buttons, by id and label.
+    natives: std::collections::HashMap<(String, String), Entity<NativeControl>>,
+    /// While a wave carries the card: the snapshot its buttons paint.
+    snapshot: Option<u64>,
+    snapshots: u64,
 }
 impl WelcomeView {
     fn motion(&mut self) -> &mut Motion<u64> {
@@ -47,7 +56,80 @@ impl WelcomeView {
             body_scroll: ScrollHandle::new(),
             body_extent: None,
             clock: None,
+            stage: false,
+            natives: Default::default(),
+            snapshot: None,
+            snapshots: 0,
         }
+    }
+    /// A wave is carrying the card (`true`): its AppKit buttons paint their
+    /// own pictures in GPUI, so the wave distorts them with the card, and
+    /// come back live when it ends.
+    pub fn set_snapshot(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.snapshot.is_some() {
+            return;
+        }
+        self.snapshot = on.then(|| {
+            self.snapshots += 1;
+            self.snapshots
+        });
+        let build = self.snapshot.map(crate::stage::snapshot_build);
+        for control in self.natives.values() {
+            control.update(cx, |c, cx| {
+                if c.set_build_snapshot(build) {
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+    /// The stage card's AppKit button for `button`, made once per label.
+    fn native_button(
+        &mut self,
+        button: &welcome::Button,
+        primary: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<NativeControl> {
+        let key = (button.id.clone(), button.label.clone());
+        if let Some(control) = self.natives.get(&key) {
+            let disabled = !button.enabled;
+            control.update(cx, |c, cx| c.update(&serde_json::Value::Null, &[], disabled, cx));
+            return control.clone();
+        }
+        let tokens = self.tokens.clone();
+        let identifier = format!("welcome-{}", button.id);
+        let control = cx.new(|cx| {
+            let mut control = NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Push,
+                    label: &button.label,
+                    identifier: &identifier,
+                    value: &serde_json::Value::Null,
+                    options: vec![],
+                    disabled: !button.enabled,
+                    default: primary,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    pull: false,
+                    tint: None,
+                    symbol: None,
+                    glass: primary,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            );
+            control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
+            control
+        });
+        let id = button.id.clone();
+        cx.subscribe(&control, move |v: &mut Self, _, _: &serde_json::Value, cx| v.act(&id, cx))
+            .detach();
+        self.natives.insert(key, control.clone());
+        control
     }
     /// Gives the view the keys, and takes them back when the control that had
     /// them leaves with its step (Begin, Back): GPUI then leaves the window
@@ -104,10 +186,20 @@ impl WelcomeView {
             _ => {}
         }
     }
-    fn button(&self, button: &welcome::Button, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn button(
+        &mut self,
+        button: &welcome::Button,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let primary = self.frame.default.as_deref() == Some(&button.id);
+        if self.stage && crate::text::available(window) {
+            return self
+                .native_button(button, primary, window, cx)
+                .into_any_element();
+        }
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
-        let primary = self.frame.default.as_deref() == Some(&button.id);
         let enabled = button.enabled;
         let id = button.id.clone();
         let mut element = div()
@@ -117,13 +209,26 @@ impl WelcomeView {
             .aria_label(button.label.clone())
             .aria_disabled(!enabled)
             .tab_index(0)
-            .px(px(m.inset))
-            .h(px(m.row))
             .flex()
             .items_center()
-            .rounded(px(m.control_radius))
-            .text_size(px(t.typography.body))
+            .justify_center()
             .child(button.label.clone());
+        // Headless (no AppKit): the stage's large glass button, drawn.
+        element = if self.stage {
+            element
+                .min_w(px(m.row * 4.))
+                .px(px(m.inset * 1.5))
+                .h(px(m.row * 1.45))
+                .rounded_full()
+                .text_size(px(t.typography.reading))
+                .font_weight(FontWeight::MEDIUM)
+        } else {
+            element
+                .px(px(m.inset))
+                .h(px(m.row))
+                .rounded(px(m.control_radius))
+                .text_size(px(t.typography.body))
+        };
         element = if primary {
             element.bg(rgb(c.accent)).text_color(rgb(c.selected_text))
         } else {
@@ -135,7 +240,7 @@ impl WelcomeView {
             let id = button.id.clone();
             element = element.on_click(cx.listener(move |v, _, _, cx| v.act(&id, cx)));
         }
-        element
+        element.into_any_element()
     }
     /// A thin bar: filled to its fraction, or a sliding segment while the total
     /// is unknown (still under Reduce Motion).
@@ -257,6 +362,53 @@ impl WelcomeView {
             );
         }
         card
+    }
+    /// The steps ahead, in one quiet row: a dot and a name each, joined by
+    /// hairlines; the one under way (or next) in the accent, the rest in the
+    /// secondary ink.
+    fn outline(&self, outline: &welcome::Outline) -> impl IntoElement + use<> {
+        let t = &self.tokens;
+        let c = &t.colors;
+        let next = outline.current.unwrap_or(0);
+        let mut row = div()
+            .id("welcome-outline")
+            .debug_selector(|| "welcome-outline".into())
+            .role(Role::List)
+            .aria_label(format!("Steps: {}", outline.steps.join(", ")))
+            .flex()
+            .items_center()
+            .gap(px(t.space.md))
+            .text_size(px(t.typography.body))
+            .text_color(rgb(c.secondary));
+        for (index, step) in outline.steps.iter().enumerate() {
+            if index > 0 {
+                row = row.child(
+                    div()
+                        .w(px(t.space.xl))
+                        .h(px(1.))
+                        .bg(rgba((c.secondary << 8) | 0x40)),
+                );
+            }
+            let dot = if index == next {
+                rgb(c.accent)
+            } else if index < next {
+                rgb(c.text)
+            } else {
+                rgba((c.secondary << 8) | 0x70)
+            };
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("welcome-outline-{index}")))
+                    .role(Role::ListItem)
+                    .aria_label(step.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.sm))
+                    .child(div().size(px(6.)).rounded_full().bg(dot))
+                    .child(step.clone()),
+            );
+        }
+        row
     }
     /// A group's heading, as Settings heads its groups.
     fn section_title(&self, title: &str) -> impl IntoElement + use<> {
@@ -536,7 +688,9 @@ impl Render for WelcomeView {
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let frame = self.frame.clone();
-        let time = (frame.animate && !t.accessibility.reduce_motion).then(|| self.time());
+        // On the stage the film is the animation.
+        let time = (frame.animate && !self.stage && !t.accessibility.reduce_motion)
+            .then(|| self.time());
         let spin = frame.spinner && !t.accessibility.reduce_motion;
         let sliding = !t.accessibility.reduce_motion
             && frame
@@ -566,7 +720,13 @@ impl Render for WelcomeView {
         let mut header = div()
             .flex()
             .flex_col()
-            .gap(px(if frame.top { m.gap + 2. } else { m.gap }))
+            .gap(px(if frame.top {
+                m.gap + 2.
+            } else if self.stage && frame.centred {
+                t.space.md
+            } else {
+                m.gap
+            }))
             .when(frame.centred, |d| d.items_center());
         if let Some(label) = &frame.eyebrow {
             header = header.child(
@@ -589,7 +749,22 @@ impl Render for WelcomeView {
                             d.text_size(px(t.typography.heading))
                                 .font_weight(FontWeight(t.typography.display_weight))
                         },
-                        |d| d.text_size(px(t.typography.display)),
+                        |d| {
+                            // On the stage the welcome is a title card.
+                            // On the stage the window is larger than the
+                            // Welcome window: its type steps up with it.
+                            let size = match (self.stage, frame.centred) {
+                                (true, true) => t.typography.display * 1.75,
+                                (true, false) => t.typography.display * 1.3,
+                                _ => t.typography.display,
+                            };
+                            d.text_size(px(size))
+                                .when(self.stage && frame.centred, |d| {
+                                    d.font_weight(FontWeight(t.typography.display_weight))
+                                        .line_height(relative(1.06))
+                                        .letter_spacing(px(-size * 0.018))
+                                })
+                        },
                     )
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
@@ -599,12 +774,19 @@ impl Render for WelcomeView {
                     .id("welcome-line")
                     .role(Role::Label)
                     .aria_label(frame.line.clone())
-                    .text_size(px(t.typography.reading))
+                    .text_size(px(if self.stage {
+                        t.typography.reading * 1.15
+                    } else {
+                        t.typography.reading
+                    }))
                     .line_height(relative(1.45))
                     .text_color(rgb(c.secondary))
                     .child(frame.line.clone()),
             );
         content = content.child(header);
+        if let Some(outline) = &frame.outline {
+            content = content.child(div().pt(px(t.space.xl)).child(self.outline(outline)));
+        }
         let spaced = |d: Div| if frame.top { d.mt(air) } else { d };
         if let Some(status) = &frame.status {
             let mut row = div()
@@ -751,9 +933,15 @@ impl Render for WelcomeView {
             .flex_none()
             .w_full()
             .gap(px(m.gap))
-            .pt(px(if frame.top { t.space.xl } else { m.inset }));
+            .pt(px(if frame.top {
+                t.space.xl
+            } else if self.stage && frame.centred {
+                t.space.xxl
+            } else {
+                m.inset
+            }));
         for button in frame.buttons.iter().filter(|b| b.leading) {
-            footer = footer.child(self.button(button, cx));
+            footer = footer.child(self.button(button, window, cx));
         }
         footer = if frame.centred {
             footer.justify_center()
@@ -761,7 +949,7 @@ impl Render for WelcomeView {
             footer.child(div().flex_1())
         };
         for button in frame.buttons.iter().filter(|b| !b.leading) {
-            footer = footer.child(self.button(button, cx));
+            footer = footer.child(self.button(button, window, cx));
         }
         content = content.child(footer);
         // The accessibility tree hangs off an identified, labelled root, as in
@@ -772,22 +960,34 @@ impl Render for WelcomeView {
             .accessibility_id("shell.welcome")
             .aria_label(spoken)
             .relative()
-            .size_full()
+            .map(|d| {
+                if self.stage {
+                    // The stage draws the window's ground; the card is its
+                    // content, so a step's content cross-fades on one ground.
+                    d.size_full()
+                } else {
+                    d.size_full().bg(rgb(c.window))
+                }
+            })
             .flex()
             .flex_col()
             .items_center()
-            .p(px(m.sheet_inset))
+            .p(px(if self.stage { m.sheet_inset * 2. } else { m.sheet_inset }))
             .map(|d| {
                 if frame.top {
                     // Clear of the title bar, with the sheet's own air below.
                     d.justify_start()
-                        .pt(px(m.toolbar))
+                        .pt(px(if self.stage { m.sheet_inset + m.inset } else { m.toolbar }))
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
-                    d.justify_center()
+                    d.justify_center().when(self.stage && frame.animate, |d| {
+                        // Under the stage's lit mark (`stage::WINDOW_MARK_Y`):
+                        // the mark, then the title, its line, the steps, the
+                        // button, on one column from the top.
+                        d.justify_start().pt(px(m.welcome_height * 0.385))
+                    })
                 }
             })
-            .bg(rgb(c.window))
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key));
@@ -803,7 +1003,7 @@ impl Render for WelcomeView {
                     .aria_label(frame.back.clone().unwrap_or_default())
                     .tab_index(0)
                     .absolute()
-                    .top(px(m.toolbar))
+                    .top(px(if self.stage { m.sheet_inset } else { m.toolbar }))
                     .left(px(m.sheet_inset))
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.text))

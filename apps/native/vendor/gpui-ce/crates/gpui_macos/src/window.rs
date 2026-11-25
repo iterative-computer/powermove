@@ -2709,6 +2709,13 @@ impl PlatformWindow for MacWindow {
         Some(Box::new((device, queue)))
     }
 
+    #[cfg(not(feature = "wgpu"))]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        let this = self.0.lock();
+        let device = this.renderer.layer()?.device().to_owned();
+        Some(Box::new(device))
+    }
+
     #[cfg(feature = "wgpu")]
     fn gpu_device_lost(&self) -> Option<bool> {
         // Only loads an atomic flag, so it is safe mid-recovery.
@@ -2958,6 +2965,15 @@ impl PlatformWindow for MacWindow {
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
+    }
+
+    fn render_region_to_texture(
+        &self,
+        scene: &gpui::Scene,
+        region: gpui::Bounds<gpui::DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        let mut this = self.0.lock();
+        this.renderer.render_region_to_texture(scene, region)
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {

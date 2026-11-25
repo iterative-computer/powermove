@@ -170,6 +170,7 @@ impl Controller {
             }
             "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
+            "welcomeIntro" => crate::first_run_stage::replay(cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
             "panelLibrary" => self.open_panel_library(cx),
             "openTelemetryDocs" => {

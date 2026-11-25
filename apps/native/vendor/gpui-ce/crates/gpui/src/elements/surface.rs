@@ -220,6 +220,19 @@ pub trait TextureLease: std::fmt::Debug + Send + Sync {
     fn gpu_completed(&self, succeeded: bool);
 }
 
+/// Part of a frame pictured on the GPU for a snapshot transition (Powermove's
+/// wave): display-encoded sRGB BGRA8, ready once `event` reaches `value`.
+/// Nothing was read back and nothing waited.
+#[cfg(target_os = "macos")]
+pub struct GpuSnapshot {
+    /// The picture, the region's size.
+    pub texture: metal::Texture,
+    /// Signalled by the producing command buffer, on the same device.
+    pub event: metal::Event,
+    /// The event's value once the picture is drawn.
+    pub value: u64,
+}
+
 /// Packed RGB source. Input is premultiplied, top-down, display-encoded sRGB.
 /// RGBA16F is accepted only after the engine's extended-linear → SDR conversion.
 /// The retained Metal objects bridge objc2-metal via +1 ownership, never borrowed raw pointers.

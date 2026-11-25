@@ -48,6 +48,9 @@ mod extensions;
 mod figma_paste;
 mod file_coordination;
 mod first_run;
+mod first_run_stage;
+#[cfg(any(debug_assertions, test))]
+mod stage_capture;
 mod generated_panel;
 mod gizmo;
 mod gizmo_layer;
@@ -393,6 +396,19 @@ fn main() -> Result<()> {
     }
     diag::mark_start();
     gpui_macos::launch::mark("main");
+    // Development builds: the first-run stage drawn offscreen (stills, a
+    // recording and frame costs) into a folder; no window opens.
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--stage-capture") {
+        let out = args
+            .get(1)
+            .context("Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing]")?;
+        return match args.get(2).and_then(|a| a.to_str()) {
+            Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
+            Some("reduced") => stage_capture::run(PathBuf::from(out), true, true),
+            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills"), false),
+        };
+    }
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
         return pro_media::cold_playback_bench();
     }
@@ -621,6 +637,12 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
+                    // Development builds: the first-run intro again, over the
+                    // app (`--replay-onboarding 1`), as Help › Replay Intro.
+                    #[cfg(debug_assertions)]
+                    if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
+                        cx.defer(first_run_stage::replay);
+                    }
                     diag::install_probe(cx);
                     telemetry::install(window, cx);
                     error_log::persist(&profile, cx);
@@ -774,6 +796,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         // Onboarding on an isolated profile (it runs only on the default one).
         "--review-onboarding" => Some("PM_NATIVE_REVIEW_ONBOARDING"),
+        // The first-run intro again, over the app (Help).
+        "--replay-onboarding" => Some("PM_NATIVE_REPLAY_ONBOARDING"),
         // Presses the extension step's buttons by id (extension_transfer::review).
         "--review-welcome" => Some("PM_NATIVE_REVIEW_WELCOME"),
         _ => None,
@@ -827,6 +851,7 @@ mod review_override_tests {
             "--cloud-fixture",
             "--electron-profile",
             "--review-onboarding",
+            "--replay-onboarding",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
@@ -852,3 +877,6 @@ mod utility_capture_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod transition_capture_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod stage_tests;

@@ -75,6 +75,13 @@ pub struct Choice {
     /// Illustration rows on a card, drawn with timeline clip recipes.
     pub lines: Vec<String>,
 }
+/// The first run's steps, shown on the Welcome: their names and the one
+/// under way (`None`: none yet).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outline {
+    pub steps: Vec<String>,
+    pub current: Option<usize>,
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
     /// Stable surface id, for inspection and tests.
@@ -112,6 +119,8 @@ pub struct Frame {
     /// screens don't jump as it moves on (N004–N006); others are centred
     /// vertically.
     pub top: bool,
+    /// The Welcome's preview of the steps ahead.
+    pub outline: Option<Outline>,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.

@@ -113,3 +113,7 @@ mod regression_docking_feel;
 #[cfg(test)]
 #[path = "../tests/dock_scroll.rs"]
 mod regression_dock_scroll;
+#[cfg(target_os = "macos")]
+pub mod stage;
+#[cfg(target_os = "macos")]
+pub mod wave;
