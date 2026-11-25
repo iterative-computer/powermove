@@ -582,6 +582,9 @@ struct Flow {
     window: Retained<NSWindow>,
     /// The handle the person typed, for a "taken" message.
     handle: String,
+    /// Opened as Create Account (the first run's step): the first sheet says
+    /// so. The flow is the same; a new email or Google account makes one.
+    signup: bool,
 }
 struct Cloud {
     profile: PathBuf,
@@ -689,12 +692,30 @@ fn changed(cx: &mut App) {
     });
 }
 
+/// Who is signed in (the account's name or email), if anyone.
+pub fn identity(cx: &App) -> Option<String> {
+    let cloud = cx.try_global::<Cloud>()?;
+    cloud
+        .account
+        .as_ref()
+        .filter(|_| cloud.signed_in)
+        .map(Account::identity)
+}
+/// Calls `f` with who is signed in whenever the account changes.
+pub fn on_change(cx: &mut App, f: impl Fn(Option<String>, &mut App) + 'static) {
+    cx.observe_global::<Cloud>(move |cx| f(identity(cx), cx)).detach();
+}
 pub(crate) fn sign_in_available(cx: &App) -> bool {
     cx.has_global::<Cloud>()
 }
 
 /// Settings › Account › Sign In…: the first step's sheet on `window`.
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
+    open_sign_in_as(window, false, cx);
+}
+/// The same sign-in, from the first run's account step: `signup` when the
+/// person chose Create Account.
+pub fn open_sign_in_as(window: Retained<NSWindow>, signup: bool, cx: &mut App) {
     if !cx.has_global::<Cloud>() {
         return;
     }
@@ -710,12 +731,13 @@ pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
         sheet: None,
         window,
         handle: String::new(),
+        signup,
     });
     present(cx);
 }
 fn surface(flow: &Flow) -> Option<crate::dialogs::Surface> {
     use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
-    let message = copy::sign_in(flow.signin.step, false, "Google", &flow.email)?;
+    let message = copy::sign_in(flow.signin.step, flow.signup, "Google", &flow.email)?;
     let button = |id: &'static str, label: &'static str, default: bool| Button {
         id,
         label,

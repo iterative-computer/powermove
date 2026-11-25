@@ -55,7 +55,8 @@ fn choice() -> Choice {
 fn welcome() -> Onboarding {
     let mut o = Onboarding::new(true);
     o.welcome();
-    for _ in 0..4 {
+    // Timeline, Account, Agent, Transcription, Workspace.
+    for _ in 0..5 {
         o.advance().unwrap();
     }
     o

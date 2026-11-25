@@ -71,6 +71,9 @@ pub enum Step {
     Animation,
     Welcome,
     Timeline,
+    /// The Powermove account: sign in or create one (or not now), before
+    /// the agent step's sign-ins.
+    Account,
     Agent,
     Transcription,
     Workspace,
@@ -151,7 +154,8 @@ impl Onboarding {
     pub fn advance(&mut self) -> Result<()> {
         self.step = match self.step {
             Step::Welcome => Step::Timeline,
-            Step::Timeline => Step::Agent,
+            Step::Timeline => Step::Account,
+            Step::Account => Step::Agent,
             Step::Agent => Step::Transcription,
             Step::Transcription => Step::Workspace,
             _ => return Err(invalid("onboarding cannot advance")),
@@ -161,7 +165,8 @@ impl Onboarding {
     pub fn back(&mut self) -> Result<()> {
         self.step = match self.step {
             Step::Timeline => Step::Welcome,
-            Step::Agent => Step::Timeline,
+            Step::Account => Step::Timeline,
+            Step::Agent => Step::Account,
             Step::Transcription => Step::Agent,
             Step::Workspace => Step::Transcription,
             _ => return Err(invalid("onboarding cannot go back")),

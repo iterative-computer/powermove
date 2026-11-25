@@ -25,6 +25,16 @@ pub struct StageWindow {
     quits: bool,
 }
 impl StageWindow {
+    /// The AppKit window the person works in (for a sheet): the real
+    /// Welcome window once live, else the stage.
+    pub fn ns_window(&self, cx: &mut gpui::App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        use pm_shell::stage::native_window::ns_window;
+        let native = *self.native.borrow();
+        match native {
+            Some(native) => native.update(cx, |_, window, _| ns_window(window)).ok().flatten(),
+            None => self.window.update(cx, |_, window, _| ns_window(window)).ok().flatten(),
+        }
+    }
     /// The window the person works in: the real Welcome window once live.
     pub fn activate(&self, cx: &mut gpui::App) {
         let native = *self.native.borrow();

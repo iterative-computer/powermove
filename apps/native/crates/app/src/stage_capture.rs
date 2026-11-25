@@ -432,6 +432,7 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
                                 },
                                 &Default::default(),
                                 None,
+                                None,
                             ),
                             tokens,
                             cx,

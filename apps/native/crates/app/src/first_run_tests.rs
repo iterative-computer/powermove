@@ -123,10 +123,29 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     flow.action("choose:tracks");
     assert_eq!(flow.frame().chosen.as_deref(), Some("tracks"));
     flow.action("continue");
+    // The Powermove account, before the agents: create one, log in (the
+    // app's own sign-in), or not now.
+    let account = flow.frame();
+    titled(&account, "Sign in to Powermove");
+    assert_eq!(account.default_action(), Some("create_account"));
+    assert_eq!(flow.action("create_account"), vec![Effect::SignIn { signup: true }]);
+    assert_eq!(flow.action("log_in"), vec![Effect::SignIn { signup: false }]);
+    titled(&flow.frame(), "Sign in to Powermove");
+    // Signed in: the step says who, and carries on.
+    flow.message(Message::Powermove(Some("ana@example.com".into())));
+    let signed = flow.frame();
+    titled(&signed, "You’re signed in");
+    assert!(signed.line.contains("ana@example.com"));
+    assert_eq!(signed.default_action(), Some("continue"));
+    flow.message(Message::Powermove(None));
+    flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
+    flow.action("back");
+    titled(&flow.frame(), "Sign in to Powermove");
     flow.action("back");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
+    flow.action("not_now");
     flow.action("choose:claude");
     flow.action("continue");
     titled(&flow.frame(), "Speech to text");
@@ -153,7 +172,7 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     flow.action("begin");
     flow.action("back");
     titled(&flow.frame(), "Welcome to Powermove");
-    for action in ["begin", "continue", "continue", "continue"] {
+    for action in ["begin", "continue", "not_now", "continue", "continue"] {
         flow.action(action);
     }
     let effects = flow.action("import");
@@ -204,13 +223,15 @@ fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     let copies = pm_kernel::LibraryStore::open(&profile).projects().unwrap();
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].name, "Synthetic project");
-    // …then the Welcome and the five steps, then Home.
+    // …then the Welcome and the steps, then Home.
     let welcome = flow.frame();
     assert!(welcome.animate);
     titled(&welcome, "Welcome to Powermove");
     flow.action("begin");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
+    titled(&flow.frame(), "Sign in to Powermove");
+    flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
     flow.action("continue");
     titled(&flow.frame(), "Speech to text");
@@ -249,6 +270,7 @@ fn a_quit_in_the_steps_after_the_copy_brings_them_back_until_they_finish() {
     titled(&flow.frame(), "Welcome to Powermove");
     flow.action("begin");
     flow.action("continue");
+    flow.action("not_now");
     flow.action("continue");
     flow.action("continue");
     let effects = flow.action("fresh");
@@ -783,6 +805,7 @@ fn a_failed_library_stays_on_a_gate_and_retries_with_the_same_choices() {
     flow.start();
     flow.action("begin");
     flow.action("continue");
+    flow.action("not_now");
     flow.action("choose:claude");
     flow.action("continue");
     flow.action("continue");
