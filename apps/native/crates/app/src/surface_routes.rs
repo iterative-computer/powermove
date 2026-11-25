@@ -197,6 +197,18 @@ impl Controller {
                 crate::providers::open(window, cx)
             }
             "providerDisconnect" => crate::providers::disconnect(cx),
+            "providerKey.openai" | "providerKey.anthropic" => {
+                let kind = if name == "providerKey.openai" {
+                    crate::provider_keys::Kind::OpenAi
+                } else {
+                    crate::provider_keys::Kind::Anthropic
+                };
+                let accounts = self.builtins.runtime.as_ref().and_then(|r| r.agent_accounts());
+                if let Some(accounts) = accounts {
+                    let window = self.account_window(cx);
+                    crate::provider_keys::open(kind, window, accounts, cx)
+                }
+            }
             "agentClientsCopy" => crate::agent_clients::copy_setup(cx),
             command
                 if command.starts_with("agentClientAdd.")

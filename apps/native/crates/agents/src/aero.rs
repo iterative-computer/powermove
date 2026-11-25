@@ -26,7 +26,7 @@ use std::{
 mod journal;
 mod model;
 
-pub use model::{Model, Reply, evaluate};
+pub use model::{Live, Model, Reply, evaluate};
 
 pub type Report = Arc<dyn Fn(Value) + Send + Sync>;
 
@@ -333,6 +333,7 @@ struct Opened {
 /// Waits for the session `request` to open.
 fn wait_open(
     runtime: &mut Runtime,
+    edge: &Model,
     request: u64,
     (model, effort): (&str, &str),
     deadline: Instant,
@@ -345,7 +346,7 @@ fn wait_open(
             if fetch.purpose != pm_aero_core::Purpose::Catalog {
                 return Err("Aero's core asked for the model before its session opened.".into());
             }
-            model::answer_catalog(remote, fetch.fetch, model, effort);
+            model::catalog(edge, remote, fetch.fetch, fetch.url, model, effort);
         }
         for event in runtime.events.drain().map_err(|e| e.to_string())? {
             match event {
@@ -469,10 +470,12 @@ fn drive(
     };
     let registry = tools(request.access);
     let (tx, callbacks) = mpsc::channel();
-    let model_name = request.model.as_deref().unwrap_or("fake/model");
+    let model_name = options.model.name(request.model.as_deref().unwrap_or("fake/model"));
     let effort = request.effort.as_deref().unwrap_or("");
     let mut runtime = Runtime::create(
         &Config {
+            provider: options.model.provider(),
+            configured_providers_json: options.model.configured(),
             model: model_name,
             effort,
             endpoint_url: options.model.endpoint(),
@@ -505,7 +508,7 @@ fn drive(
             image_store: false,
         })
         .map_err(err)?;
-    let opened = wait_open(&mut runtime, opening, (model_name, effort), deadline)?;
+    let opened = wait_open(&mut runtime, &options.model, opening, (model_name, effort), deadline)?;
     // A turn the person stopped is never resumed, even when the host went
     // away before the core stored its end.
     let resumable = opened
@@ -820,15 +823,16 @@ fn drive(
         }
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {
-                model::answer_catalog(remote, fetch.fetch, model_name, effort);
+                model::catalog(&options.model, remote, fetch.fetch, fetch.url, model_name, effort);
             } else {
                 let model = options.model.clone();
                 let id = fetch.fetch;
                 let url = fetch.url.to_owned();
+                let headers: Vec<_> = fetch.headers().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
                 let body = fetch.body.to_vec();
                 fetch_workers.retain(|worker: &thread::JoinHandle<()>| !worker.is_finished());
                 fetch_workers.push(thread::spawn(move || {
-                    model::deliver(&model, remote, id, &url, &body)
+                    model::deliver(&model, remote, id, &url, &headers, &body)
                 }));
             }
         }

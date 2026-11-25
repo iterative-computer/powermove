@@ -9,6 +9,7 @@ export const sections = [
   "shortcuts",
   "transcription",
   "storage",
+  "providers",
   "agents",
   "extensions",
   "privacy",
@@ -47,6 +48,12 @@ export const sectionCopy: Record<
     title: "Account",
     description: "",
     symbol: "person.crop.circle",
+  },
+  providers: {
+    title: "Providers",
+    description:
+      "Sign in once; every agent that can use a provider does. Keys stay in your Keychain.",
+    symbol: "key",
   },
   agents: { title: "Agents", description: "", symbol: "sparkles" },
   privacy: {
