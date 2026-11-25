@@ -2859,6 +2859,17 @@ impl SurfaceView {
     pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
         self.anchors.borrow().get(&id).copied()
     }
+    /// The bounds of the menu anchor whose `id` prop is `element` (the
+    /// Agent composer, which its chooser stands clear of).
+    pub fn element_bounds(&self, element: &str) -> Option<Bounds<Pixels>> {
+        let (id, _) = self
+            .publication
+            .surface
+            .nodes()
+            .iter()
+            .find(|(_, node)| node.props.get("id").and_then(Value::as_str) == Some(element))?;
+        self.anchor_bounds(*id)
+    }
     /// The display-link readout follows its painted button. If the header
     /// clips that slot, hide the layer too so it cannot cover other controls.
     pub(crate) fn timeline_timecode_bounds(

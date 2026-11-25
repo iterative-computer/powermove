@@ -223,6 +223,9 @@ pub struct Host {
     agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
+    /// The development switch's Powermove harness is on: the Agent panel's
+    /// way to an account is Settings › Providers.
+    pub providers: bool,
     /// The Settings window's AppKit chrome while this editor hosts it, and
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
@@ -446,6 +449,7 @@ impl Controller {
         {
             environment.aero = Some(crate::mcp::aero_launcher());
         }
+        self.builtins.providers = environment.aero.is_some();
         environment.compatible = Some(Arc::new(crate::providers::Chat {
             profile: self.mcp.profile.clone(),
         }));
@@ -1051,6 +1055,53 @@ impl Controller {
             })
         });
         let owner = self.agent_popover_window(cx);
+        // The composer's chooser is its own popover (PM-727), answered as
+        // the menus are: the chosen row's value.
+        if request.input["picker"] == "chooser" {
+            let spec = pm_shell::ChooserSpec::from_request(&request.input);
+            // The composer it stands clear of.
+            let composer = request.input["avoid"].as_str().and_then(|element| {
+                let view = self.builtins.views.get(&request.panel)?;
+                let b = view.read(cx).element_bounds(element)?;
+                Some(pm_shell::layout::Rect {
+                    x: f32::from(b.origin.x),
+                    y: f32::from(b.origin.y),
+                    w: f32::from(b.size.width),
+                    h: f32::from(b.size.height),
+                })
+            });
+            let values: Vec<Value> = options.iter().map(|o| o["value"].clone()).collect();
+            let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
+            if request.input["refresh"] == true {
+                if let Some((owner, _, current, None)) = &mut self.builtins.agent_pick
+                    && Arc::ptr_eq(owner, runtime)
+                    && self.host.borrow_mut().update_chooser(spec, None)
+                {
+                    *current = values;
+                }
+                runtime.platform_reply(request.id, Ok(Value::Null));
+                return;
+            }
+            if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+                previous.platform_reply(id, Ok(Value::Null));
+            }
+            let mut host = self.host.borrow_mut();
+            let shown = if request.input["update"] == true {
+                host.update_chooser(spec, dismiss)
+            } else if let Some(anchor) = anchor {
+                host.open_chooser(owner, anchor, composer, spec, dismiss);
+                true
+            } else {
+                false
+            };
+            drop(host);
+            if shown {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, None));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
         let choices = options
             .iter()
             .enumerate()
@@ -2877,6 +2928,9 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.settings" => {
+                    if self.builtins.providers {
+                        self.builtins.settings_page = Some("providers".into());
+                    }
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }

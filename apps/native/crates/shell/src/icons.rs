@@ -10,13 +10,16 @@ use resvg::{tiny_skia, usvg};
 /// A vendored glyph: its SVG (a 16 px grid; a wider one is fitted by its
 /// longer side), how many quarter turns (clockwise) it is drawn at, whether
 /// it is mirrored left to right first, and its size against the shared
-/// `FILL` (1 for all but a glyph matched by eye to the SF Symbol it replaced).
+/// `FILL` (1 for all but a glyph matched by eye to the SF Symbol it replaced),
+/// and, for a product mark that keeps its own colour (0xRRGGBB), that colour
+/// in place of the surface's tint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
     pub svg: &'static str,
     pub turns: u8,
     pub mirror: bool,
     pub size: f32,
+    pub color: Option<u32>,
 }
 
 macro_rules! pierre {
@@ -38,6 +41,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             turns: 0,
             mirror: false,
             size: 1.,
+            color: None,
         })
     };
     let turned = |svg, turns| {
@@ -46,6 +50,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             turns,
             mirror: false,
             size: 1.,
+            color: None,
         })
     };
     match name {
@@ -57,6 +62,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             turns: 0,
             mirror: false,
             size: 16. / 14.,
+            color: None,
         }),
         "align.horizontal.left" => g(pierre!("AlignLeft")),
         "align.horizontal.center" => g(pierre!("AlignCenter")),
@@ -79,10 +85,11 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "composer.stop" => g(drawn!("stop")),
         // The model chooser's one small chevron.
         "composer.chevron" => g(pierre!("ChevronSm")),
-        // Provider marks beside the model's name, monochrome. OpenAI's
-        // blossom identifies ChatGPT (as in Settings, see its ATTRIBUTION);
-        // Anthropic asks permission before its artwork is bundled, so Claude
-        // and API or local models show Pierre's neutral sparkle.
+        // Provider marks beside the model's name. OpenAI's blossom
+        // identifies ChatGPT and OpenAI, monochrome (as in Settings, see its
+        // ATTRIBUTION); the Claude logo identifies Claude, Claude Code and
+        // Anthropic keys, in its own colour (SVGL's file, unchanged, same
+        // ATTRIBUTION); custom endpoints show Pierre's neutral sparkle.
         "provider.chatgpt" => Some(Glyph {
             svg: include_str!("../../app/assets/settings-agent-icons/openai-blossom.svg"),
             turns: 0,
@@ -90,16 +97,25 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             // The official file keeps clear space round the mark (about half
             // its square): drawn at the sparkle's size.
             size: 2.,
+            color: None,
         }),
-        // The Claude logo (`app/assets/settings-agent-icons`, see its
-        // attribution).
-        "provider.claude" => Some(Glyph {
-            svg: include_str!("../../app/assets/settings-agent-icons/claude.svg"),
+        "provider.claude" | "provider.anthropic" => Some(Glyph {
+            svg: include_str!("../../app/assets/settings-agent-icons/claude-ai-icon.svg"),
             turns: 0,
             mirror: false,
             size: 1.,
+            color: Some(0xD97757),
         }),
         "provider.compatible" => g(pierre!("Sparkle")),
+        // The Powermove harness: the app's own mark (assets/brand), filled
+        // in one ink, a touch smaller than its box as the sparkle is.
+        "provider.powermove" => Some(Glyph {
+            svg: drawn!("powermove"),
+            turns: 0,
+            mirror: false,
+            size: 0.8,
+            color: None,
+        }),
         "minus" => g(pierre!("Minus")),
         "xmark" => g(pierre!("X")),
         "ellipsis" => g(pierre!("Ellipsis")),
@@ -122,6 +138,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             turns: 0,
             mirror: true,
             size: 1.,
+            color: None,
         }),
         // Pierre's chevron points down; the others are it turned.
         "chevron.down" => g(pierre!("Chevron")),
@@ -212,8 +229,10 @@ pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
     Some(pixmap.pixels().iter().map(|p| p.alpha()).collect())
 }
 
-/// `glyph` tinted `color` (0xRRGGBB) as straight BGRA, GPUI's sprite format.
+/// `glyph` tinted `color` (0xRRGGBB), or in its own colour, as straight BGRA,
+/// GPUI's sprite format.
 pub fn tinted_bgra(glyph: Glyph, side: u32, color: u32) -> Option<Vec<u8>> {
+    let color = glyph.color.unwrap_or(color);
     let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
     Some(
         coverage(glyph, side)?
@@ -245,7 +264,9 @@ mod tests {
         "composer.chevron",
         "provider.chatgpt",
         "provider.claude",
+        "provider.anthropic",
         "provider.compatible",
+        "provider.powermove",
         "minus",
         "xmark",
         "ellipsis",

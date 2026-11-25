@@ -289,6 +289,14 @@ pub struct Metrics {
     pub palette_height: f32,
     pub field_menu_width: f32,
     pub field_menu_height: f32,
+    /// The Agent chooser popover (PM-727), measured on Capy's picker: the
+    /// harness rail, the model list, the model card, its height, and the
+    /// marks in the rail, the rows and the card.
+    pub chooser_rail: f32,
+    pub chooser_list: f32,
+    pub chooser_card: f32,
+    pub chooser_height: f32,
+    pub chooser_mark: f32,
     pub settings_width: f32,
     pub settings_height: f32,
     pub settings_sidebar: f32,
@@ -918,6 +926,11 @@ impl Tokens {
                 palette_height: 360.,
                 field_menu_width: 300.,
                 field_menu_height: 280.,
+                chooser_rail: 36.,
+                chooser_list: 320.,
+                chooser_card: 288.,
+                chooser_height: 360.,
+                chooser_mark: 16.,
                 settings_width: 760.,
                 settings_height: 520.,
                 settings_sidebar: 200.,

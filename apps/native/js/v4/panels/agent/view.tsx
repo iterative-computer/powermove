@@ -837,6 +837,86 @@ export function providerGroup(harness: string, model: string): string {
     ] ?? "Development"
   );
 }
+/** The model the chooser shows: the chosen one, else the one that runs
+ * when none is chosen (the provider's default, else the first listed). */
+export function harnessModel(s: Snapshot, n?: NativeFacts): string {
+  const chosen = s.settings.model;
+  if (chosen && chosen !== "default") return chosen;
+  const group = n?.modelGroups?.[s.settings.provider];
+  return group?.find(([, , on]) => on)?.[0] ?? s.catalog.models[0]?.[0] ?? "";
+}
+/** The mark the chooser shows for a harness's model: Claude Code's own
+ * under Claude Code, else its provider group's (OpenAI's blossom, a neutral
+ * sparkle for Anthropic keys and the rest). */
+function providerMark(harness: string, group: string): string {
+  if (harness === "claude") return "claude";
+  return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "anthropic" : "compatible";
+}
+/** A model label's context note ("Opus 5.5 (1M context)" → "1M"), when it
+ * names one. */
+export function modelContext(label: string): string | undefined {
+  return label.match(/\(([^)]*?)\s*context[^)]*\)/i)?.[1]?.trim() || undefined;
+}
+/** A model label without its context note. */
+export function modelBase(label: string): string {
+  return label.replace(/\s*\([^)]*context[^)]*\)/i, "");
+}
+/** How the chooser and the pill name a model: its base name, with a short
+ * context qualifier ("Opus 5.5 (1M)") when another listed model shares
+ * that base name, so two variants never read alike. */
+export function chooserName(models: [string, string][], id: string, label: string): string {
+  const base = modelBase(label);
+  const context = modelContext(label);
+  const shared = models.some(([other, text]) => other !== id && modelBase(text) === base);
+  return context && shared ? `${base} (${context})` : base;
+}
+/** The account heading a harness's model is listed under in the chooser. */
+export function accountHeading(harness: string, model: string, n?: NativeFacts): string {
+  if (harness === "chatgpt") return n?.accounts?.chatgpt ?? "ChatGPT";
+  if (harness === "claude") return n?.accounts?.claude ?? "Claude";
+  const source = model.split("/")[0] ?? "";
+  return (
+    ({ chatgpt: "ChatGPT", openai: "OpenAI API key", anthropic: "Anthropic API key", custom: "Custom" } as Record<
+      string,
+      string
+    >)[source] ?? "Development"
+  );
+}
+/** A chooser heading's small mark: its provider's. */
+function headingIcon(heading: string): string {
+  if (heading === "ChatGPT" || heading === "OpenAI API key") return "provider.chatgpt";
+  if (heading === "Claude" || heading === "Anthropic API key") return "provider.claude";
+  return "provider.compatible";
+}
+/** The chooser's card: the chosen model (or, signed out, the harness). */
+export interface ChooserCard {
+  title: string;
+  icon: string;
+  /** Facts the provider reports, as [label, value]. */
+  facts?: [string, string][];
+  /** A quiet line (where to sign in). */
+  note?: string;
+}
+/** Each harness's own mark in the chooser's rail. */
+function harnessMark(harness: string): string {
+  return harness === "aero" ? "powermove" : harness === "chatgpt" ? "chatgpt" : "claude";
+}
+/** The Powermove harness has no account for the chosen harness yet: the
+ * chooser leads to Settings › Providers. */
+export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
+  return (
+    harnessMode(s) &&
+    s.runId === null &&
+    (n.connection === "waiting" || (n.connection === "unavailable" && !!n.signedOut))
+  );
+}
+/** The one quiet line under a signed-out composer: what the chosen harness
+ * runs on, and where to sign in. One line at the narrowest dock. */
+export function signInCopy(harness: string): string {
+  if (harness === "chatgpt") return "Sign in to ChatGPT in Settings › Providers";
+  if (harness === "claude") return "Sign in to Claude in Settings › Providers";
+  return "Add a provider in Settings › Providers";
+}
 /** One row of the window's field menu (the kit's searchable menu). */
 export interface MenuOption {
   label: string;
@@ -850,8 +930,16 @@ export interface MenuOption {
   provider?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
   stays?: boolean;
-  /** Quiet status text, not a choice. */
+  /** Quiet status text, not a choice; with a provider, a greyed row in
+   * that provider's group (its `detail` on the right). */
   informational?: boolean;
+  /** Where a chooser row stands (harness, heading, model, connect,
+   * effort, action). */
+  kind?: string;
+  /** The row's small mark (a symbol name). */
+  icon?: string;
+  /** Shown greyed, never chosen. */
+  disabled?: boolean;
 }
 /** Opens the field menu at `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -860,7 +948,11 @@ export type Menu = (request: {
   placeholder: string;
   options: MenuOption[];
   /** Composer pop-ups track their button rather than the legacy field menu. */
-  picker?: "model" | "effort" | "access" | "add";
+  picker?: "model" | "effort" | "access" | "add" | "chooser";
+  /** The chooser's card. */
+  chooser?: ChooserCard;
+  /** The `id` of the element the chooser stands clear of (the composer). */
+  avoid?: string;
   search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
@@ -935,25 +1027,45 @@ function Trigger({
  * control. The name opens the model menu and the effort its own menu (the
  * window's composer menus); a model with no effort levels shows none. */
 function ModelChooser({
-  provider,
+  mark,
   model,
   effort,
   disabled,
   opened,
   openModels,
   openEffort,
+  signedOut = false,
 }: {
-  provider: string;
+  /** The provider mark before the name; none while signed out. */
+  mark: string | null;
   model: string;
   /** Null for a model with no effort levels. */
   effort: string | null;
   disabled: boolean;
   opened: string | null;
   openModels: (anchor: number) => void;
-  openEffort: (anchor: number) => void;
+  /** Absent: the pill is one hit target (the Powermove harness's chooser
+   * holds the effort). */
+  openEffort?: (anchor: number) => void;
+  /** The Powermove harness has no account: the name half reads "Connect a
+   * provider" and its menu offers the harnesses and Settings › Providers. */
+  signedOut?: boolean;
 }) {
   const name = t(disabled ? "colors.faint" : "colors.secondary");
   const quietInk = t(disabled ? "colors.faint" : "colors.muted");
+  const single = !openEffort;
+  const effortText = (
+    <text
+      style={{
+        flexShrink: 0,
+        fontSize: t("typography.reading"),
+        color: quietInk,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {effort}
+    </text>
+  );
   const chevron = (
     <div
       metadata={{ symbol: "composer.chevron" }}
@@ -1015,23 +1127,25 @@ function ModelChooser({
     <div id="agent-chooser" style={{ ...row, ...shrink }}>
       {part(
         "agent-model",
-        `Model, ${model}`,
-        "Model",
+        signedOut ? "Connect a provider" : `Model, ${model}${single && effort ? `, ${effort}` : ""}`,
+        signedOut ? "Harness and providers" : single ? "Harness, model and reasoning" : "Model",
         openModels,
         true,
-        effort === null,
+        single || effort === null,
         true,
         <>
-          <div
-            metadata={{ symbol: `provider.${provider}` }}
-            style={{
-              flexShrink: 0,
-              width: t("metrics.symbol_panel"),
-              height: t("metrics.symbol_panel"),
-              symbolSize: t("metrics.symbol_panel"),
-              color: name,
-            }}
-          />
+          {mark !== null && (
+            <div
+              metadata={{ symbol: `provider.${mark}` }}
+              style={{
+                flexShrink: 0,
+                width: t("metrics.symbol_panel"),
+                height: t("metrics.symbol_panel"),
+                symbolSize: t("metrics.symbol_panel"),
+                color: name,
+              }}
+            />
+          )}
           <text
             style={{
               ...shrink,
@@ -1043,10 +1157,13 @@ function ModelChooser({
           >
             {model.replace(/\s*\([^)]*context[^)]*\)/i, "")}
           </text>
-          {effort === null && chevron}
+          {single && effort !== null && effortText}
+          {(single || effort === null) && chevron}
         </>,
       )}
-      {effort !== null &&
+      {!single &&
+        effort !== null &&
+        openEffort &&
         part(
           "agent-effort",
           `Reasoning effort, ${effort}`,
@@ -1056,16 +1173,7 @@ function ModelChooser({
           true,
           false,
           <>
-            <text
-              style={{
-                flexShrink: 0,
-                fontSize: t("typography.reading"),
-                color: quietInk,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {effort}
-            </text>
+            {effortText}
             {chevron}
           </>,
         )}
@@ -2768,11 +2876,17 @@ function Composer({
 }) {
   const [dragging, setDragging] = useState(false);
   const working = s.runId !== null;
+  const harness = harnessMode(s);
   const available = n.connection === "connected" || working;
   const disabled = !available || s.composerDisabled;
+  // With the Powermove harness, signed out keeps the composer as it is: a
+  // draft can be written; the chooser and one line under it lead to
+  // Settings › Providers.
+  const signedOut = harnessSignedOut(s, n);
+  const fieldDisabled = harness ? s.composerDisabled : disabled;
   const acceptsFiles = !disabled && s.attachments.length < 6;
   const dropTarget = acceptsFiles && (dragging || n.dropTarget);
-  const placeholder = !available
+  const placeholder = !available && !harness
     ? "Connect an agent to start"
     : working
       ? "Add direction…"
@@ -2807,6 +2921,7 @@ function Composer({
     s.settings.model,
     named(s.catalog.providers, s.settings.provider),
   );
+  const shownModel = harnessModel(s, n);
   // The model's reasoning effort is its own picker beside the model's; a
   // model with no effort levels lists none, and the picker is not shown.
   const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
@@ -2826,38 +2941,102 @@ function Composer({
     provider: string;
     epoch: number;
   } | null>(null);
-  // With the Powermove harness (the development switch), the harness is
-  // its own segmented control and the menu lists only what the chosen one
-  // can run, grouped by provider (Settings › Providers), then the way there.
-  const harnessRows = (s: Snapshot): MenuOption[] => {
+  // With the Powermove harness (the development switch), the pill opens the
+  // chooser popover (PM-727, Capy's layout): the harnesses as a rail, the
+  // models the chosen one runs under their account headings, and a card for
+  // the chosen model (its context when the label names it, Reasoning as a
+  // track, Add a provider…). Signed out, the list and the card lead to
+  // Settings › Providers.
+  const chooserRequest = (s: Snapshot): { options: MenuOption[]; chooser?: ChooserCard } => {
+    const n = native.current;
     const harness = s.settings.provider;
-    const rows: MenuOption[] = pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
-      label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
-      detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
-      value: `model:${v}`,
-      checked: v === s.settings.model,
-      category: providerGroup(harness, v),
-      // The menu heads each provider's models with the provider's name.
-      provider: providerGroup(harness, v).toLowerCase(),
+    const harnessName = named(s.catalog.providers, harness);
+    const options: MenuOption[] = s.catalog.providers.map(([id, label]) => ({
+      kind: "harness",
+      label,
+      value: `provider:${id}`,
+      checked: id === harness,
+      icon: `provider.${harnessMark(id)}`,
+      stays: true,
     }));
-    if (harness === "aero")
+    const listed = pairs(s.catalog.models, s.settings.model);
+    // Nothing to choose: one compact pane with its one action (Try Again
+    // for a harness that couldn't start), and no card. The composer's own
+    // line says where to sign in.
+    const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
+    if (harnessSignedOut(s, n) || !listed.length || fault) {
+      // The compact card says it once: what's wrong, then its one button.
+      const status = fault
+        ? `${harnessName} couldn’t start.`
+        : n.findingModels && !harnessSignedOut(s, n)
+          ? "Finding models…"
+          : signInCopy(harness);
+      options.push({ kind: "status", label: status, value: "" });
+      options.push(
+        fault
+          ? { kind: "action", label: "Try Again", value: "retry:" }
+          : { kind: "action", label: "Connect a provider…", value: "providers:" },
+      );
+      return { options };
+    }
+    const shown = harnessModel(s, n);
+    const groups = new Map<string, MenuOption[]>();
+    for (const { v, label } of listed) {
+      const heading = accountHeading(harness, v, n);
+      const rows = groups.get(heading) ?? [];
       rows.push({
-        label: "Aerolite · Coming later",
-        value: "",
-        category: "Powermove",
-        provider: "powermove",
-        informational: true,
+        kind: "model",
+        label: chooserName(s.catalog.models, v, label),
+        value: `model:${v}`,
+        checked: v === shown,
+        icon: `provider.${providerMark(harness, providerGroup(harness, v))}`,
+        stays: true,
       });
-    if (native.current.findingModels && !rows.some((r) => r.value.startsWith("model:")))
-      rows.push({ label: "Finding models…", value: "", informational: true });
-    const order = ["OpenAI", "Anthropic", "Powermove", "Custom", "Development"];
-    const rank = (r: MenuOption) => order.indexOf(r.category ?? "") >>> 0;
-    rows.sort((a, b) => rank(a) - rank(b));
-    rows.push({ label: "Add a provider…", value: "providers:", category: " " });
-    return rows;
+      groups.set(heading, rows);
+    }
+    const order = ["ChatGPT", "OpenAI API key", "Claude", "Anthropic API key", "Custom", "Development"];
+    const rank = (heading: string) => order.indexOf(heading) >>> 0;
+    for (const heading of [...groups.keys()].sort((a, b) => rank(a) - rank(b)))
+      options.push({ kind: "heading", label: heading, value: "", icon: headingIcon(heading) }, ...groups.get(heading)!);
+    if (harness === "aero")
+      options.push({
+        kind: "heading",
+        label: "Aerolite",
+        detail: "Coming later",
+        value: "",
+        icon: "provider.powermove",
+        disabled: true,
+      });
+    const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
+    options.push(
+      ...efforts.map((value) => ({
+        kind: "effort",
+        label: effortLabel(value),
+        value: `effort:${value}`,
+        checked: value === s.settings.effort || (!efforts.includes(s.settings.effort) && value === s.catalog.defaultEffort),
+        default: value === s.catalog.defaultEffort || undefined,
+        stays: true,
+      })),
+    );
+    options.push({ kind: "add", label: "Add a provider…", value: "providers:" });
+    const label = named(s.catalog.models, shown, harnessName);
+    const context = modelContext(label);
+    // What the provider reports about this model and its account; nothing
+    // else (no usage or speed: none is reported or wired).
+    const facts: [string, string][] = [];
+    if (context) facts.push(["Context", context]);
+    facts.push(["Account", accountHeading(harness, shown, n)]);
+    return {
+      options,
+      chooser: {
+        title: modelBase(label),
+        icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
+        facts,
+      },
+    };
   };
   const modelRows = (s: Snapshot): MenuOption[] =>
-    harnessMode(s) ? harnessRows(s) : s.catalog.providers.flatMap(([provider, providerName]) => {
+    harnessMode(s) ? chooserRequest(s).options : s.catalog.providers.flatMap(([provider, providerName]) => {
       const active = provider === s.settings.provider;
       const group = native.current.modelGroups?.[provider];
       const category = provider === "compatible"
@@ -2883,6 +3062,13 @@ function Composer({
       return rows;
     });
   const modelSearch = (s: Snapshot) => s.catalog.models.length > 12;
+  /** The model menu's request, or the chooser's with the Powermove harness. */
+  const modelRequest = (s: Snapshot) => {
+    if (!harnessMode(s))
+      return { picker: "model" as const, search: modelSearch(s), placeholder: "Search models", options: modelRows(s) };
+    const { options, chooser } = chooserRequest(s);
+    return { picker: "chooser" as const, placeholder: "Search models", avoid: "agent-composer", options, chooser };
+  };
   const modelMenu = (
     anchor: number,
     update: boolean,
@@ -2890,10 +3076,7 @@ function Composer({
   ) =>
     void requestModelMenu({
       anchor,
-      picker: "model",
-      search: modelSearch(latest.current),
-      placeholder: "Search models",
-      options: modelRows(latest.current),
+      ...modelRequest(latest.current),
       ...(update ? { update } : {}),
     }).then((choice) => {
       if (menuEpoch.current !== epoch) return;
@@ -2907,6 +3090,13 @@ function Composer({
       if (kind === "providers") {
         setOpenPicker(null);
         send({ type: "openSettings" });
+      } else if (kind === "retry") {
+        setOpenPicker(null);
+        send({ type: "retryConnection" });
+      } else if (kind === "effort") {
+        // The chooser stays open on its Reasoning track.
+        if (value !== now.settings.effort) send({ type: "setModel", model: now.settings.model, effort: value });
+        modelMenu(anchor, true);
       } else if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
         awaiting.current = { anchor, provider: value, epoch };
@@ -2927,12 +3117,14 @@ function Composer({
       // The effort shown goes along: the new model keeps it when it
       // takes it, else runs at its own default.
       else if (kind === "model") {
-        setOpenPicker(null);
         send({
           type: "setModel",
           model: value,
           effort: now.settings.effort,
         });
+        // The chooser stays open: its card follows the chosen model.
+        if (harnessMode(now)) modelMenu(anchor, true);
+        else setOpenPicker(null);
       } else if (kind === "other") {
         const colon = value.indexOf(":");
         setOpenPicker(null);
@@ -2960,18 +3152,19 @@ function Composer({
     open.rows = rows;
     void menu?.({
       anchor: open.anchor,
-      picker: "model",
-      search: modelSearch(s),
-      placeholder: "Search models",
-      options,
+      ...modelRequest(s),
       update: true,
       refresh: true,
     });
   }, [
     s.settings.provider,
     s.settings.model,
+    s.settings.effort,
+    s.catalog.efforts,
     s.catalog.providers,
     s.catalog.models,
+    n.connection,
+    n.signedOut,
     n.findingModels,
     n.modelGroups,
     n.connectedModelName,
@@ -3080,16 +3273,20 @@ function Composer({
   // Send and Stop are one circle at the row's end: a dim disc while there
   // is nothing to send, the text ink once there is (or while a run can be
   // stopped). With a draft during a run, Stop steps back beside Send.
-  const circle = (lit: boolean): Style => ({
+  // Send and Stop are rounded rectangles of the pill's highlight box (its
+  // height and corner), so the row reads as one family (no circles).
+  function sendFace(lit: boolean): Style {
+    return {
     ...row,
     justifyContent: "center",
-    width: t("metrics.composer_control"),
-    height: t("metrics.composer_control"),
-    borderRadius: t("metrics.composer_control"),
+    width: t("metrics.hit"),
+    height: t("metrics.hit"),
+    borderRadius: t("metrics.inner_radius"),
     background: t(lit ? "colors.text" : "colors.composer_send_idle"),
     color: t(lit ? (n.presentation === "popover" ? "colors.raised" : "colors.floating") : "colors.muted"),
     symbolSize: t("metrics.composer_symbol"),
-  });
+    };
+  }
   const hitBox: Style = {
     ...target,
     ...row,
@@ -3099,11 +3296,13 @@ function Composer({
     height: t("metrics.hit"),
     borderRadius: t("metrics.hit"),
   };
-  return (
+  const composer = (
     <div
       id="agent-composer"
       role="group"
       label="Message composer"
+      // The chooser stands clear of the composer: its bounds are measured.
+      metadata={{ menuAnchor: true }}
       state={{ dropTarget }}
       data-pm-drop="files"
       onDragOver={() => {
@@ -3183,7 +3382,7 @@ function Composer({
         label="Message Powermove agent"
         title="Return to send · Shift-Return for a new line · / for shortcuts"
         value={s.draft.text}
-        disabled={disabled}
+        disabled={fieldDisabled}
         metadata={{
           placeholder,
           submitOnReturn: true,
@@ -3219,20 +3418,6 @@ function Composer({
           minWidth: t("metrics.hit"),
         }}
       />
-      {harnessMode(s) && (
-        <div id="agent-harness" style={{ ...row, height: t("metrics.control") }}>
-          <UI.SegmentedControl
-            id="agent-harness-choice"
-            label="Harness"
-            disabled={choicesLocked}
-            value={s.settings.provider}
-            options={s.catalog.providers.map(([id, label]) => ({ id, label }))}
-            onChange={(id) => {
-              if (id !== s.settings.provider) send({ type: "setProvider", provider: id });
-            }}
-          />
-        </div>
-      )}
       <div
         id="agent-options"
         // The row stands `space.xl` under the field (about 24 pt under the
@@ -3274,13 +3459,30 @@ function Composer({
           }}
         />
         <ModelChooser
-          provider={s.settings.provider}
-          model={modelName}
-          effort={efforts.length > 0 ? effortName : null}
+          mark={
+            signedOut
+              ? null
+              : harness
+                ? providerMark(s.settings.provider, providerGroup(s.settings.provider, shownModel))
+                : s.settings.provider
+          }
+          model={
+            signedOut
+              ? "Connect a provider"
+              : harness
+                ? chooserName(
+                    s.catalog.models,
+                    shownModel,
+                    named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
+                  )
+                : modelName
+          }
+          effort={!signedOut && efforts.length > 0 ? effortName : null}
           disabled={!menu || choicesLocked}
           opened={openPicker}
           openModels={openModels}
-          openEffort={openEffort}
+          openEffort={harness ? undefined : openEffort}
+          signedOut={signedOut}
         />
         <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
         {working && (
@@ -3294,7 +3496,7 @@ function Composer({
             onClick={stop}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.stop" }} style={circle(!hasDraft && !s.stopping)} />
+            <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
           </button>
         )}
         {(!working || hasDraft) && (
@@ -3317,12 +3519,13 @@ function Composer({
             }}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.send" }} style={circle(ready)} />
+            <div metadata={{ symbol: "composer.send" }} style={sendFace(ready)} />
           </button>
         )}
       </div>
     </div>
   );
+  return composer;
 }
 
 // ── The panel ────────────────────────────────────────────────────────────
@@ -3539,8 +3742,13 @@ export function AgentView({
   // While the connection is still being checked, what was shown stays
   // (the original keeps setup and composer from flashing).
   const gate = !connected && !working && n.connection !== "checking";
+  // With the Powermove harness the panel keeps its normal empty state and
+  // composer: signing in is the chooser's (Settings › Providers); only a
+  // fault is reported here.
+  const harness = harnessMode(s);
+  const fault = gate && harness && n.connection === "unavailable" && !n.signedOut;
   // Nothing to keep yet: the connection is the whole panel.
-  const setup = gate && empty && !s.draft.text && !s.attachments.length;
+  const setup = gate && !harness && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";
   const welcome = empty && !setup;
   const content = (
@@ -3638,7 +3846,15 @@ export function AgentView({
                 </text>
               </div>
             )}
-            {gate && <Gate s={s} n={n} send={send} compact={!setup} />}
+            {gate && !harness && <Gate s={s} n={n} send={send} compact={!setup} />}
+            {fault && (
+              <ErrorNotice
+                raw={n.reason || `${named(s.catalog.providers, s.settings.provider)} couldn’t start.`}
+                fallbackTitle={`${named(s.catalog.providers, s.settings.provider)} couldn’t start`}
+                retry={() => send({ type: "retryConnection" })}
+                id="agent-connect-error"
+              />
+            )}
             {!setup &&
               (n.loadingHistory ? (
                 <UI.ProgressRow label="Loading earlier messages…" />

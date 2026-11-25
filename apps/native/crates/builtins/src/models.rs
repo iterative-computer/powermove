@@ -827,6 +827,16 @@ impl Backend {
             .agent_link
             .accounts()
             .is_some_and(|a| a.finding_models(provider));
+        // The account Codex runs on, as the chooser heads its models (an API
+        // key or the ChatGPT sign-in).
+        let accounts: BTreeMap<&str, &str> = self
+            .native
+            .agent_link
+            .accounts()
+            .filter(|a| a.status(pm_agents::Provider::Chatgpt).key.is_some())
+            .map(|_| (pm_agents::Provider::Chatgpt.name(), "OpenAI API key"))
+            .into_iter()
+            .collect();
         let model_groups: BTreeMap<_, Vec<_>> = [
             pm_agents::Provider::Chatgpt,
             pm_agents::Provider::Claude,
@@ -855,7 +865,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"connectedModelName":connected_model_name,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"accounts":accounts,"connectedModelName":connected_model_name,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

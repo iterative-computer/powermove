@@ -44,6 +44,12 @@ bars, knockouts by mask, no thinner strokes or outlines.
 - `plus-thin.svg`: the Agent composer's "+", the same plus in Pierre's 1.5 px line, drawn
   large and light beside the draft.
 - `stop.svg`: the composer's Stop inside its circle, a 10 px square with 1.5 px corners.
+- `powermove.svg`: the Powermove harness's mark in the Agent model menu, the brand mark
+  (`assets/brand`) filled in one ink, on its own 141 × 116 box.
+
+Product marks for the Agent chooser come from `apps/native/crates/app/assets/settings-agent-icons`
+(see its `ATTRIBUTION.md`): OpenAI's blossom, drawn in the surface's ink, and SVGL's Claude logo
+(unchanged), drawn in its own colour.
 
 The composer's Send arrow is Pierre's `IconArrow` turned a quarter, its chevron
 `IconChevronSm`, and the provider mark beside a model's name Pierre's `IconSparkle`

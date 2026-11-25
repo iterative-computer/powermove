@@ -1,4 +1,6 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "agent_chooser.rs"]
+pub mod agent_chooser;
 #[path = "coedit_presence.rs"]
 mod coedit_presence;
 #[path = "flowchart.rs"]
@@ -2874,15 +2876,18 @@ pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) 
         return None;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
-    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    // Black at the glyph's coverage, premultiplied: a template takes its
+    // shape. A mark with its own colour is drawn in it and never tinted.
+    let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+    let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
     for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
-        p.copy_from_slice(&[0, 0, 0, a]);
+        p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
     }
     let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
-    image.setTemplate(true);
+    image.setTemplate(glyph.color.is_none());
     image.setAccessibilityDescription(Some(&NSString::from_str(label)));
     Some(image)
 }
@@ -3784,6 +3789,8 @@ pub struct Host {
     pub canvas_focus: Cell<bool>,
     pub studio_flying: Rc<Cell<bool>>,
     flowchart: Option<flowchart::Popover>,
+    /// The Agent composer's chooser while it is open (PM-727).
+    chooser: Option<agent_chooser::Chooser>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
     viewer_raster: Option<(SlotGeometry, f64, [f64; 2])>,
@@ -4022,6 +4029,7 @@ impl Host {
             canvas_focus: Cell::new(false),
             studio_flying: Rc::new(Cell::new(false)),
             flowchart: None,
+            chooser: None,
             layer,
             viewer_transform: None,
             viewer_raster: None,
@@ -4283,6 +4291,17 @@ impl Host {
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
                         let mut h = host.borrow_mut();
+                        // The chooser keeps its keys (⌘1…⌘9, the arrows,
+                        // Return, Escape) from the editor's keymap; typing
+                        // goes on to its search field.
+                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.owns_event(e)) {
+                            let chooser_key = key.starts_with("cmd+")
+                                || matches!(key.as_str(), "escape" | "up" | "down" | "enter");
+                            if chooser_key && chooser.key(&key) {
+                                return std::ptr::null_mut();
+                            }
+                            return event.as_ptr();
+                        }
                         if h.flowchart.as_ref().is_some_and(|p| {
                             p.owns_event(e)
                                 || (h.flowchart_open() && e.windowNumber() == window.windowNumber())

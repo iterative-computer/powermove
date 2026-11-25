@@ -12,12 +12,20 @@ POST /control merges test knobs: refresh_barrier (hold refreshes until that many
 arrived, 3 s at most), refresh_delay (seconds before a refresh answers),
 hold_seconds (before a Codex reply), account (the account a sign-in gets).
 Every request's headers and body are kept in /stats "raw" for leak checks."""
-import base64, hashlib, json, sys, threading, time, urllib.parse
+import base64, hashlib, json, os, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
 TTL = int(sys.argv[2]) if len(sys.argv) > 2 else 3600
 OPENAI_KEY_PREFIX, ANTHROPIC_KEY_PREFIX, CUSTOM_KEY = "sk-fake-openai-", "sk-ant-fake-", "custom-fake-key"
+# PM_FAKE_RICH_MODELS=1: key model lists shaped like real ones (families with reasoning levels, enough rows to
+# overflow a picker, a context variant), for on-screen checks. Off by default: tests assert the short lists.
+RICH = os.environ.get("PM_FAKE_RICH_MODELS") == "1"
+RICH_OPENAI = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6", "gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-pro",
+               "gpt-5.3", "gpt-5.2", "o4-mini", "o3", "gpt-oss-120b", "text-embedding-fake"]
+RICH_ANTHROPIC = [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"},
+                  {"id": "claude-opus-5-5-1m", "display_name": "Claude Opus 5.5 (1M context)"},
+                  {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"}]
 ACCOUNT = "acct-fake-1"
 lock = threading.Lock()
 codes, refresh, used, access = {}, {}, set(), {}
@@ -165,10 +173,14 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/openai/v1/models":
             if not self.bearer().startswith(OPENAI_KEY_PREFIX):
                 return self.reply(401, {"error": {"message": "bad key"}})
+            if RICH:
+                return self.reply(200, {"object": "list", "data": [{"id": i} for i in RICH_OPENAI]})
             return self.reply(200, {"object": "list", "data": [{"id": "gpt-fake-key"}, {"id": "text-embedding-fake"}]})
         if url.path == "/anthropic/v1/models":
             if not (self.headers.get("x-api-key") or "").startswith(ANTHROPIC_KEY_PREFIX):
                 return self.reply(401, {"error": {"message": "bad key"}})
+            if RICH:
+                return self.reply(200, {"data": RICH_ANTHROPIC, "has_more": False})
             return self.reply(200, {"data": [{"id": "claude-fake-opus", "display_name": "Claude Fake Opus"}], "has_more": False})
         if url.path == "/custom/v1/models":
             return self.reply(200, {"object": "list", "data": [{"id": "custom-fake-model"}]})

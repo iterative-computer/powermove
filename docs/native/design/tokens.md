@@ -82,6 +82,11 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
 | `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
+| `metrics.chooser_card` | Agent chooser model card width | 288 | 288 | 288 | 288 |
+| `metrics.chooser_height` | Agent chooser height | 360 | 360 | 360 | 360 |
+| `metrics.chooser_list` | Agent chooser model list width | 320 | 320 | 320 | 320 |
+| `metrics.chooser_mark` | Agent chooser mark size (rail, rows, card) | 16 | 16 | 16 | 16 |
+| `metrics.chooser_rail` | Agent chooser harness rail width | 36 | 36 | 36 | 36 |
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
 | `metrics.color_picker_plane_height` | Height of the colour saturation plane and vertical tracks | 256 | 256 | 256 | 256 |
 | `metrics.color_picker_plane_width` | Width of the colour saturation and brightness plane | 230 | 230 | 230 | 230 |

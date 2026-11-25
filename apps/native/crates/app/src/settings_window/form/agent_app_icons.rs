@@ -21,7 +21,7 @@ const OPENAI: Mark = Mark {
     scale: 1.,
 };
 const CLAUDE: Mark = Mark {
-    svg: include_bytes!("../../../assets/settings-agent-icons/claude.svg"),
+    svg: include_bytes!("../../../assets/settings-agent-icons/claude-ai-icon.svg"),
     scale: 2. / 3.,
 };
 const OPENCODE: Mark = Mark {
@@ -37,8 +37,9 @@ fn resolve<T>(
 ) -> Option<T> {
     // See the asset attribution for the product marks that require prior approval.
     let (apps, mark, fallback): (&[&str], Option<&Mark>, _) = match id {
-        // The bundled Claude logo, ahead of the installed app's icon.
-        "claude-code" | "claude-desktop" => (&[], Some(&CLAUDE), "terminal"),
+        // Claude Code is a command-line tool: the Claude logo, not the app's icon.
+        "claude-code" => (&[], Some(&CLAUDE), "terminal"),
+        "claude-desktop" => (&["Claude"], Some(&CLAUDE), "terminal"),
         "codex" => (&["Codex", "ChatGPT"], Some(&OPENAI), "terminal"),
         "gemini-cli" => (&["Gemini"], None, "terminal"),
         "opencode" => (&["OpenCode"], Some(&OPENCODE), "terminal"),
@@ -195,24 +196,12 @@ pub(super) fn capture_app_icon(name: &str) -> Option<Retained<NSImage>> {
 mod tests {
     use super::*;
 
-    const CLIENTS: [(&str, &str); 3] = [
+    const CLIENTS: [(&str, &str); 4] = [
         ("codex", "Codex"),
+        ("claude-desktop", "Claude"),
         ("gemini-cli", "Gemini"),
         ("opencode", "OpenCode"),
     ];
-
-    #[test]
-    fn claude_clients_show_the_claude_logo() {
-        for id in ["claude-code", "claude-desktop"] {
-            let image = resolve(
-                id,
-                |_| panic!("Claude shows its logo, not the installed app's icon"),
-                |mark| Some(mark.svg),
-                |_| panic!("the logo comes before the symbol"),
-            );
-            assert!(image.is_some_and(|image| image == CLAUDE.svg), "{id}");
-        }
-    }
 
     #[test]
     fn installed_app_icon_wins_for_each_known_client() {
@@ -251,6 +240,8 @@ mod tests {
         for (id, apps, expected) in [
             ("codex", &["Codex", "ChatGPT"][..], OPENAI.svg),
             ("opencode", &["OpenCode"][..], OPENCODE.svg),
+            ("claude-code", &[][..], CLAUDE.svg),
+            ("claude-desktop", &["Claude"][..], CLAUDE.svg),
         ] {
             let mut lookups = Vec::new();
             let image = resolve(

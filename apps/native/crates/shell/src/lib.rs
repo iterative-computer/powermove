@@ -66,6 +66,8 @@ pub mod workspace;
 pub use macos::open_editor_tab;
 pub use native::{front_restoring, restore_arranging, set_front_restoring, window_shown};
 #[cfg(target_os = "macos")]
+pub use native::agent_chooser::Spec as ChooserSpec;
+#[cfg(target_os = "macos")]
 pub use native::{
     bring_forward, install_menus, quit_blocker_window, set_quit_hook, show_in_tab_group,
 };

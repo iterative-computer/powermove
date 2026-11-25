@@ -91,6 +91,8 @@ export interface Snapshot {
     models: [string, string][];
     providers: [string, string][];
     efforts: string[];
+    /** The effort the current model runs at when none is chosen. */
+    defaultEffort?: string;
   };
   slash: {
     visible: boolean;
@@ -108,6 +110,9 @@ export interface NativeFacts {
   findingModels?: boolean;
   /** The discovered choices for each provider, including its default. */
   modelGroups?: Record<string, [id: string, label: string, isDefault: boolean][]>;
+  /** The account each agent harness runs on, as the chooser heads its
+   * models ("ChatGPT", "OpenAI API key", …). */
+  accounts?: Record<string, string>;
   /** The configured compatible model's display name for its menu heading. */
   connectedModelName?: string | null;
   /** What to tell the user when `connection` isn't "connected". */
