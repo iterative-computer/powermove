@@ -1,7 +1,8 @@
 # Powermove fork of fx (libfx core)
 
 Upstream: https://github.com/vercel-labs/fx
-Pinned commit: `8fbe9b8` (upstream version 0.0.18).
+Pinned: tag `v0.0.18`, commit `6196071b3` (2026-11-25; re-pinned from the
+pre-release `8fbe9b8` with `tools/sync.sh`, every patch merged unchanged).
 License: Apache-2.0, retained in `LICENSE`; upstream's third-party notices in
 `THIRD_PARTY_NOTICES.md`. Every file we changed or added carries a
 "Powermove notice"; nothing here has been submitted upstream.
@@ -22,6 +23,7 @@ core and nothing else.
 | `test-support/fake-inference-server.zig` | Upstream's `benchmarks/libfx/fake-inference-server.zig`, verbatim: the deterministic fake model for tests and benchmarks. |
 | `toolchain.toml` | The pinned Zig (0.17.1) with the tarball's sha256 from ziglang.org's index. |
 | `install-zig.sh` | Downloads that tarball, checks the sha256, unpacks it into `$PM_ZIG_HOME`. |
+| `tools/sync.sh` | Re-pins to another upstream commit: our patch series merged three ways onto it, then the closure re-derived (below). |
 | `tools/derive-closure.sh`, `tools/closure.txt` | Derives the closure from the build graph and refreshes `src/` to it. |
 | `tools/extract-core-runtime.py` | Copies the N-API entry's runtime pieces verbatim into `src/libfx_core_runtime.zig`. |
 
@@ -29,7 +31,7 @@ Omitted from upstream: the fx CLI's and terminal UI's entry points
 (`src/main.zig` and the files only they reach), the WebAssembly and Node-API
 entries, the SDK JavaScript (`sdk/`), benchmarks, examples, e2e and TLA+
 tests, fuzzing and PGO build steps, scripts and CI. The closure still holds
-85 files under `src/ui/`: shared code `@import`s them, and Zig parses every
+85 of its 722 upstream files under `src/ui/`: shared code `@import`s them, and Zig parses every
 file an import names, so they are on disk though no C ABI path runs them. The TLA+ specs stay upstream
 (`tests/tla/sdk/*.tla`); they are the steering, journal and image contract our
 ABI keeps (section 2.7).
@@ -79,8 +81,8 @@ at the commit, lays our files over it, builds `capi` there with a fresh cache,
 and reads the compile's cache manifest, which lists every source file the
 compiler read. Zig parses every file an `@import` names, whether or not its
 code is used, so that list is exactly what the build needs on disk. The script
-writes it to `tools/closure.txt` and makes `src/` exactly the closure plus our
-files. Every manifest of the fresh cache that names the C entry is read, in
+writes its upstream files (the 11 we patched included) to `tools/closure.txt` and makes `src/` exactly the closure plus our
+files; a file with a notice is never overwritten. Every manifest of the fresh cache that names the C entry is read, in
 sorted order, and the script fails if they list different sources. Building the crate from the pruned tree proves it complete.
 
 ## Powermove patches
@@ -119,6 +121,16 @@ sorted order, and the script fails if they list different sources. Building the 
 
 ## Upstream tracking
 
-Re-pin by running `tools/derive-closure.sh` at the new commit after
-re-applying our patches (`sync.sh`, milestone 2, design 2.7), then
-`tools/extract-core-runtime.py` against the new `napi_core_main.zig`.
+    tools/sync.sh ~/Developer/pm-durable/harness/refs/fx <tag or commit>
+
+reads the pin from `tools/closure.txt`, checks that every upstream file
+without a notice is upstream's at the pin, exports our series (the 11 patched
+upstream files against the pin) to `series.diff` in a temporary folder,
+merges each patched file with `git merge-file --diff3` (ours, the pin, the new
+commit) in place and stops on a conflict with the markers left; after
+resolving, `tools/sync.sh --continue …` re-derives the closure (which builds
+it), re-extracts `src/libfx_core_runtime.zig` from the new
+`napi_core_main.zig`, refreshes `LICENSE`, `THIRD_PARTY_NOTICES.md` and the
+fake server, and names any change to upstream's `build.zig`/`build.zig.zon`
+(ours are trimmed by hand). Then the Aero gates must pass before the pin
+lands, and the pin and closure count above are updated.
