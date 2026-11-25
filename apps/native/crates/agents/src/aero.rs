@@ -6,7 +6,9 @@ use crate::{
     transport::{self, Action, Handle},
 };
 use pm_aero_core::{
-    Config, Hook, HookAnswer, HookKind, Host, JournalAppend, Runtime, StopReason, Tool, ToolLease,
+    Config, HookAnswer, HookKind, HookKinds, HookLease, Host, JournalAppend, OpenArgs, Runtime,
+    StopReason, Tool, ToolLease,
+    journal::{JournalWriter, SessionFolder, StoreError},
 };
 use serde_json::{Value, json};
 use std::{
@@ -226,40 +228,40 @@ type End = (&'static str, String);
 
 enum Callback {
     Tool(ToolLease),
-    Append(journal::Append),
-    PreTool { question: u64, name: String },
-    Stop { question: u64, continuations: u32 },
+    Hook(HookLease),
 }
 
-struct Mailbox(mpsc::Sender<Callback>);
+/// The core's callbacks only enqueue (header rule): the drive loop answers.
+struct Mailbox {
+    calls: mpsc::Sender<Callback>,
+    journal: Arc<JournalWriter>,
+}
 impl Host for Mailbox {
     fn tool_call(&self, tool: ToolLease) {
-        let _ = self.0.send(Callback::Tool(tool));
-    }
-    fn hook(&self, hook: Hook<'_>) -> bool {
-        let ask = match hook.kind {
-            HookKind::PreTool => Callback::PreTool {
-                question: hook.question,
-                name: hook.name.into(),
-            },
-            HookKind::Stop => Callback::Stop {
-                question: hook.question,
-                continuations: hook.continuations,
-            },
-        };
-        self.0.send(ask).is_ok()
+        let _ = self.calls.send(Callback::Tool(tool));
     }
     fn journaled(&self) -> bool {
         true
     }
     fn journal_append(&self, append: JournalAppend<'_>) {
-        let _ = self.0.send(Callback::Append(journal::Append {
-            id: append.append,
-            start: append.first_seq,
-            end: append.last_seq,
-            events: append.events_json.into(),
-        }));
+        self.journal.enqueue(&append);
     }
+    fn hook_kinds(&self) -> HookKinds {
+        HookKinds {
+            pre_tool: true,
+            stop: true,
+        }
+    }
+    fn hook(&self, question: HookLease) {
+        let _ = self.calls.send(Callback::Hook(question));
+    }
+}
+
+fn answer_hook(question: HookLease, answer: HookAnswer<'_>) -> Result<(), String> {
+    question
+        .answer(answer)
+        .map(|_| ())
+        .map_err(|(_, e)| e.to_string())
 }
 
 struct Approval {
@@ -274,25 +276,38 @@ enum Work {
     Check,
 }
 
-fn wait_open(runtime: &mut Runtime, deadline: Instant) -> Result<(), String> {
+/// Waits for the session `request` opened; true when a turn the last host
+/// left open can resume.
+fn wait_open(
+    runtime: &mut Runtime,
+    request: u64,
+    (model, effort): (&str, &str),
+    deadline: Instant,
+) -> Result<bool, String> {
     let remote = runtime.remote();
     while Instant::now() < deadline {
-        // Opening with an effort looks the model up in the provider's
-        // catalog. A 404 makes the core use its built-in capabilities.
+        // Opening looks the model up in the provider's catalog.
         if let Some(fetch) = runtime.fetches.take().map_err(|e| e.to_string())? {
             if fetch.purpose != pm_aero_core::Purpose::Catalog {
                 return Err("Aero's core asked for the model before its session opened.".into());
             }
-            model::refuse_catalog(remote, fetch.fetch);
+            model::answer_catalog(remote, fetch.fetch, model, effort);
         }
         for event in runtime.events.drain().map_err(|e| e.to_string())? {
             match event {
-                pm_aero_core::Event::SessionOpened { .. } => return Ok(()),
+                pm_aero_core::Event::SessionOpened {
+                    request: opened,
+                    resumable,
+                    ..
+                } if opened == request => return Ok(resumable),
+                pm_aero_core::Event::ImagesNeeded { .. } => {
+                    return Err("Aero's saved session names images it no longer has.".into());
+                }
                 pm_aero_core::Event::RequestDone {
+                    request: done,
                     message,
                     outcome: Err(error),
-                    ..
-                } => {
+                } if done == request => {
                     return Err(format!(
                         "Aero couldn't open the session: {error}. {message}"
                     ));
@@ -340,7 +355,13 @@ fn drive(
     let err = |e: pm_aero_core::Error| e.to_string();
     let run = request.run;
     let deadline = Instant::now() + options.wall;
-    let mut journal = journal::Journal::open(scope)?;
+    let journal = journal::Journal::new(scope);
+    let folder = SessionFolder::open(scope).map_err(|error| match error {
+        StoreError::Fenced => "This Aero session is already running elsewhere.".to_owned(),
+        StoreError::Io(error) => format!("Aero's session storage failed: {error}"),
+    })?;
+    let writer = JournalWriter::start(folder).map_err(|e| e.to_string())?;
+    let stored = SessionFolder::load(scope).map_err(|e| e.to_string())?;
     let mut session = open(scope)?;
     let context = session.context()?;
     let instructions = if options.skip_topics {
@@ -354,10 +375,12 @@ fn drive(
     };
     let registry = tools(request.access);
     let (tx, callbacks) = mpsc::channel();
+    let model_name = request.model.as_deref().unwrap_or("fake/model");
+    let effort = request.effort.as_deref().unwrap_or("");
     let mut runtime = Runtime::create(
         &Config {
-            model: request.model.as_deref().unwrap_or("fake/model"),
-            effort: request.effort.as_deref().unwrap_or(""),
+            model: model_name,
+            effort,
             endpoint_url: options.model.endpoint(),
             instructions: &instructions,
             workspace_root: scope.to_str().ok_or("Aero needs a UTF-8 session path.")?,
@@ -368,11 +391,27 @@ fn drive(
             max_stop_continuations: options.continuations,
             ..Config::default()
         },
-        Arc::new(Mailbox(tx)),
+        Arc::new(Mailbox {
+            calls: tx,
+            journal: writer.clone(),
+        }),
     )
     .map_err(err)?;
-    journal.open_core(&mut runtime, id)?;
-    wait_open(&mut runtime, deadline)?;
+    writer.bind(runtime.remote());
+    let opening = runtime
+        .open(&OpenArgs {
+            session_id: if stored.journal_json.is_empty() {
+                id
+            } else {
+                ""
+            },
+            journal_json: &stored.journal_json,
+            checkpoint: &stored.checkpoint,
+            inputs_durable: true,
+            image_store: false,
+        })
+        .map_err(err)?;
+    let resumable = wait_open(&mut runtime, opening, (model_name, effort), deadline)?;
     let emit = |event| {
         events
             .send(event)
@@ -461,8 +500,24 @@ fn drive(
     })?;
     let prompt = journal.context_prompt(&context, &request.prompt)?;
     let id_prompt = format!("{run}-prompt");
+    // The same run launched again (a retry after a crash) is the open turn.
+    let retried = journal.has_input(&id_prompt);
     journal.store_input(&id_prompt, &prompt)?;
-    let mut turn = runtime.prompt(&prompt, &id_prompt).map_err(err)?;
+    // A turn the last host left open (a crash, a kill) finishes first; the
+    // core tells the model about a call that may have half-run.
+    let mut queued = None;
+    let mut turn = if resumable {
+        emit(Event::Progress {
+            run: run.clone(),
+            text: "Resuming the interrupted turn…".into(),
+        })?;
+        if !retried {
+            queued = Some((id_prompt, prompt));
+        }
+        runtime.resume().map_err(err)?
+    } else {
+        runtime.prompt(&prompt, &id_prompt).map_err(err)?
+    };
     let mut steer_count = 0u64;
     let mut steers = BTreeMap::new();
     let mut text = String::new();
@@ -471,12 +526,9 @@ fn drive(
     let mut allowed = HashSet::new();
     let mut opened = HashSet::new();
     let mut stopped = None;
-    let mut settled = None;
-    let mut stop_hook = None;
-    let mut hook_checked = false;
+    let mut stop_hook: Option<HookLease> = None;
     let mut gate_exhausted = None;
     let mut outputs = BTreeMap::new();
-    let mut continuations = 0;
     let mut fetch_workers = Vec::new();
     let remote = runtime.remote();
     let mut outcome = None;
@@ -569,29 +621,24 @@ fn drive(
                 Callback::Tool(tool) => {
                     let _ = tool.answer("The turn was stopped.", true);
                 }
-                Callback::Append(append) => journal.append(remote, append)?,
-                Callback::PreTool { question, name } => {
-                    let answer =
-                        if registry.iter().any(|tool| tool.name == name) && stopped.is_none() {
-                            HookAnswer::Allow
-                        } else {
-                            HookAnswer::Block(
-                                "This tool is outside this run's Access or the turn was cancelled.",
-                            )
-                        };
-                    remote.hook_answer(question, answer).map_err(err)?;
-                }
-                Callback::Stop {
-                    question,
-                    continuations,
-                } => {
-                    hook_checked = true;
-                    if skip_gate || stopped.is_some() {
-                        remote
-                            .hook_answer(question, HookAnswer::Allow)
-                            .map_err(err)?;
+                Callback::Hook(question) if question.kind() == HookKind::PreTool => {
+                    // Access is enforced here, deterministically, not in the prompt.
+                    let answer = if stopped.is_some() {
+                        HookAnswer::Block("The turn was stopped.")
+                    } else if registry.iter().any(|tool| tool.name == question.name()) {
+                        HookAnswer::Allow
                     } else {
-                        stop_hook = Some((question, continuations));
+                        HookAnswer::Block(
+                            "This tool is outside this run's Access. Ask the user to change Access.",
+                        )
+                    };
+                    answer_hook(question, answer)?;
+                }
+                Callback::Hook(question) => {
+                    if skip_gate || stopped.is_some() {
+                        answer_hook(question, HookAnswer::Allow)?;
+                    } else {
+                        stop_hook = Some(question);
                         tool_tx
                             .send(Work::Check)
                             .map_err(|_| "Aero's completion check worker stopped.")?;
@@ -628,12 +675,16 @@ fn drive(
                 .collect();
             let id = format!("{}/{}", call.turn(), call.model_call_id());
             outputs.insert(id, crate::trace::truncate(&result.text, 1000));
-            call.answer_images_or_text(&result.text, &image_refs, failed)
-                .map_err(err)?;
+            // An image the core cannot use is answered as an error by the
+            // wrapper; the model reads why.
+            match call.answer_with(&result.text, &image_refs, failed) {
+                Ok(_) | Err(pm_aero_core::Error::Invalid) => {}
+                Err(error) => return Err(err(error)),
+            }
         }
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {
-                model::refuse_catalog(remote, fetch.fetch);
+                model::answer_catalog(remote, fetch.fetch, model_name, effort);
             } else {
                 let model = options.model.clone();
                 let id = fetch.fetch;
@@ -718,26 +769,20 @@ fn drive(
                 _ => {}
             }
         }
-        if let Some((message, next)) = follow_up.filter(|_| {
-            stopped.is_none()
-                && outcome
-                    .as_ref()
-                    .is_some_and(|(reason, _)| *reason == "completed")
-        }) {
+        let completed = stopped.is_none()
+            && outcome
+                .as_ref()
+                .is_some_and(|(reason, _)| *reason == "completed");
+        // A returned steer, or the person's prompt after a resumed turn.
+        let next = if completed {
+            follow_up.or_else(|| queued.take())
+        } else {
+            None
+        };
+        if let Some((message, next)) = next {
             text.clear();
             turn = runtime.prompt(&next, &message).map_err(err)?;
             outcome = None;
-        }
-        if outcome
-            .as_ref()
-            .is_some_and(|(reason, _)| *reason == "completed")
-            && !skip_gate
-            && !hook_checked
-        {
-            settled = outcome.take();
-            tool_tx
-                .send(Work::Check)
-                .map_err(|_| "Aero's completion check worker stopped.")?;
         }
         if let Ok(failures) = checks.try_recv() {
             let prompt = || {
@@ -747,41 +792,22 @@ fn drive(
                 )
             };
             let not_done = || format!("Not done: {}", failures.join(" "));
-            if let Some((question, count)) = stop_hook.take() {
+            if let Some(question) = stop_hook.take() {
                 if failures.is_empty() {
-                    remote
-                        .hook_answer(question, HookAnswer::Allow)
-                        .map_err(err)?;
-                } else if count < options.continuations {
-                    report(json!({"type":"gate-continuation","failures":failures}));
-                    text.clear();
-                    remote
-                        .hook_answer(question, HookAnswer::Continue(&prompt()))
-                        .map_err(err)?;
-                } else {
-                    gate_exhausted = Some(not_done());
-                    remote
-                        .hook_answer(question, HookAnswer::Allow)
-                        .map_err(err)?;
-                }
-            } else if let Some(candidate) = settled.take() {
-                // ABI 2a does not call Stop; maintain the visible completion
-                // check with a bounded follow-up until ABI 2b is linked.
-                if failures.is_empty() {
-                    outcome = Some(candidate);
-                } else if continuations < options.continuations && stopped.is_none() {
-                    continuations += 1;
+                    answer_hook(question, HookAnswer::Allow)?;
+                } else if question.continuations() < options.continuations {
                     report(json!({"type":"gate-continuation","failures":failures}));
                     emit(Event::Progress {
                         run: run.clone(),
                         text: "Checking and repairing the result…".into(),
                     })?;
-                    let message = format!("{run}-gate-{continuations}");
-                    let prompt = prompt();
-                    journal.store_input(&message, &prompt)?;
-                    turn = runtime.prompt(&prompt, &message).map_err(err)?;
+                    text.clear();
+                    answer_hook(question, HookAnswer::Continue(&prompt()))?;
                 } else {
-                    outcome = Some(("gate-exhausted", not_done()));
+                    // The core asks once more after the last continuation;
+                    // that ask can only end the turn.
+                    gate_exhausted = Some(not_done());
+                    answer_hook(question, HookAnswer::Allow)?;
                 }
             }
         }

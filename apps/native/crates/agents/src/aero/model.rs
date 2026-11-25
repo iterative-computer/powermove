@@ -61,9 +61,22 @@ impl Model {
     }
 }
 
-pub(super) fn refuse_catalog(remote: Remote, fetch: u64) {
-    let _ = remote.fetch_status(fetch, 404, None);
-    let _ = remote.fetch_finish(fetch, true);
+/// The fake and replay edges answer the catalog GET here, never on the
+/// network: the session's model with tool use and vision, so tool images
+/// reach it (the core refuses images to a model without vision), and the
+/// session's effort as its one reasoning option (the core refuses an effort
+/// the model does not list).
+pub(super) fn answer_catalog(remote: Remote, fetch: u64, model: &str, effort: &str) {
+    let mut entry = json!({"id":model,"type":"language","tags":["tool-use","vision"],
+        "context_window":200000,"max_tokens":8000});
+    if !effort.is_empty() {
+        entry["tags"] = json!(["reasoning", "tool-use", "vision"]);
+        entry["reasoning_options"] = json!([{"type":"effort","values":[effort]}]);
+    }
+    let catalog = json!({"object":"list","data":[entry]});
+    let ok = status(remote, fetch, 200)
+        .and_then(|_| push(remote, fetch, catalog.to_string().as_bytes()));
+    let _ = remote.fetch_finish(fetch, ok.is_ok());
 }
 
 pub(super) fn deliver(model: &Model, remote: Remote, fetch: u64, url: &str, body: &[u8]) {
@@ -273,18 +286,24 @@ pub fn evaluate(
         instructions: "You are an independent evaluator. Use only the provided result, captures and rubric. Score each criterion with specific evidence. Return the evaluation as JSON.",
         ..Config::default()
     }, Arc::new(NoTools)).map_err(err)?;
-    runtime.open_session("").map_err(err)?;
+    let opening = runtime.open_session("").map_err(err)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    wait_open(&mut runtime, deadline)?;
+    wait_open(&mut runtime, opening, ("fake/model", ""), deadline)?;
     runtime
-        .prompt_images(evidence, "evaluation", images)
+        .prompt_input(
+            &pm_aero_core::Input {
+                text: evidence,
+                images,
+            },
+            "evaluation",
+        )
         .map_err(err)?;
     let remote = runtime.remote();
     let mut text = String::new();
     while Instant::now() < deadline {
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {
-                refuse_catalog(remote, fetch.fetch);
+                answer_catalog(remote, fetch.fetch, "fake/model", "");
             } else {
                 let (id, url, body) = (fetch.fetch, fetch.url.to_owned(), fetch.body.to_vec());
                 let model = model.clone();

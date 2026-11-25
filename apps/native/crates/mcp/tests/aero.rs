@@ -66,14 +66,28 @@ impl Fixture {
         model: Model,
         build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
     ) -> (Handle, mpsc::Receiver<Value>) {
+        self.start_at(
+            "cut",
+            self.profile.path().join("aero/sessions/cut"),
+            model,
+            build,
+        )
+    }
+
+    fn start_at(
+        &self,
+        run: &str,
+        scope: std::path::PathBuf,
+        model: Model,
+        build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
+    ) -> (Handle, mpsc::Receiver<Value>) {
         let host = self.host.clone();
         let project = self.project.clone();
         let revision = self.revision;
-        let scope = self.profile.path().join("aero/sessions/cut");
         let (report, notes) = mpsc::channel();
         let handle = aero::start(
             Request {
-                run: "cut".into(),
+                run: run.into(),
                 prompt: "Cut the flubbed take.".into(),
                 provider: Provider::Aero,
                 model: None,
@@ -87,7 +101,7 @@ impl Fixture {
                 files: vec![],
                 project: Some(project.clone()),
             },
-            "cut".into(),
+            run.into(),
             scope,
             Options {
                 model,
@@ -774,4 +788,159 @@ fn review_grades_in_a_fresh_session_that_never_sees_the_generator() {
         RunResult::success("Reviewed.".into(), Access::Project)
     );
     assert_eq!(evaluated.load(Ordering::Relaxed), 1);
+}
+
+const KILL_CHILD: &str = "PM_AERO_KILL_CHILD";
+
+/// Counts the calls that reach the project tools.
+struct Counted {
+    tools: Tools,
+    calls: Arc<AtomicUsize>,
+    hold: bool,
+}
+impl aero::Session for Counted {
+    fn context(&mut self) -> Result<Value, String> {
+        aero::Session::context(&mut self.tools)
+    }
+    fn call(
+        &mut self,
+        tool: &str,
+        input: &str,
+        approve: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<aero::ToolResult, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.hold {
+            // The child's host is killed while this call runs.
+            loop {
+                std::thread::park();
+            }
+        }
+        aero::Session::call(&mut self.tools, tool, input, approve)
+    }
+    fn failures(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        aero::Session::finish(&mut self.tools)
+    }
+}
+
+#[test]
+fn a_turn_resumes_after_its_host_is_killed_mid_edit_without_rerunning_it() {
+    if let Ok(dir) = std::env::var(KILL_CHILD) {
+        let dir = std::path::PathBuf::from(dir);
+        let fixture = Fixture::new();
+        let revision = fixture.revision;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let held = calls.clone();
+        let (_turn, _) = fixture.start_at(
+            "before-crash",
+            dir.join("session"),
+            Model::fake(move |_| {
+                call(
+                    "edit",
+                    "commands",
+                    Some(revision),
+                    json!({"commands":[{"type":"delete_layers","targets":["flub"]}]}),
+                )
+            }),
+            move |tools| {
+                Box::new(Counted {
+                    tools,
+                    calls: held,
+                    hold: true,
+                })
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while calls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the edit never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Let the journal store the running call before saying READY.
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(dir.join("READY"), b"").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("pm-aero-kill-")
+        .tempdir()
+        .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_turn_resumes_after_its_host_is_killed_mid_edit_without_rerunning_it",
+            "--test-threads=1",
+        ])
+        .env(KILL_CHILD, dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !dir.path().join("READY").exists() {
+        assert!(
+            Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+            "the child host never reached its edit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: the pid is the child this test started.
+    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    let _ = child.wait();
+
+    let fixture = Fixture::new();
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let (turn, _) = fixture.start_at(
+        "after-crash",
+        dir.path().join("session"),
+        Model::fake(move |input| {
+            let mut bodies = seen.lock().unwrap();
+            bodies.push(String::from_utf8_lossy(input).into_owned());
+            Reply::Text(match bodies.len() {
+                1 => "The cut may have run before the restart; checking first.".into(),
+                _ => "Done.".into(),
+            })
+        }),
+        move |tools| {
+            Box::new(Counted {
+                tools,
+                calls: counted,
+                hold: false,
+            })
+        },
+    );
+    let mut progress = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let result = loop {
+        match turn.try_event() {
+            Ok(Event::Completed { result, .. }) => break result,
+            Ok(Event::Progress { text, .. }) => progress.push(text),
+            Ok(_) | Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(3))
+            }
+            other => panic!("Aero did not finish: {other:?}"),
+        }
+    };
+    assert_eq!(result, RunResult::success("Done.".into(), Access::Project));
+    assert!(
+        progress.iter().any(|text| text.contains("Resuming")),
+        "{progress:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the half-run edit was re-run"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "{bodies:#?}");
+    // The resumed turn carries the interrupted edit call; the new prompt
+    // runs after it.
+    assert!(bodies[0].contains("delete_layers"), "{}", bodies[0]);
+    assert!(bodies[1].contains("Cut the flubbed take."));
 }
