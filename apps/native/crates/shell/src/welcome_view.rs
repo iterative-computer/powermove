@@ -879,10 +879,7 @@ impl Render for WelcomeView {
             .aria_label(spoken)
             .relative()
             .map(|d| {
-                if self.stage && frame.centred {
-                    // The welcome itself stands on the room, no card.
-                    d.w(px(m.welcome_width)).h(px(m.welcome_height))
-                } else if self.stage {
+                if self.stage {
                     // The window's content, as a card on the room: the same
                     // size, its corners concentric with the groups inside.
                     let mut ground = Rgba::from(rgb(c.window));

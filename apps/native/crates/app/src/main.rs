@@ -51,8 +51,6 @@ mod first_run;
 mod first_run_stage;
 #[cfg(any(debug_assertions, test))]
 mod stage_capture;
-mod demo_editor;
-mod film_script;
 mod stage_pictures;
 mod generated_panel;
 mod gizmo;
@@ -621,8 +619,8 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
-                    // Development builds: the first-run film again, over the
-                    // app (`--replay-onboarding 1`), as Help › Welcome Film.
+                    // Development builds: the first-run intro again, over the
+                    // app (`--replay-onboarding 1`), as Help › Welcome to Powermove.
                     #[cfg(debug_assertions)]
                     if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
                         cx.defer(first_run_stage::replay);
@@ -779,7 +777,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         // Onboarding on an isolated profile (it runs only on the default one).
         "--review-onboarding" => Some("PM_NATIVE_REVIEW_ONBOARDING"),
-        // The first-run film again, over the app (Help › Welcome Film).
+        // The first-run intro again, over the app (Help).
         "--replay-onboarding" => Some("PM_NATIVE_REPLAY_ONBOARDING"),
         // Presses the extension step's buttons by id (extension_transfer::review).
         "--review-welcome" => Some("PM_NATIVE_REVIEW_WELCOME"),

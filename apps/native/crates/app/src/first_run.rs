@@ -734,8 +734,6 @@ impl Flow {
                 animate: true,
                 // Two lines, as v1.2.0 (read as one sentence).
                 title: "Welcome to\nPowermove.".into(),
-                // The film's closing line (OWNER-COPY in `beats::CLOSING`).
-                line: pm_shell::stage::beats::CLOSING.into(),
                 centred: true,
                 buttons: vec![Button::new("begin", "Begin")],
                 default: Some("begin".into()),

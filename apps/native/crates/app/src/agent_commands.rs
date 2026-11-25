@@ -71,7 +71,7 @@ pub fn refused(command: &str) -> Option<Option<&'static str>> {
         "quit" | "closeWindow" | "closeTab" | "closeProject" | "newWindow" | "newTab"
         | "moveTabToNewWindow"
         | "nextTab" | "previousTab" | "checkForUpdates" | "help" | "palette" | "fieldMenu"
-        | "agent" | "bringWorkspace" | "bringSignIns" | "panelLibrary" | "welcomeFilm" => None,
+        | "agent" | "bringWorkspace" | "bringSignIns" | "panelLibrary" | "welcomeIntro" => None,
         "open" | "openRecent" => Some("open_project"),
         "projects" => Some("list_projects"),
         "newProject" => Some("create_project"),
@@ -379,7 +379,7 @@ mod tests {
                     "bringWorkspace",
                     "bringSignIns",
                     "panelLibrary",
-                    "welcomeFilm"
+                    "welcomeIntro"
                 ]
                 .contains(&command.as_str()),
                 "{command} is an edit with no agent route"

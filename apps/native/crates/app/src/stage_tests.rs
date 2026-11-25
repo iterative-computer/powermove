@@ -11,7 +11,7 @@ use pm_shell::stage::CueSheet;
 fn the_engine_draws_every_scene_on_the_stage() {
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut cx = headless();
-    let window = open(&mut cx, tokens, false);
+    let window = open(&mut cx, tokens, false, true);
     let first = frame_at(&mut cx, window, 0.);
     assert!(
         first.pixels().all(|p| p[3] == 0 || p[0] < 8),

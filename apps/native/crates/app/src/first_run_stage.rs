@@ -1,6 +1,6 @@
-//! The first run on the stage (`pm_shell::stage`): the film, then the
-//! first-run steps on its card, then the hand-off into the app. Also the
-//! film replayed from Help › Welcome Film and `--replay-onboarding`.
+//! The first run on the stage (`pm_shell::stage`): the intro, then the
+//! first-run steps in the Welcome window it draws, then the hand-off into
+//! the app. Also the intro replayed from Help and `--replay-onboarding`.
 use gpui::{AppContext, Entity, WindowHandle};
 use pm_shell::{
     stage::{CueSheet, Stage},
@@ -9,7 +9,7 @@ use pm_shell::{
 };
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-/// What the film's engine needs from the app: its fonts and its folder of
+/// What the stage's engine needs from the app: its fonts and its folder of
 /// translated shaders. Set once at startup.
 #[derive(Clone)]
 pub struct FilmInputs {
@@ -64,12 +64,12 @@ impl StageWindow {
     }
 }
 
-/// Opens the stage over the display with `frame` on its card; `film`
-/// plays the film first (the first launch's Welcome).
+/// Opens the stage over the display with `frame` in its window; `intro`
+/// plays the intro first (the first launch's Welcome).
 pub fn open(
     frame: Frame,
     on_action: OnAction,
-    film: bool,
+    intro: bool,
     on_sound: pm_shell::stage::OnSound,
     cx: &mut gpui::App,
 ) -> anyhow::Result<StageWindow> {
@@ -83,26 +83,16 @@ pub fn open(
     let window = pm_shell::stage::open_stage(
         move |window, cx| {
             let room = window.bounds().size;
-            let pictures = crate::demo_editor::SharedPictures(Rc::new(RefCell::new(
-                crate::stage_pictures::EnginePictures::start(
-                    inputs.fonts,
-                    inputs.shader_cache,
-                    (f64::from(room.width), f64::from(room.height)),
-                    crate::stage_pictures::film(),
-                ),
-            )));
-            let demo: Option<Box<dyn pm_shell::stage::Demo>> = film.then(|| {
-                Box::new(crate::demo_editor::FilmDemo::start(
-                    crate::stage_pictures::film(),
-                    tokens.clone(),
-                    pictures.clone(),
-                )) as Box<dyn pm_shell::stage::Demo>
-            });
+            let pictures = crate::stage_pictures::EnginePictures::start(
+                inputs.fonts,
+                inputs.shader_cache,
+                (f64::from(room.width), f64::from(room.height)),
+            );
             let mut stage = Stage::new(
                 tokens.clone(),
                 CueSheet::default(),
                 Box::new(pictures),
-                demo,
+                intro,
                 cx,
             );
             stage.on_sound(on_sound);
@@ -128,8 +118,9 @@ pub fn open(
     })
 }
 
-/// The film again (Help › Welcome Film, `--replay-onboarding`): the film,
-/// then a card whose one action closes the stage. Nothing is set up again.
+/// The intro again (Help › Welcome to Powermove, `--replay-onboarding`):
+/// the intro, then a window whose one action closes the stage. Nothing is
+/// set up again.
 pub fn replay(cx: &mut gpui::App) {
     let handle = Rc::new(RefCell::new(None::<StageWindow>));
     let close = handle.clone();
@@ -143,7 +134,6 @@ pub fn replay(cx: &mut gpui::App) {
     let frame = Frame {
         surface: "S107-replay".into(),
         title: "Welcome to\nPowermove.".into(),
-        line: pm_shell::stage::beats::CLOSING.into(),
         centred: true,
         buttons: vec![Button::new("done", "Done")],
         default: Some("done".into()),
@@ -157,6 +147,6 @@ pub fn replay(cx: &mut gpui::App) {
         cx,
     ) {
         Ok(stage) => *handle.borrow_mut() = Some(stage),
-        Err(error) => eprintln!("The Welcome film could not open: {error:#}"),
+        Err(error) => eprintln!("The Welcome intro could not open: {error:#}"),
     }
 }

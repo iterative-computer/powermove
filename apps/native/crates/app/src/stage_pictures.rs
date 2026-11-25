@@ -1,14 +1,12 @@
-//! The first-run stage's pictures, drawn by the engine on a worker of their
-//! own (`Headless::draw_srgb`) into textures the stage paints: the room's
-//! light, a composition built here, and the film's project as the editor's
-//! viewer shows it. Nothing is read back; the stage's GPU waits on the
-//! worker's event.
+//! The first-run stage's room, drawn by the engine on a worker of its own
+//! (`Headless::draw_srgb`) into textures the stage paints: a dark ground
+//! with a soft falloff and grain, and the light the mark rises in. Nothing
+//! is read back; the stage's GPU waits on the worker's event.
 use pm_engine_service::{FrameSpec, Headless, Moment, Output, Scene};
 use pm_protocol::common::{TICKS_PER_SECOND, Ticks};
-use pm_shell::stage::{Picture, Pictures};
+use pm_shell::stage::{Pictures, cue::CueSheet};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,10 +15,10 @@ use std::{
     time::Duration,
 };
 
-/// The room's composition outlasts the film; the card holds its last frame.
-const ROOM_SECONDS: f64 = 26.;
+/// The room's composition outlasts the intro; the window holds its last frame.
+const ROOM_SECONDS: f64 = 12.;
 
-// ---------- Compositions ----------
+// ---------- The room ----------
 
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
@@ -119,44 +117,6 @@ fn grain(amount: f64, size: f64) -> Value {
         json!({ "amount": ch(json!(amount)), "size": ch(json!(size)) }),
     )
 }
-fn text(
-    id: &str,
-    words: &str,
-    size: f64,
-    weight: u32,
-    color: &str,
-    at: (f64, f64),
-    span: (f64, f64),
-) -> Value {
-    layer(
-        id,
-        "text",
-        json!({ "text": words, "font": pm_design::DISPLAY_FONT, "weight": weight, "size": size,
-            "leading": 1.0, "tracking": -2, "color": color, "align": "center" }),
-        at,
-        span,
-    )
-}
-fn shape(
-    id: &str,
-    kind: &str,
-    color: &str,
-    size: (f64, f64),
-    at: (f64, f64),
-    span: (f64, f64),
-) -> Value {
-    centred(
-        layer(
-            id,
-            "shape",
-            json!({ "shape": kind, "color": color, "w": size.0, "h": size.1, "radius": 0, "stroke": 0,
-                "strokeColor": "#ffffff", "points": 5 }),
-            at,
-            span,
-        ),
-        size,
-    )
-}
 fn project(w: f64, h: f64, dur: f64, layers: Vec<Value>) -> Value {
     json!({
         "id": "Pstage", "name": "Stage", "w": w, "h": h, "fps": 60, "dur": dur, "bg": "#000000",
@@ -167,119 +127,55 @@ fn project(w: f64, h: f64, dur: f64, layers: Vec<Value>) -> Value {
     })
 }
 
-/// The room: a dark ground with a soft falloff and grain, and the
-/// projector's light, which gathers for the mark and settles for the reels.
+/// The room: a dark ground with a soft falloff and grain, and the mark's
+/// light: a glow at the bottom edge that rises with the mark into the
+/// centre, then softens and spreads before the window is drawn.
 pub fn room(w: f64, h: f64) -> Value {
+    let sheet = CueSheet::default();
     let all = (0., ROOM_SECONDS);
     let mut ground = solid("ground", "#000000", (w, h), all);
     ground["fx"] = json!([
-        gradient("#1a1918", "#040505", 0., true, (0., -14.), 118.),
-        grain(9., 1.5)
+        gradient("#151413", "#040505", 0., true, (0., -10.), 120.),
+        grain(8., 1.5)
     ]);
     let mut light = solid("light", "#000000", (w, h), all);
     light["blend"] = json!("screen");
-    light["fx"] = json!([gradient("#6d635a", "#000000", 0., true, (0., -6.), 62.)]);
-    // The cue sheet's light: dark for the house lights, a bloom as the mark
-    // arrives (4.4 s), lower for the reels (7.6 s), calm on the card (22 s).
+    let (edge, rise, settled, spread, window) = (
+        sheet.edge_light,
+        sheet.rise.0,
+        sheet.rise.1,
+        sheet.spread,
+        sheet.window,
+    );
+    let mut glow = gradient("#8a7766", "#000000", 0., true, (0., 52.), 38.);
+    // The light's centre climbs with the mark (gradient centre, % of the
+    // half-height, + down), and widens as it softens before the window.
+    glow["p"]["centerY"] = keys(&[
+        (0., 104.),
+        (edge, 98.),
+        (rise, 92.),
+        (settled, -12.),
+        (window + 1., -12.),
+    ]);
+    glow["p"]["spread"] = keys(&[
+        (0., 30.),
+        (edge, 34.),
+        (settled, 44.),
+        (spread, 52.),
+        (window, 110.),
+        (window + 1., 120.),
+    ]);
+    light["fx"] = json!([glow]);
     light["p"]["opacity"] = keys(&[
         (0., 0.),
-        (1.4, 0.),
-        (3.0, 22.),
-        (4.4, 26.),
-        (5.25, 92.),
-        (7.2, 36.),
-        (8.2, 16.),
-        (21.4, 16.),
-        (23.0, 30.),
+        (edge - 0.4, 0.),
+        (edge + 0.6, 55.),
+        (rise + 0.4, 95.),
+        (settled, 70.),
+        (spread + 0.5, 60.),
+        (window + 0.6, 26.),
     ]);
     project(w, h, ROOM_SECONDS, vec![light, ground])
-}
-
-/// The film's project: the one the editor opens and the agent changes. Two
-/// shots cut back to back (where the light leak goes), a title over the
-/// first, a few graphic layers: a timeline with something on it.
-pub fn film() -> Value {
-    let (w, h) = (1920., 1080.);
-    let dur = 8.;
-    let a = (0., 4.);
-    let b = (4., 4.);
-    let mut dusk = solid("Dusk", "#000000", (w, h), a);
-    dusk["fx"] = json!([
-        gradient("#5b2f22", "#120a0b", 160., false, (0., 0.), 100.),
-        grain(8., 1.3)
-    ]);
-    let mut title = text(
-        "Title",
-        "Night Drive",
-        170.,
-        700,
-        "#f6efe6",
-        (w / 2., h * 0.56),
-        a,
-    );
-    title["p"]["opacity"] = keys(&[(0., 0.), (0.8, 100.), (3.4, 100.), (4., 0.)]);
-    title["p"]["scale.x"] = keys(&[(0., 94.), (4., 100.)]);
-    title["p"]["scale.y"] = keys(&[(0., 94.), (4., 100.)]);
-    let mut sun = shape(
-        "Sun",
-        "ellipse",
-        "#ff9b5e",
-        (260., 260.),
-        (w * 0.5, h * 0.78),
-        a,
-    );
-    sun["p"]["position.y"] = keys(&[(0., h * 0.86), (4., h * 0.74)]);
-    sun["fx"] = json!([fx(
-        "glow",
-        "glow",
-        json!({
-            "threshold": ch(json!(20)), "radius": ch(json!(120)), "intensity": ch(json!(90))
-        })
-    )]);
-    let mut city = solid("City", "#000000", (w, h), b);
-    city["fx"] = json!([
-        gradient("#1b2b3f", "#06080c", 180., false, (0., 0.), 100.),
-        grain(8., 1.3)
-    ]);
-    let mut towers = Vec::new();
-    for (i, (x, height, colour)) in [
-        (0.18, 0.46, "#2c3e56"),
-        (0.33, 0.62, "#364b66"),
-        (0.5, 0.38, "#24344a"),
-        (0.66, 0.7, "#3d5574"),
-        (0.82, 0.5, "#2a3b52"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut tower = shape(
-            &format!("Tower {}", i + 1),
-            "rect",
-            colour,
-            (w * 0.12, h * height),
-            (w * x, h * (1. - height / 2.)),
-            b,
-        );
-        tower["p"]["position.x"] = keys(&[(4., w * x + 40.), (8., w * x - 40.)]);
-        towers.push(tower);
-    }
-    let mut lights = text(
-        "Lights",
-        "· · · · · · · · ·",
-        90.,
-        700,
-        "#ffd28a",
-        (w / 2., h * 0.3),
-        b,
-    );
-    lights["p"]["opacity"] = keys(&[(4., 0.), (5., 80.)]);
-    let mut layers = vec![title, sun, dusk, lights];
-    layers.extend(towers);
-    layers.push(city);
-    let mut project = project(w, h, dur, layers);
-    project["name"] = json!("Night Drive");
-    project["compName"] = json!("Night Drive");
-    project
 }
 
 fn scene(project: Value) -> anyhow::Result<Scene> {
@@ -289,29 +185,15 @@ fn scene(project: Value) -> anyhow::Result<Scene> {
         doc: snapshot.document.clone(),
         comp: snapshot
             .open_comp()
-            .ok_or_else(|| anyhow::anyhow!("the stage composition has no root"))?,
+            .ok_or_else(|| anyhow::anyhow!("the room has no composition"))?,
         media: Default::default(),
         content: snapshot.doc_id,
     })
 }
-fn scenes(room_size: (f64, f64), film: &Value) -> anyhow::Result<HashMap<Picture, Scene>> {
-    Ok(HashMap::from([
-        (Picture::Backdrop, scene(room(room_size.0, room_size.1))?),
-        (Picture::Viewer, scene(film.clone())?),
-    ]))
-}
 
 // ---------- The worker ----------
 
-/// What the worker is asked: a frame, or the film's project as it is now.
-enum Job {
-    Draw(Request),
-    /// The film's viewer draws this scene with these definitions from now
-    /// on (the agent changed the project, or an extension it wrote arrived).
-    Viewer(Scene, Arc<pm_engine_service::resources::ResourceSnapshot>),
-}
 struct Request {
-    what: Picture,
     t: f64,
     target: metal::Texture,
     /// The stage's event: the worker signals `value` on it when drawn.
@@ -324,7 +206,6 @@ enum Reply {
     Ready(metal::Device),
     Failed(String),
     Drawn {
-        what: Picture,
         t: f64,
         value: u64,
         error: Option<String>,
@@ -351,49 +232,43 @@ struct Slot {
     texture: metal::Texture,
     free: Arc<AtomicBool>,
 }
-#[derive(Default)]
-struct Stream {
-    size: (u32, u32),
-    slots: Vec<Slot>,
-    latest: Option<(f64, Arc<gpui::NativeTexture>)>,
-    /// The time and slot of the frame being drawn.
-    drawing: Option<(f64, usize, u64)>,
-}
 
-/// The engine's pictures for the stage.
+/// The engine's room for the stage.
 pub struct EnginePictures {
-    tx: Option<mpsc::Sender<Job>>,
+    tx: Option<mpsc::Sender<Request>>,
     rx: mpsc::Receiver<Reply>,
     device: Option<metal::Device>,
     event: Option<metal::Event>,
     value: u64,
-    streams: HashMap<Picture, Stream>,
+    size: (u32, u32),
+    slots: Vec<Slot>,
+    latest: Option<(f64, Arc<gpui::NativeTexture>)>,
+    /// The time and slot of the frame being drawn.
+    drawing: Option<(f64, usize)>,
     /// Recordings and captures: each asked-for frame is waited for, with
     /// `pump` run meanwhile (the font registry answers on this thread).
     pub exact: Option<Box<dyn FnMut()>>,
     /// Timing runs: each frame waits for the GPU (`measured` collects).
     pub measure: bool,
-    pub measured: Vec<(Picture, f64)>,
+    pub measured: Vec<f64>,
     failed: Option<String>,
 }
 impl EnginePictures {
     /// Starts the worker; its engine is made there, off the main thread.
     /// `room` is the stage's size in points.
-    /// `film` is the film's project, as the editor's viewer shows it.
     pub fn start(
         fonts: pm_render::text::host::RenderFonts,
         shader_cache: Option<std::path::PathBuf>,
         room: (f64, f64),
-        film: Value,
     ) -> Self {
-        let (tx, requests) = mpsc::channel::<Job>();
+        let (tx, requests) = mpsc::channel::<Request>();
         let (replies, rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("stage-pictures".into())
+            .name("stage-room".into())
             .spawn(move || {
                 let setup = Headless::for_surfaces(fonts, shader_cache)
-                    .and_then(|engine| Ok((engine, scenes(room, &film)?)));
-                let (mut engine, mut scenes) = match setup {
+                    .and_then(|engine| Ok((engine, scene(self::room(room.0, room.1))?)));
+                let (mut engine, scene) = match setup {
                     Ok(v) => v,
                     Err(error) => {
                         let _ = replies.send(Reply::Failed(format!("{error:#}")));
@@ -401,17 +276,9 @@ impl EnginePictures {
                     }
                 };
                 let _ = replies.send(Reply::Ready(engine.metal_device()));
-                while let Ok(job) = requests.recv() {
-                    let request = match job {
-                        Job::Draw(request) => request,
-                        Job::Viewer(scene, resources) => {
-                            engine.set_resources(resources);
-                            scenes.insert(Picture::Viewer, scene);
-                            continue;
-                        }
-                    };
+                while let Ok(request) = requests.recv() {
                     let started = std::time::Instant::now();
-                    let drawn = draw(&mut engine, &scenes, &request);
+                    let drawn = draw(&mut engine, &scene, &request);
                     let ms = match (&drawn, request.measure) {
                         (Ok(command), true) => {
                             command.wait_until_completed();
@@ -420,7 +287,6 @@ impl EnginePictures {
                         _ => None,
                     };
                     let _ = replies.send(Reply::Drawn {
-                        what: request.what,
                         t: request.t,
                         value: request.value,
                         error: drawn.err().map(|e| format!("{e:#}")),
@@ -428,46 +294,24 @@ impl EnginePictures {
                     });
                 }
             })
-            .expect("the stage's picture worker starts");
+            .expect("the stage's room worker starts");
         Self {
             tx: Some(tx),
             rx,
             device: None,
             event: None,
             value: 0,
-            streams: HashMap::new(),
+            size: (0, 0),
+            slots: Vec::new(),
+            latest: None,
+            drawing: None,
             exact: None,
             measure: false,
             measured: Vec::new(),
             failed: None,
         }
     }
-    /// The film's viewer pictures `project` (a kernel snapshot of the film's
-    /// project) with `resources` (what its extensions contribute) from the
-    /// next frame on.
-    pub fn set_viewer(
-        &mut self,
-        project: &pm_kernel::Published,
-        resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
-    ) {
-        let Some(comp) = project.snapshot.open_comp() else {
-            return;
-        };
-        let scene = Scene {
-            doc: project.snapshot.document.clone(),
-            comp,
-            media: Default::default(),
-            content: project.snapshot.doc_id,
-        };
-        if let Some(tx) = &self.tx
-            && tx.send(Job::Viewer(scene, resources)).is_ok()
-            && let Some(stream) = self.streams.get_mut(&Picture::Viewer)
-        {
-            // The frame held is the old project's: the next ask draws again.
-            stream.latest = stream.latest.take().map(|(_, texture)| (f64::NAN, texture));
-        }
-    }
-    /// Why the engine could not draw the stage, if it could not.
+    /// Why the engine could not draw the room, if it could not.
     pub fn failure(&self) -> Option<&str> {
         self.failed.as_deref()
     }
@@ -478,47 +322,38 @@ impl EnginePictures {
                 self.device = Some(device);
             }
             Reply::Failed(error) => {
-                eprintln!("The first-run stage draws without the engine: {error}");
+                eprintln!("The first-run stage draws its room without the engine: {error}");
                 self.failed = Some(error);
             }
             Reply::Drawn {
-                what,
                 t,
                 value,
                 error,
                 ms,
             } => {
                 if let Some(ms) = ms {
-                    self.measured.push((what, ms));
+                    self.measured.push(ms);
                 }
-                let Some(stream) = self.streams.get_mut(&what) else {
+                let Some((_, slot)) = self.drawing.take() else {
                     return;
                 };
-                let Some((_, slot, drawing)) = stream.drawing.take() else {
-                    return;
+                let slot = &self.slots[slot];
+                let texture = match error {
+                    None => gpui::NativeTexture::new(
+                        slot.texture.clone(),
+                        self.event.clone().unwrap(),
+                        value,
+                        Arc::new(Lease(slot.free.clone())),
+                    )
+                    .map_err(str::to_owned),
+                    Some(error) => Err(error),
                 };
-                debug_assert_eq!(drawing, value);
-                let slot = &stream.slots[slot];
-                match error {
-                    None => {
-                        let texture = gpui::NativeTexture::new(
-                            slot.texture.clone(),
-                            self.event.clone().unwrap(),
-                            value,
-                            Arc::new(Lease(slot.free.clone())),
-                        );
-                        match texture {
-                            Ok(texture) => stream.latest = Some((t, texture)),
-                            Err(error) => {
-                                slot.free.store(true, Ordering::Release);
-                                eprintln!("Stage picture refused: {error}");
-                            }
-                        }
-                    }
-                    Some(error) => {
+                match texture {
+                    Ok(texture) => self.latest = Some((t, texture)),
+                    Err(error) => {
                         slot.free.store(true, Ordering::Release);
                         if self.failed.is_none() {
-                            eprintln!("Stage picture failed: {error}");
+                            eprintln!("The stage's room failed: {error}");
                         }
                         self.failed = Some(error);
                     }
@@ -559,14 +394,7 @@ impl EnginePictures {
         device.new_texture(&desc)
     }
 }
-fn draw(
-    engine: &mut Headless,
-    scenes: &HashMap<Picture, Scene>,
-    r: &Request,
-) -> anyhow::Result<metal::CommandBuffer> {
-    let scene = scenes
-        .get(&r.what)
-        .ok_or_else(|| anyhow::anyhow!("no composition for {:?}", r.what))?;
+fn draw(engine: &mut Headless, scene: &Scene, r: &Request) -> anyhow::Result<metal::CommandBuffer> {
     let spec = FrameSpec {
         time: Ticks::new((r.t * TICKS_PER_SECOND as f64).round() as i64)?,
         output: Output {
@@ -586,12 +414,7 @@ fn draw(
 }
 
 impl Pictures for EnginePictures {
-    fn picture(
-        &mut self,
-        what: Picture,
-        t: f64,
-        size: (u32, u32),
-    ) -> Option<Arc<gpui::NativeTexture>> {
+    fn picture(&mut self, t: f64, size: (u32, u32)) -> Option<Arc<gpui::NativeTexture>> {
         self.drain();
         if self.device.is_none() && self.exact.is_some() && self.failed.is_none() {
             // A recording waits for the engine to start.
@@ -600,58 +423,47 @@ impl Pictures for EnginePictures {
         let (Some(device), Some(event), Some(tx)) = (&self.device, &self.event, &self.tx) else {
             return None;
         };
-        let stream = self.streams.entry(what).or_default();
-        if stream.size != size {
-            // A new size: new textures (frames drawn at the old one stay
-            // leased until let go).
-            stream.size = size;
-            stream.slots = (0..3)
+        if self.size != size {
+            self.size = size;
+            self.slots = (0..3)
                 .map(|_| Slot {
                     texture: Self::texture(device, size),
                     free: Arc::new(AtomicBool::new(true)),
                 })
                 .collect();
-            stream.latest = None;
-            stream.drawing = None;
+            self.latest = None;
+            self.drawing = None;
         }
-        let current = stream
+        let current = self
             .latest
             .as_ref()
             .is_some_and(|(at, _)| (*at - t).abs() < 1e-6);
         if !current
-            && stream.drawing.is_none()
-            && let Some(slot) = stream
+            && self.drawing.is_none()
+            && let Some(slot) = self
                 .slots
                 .iter()
                 .position(|s| s.free.load(Ordering::Acquire))
         {
-            stream.slots[slot].free.store(false, Ordering::Release);
+            self.slots[slot].free.store(false, Ordering::Release);
             self.value += 1;
-            stream.drawing = Some((t, slot, self.value));
-            let sent = tx.send(Job::Draw(Request {
-                what,
+            self.drawing = Some((t, slot));
+            let sent = tx.send(Request {
                 t,
-                target: stream.slots[slot].texture.clone(),
+                target: self.slots[slot].texture.clone(),
                 event: event.clone(),
                 value: self.value,
                 measure: self.measure,
-            }));
+            });
             if sent.is_err() {
-                stream.drawing = None;
-                stream.slots[slot].free.store(true, Ordering::Release);
+                self.drawing = None;
+                self.slots[slot].free.store(true, Ordering::Release);
             }
         }
         if self.exact.is_some() {
-            while self.streams.get(&what).is_some_and(|s| s.drawing.is_some()) && self.wait() {}
+            while self.drawing.is_some() && self.wait() {}
         }
-        self.streams
-            .get(&what)
-            .and_then(|s| s.latest.as_ref().map(|(_, texture)| texture.clone()))
-    }
-    fn rest(&mut self) {
-        self.drain();
-        // The editor is gone: its textures go; the room keeps its last frame.
-        self.streams.retain(|what, _| *what == Picture::Backdrop);
+        self.latest.as_ref().map(|(_, texture)| texture.clone())
     }
 }
 impl Drop for EnginePictures {
