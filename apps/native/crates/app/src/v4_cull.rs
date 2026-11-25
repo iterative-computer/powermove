@@ -67,9 +67,6 @@ pub(super) struct Cull {
     /// edge, as its layer records, until the steps stop (counted, so only
     /// the last step's rest ends it).
     wheeling: Option<u64>,
-    /// A hover the scroll moved was not drawn (it waits for the scroll to
-    /// end): the end of the scroll draws the panel.
-    pub(super) hover_stale: Rc<std::cell::Cell<bool>>,
 }
 
 impl Cull {
@@ -410,9 +407,9 @@ impl SurfaceView {
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(WHEEL_REST).await;
-            let _ = this.update(cx, |v, cx| {
+            let _ = this.update(cx, |v, _| {
                 if v.cull.wheeling == Some(step) {
-                    v.end_scroll(cx);
+                    v.end_scroll();
                 }
             });
         })
@@ -457,7 +454,7 @@ impl SurfaceView {
                     let view = view.clone();
                     window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, _, cx| {
                         if phase == gpui::DispatchPhase::Bubble {
-                            let _ = view.update(cx, |v, cx| v.end_scroll(cx));
+                            let _ = view.update(cx, |v, _| v.end_scroll());
                         }
                     });
                 },
@@ -466,13 +463,9 @@ impl SurfaceView {
             .into_any_element(),
         )
     }
-    /// The scroll ended (its steps rested, or the pointer moved): a hover
-    /// it moved and nobody drew shows in the next frame (PM-732 review).
-    fn end_scroll(&mut self, cx: &mut gpui::Context<Self>) {
+    /// The scroll ended (its steps rested, or the pointer moved).
+    fn end_scroll(&mut self) {
         self.cull.wheeling = None;
-        if self.cull.hover_stale.replace(false) {
-            cx.notify();
-        }
     }
     /// Whether the panel is being scrolled (its body or its own scrollers),
     /// until the steps rest or the pointer moves.

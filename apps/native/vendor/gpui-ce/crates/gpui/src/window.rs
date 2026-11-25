@@ -3630,9 +3630,11 @@ impl Window {
         self.reset_cursor_style(cx);
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
-        if !self.scroll_layer_moving {
-            self.notify_pointer_observers(PointerChangeCause::Layout, cx);
-        }
+        // Replayed scroll steps too: the hover follows the rows a scroll
+        // moves under a still pointer, so it is right the moment the scroll
+        // stops (PM-710 on screen: waiting for the layer's settle showed no
+        // hover for 150 ms and more after a stop).
+        self.notify_pointer_observers(PointerChangeCause::Layout, cx);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the

@@ -4321,17 +4321,11 @@ impl SurfaceView {
     fn hover_probe(&self, id: Id, cx: &mut Context<Self>) -> AnyElement {
         let (painted, view) = (self.painted_groups.clone(), cx.entity().downgrade());
         let rendered = self.hovered_groups.contains(&id);
-        // A scroll moves the rows under a still pointer: the draw that ends
-        // it finds the group (PM-732).
-        let scrolling = self.scrolling();
-        let stale = self.cull.hover_stale.clone();
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
             move |_, hitbox, window, cx| {
                 painted.borrow_mut().insert(id, hitbox.id);
-                if scrolling && hitbox.is_hovered(window) != rendered {
-                    stale.set(true);
-                } else if hitbox.is_hovered(window) != rendered {
+                if hitbox.is_hovered(window) != rendered {
                     let view = view.clone();
                     cx.defer(move |cx| {
                         let _ = view.update(cx, |_, cx| cx.notify());
@@ -5911,29 +5905,25 @@ impl SurfaceView {
         let group = node.hover_group;
         if wash || events.hover || group {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                // While the panel scrolls, the rows move under a still
-                // pointer: its hover moves without a draw or a wash, and the
-                // draw that ends the scroll shows it (PM-732: each hover
-                // crossed drew Properties again, and its wash every frame).
-                if v.scrolling() {
-                    if wash {
+                // The pointer crossed a group: draw again, which finds the
+                // groups under it (`hovered_groups`).
+                if group {
+                    let _ = hovered;
+                    cx.notify();
+                }
+                if wash {
+                    // While the panel scrolls, the rows move under a still
+                    // pointer: the hover follows them at once, with no wash
+                    // animating every frame (PM-732), so it is where the
+                    // pointer is the moment the scroll stops (PM-710 on
+                    // screen: deferring it to the scroll's end showed none).
+                    if v.scrolling() {
                         v.motion.hovers.set(id, *hovered);
-                    }
-                    if wash || group {
-                        v.cull.hover_stale.set(true);
-                    }
-                } else {
-                    // The pointer crossed a group: draw again, which finds
-                    // the groups under it (`hovered_groups`).
-                    if group {
-                        let _ = hovered;
-                        cx.notify();
-                    }
-                    if wash {
+                    } else {
                         let tokens = v.table.tokens.clone();
                         v.motion.hovers.hover(id, *hovered, &tokens);
-                        cx.notify();
                     }
+                    cx.notify();
                 }
                 if events.hover {
                     let event = if *hovered {

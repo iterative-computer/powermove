@@ -3902,10 +3902,10 @@ fn a_panel_that_left_rows_out_builds_them_on_the_first_wheel_step(cx: &mut TestA
 }
 
 /// PM-732: a panel whose own list takes the wheel (Properties) knows it is
-/// being scrolled, so the list replays its steps as a layer; and rows with a
-/// hover moving under the still pointer draw nothing until the scroll ends.
-/// The list stopped the wheel before the panel saw it, and each hover the
-/// rows crossed drew Properties again: three full draws a step.
+/// being scrolled, so the list replays its steps as a layer; a hover the
+/// rows move under the still pointer draws the panel once, on the step that
+/// crosses a row, with no wash animating after it. The list stopped the
+/// wheel before the panel saw it, and each step drew Properties three times.
 #[gpui::test]
 fn a_panel_scrolled_by_its_own_list_replays_the_steps(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
@@ -3971,11 +3971,13 @@ fn a_panel_scrolled_by_its_own_list_replays_the_steps(cx: &mut TestAppContext) {
     let wheel = |vcx: &mut VisualTestContext| {
         vcx.simulate_event(ScrollWheelEvent {
             position: at,
-            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-5.))),
             ..Default::default()
         });
         vcx.run_until_parked();
-        vcx.simulate_frame();
+        for _ in 0..3 {
+            vcx.simulate_frame();
+        }
     };
     wheel(&mut vcx);
     assert!(list(&vcx) > 0., "the panel's list took the step");
@@ -3983,26 +3985,30 @@ fn a_panel_scrolled_by_its_own_list_replays_the_steps(cx: &mut TestAppContext) {
         view.read_with(&vcx, |v, _| v.scrolling()),
         "the panel knows it is scrolled"
     );
-    let rendered = renders(&vcx);
-    for step in 1..5 {
-        let before = list(&vcx);
+    let hovered = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.hovered_row_for_test());
+    let mut crossings = 0;
+    for step in 1..9 {
+        let (before, row, rendered) = (list(&vcx), hovered(&vcx), renders(&vcx));
         wheel(&mut vcx);
         assert!(list(&vcx) > before, "step {step} moved the list");
+        let crossed = hovered(&vcx) != row;
+        crossings += usize::from(crossed);
         assert_eq!(
             renders(&vcx),
-            rendered,
-            "step {step} replayed, no draw of the panel"
+            rendered + usize::from(crossed),
+            "step {step}: replayed, or one draw where the hover crossed a row"
         );
     }
+    assert!(crossings >= 1, "the steps crossed a row");
 }
 
-/// PM-732 review: a scroll moves a hover without drawing it, so the end of
-/// the scroll draws it: one notch puts the next row under the still
+/// PM-732 review, PM-710 on screen: a scroll moves the hover with the rows
+/// at once: one notch puts the next row under the still
 /// pointer, and once the steps rest (no input) the panel draws again with
 /// that row hovered. It kept the row the notch left until something else
 /// drew the panel.
 #[gpui::test]
-fn the_end_of_a_scroll_draws_the_row_it_moved_under_the_pointer(cx: &mut TestAppContext) {
+fn a_scroll_moves_the_hover_with_the_rows_at_once(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
     let column = json!({"display":"flex","flexDirection":"column","width":100});
@@ -4064,8 +4070,12 @@ fn the_end_of_a_scroll_draws_the_row_it_moved_under_the_pointer(cx: &mut TestApp
     vcx.run_until_parked();
     vcx.simulate_frame();
     assert!(view.read_with(&vcx, |v, _| v.scrolling()));
-    let rendered = view.read_with(&vcx, |v, _| v.renders);
-    // No input: the steps rest.
+    assert_eq!(
+        hovered(&vcx).as_deref(),
+        Some("row-3"),
+        "the row the notch moved under the pointer is hovered at once"
+    );
+    // No input: the steps rest, the hover where it is.
     vcx.executor()
         .advance_clock(std::time::Duration::from_millis(200));
     vcx.run_until_parked();
@@ -4073,15 +4083,7 @@ fn the_end_of_a_scroll_draws_the_row_it_moved_under_the_pointer(cx: &mut TestApp
         !view.read_with(&vcx, |v, _| v.scrolling()),
         "the scroll ended"
     );
-    assert!(
-        view.read_with(&vcx, |v, _| v.renders) > rendered,
-        "the end of the scroll drew the panel"
-    );
-    assert_eq!(
-        hovered(&vcx).as_deref(),
-        Some("row-3"),
-        "the row the notch moved under the pointer is hovered"
-    );
+    assert_eq!(hovered(&vcx).as_deref(), Some("row-3"));
 }
 
 /// PM-732: a list in a scroller of its own panel (`scrollOwner: "parent"`,
