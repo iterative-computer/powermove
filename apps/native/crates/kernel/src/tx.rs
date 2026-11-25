@@ -726,7 +726,9 @@ pub struct Project {
     mutation_serial: u64,
     mutations: VecDeque<(u64, Writer)>,
     record_writers: HashMap<u64, Writer>,
-    agent_turns: HashSet<Writer>,
+    /// Every writer that ran an agent turn (each turn has its own). Undo and
+    /// Redo by anyone else step over a run of one turn's steps as one step.
+    turn_writers: HashSet<Writer>,
     /// History-only finalization waits for the person's current entry to end.
     pending_squashes: HashMap<Writer, (ActorHistoryMark, String)>,
     /// Undo, Redo and Seal calls that arrived while another writer's edit
@@ -797,7 +799,7 @@ impl Project {
             mutation_serial: 0,
             mutations: VecDeque::new(),
             record_writers: HashMap::new(),
-            agent_turns: HashSet::new(),
+            turn_writers: HashSet::new(),
             pending_squashes: HashMap::new(),
             waiting: VecDeque::new(),
             wait_limit: UNDO_WAIT_LIMIT,
@@ -1769,9 +1771,7 @@ impl Project {
             ),
             HistoryCall::AgentTurn { active } => {
                 if active {
-                    self.agent_turns.insert(writer);
-                } else {
-                    self.agent_turns.remove(&writer);
+                    self.turn_writers.insert(writer);
                 }
                 Reply::Unit
             }
@@ -1809,7 +1809,7 @@ impl Project {
                 writer: target,
                 keep_mine,
                 label,
-            } => self.undo_writer(caller, target, keep_mine, &label, None),
+            } => self.undo_writer(caller, target, keep_mine, &label),
             HistoryCall::SquashSegments {
                 mark,
                 label,
@@ -1897,28 +1897,6 @@ impl Project {
                     bytes,
                 )))
             }
-            HistoryCall::Undo if !self.agent_turns.is_empty() => {
-                let record = self.store.history().records()[..self.store.history().applied()]
-                    .iter()
-                    .rev()
-                    .find(|r| {
-                        r.origin == Origin::Interface
-                            && !r.label.starts_with("Undo ")
-                            && self.record_writers.contains_key(&r.id)
-                    });
-                if let Some(record) = record {
-                    let id = record.id;
-                    let label = format!("Undo {}", record.label);
-                    let owner = self
-                        .record_writers
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(caller.writer);
-                    self.undo_writer(caller, owner, false, &label, Some(id))
-                } else {
-                    Reply::Bool(false)
-                }
-            }
             HistoryCall::Undo => return self.step(caller, txid, Direction::Undo),
             HistoryCall::EditorUndo { seal_left_open } => {
                 if seal_left_open {
@@ -1929,28 +1907,6 @@ impl Project {
             HistoryCall::Lapse => {
                 self.lapse();
                 Reply::Unit
-            }
-            HistoryCall::Redo if !self.agent_turns.is_empty() => {
-                let record = self.store.history().records()[..self.store.history().applied()]
-                    .iter()
-                    .rev()
-                    .find(|r| {
-                        r.origin == Origin::Interface
-                            && r.label.starts_with("Undo ")
-                            && self.record_writers.contains_key(&r.id)
-                    });
-                if let Some(record) = record {
-                    let id = record.id;
-                    let label = format!("Redo {}", record.label.trim_start_matches("Undo "));
-                    let owner = self
-                        .record_writers
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(caller.writer);
-                    self.undo_writer(caller, owner, false, &label, Some(id))
-                } else {
-                    Reply::Bool(false)
-                }
             }
             HistoryCall::Redo => return self.step(caller, txid, Direction::Redo),
             HistoryCall::UndoIfTop { entry } => {
@@ -1974,7 +1930,6 @@ impl Project {
         target: Writer,
         keep_mine: bool,
         label: &str,
-        only_entry: Option<u64>,
     ) -> Reply {
         if self.entry.is_some() {
             return Reply::Throw(KernelError::Guard(
@@ -1998,9 +1953,7 @@ impl Project {
                         .map_err(|e| e.to_string())?
                         .0;
                 }
-                if self.record_writers.get(&record.id) != Some(&target)
-                    || only_entry.is_some_and(|id| id != record.id)
-                {
+                if self.record_writers.get(&record.id) != Some(&target) {
                     continue;
                 }
                 let forward = record.forward.to_vec();
@@ -2056,11 +2009,6 @@ impl Project {
             return Reply::Throw(KernelError::Guard(error));
         }
         if conflicts > 0 && !keep_mine {
-            if only_entry.is_some() {
-                return Reply::Throw(KernelError::Guard(format!(
-                    "Can't {label} — the agent changed this value since. Stop the agent first."
-                )));
-            }
             return Reply::Workspace(Value::Object(
                 [
                     ("status".into(), Value::from("confirmation_required")),
@@ -2079,11 +2027,7 @@ impl Project {
             true,
         ) {
             Ok((changed, _)) => {
-                if let Some(id) = only_entry {
-                    self.record_writers.remove(&id);
-                } else {
-                    self.record_writers.retain(|_, owner| *owner != target);
-                }
+                self.record_writers.retain(|_, owner| *owner != target);
                 Reply::Applied {
                     revision: self.revision(),
                     changed,
@@ -2105,7 +2049,59 @@ impl Project {
         self.close_entry(label)
     }
 
+    /// How many records the next Undo or Redo by `caller` takes: the run of
+    /// one agent turn's steps next to the cursor, whole (PM-718). An agent's
+    /// in-progress turn is many steps until its end squashes them into one;
+    /// the person's Undo takes back what the turn did so far, never one tool
+    /// call of it, and never steps around it. The turn's own Undo stays one
+    /// step at a time.
+    fn turn_run(&self, caller: Writer, direction: Direction) -> usize {
+        let history = self.store.history();
+        let records = history.records();
+        let at = history.applied();
+        let owner = |i: usize| {
+            let record = &records[i];
+            self.record_writers
+                .get(&record.id)
+                .filter(|w| **w != caller && self.turn_writers.contains(w) && record.is_document())
+                .copied()
+        };
+        let (first, rest): (Option<usize>, Box<dyn Iterator<Item = usize>>) = match direction {
+            Direction::Undo => (at.checked_sub(1), Box::new((0..at.saturating_sub(1)).rev())),
+            Direction::Redo => (
+                (at < records.len()).then_some(at),
+                Box::new(at + 1..records.len()),
+            ),
+        };
+        let Some(writer) = first.and_then(owner) else {
+            return 1;
+        };
+        1 + rest.take_while(|&i| owner(i) == Some(writer)).count()
+    }
+
     fn step(&mut self, caller: Caller, txid: Option<TxId>, direction: Direction) -> Handled {
+        for _ in 1..self.turn_run(caller.writer, direction) {
+            let earlier = match direction {
+                Direction::Undo => self.store.kernel_undo(),
+                Direction::Redo => self.store.kernel_redo(),
+            };
+            if let (
+                Ok(Step::Document {
+                    ops,
+                    reverse,
+                    label,
+                }),
+                true,
+            ) = (earlier, self.entry.is_some())
+            {
+                let applied = Applied {
+                    scopes: ops.iter().map(|o| o.path().to_vec()).collect(),
+                    forward: ops.to_vec(),
+                    inverse: reverse.to_vec(),
+                };
+                self.fold(caller.writer, caller.origin, &label, applied, true);
+            }
+        }
         let result = match direction {
             Direction::Undo => self.store.kernel_undo(),
             Direction::Redo => self.store.kernel_redo(),

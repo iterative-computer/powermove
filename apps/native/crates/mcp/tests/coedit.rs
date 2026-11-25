@@ -1017,3 +1017,96 @@ fn committed_user_roundtrip_drops_the_waiting_write_and_retains_ownership() {
     drop(actor);
     std::fs::remove_dir_all(root).unwrap();
 }
+/// PM-718, the acceptance case: during an in-app agent run (its turn open,
+/// its MCP session not yet finished) the person's Undo, sent as the editor
+/// sends ⌘Z, takes back the agent's edits so far as one step first; the
+/// person's own step stays on the stack and is the next Undo; every Undo
+/// goes back and every Redo forward, never an Undo that redoes.
+#[test]
+fn undo_during_an_open_agent_turn_takes_back_the_agents_edits_first() {
+    use pm_kernel::{Call, Caller, Command, HistoryCall, Reply, Request, WriteBody};
+    let (root, host, actor, mut s, id) = attached_fixture();
+    let kernel = actor.handle();
+    let read = |key: &str| {
+        let document = host.lock().unwrap().read_document(&id).unwrap();
+        let layer = document["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == "L")
+            .cloned()
+            .unwrap();
+        layer["p"][key]["v"].clone()
+    };
+    let person = |call: Call| {
+        kernel
+            .call_blocking(&id, Request::new(Caller::native(), call))
+            .unwrap()
+            .reply
+    };
+    let undo = || {
+        person(Call::History(HistoryCall::EditorUndo {
+            seal_left_open: true,
+        }))
+    };
+    let redo = || person(Call::History(HistoryCall::Redo));
+
+    // The person types a value (one step of theirs) while the run goes on.
+    let typed = person(Call::Transact {
+        label: Some("Opacity".into()),
+        body: WriteBody::Commands(vec![Command::SetStaticOpacity {
+            layer_id: "L".into(),
+            value: 7.0,
+        }]),
+        expected_revision: None,
+    });
+    assert!(matches!(typed, Reply::Applied { .. }), "{typed:?}");
+    // The run moves the layer in two tool calls; its session stays open.
+    for x in [1200, 1300] {
+        ok(s.call(
+            "apply_commands",
+            json!({"commands":[{"type":"set_property","target":"L","path":"position.x","value":x}]}),
+        ));
+    }
+    assert_eq!(read("position.x"), json!(1300));
+
+    let first = undo();
+    assert!(
+        matches!(first, Reply::Bool(true)),
+        "{first:?}: opacity {}, x {}",
+        read("opacity"),
+        read("position.x")
+    );
+    assert_eq!(read("opacity"), json!(7), "the person's step stays");
+    assert_ne!(
+        read("position.x"),
+        json!(1300),
+        "the agent's move is undone"
+    );
+    assert_ne!(
+        read("position.x"),
+        json!(1200),
+        "both of its calls, as one step"
+    );
+    assert!(matches!(undo(), Reply::Bool(true)));
+    assert_eq!(read("opacity"), json!(100), "then the person's step");
+    assert!(matches!(redo(), Reply::Bool(true)));
+    assert_eq!(read("opacity"), json!(7));
+    assert_ne!(read("position.x"), json!(1300));
+    assert!(matches!(redo(), Reply::Bool(true)));
+    assert_eq!(read("position.x"), json!(1300), "the agent's move, whole");
+    assert!(matches!(redo(), Reply::Bool(false)));
+
+    // The run ends: its steps become one; Undo takes it back whole, then
+    // the person's step, and nothing turns into a Redo.
+    s.finish(true).unwrap();
+    assert!(matches!(undo(), Reply::Bool(true)));
+    assert_eq!(read("opacity"), json!(7));
+    assert_ne!(read("position.x"), json!(1300));
+    assert!(matches!(undo(), Reply::Bool(true)));
+    assert_eq!(read("opacity"), json!(100));
+    drop(s);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
