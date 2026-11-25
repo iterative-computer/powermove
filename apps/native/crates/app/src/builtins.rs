@@ -103,6 +103,22 @@ fn panel_scroll_body(
         )
         .into_any_element()
 }
+/// A panel body's scroll thumb while it shows: for `SCROLL_THUMB_HOLD` after
+/// the last scroll (`scrolled_at`), or always where the system shows
+/// scrollbars (the UI-latency bench draws it through this too).
+pub(crate) fn body_thumb(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    scrolled_at: Option<std::time::Instant>,
+    t: &pm_design::Tokens,
+    cx: &App,
+) -> Option<AnyElement> {
+    let shown = scrolled_at.is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
+    (shown || !cx.should_auto_hide_scrollbars())
+        .then(|| scroll_thumb(handle, width, height, t))
+        .flatten()
+}
 /// How long a panel's scroll thumb stays after the last scroll.
 pub(crate) const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
@@ -1887,14 +1903,14 @@ impl Controller {
             );
         }
         let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
-        let shown = self
-            .builtins
-            .scrolled_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = (shown || !cx.should_auto_hide_scrollbars())
-            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
-            .flatten();
+        let thumb = body_thumb(
+            &handle,
+            bounds.w,
+            body,
+            self.builtins.scrolled_at.get(id).copied(),
+            &t,
+            cx,
+        );
         let panel = id.to_owned();
         view.update(cx, |v, _| v.scrolls_in(&handle));
         let on_wheel = {

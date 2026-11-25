@@ -3751,6 +3751,82 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     assert!(!layered(&vcx), "a pointer move ends the scroll");
 }
 
+/// PM-710 review: a panel that left rows out draws them on its body's first
+/// wheel step (for the body's layer to record them), then replays.
+#[gpui::test]
+fn a_panel_that_left_rows_out_builds_them_on_the_first_wheel_step(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    // A header over the panel's own scroller: a wheel over the header moves
+    // only the body around the panel.
+    let column = json!({"display":"flex","flexDirection":"column","width":100});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id": "header", "style":{"width":100,"height":50,"flexShrink":0}}),
+        &[],
+    ));
+    let list =
+        json!({"display":"flex","flexDirection":"column","width":100,"height":350,"flexShrink":0});
+    ops.extend(node_ops(3, 1, "scroll", json!({ "style": list }), &[]));
+    for i in 0..40u64 {
+        ops.extend(node_ops(
+            4 + i,
+            3,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    // Laid out once, the panel culls on its next draw. Not more draws: a
+    // layer recorded three times in a row with no step rests (draws plainly).
+    for _ in 0..2 {
+        view.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    assert!(
+        view.read_with(&vcx, |v, _| v.culls()),
+        "rows far below are left out"
+    );
+    let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
+    let rendered = renders(&vcx);
+    let list = view.read_with(&vcx, |v, _| v.scroll_offsets());
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(20.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.scroll_offsets()),
+        list,
+        "the body scrolled, not the panel's list"
+    );
+    assert!(
+        renders(&vcx) > rendered,
+        "the first step builds the rows past each edge"
+    );
+}
+
 /// PM-702: evaluating a transition at rest (the workspace's corner fades)
 /// does not tell its state it changed. A mutable borrow of the state did, on
 /// every render of every fade, and the workspace that evaluated them drew

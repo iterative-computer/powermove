@@ -62,6 +62,7 @@ struct Dock {
     views: RefCell<HashMap<String, Entity<SurfaceView>>>,
     scrolls: RefCell<HashMap<String, ScrollHandle>>,
     bodies: RefCell<std::collections::BTreeMap<String, Entity<crate::builtins::PanelBody>>>,
+    scrolled_at: Rc<RefCell<HashMap<String, Instant>>>,
 }
 
 impl pm_shell::integration::Integration for Dock {
@@ -133,8 +134,9 @@ impl pm_shell::integration::Integration for Dock {
             .clone();
         view.update(cx, |v, _| v.scrolls_in(&handle));
         // As `Controller::builtin_panel` draws a side panel: its body view, a
-        // scroll layer (`PanelBody`), and a wheel listener that redraws the
-        // workspace for the scroll thumb and hides it once the scroll stops.
+        // scroll layer (`PanelBody`), its scroll thumb, and a wheel listener
+        // that redraws the workspace for the thumb and hides it once the
+        // scroll stops.
         let panel_body = crate::builtins::PanelBody::sync(
             &mut self.bodies.borrow_mut(),
             id,
@@ -143,6 +145,16 @@ impl pm_shell::integration::Integration for Dock {
             body,
             cx,
         );
+        let thumb = crate::builtins::body_thumb(
+            &handle,
+            rect.w,
+            body,
+            self.scrolled_at.borrow().get(id).copied(),
+            &self.tokens,
+            cx,
+        );
+        let scrolled_at = self.scrolled_at.clone();
+        let panel = id.to_owned();
         let workspace = window.current_view();
         let keep = {
             let view = view.clone();
@@ -159,6 +171,9 @@ impl pm_shell::integration::Integration for Dock {
                 .w_full()
                 .h(px(body))
                 .on_scroll_wheel(move |_, window, cx| {
+                    scrolled_at
+                        .borrow_mut()
+                        .insert(panel.clone(), Instant::now());
                     window
                         .spawn(cx, async move |cx| {
                             cx.background_executor()
@@ -171,6 +186,7 @@ impl pm_shell::integration::Integration for Dock {
                 })
                 .child(panel_body.cached(StyleRefinement::default().size_full()))
                 .child(keep)
+                .children(thumb)
                 .into_any_element(),
         )
     }
@@ -350,6 +366,7 @@ fn workspace(cx: &mut TestAppContext) -> Result<Workspace, String> {
         views: RefCell::default(),
         scrolls: RefCell::default(),
         bodies: RefCell::default(),
+        scrolled_at: Rc::default(),
     });
     cx.executor().allow_parking();
     let integration = dock.clone();
