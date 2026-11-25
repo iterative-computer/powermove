@@ -1394,7 +1394,7 @@ const FIELD_LIGHT: u32 = 0xff7a2e;
 const FIELD_DEEP: u32 = 0xa3301a;
 const COLUMN: f32 = 330.;
 const TITLE_SIZE: f32 = 26.;
-const PREVIEW_LEFT: f32 = 56.;
+const PREVIEW_LEFT: f32 = 24.;
 const PREVIEW_TOP: f32 = 140.;
 /// The stage's grouped list: its corner (continuous), the row's least
 /// height and side inset (where the hairlines start), the icons' tile.
@@ -1474,9 +1474,9 @@ pub fn stage_ground() -> Div {
         )
 }
 
-/// The product beside a step: a real picture of the app (its panels drawn
-/// headlessly on a demo project, `assets/onboarding`) in a window that the
-/// field's right edge crops, as Arc shows its browser.
+/// The product beside a step: a real picture of the app on a demo project
+/// (`assets/onboarding`), which the field's right and bottom edges crop, as
+/// Arc shows its browser.
 fn preview(id: &str, window: &Window) -> Option<AnyElement> {
     use std::{cell::RefCell, collections::HashMap};
     thread_local! {
@@ -1519,12 +1519,9 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
     Some(
         div()
             .absolute()
-            // A timeline starts further left: its names and its clips.
-            .left(px(if id.starts_with("timeline") || id == "agent" {
-                24.
-            } else {
-                PREVIEW_LEFT
-            }))
+            // One place for every step's picture: nothing moves sideways
+            // on Continue.
+            .left(px(PREVIEW_LEFT))
             .top(px(PREVIEW_TOP))
             .w(px(w))
             .h(px(h))

@@ -331,6 +331,13 @@ test("exact asset, composition and folder spoken values", () => {
   expect(accessibleName(folder())).toBe("Shots, folder, 4 items");
   expect(accessibleName(selected)).toEndWith(", selected");
   expect(meta(asset())).toBe("MOV · 1920×1080 · 0:12 · 48 MB");
+  // A still shows no running time, as its tile's badge.
+  const still = asset("s");
+  if ("Asset" in still.data) {
+    Object.assign(still.data.Asset[0], { kind: "image", format: "jpg" });
+    expect(meta(still)).toBe("JPG · 1920×1080 · 48 MB");
+    expect(accessibleName(still)).not.toContain("seconds");
+  }
   const unknown = asset("x", "Unknown");
   if ("Asset" in unknown.data) {
     Object.assign(unknown.data.Asset[0], {

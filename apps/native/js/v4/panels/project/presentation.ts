@@ -114,7 +114,8 @@ export function meta(row: Row): string {
           : a.format?.toUpperCase(),
       runtime.hdr ?? null,
       a.kind === "audio" ? null : dimensions(a),
-      a.duration === null ? null : clock(a.duration),
+      // A still has no running time (as its tile's badge).
+      a.duration === null || a.kind === "image" ? null : clock(a.duration),
       a.kind === "model" && a.triangles !== null ? `${a.triangles} tris` : null,
       a.bytes === null ? null : mediaSize(a.bytes),
       extra,
@@ -145,7 +146,8 @@ export function accessibleName(row: Row): string {
   ];
   if (a.width !== null && a.height !== null)
     parts.push(`${a.width} by ${a.height}`);
-  if (a.duration !== null) parts.push(spokenSeconds(a.duration));
+  const still = "Asset" in row.data && row.data.Asset[0].kind === "image";
+  if (a.duration !== null && !still) parts.push(spokenSeconds(a.duration));
   if ("Composition" in row.data) {
     if (row.data.Composition.open) parts.push("open in the timeline");
   } else {
