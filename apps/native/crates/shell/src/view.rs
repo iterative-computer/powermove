@@ -2783,6 +2783,8 @@ const TAB_SPACING: f32 = 2.;
 const TAB_STEP: f32 = layout::MIN_TAB_WIDTH + TAB_SPACING;
 const TAB_EDGE_FADE: f32 = 16.;
 const TAB_PADDING: f32 = 12.;
+const TAB_CLOSE_PADDING: f32 = 18.;
+const TAB_MIN_EDGE: f32 = 8.;
 
 fn whole_tabs(viewport: f32, widths: impl IntoIterator<Item = f32>) -> (usize, f32) {
     let mut count = 0;
@@ -2869,7 +2871,8 @@ fn tab_label_insets(widths: &[f32], labels: &[(String, f32)]) -> Vec<f32> {
     let mut tab_left = 0.;
     let mut packed = 0.;
     // Subtract the preceding label widths. Each remaining interval constrains
-    // the first label position plus one copy of the gap per preceding tab.
+    // the first label position plus one copy of the gap per preceding tab,
+    // keeping breathing room inside both edges of every tab's hover pill.
     let starts: Vec<_> = widths
         .iter()
         .zip(labels)
@@ -2877,7 +2880,9 @@ fn tab_label_insets(widths: &[f32], labels: &[(String, f32)]) -> Vec<f32> {
             let left = tab_left - packed;
             tab_left += width + TAB_SPACING;
             packed += label;
-            (left, left + (width - label).max(0.))
+            let slack = (width - label).max(0.);
+            let edge = (slack / 2.).min(TAB_MIN_EDGE);
+            (left + edge, left + slack - edge)
         })
         .collect();
     let mut minimum = 0f32;
@@ -2896,17 +2901,27 @@ fn tab_label_insets(widths: &[f32], labels: &[(String, f32)]) -> Vec<f32> {
             .map(|(&width, (_, label))| (width - label) / 2.)
             .collect();
     }
-    let gap = (2. * TAB_PADDING + TAB_SPACING).clamp(minimum, maximum);
+    let gap = (TAB_PADDING + TAB_CLOSE_PADDING + TAB_SPACING).clamp(minimum, maximum);
     let mut first = (0f32, f32::INFINITY);
     for (index, &(left, right)) in starts.iter().enumerate() {
         first.0 = first.0.max(left - index as f32 * gap);
         first.1 = first.1.min(right - index as f32 * gap);
     }
     let first = TAB_PADDING.clamp(first.0, first.1.max(first.0));
-    starts
+    let mut tab_left = 0.;
+    let mut packed = 0.;
+    widths
         .iter()
+        .zip(labels)
         .enumerate()
-        .map(|(i, (left, _))| first + i as f32 * gap - left)
+        .map(|(i, (&width, (_, label)))| {
+            let base = tab_left - packed;
+            tab_left += width + TAB_SPACING;
+            packed += label;
+            let slack = (width - label).max(0.);
+            let edge = (slack / 2.).min(TAB_MIN_EDGE);
+            (first + i as f32 * gap - base).clamp(edge, (slack - edge).max(edge))
+        })
         .collect()
 }
 
@@ -3420,7 +3435,6 @@ impl Editor {
         // viewer a border inside its panel, an extension body its inset).
         let viewer_radius = (m.panel_radius - m.border).max(0.);
         let body_radius = (m.panel_radius - m.border.max(m.splitter_reach)).max(0.);
-        let (line, line_alpha) = t.line();
         // This paint and AppKit share one placement. The background canvas
         // paints first, after the render below has resolved the panel rects.
         let native_geometry = Rc::new(OnceCell::<NativePanelGeometry>::new());
@@ -3775,7 +3789,8 @@ impl Editor {
                 .iter()
                 .map(|tab| {
                     measure_tab_text(panels.title(tab), label_size, label_weight, w)
-                        + 2. * TAB_PADDING
+                        + TAB_PADDING
+                        + TAB_CLOSE_PADDING
                 })
                 .collect();
             let header_rect = self.geometry.header_rect(&p, &t);
@@ -3894,10 +3909,6 @@ impl Editor {
                     (is_viewer && native) || own_ground || header_offset > 0.,
                     |h| h.bg(tint(c.panel, t.translucency.panel)),
                 )
-                .when(!is_viewer, |h| {
-                    h.border_b(px(m.border))
-                        .border_color(tint(line, line_alpha))
-                })
                 // The header's empty area moves the whole stack; a tab moves one panel.
                 .on_mouse_down(
                     MouseButton::Left,
@@ -3995,13 +4006,13 @@ impl Editor {
                     .enumerate()
                     .map(|(index, tab)| {
                         let room = if multi {
-                            track.widths[index] - 2. * TAB_PADDING
+                            track.widths[index] - TAB_PADDING - TAB_CLOSE_PADDING
                         } else {
                             single_width
                         };
                         tab_label(
                             panels.title(tab),
-                            widths[index] - 2. * TAB_PADDING,
+                            widths[index] - TAB_PADDING - TAB_CLOSE_PADDING,
                             room,
                             measure_label,
                         )
@@ -4084,7 +4095,7 @@ impl Editor {
                         .items_center()
                         .h(px(m.hit))
                         .when(multi, |s| {
-                            let s = s.rounded(px(m.control_radius));
+                            let s = s.rounded(px(m.control_radius)).overflow_hidden();
                             s.when(!dragging, |s| s.hover_style(|s| s.bg(rgb(c.hover))))
                         })
                         .when(slide != 0., |s| s.left(px(slide)))
@@ -4110,7 +4121,6 @@ impl Editor {
                         .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
                         .child(div().ml(px(inset)).flex_none().child(label.clone()));
                     if closable && !dragging {
-                        let leading = inset >= TAB_PADDING;
                         cell = cell.child(
                             div()
                                 .id(format!("close-{tab}"))
@@ -4119,11 +4129,12 @@ impl Editor {
                                 .tab_index(0)
                                 .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .when(leading, |button| button.left_0())
-                                .when(!leading, |button| button.right_0().bg(rgb(c.hover)))
+                                .right_0()
                                 .top_0()
                                 .bottom_0()
-                                .w(px(TAB_PADDING))
+                                .w(px(TAB_CLOSE_PADDING))
+                                .rounded_r(px(m.control_radius))
+                                .bg(rgb(c.hover))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4131,7 +4142,7 @@ impl Editor {
                                 .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
                                 .child(crate::symbol::symbol(
                                     "xmark",
-                                    m.symbol_inline - 3.,
+                                    (m.symbol_inline - 5.).max(8.),
                                     crate::symbol::Weight::Semibold,
                                     c.muted,
                                     w,
@@ -7050,6 +7061,20 @@ mod tests {
             assert_eq!(item.command, format!("panel:activate:{id}"));
             assert_eq!(item.checked, index == group.active);
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn dock_tab_insets_preserve_edge_padding_when_neighbor_is_widened_to_min_tab_width() {
+        let widths = [72., 76.];
+        let labels = [("Agent".to_owned(), 38.), ("Project".to_owned(), 46.)];
+        let insets = super::tab_label_insets(&widths, &labels);
+        assert!(insets[0] >= super::TAB_MIN_EDGE, "Agent inset {:?}", insets);
+        assert!(insets[1] >= super::TAB_MIN_EDGE, "Project inset {:?}", insets);
+        assert!(
+            widths[1] - labels[1].1 - insets[1] >= super::TAB_MIN_EDGE,
+            "Project trailing inset {:?}",
+            insets
+        );
     }
 
     #[gpui::test]

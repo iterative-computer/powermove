@@ -4626,6 +4626,12 @@ impl SurfaceView {
             // some rows (`metadata.rowFloor`, Effect Controls' effects): a
             // panel body shorter than those rows scrolls instead.
             let floor = self.row_floor(id);
+            let min_h = match node.style.min_size.height {
+                Some(gpui::Length::Definite(gpui::DefiniteLength::Absolute(
+                    gpui::AbsoluteLength::Pixels(p),
+                ))) => floor.max(f32::from(p)),
+                _ => floor,
+            };
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -4633,11 +4639,11 @@ impl SurfaceView {
             } else if self.grows {
                 // In a body that scrolls the panel's height comes from its
                 // content: a scroller adds only its floor, then fills.
-                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(floor))
+                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(min_h))
             } else {
                 element.flex_1()
             };
-            element = element.min_h(px(floor)).track_scroll(scroll);
+            element = element.min_h(px(min_h)).track_scroll(scroll);
             // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
             // was at its end stays there as content grows; once scrolled up,
             // it stays where the person left it.

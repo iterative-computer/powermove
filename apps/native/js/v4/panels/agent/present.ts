@@ -862,7 +862,7 @@ export function inline(text: string): Run[] {
     else runs.push(run);
   };
   const pattern =
-    /(`+)([^`]+?)\1|\*\*([^*]+?)\*\*|__([^_]+?)__|(?<![\w*])\*([^*\s][^*]*?)\*(?!\w)|(?<![\w_])_([^_\s][^_]*?)_(?![\w])|\[([^\]]+)\]\(([^)\s]+)\)|<(https?:\/\/[^>\s]+)>/g;
+    /(`+)([^`]+?)\1|\*\*([^*]+?)\*\*|__([^_]+?)__|(?<![\w*])\*([^*\s][^*]*?)\*(?!\w)|(?<![\w_])_([^_\s][^_]*?)_(?![\w])|\[([^\]]+)\]\((?:<([^<>\n]+)>|((?:[^()\s<>]|\([^()\s]*\))+))(?:\s+"[^"]*")?\)|<(https?:\/\/[^>\s]+)>/g;
   let at = 0;
   for (const m of text.matchAll(pattern)) {
     push({ t: text.slice(at, m.index) });
@@ -871,8 +871,11 @@ export function inline(text: string): Run[] {
       for (const r of inline(m[3] ?? m[4]!)) push({ ...r, b: true });
     else if (m[5] !== undefined || m[6] !== undefined)
       for (const r of inline(m[5] ?? m[6]!)) push({ ...r, i: true });
-    else if (m[7] !== undefined) push({ t: m[7], a: true, href: m[8] });
-    else if (m[9] !== undefined) push({ t: m[9], a: true, href: m[9] });
+    else if (m[7] !== undefined) {
+      const dest = m[8] ?? m[9]!;
+      if (/^https?:\/\//i.test(dest)) push({ t: m[7], a: true, href: dest });
+      else push({ t: m[7], c: true });
+    } else if (m[10] !== undefined) push({ t: m[10], a: true, href: m[10] });
     at = m.index! + m[0].length;
   }
   push({ t: text.slice(at) });

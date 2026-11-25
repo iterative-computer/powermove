@@ -452,8 +452,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
           <scroll
             id="export.queue.rows"
             label="Render queue and history"
-            // Reserve room for up to four two-line jobs while the preview flexes.
-            metadata={{ rowFloor: 2 * Math.min(jobs.length, 4) }}
+            // Reserve room for the section header plus up to four two-line jobs while the preview flexes.
+            metadata={{ rowFloor: jobs.length ? 2 + 2 * Math.min(jobs.length, 4) : 0 }}
             style={{
               ...stack,
               flexShrink: 1,

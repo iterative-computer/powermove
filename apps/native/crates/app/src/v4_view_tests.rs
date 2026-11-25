@@ -1301,6 +1301,36 @@ fn a_scroller_keeps_the_rows_its_panel_asks_for_in_a_short_body(cx: &mut TestApp
     assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 3. * row);
     assert!(f32::from(bounds(&mut vcx, "n5").size.height) < row);
 }
+
+#[gpui::test]
+fn scroll_preserves_authored_min_height_above_smaller_row_floor(cx: &mut TestAppContext) {
+    let rig = rig("export", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","width":420,"height":420});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"style":{"height":315,"minHeight":120,"flexShrink":1}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"rowFloor":2},"style":{"minHeight":120,"maxHeight":440,"flexShrink":1}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "div", json!({"style":{"height":88}}), &[]));
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    assert!(
+        f32::from(bounds(&mut vcx, "n3").size.height) >= 120.,
+        "scroll minHeight must not be shrunk down to rowFloor: {:?}",
+        bounds(&mut vcx, "n3")
+    );
+}
 /// A side panel's body as `panel_body` builds it: a slot that scrolls, the
 /// panel as tall as its content and at least the slot.
 struct ScrollingBody {

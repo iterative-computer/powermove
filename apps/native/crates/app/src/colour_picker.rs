@@ -1205,6 +1205,7 @@ impl Render for Picker {
                     p.finish(true, cx);
                 }
             }))
+            .child(pm_shell::native_control::native_occlusion_backdrop())
             .child(
                 div()
                     .flex()

@@ -122,9 +122,9 @@ struct State {
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
-    /// What a paint staged, with that paint's number: placed by the present
-    /// that follows that paint, and by no later one.
-    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    /// What a paint staged, with that paint's number and stage order: placed
+    /// by the present that follows that paint, and by no later one.
+    geometry: Cell<Option<(u64, u64, NSRect, NSRect)>>,
     scroll_fade: crate::scroll_fade::ScrollFade,
     staged: Cell<Option<(NSRect, NSRect)>>,
     build_alpha: Cell<Option<(u64, f64)>>,
@@ -1289,9 +1289,11 @@ impl Drop for NativeTextSlot {
 }
 impl State {
     fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
-        let paint = crate::composition::open_paint(Retained::as_ptr(&self.gpui) as usize);
+        let key = Retained::as_ptr(&self.gpui) as usize;
+        let paint = crate::composition::open_paint(key);
+        let order = crate::composition::next_stage_order(key);
         self.geometry
-            .set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+            .set(geometry.map(|(bounds, clip)| (paint, order, bounds, clip)));
     }
 }
 /// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
@@ -1316,16 +1318,17 @@ fn place(key: usize, apply: bool) -> bool {
             .geometry
             .get()
             .filter(|(paint, ..)| Some(*paint) == last)
-            .map(|(_, bounds, clip)| (bounds, clip))
+            .map(|(_, order, bounds, clip)| (order, bounds, clip))
             .or_else(|| {
                 (state.kind == TextKind::Canvas)
                     .then(|| state.staged.get())
                     .flatten()
+                    .map(|(bounds, clip)| (0, bounds, clip))
             });
         if apply {
             state.geometry.set(None);
         }
-        let Some((bounds, clip)) = geometry else {
+        let Some((order, bounds, clip)) = geometry else {
             if !state.wrapper.isHidden() {
                 moved = true;
                 if apply {
@@ -1359,9 +1362,12 @@ fn place(key: usize, apply: bool) -> bool {
         }
         // From GPUI's frame in its parent (P-EMBED).
         let visible = intersection(bounds, clip);
+        let occluded = state.kind != TextKind::Canvas
+            && crate::composition::is_occluded(key, order, visible);
         let hidden = visible.size.width <= 0.
             || visible.size.height <= 0.
-            || (state.kind.dense() && !state.editing.get());
+            || (state.kind.dense() && !state.editing.get())
+            || occluded;
         // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
         // field at rest, a field scrolled out) still follows its row, but
         // nothing on screen moved, so the frame needs no synchronous

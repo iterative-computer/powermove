@@ -1779,6 +1779,34 @@ impl Render for NativeControl {
             )
     }
 }
+
+/// Record an opaque GPUI overlay rect so AppKit controls/text slots staged
+/// beneath it in the same paint are hidden instead of bleeding through.
+pub fn occlude_native_overlay(bounds: Bounds<Pixels>, window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    if let Some(view) = unsafe { (handle.ns_view.as_ptr() as *const NSView).as_ref() } {
+        gpui_macos::composition::occlude(view, ns_rect(bounds));
+    }
+}
+
+/// First child for GPUI popovers/menus so AppKit subviews staged earlier in
+/// the frame (like Timeline's segmented control) never bleed through them,
+/// while native text fields painted *inside* the overlay remain visible.
+pub fn native_occlusion_backdrop() -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        |bounds, _, window, _| occlude_native_overlay(bounds, window),
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
 /// The value a row stands for (a plain string row is its own value).
 fn row_value(option: &Value) -> &Value {
     option.get("v").unwrap_or(option)

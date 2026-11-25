@@ -12,9 +12,9 @@ struct State {
     gpui: Retained<NSView>,
     wrapper: Retained<NSView>,
     control: Retained<NSView>,
-    /// What a paint staged, with that paint's number: placed by the present
-    /// that follows that paint, and by no later one.
-    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    /// What a paint staged, with that paint's number and stage order: placed
+    /// by the present that follows that paint, and by no later one.
+    geometry: Cell<Option<(u64, u64, NSRect, NSRect)>>,
     scroll_fade: crate::scroll_fade::ScrollFade,
     staged: Cell<Option<(NSRect, NSRect)>>,
     alpha: Cell<Option<(u64, f64)>>,
@@ -25,8 +25,11 @@ impl State {
         Retained::as_ptr(&self.gpui) as usize
     }
     fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
-        let paint = crate::composition::open_paint(self.key());
-        self.geometry.set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+        let key = self.key();
+        let paint = crate::composition::open_paint(key);
+        let order = crate::composition::next_stage_order(key);
+        self.geometry
+            .set(geometry.map(|(bounds, clip)| (paint, order, bounds, clip)));
     }
     /// Powermove P-SLOT-LAZY: a control joins the window the first time a
     /// paint shows it. AppKit lays out every view in the window, hidden or
@@ -45,12 +48,12 @@ impl State {
         }
     }
     /// Where the last complete paint put this control, if it staged it.
-    fn placed(&self) -> Option<(NSRect, NSRect)> {
+    fn placed(&self) -> Option<(u64, NSRect, NSRect)> {
         let last = crate::composition::last_paint(self.key());
         self.geometry
             .get()
             .filter(|(paint, ..)| Some(*paint) == last)
-            .map(|(_, bounds, clip)| (bounds, clip))
+            .map(|(_, order, bounds, clip)| (order, bounds, clip))
     }
     fn visible_rect(bounds: NSRect, clip: NSRect) -> NSRect {
         let x = bounds.origin.x.max(clip.origin.x);
@@ -65,7 +68,7 @@ impl State {
     }
 
     fn place_fade(&self, apply: bool) -> bool {
-        let Some((bounds, clip)) = self.placed() else {
+        let Some((_, bounds, clip)) = self.placed() else {
             return false;
         };
         self.scroll_fade.place(&self.wrapper, Self::visible_rect(bounds, clip), clip, apply)
@@ -73,8 +76,9 @@ impl State {
     /// The wrapper's frame, the control's frame inside it and whether the
     /// wrapper is hidden, for what the last paint staged.
     fn target(&self) -> Option<(NSRect, NSRect, bool)> {
-        let (bounds, clip) = self.placed()?;
+        let (order, bounds, clip) = self.placed()?;
         let visible = Self::visible_rect(bounds, clip);
+        let occluded = crate::composition::is_occluded(self.key(), order, visible);
         let x = visible.origin.x;
         let y = visible.origin.y;
         let frame = crate::composition::hosted_rect(&self.gpui, &self.wrapper, visible);
@@ -86,7 +90,7 @@ impl State {
             ),
             bounds.size,
         );
-        Some((frame, local, visible.width <= 0. || visible.height <= 0.))
+        Some((frame, local, visible.width <= 0. || visible.height <= 0. || occluded))
     }
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}

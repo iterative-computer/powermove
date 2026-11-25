@@ -162,6 +162,12 @@ thread_local! {
     /// open (this count); a present places what the last complete paint
     /// staged and nothing an earlier one left behind.
     static PAINTS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+    /// Monotonic paint-order counter per GPUI view so overlays painted after
+    /// underlying native controls/text fields can occlude only controls below
+    /// them while keeping controls inside the overlay itself visible.
+    static STAGE_ORDER: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+    static OCCLUDERS: RefCell<HashMap<usize, (u64, Vec<(u64, NSRect)>)>> =
+        RefCell::new(HashMap::new());
 }
 /// The paint a slot staged now belongs to.
 pub(crate) fn open_paint(view: usize) -> u64 {
@@ -171,12 +177,66 @@ pub(crate) fn open_paint(view: usize) -> u64 {
 pub(crate) fn last_paint(view: usize) -> Option<u64> {
     open_paint(view).checked_sub(1)
 }
+pub(crate) fn next_stage_order(view: usize) -> u64 {
+    STAGE_ORDER.with(|s| {
+        let mut s = s.borrow_mut();
+        let entry = s.entry(view).or_default();
+        *entry += 1;
+        *entry
+    })
+}
+/// Record an opaque GPUI overlay rect (in GPUI paint coordinates, y down) for
+/// the current paint so any AppKit control/text slot staged earlier in the
+/// frame that intersects `rect` is hidden instead of bleeding through it.
+pub fn occlude(view: &NSView, rect: NSRect) {
+    if rect.size.width <= 0. || rect.size.height <= 0. {
+        return;
+    }
+    let key = view as *const NSView as usize;
+    let paint = open_paint(key);
+    let order = next_stage_order(key);
+    OCCLUDERS.with(|o| {
+        let mut o = o.borrow_mut();
+        let entry = o.entry(key).or_insert_with(|| (paint, Vec::new()));
+        if entry.0 != paint {
+            entry.0 = paint;
+            entry.1.clear();
+        }
+        entry.1.push((order, rect));
+    });
+}
+pub(crate) fn is_occluded(view: usize, order: u64, rect: NSRect) -> bool {
+    if rect.size.width <= 0. || rect.size.height <= 0. {
+        return false;
+    }
+    let Some(last) = last_paint(view) else {
+        return false;
+    };
+    OCCLUDERS.with(|o| {
+        let o = o.borrow();
+        let Some((paint, rects)) = o.get(&view) else {
+            return false;
+        };
+        if *paint != last {
+            return false;
+        }
+        rects.iter().any(|(occ_order, occ)| {
+            *occ_order > order
+                && rect.origin.x < occ.origin.x + occ.size.width
+                && rect.origin.x + rect.size.width > occ.origin.x
+                && rect.origin.y < occ.origin.y + occ.size.height
+                && rect.origin.y + rect.size.height > occ.origin.y
+        })
+    })
+}
 /// A paint of `view` ended.
 pub(crate) fn painted(view: usize) {
     PAINTS.with(|p| *p.borrow_mut().entry(view).or_default() += 1);
 }
 pub(crate) fn forget_paints(view: usize) {
     PAINTS.with(|p| p.borrow_mut().remove(&view));
+    STAGE_ORDER.with(|s| s.borrow_mut().remove(&view));
+    OCCLUDERS.with(|o| o.borrow_mut().remove(&view));
 }
 /// Whether presenting now would move a hosted view. Nothing is touched.
 pub(crate) fn pending(view: usize, painted: bool) -> bool {
