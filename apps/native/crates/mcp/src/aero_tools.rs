@@ -43,8 +43,11 @@ pub struct Tools {
     /// Runs between an edit's write and its check (tests: a competing
     /// writer, a project closed mid-edit).
     #[cfg(test)]
-    pub(crate) after_write: Option<Box<dyn FnMut(&Arc<Mutex<Automation>>) + Send>>,
+    pub(crate) after_write: Option<AfterWrite>,
 }
+
+#[cfg(test)]
+type AfterWrite = Box<dyn FnMut(&Arc<Mutex<Automation>>) + Send>;
 
 /// The stage's baseline, kept beside it so a later turn resumes the same
 /// tree instead of a fresh copy that would drop its drafts.

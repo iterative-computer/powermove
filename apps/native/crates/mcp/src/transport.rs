@@ -34,9 +34,7 @@ fn at_socket<T>(path: &Path, op: impl FnOnce(&Path) -> std::io::Result<T>) -> st
     let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
         return op(path);
     };
-    let _held = WORKING_DIRECTORY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _held = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
     let previous = std::env::current_dir()?;
     std::env::set_current_dir(folder)?;
     let result = op(Path::new(name));
