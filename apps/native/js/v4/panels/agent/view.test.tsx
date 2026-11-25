@@ -2180,6 +2180,29 @@ test("with the Codex and Claude Code harnesses the chooser heads their models wi
     root.dispose();
   }
 });
+test("a harness with no models lists Connect a provider…", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([]);
+  p.snapshot.settings.provider = "claude";
+  p.snapshot.settings.model = "";
+  const asked: Parameters<Menu>[0][] = [];
+  await root.render(
+    <AgentView
+      publication={p}
+      menu={async (r) => {
+        asked.push(r);
+        return null;
+      }}
+      send={() => {}}
+    />,
+  );
+  await root.drive(byId(root, "agent-model").id, "click");
+  expect(chooserRows(asked[0]!).filter(([kind]) => kind === "connect").map(([, label]) => label)).toEqual([
+    "Connect a provider…",
+  ]);
+  root.dispose();
+});
 test("with the Powermove harness a rail harness keeps the chooser open and switches the harness", async () => {
   const { root } = mount();
   const actions: Action[] = [];

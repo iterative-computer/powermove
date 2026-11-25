@@ -292,7 +292,7 @@ define_class!(
                     s.query = query;
                     s.lit = None;
                 }
-                build_list(&state);
+                let _ = build_list(&state);
             }
         }
         #[unsafe(method(control:textView:doCommandBySelector:))]
@@ -549,8 +549,21 @@ fn fitting(view: &NSView) -> NSSize {
     NSSize::new(size.width.ceil(), size.height.ceil())
 }
 
-/// Lays the whole popover out again from its state (a refresh or an open).
-fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
+/// Lays the popover out from its state, as tall as its content up to the
+/// chooser's height (the list scrolls past it).
+fn lay_out(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
+    let most = Shape::new(&state.borrow().tokens).height;
+    let (size, needed) = build(state, mtm, most);
+    if needed + 0.5 < size.height {
+        build(state, mtm, needed.ceil()).0
+    } else {
+        size
+    }
+}
+
+/// Lays the whole popover out at `height`; answers its size and the height
+/// its content needs.
+fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker, height: f64) -> (NSSize, f64) {
     let (spec, t) = {
         let s = state.borrow();
         (s.spec.clone(), s.tokens.clone())
@@ -559,13 +572,19 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
     let shape = Shape::new(&t);
     let has_card = spec.title.is_some();
     let width = shape.rail + shape.line + shape.list + if has_card { shape.card } else { 0. };
-    let height = shape.height;
     let root = ChooserView::new(
         mtm,
         state,
         NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
     );
     root.setAccessibilityLabel(Some(&NSString::from_str("Harness and model")));
+    // An opaque ground in the popover's token, not the material behind it.
+    root.setWantsLayer(true);
+    if let Some(layer) = root.layer() {
+        layer.setBackgroundColor(Some(&native_color(t.colors.floating).CGColor()));
+    }
+    let harnesses = spec.of(Part::Harness).count() as f64;
+    let mut needed = harnesses * (shape.tile + shape.tile_gap) + shape.pad;
 
     // The rail: one mark per harness, the chosen one on a soft tile.
     for (n, (i, row)) in spec.of(Part::Harness).enumerate() {
@@ -812,6 +831,7 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
             t.radius.nested(t.metrics.popover_radius, t.space.md) as f64,
             mtm,
         );
+        needed = needed.max(y + shape.pad);
         card.setBorderWidth(shape.line);
         card.setBorderColor(&native_color(t.colors.separator));
         root.addSubview(&card);
@@ -826,14 +846,15 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         s.list = Some(list);
         s.search = Some(search);
     }
-    build_list(state);
-    NSSize::new(width, height)
+    let list_h = build_list(state);
+    needed = needed.max(shape.search + shape.line + list_h);
+    (NSSize::new(width, height), needed.min(height))
 }
 
 /// Lays the middle list out for the current query.
-fn build_list(state: &Rc<RefCell<State>>) {
+fn build_list(state: &Rc<RefCell<State>>) -> f64 {
     let Some(list) = state.borrow().list.clone() else {
-        return;
+        return 0.;
     };
     let mtm = list.mtm();
     for view in list.subviews().to_vec() {
@@ -863,7 +884,16 @@ fn build_list(state: &Rc<RefCell<State>>) {
     let mut y = t.space.xs as f64;
     let listed = spec.listed(&query);
     if listed.is_empty() {
-        let none = label("No models match", t.typography.reading, t.colors.muted, mtm);
+        let none = label(
+            if query.trim().is_empty() {
+                "No models"
+            } else {
+                "No models match"
+            },
+            t.typography.reading,
+            t.colors.muted,
+            mtm,
+        );
         place(&none, x, y, shape.row, width - 2. * x, body_h);
         list.addSubview(&none);
         y += shape.row;
@@ -998,6 +1028,7 @@ fn build_list(state: &Rc<RefCell<State>>) {
         s.highlight = Some(highlight);
     }
     light(state);
+    y
 }
 
 /// The open chooser, held by the host while it shows.
@@ -1072,7 +1103,7 @@ impl Host {
             frames: vec![],
             highlight: None,
         }));
-        let size = build(&state, mtm);
+        let size = lay_out(&state, mtm);
         let root = state.borrow().root.clone();
         let Some(root) = root else {
             return;
@@ -1120,7 +1151,7 @@ impl Host {
             .and_then(|s| s.window())
             .and_then(|w| w.firstResponder())
             .is_some();
-        let size = build(&state, mtm);
+        let size = lay_out(&state, mtm);
         let (popover, root, search) = {
             let s = state.borrow();
             (s.popover.clone(), s.root.clone(), s.search.clone())

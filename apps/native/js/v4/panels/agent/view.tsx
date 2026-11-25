@@ -2977,7 +2977,13 @@ function Composer({
         icon: "provider.powermove",
         disabled: true,
       });
-    if (n.findingModels && !groups.size) options.push({ kind: "heading", label: "Finding models…", value: "" });
+    // No models to list: the way to an account that has some.
+    if (!groups.size)
+      options.push(
+        n.findingModels
+          ? { kind: "heading", label: "Finding models…", value: "" }
+          : { kind: "connect", label: "Connect a provider…", value: "providers:" },
+      );
     const level = (value: string) => ({
       kind: "effort",
       label: effortLabel(value),
