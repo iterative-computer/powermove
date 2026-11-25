@@ -259,6 +259,13 @@ pub enum Kind {
     /// back to the window's content and are sent as `{"key": …}` (`Enter`,
     /// `Escape`, `ArrowDown`) for the view to act on.
     Search,
+    /// A plain one-line field: `label` is its placeholder, the value its
+    /// text, sent as it is typed. `symbol` is its content type, the hint
+    /// AutoFill reads: `email`, or `code` for a one-time code (digits
+    /// only, six at most: a pasted "123 456" arrives as "123456"). Return,
+    /// Escape and Tab are sent as `{"key": …}` (`Enter`, `Escape`, `Tab`);
+    /// the keyboard stays in the field.
+    Text,
     /// AppKit's colour well in its minimal style (a swatch with a chevron
     /// that opens the system's colours): the value is `#rrggbb`.
     Well,
@@ -346,6 +353,8 @@ struct TargetState {
     kind: Kind,
     /// The window's content view: where the keyboard goes back to.
     content: Option<Retained<NSView>>,
+    /// A one-time code field: digits only, six at most.
+    digits: bool,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -364,9 +373,21 @@ define_class!(
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
                 Kind::Push|Kind::PopupTrigger=>Value::Null,
                 Kind::Well=>sender.downcast_ref::<NSColorWell>().map_or(Value::Null,|w|json!(colour_hex(&w.color()))),
+                Kind::Text=>Value::Null,
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
+            if matches!(self.ivars().kind,Kind::Text){return;}
             let _=self.ivars().sender.try_send(value);
+        }
+        /// A plain field's text, as it is typed (NSControlTextEditingDelegate).
+        #[unsafe(method(controlTextDidChange:))]
+        fn text_changed(&self,note:&objc2_foundation::NSNotification){
+            if !matches!(self.ivars().kind,Kind::Text){return;}
+            let Some(field)=note.object().and_then(|o|o.downcast::<NSTextField>().ok()) else{return};
+            let typed=field.stringValue().to_string();
+            let text=if self.ivars().digits{typed.chars().filter(char::is_ascii_digit).take(6).collect()}else{typed.clone()};
+            if text!=typed{field.setStringValue(&NSString::from_str(&text));}
+            let _=self.ivars().sender.try_send(json!(text));
         }
         #[unsafe(method(menuBegan:))]
         fn menu_began(&self,_:&AnyObject){self.ivars().tracking.set(true);}
@@ -401,12 +422,15 @@ define_class!(
         /// keyboard back to the window's content and tell the view.
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self,control:&NSControl,_editor:&NSTextView,command:objc2::runtime::Sel)->bool{
+            let text=matches!(self.ivars().kind,Kind::Text);
             let key=if command==sel!(cancelOperation:){Some("Escape")}
                 else if command==sel!(insertNewline:){Some("Enter")}
-                else if command==sel!(moveDown:){Some("ArrowDown")}
+                else if command==sel!(moveDown:)&&!text{Some("ArrowDown")}
+                else if command==sel!(insertTab:)&&text{Some("Tab")}
                 else{None};
+            // A plain field keeps the keyboard, but for Tab; a search gives it back.
             if let Some(key)=key{
-                if let Some(window)=control.window(){
+                if (!text||key=="Tab")&&let Some(window)=control.window(){
                     window.makeFirstResponder(self.ivars().content.as_deref().map(AsRef::as_ref));
                 }
                 let _=self.ivars().sender.try_send(json!({"key":key}));
@@ -458,6 +482,7 @@ enum Control {
     Segmented(Retained<SegmentedControl>),
     Slider(Retained<NSSlider>),
     Search(Retained<NSSearchField>),
+    Text(Retained<NSTextField>),
     Well(Retained<NSColorWell>),
 }
 impl Control {
@@ -469,6 +494,7 @@ impl Control {
             Self::Segmented(v) => v,
             Self::Slider(v) => v.as_ref(),
             Self::Search(v) => v.as_ref(),
+            Self::Text(v) => v.as_ref(),
             Self::Well(v) => v.as_ref(),
         }
     }
@@ -480,6 +506,7 @@ impl Control {
             Self::Segmented(v) => v.setEnabled(enabled),
             Self::Slider(v) => v.setEnabled(enabled),
             Self::Search(v) => v.setEnabled(enabled),
+            Self::Text(v) => v.setEnabled(enabled),
             Self::Well(v) => v.setEnabled(enabled),
         }
     }
@@ -555,6 +582,13 @@ impl Control {
                     v.setStringValue(&NSString::from_str(text));
                 }
                 search_hint(v, v.stringValue().is_empty());
+            }
+            // As a search field: the typed text stands while it is typed in.
+            Self::Text(v) => {
+                let text = value.as_str().unwrap_or("");
+                if v.currentEditor().is_none() && v.stringValue().to_string() != text {
+                    v.setStringValue(&NSString::from_str(text));
+                }
             }
         }
     }
@@ -751,6 +785,11 @@ pub struct NativeControl {
     /// (PM-342: a panel laid out again showed the search empty while its
     /// list stayed filtered).
     search_value: Option<Value>,
+    /// How opaque AppKit draws the control (a code field drawn by its view
+    /// is 0: it keeps the keyboard, pastes and VoiceOver).
+    pub alpha: f32,
+    /// A push button at work: its title, kept while a spinner stands in it.
+    busy: Option<(Retained<NSString>, Retained<NSProgressIndicator>)>,
 }
 impl EventEmitter<Value> for NativeControl {}
 
@@ -891,6 +930,7 @@ impl FormControl {
                 set_rows(&self.target, popup, options, value);
             }
             Control::Search(field) if field.currentEditor().is_some() => {}
+            Control::Text(field) if field.currentEditor().is_some() => {}
             _ => self.control.value(value, options),
         }
     }
@@ -950,6 +990,7 @@ fn make_control(
                 fill: std::cell::RefCell::new(None),
                 kind,
                 content,
+                digits: matches!(kind, Kind::Text) && symbol == Some("code"),
             })),
             init
         ]
@@ -1167,6 +1208,32 @@ fn make_control(
             }
             Control::Search(v)
         }
+        Kind::Text => {
+            let v = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+            v.setPlaceholderString(Some(&NSString::from_str(label)));
+            v.setEditable(true);
+            v.setSelectable(true);
+            v.setBezeled(true);
+            v.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
+            v.setControlSize(NSControlSize::Large);
+            v.setFont(Some(&NSFont::systemFontOfSize(15.)));
+            v.cell().inspect(|c| {
+                c.setScrollable(true);
+                c.setWraps(false);
+            });
+            unsafe {
+                let _: () = msg_send![&*v, setDelegate: &*target];
+                v.setContentType(Some(if symbol == Some("code") {
+                    NSTextContentTypeOneTimeCode
+                } else {
+                    NSTextContentTypeEmailAddress
+                }));
+            }
+            // An address is never corrected or completed as words.
+            v.setAutomaticTextCompletionEnabled(false);
+            v.sizeToFit();
+            Control::Text(v)
+        }
         Kind::Well => {
             let v = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
             v.setColorWellStyle(NSColorWellStyle::Minimal);
@@ -1256,7 +1323,7 @@ impl NativeControl {
         };
         let width = if matches!(kind, Kind::Popup | Kind::PopupTrigger) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
-        } else if matches!(kind, Kind::Slider | Kind::Search) {
+        } else if matches!(kind, Kind::Slider | Kind::Search | Kind::Text) {
             t.metrics.value_column
         } else {
             (intrinsic.width as f32).max(t.metrics.hit)
@@ -1292,7 +1359,7 @@ impl NativeControl {
                 0.
             },
             // A search field is as wide as the place it is given.
-            fill: matches!(kind, Kind::Search),
+            fill: matches!(kind, Kind::Search | Kind::Text),
             stretch: well && matches!(kind, Kind::Popup | Kind::PopupTrigger),
             focus: Rc::default(),
             tab_focus: matches!(kind, Kind::Segmented).then(|| cx.focus_handle().tab_stop(true)),
@@ -1300,13 +1367,17 @@ impl NativeControl {
             host_revision: None,
             menu_open: false,
             search_value: None,
+            alpha: 1.,
+            busy: None,
         }
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
     /// one not yet in its window takes it when it is first placed.
     pub fn focus(&self) {
-        let Control::Search(v) = &self.control else {
-            return;
+        let v: &NSView = match &self.control {
+            Control::Search(v) => v,
+            Control::Text(v) => v,
+            _ => return,
         };
         match v.window() {
             Some(window) => {
@@ -1394,9 +1465,82 @@ impl NativeControl {
         self.set_search_text("");
     }
     fn set_search_text(&self, text: &str) {
-        if let Control::Search(v) = &self.control {
-            v.setStringValue(&NSString::from_str(text));
-            search_hint(v, text.is_empty());
+        match &self.control {
+            Control::Search(v) => {
+                v.setStringValue(&NSString::from_str(text));
+                search_hint(v, text.is_empty());
+            }
+            Control::Text(v) => {
+                // The field editor holds the text while typed in.
+                if let Some(editor) = v.currentEditor() {
+                    editor.setString(&NSString::from_str(text));
+                }
+                v.setStringValue(&NSString::from_str(text));
+            }
+            _ => {}
+        }
+    }
+    /// Takes the keyboard when it is next placed (a field that comes back
+    /// with its step: the view that holds it is not on screen yet).
+    pub fn focus_on_paint(&self) {
+        self.focus.set(true);
+    }
+    /// The height its place gives it (a field under the cells its view draws).
+    pub fn set_height(&mut self, height: f32) {
+        self.height = height;
+    }
+    /// What VoiceOver calls it, when that is not its placeholder.
+    pub fn describe(&self, label: &str) {
+        self.control
+            .view()
+            .setAccessibilityLabel(Some(&NSString::from_str(label)));
+    }
+    /// A push button at work: a spinner in place of its title, the button
+    /// where it was and as wide (never a jump); `false` gives the title back.
+    pub fn set_busy(&mut self, busy: bool) {
+        let Control::Button(v) = &self.control else {
+            return;
+        };
+        match (busy, self.busy.take()) {
+            (true, None) => {
+                let mtm = MainThreadMarker::new().expect("main thread");
+                let spinner = NSProgressIndicator::initWithFrame(
+                    NSProgressIndicator::alloc(mtm),
+                    NSRect::ZERO,
+                );
+                spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+                spinner.setControlSize(NSControlSize::Small);
+                spinner.setDisplayedWhenStopped(false);
+                // Light on the accent fill, as the title it stands for.
+                spinner.setAppearance(
+                    NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
+                );
+                spinner.sizeToFit();
+                let (own, button) = (spinner.frame().size, v.bounds().size);
+                spinner.setFrameOrigin(NSPoint::new(
+                    ((button.width - own.width) / 2.).round(),
+                    ((button.height - own.height) / 2.).round(),
+                ));
+                spinner.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewMinXMargin
+                        | NSAutoresizingMaskOptions::ViewMaxXMargin
+                        | NSAutoresizingMaskOptions::ViewMinYMargin
+                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                );
+                v.addSubview(&spinner);
+                unsafe { spinner.startAnimation(None) };
+                let title = v.title();
+                v.setTitle(&NSString::from_str(""));
+                // VoiceOver still names the button.
+                v.setAccessibilityLabel(Some(&title));
+                self.busy = Some((title, spinner));
+            }
+            (false, Some((title, spinner))) => {
+                unsafe { spinner.stopAnimation(None) };
+                spinner.removeFromSuperview();
+                v.setTitle(&title);
+            }
+            (_, kept) => self.busy = kept,
         }
     }
     /// A search field's placeholder, when it is not its accessibility label.
@@ -1466,6 +1610,7 @@ impl NativeControl {
     pub fn focused(&self) -> bool {
         match &self.control {
             Control::Search(v) => v.currentEditor().is_some(),
+            Control::Text(v) => v.currentEditor().is_some(),
             Control::Segmented(v) => {
                 v.window()
                     .and_then(|w| w.firstResponder())
@@ -1658,10 +1803,12 @@ impl Render for NativeControl {
         let owner = cx.entity().downgrade();
         let slot = self.slot.clone();
         let focus = self.focus.clone();
+        let alpha = self.alpha;
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
-        let root = if self.stretch || matches!(self.control, Control::Search(_)) {
+        let root = if self.stretch || matches!(self.control, Control::Search(_) | Control::Text(_))
+        {
             div().w_full()
         } else if self.fill {
             div().w_full().max_w(px(self.width))
@@ -1714,7 +1861,7 @@ impl Render for NativeControl {
                                 pm_design::dots::snapshot_visibility(captured, build.ready);
                             slot.stage_alpha(live as f64);
                         } else {
-                            slot.stage_alpha(1.);
+                            slot.stage_alpha(alpha as f64);
                         }
                         // Capture may have completed in this paint.
                         let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
@@ -1940,6 +2087,7 @@ impl PopupRows {
                     fill: std::cell::RefCell::new(None),
                     kind: Kind::Popup,
                     content: Some(content),
+                    digits: false,
                 })),
                 init
             ]

@@ -141,6 +141,39 @@ pub struct Frame {
     /// preview`): `welcome`, `home`, `workspace`, `timeline-layers`, `timeline-tracks`, `agent`
     /// or `speech`.
     pub preview: Option<String>,
+    /// The Powermove account's sign-in, in the window: an email, then the
+    /// code sent to it.
+    pub sign_in: Option<SignIn>,
+    /// The primary action is at work: a spinner stands in its title.
+    pub busy: bool,
+}
+/// Where the account's sign-in is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SignInStage {
+    #[default]
+    Email,
+    /// The code sent to the email.
+    Code,
+    /// Signed in: a check, then the next step.
+    Done,
+}
+/// The account step's email and code. The fields send what is typed as
+/// `field:email:<text>` and `field:code:<digits>`; Return, Escape and Tab
+/// as `key:Enter`, `key:Escape` and `key:Tab`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SignIn {
+    pub stage: SignInStage,
+    pub email: String,
+    pub code: String,
+    /// A new revision puts `email` and `code` into the fields even while
+    /// they are typed in (a wrong code cleared, the email back on Change).
+    pub revision: u64,
+    /// A new value shakes the code once (a wrong or expired code).
+    pub shake: u64,
+    /// Seconds until Resend is offered again; `Some(0)` offers it.
+    pub resend_in: Option<u32>,
+    /// The error under the field offers Try again (`retry`).
+    pub retry: bool,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.

@@ -22,7 +22,9 @@ use pm_first_launch::{
 };
 use pm_kernel::locks::{ElectronOwner, electron_owner};
 use pm_services::surface_backing::onboarding::{Choice as Chosen, Onboarding, Step as Onboard};
-use pm_shell::welcome::{Button, Choice, Frame, Progress, Row, Severity, StepRow};
+use pm_shell::welcome::{
+    Button, Choice, Frame, Progress, Row, Severity, SignIn as SignInFrame, SignInStage, StepRow,
+};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -31,6 +33,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 const APPLICATION_SUPPORT: &str = "Library/Application Support";
@@ -141,6 +144,12 @@ pub enum Message {
     /// Who is signed in to Powermove changed (name or email), `None` for
     /// nobody: the account step shows it.
     Powermove(Option<String>),
+    /// The account step's code went out, or why it didn't (the registry's
+    /// error code: `network`, `api:rate_limited` …).
+    CodeSent(Result<(), String>),
+    /// The code was checked: the account's email, or the error code
+    /// (`api:unauthorized` wrong, `api:gone` expired, `network`).
+    Verified(Result<String, String>),
     Finished(Finished),
     /// The waiting original app has gone; the copy can start.
     ElectronClosed,
@@ -204,9 +213,18 @@ pub enum Effect {
     /// Sign in to an agent's provider, as Settings › Providers does (the
     /// provider's own sign-in, in the browser).
     Connect(pm_agents::Provider),
-    /// The Powermove account's own sign-in (Home's and Settings' sheets) on
-    /// the Welcome window; `signup` for Create Account.
-    SignIn { signup: bool },
+    /// The account step: email a code to this address (the sign-in sheet's
+    /// own request, `cloud::send_code`).
+    SendCode(String),
+    /// The account step: check the code, then save the session and read the
+    /// account (`cloud::verify_code`).
+    VerifyCode {
+        email: String,
+        code: String,
+    },
+    /// The action `id` after a while (the signed-in check's pause, Resend's
+    /// countdown).
+    After(Duration, &'static str),
     /// Bring in the recent work the person asked for, before the library opens.
     BringIn,
     /// Open without it: the request is withdrawn.
@@ -266,6 +284,56 @@ pub struct Flow {
     review: bool,
     /// Who is signed in to Powermove (name or email), for the account step.
     powermove: Option<String>,
+    /// The account step's email, then the code sent to it.
+    sign_in: SignInFlow,
+}
+/// Resend is offered again this long after a code goes out.
+pub(crate) const RESEND_AFTER: Duration = Duration::from_secs(30);
+/// The signed-in check stays this long before the next step.
+pub(crate) const SIGNED_IN_PAUSE: Duration = Duration::from_millis(600);
+/// The account step's sign-in, in the window: an email, then the code the
+/// registry sends to it, then a check. One path for a new account and an
+/// existing one: the registry makes the account if the address has none.
+#[derive(Debug, Default)]
+struct SignInFlow {
+    stage: SignInStage,
+    email: String,
+    code: String,
+    /// Bumped when the flow sets a field's text (a wrong code cleared).
+    revision: u64,
+    /// Bumped once per wrong or expired code.
+    shake: u64,
+    /// The first code is on its way, or a code is being checked (Continue
+    /// spins).
+    busy: bool,
+    /// A new code is on its way (Resend).
+    resending: bool,
+    /// When Resend is offered again.
+    resend_at: Option<Instant>,
+    /// The line under the field, and what Try again does (`None`: there
+    /// is nothing to try again).
+    error: Option<(String, Option<Retry>)>,
+    /// Signed in already, and asked for another account.
+    switching: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Retry {
+    Send,
+    Verify,
+}
+/// Could be an address: something, an @, and a domain with a dot in it.
+fn plausible_email(email: &str) -> bool {
+    let email = email.trim();
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && email.len() <= 254
+        && !email.chars().any(char::is_whitespace)
+        && !domain.contains('@')
+        && domain
+            .rsplit_once('.')
+            .is_some_and(|(name, top)| !name.is_empty() && !name.ends_with('.') && top.len() >= 2)
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -285,6 +353,7 @@ impl Flow {
             powermove: std::env::var("PM_NATIVE_REVIEW_ACCOUNT")
                 .ok()
                 .filter(|v| cfg!(debug_assertions) && !v.is_empty()),
+            sign_in: SignInFlow::default(),
             details: None,
             low_disk: None,
             report_unread: false,
@@ -427,6 +496,8 @@ impl Flow {
                 }
                 vec![]
             }
+            Message::CodeSent(result) => self.code_sent(result),
+            Message::Verified(result) => self.verified(result),
             Message::Account(provider, line) => {
                 match line {
                     Some(line) => self.accounts.insert(provider.name().into(), line),
@@ -634,7 +705,188 @@ impl Flow {
             }
         }
     }
+    /// The account step's own actions; `None` for the step's ordinary ones
+    /// (Back from the email, Not now).
+    fn sign_in_action(&mut self, id: &str) -> Option<Vec<Effect>> {
+        let signed_in = self.powermove.is_some() && !self.sign_in.switching;
+        let s = &mut self.sign_in;
+        let none = Some(vec![]);
+        if let Some(text) = id.strip_prefix("field:email:") {
+            if s.stage == SignInStage::Email && !s.busy {
+                s.email = text.to_owned();
+                s.error = None;
+            }
+            return none;
+        }
+        if let Some(text) = id.strip_prefix("field:code:") {
+            if s.stage != SignInStage::Code || s.busy {
+                return none;
+            }
+            s.code = text.to_owned();
+            s.error = None;
+            // The sixth digit sends it.
+            return Some(self.verify());
+        }
+        match (s.stage, id) {
+            (SignInStage::Email, "continue") if signed_in => None,
+            (SignInStage::Email, "continue") | (SignInStage::Email, "retry") => Some(self.send()),
+            (SignInStage::Code, "continue") => Some(self.verify()),
+            (SignInStage::Code, "retry")
+                if s.error.as_ref().is_some_and(|(_, r)| *r == Some(Retry::Verify)) =>
+            {
+                Some(self.verify())
+            }
+            // A new code: Continue stays as it is (the line under the cells
+            // says it went).
+            (SignInStage::Code, "retry" | "resend") => {
+                let ready = s.resend_at.is_none_or(|at| Instant::now() >= at);
+                if s.busy || s.resending || !(ready || id == "retry") {
+                    return none;
+                }
+                s.resending = true;
+                s.error = None;
+                Some(vec![Effect::SendCode(s.email.trim().to_owned())])
+            }
+            // Back a step: the email again, as it was typed.
+            (SignInStage::Code, "change" | "escape" | "back") => {
+                s.stage = SignInStage::Email;
+                s.code.clear();
+                s.busy = false;
+                s.resending = false;
+                s.error = None;
+                s.revision += 1;
+                none
+            }
+            (SignInStage::Email, "escape") if s.switching => {
+                s.switching = false;
+                s.error = None;
+                none
+            }
+            (SignInStage::Email, "use_other") if signed_in => {
+                s.switching = true;
+                s.email.clear();
+                s.revision += 1;
+                none
+            }
+            (SignInStage::Code, "tick") => Some(match s.resend_at {
+                Some(at) if Instant::now() < at => {
+                    vec![Effect::After(Duration::from_secs(1), "tick")]
+                }
+                _ => vec![],
+            }),
+            // Leaving the check for the timeline: back on the step, who is
+            // signed in.
+            (SignInStage::Done, "back") => {
+                s.stage = SignInStage::Email;
+                None
+            }
+            (SignInStage::Done, "continue" | "signed_in") => {
+                s.stage = SignInStage::Email;
+                s.switching = false;
+                self.onboarding.as_mut().map(|o| o.advance());
+                none
+            }
+            (_, "escape" | "tick" | "signed_in" | "change" | "resend" | "retry" | "use_other") => {
+                none
+            }
+            _ => None,
+        }
+    }
+    /// Continue on the email: the code goes out, Continue spinning meanwhile.
+    fn send(&mut self) -> Vec<Effect> {
+        let s = &mut self.sign_in;
+        if s.busy || !plausible_email(&s.email) {
+            return vec![];
+        }
+        s.busy = true;
+        s.error = None;
+        vec![Effect::SendCode(s.email.trim().to_owned())]
+    }
+    /// All six digits: the code is checked.
+    fn verify(&mut self) -> Vec<Effect> {
+        let s = &mut self.sign_in;
+        if s.busy || s.code.len() != 6 {
+            return vec![];
+        }
+        s.busy = true;
+        s.error = None;
+        vec![Effect::VerifyCode {
+            email: s.email.trim().to_owned(),
+            code: s.code.clone(),
+        }]
+    }
+    fn code_sent(&mut self, result: Result<(), String>) -> Vec<Effect> {
+        let s = &mut self.sign_in;
+        if !s.busy && !s.resending {
+            return vec![];
+        }
+        s.busy = false;
+        s.resending = false;
+        match result {
+            Ok(()) => {
+                if s.stage == SignInStage::Email {
+                    s.stage = SignInStage::Code;
+                }
+                s.code.clear();
+                s.revision += 1;
+                s.error = None;
+                s.resend_at = Some(Instant::now() + RESEND_AFTER);
+                vec![Effect::After(Duration::from_secs(1), "tick")]
+            }
+            Err(code) => {
+                let retry = (code == "network").then_some(Retry::Send);
+                s.error = Some((crate::cloud::code_error(&code, false), retry));
+                vec![]
+            }
+        }
+    }
+    fn verified(&mut self, result: Result<String, String>) -> Vec<Effect> {
+        let s = &mut self.sign_in;
+        // Changed back to the email meanwhile: this code is not wanted.
+        if !s.busy || s.stage != SignInStage::Code {
+            return vec![];
+        }
+        s.busy = false;
+        match result {
+            Ok(email) => {
+                s.stage = SignInStage::Done;
+                s.error = None;
+                s.email = email.clone();
+                if !(cfg!(debug_assertions)
+                    && std::env::var_os("PM_NATIVE_REVIEW_ACCOUNT").is_some())
+                {
+                    self.powermove = Some(email);
+                }
+                vec![Effect::After(SIGNED_IN_PAUSE, "signed_in")]
+            }
+            Err(code) => {
+                let message = crate::cloud::code_error(&code, true);
+                if matches!(
+                    code.as_str(),
+                    "api:unauthorized" | "api:bad_request" | "api:gone"
+                ) {
+                    // Shaken once and cleared, for the code to be typed again.
+                    s.code.clear();
+                    s.revision += 1;
+                    s.shake += 1;
+                    if code == "api:gone" {
+                        s.resend_at = None;
+                    }
+                    s.error = Some((message, None));
+                } else {
+                    let retry = (code == "network").then_some(Retry::Verify);
+                    s.error = Some((message, retry));
+                }
+                vec![]
+            }
+        }
+    }
     fn onboarding_action(&mut self, id: &str) -> Vec<Effect> {
+        if self.onboarding.as_ref().map(|o| o.step) == Some(Onboard::Account)
+            && let Some(effects) = self.sign_in_action(id)
+        {
+            return effects;
+        }
         let Some(onboarding) = self.onboarding.as_mut() else {
             return vec![];
         };
@@ -675,12 +927,6 @@ impl Flow {
             "begin" => {
                 onboarding.welcome();
                 let _ = onboarding.advance();
-            }
-            "create_account" if onboarding.step == Onboard::Account => {
-                return vec![Effect::SignIn { signup: true }];
-            }
-            "log_in" if onboarding.step == Onboard::Account => {
-                return vec![Effect::SignIn { signup: false }];
             }
             "not_now" if onboarding.step == Onboard::Account => {
                 let _ = onboarding.advance();
@@ -884,14 +1130,85 @@ impl Flow {
         }
     }
     fn onboarding_frame(&self, onboarding: &Onboarding) -> Frame {
-        step_frame(
+        let mut frame = step_frame(
             onboarding.step,
             &self.choices,
             &self.accounts,
             self.powermove.as_deref(),
             self.error.clone(),
-        )
+        );
+        if onboarding.step == Onboard::Account {
+            sign_in_frame(&self.sign_in, self.powermove.as_deref(), &mut frame);
+        }
+        frame
     }
+}
+/// The account step as its sign-in stands: the email, the code sent to it,
+/// or the check; or who is signed in already.
+fn sign_in_frame(s: &SignInFlow, powermove: Option<&str>, frame: &mut Frame) {
+    {
+        let signed_in = powermove.filter(|_| !s.switching);
+        if s.stage == SignInStage::Email
+            && let Some(identity) = signed_in
+        {
+            frame.title = "Your Powermove account".into();
+            frame.line = format!("Signed in as {identity}.");
+            frame.buttons = vec![
+                Button::new("continue", "Continue"),
+                Button::new("use_other", "Use a different account"),
+            ];
+            frame.default = Some("continue".into());
+            return;
+        }
+        let resend_in = s.resend_at.map(|at| {
+            at.saturating_duration_since(Instant::now())
+                .as_secs_f64()
+                .ceil() as u32
+        });
+        let (title, line, ready) = match s.stage {
+            SignInStage::Email => (
+                "Create your Powermove account".to_owned(),
+                frame.line.clone(),
+                plausible_email(&s.email),
+            ),
+            SignInStage::Code => (
+                "Check your email".to_owned(),
+                format!("We sent a 6-digit code to {}.", s.email.trim()),
+                s.code.len() == 6,
+            ),
+            SignInStage::Done => (
+                "You’re in".to_owned(),
+                format!("Signed in as {}.", s.email),
+                true,
+            ),
+        };
+        frame.title = title;
+        frame.line = line;
+        frame.note = (s.stage == SignInStage::Email)
+            .then(|| "Already have an account? Use the same email.".into());
+        frame.error = s.error.as_ref().map(|(message, _)| message.clone());
+        frame.busy = s.busy;
+        frame.buttons = vec![
+            Button {
+                // Clickable while it spins: a second press does nothing.
+                enabled: ready || s.busy,
+                ..Button::new("continue", "Continue")
+            },
+            Button::new("not_now", "Not now"),
+        ];
+        frame.default = Some("continue".into());
+        frame.sign_in = Some(SignInFrame {
+            stage: s.stage,
+            email: s.email.clone(),
+            code: s.code.clone(),
+            revision: s.revision,
+            shake: s.shake,
+            resend_in: resend_in.or((s.stage == SignInStage::Code).then_some(0)),
+            retry: s.error.as_ref().is_some_and(|(_, r)| r.is_some()),
+        });
+    }
+}
+impl Flow {
     pub fn frame(&self) -> Frame {
         match (&self.entry, &self.onboarding) {
             (Entry::Failed { details }, _) => library_failed_frame(details),
@@ -964,32 +1281,21 @@ pub(crate) fn step_frame(
         // The Powermove account, before the agents' own sign-ins: create one
         // or log in (the app's one sign-in, as Home and Settings open it), or
         // carry on without one (no network, or later from Settings).
-        Onboard::Account => match powermove {
-            Some(identity) => continuing(Frame {
+        // The Powermove account, before the agents' own sign-ins: an email,
+        // then the code sent to it, in the window (`sign_in_frame`); or
+        // carry on without one (no network, or later from Settings).
+        Onboard::Account => {
+            let mut frame = Frame {
                 surface: "S109".into(),
                 back: Some("Back to Timeline Choice".into()),
-                title: "You’re signed in".into(),
-                outline: Some(steps_outline(Some(1))),
-                line: format!("Powermove is using the account {identity}."),
-                preview: Some("home".into()),
-                ..Frame::default()
-            }),
-            None => Frame {
-                surface: "S109".into(),
-                back: Some("Back to Timeline Choice".into()),
-                title: "Sign in to Powermove".into(),
                 outline: Some(steps_outline(Some(1))),
                 line: "Your account remembers the extensions you install on each Mac, and lets you publish your own on the Store.".into(),
-                buttons: vec![
-                    Button::new("create_account", "Create Account"),
-                    Button::new("log_in", "Log In"),
-                    Button::new("not_now", "Not Now"),
-                ],
-                default: Some("create_account".into()),
                 preview: Some("home".into()),
                 ..Frame::default()
-            },
-        },
+            };
+            sign_in_frame(&SignInFlow::default(), powermove, &mut frame);
+            frame
+        }
         Onboard::Agent => continuing(Frame {
             surface: "S109".into(),
             back: Some("Back to Account".into()),
@@ -1476,23 +1782,6 @@ pub fn play_sound(id: &str, _: &mut gpui::App) {
     }
 }
 impl Driver {
-    /// The Powermove account's sign-in (the sheets Home and Settings open),
-    /// on the Welcome window.
-    fn sign_in(&self, signup: bool, cx: &mut gpui::App) {
-        crate::cloud::init(self.library.plan.profile.clone(), cx);
-        let window = self.window.borrow().clone();
-        let ns = match window {
-            Some(GateWindow::Stage(stage)) => stage.ns_window(cx),
-            Some(GateWindow::Welcome(handle)) => handle
-                .update(cx, |_, window, _| pm_shell::stage::native_window::ns_window(window))
-                .ok()
-                .flatten(),
-            None => None,
-        };
-        if let Some(ns) = ns {
-            crate::cloud::open_sign_in_as(ns, signup, cx);
-        }
-    }
     /// Settings › Providers' sign-in for `provider`, from the agent step.
     fn connect(&self, provider: pm_agents::Provider) {
         let mut slot = self.accounts.borrow_mut();
@@ -1679,7 +1968,26 @@ impl Driver {
         for effect in effects {
             match effect {
                 Effect::Connect(provider) => self.connect(provider),
-                Effect::SignIn { signup } => self.sign_in(signup, cx),
+                Effect::SendCode(email) => {
+                    let tx = self.tx.clone();
+                    crate::cloud::send_code(email, cx, move |result, _| {
+                        let _ = tx.try_send(Message::CodeSent(result));
+                    });
+                }
+                Effect::VerifyCode { email, code } => {
+                    let tx = self.tx.clone();
+                    crate::cloud::verify_code(email, code, cx, move |result, _| {
+                        let _ = tx.try_send(Message::Verified(result));
+                    });
+                }
+                Effect::After(wait, id) => {
+                    let driver = self.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = cx.update(|cx| driver.step(|flow| flow.action(id), cx));
+                    })
+                    .detach();
+                }
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {

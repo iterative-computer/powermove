@@ -364,6 +364,10 @@ impl Http {
         kind: Option<String>,
         auth: bool,
     ) -> pm_services::Result<Value> {
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return review::answer(method, path, &body);
+        }
         let mut headers = vec![(
             "X-Powermove-Client".to_owned(),
             format!("desktop/{}", env!("CARGO_PKG_VERSION")),
@@ -582,9 +586,6 @@ struct Flow {
     window: Retained<NSWindow>,
     /// The handle the person typed, for a "taken" message.
     handle: String,
-    /// Opened as Create Account (the first run's step): the first sheet says
-    /// so. The flow is the same; a new email or Google account makes one.
-    signup: bool,
 }
 struct Cloud {
     profile: PathBuf,
@@ -607,6 +608,15 @@ pub fn init(profile: PathBuf, cx: &mut App) {
     let origin = store_install::origin();
     let worker_profile = profile.clone();
     let Ok(worker) = ServiceWorker::start(move || {
+        // A development review's account lives in memory, never the Keychain.
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return Ok(Http::new(
+                origin,
+                Box::new(review::Memory::default()),
+                worker_profile,
+            ));
+        }
         Ok(Http::new(
             origin,
             Box::new(Keychain::for_app(&worker_profile)),
@@ -692,14 +702,153 @@ fn changed(cx: &mut App) {
     });
 }
 
-/// Who is signed in (the account's name or email), if anyone.
+/// The email code's two steps for the first run's account step, on the same
+/// worker, host and session store as the sign-in sheet: `send_code` asks the
+/// registry to email a code; `verify_code` checks it, saves the session and
+/// reads the account. `done` gets the registry's error code on a failure
+/// (`api:unauthorized` wrong, `api:gone` expired, `network`).
+pub fn send_code(
+    email: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<(), String>, &mut App) + 'static,
+) {
+    run_code(CloudWork::SendEmail { email }, cx, move |result, cx| {
+        done(result.map(drop), cx)
+    });
+}
+pub fn verify_code(
+    email: String,
+    code: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+) {
+    let work = CloudWork::VerifyEmail {
+        email: email.clone(),
+        code: Secret::new(code),
+    };
+    run_code(work, cx, move |result, cx| {
+        done(
+            result.map(|reply| match reply {
+                CloudReply::Account(Some(account)) if !account.email.is_empty() => account.email,
+                _ => email,
+            }),
+            cx,
+        )
+    });
+}
+fn run_code(
+    work: CloudWork,
+    cx: &mut App,
+    done: impl FnOnce(Result<CloudReply, String>, &mut App) + 'static,
+) {
+    let Some(cloud) = cx.try_global::<Cloud>() else {
+        return done(Err("unavailable".into()), cx);
+    };
+    let ticket = pm_services::surfaces::Flight::default().start();
+    let Some(task) = CloudTask::new(ticket, cloud.origin, work) else {
+        return done(Err("unavailable".into()), cx);
+    };
+    let Ok(pending) = cloud.worker.submit(move |host| Ok(task.run(host))) else {
+        return done(Err("unavailable".into()), cx);
+    };
+    cx.spawn(async move |cx| {
+        let result = wait(pending, cx)
+            .await
+            .map(|done| done.result.map_err(|e| e.to_string()))
+            .unwrap_or_else(|| Err("unavailable".into()));
+        cx.update(|cx| {
+            if let Ok(CloudReply::Account(account)) = &result {
+                let cloud = cx.global_mut::<Cloud>();
+                cloud.signed_in = account.is_some();
+                cloud.account = account.clone();
+                changed(cx);
+            }
+            done(result, cx);
+        });
+    })
+    .detach();
+}
+/// The sign-in sheet's sentence for a failed send (`verifying: false`) or
+/// check of a code, for the first run's account step.
+pub(crate) fn code_error(code: &str, verifying: bool) -> String {
+    let error = match (verifying, code) {
+        (_, "api:rate_limited") => AuthError::RateLimited,
+        (_, "api:client_too_old") => AuthError::OldClient,
+        (false, "network") => AuthError::Offline,
+        (false, _) => AuthError::EmailRejected,
+        (true, "api:unauthorized" | "api:bad_request") => AuthError::WrongCode,
+        (true, "api:gone") => AuthError::ExpiredCode,
+        (true, _) => AuthError::CheckCode,
+    };
+    copy::auth_error(error, "", "")
+}
+/// Development builds: the account step against a review backend
+/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain.
+#[cfg(debug_assertions)]
+fn review_cloud() -> bool {
+    std::env::var_os("PM_NATIVE_REVIEW_CLOUD").is_some()
+}
+/// The review backend: code 123456 signs in, 000000 is wrong, 111111 has
+/// expired; an address at `offline.example` can't be reached. The session
+/// stays in memory.
+#[cfg(debug_assertions)]
+mod review {
+    use super::*;
+    use std::sync::Mutex;
+    static EMAIL: Mutex<String> = Mutex::new(String::new());
+    #[derive(Default)]
+    pub struct Memory(Option<Vec<u8>>);
+    impl Vault for Memory {
+        fn read(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.clone())
+        }
+        fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+            self.0 = Some(bytes.to_vec());
+            Ok(())
+        }
+        fn delete(&mut self) -> Result<(), String> {
+            self.0 = None;
+            Ok(())
+        }
+    }
+    pub fn answer(method: &str, path: &str, body: &[u8]) -> pm_services::Result<Value> {
+        let body: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let fail = |kind, code: &str| Err(ServiceError::message(kind, code.to_owned()));
+        // A beat, as a network would take.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        match (method, path) {
+            ("POST", "/v1/auth/email/send") => {
+                let email = body["email"].as_str().unwrap_or_default();
+                if email.ends_with("@offline.example") {
+                    return fail(ServiceErrorCode::Offline, "network");
+                }
+                *EMAIL.lock().unwrap() = email.to_owned();
+                Ok(json!({ "ok": true }))
+            }
+            ("POST", "/v1/auth/email/verify") => match body["otp"].as_str() {
+                Some("123456") => {
+                    Ok(json!({"token":"review-session","expiresAt":"2099-01-01T00:00:00.000Z"}))
+                }
+                Some("111111") => fail(ServiceErrorCode::NotFound, "api:gone"),
+                _ => fail(ServiceErrorCode::PermissionDenied, "api:unauthorized"),
+            },
+            ("GET", "/v1/me") => {
+                Ok(json!({"user":{"id":"review","email":EMAIL.lock().unwrap().clone()}}))
+            }
+            _ => Ok(json!({ "ok": true })),
+        }
+    }
+}
+/// Who is signed in, if anyone: the account's email (its handle if it has
+/// no email), as the first run's account step names it.
 pub fn identity(cx: &App) -> Option<String> {
     let cloud = cx.try_global::<Cloud>()?;
-    cloud
-        .account
-        .as_ref()
-        .filter(|_| cloud.signed_in)
-        .map(Account::identity)
+    let account = cloud.account.as_ref().filter(|_| cloud.signed_in)?;
+    Some(if account.email.is_empty() {
+        account.identity()
+    } else {
+        account.email.clone()
+    })
 }
 /// Calls `f` with who is signed in whenever the account changes.
 pub fn on_change(cx: &mut App, f: impl Fn(Option<String>, &mut App) + 'static) {
@@ -712,11 +861,6 @@ pub(crate) fn sign_in_available(cx: &App) -> bool {
 
 /// Settings › Account › Sign In…: the first step's sheet on `window`.
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
-    open_sign_in_as(window, false, cx);
-}
-/// The same sign-in, from the first run's account step: `signup` when the
-/// person chose Create Account.
-pub fn open_sign_in_as(window: Retained<NSWindow>, signup: bool, cx: &mut App) {
     if !cx.has_global::<Cloud>() {
         return;
     }
@@ -732,13 +876,12 @@ pub fn open_sign_in_as(window: Retained<NSWindow>, signup: bool, cx: &mut App) {
         sheet: None,
         window,
         handle: String::new(),
-        signup,
     });
     present(cx);
 }
 fn surface(flow: &Flow) -> Option<crate::dialogs::Surface> {
     use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
-    let message = copy::sign_in(flow.signin.step, flow.signup, "Google", &flow.email)?;
+    let message = copy::sign_in(flow.signin.step, false, "Google", &flow.email)?;
     let button = |id: &'static str, label: &'static str, default: bool| Button {
         id,
         label,

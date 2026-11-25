@@ -333,7 +333,33 @@ fn active_send(command: Command) {
                 let _ = tx.try_send(command);
             }
         });
+    } else {
+        // No editor yet (the first run's Welcome window): the Edit commands
+        // still reach the field being typed in, as the editor's host sends them.
+        field_edit(&command.name);
     }
+}
+/// Undo, Cut, Copy, Paste and Select All for the key window's field editor,
+/// if a field is being edited.
+fn field_edit(name: &str) -> bool {
+    let selector = match name {
+        "contextUndo" => sel!(undo:),
+        "contextRedo" => sel!(redo:),
+        "contextCut" => sel!(cut:),
+        "contextCopy" => sel!(copy:),
+        "contextPaste" => sel!(paste:),
+        "contextSelectAll" => sel!(selectAll:),
+        _ => return false,
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let editing = app
+        .keyWindow()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| unsafe { msg_send![&*r, isKindOfClass: NSTextView::class()] });
+    editing && unsafe { app.sendAction_to_from(selector, None, None) }
 }
 /// A press or its gesture's other events (not a move or a scroll).
 fn is_pointer(e: &NSEvent) -> bool {

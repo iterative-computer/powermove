@@ -123,25 +123,28 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     flow.action("choose:tracks");
     assert_eq!(flow.frame().chosen.as_deref(), Some("tracks"));
     flow.action("continue");
-    // The Powermove account, before the agents: create one, log in (the
-    // app's own sign-in), or not now.
+    // The Powermove account, before the agents: an email first, Continue
+    // waiting for one that could be an address, and Not now.
     let account = flow.frame();
-    titled(&account, "Sign in to Powermove");
-    assert_eq!(account.default_action(), Some("create_account"));
-    assert_eq!(flow.action("create_account"), vec![Effect::SignIn { signup: true }]);
-    assert_eq!(flow.action("log_in"), vec![Effect::SignIn { signup: false }]);
-    titled(&flow.frame(), "Sign in to Powermove");
+    titled(&account, "Create your Powermove account");
+    assert_eq!(account.default_action(), None);
+    assert!(account.buttons.iter().any(|b| b.id == "not_now"));
+    assert_eq!(
+        account.note.as_deref(),
+        Some("Already have an account? Use the same email.")
+    );
     // Signed in: the step says who, and carries on.
     flow.message(Message::Powermove(Some("ana@example.com".into())));
     let signed = flow.frame();
-    titled(&signed, "You’re signed in");
+    titled(&signed, "Your Powermove account");
     assert!(signed.line.contains("ana@example.com"));
     assert_eq!(signed.default_action(), Some("continue"));
+    assert!(signed.buttons.iter().any(|b| b.id == "use_other"));
     flow.message(Message::Powermove(None));
     flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
     flow.action("back");
-    titled(&flow.frame(), "Sign in to Powermove");
+    titled(&flow.frame(), "Create your Powermove account");
     flow.action("back");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
@@ -230,7 +233,7 @@ fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     flow.action("begin");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
-    titled(&flow.frame(), "Sign in to Powermove");
+    titled(&flow.frame(), "Create your Powermove account");
     flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
     flow.action("continue");
@@ -1331,4 +1334,250 @@ fn each_review_frame_shows_on_its_own_and_its_buttons_do_nothing() {
     let frame = flow.frame();
     assert!(frame.rows.is_empty());
     assert_eq!(frame.default_action(), Some("open_native"));
+}
+
+/// A flow on the account step (Welcome, then the timeline's Continue).
+fn on_account() -> (tempfile::TempDir, Flow) {
+    let (temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    assert!(start(&mut flow).is_empty());
+    flow.action("begin");
+    flow.action("continue");
+    titled(&flow.frame(), "Create your Powermove account");
+    (temp, flow)
+}
+fn sign_in(frame: &Frame) -> &pm_shell::welcome::SignIn {
+    frame.sign_in.as_ref().expect("the sign-in")
+}
+/// Types an email and presses Continue; the code goes out.
+fn send(flow: &mut Flow, email: &str) {
+    flow.action(&format!("field:email:{email}"));
+    assert_eq!(
+        flow.action("continue"),
+        vec![Effect::SendCode(email.into())]
+    );
+    assert!(flow.frame().busy, "Continue spins while the code goes out");
+    let effects = flow.message(Message::CodeSent(Ok(())));
+    assert_eq!(effects, vec![Effect::After(Duration::from_secs(1), "tick")]);
+}
+#[test]
+fn the_account_step_sends_a_code_to_a_plausible_email() {
+    let (_temp, mut flow) = on_account();
+    for typed in [
+        "",
+        "ana",
+        "ana@",
+        "ana@example",
+        "@example.com",
+        "ana @example.com",
+    ] {
+        flow.action(&format!("field:email:{typed}"));
+        assert_eq!(flow.frame().default_action(), None, "{typed:?}");
+        assert_eq!(flow.action("continue"), vec![], "{typed:?}");
+    }
+    flow.action("field:email:ana@example.com");
+    assert_eq!(flow.frame().default_action(), Some("continue"));
+    assert_eq!(
+        flow.action("continue"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // A second press (or Return) while it goes out does nothing.
+    assert_eq!(flow.action("continue"), vec![]);
+    let sending = flow.frame();
+    assert!(sending.busy);
+    assert_eq!(sign_in(&sending).stage, SignInStage::Email);
+    flow.message(Message::CodeSent(Ok(())));
+    let code = flow.frame();
+    titled(&code, "Check your email");
+    assert_eq!(code.line, "We sent a 6-digit code to ana@example.com.");
+    assert!(!code.busy);
+    let s = sign_in(&code);
+    assert_eq!(
+        (s.stage, s.email.as_str(), s.code.as_str()),
+        (SignInStage::Code, "ana@example.com", "")
+    );
+    assert_eq!(code.default_action(), None, "Continue waits for six digits");
+}
+#[test]
+fn the_sixth_digit_checks_the_code_and_the_check_moves_on() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    assert_eq!(flow.action("field:code:12345"), vec![]);
+    // A pasted full code arrives at once, and checks itself.
+    let effects = flow.action("field:code:123456");
+    assert_eq!(
+        effects,
+        vec![Effect::VerifyCode {
+            email: "ana@example.com".into(),
+            code: "123456".into()
+        }]
+    );
+    assert!(flow.frame().busy);
+    assert_eq!(flow.action("continue"), vec![], "already being checked");
+    let effects = flow.message(Message::Verified(Ok("ana@example.com".into())));
+    assert_eq!(effects, vec![Effect::After(SIGNED_IN_PAUSE, "signed_in")]);
+    let done = flow.frame();
+    titled(&done, "You’re in");
+    assert_eq!(done.line, "Signed in as ana@example.com.");
+    assert_eq!(sign_in(&done).stage, SignInStage::Done);
+    // Continue stays: it moves on before the pause ends, and the pause's
+    // own move does nothing more.
+    assert_eq!(done.default_action(), Some("continue"));
+    flow.action("signed_in");
+    titled(&flow.frame(), "Choose your agent");
+    flow.action("signed_in");
+    titled(&flow.frame(), "Choose your agent");
+    // Back on the step: who is signed in, and another account on offer.
+    flow.action("back");
+    let signed = flow.frame();
+    titled(&signed, "Your Powermove account");
+    assert_eq!(signed.line, "Signed in as ana@example.com.");
+    flow.action("use_other");
+    titled(&flow.frame(), "Create your Powermove account");
+    assert_eq!(sign_in(&flow.frame()).email, "");
+    flow.action("escape");
+    titled(&flow.frame(), "Your Powermove account");
+}
+#[test]
+fn a_wrong_or_expired_code_shakes_clears_and_says_so() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let before = sign_in(&flow.frame()).clone();
+    flow.action("field:code:000000");
+    assert_eq!(
+        flow.message(Message::Verified(Err("api:unauthorized".into()))),
+        vec![]
+    );
+    let wrong = flow.frame();
+    let s = sign_in(&wrong);
+    assert_eq!(s.stage, SignInStage::Code);
+    assert_eq!(s.code, "");
+    assert_eq!(s.shake, before.shake + 1);
+    assert!(s.revision > before.revision, "the field is cleared");
+    assert!(!s.retry);
+    assert_eq!(
+        wrong.error.as_deref(),
+        Some("That code didn’t match. Check it, or send a new one.")
+    );
+    // Typing again takes the line away.
+    flow.action("field:code:1");
+    assert_eq!(flow.frame().error, None);
+    flow.action("field:code:111111");
+    flow.message(Message::Verified(Err("api:gone".into())));
+    let expired = flow.frame();
+    assert_eq!(
+        expired.error.as_deref(),
+        Some("That code has expired. Send a new one.")
+    );
+    assert_eq!(sign_in(&expired).shake, before.shake + 2);
+    // An expired code can be sent again at once.
+    assert_eq!(sign_in(&expired).resend_in, Some(0));
+    assert_eq!(
+        flow.action("resend"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+}
+#[test]
+fn network_errors_stay_inline_with_try_again() {
+    let (_temp, mut flow) = on_account();
+    flow.action("field:email:ana@example.com");
+    flow.action("continue");
+    flow.message(Message::CodeSent(Err("network".into())));
+    let offline = flow.frame();
+    titled(&offline, "Create your Powermove account");
+    assert_eq!(
+        offline.error.as_deref(),
+        Some("Couldn’t send a code. Check your connection and try again.")
+    );
+    assert!(sign_in(&offline).retry);
+    assert!(!offline.busy);
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    flow.message(Message::CodeSent(Ok(())));
+    flow.action("field:code:123456");
+    flow.message(Message::Verified(Err("network".into())));
+    let offline = flow.frame();
+    assert!(sign_in(&offline).retry);
+    // The code stays: Try again checks it again.
+    assert_eq!(sign_in(&offline).code, "123456");
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::VerifyCode {
+            email: "ana@example.com".into(),
+            code: "123456".into()
+        }]
+    );
+}
+#[test]
+fn resend_waits_thirty_seconds() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let wait = sign_in(&flow.frame()).resend_in.unwrap();
+    assert!((29..=30).contains(&wait), "{wait}");
+    assert_eq!(flow.action("resend"), vec![]);
+    // The countdown ticks while it runs.
+    assert_eq!(
+        flow.action("tick"),
+        vec![Effect::After(Duration::from_secs(1), "tick")]
+    );
+    flow.sign_in.resend_at = Some(Instant::now());
+    assert_eq!(sign_in(&flow.frame()).resend_in, Some(0));
+    assert_eq!(flow.action("tick"), vec![]);
+    assert_eq!(
+        flow.action("resend"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // Continue does not spin for it, and a second press does nothing.
+    assert!(!flow.frame().busy);
+    assert_eq!(flow.action("resend"), vec![]);
+    // A failed resend stays inline; Continue still checks the code, never
+    // leaves the step.
+    flow.message(Message::CodeSent(Err("network".into())));
+    assert!(sign_in(&flow.frame()).retry);
+    assert_eq!(flow.action("continue"), vec![]);
+    titled(&flow.frame(), "Check your email");
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // Resending keeps the step on the code, and starts the wait again.
+    flow.message(Message::CodeSent(Ok(())));
+    let again = flow.frame();
+    titled(&again, "Check your email");
+    assert!(sign_in(&again).resend_in.unwrap() >= 29);
+}
+#[test]
+fn change_and_escape_go_back_to_the_email_as_typed() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let revision = sign_in(&flow.frame()).revision;
+    flow.action("field:code:12");
+    flow.action("change");
+    let email = flow.frame();
+    titled(&email, "Create your Powermove account");
+    let s = sign_in(&email);
+    assert_eq!(
+        (s.stage, s.email.as_str()),
+        (SignInStage::Email, "ana@example.com")
+    );
+    assert!(s.revision > revision, "the field shows the email again");
+    assert_eq!(email.default_action(), Some("continue"));
+    // Escape and Back do the same from the code.
+    send(&mut flow, "ana@example.com");
+    flow.action("escape");
+    assert_eq!(sign_in(&flow.frame()).stage, SignInStage::Email);
+    send(&mut flow, "ana@example.com");
+    flow.action("back");
+    titled(&flow.frame(), "Create your Powermove account");
+    // A code checked after Change is not wanted.
+    send(&mut flow, "ana@example.com");
+    flow.action("field:code:123456");
+    flow.action("change");
+    flow.message(Message::Verified(Ok("ana@example.com".into())));
+    titled(&flow.frame(), "Create your Powermove account");
+    // From the email, Back leaves the step.
+    flow.action("back");
+    titled(&flow.frame(), "Choose your timeline");
 }

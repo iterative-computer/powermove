@@ -1,13 +1,16 @@
 //! The Welcome window: a standard titled window, title hidden, close button only.
 //! Closing it quits the app; quitting at any point is safe and the next launch resumes.
-use crate::welcome::{self, Frame, Progress, Severity};
+use crate::welcome::{self, Frame, Progress, Severity, SignIn, SignInStage};
 use crate::{
     kit::{Button, Kit, Recipes},
     motion::Motion,
     native_control::{ControlSpec, Kind, NativeControl},
 };
 use gpui::{prelude::*, *};
-use pm_design::{Elevation, Tokens};
+use pm_design::{
+    Elevation, Tokens,
+    motion::{Animated, Preset},
+};
 use std::{rc::Rc, time::Instant};
 
 pub type OnAction = Rc<dyn Fn(&str, &mut App)>;
@@ -40,6 +43,13 @@ pub struct WelcomeView {
     /// While a wave carries the card: the snapshot its buttons paint.
     snapshot: Option<u64>,
     snapshots: u64,
+    /// The account step's email and code fields (`Frame::sign_in`).
+    email_field: Option<Entity<NativeControl>>,
+    code_field: Option<Entity<NativeControl>>,
+    /// The sign-in's stage as last drawn: a new one gives its field the keyboard.
+    sign_in_stage: Option<SignInStage>,
+    /// The last wrong code's shake, and when it started.
+    shake: (u64, f64),
 }
 impl WelcomeView {
     fn motion(&mut self) -> &mut Motion<u64> {
@@ -64,6 +74,10 @@ impl WelcomeView {
             natives: Default::default(),
             snapshot: None,
             snapshots: 0,
+            email_field: None,
+            code_field: None,
+            sign_in_stage: None,
+            shake: (0, 0.),
         }
     }
     /// A wave is carrying the card (`true`): its AppKit buttons paint their
@@ -97,9 +111,11 @@ impl WelcomeView {
     ) -> Entity<NativeControl> {
         let primary = size == Size::Primary;
         let key = (button.id.clone(), button.label.clone());
+        let busy = primary && self.frame.busy;
         if let Some(control) = self.natives.get(&key) {
             let disabled = !button.enabled;
             control.update(cx, |c, cx| {
+                c.set_busy(busy);
                 c.update(&serde_json::Value::Null, &[], disabled, cx)
             });
             return control.clone();
@@ -132,6 +148,7 @@ impl WelcomeView {
                 cx,
             );
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
+            control.set_busy(busy);
             match size {
                 Size::Primary if self.stage => control.prominent(PRIMARY_WIDTH),
                 Size::Pill => control.small(),
@@ -194,6 +211,8 @@ impl WelcomeView {
                     self.act(&id, cx);
                 }
             }
+            // Back a step within the sign-in (the code to the email).
+            "escape" if self.frame.sign_in.is_some() => self.act("escape", cx),
             "left" | "right" => {
                 let forward = event.keystroke.key == "right";
                 if let Some(id) = self.frame.stepped_choice(forward).map(str::to_owned) {
@@ -576,6 +595,28 @@ impl WelcomeView {
     /// edge (`preview`).
     fn stage_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         self.motion.frame(window);
+        // The sign-in's stages spring in: the title and line rise into place
+        // as a stage changes, the fields and lines under them follow.
+        let sign_in = self.frame.sign_in.clone();
+        let title_p = match &sign_in {
+            Some(s) => {
+                let mut p = 1.;
+                for stage in [SignInStage::Email, SignInStage::Code, SignInStage::Done] {
+                    let shown = self.shown(
+                        TITLE_KEY + stage as u64,
+                        s.stage == stage,
+                        Preset::Show,
+                        window,
+                    );
+                    if s.stage == stage {
+                        p = shown;
+                    }
+                }
+                p
+            }
+            None => 1.,
+        };
+        let sign_in = sign_in.map(|s| self.sign_in_block(&s, window, cx));
         let kit = Kit::new(&self.tokens, &self.motion, Self::motion, window, cx);
         let t = self.tokens.clone();
         let c = &t.colors;
@@ -613,6 +654,9 @@ impl WelcomeView {
                     .line_height(relative(1.15))
                     .letter_spacing(px(-0.4))
                     .text_color(rgb(c.text))
+                    .relative()
+                    .top(px((1. - title_p) * 8.))
+                    .opacity(title_p.clamp(0., 1.))
                     .child(frame.title.clone()),
             )
             .child(
@@ -624,10 +668,16 @@ impl WelcomeView {
                     .text_size(px(13.))
                     .line_height(px(18.))
                     .text_color(rgb(c.secondary))
+                    .relative()
+                    .top(px((1. - title_p) * 12.))
+                    .opacity(title_p.clamp(0., 1.))
                     .child(frame.line.clone()),
             );
         // The step's controls.
         let mut controls = div().w_full().flex().flex_col().gap(px(12.)).text_left();
+        if let Some(sign_in) = sign_in {
+            controls = controls.child(sign_in);
+        }
         if let Some(status) = &frame.status {
             let mut row = div()
                 .id("welcome-status")
@@ -697,7 +747,8 @@ impl WelcomeView {
             }
             controls = controls.child(body);
         }
-        if let Some(error) = &frame.error {
+        // The sign-in draws its own error, under its field.
+        if let Some(error) = frame.error.as_ref().filter(|_| frame.sign_in.is_none()) {
             controls = controls.child(
                 div()
                     .text_size(px(13.))
@@ -747,6 +798,7 @@ impl WelcomeView {
             }
         }
         let has_controls = !frame.choices.is_empty()
+            || frame.sign_in.is_some()
             || frame.status.is_some()
             || !frame.steps.is_empty()
             || !frame.stats.is_empty()
@@ -872,6 +924,341 @@ impl WelcomeView {
             .child(left)
             .child(right)
             .child(actions)
+    }
+    /// How far `key` has sprung in (0–1, or past it on an overshoot): from
+    /// 0 the first time it is shown, back towards 0 while it is not, so a
+    /// stage that comes back mid-way carries on from where it was.
+    fn shown(&mut self, key: u64, shown: bool, preset: Preset, window: &mut Window) -> f32 {
+        if self.tokens.accessibility.reduce_motion {
+            return if shown { 1. } else { 0. };
+        }
+        let spring = self.tokens.spring(preset);
+        let mut values = self.motion.values.borrow_mut();
+        let value = values.entry(key).or_insert_with(|| Animated::unit(0.));
+        let target = if shown { 1. } else { 0. };
+        if value.target[0] != target {
+            value.to(target, spring);
+        }
+        // Set after this frame's step (`Motion::frame`): the next frames
+        // carry it on.
+        let now = value.get();
+        if (now - target).abs() > 0.001 && self.clock.is_none() {
+            window.request_animation_frame();
+        }
+        now
+    }
+    /// The sign-in's field for `which` (`email` or `code`), made once: a
+    /// real AppKit text field, its typing and keys sent to the flow.
+    fn text_field(
+        &mut self,
+        which: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<NativeControl> {
+        let held = if which == "code" {
+            &self.code_field
+        } else {
+            &self.email_field
+        };
+        if let Some(field) = held {
+            return field.clone();
+        }
+        let tokens = self.tokens.clone();
+        let code = which == "code";
+        let identifier = format!("welcome-{which}");
+        let field = cx.new(|cx| {
+            let mut field = NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Text,
+                    label: if code { "" } else { "name@example.com" },
+                    identifier: &identifier,
+                    value: &serde_json::Value::String(String::new()),
+                    options: vec![],
+                    disabled: false,
+                    default: false,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    pull: false,
+                    tint: None,
+                    symbol: Some(which),
+                    glass: false,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            );
+            if code {
+                // The cells are drawn here; the field under them keeps the
+                // keyboard, a pasted code and VoiceOver.
+                field.alpha = 0.;
+                field.set_height(CELL_HEIGHT);
+                field.describe("6-digit code");
+            } else {
+                field.describe("Email");
+            }
+            field
+        });
+        cx.subscribe_in(
+            &field,
+            window,
+            move |v: &mut Self, _, value: &serde_json::Value, window, cx| match value {
+                serde_json::Value::String(text) => v.act(&format!("field:{which}:{text}"), cx),
+                serde_json::Value::Object(key) => match key.get("key").and_then(|k| k.as_str()) {
+                    Some("Enter") => {
+                        if let Some(id) = v.frame.default_action().map(str::to_owned) {
+                            v.act(&id, cx);
+                        }
+                    }
+                    Some("Escape") => v.act("escape", cx),
+                    // On to the actions: the keyboard is the window's again.
+                    Some("Tab") => window.focus(&v.focus, cx),
+                    _ => {}
+                },
+                _ => {}
+            },
+        )
+        .detach();
+        if code {
+            self.code_field = Some(field.clone());
+        } else {
+            self.email_field = Some(field.clone());
+        }
+        field
+    }
+    /// The account's sign-in under the title: the email field; then the
+    /// email as a line with Change over the code's six cells and Resend; then
+    /// a check. Its error, if any, under it.
+    fn sign_in_block(
+        &mut self,
+        s: &SignIn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.tokens.clone();
+        let c = &t.colors;
+        let now = self.now();
+        let arrived = self.sign_in_stage.replace(s.stage) != Some(s.stage);
+        if s.shake != self.shake.0 {
+            self.shake = (s.shake, now);
+        }
+        let shake_t = (now - self.shake.1) as f32;
+        let shaking = s.shake > 0 && shake_t < SHAKE_SECONDS && !t.accessibility.reduce_motion;
+        if shaking && self.clock.is_none() {
+            window.request_animation_frame();
+        }
+        // One shake: a quick sideways swing that dies away.
+        let dx = if shaking {
+            8. * (-shake_t * 7.).exp() * (shake_t * std::f32::consts::TAU * 6.).sin()
+        } else {
+            0.
+        };
+        let email_p = self.shown(
+            SIGN_IN_KEY,
+            s.stage == SignInStage::Email,
+            Preset::Show,
+            window,
+        );
+        let code_p = self.shown(
+            SIGN_IN_KEY + 1,
+            s.stage == SignInStage::Code,
+            Preset::Show,
+            window,
+        );
+        let done_p = self.shown(
+            SIGN_IN_KEY + 2,
+            s.stage == SignInStage::Done,
+            Preset::Pop,
+            window,
+        );
+        let link = |id: &'static str, label: &str, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(format!("welcome-{id}")))
+                .debug_selector(move || format!("welcome-{id}"))
+                .role(Role::Link)
+                .aria_label(label.to_owned())
+                .tab_index(0)
+                .text_color(rgb(c.text))
+                .hover_style(|s| s.opacity(0.75))
+                .child(label.to_owned())
+                .on_click(cx.listener(move |v, _, _, cx| v.act(id, cx)))
+        };
+        let mut block = div()
+            .id("welcome-sign-in")
+            .debug_selector(|| "welcome-sign-in".into())
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(14.))
+            .text_size(px(13.));
+        match s.stage {
+            SignInStage::Email => {
+                let field = self.text_field("email", window, cx);
+                field.update(cx, |f, cx| {
+                    f.host_text(&s.email, s.revision);
+                    f.alpha = email_p.clamp(0., 1.);
+                    if arrived {
+                        f.focus_on_paint();
+                    }
+                    cx.notify();
+                });
+                block = block.child(
+                    div()
+                        .w(px(PRIMARY_WIDTH))
+                        .relative()
+                        .top(px((1. - email_p) * 10.))
+                        .opacity(email_p.clamp(0., 1.))
+                        .child(field),
+                );
+            }
+            SignInStage::Code => {
+                // The email, risen from its field into a line.
+                block = block.child(
+                    div()
+                        .id("welcome-sent-to")
+                        .debug_selector(|| "welcome-sent-to".into())
+                        .flex()
+                        .gap(px(6.))
+                        .relative()
+                        .top(px((1. - code_p) * 26.))
+                        .opacity(code_p.clamp(0., 1.))
+                        .child(
+                            div()
+                                .id("welcome-sent-email")
+                                .role(Role::Label)
+                                .aria_label(s.email.clone())
+                                .text_color(rgb(c.secondary))
+                                .child(s.email.clone()),
+                        )
+                        .child(div().text_color(rgb(c.faint)).child("·"))
+                        .child(link("change", "Change", cx)),
+                );
+                let field = self.text_field("code", window, cx);
+                let focused = field.update(cx, |f, cx| {
+                    f.host_text(&s.code, s.revision);
+                    if arrived {
+                        f.focus_on_paint();
+                    }
+                    cx.notify();
+                    f.focused()
+                });
+                let digits: Vec<char> = s.code.chars().collect();
+                let active = digits.len().min(CELLS - 1);
+                let cells = (0..CELLS).map(|i| {
+                    let digit = digits.get(i).copied();
+                    let current = focused && i == active;
+                    div()
+                        .w(px(CELL_WIDTH))
+                        .h(px(CELL_HEIGHT))
+                        // The middle of the code: "123 456".
+                        .when(i == CELLS / 2, |d| d.ml(px(8.)))
+                        .rounded(px(10.))
+                        .bg(rgba((c.text << 8) | 0x0d))
+                        .border_1()
+                        .border_color(if current {
+                            rgb(c.focus)
+                        } else {
+                            rgba((c.text << 8) | 0x1c)
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(22.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c.text))
+                        .children(digit.map(|d| d.to_string()))
+                        .when(current && digit.is_none(), |d| {
+                            d.child(div().w(px(1.5)).h(px(22.)).bg(rgb(c.text)))
+                        })
+                });
+                block = block.child(
+                    div()
+                        .id("welcome-code")
+                        .debug_selector(|| "welcome-code".into())
+                        .relative()
+                        .left(px(dx))
+                        .top(px((1. - code_p) * 14.))
+                        .opacity(code_p.clamp(0., 1.))
+                        .child(div().flex().gap(px(8.)).children(cells))
+                        .child(div().absolute().inset_0().child(field)),
+                );
+            }
+            SignInStage::Done => {
+                let size = 44. * (0.7 + 0.3 * done_p);
+                block = block.child(
+                    div()
+                        .id("welcome-signed-in")
+                        .debug_selector(|| "welcome-signed-in".into())
+                        .role(Role::Image)
+                        .aria_label("Signed in")
+                        .h(px(52.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(size))
+                                .rounded_full()
+                                .bg(rgb(c.success))
+                                .opacity(done_p.clamp(0., 1.))
+                                .child(check(size, done_p)),
+                        ),
+                );
+            }
+        }
+        if let Some(error) = &self.frame.error {
+            // The line wraps in the column; Try again under it.
+            block = block.child(
+                div()
+                    .id("welcome-sign-in-error")
+                    .debug_selector(|| "welcome-sign-in-error".into())
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id("welcome-sign-in-error-line")
+                            .role(Role::Alert)
+                            .aria_label(error.clone())
+                            .w_full()
+                            .text_center()
+                            .line_height(px(18.))
+                            .text_color(rgb(c.danger))
+                            .child(error.clone()),
+                    )
+                    .when(s.retry, |d| d.child(link("retry", "Try again", cx))),
+            );
+        }
+        if s.stage == SignInStage::Code
+            && let Some(wait) = s.resend_in
+        {
+            block = block.child(
+                div()
+                    .id("welcome-resend")
+                    .debug_selector(|| "welcome-resend".into())
+                    .flex()
+                    .gap(px(5.))
+                    .text_color(rgb(c.secondary))
+                    .opacity(code_p.clamp(0., 1.))
+                    .map(|d| {
+                        if wait == 0 {
+                            d.child("Didn’t get it?")
+                                .child(link("resend", "Resend code", cx))
+                        } else {
+                            let label = format!("Resend code in {wait} s");
+                            d.role(Role::Label)
+                                .aria_label(label.clone())
+                                .text_color(rgb(c.faint))
+                                .child(label)
+                        }
+                    }),
+            );
+        }
+        block.into_any_element()
     }
     /// A group's heading, as Settings heads its groups.
     fn section_title(&self, title: &str) -> impl IntoElement + use<> {
@@ -1483,10 +1870,40 @@ const LOGO_TOP: f32 = 104.;
 /// Where the content's room ends, and where the actions start: the primary
 /// at one height on every frame, its links 12 under it, 64 above the bottom.
 const ACTIONS_TOP: f32 = 510.;
+/// The sign-in's six code cells, as wide together as the primary action.
+const CELLS: usize = 6;
+const CELL_WIDTH: f32 = 38.;
+const CELL_HEIGHT: f32 = 48.;
+const SHAKE_SECONDS: f32 = 0.45;
+/// `Motion::values` keys: the sign-in's title by stage, and its parts.
+const TITLE_KEY: u64 = 0x5160_0000;
+const SIGN_IN_KEY: u64 = 0x5160_0010;
 const CONTENT_BOTTOM: f32 = ACTIONS_TOP - 20.;
 
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
 /// under Reduce Motion. Also the kit's indeterminate progress row.
+/// The signed-in check, drawn in as `p` reaches 1.
+fn check(size: f32, p: f32) -> impl IntoElement + use<> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * size), px(y * size));
+            let points = [at(0.30, 0.52), at(0.44, 0.66), at(0.71, 0.37)];
+            let mut builder = PathBuilder::stroke(px(size / 15.));
+            builder.move_to(points[0]);
+            // The stroke's two legs, the second drawn as the first ends.
+            let drawn = p.clamp(0., 1.) * 2.;
+            builder.line_to(points[0] + (points[1] - points[0]) * drawn.min(1.));
+            if drawn > 1. {
+                builder.line_to(points[1] + (points[2] - points[1]) * (drawn - 1.));
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, rgb(0xffffff));
+            }
+        },
+    )
+    .size(px(size))
+}
 pub fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let colour = tokens.colors.secondary;
     let size = tokens.typography.reading;
