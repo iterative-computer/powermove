@@ -1026,8 +1026,8 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
             push(&mut views, &slider);
             y += h;
         }
-        // As tall as the list beside it, so the two balance.
-        card_h = (y + shape.inset).max(list_h);
+        // It ends at its content, as Capy's does (top edges aligned).
+        card_h = y + shape.inset;
     }
 
     // The rail: a mark per harness on its tile, then "+" at its foot.
