@@ -2180,12 +2180,49 @@ test("with the Codex and Claude Code harnesses the chooser heads their models wi
     root.dispose();
   }
 });
-test("a harness with no models lists Connect a provider…", async () => {
+test("a harness with no models offers one action and no card; one that couldn't start offers Try Again", async () => {
+  for (const [connection, rows, action] of [
+    ["connected", [["action", "Connect a provider…"]], "providers:"],
+    ["unavailable", [["status", "Claude Code couldn’t start."], ["action", "Try Again"]], "retry:"],
+  ] as const) {
+    const { root } = mount();
+    const actions: Action[] = [];
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([]);
+    p.snapshot.settings.provider = "claude";
+    p.snapshot.settings.model = "";
+    p.native.connection = connection;
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return action;
+        }}
+        send={(a) => actions.push(a)}
+      />,
+    );
+    await root.drive(byId(root, "agent-model").id, "click");
+    await Promise.resolve();
+    expect(chooserRows(asked[0]!).filter(([kind]) => kind !== "harness").map(([kind, label]) => [kind, label])).toEqual(
+      rows.map((r) => [...r]),
+    );
+    expect(asked[0]!.chooser).toBeUndefined();
+    expect(actions).toEqual([{ type: connection === "connected" ? "openSettings" : "retryConnection" }]);
+    root.dispose();
+  }
+});
+test("two context variants of one model never read alike, in the chooser or the pill; the card gets the Context fact", async () => {
   const { root } = mount();
   const p = fixture();
-  p.snapshot.catalog = harnessCatalog([]);
+  p.snapshot.catalog = harnessCatalog([
+    ["opus", "Opus 5.5"],
+    ["opus[1m]", "Opus 5.5 (1M context)"],
+    ["sonnet", "Sonnet 5.5 (200K context)"],
+  ]);
   p.snapshot.settings.provider = "claude";
-  p.snapshot.settings.model = "";
+  p.snapshot.settings.model = "opus[1m]";
   const asked: Parameters<Menu>[0][] = [];
   await root.render(
     <AgentView
@@ -2197,10 +2234,24 @@ test("a harness with no models lists Connect a provider…", async () => {
       send={() => {}}
     />,
   );
+  expect(byId(root, "agent-model").props.label).toBe("Model, Opus 5.5 (1M)");
   await root.drive(byId(root, "agent-model").id, "click");
-  expect(chooserRows(asked[0]!).filter(([kind]) => kind === "connect").map(([, label]) => label)).toEqual([
-    "Connect a provider…",
-  ]);
+  const names = asked[0]!.options.filter((o) => o.kind === "model").map((o) => o.label);
+  expect(names).toEqual(["Opus 5.5", "Opus 5.5 (1M)", "Sonnet 5.5"]);
+  expect(new Set(names).size).toBe(names.length);
+  expect(asked[0]!.chooser).toEqual({ title: "Opus 5.5", icon: "provider.claude", facts: [["Context", "1M"]] });
+  root.dispose();
+});
+test("Stop keeps the approved 22 pt circle while Send is the pill's highlight box", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["chatgpt/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.runId = "run-1";
+  await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+  const stop = root.inspect().nodes.find((n) => n.props.metadata?.symbol === "composer.stop")!;
+  for (const key of ["width", "height", "borderRadius"])
+    expect(stop.props.style[key]).toEqual({ token: "metrics.composer_control" });
   root.dispose();
 });
 test("with the Powermove harness a rail harness keeps the chooser open and switches the harness", async () => {
@@ -2224,11 +2275,11 @@ test("with the Powermove harness a rail harness keeps the chooser open and switc
   expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
   root.dispose();
 });
-test("with the Powermove harness signed out: the pill reads Connect a provider and opens the chooser with the rail and Connect a provider…, one quiet line per harness", async () => {
-  for (const [harness, name, line] of [
-    ["aero", "Powermove", "Add a provider in Settings › Providers"],
-    ["chatgpt", "Codex", "Sign in to ChatGPT in Settings › Providers"],
-    ["claude", "Claude Code", "Sign in to Claude in Settings › Providers"],
+test("with the Powermove harness signed out: the pill reads Connect a provider and opens the rail with one Connect a provider… action, no card; one quiet line per harness under the composer", async () => {
+  for (const [harness, line] of [
+    ["aero", "Add a provider in Settings › Providers"],
+    ["chatgpt", "Sign in to ChatGPT in Settings › Providers"],
+    ["claude", "Sign in to Claude in Settings › Providers"],
   ] as const) {
     const { root } = mount();
     const actions: Action[] = [];
@@ -2267,10 +2318,9 @@ test("with the Powermove harness signed out: the pill reads Connect a provider a
       ["harness", "Powermove", harness === "aero"],
       ["harness", "Codex", harness === "chatgpt"],
       ["harness", "Claude Code", harness === "claude"],
-      ["connect", "Connect a provider…", null],
       ["action", "Connect a provider…", null],
     ]);
-    expect(asked[0]!.chooser).toEqual({ title: name, icon: `provider.${harness === "aero" ? "powermove" : harness}`, note: line });
+    expect(asked[0]!.chooser).toBeUndefined();
     expect(actions).toEqual([{ type: "openSettings" }]);
     root.dispose();
   }

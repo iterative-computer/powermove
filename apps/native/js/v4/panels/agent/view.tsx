@@ -852,6 +852,24 @@ function providerMark(harness: string, group: string): string {
   if (harness === "claude") return "claude";
   return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "anthropic" : "compatible";
 }
+/** A model label's context note ("Opus 5.5 (1M context)" → "1M"), when it
+ * names one. */
+export function modelContext(label: string): string | undefined {
+  return label.match(/\(([^)]*?)\s*context[^)]*\)/i)?.[1]?.trim() || undefined;
+}
+/** A model label without its context note. */
+export function modelBase(label: string): string {
+  return label.replace(/\s*\([^)]*context[^)]*\)/i, "");
+}
+/** How the chooser and the pill name a model: its base name, with a short
+ * context qualifier ("Opus 5.5 (1M)") when another listed model shares
+ * that base name, so two variants never read alike. */
+export function chooserName(models: [string, string][], id: string, label: string): string {
+  const base = modelBase(label);
+  const context = modelContext(label);
+  const shared = models.some(([other, text]) => other !== id && modelBase(text) === base);
+  return context && shared ? `${base} (${context})` : base;
+}
 /** The account heading a harness's model is listed under in the chooser. */
 export function accountHeading(harness: string, model: string, n?: NativeFacts): string {
   if (harness === "chatgpt") return n?.accounts?.chatgpt ?? "ChatGPT";
@@ -2927,7 +2945,7 @@ function Composer({
   // the chosen model (its context when the label names it, Reasoning as a
   // track, Add a provider…). Signed out, the list and the card lead to
   // Settings › Providers.
-  const chooserRequest = (s: Snapshot): { options: MenuOption[]; chooser: ChooserCard } => {
+  const chooserRequest = (s: Snapshot): { options: MenuOption[]; chooser?: ChooserCard } => {
     const n = native.current;
     const harness = s.settings.provider;
     const harnessName = named(s.catalog.providers, harness);
@@ -2939,24 +2957,29 @@ function Composer({
       icon: `provider.${harnessMark(id)}`,
       stays: true,
     }));
-    if (harnessSignedOut(s, n)) {
+    const listed = pairs(s.catalog.models, s.settings.model);
+    // Nothing to choose: one compact pane with its one action (Try Again
+    // for a harness that couldn't start), and no card. The composer's own
+    // line says where to sign in.
+    const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
+    if (harnessSignedOut(s, n) || !listed.length || fault) {
+      if (fault) options.push({ kind: "status", label: `${harnessName} couldn’t start.`, value: "" });
+      else if (n.findingModels) options.push({ kind: "status", label: "Finding models…", value: "" });
       options.push(
-        { kind: "connect", label: "Connect a provider…", value: "providers:" },
-        { kind: "action", label: "Connect a provider…", value: "providers:" },
+        fault
+          ? { kind: "action", label: "Try Again", value: "retry:" }
+          : { kind: "action", label: "Connect a provider…", value: "providers:" },
       );
-      return {
-        options,
-        chooser: { title: harnessName, icon: `provider.${harnessMark(harness)}`, note: signInCopy(harness) },
-      };
+      return { options };
     }
     const shown = harnessModel(s, n);
     const groups = new Map<string, MenuOption[]>();
-    for (const { v, label } of pairs(s.catalog.models, s.settings.model)) {
+    for (const { v, label } of listed) {
       const heading = accountHeading(harness, v, n);
       const rows = groups.get(heading) ?? [];
       rows.push({
         kind: "model",
-        label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        label: chooserName(s.catalog.models, v, label),
         value: `model:${v}`,
         checked: v === shown,
         icon: `provider.${providerMark(harness, providerGroup(harness, v))}`,
@@ -2977,30 +3000,24 @@ function Composer({
         icon: "provider.powermove",
         disabled: true,
       });
-    // No models to list: the way to an account that has some.
-    if (!groups.size)
-      options.push(
-        n.findingModels
-          ? { kind: "heading", label: "Finding models…", value: "" }
-          : { kind: "connect", label: "Connect a provider…", value: "providers:" },
-      );
-    const level = (value: string) => ({
-      kind: "effort",
-      label: effortLabel(value),
-      value: `effort:${value}`,
-      checked: value === s.settings.effort || (!efforts.includes(s.settings.effort) && value === s.catalog.defaultEffort),
-      default: value === s.catalog.defaultEffort || undefined,
-      stays: true,
-    });
     const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
-    options.push(...efforts.map(level));
+    options.push(
+      ...efforts.map((value) => ({
+        kind: "effort",
+        label: effortLabel(value),
+        value: `effort:${value}`,
+        checked: value === s.settings.effort || (!efforts.includes(s.settings.effort) && value === s.catalog.defaultEffort),
+        default: value === s.catalog.defaultEffort || undefined,
+        stays: true,
+      })),
+    );
     options.push({ kind: "action", label: "Add a provider…", value: "providers:" });
     const label = named(s.catalog.models, shown, harnessName);
-    const context = label.match(/\(([^)]*?)\s*context[^)]*\)/i)?.[1];
+    const context = modelContext(label);
     return {
       options,
       chooser: {
-        title: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        title: modelBase(label),
         icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
         facts: context ? [["Context", context]] : [],
       },
@@ -3061,6 +3078,9 @@ function Composer({
       if (kind === "providers") {
         setOpenPicker(null);
         send({ type: "openSettings" });
+      } else if (kind === "retry") {
+        setOpenPicker(null);
+        send({ type: "retryConnection" });
       } else if (kind === "effort") {
         // The chooser stays open on its Reasoning track.
         if (value !== now.settings.effort) send({ type: "setModel", model: now.settings.model, effort: value });
@@ -3241,9 +3261,16 @@ function Composer({
   // Send and Stop are one circle at the row's end: a dim disc while there
   // is nothing to send, the text ink once there is (or while a run can be
   // stopped). With a draft during a run, Stop steps back beside Send.
-  // Send and Stop are rounded rectangles of the pill's highlight box (its
-  // height and corner), so the row reads as one family.
-  const sendFace = (lit: boolean): Style => ({
+  // Send is a rounded rectangle of the pill's highlight box (its height and
+  // corner), so the row reads as one family; Stop keeps its approved circle.
+  const stopFace = (lit: boolean): Style => ({
+    ...sendFace(lit),
+    width: t("metrics.composer_control"),
+    height: t("metrics.composer_control"),
+    borderRadius: t("metrics.composer_control"),
+  });
+  function sendFace(lit: boolean): Style {
+    return {
     ...row,
     justifyContent: "center",
     width: t("metrics.hit"),
@@ -3252,7 +3279,8 @@ function Composer({
     background: t(lit ? "colors.text" : "colors.composer_send_idle"),
     color: t(lit ? (n.presentation === "popover" ? "colors.raised" : "colors.floating") : "colors.muted"),
     symbolSize: t("metrics.composer_symbol"),
-  });
+    };
+  }
   const hitBox: Style = {
     ...target,
     ...row,
@@ -3434,7 +3462,11 @@ function Composer({
             signedOut
               ? "Connect a provider"
               : harness
-                ? named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider))
+                ? chooserName(
+                    s.catalog.models,
+                    shownModel,
+                    named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
+                  )
                 : modelName
           }
           effort={!signedOut && efforts.length > 0 ? effortName : null}
@@ -3456,7 +3488,7 @@ function Composer({
             onClick={stop}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
+            <div metadata={{ symbol: "composer.stop" }} style={stopFace(!hasDraft && !s.stopping)} />
           </button>
         )}
         {(!working || hasDraft) && (

@@ -12252,7 +12252,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "colors.text",
           },
           "borderRadius": {
-            "token": "metrics.inner_radius",
+            "token": "metrics.composer_control",
           },
           "color": {
             "token": "colors.raised",
@@ -12260,14 +12260,14 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "display": "flex",
           "flexDirection": "row",
           "height": {
-            "token": "metrics.hit",
+            "token": "metrics.composer_control",
           },
           "justifyContent": "center",
           "symbolSize": {
             "token": "metrics.composer_symbol",
           },
           "width": {
-            "token": "metrics.hit",
+            "token": "metrics.composer_control",
           },
         },
       },
@@ -13592,7 +13592,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "colors.composer_send_idle",
           },
           "borderRadius": {
-            "token": "metrics.inner_radius",
+            "token": "metrics.composer_control",
           },
           "color": {
             "token": "colors.muted",
@@ -13600,14 +13600,14 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "display": "flex",
           "flexDirection": "row",
           "height": {
-            "token": "metrics.hit",
+            "token": "metrics.composer_control",
           },
           "justifyContent": "center",
           "symbolSize": {
             "token": "metrics.composer_symbol",
           },
           "width": {
-            "token": "metrics.hit",
+            "token": "metrics.composer_control",
           },
         },
       },
