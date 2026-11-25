@@ -2,6 +2,10 @@
 //! transport, for runtimes such as libfx whose network access belongs to the
 //! host. The request, the declared models and the reply parsing are the CLI's
 //! own; only the HTTP client differs. The host adds the API key, if any.
+//!
+//! Powermove notice: modified from upstream fx (patch P-HOST-MESSAGES): the
+//! host transport also carries `anthropic-messages` connections, at the
+//! protocol's own path, with the API version, read and replayed by protocol.
 const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
@@ -9,6 +13,7 @@ const definitions = @import("../core/config/configured_provider.zig");
 const chat_completions = @import("chat_completions.zig");
 const gateway_client = @import("client.zig");
 const host_stream = @import("host_stream_provider.zig");
+const configured_transport = @import("configured_transport.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -29,7 +34,8 @@ pub const Context = struct {
         // environment for a header, ask the server for its model list on a
         // connection of its own, or bound the host's fetch.
         const only = registry.definitions[0];
-        if (only.protocol != .@"openai-chat-completions" or only.headers.len != 0 or only.fetch_models or !std.meta.eql(only.timeouts, definitions.Timeouts{})) {
+        const carried = only.protocol == .@"openai-chat-completions" or only.protocol == .@"anthropic-messages";
+        if (!carried or only.headers.len != 0 or only.fetch_models or !std.meta.eql(only.timeouts, definitions.Timeouts{})) {
             return error.InvalidConfiguredProvider;
         }
         return .{ .transport = transport, .registry = registry };
@@ -58,7 +64,7 @@ pub fn bundle(raw: ?*anyopaque, definition: *const definitions.Definition) provi
             .context = context,
             .stream_fn = stream,
             .build_request_fn = buildRequest,
-            .project_replay_fn = chat_completions.project_replay,
+            .project_replay_fn = chat_completions.replay_projection(own.protocol),
         },
         .model_catalog = chat_completions.model_catalog_provider(own),
     };
@@ -82,14 +88,16 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     const payload = request.prepared_request_body orelse
         try chat_completions.build_for(definition, alloc, request.data());
     defer if (request.prepared_request_body == null) alloc.free(payload);
-    const endpoint = try definition.chat_url(alloc);
+    const endpoint = try definition.request_url(alloc);
     defer alloc.free(endpoint);
-    const headers = [_]std.http.Header{
+    const all_headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "accept", .value = "text/event-stream" },
+        .{ .name = "anthropic-version", .value = configured_transport.anthropic_version },
     };
+    const headers = if (definition.protocol == .@"anthropic-messages") all_headers[0..] else all_headers[0..2];
 
-    const opened = try host_stream.openPost(alloc, transport, request, endpoint, &headers, payload);
+    const opened = try host_stream.openPost(alloc, transport, request, endpoint, headers, payload);
     defer transport.close(opened.handle);
     if (opened.status != .ok) {
         const body = try host_stream.readErrorBody(alloc, transport, opened.handle, request);
@@ -104,7 +112,8 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
 
     var reader: host_stream.HostStreamReader = undefined;
     reader.init(transport, opened.handle, request.cancel_flag, request.deadline, request.cooperative_pulse);
-    const result = chat_completions.consume(alloc, &reader.interface, request, null) catch |err| switch (err) {
+    const consume = chat_completions.consumer(definition.protocol);
+    const result = consume(alloc, &reader.interface, request, null) catch |err| switch (err) {
         error.ReadFailed => return host_stream.readFailure(&reader, request.cancel_flag),
         else => return err,
     };
@@ -229,4 +238,59 @@ test "host chat completions context refuses settings it cannot honor" {
     try std.testing.expectError(error.InsecureBaseUrl, Context.init(alloc, fake.transport(),
         \\{"plain":{"protocol":"openai-chat-completions","base_url":"http://models.example/v1","auth":{"type":"none"}}}
     ));
+}
+
+const messages_provider =
+    \\{"claude":{"protocol":"anthropic-messages","base_url":"https://api.anthropic.example/v1","auth":{"type":"none"},
+    \\"model_metadata":{"claude-model":{"supports_tool_use":true}}}}
+;
+
+const messages_sse =
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-model\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n" ++
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Read the file.\"}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-host\"}}\n\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+    "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"x\\\"}\"}}\n\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" ++
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n" ++
+    "data: {\"type\":\"message_stop\"}\n\n";
+
+test "host anthropic messages posts to /messages with the version and reads thinking, its signature and a tool call" {
+    const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
+    const alloc = std.testing.allocator;
+    var fake = FakeTransport{ .model = "claude-model", .responses = &.{.{ .status = 200, .body = messages_sse }} };
+    defer fake.deinit();
+    var context = try Context.init(alloc, fake.transport(), messages_provider);
+    defer context.deinit(alloc);
+    const functions = [_]model_tool_schema.FunctionSchema{.{ .name = "read_file", .description = "Read a file.", .input_schema = .{
+        .properties = &.{.{ .name = "path", .json_type = .string }},
+        .required = &.{"path"},
+        .additional_properties = false,
+    } }};
+    var request = fake.request(.host_managed);
+    request.tools = .{ .advertised_names = &.{"read_file"}, .advertised_functions = &functions };
+    const agent_stream = bundle(&context, context.definition()).agent_stream.?;
+    var result = try agent_stream.stream(alloc, request);
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqualStrings("https://api.anthropic.example/v1/messages", fake.urls[0]);
+    try std.testing.expectEqualStrings(
+        "[{\"name\":\"content-type\",\"value\":\"application/json\"},{\"name\":\"accept\",\"value\":\"text/event-stream\"},{\"name\":\"anthropic-version\",\"value\":\"2023-06-01\"}]",
+        fake.headers[0],
+    );
+    const completion = result.completed.completion;
+    try std.testing.expectEqualStrings(
+        "[{\"type\":\"thinking\",\"thinking\":\"Read the file.\",\"signature\":\"sig-host\"}]",
+        completion.provider_state_json.?,
+    );
+    try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
+    try std.testing.expectEqualStrings("read_file", completion.tool_calls[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"x\"}", completion.tool_calls[0].arguments_json);
+    // The replay this connection keeps is the Messages protocol's.
+    const project = agent_stream.project_replay_fn.?;
+    try std.testing.expect(project == chat_completions.replay_projection(.@"anthropic-messages"));
+    try std.testing.expectEqual(@as(usize, 1), fake.consumed);
+    try std.testing.expectEqual(fake.calls, fake.closed);
 }
