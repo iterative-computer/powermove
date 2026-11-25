@@ -32,7 +32,8 @@ pub struct Live {
     pub catalog: Option<Value>,
     pub net: Arc<dyn crate::edge::Net>,
     #[allow(clippy::type_complexity)]
-    pub credentials: Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
+    pub credentials:
+        Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
 }
 
 pub enum Reply {
@@ -112,7 +113,14 @@ impl Model {
 /// session's effort as its one reasoning option (the core refuses an effort
 /// the model does not list).
 /// A catalog GET: a live Codex route's own answer, else the fakes'.
-pub(super) fn catalog(edge: &Model, remote: Remote, fetch: u64, url: &str, model: &str, effort: &str) {
+pub(super) fn catalog(
+    edge: &Model,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    model: &str,
+    effort: &str,
+) {
     let Transport::Live(live) = &edge.transport else {
         return answer_catalog(remote, fetch, model, effort);
     };
@@ -226,13 +234,19 @@ fn deliver_live(
             Ok(found) => found,
             Err(reason) => {
                 // The core reads why from the body of a refusal.
-                let body = json!({"error":{"message":reason,"code":"powermove_account"}}).to_string();
-                return status(remote, fetch, 401).and_then(|_| push(remote, fetch, body.as_bytes()));
+                let body =
+                    json!({"error":{"message":reason,"code":"powermove_account"}}).to_string();
+                return status(remote, fetch, 401)
+                    .and_then(|_| push(remote, fetch, body.as_bytes()));
             }
         };
         let mut all: Vec<(String, String)> = headers
             .iter()
-            .filter(|(name, _)| !credentials.iter().any(|(c, _)| c.eq_ignore_ascii_case(name)))
+            .filter(|(name, _)| {
+                !credentials
+                    .iter()
+                    .any(|(c, _)| c.eq_ignore_ascii_case(name))
+            })
             .cloned()
             .collect();
         let bearer = credentials
@@ -243,7 +257,12 @@ fn deliver_live(
             all.extend(credentials);
         }
         let mut retry = false;
-        let request = NetRequest { method: "POST", url, headers: &all, body };
+        let request = NetRequest {
+            method: "POST",
+            url,
+            headers: &all,
+            body,
+        };
         let stop = std::sync::atomic::AtomicBool::new(false);
         live.net.stream(&request, &stop, &mut |chunk| match chunk {
             Chunk::Status(401) if attempt == 0 && bearer.is_some() => {
@@ -440,7 +459,10 @@ pub fn evaluate(
                 catalog(model, remote, fetch.fetch, fetch.url, name, "");
             } else {
                 let (id, url, body) = (fetch.fetch, fetch.url.to_owned(), fetch.body.to_vec());
-                let headers: Vec<_> = fetch.headers().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
+                let headers: Vec<_> = fetch
+                    .headers()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect();
                 let model = model.clone();
                 thread::spawn(move || deliver(&model, remote, id, &url, &headers, &body));
             }

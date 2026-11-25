@@ -98,12 +98,25 @@ impl Net for SystemNet {
 /// answered by local fakes in a development build that names them), this
 /// build's Keychain prefix, and the browser hop.
 pub fn attach(environment: &mut pm_agents::launch::Environment) -> Arc<pm_agents::account::Opener> {
-    environment.secrets = Some(Arc::new(Keychain));
-    environment.net = Some(pm_agents::edge::Reroute::from_env(&environment.vars, Arc::new(SystemNet)));
+    // A development build against the local fakes keeps everything in the
+    // lane's own test keychain file; every other build, the login Keychain.
+    environment.secrets = Some(
+        match pm_agents::edge::KeychainFile::from_env(&environment.vars) {
+            Some(file) => Arc::new(file) as Arc<dyn Secrets>,
+            None => Arc::new(Keychain),
+        },
+    );
+    environment.net = Some(pm_agents::edge::Reroute::from_env(
+        &environment.vars,
+        Arc::new(SystemNet),
+    ));
     environment.keychain_prefix =
         crate::platform::bundle_id().unwrap_or_else(|| "com.powermove.native.dev".into());
     let fake_browser = cfg!(debug_assertions)
-        && environment.vars.get("PM_AGENT_FAKE_BROWSER").is_some_and(|v| v == "1");
+        && environment
+            .vars
+            .get("PM_AGENT_FAKE_BROWSER")
+            .is_some_and(|v| v == "1");
     if fake_browser {
         // A development build against local fakes: the sign-in page is a
         // loopback fake that approves at once, so follow it here rather than
@@ -122,14 +135,21 @@ fn follow_loopback(url: &str) {
     let mut next = url.to_owned();
     for _ in 0..4 {
         let mut location = None;
-        let request = NetRequest { method: "GET", url: &next, headers: &[], body: b"" };
+        let request = NetRequest {
+            method: "GET",
+            url: &next,
+            headers: &[],
+            body: b"",
+        };
         let (status, body) = match fetch(&Loopback, &request) {
             Ok(found) => found,
             Err(_) => return,
         };
         // The fake answers a redirect's target in its body's first line.
         if (300..400).contains(&status) {
-            location = String::from_utf8(body).ok().and_then(|b| b.lines().next().map(str::to_owned));
+            location = String::from_utf8(body)
+                .ok()
+                .and_then(|b| b.lines().next().map(str::to_owned));
         }
         match location {
             Some(target) if target.starts_with("http://127.0.0.1:") => next = target,
@@ -150,19 +170,45 @@ struct KeySheet(Option<OpenSheet>);
 impl Global for KeySheet {}
 
 /// Opens "Add an API Key" over Settings; Save hands the key to `accounts`.
-pub fn open(kind: Kind, window: Retained<NSWindow>, accounts: Arc<pm_agents::account::Accounts>, cx: &mut App) {
+pub fn open(
+    kind: Kind,
+    window: Retained<NSWindow>,
+    accounts: Arc<pm_agents::account::Accounts>,
+    cx: &mut App,
+) {
     use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
     if cx.try_global::<KeySheet>().is_some_and(|s| s.0.is_some()) {
         return;
     }
     let (title, line) = match kind {
-        Kind::OpenAi => ("Add an OpenAI API Key", "Codex saves it in your Keychain. Used by Codex and Powermove."),
-        Kind::Anthropic => ("Add an Anthropic API Key", "Saved in your Keychain. Used by Claude Code and Powermove."),
+        Kind::OpenAi => (
+            "Add an OpenAI API Key",
+            "Codex saves it in your Keychain. Used by Codex and Powermove.",
+        ),
+        Kind::Anthropic => (
+            "Add an Anthropic API Key",
+            "Saved in your Keychain. Used by Claude Code and Powermove.",
+        ),
     };
-    let mut key = Field::new("key", "API Key", NativePiece::TextField, vec![String::new()]);
+    let mut key = Field::new(
+        "key",
+        "API Key",
+        NativePiece::TextField,
+        vec![String::new()],
+    );
     key.secure = true;
-    key.placeholder = Some(if kind == Kind::OpenAi { "sk-…" } else { "sk-ant-…" });
-    let mut surface = Surface::sheet(DialogId("provider-key".into()), WindowId("settings".into()), title, vec![key], "Save");
+    key.placeholder = Some(if kind == Kind::OpenAi {
+        "sk-…"
+    } else {
+        "sk-ant-…"
+    });
+    let mut surface = Surface::sheet(
+        DialogId("provider-key".into()),
+        WindowId("settings".into()),
+        title,
+        vec![key],
+        "Save",
+    );
     surface.line = Some(line.into());
     surface.buttons = vec![Button::cancel(false), Button::action("Save")];
     let tokens = pm_shell::tokens();
@@ -175,7 +221,9 @@ pub fn open(kind: Kind, window: Retained<NSWindow>, accounts: Arc<pm_agents::acc
                 let sheet = cx.global_mut::<KeySheet>();
                 match action.as_str() {
                     "apply" => {
-                        let Some(open) = sheet.0.take() else { return true };
+                        let Some(open) = sheet.0.take() else {
+                            return true;
+                        };
                         let key = open.text("key").trim().to_owned();
                         open.close();
                         let accounts = accounts.clone();

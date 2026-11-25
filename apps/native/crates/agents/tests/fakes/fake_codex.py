@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """A fake `codex` for Settings › Providers tests and on-screen passes: the
 App Server account methods Powermove calls, with Codex 0.169's keyring store
-(one generic password, service PM_CODEX_KEYRING_SERVICE, account
+(one generic password, in the lane's test keychain file PM_AGENT_KEYCHAIN,
+service PM_CODEX_KEYRING_SERVICE, account
 `cli|<first 16 hex of sha256(realpath(CODEX_HOME))>`, Codex's auth.json
 document). Sign-in follows the Codex ChatGPT route against the fake issuer
 PM_FAKE_AUTH (authorize, loopback /auth/callback, code exchange with PKCE);
 `account/read` with `refreshToken` refreshes when the access token is within
 five minutes of expiring, the only refresher, as Codex is. Items are made
-with `security -A` (no Keychain prompt) and only under the lane's service."""
+with `security -A`, only in that file and under the lane's service."""
 import base64, hashlib, json, os, secrets, subprocess, sys, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -20,6 +21,17 @@ if not SERVICE or SERVICE == "Codex Auth":
 HOME = os.path.realpath(os.environ["CODEX_HOME"])
 KEY = "cli|" + hashlib.sha256(HOME.encode()).hexdigest()[:16]
 out_lock = threading.Lock()
+# Only the lane's own test keychain file, named on every call: never the
+# login keychain or the search list, and a call that would wait on a prompt
+# times out instead.
+KEYCHAIN = os.environ.get("PM_AGENT_KEYCHAIN", "")
+if not KEYCHAIN.endswith(".keychain-db") or not os.path.isfile(KEYCHAIN):
+    sys.exit("fake codex: set PM_AGENT_KEYCHAIN to the lane's test keychain file")
+
+
+def security(*args, check=False):
+    return subprocess.run(["/usr/bin/security", *args, KEYCHAIN], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=5, check=check)
 
 
 def send(value):
@@ -29,17 +41,18 @@ def send(value):
 
 
 def item():
-    found = subprocess.run(["security", "find-generic-password", "-s", SERVICE, "-a", KEY, "-w"], capture_output=True, text=True)
+    found = security("find-generic-password", "-s", SERVICE, "-a", KEY, "-w")
     return json.loads(found.stdout) if found.returncode == 0 and found.stdout.strip() else None
 
 
 def save(document):
-    subprocess.run(["security", "add-generic-password", "-U", "-A", "-s", SERVICE, "-a", KEY, "-w", json.dumps(document, separators=(",", ":"))],
-                   check=True, capture_output=True)
+    # Never update in place (`-U` can ask for access): delete, then add.
+    security("delete-generic-password", "-s", SERVICE, "-a", KEY)
+    security("add-generic-password", "-A", "-s", SERVICE, "-a", KEY, "-w", json.dumps(document, separators=(",", ":")), check=True)
 
 
 def delete():
-    subprocess.run(["security", "delete-generic-password", "-s", SERVICE, "-a", KEY], capture_output=True)
+    security("delete-generic-password", "-s", SERVICE, "-a", KEY)
 
 
 def claims(token):

@@ -37,7 +37,9 @@ pub fn service(env: &Environment) -> String {
 }
 /// Codex's `compute_store_key`.
 pub fn store_key(codex_home: &Path) -> String {
-    let path = codex_home.canonicalize().unwrap_or_else(|_| codex_home.to_path_buf());
+    let path = codex_home
+        .canonicalize()
+        .unwrap_or_else(|_| codex_home.to_path_buf());
     let hash = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
     format!("cli|{}", &hash[..16])
 }
@@ -54,7 +56,12 @@ pub struct CodexAuth {
 }
 impl std::fmt::Debug for CodexAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CodexAuth {{ chatgpt: {}, api_key: {} }}", self.chatgpt.is_some(), self.api_key.is_some())
+        write!(
+            f,
+            "CodexAuth {{ chatgpt: {}, api_key: {} }}",
+            self.chatgpt.is_some(),
+            self.api_key.is_some()
+        )
     }
 }
 impl CodexAuth {
@@ -62,26 +69,43 @@ impl CodexAuth {
         let v: Value = serde_json::from_slice(bytes).ok()?;
         let tokens = &v["tokens"];
         let access = tokens["access_token"].as_str().filter(|s| !s.is_empty());
-        let chatgpt = access.map(|a| (a.to_owned(), tokens["account_id"].as_str().map(str::to_owned)));
+        let chatgpt = access.map(|a| {
+            (
+                a.to_owned(),
+                tokens["account_id"].as_str().map(str::to_owned),
+            )
+        });
         Some(Self {
             expires_at: access.and_then(jwt_exp),
             chatgpt,
             // A ChatGPT login may also carry an exchanged key; the key is the
             // method only when there are no ChatGPT tokens.
-            api_key: v["OPENAI_API_KEY"].as_str().filter(|k| !k.is_empty() && access.is_none()).map(str::to_owned),
+            api_key: v["OPENAI_API_KEY"]
+                .as_str()
+                .filter(|k| !k.is_empty() && access.is_none())
+                .map(str::to_owned),
         })
     }
+    /// Outside Codex's refresh window: no refresh needed yet.
     fn fresh(&self) -> bool {
         self.chatgpt.is_none() || self.expires_at.is_some_and(|exp| exp > now() + WINDOW_SECS)
     }
+    /// Still usable now (a token Codex just refreshed may be short-lived).
+    fn usable(&self) -> bool {
+        self.chatgpt.is_none() || self.expires_at.is_some_and(|exp| exp > now() + 5)
+    }
 }
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 fn jwt_exp(token: &str) -> Option<u64> {
     use base64::Engine as _;
     let claims = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')).ok()?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims.trim_end_matches('='))
+        .ok()?;
     serde_json::from_slice::<Value>(&bytes).ok()?["exp"].as_u64()
 }
 
@@ -99,10 +123,13 @@ pub fn read(secrets: &dyn Secrets, env: &Environment) -> Result<Option<CodexAuth
 /// keyring item, once, and removes the file. Never overwrites an item.
 pub fn migrate(secrets: &dyn Secrets, env: &Environment, home: &Path) -> Result<(), String> {
     let file = home.join("auth.json");
-    let Ok(bytes) = std::fs::read(&file) else { return Ok(()) };
+    let Ok(bytes) = std::fs::read(&file) else {
+        return Ok(());
+    };
     let key = store_key(home);
     if secrets.read(&service(env), &key)?.is_none() {
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| "Codex's saved sign-in is unreadable.")?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| "Codex's saved sign-in is unreadable.")?;
         secrets.write(&service(env), &key, value.to_string().as_bytes())?;
     }
     std::fs::remove_file(&file).map_err(|e| e.to_string())
@@ -113,7 +140,11 @@ static REFRESH: Mutex<()> = Mutex::new(());
 /// A usable credential: the item as it is, or after Codex refreshed it.
 /// `rejected` is the bearer a backend just refused (a 401): refresh unless
 /// the item already holds another one.
-pub fn current(secrets: &dyn Secrets, env: &Environment, rejected: Option<&str>) -> Result<CodexAuth, String> {
+pub fn current(
+    secrets: &dyn Secrets,
+    env: &Environment,
+    rejected: Option<&str>,
+) -> Result<CodexAuth, String> {
     let signed_out = || "Sign in to OpenAI in Settings › Providers.".to_owned();
     let _one = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
     let auth = read(secrets, env)?.ok_or_else(signed_out)?;
@@ -128,7 +159,7 @@ pub fn current(secrets: &dyn Secrets, env: &Environment, rejected: Option<&str>)
     let auth = read(secrets, env)?.ok_or_else(signed_out)?;
     match (&auth.chatgpt, rejected) {
         (Some((access, _)), Some(bad)) if access == bad => Err(expired()),
-        _ if !auth.fresh() => Err(expired()),
+        _ if !auth.usable() => Err(expired()),
         _ => Ok(auth),
     }
 }
@@ -137,7 +168,9 @@ fn expired() -> String {
 }
 
 fn ask_codex_to_refresh(env: &Environment) -> Result<(), String> {
-    let binary = env.binary(Runtime::Codex).ok_or("Powermove's built-in Codex runtime is missing.")?;
+    let binary = env
+        .binary(Runtime::Codex)
+        .ok_or("Powermove's built-in Codex runtime is missing.")?;
     let mut peer = crate::account::Peer::start(&binary, &["app-server"], env.codex_vars()?)?;
     let wait = Duration::from_secs(45);
     peer.request(
@@ -167,7 +200,8 @@ mod tests {
     #[test]
     fn the_item_reads_as_chatgpt_or_as_a_key() {
         use base64::Engine as _;
-        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
+        let claims =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
         let access = format!("h.{claims}.s");
         let chatgpt = json!({"auth_mode":"chatgpt","OPENAI_API_KEY":"sk-exchanged","tokens":{"id_token":"x","access_token":access,"refresh_token":"r","account_id":"acct"}});
         let auth = CodexAuth::parse(chatgpt.to_string().as_bytes()).unwrap();

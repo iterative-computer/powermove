@@ -21,15 +21,89 @@ pub trait Secrets: Send + Sync + std::fmt::Debug {
 pub struct MemorySecrets(pub Mutex<BTreeMap<(String, String), Vec<u8>>>);
 impl Secrets for MemorySecrets {
     fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(self.0.lock().unwrap().get(&(service.into(), account.into())).cloned())
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(&(service.into(), account.into()))
+            .cloned())
     }
     fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
-        self.0.lock().unwrap().insert((service.into(), account.into()), bytes.to_vec());
+        self.0
+            .lock()
+            .unwrap()
+            .insert((service.into(), account.into()), bytes.to_vec());
         Ok(())
     }
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
-        self.0.lock().unwrap().remove(&(service.into(), account.into()));
+        self.0
+            .lock()
+            .unwrap()
+            .remove(&(service.into(), account.into()));
         Ok(())
+    }
+}
+
+/// Generic passwords in one keychain file, never the login keychain or the
+/// search list: development builds and tests against the local fakes
+/// (`PM_AGENT_KEYCHAIN`, a lane's unlocked test keychain). Each call is
+/// `security` with the file named explicitly and a five-second limit, so a
+/// call that would wait on a prompt fails instead.
+#[derive(Debug)]
+pub struct KeychainFile(pub std::path::PathBuf);
+impl KeychainFile {
+    /// The development switch's test keychain, when the environment names one.
+    pub fn from_env(vars: &BTreeMap<String, String>) -> Option<Self> {
+        vars.get("PM_AGENT_KEYCHAIN")
+            .filter(|p| cfg!(debug_assertions) && p.ends_with(".keychain-db"))
+            .map(|p| Self(p.into()))
+    }
+    fn run(&self, args: &[&str]) -> Result<(bool, Vec<u8>), String> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/usr/bin/security")
+            .args(args)
+            .arg(&self.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                let mut out = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    stdout.read_to_end(&mut out).map_err(|e| e.to_string())?;
+                }
+                return Ok((status.success(), out));
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("The test keychain did not answer in time.".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+impl Secrets for KeychainFile {
+    fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        let (found, out) =
+            self.run(&["find-generic-password", "-s", service, "-a", account, "-w"])?;
+        Ok(found.then(|| out.trim_ascii_end().to_vec()))
+    }
+    fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+        // Never update in place (`-U` can ask for access): delete, then add.
+        self.delete(service, account)?;
+        let (ok, _) =
+            self.run(&["add-generic-password", "-A", "-s", service, "-a", account, "-w", text])?;
+        ok.then_some(())
+            .ok_or_else(|| "The test keychain refused the item.".into())
+    }
+    fn delete(&self, service: &str, account: &str) -> Result<(), String> {
+        self.run(&["delete-generic-password", "-s", service, "-a", account])
+            .map(|_| ())
     }
 }
 
@@ -81,9 +155,13 @@ impl Net for Loopback {
     ) -> Result<(), String> {
         let url = url::Url::parse(request.url).map_err(|e| e.to_string())?;
         if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") {
-            return Err(format!("The loopback client reaches 127.0.0.1 only, not {}.", url.origin().ascii_serialization()));
+            return Err(format!(
+                "The loopback client reaches 127.0.0.1 only, not {}.",
+                url.origin().ascii_serialization()
+            ));
         }
-        let mut stream = TcpStream::connect(("127.0.0.1", url.port().unwrap_or(80))).map_err(|e| e.to_string())?;
+        let mut stream = TcpStream::connect(("127.0.0.1", url.port().unwrap_or(80)))
+            .map_err(|e| e.to_string())?;
         let target = match url.query() {
             Some(q) => format!("{}?{q}", url.path()),
             None => url.path().to_owned(),
@@ -104,7 +182,11 @@ impl Net for Loopback {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        let status = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("No HTTP status line.")?;
+        let status = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or("No HTTP status line.")?;
         let mut chunked = false;
         loop {
             let mut h = String::new();
@@ -169,11 +251,20 @@ impl Reroute {
                 spec.split_whitespace()
                     .filter_map(|pair| pair.split_once('='))
                     .filter(|(_, to)| to.starts_with("http://127.0.0.1:"))
-                    .map(|(from, to)| (from.trim_end_matches('/').to_owned(), to.trim_end_matches('/').to_owned()))
+                    .map(|(from, to)| {
+                        (
+                            from.trim_end_matches('/').to_owned(),
+                            to.trim_end_matches('/').to_owned(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        if map.is_empty() { inner } else { Arc::new(Self { map, inner }) }
+        if map.is_empty() {
+            inner
+        } else {
+            Arc::new(Self { map, inner })
+        }
     }
     /// The URL a fake answers, if one stands in for `url`'s origin.
     pub fn target(&self, url: &str) -> Option<String> {
@@ -191,7 +282,14 @@ impl Net for Reroute {
         on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
     ) -> Result<(), String> {
         match self.target(request.url) {
-            Some(url) => Loopback.stream(&NetRequest { url: &url, ..*request }, stop, on),
+            Some(url) => Loopback.stream(
+                &NetRequest {
+                    url: &url,
+                    ..*request
+                },
+                stop,
+                on,
+            ),
             None => self.inner.stream(request, stop, on),
         }
     }
@@ -205,14 +303,23 @@ mod tests {
     fn reroute_maps_only_listed_loopback_targets() {
         let vars = BTreeMap::from([(
             "PM_AGENT_FAKES".to_owned(),
-            "https://chatgpt.com=http://127.0.0.1:9 https://api.anthropic.com=https://elsewhere".to_owned(),
+            "https://chatgpt.com=http://127.0.0.1:9 https://api.anthropic.com=https://elsewhere"
+                .to_owned(),
         )]);
         let net = Reroute::from_env(&vars, Arc::new(Loopback));
         let text = format!("{net:?}");
-        assert!(text.contains("https://chatgpt.com") && !text.contains("elsewhere"), "{text}");
-        let probe = Reroute { map: vec![("https://chatgpt.com".into(), "http://127.0.0.1:9".into())], inner: Arc::new(Loopback) };
+        assert!(
+            text.contains("https://chatgpt.com") && !text.contains("elsewhere"),
+            "{text}"
+        );
+        let probe = Reroute {
+            map: vec![("https://chatgpt.com".into(), "http://127.0.0.1:9".into())],
+            inner: Arc::new(Loopback),
+        };
         assert_eq!(
-            probe.target("https://chatgpt.com/backend-api/codex/responses").as_deref(),
+            probe
+                .target("https://chatgpt.com/backend-api/codex/responses")
+                .as_deref(),
             Some("http://127.0.0.1:9/backend-api/codex/responses")
         );
         assert!(probe.target("https://chatgpt.com.evil/x").is_none());

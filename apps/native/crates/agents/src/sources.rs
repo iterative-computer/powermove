@@ -46,18 +46,34 @@ impl Source {
     }
     pub fn of(id: &str) -> Option<(Self, &str)> {
         let (prefix, model) = id.split_once('/')?;
-        let source = [Self::ChatGpt, Self::OpenAiKey, Self::AnthropicKey, Self::Custom]
-            .into_iter()
-            .find(|s| s.prefix() == prefix)?;
+        let source = [
+            Self::ChatGpt,
+            Self::OpenAiKey,
+            Self::AnthropicKey,
+            Self::Custom,
+        ]
+        .into_iter()
+        .find(|s| s.prefix() == prefix)?;
         (!model.is_empty()).then_some((source, model))
     }
 }
 
 /// `sk-…a1b2`: a key as Settings shows it.
 pub fn mask(key: &str) -> String {
-    let tail: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let head: String = key.chars().take(3).collect();
-    if key.chars().count() <= 8 { "••••".into() } else { format!("{head}…{tail}") }
+    if key.chars().count() <= 8 {
+        "••••".into()
+    } else {
+        format!("{head}…{tail}")
+    }
 }
 
 pub fn anthropic_service(env: &Environment) -> String {
@@ -75,46 +91,84 @@ pub fn valid_key(key: &str) -> bool {
 /// GET `{api}/models`, the key's own list (ids in the server's order).
 pub fn key_models(net: &dyn Net, source: Source, key: &str) -> Result<Vec<Model>, String> {
     let (url, headers) = match source {
-        Source::OpenAiKey => (format!("{OPENAI_API}/models"), vec![("Authorization".to_owned(), format!("Bearer {key}"))]),
+        Source::OpenAiKey => (
+            format!("{OPENAI_API}/models"),
+            vec![("Authorization".to_owned(), format!("Bearer {key}"))],
+        ),
         Source::AnthropicKey => (
             format!("{ANTHROPIC_API}/models?limit=100"),
-            vec![("x-api-key".to_owned(), key.to_owned()), ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned())],
+            vec![
+                ("x-api-key".to_owned(), key.to_owned()),
+                ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+            ],
         ),
         _ => return Err("Only API keys list models here.".into()),
     };
-    let (status, body) = fetch(net, &NetRequest { method: "GET", url: &url, headers: &headers, body: b"" })?;
+    let (status, body) = fetch(
+        net,
+        &NetRequest {
+            method: "GET",
+            url: &url,
+            headers: &headers,
+            body: b"",
+        },
+    )?;
     if status == 401 || status == 403 {
         return Err("The API key was refused.".into());
     }
     if status != 200 {
         return Err(format!("The model list answered HTTP {status}."));
     }
-    let value: Value = serde_json::from_slice(&body).map_err(|_| "The model list is unreadable.")?;
+    let value: Value =
+        serde_json::from_slice(&body).map_err(|_| "The model list is unreadable.")?;
     let models = value["data"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|m| {
-            let id = m["id"].as_str().filter(|id| crate::launch::is_valid_model_id(id))?;
+            let id = m["id"]
+                .as_str()
+                .filter(|id| crate::launch::is_valid_model_id(id))?;
             if source == Source::OpenAiKey && !chat_model(id) {
                 return None;
             }
             Some(Model {
                 id: id.into(),
-                label: m["display_name"].as_str().map_or_else(|| crate::account::codex_model_label(id), str::to_owned),
-                efforts: if source == Source::OpenAiKey { crate::compatible::efforts(id) } else { vec![] },
+                label: m["display_name"]
+                    .as_str()
+                    .map_or_else(|| crate::account::codex_model_label(id), str::to_owned),
+                efforts: if source == Source::OpenAiKey {
+                    crate::compatible::efforts(id)
+                } else {
+                    vec![]
+                },
                 default: false,
                 aliases: vec![],
                 default_effort: None,
             })
         })
         .collect::<Vec<_>>();
-    if models.is_empty() { Err("The key lists no models Powermove can run.".into()) } else { Ok(models) }
+    if models.is_empty() {
+        Err("The key lists no models Powermove can run.".into())
+    } else {
+        Ok(models)
+    }
 }
 /// OpenAI's list holds every kind of model; Powermove runs the chat ones.
 fn chat_model(id: &str) -> bool {
-    let chat = id.starts_with("gpt-") || (id.starts_with('o') && id[1..].starts_with(|c: char| c.is_ascii_digit()));
-    let other = ["audio", "realtime", "image", "tts", "transcribe", "embedding", "search", "moderation", "instruct"];
+    let chat = id.starts_with("gpt-")
+        || (id.starts_with('o') && id[1..].starts_with(|c: char| c.is_ascii_digit()));
+    let other = [
+        "audio",
+        "realtime",
+        "image",
+        "tts",
+        "transcribe",
+        "embedding",
+        "search",
+        "moderation",
+        "instruct",
+    ];
     chat && !other.iter().any(|o| id.contains(o))
 }
 
@@ -123,7 +177,10 @@ fn chat_model(id: &str) -> bool {
 pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
     let (source, model) = Source::of(id).ok_or("Choose a model in the picker.")?;
     let secrets = env.secrets.clone().ok_or("The Keychain is unavailable.")?;
-    let net = env.net.clone().ok_or("Powermove's network client is unavailable.")?;
+    let net = env
+        .net
+        .clone()
+        .ok_or("Powermove's network client is unavailable.")?;
     let metadata = |efforts: &[String]| {
         let mut entry = json!({"supports_tool_use": true, "supports_vision": true});
         if !efforts.is_empty() {
@@ -140,7 +197,13 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             "tool_choice_mode":"send","model_metadata":{model: metadata(efforts)}}})
         .to_string()
     };
-    let effort_list = |e: &str| if e.is_empty() { vec![] } else { vec![e.to_owned()] };
+    let effort_list = |e: &str| {
+        if e.is_empty() {
+            vec![]
+        } else {
+            vec![e.to_owned()]
+        }
+    };
     Ok(match source {
         Source::ChatGpt => {
             let env = env.clone();
@@ -152,8 +215,11 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
                 net,
                 credentials: Arc::new(move |rejected| {
                     let auth = crate::codex_auth::current(secrets.as_ref(), &env, rejected)?;
-                    let (access, account) = auth.chatgpt.ok_or("OpenAI is signed in with an API key, not ChatGPT.")?;
-                    let mut headers = vec![("authorization".to_owned(), format!("Bearer {access}"))];
+                    let (access, account) = auth
+                        .chatgpt
+                        .ok_or("OpenAI is signed in with an API key, not ChatGPT.")?;
+                    let mut headers =
+                        vec![("authorization".to_owned(), format!("Bearer {access}"))];
                     if let Some(account) = account {
                         headers.push(("chatgpt-account-id".into(), account));
                     }
@@ -171,11 +237,17 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
                 model: model.into(),
                 catalog: None,
                 net,
-                credentials: Arc::new(move |_| Ok(("https://api.openai.com".into(), vec![("authorization".into(), format!("Bearer {key}"))]))),
+                credentials: Arc::new(move |_| {
+                    Ok((
+                        "https://api.openai.com".into(),
+                        vec![("authorization".into(), format!("Bearer {key}"))],
+                    ))
+                }),
             }
         }
         Source::AnthropicKey => {
-            let key = anthropic_key(secrets.as_ref(), env).ok_or("Add an Anthropic API key in Settings › Providers.")?;
+            let key = anthropic_key(secrets.as_ref(), env)
+                .ok_or("Add an Anthropic API key in Settings › Providers.")?;
             Live {
                 provider: "anthropic".into(),
                 configured: configured("anthropic", ANTHROPIC_API, &[]),
@@ -183,23 +255,44 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
                 catalog: None,
                 net,
                 credentials: Arc::new(move |_| {
-                    Ok(("https://api.anthropic.com".into(), vec![("authorization".into(), format!("Bearer {key}")), ("x-api-key".into(), key.clone())]))
+                    Ok((
+                        "https://api.anthropic.com".into(),
+                        vec![
+                            ("authorization".into(), format!("Bearer {key}")),
+                            ("x-api-key".into(), key.clone()),
+                        ],
+                    ))
                 }),
             }
         }
         Source::Custom => {
-            let host = env.compatible.clone().ok_or("Set up a custom endpoint in Settings › Providers.")?;
-            let saved = host.saved().ok_or("Set up a custom endpoint in Settings › Providers.")?;
+            let host = env
+                .compatible
+                .clone()
+                .ok_or("Set up a custom endpoint in Settings › Providers.")?;
+            let saved = host
+                .saved()
+                .ok_or("Set up a custom endpoint in Settings › Providers.")?;
             let key = host.key(&saved.base_url);
-            let origin = pm_aero_core::origin_of(&saved.base_url).ok_or("The custom endpoint's address is invalid.")?;
+            let origin = pm_aero_core::origin_of(&saved.base_url)
+                .ok_or("The custom endpoint's address is invalid.")?;
             Live {
                 provider: "custom".into(),
-                configured: configured("custom", saved.base_url.trim_end_matches('/'), &effort_list(effort)),
+                configured: configured(
+                    "custom",
+                    saved.base_url.trim_end_matches('/'),
+                    &effort_list(effort),
+                ),
                 model: model.into(),
                 catalog: None,
                 net,
                 credentials: Arc::new(move |_| {
-                    Ok((origin.clone(), key.iter().map(|k| ("authorization".to_owned(), format!("Bearer {k}"))).collect()))
+                    Ok((
+                        origin.clone(),
+                        key.iter()
+                            .map(|k| ("authorization".to_owned(), format!("Bearer {k}")))
+                            .collect(),
+                    ))
                 }),
             }
         }
@@ -210,7 +303,11 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
 /// `backend-api/codex/models`), answered here with the chosen model alone:
 /// the account's list already chose it, and nothing else may run.
 fn codex_catalog(model: &str, effort: &str) -> Value {
-    let levels: Vec<Value> = if effort.is_empty() { vec![] } else { vec![json!({"effort": effort})] };
+    let levels: Vec<Value> = if effort.is_empty() {
+        vec![]
+    } else {
+        vec![json!({"effort": effort})]
+    };
     json!({"version": crate::runtime::CODEX_VERSION, "models":[{"slug":model,"visibility":"list","supported_in_api":true,
         "priority":1,"supported_reasoning_levels":levels,"additional_speed_tiers":[],"input_modalities":["text","image"],
         "context_window":272000}]})
@@ -222,12 +319,23 @@ mod tests {
 
     #[test]
     fn ids_name_their_source_and_keys_are_masked() {
-        assert_eq!(Source::of("chatgpt/gpt-6-sol"), Some((Source::ChatGpt, "gpt-6-sol")));
-        assert_eq!(Source::of("anthropic/claude-opus-5-5").map(|s| s.0.group()), Some("Anthropic"));
+        assert_eq!(
+            Source::of("chatgpt/gpt-6-sol"),
+            Some((Source::ChatGpt, "gpt-6-sol"))
+        );
+        assert_eq!(
+            Source::of("anthropic/claude-opus-5-5").map(|s| s.0.group()),
+            Some("Anthropic")
+        );
         assert_eq!(Source::of("gpt-6-sol"), None);
         assert_eq!(Source::of("custom/"), None);
         assert_eq!(mask("sk-ant-api03-abcdefa1b2"), "sk-…a1b2");
         assert_eq!(mask("short"), "••••");
-        assert!(chat_model("gpt-6-sol") && chat_model("o4-mini") && !chat_model("gpt-4o-realtime") && !chat_model("omni-moderation"));
+        assert!(
+            chat_model("gpt-6-sol")
+                && chat_model("o4-mini")
+                && !chat_model("gpt-4o-realtime")
+                && !chat_model("omni-moderation")
+        );
     }
 }
