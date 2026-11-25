@@ -1055,6 +1055,42 @@ impl Controller {
             })
         });
         let owner = self.agent_popover_window(cx);
+        // The composer's chooser is its own popover (PM-727), answered as
+        // the menus are: the chosen row's value.
+        if request.input["picker"] == "chooser" {
+            let spec = pm_shell::ChooserSpec::from_request(&request.input);
+            let values: Vec<Value> = options.iter().map(|o| o["value"].clone()).collect();
+            let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
+            if request.input["refresh"] == true {
+                if let Some((owner, _, current, None)) = &mut self.builtins.agent_pick
+                    && Arc::ptr_eq(owner, runtime)
+                    && self.host.borrow_mut().update_chooser(spec, None)
+                {
+                    *current = values;
+                }
+                runtime.platform_reply(request.id, Ok(Value::Null));
+                return;
+            }
+            if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+                previous.platform_reply(id, Ok(Value::Null));
+            }
+            let mut host = self.host.borrow_mut();
+            let shown = if request.input["update"] == true {
+                host.update_chooser(spec, dismiss)
+            } else if let Some(anchor) = anchor {
+                host.open_chooser(owner, anchor, spec, dismiss);
+                true
+            } else {
+                false
+            };
+            drop(host);
+            if shown {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, None));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
         let choices = options
             .iter()
             .enumerate()
@@ -1079,8 +1115,6 @@ impl Controller {
                 }
                 c.informational = o["informational"] == true;
                 c.is_default = o["default"] == true;
-                c.section = o["section"] == true;
-                c.icon = o["icon"].as_str().map(str::to_owned);
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })

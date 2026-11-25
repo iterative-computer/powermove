@@ -852,7 +852,34 @@ function providerMark(harness: string, group: string): string {
   if (harness === "claude") return "claude";
   return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "anthropic" : "compatible";
 }
-/** Each harness's own small mark in the menu's Harness section. */
+/** The account heading a harness's model is listed under in the chooser. */
+export function accountHeading(harness: string, model: string, n?: NativeFacts): string {
+  if (harness === "chatgpt") return n?.accounts?.chatgpt ?? "ChatGPT";
+  if (harness === "claude") return n?.accounts?.claude ?? "Claude";
+  const source = model.split("/")[0] ?? "";
+  return (
+    ({ chatgpt: "ChatGPT", openai: "OpenAI API key", anthropic: "Anthropic API key", custom: "Custom" } as Record<
+      string,
+      string
+    >)[source] ?? "Development"
+  );
+}
+/** A chooser heading's small mark: its provider's. */
+function headingIcon(heading: string): string {
+  if (heading === "ChatGPT" || heading === "OpenAI API key") return "provider.chatgpt";
+  if (heading === "Claude" || heading === "Anthropic API key") return "provider.claude";
+  return "provider.compatible";
+}
+/** The chooser's card: the chosen model (or, signed out, the harness). */
+export interface ChooserCard {
+  title: string;
+  icon: string;
+  /** Facts the provider reports, as [label, value]. */
+  facts?: [string, string][];
+  /** A quiet line (where to sign in). */
+  note?: string;
+}
+/** Each harness's own mark in the chooser's rail. */
 function harnessMark(harness: string): string {
   return harness === "aero" ? "powermove" : harness === "chatgpt" ? "chatgpt" : "claude";
 }
@@ -888,10 +915,13 @@ export interface MenuOption {
   /** Quiet status text, not a choice; with a provider, a greyed row in
    * that provider's group (its `detail` on the right). */
   informational?: boolean;
-  /** A row outside the provider groups, under its own plain heading. */
-  section?: boolean;
+  /** Where a chooser row stands (harness, heading, model, connect,
+   * effort, action). */
+  kind?: string;
   /** The row's small mark (a symbol name). */
   icon?: string;
+  /** Shown greyed, never chosen. */
+  disabled?: boolean;
 }
 /** Opens the field menu at `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -900,7 +930,9 @@ export type Menu = (request: {
   placeholder: string;
   options: MenuOption[];
   /** Composer pop-ups track their button rather than the legacy field menu. */
-  picker?: "model" | "effort" | "access" | "add";
+  picker?: "model" | "effort" | "access" | "add" | "chooser";
+  /** The chooser's card. */
+  chooser?: ChooserCard;
   search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
@@ -992,13 +1024,28 @@ function ModelChooser({
   disabled: boolean;
   opened: string | null;
   openModels: (anchor: number) => void;
-  openEffort: (anchor: number) => void;
+  /** Absent: the pill is one hit target (the Powermove harness's chooser
+   * holds the effort). */
+  openEffort?: (anchor: number) => void;
   /** The Powermove harness has no account: the name half reads "Connect a
    * provider" and its menu offers the harnesses and Settings › Providers. */
   signedOut?: boolean;
 }) {
   const name = t(disabled ? "colors.faint" : "colors.secondary");
   const quietInk = t(disabled ? "colors.faint" : "colors.muted");
+  const single = !openEffort;
+  const effortText = (
+    <text
+      style={{
+        flexShrink: 0,
+        fontSize: t("typography.reading"),
+        color: quietInk,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {effort}
+    </text>
+  );
   const chevron = (
     <div
       metadata={{ symbol: "composer.chevron" }}
@@ -1060,11 +1107,11 @@ function ModelChooser({
     <div id="agent-chooser" style={{ ...row, ...shrink }}>
       {part(
         "agent-model",
-        signedOut ? "Connect a provider" : `Model, ${model}`,
-        signedOut ? "Harness and providers" : "Model",
+        signedOut ? "Connect a provider" : `Model, ${model}${single && effort ? `, ${effort}` : ""}`,
+        signedOut ? "Harness and providers" : single ? "Harness, model and reasoning" : "Model",
         openModels,
         true,
-        effort === null,
+        single || effort === null,
         true,
         <>
           {mark !== null && (
@@ -1090,10 +1137,13 @@ function ModelChooser({
           >
             {model.replace(/\s*\([^)]*context[^)]*\)/i, "")}
           </text>
-          {effort === null && chevron}
+          {single && effort !== null && effortText}
+          {(single || effort === null) && chevron}
         </>,
       )}
-      {effort !== null &&
+      {!single &&
+        effort !== null &&
+        openEffort &&
         part(
           "agent-effort",
           `Reasoning effort, ${effort}`,
@@ -1103,16 +1153,7 @@ function ModelChooser({
           true,
           false,
           <>
-            <text
-              style={{
-                flexShrink: 0,
-                fontSize: t("typography.reading"),
-                color: quietInk,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {effort}
-            </text>
+            {effortText}
             {chevron}
           </>,
         )}
@@ -2880,60 +2921,87 @@ function Composer({
     provider: string;
     epoch: number;
   } | null>(null);
-  // With the Powermove harness (the development switch), the model menu
-  // opens on the Harness section (a row keeps the menu open and the rest
-  // follows it), then the models the chosen harness can run in their
-  // provider groups (Settings › Providers), then the way to add one.
-  // Effort keeps its own menu. Signed out, it offers the harnesses and the
-  // way to connect a provider.
-  const harnessRows = (s: Snapshot): MenuOption[] => {
+  // With the Powermove harness (the development switch), the pill opens the
+  // chooser popover (PM-727, Capy's layout): the harnesses as a rail, the
+  // models the chosen one runs under their account headings, and a card for
+  // the chosen model (its context when the label names it, Reasoning as a
+  // track, Add a provider…). Signed out, the list and the card lead to
+  // Settings › Providers.
+  const chooserRequest = (s: Snapshot): { options: MenuOption[]; chooser: ChooserCard } => {
+    const n = native.current;
     const harness = s.settings.provider;
-    const rows: MenuOption[] = s.catalog.providers.map(([id, label]) => ({
+    const harnessName = named(s.catalog.providers, harness);
+    const options: MenuOption[] = s.catalog.providers.map(([id, label]) => ({
+      kind: "harness",
       label,
       value: `provider:${id}`,
       checked: id === harness,
-      category: "Harness",
-      section: true,
       icon: `provider.${harnessMark(id)}`,
       stays: true,
     }));
-    if (harnessSignedOut(s, native.current)) {
-      rows.push({ label: "Connect a provider…", value: "providers:", category: "", section: true });
-      return rows;
+    if (harnessSignedOut(s, n)) {
+      options.push(
+        { kind: "connect", label: "Connect a provider…", value: "providers:" },
+        { kind: "action", label: "Connect a provider…", value: "providers:" },
+      );
+      return {
+        options,
+        chooser: { title: harnessName, icon: `provider.${harnessMark(harness)}`, note: signInCopy(harness) },
+      };
     }
-    const shown = harnessModel(s, native.current);
-    const defaults = new Set(
-      native.current.modelGroups?.[harness]?.filter(([, , on]) => on).map(([id]) => id),
-    );
-    const models: MenuOption[] = pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
-      label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
-      detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
-      value: `model:${v}`,
-      checked: v === shown,
-      default: defaults.has(v) || undefined,
-      category: providerGroup(harness, v),
-      provider: providerGroup(harness, v).toLowerCase(),
-    }));
+    const shown = harnessModel(s, n);
+    const groups = new Map<string, MenuOption[]>();
+    for (const { v, label } of pairs(s.catalog.models, s.settings.model)) {
+      const heading = accountHeading(harness, v, n);
+      const rows = groups.get(heading) ?? [];
+      rows.push({
+        kind: "model",
+        label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        value: `model:${v}`,
+        checked: v === shown,
+        icon: `provider.${providerMark(harness, providerGroup(harness, v))}`,
+        stays: true,
+      });
+      groups.set(heading, rows);
+    }
+    const order = ["ChatGPT", "OpenAI API key", "Claude", "Anthropic API key", "Custom", "Development"];
+    const rank = (heading: string) => order.indexOf(heading) >>> 0;
+    for (const heading of [...groups.keys()].sort((a, b) => rank(a) - rank(b)))
+      options.push({ kind: "heading", label: heading, value: "", icon: headingIcon(heading) }, ...groups.get(heading)!);
     if (harness === "aero")
-      models.push({
+      options.push({
+        kind: "heading",
         label: "Aerolite",
         detail: "Coming later",
         value: "",
-        category: "Powermove",
-        provider: "powermove",
-        informational: true,
+        icon: "provider.powermove",
+        disabled: true,
       });
-    const order = ["OpenAI", "Anthropic", "Custom", "Development", "Powermove"];
-    const rank = (r: MenuOption) => order.indexOf(r.category ?? "") >>> 0;
-    models.sort((a, b) => rank(a) - rank(b));
-    rows.push(...models);
-    rows.push({ label: "Add a provider…", value: "providers:", category: "", section: true });
-    if (native.current.findingModels && !models.some((r) => r.value.startsWith("model:")))
-      rows.push({ label: "Finding models…", value: "", informational: true });
-    return rows;
+    if (n.findingModels && !groups.size) options.push({ kind: "heading", label: "Finding models…", value: "" });
+    const level = (value: string) => ({
+      kind: "effort",
+      label: effortLabel(value),
+      value: `effort:${value}`,
+      checked: value === s.settings.effort || (!efforts.includes(s.settings.effort) && value === s.catalog.defaultEffort),
+      default: value === s.catalog.defaultEffort || undefined,
+      stays: true,
+    });
+    const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
+    options.push(...efforts.map(level));
+    options.push({ kind: "action", label: "Add a provider…", value: "providers:" });
+    const label = named(s.catalog.models, shown, harnessName);
+    const context = label.match(/\(([^)]*?)\s*context[^)]*\)/i)?.[1];
+    return {
+      options,
+      chooser: {
+        title: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
+        facts: context ? [["Context", context]] : [],
+      },
+    };
   };
   const modelRows = (s: Snapshot): MenuOption[] =>
-    harnessMode(s) ? harnessRows(s) : s.catalog.providers.flatMap(([provider, providerName]) => {
+    harnessMode(s) ? chooserRequest(s).options : s.catalog.providers.flatMap(([provider, providerName]) => {
       const active = provider === s.settings.provider;
       const group = native.current.modelGroups?.[provider];
       const category = provider === "compatible"
@@ -2959,6 +3027,13 @@ function Composer({
       return rows;
     });
   const modelSearch = (s: Snapshot) => s.catalog.models.length > 12;
+  /** The model menu's request, or the chooser's with the Powermove harness. */
+  const modelRequest = (s: Snapshot) => {
+    if (!harnessMode(s))
+      return { picker: "model" as const, search: modelSearch(s), placeholder: "Search models", options: modelRows(s) };
+    const { options, chooser } = chooserRequest(s);
+    return { picker: "chooser" as const, placeholder: "Search models", options, chooser };
+  };
   const modelMenu = (
     anchor: number,
     update: boolean,
@@ -2966,10 +3041,7 @@ function Composer({
   ) =>
     void requestModelMenu({
       anchor,
-      picker: "model",
-      search: modelSearch(latest.current),
-      placeholder: "Search models",
-      options: modelRows(latest.current),
+      ...modelRequest(latest.current),
       ...(update ? { update } : {}),
     }).then((choice) => {
       if (menuEpoch.current !== epoch) return;
@@ -2983,6 +3055,10 @@ function Composer({
       if (kind === "providers") {
         setOpenPicker(null);
         send({ type: "openSettings" });
+      } else if (kind === "effort") {
+        // The chooser stays open on its Reasoning track.
+        if (value !== now.settings.effort) send({ type: "setModel", model: now.settings.model, effort: value });
+        modelMenu(anchor, true);
       } else if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
         awaiting.current = { anchor, provider: value, epoch };
@@ -3003,12 +3079,14 @@ function Composer({
       // The effort shown goes along: the new model keeps it when it
       // takes it, else runs at its own default.
       else if (kind === "model") {
-        setOpenPicker(null);
         send({
           type: "setModel",
           model: value,
           effort: now.settings.effort,
         });
+        // The chooser stays open: its card follows the chosen model.
+        if (harnessMode(now)) modelMenu(anchor, true);
+        else setOpenPicker(null);
       } else if (kind === "other") {
         const colon = value.indexOf(":");
         setOpenPicker(null);
@@ -3036,16 +3114,15 @@ function Composer({
     open.rows = rows;
     void menu?.({
       anchor: open.anchor,
-      picker: "model",
-      search: modelSearch(s),
-      placeholder: "Search models",
-      options,
+      ...modelRequest(s),
       update: true,
       refresh: true,
     });
   }, [
     s.settings.provider,
     s.settings.model,
+    s.settings.effort,
+    s.catalog.efforts,
     s.catalog.providers,
     s.catalog.models,
     n.connection,
@@ -3158,12 +3235,14 @@ function Composer({
   // Send and Stop are one circle at the row's end: a dim disc while there
   // is nothing to send, the text ink once there is (or while a run can be
   // stopped). With a draft during a run, Stop steps back beside Send.
-  const circle = (lit: boolean): Style => ({
+  // Send and Stop are rounded rectangles of the pill's highlight box (its
+  // height and corner), so the row reads as one family.
+  const sendFace = (lit: boolean): Style => ({
     ...row,
     justifyContent: "center",
-    width: t("metrics.composer_control"),
-    height: t("metrics.composer_control"),
-    borderRadius: t("metrics.composer_control"),
+    width: t("metrics.hit"),
+    height: t("metrics.hit"),
+    borderRadius: t("metrics.inner_radius"),
     background: t(lit ? "colors.text" : "colors.composer_send_idle"),
     color: t(lit ? (n.presentation === "popover" ? "colors.raised" : "colors.floating") : "colors.muted"),
     symbolSize: t("metrics.composer_symbol"),
@@ -3356,7 +3435,7 @@ function Composer({
           disabled={!menu || choicesLocked}
           opened={openPicker}
           openModels={openModels}
-          openEffort={openEffort}
+          openEffort={harness ? undefined : openEffort}
           signedOut={signedOut}
         />
         <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
@@ -3371,7 +3450,7 @@ function Composer({
             onClick={stop}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.stop" }} style={circle(!hasDraft && !s.stopping)} />
+            <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
           </button>
         )}
         {(!working || hasDraft) && (
@@ -3394,7 +3473,7 @@ function Composer({
             }}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.send" }} style={circle(ready)} />
+            <div metadata={{ symbol: "composer.send" }} style={sendFace(ready)} />
           </button>
         )}
       </div>

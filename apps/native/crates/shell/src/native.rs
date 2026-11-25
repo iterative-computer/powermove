@@ -1,4 +1,6 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "agent_chooser.rs"]
+pub mod agent_chooser;
 #[path = "coedit_presence.rs"]
 mod coedit_presence;
 #[path = "flowchart.rs"]
@@ -3787,6 +3789,8 @@ pub struct Host {
     pub canvas_focus: Cell<bool>,
     pub studio_flying: Rc<Cell<bool>>,
     flowchart: Option<flowchart::Popover>,
+    /// The Agent composer's chooser while it is open (PM-727).
+    chooser: Option<agent_chooser::Chooser>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
     viewer_raster: Option<(SlotGeometry, f64, [f64; 2])>,
@@ -4025,6 +4029,7 @@ impl Host {
             canvas_focus: Cell::new(false),
             studio_flying: Rc::new(Cell::new(false)),
             flowchart: None,
+            chooser: None,
             layer,
             viewer_transform: None,
             viewer_raster: None,
@@ -4286,6 +4291,17 @@ impl Host {
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
                         let mut h = host.borrow_mut();
+                        // The chooser keeps its keys (⌘1…⌘9, the arrows,
+                        // Return, Escape) from the editor's keymap; typing
+                        // goes on to its search field.
+                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.owns_event(e)) {
+                            let chooser_key = key.starts_with("cmd+")
+                                || matches!(key.as_str(), "escape" | "up" | "down" | "enter");
+                            if chooser_key && chooser.key(&key) {
+                                return std::ptr::null_mut();
+                            }
+                            return event.as_ptr();
+                        }
                         if h.flowchart.as_ref().is_some_and(|p| {
                             p.owns_event(e)
                                 || (h.flowchart_open() && e.windowNumber() == window.windowNumber())
@@ -8410,15 +8426,7 @@ impl Popup {
             kind.width().min(interior.w)
         }) as f64 + 2. * POPUP_SHADOW_PAD;
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
-            // A searched model list keeps the field menu's height; one
-            // without a search (the harness menu) shows all of itself, up
-            // to the room above its chooser.
-            let most = if composer.is_some_and(|(_, search)| search) {
-                m.field_menu_height
-            } else {
-                interior.h
-            };
-            model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., most)).h
+            model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
         } else if self.composer == Some(ComposerPicker::Add) {
             // "+" lists its attachment rows above Approvals' described rows:
             // all of it shows, up to the window's room, never scrolled past
@@ -9312,16 +9320,9 @@ impl PopupLayout<'_> {
             PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
             PickerRow::Provider(_) => true,
         });
-        // Plain section headings: every row's in a list, only the rows
-        // outside the provider groups (the harness) in a model menu.
-        let sectioned = |c: &Choice| !model_rows || c.section;
-        let sections = chosen.iter().any(|row| {
-            matches!(*row, PickerRow::Choice(i)
-                if sectioned(&self.model.choices[i]) && !self.model.choices[i].category.is_empty())
+        let sections = !model_rows && chosen.iter().any(|row| {
+            matches!(*row, PickerRow::Choice(i) if !self.model.choices[i].category.is_empty())
         });
-        // The previous row stood in a plain section: a provider group
-        // after it starts under a separator.
-        let mut after_section = false;
         let edge = inset + t.space.md as f64;
         let lead = edge
             + if checks {
@@ -9360,7 +9361,7 @@ impl PopupLayout<'_> {
             let c = &model.choices[index];
             let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
             if disclosure.is_some() {
-                if seen_provider || after_section {
+                if seen_provider {
                     let padding = f64::from(t.space.xs);
                     let thickness = self.list.window().map_or(1., |window| {
                         window.backingScaleFactor().recip()
@@ -9382,35 +9383,9 @@ impl PopupLayout<'_> {
                 }
                 seen_provider = true;
             }
-            after_section = disclosure.is_none() && c.section;
-            if sections && sectioned(c) && category != Some(c.category.as_str()) {
+            if sections && category != Some(c.category.as_str()) {
                 category = Some(c.category.as_str());
-                if c.category.is_empty()
-                    && place > 0
-                    && self.composer == Some(ComposerPicker::Model)
-                {
-                    // The model menu's closing row (Add a provider…) stands
-                    // under a separator, as a native menu's last item.
-                    let padding = f64::from(t.space.xs);
-                    let thickness = self
-                        .list
-                        .window()
-                        .map_or(1., |window| window.backingScaleFactor().recip());
-                    let line = NSBox::initWithFrame(
-                        NSBox::alloc(mtm),
-                        NSRect::new(
-                            NSPoint::new(edge, y + padding),
-                            NSSize::new((width - 2. * edge).max(0.), thickness),
-                        ),
-                    );
-                    line.setBoxType(NSBoxType::Custom);
-                    line.setBorderWidth(0.);
-                    line.setFillColor(&native_color(t.colors.separator));
-                    line.setAccessibilityElement(false);
-                    self.list.addSubview(&line);
-                    self.parts.push(Retained::into_super(line));
-                    y += 2. * padding + thickness;
-                } else if c.category.is_empty() {
+                if c.category.is_empty() {
                     y += if place > 0 { t.space.sm as f64 } else { 0. };
                 } else {
                     // A heading sits low in its band, nearer its own rows.
@@ -9423,8 +9398,7 @@ impl PopupLayout<'_> {
                     y += shape.heading as f64;
                 }
             }
-            // A provider's greyed row says why on the right, as Default does.
-            let detail = if disclosure.is_some() || is_palette || c.informational {
+            let detail = if disclosure.is_some() || is_palette {
                 ""
             } else {
                 c.detail.as_str()
@@ -9501,11 +9475,6 @@ impl PopupLayout<'_> {
                 );
                 self.list.addSubview(&chevron);
                 self.parts.push(Retained::into_super(Retained::into_super(chevron)));
-            } else if !is_palette && c.informational && !c.detail.is_empty() {
-                let hint = self.label(&c.detail, caption, t.colors.faint, None);
-                let w = hint.fittingSize().width.ceil();
-                centred(&hint, trailing - w, y, row_h, w, caption_h);
-                trailing -= w + t.space.md as f64;
             } else if !is_palette && c.is_default {
                 let hint = self.label("Default", caption, t.colors.muted, None);
                 let w = hint.fittingSize().width.ceil();
@@ -9541,36 +9510,9 @@ impl PopupLayout<'_> {
             };
             let title_color = if disclosure.is_some() {
                 t.colors.secondary
-            } else if c.informational {
-                t.colors.muted
             } else {
                 t.colors.text
             };
-            // A row's own small mark (a harness) stands before its title.
-            let marked = disclosure
-                .is_none()
-                .then_some(c.icon.as_deref())
-                .flatten()
-                .and_then(|name| {
-                    crate::icons::glyph(name)
-                        .and_then(|g| glyph_image(g, m.symbol_inline as f64, ""))
-                });
-            if let Some(image) = &marked {
-                let mark = NSImageView::imageViewWithImage(image, mtm);
-                mark.setContentTintColor(Some(&native_color(t.colors.secondary)));
-                mark.setAccessibilityElement(false);
-                centred(
-                    &mark,
-                    lead,
-                    y,
-                    row_h,
-                    m.symbol_inline as f64,
-                    m.symbol_inline as f64,
-                );
-                self.list.addSubview(&mark);
-                self.parts
-                    .push(Retained::into_super(Retained::into_super(mark)));
-            }
             let title_size = t.typography.body;
             if let Some(query) = &palette_query {
                 if place == self.cache.palette_rows.len() {
@@ -9628,8 +9570,6 @@ impl PopupLayout<'_> {
                 };
                 let title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
-                } else if marked.is_some() {
-                    lead + f64::from(m.symbol_inline + t.space.sm)
                 } else {
                     lead
                 };
@@ -9665,8 +9605,6 @@ impl PopupLayout<'_> {
                 format!("{display_label}, {summary}")
             } else if c.is_default {
                 format!("{display_label}, Default")
-            } else if c.informational && !c.detail.is_empty() {
-                format!("{display_label}, {}", c.detail)
             } else {
                 display_label
             };
@@ -9690,8 +9628,6 @@ impl PopupLayout<'_> {
                 disclosure,
                 reuse_buttons,
             );
-            // A greyed row reads as a dimmed menu item and takes no press.
-            button.setEnabled(!c.informational);
             self.rows.push(PopupRow {
                 place,
                 kind: row,
@@ -9900,8 +9836,6 @@ pub fn capture_agent_picker(
             c.checked = o["checked"].as_bool();
             c.is_default = o["default"] == true;
             c.informational = o["informational"] == true;
-            c.section = o["section"] == true;
-            c.icon = o["icon"].as_str().map(str::to_owned);
             c
         }).collect(),
         ..Default::default()
@@ -9923,13 +9857,8 @@ pub fn capture_agent_picker(
     let mut rows = vec![];
     let height = PopupLayout {
         width: width as f64,
-        max_height: if kind == Some(ComposerPicker::Model) {
-            let most = if searchable {
-                t.metrics.field_menu_height
-            } else {
-                available.h
-            };
-            model_picker_frame(owner, anchor, (width, most)).h
+        max_height: if providers {
+            model_picker_frame(owner, anchor, (width, t.metrics.field_menu_height)).h
         } else {
             t.metrics.field_menu_height.min(available.h)
         },
@@ -9972,8 +9901,7 @@ pub fn capture_agent_picker(
         bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new())
     }?;
     let h = height as f32;
-    // As the live menu: the model menu stands above its trigger.
-    let frame = if kind == Some(ComposerPicker::Model) {
+    let frame = if providers {
         model_picker_frame(owner, anchor, (width, h))
     } else if kind.is_some() {
         composer_picker_frame(owner, anchor, (width, h), popup_checked_offset(&model, &rows, &scroll, height, shape.row))
@@ -10103,9 +10031,6 @@ impl Popup {
             self.hide();
             return;
         };
-        if choice.informational {
-            return;
-        }
         let (name, stays) = (choice.command.clone(), choice.stays);
         self.dispatch_choice(&name);
         if close || !stays {
