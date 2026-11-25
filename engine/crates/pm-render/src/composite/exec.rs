@@ -805,7 +805,7 @@ impl Exec<'_> {
                             self.release(old);
                         }
                         in_target = false;
-                        ids.push(image);
+                        self.keep_draw_for_legend(&mut ids, image);
                     } else if n.blend == BlendMode::Normal {
                         // `drawFbo(res, W, H, compositeAlpha)`: given back
                         // after the flush that draws it, masked or not.
@@ -818,7 +818,7 @@ impl Exec<'_> {
                         self.blend_region(
                             encoder, &res, covered, &acc, rect, full, n.blend, n.alpha,
                         );
-                        ids.push(image);
+                        self.keep_draw_for_legend(&mut ids, image);
                         if res_owned {
                             self.release(res);
                         }
@@ -877,11 +877,24 @@ impl Exec<'_> {
     ) {
         self.draw_pass(encoder, plan, &pending.draws, pass_region, acc, !*cleared);
         *cleared = true;
-        ids.append(&mut pending.draws);
+        for draw in pending.draws.drain(..) {
+            self.keep_draw_for_legend(ids, draw);
+        }
         pending.images = 0;
         for t in pending.take_targets() {
             self.release(t);
         }
+    }
+
+    fn keep_draw_for_legend(&self, ids: &mut Vec<Resolved>, mut draw: Resolved) {
+        if !self.depth_id {
+            // Color has recorded its reads. Only the layer ID is needed
+            // from here, so the legend must not pin the draw's textures.
+            draw.view = None;
+            draw.depth = None;
+            draw.pyramid = None;
+        }
+        ids.push(draw);
     }
 
     /// Snapshot only the destination pixels read by the blend, then write
