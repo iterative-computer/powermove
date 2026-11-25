@@ -11,7 +11,13 @@ use pm_builtins::{Builtins, Publication};
 use pm_kernel::{KernelActor, KernelConfig, KernelHandle, session::SessionSource};
 use pm_shell::{stage::Change, view::Editor};
 use serde_json::Value;
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use pm_compat_runner::host::{ExtensionHost, HostConfig};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::{Arc, mpsc},
+};
 
 /// The film's project id in its own kernel.
 pub const PROJECT: &str = "pm-first-run-film";
@@ -37,8 +43,13 @@ pub(crate) struct Dock {
     pub pending: RefCell<HashMap<String, Publication>>,
     pub views: RefCell<HashMap<String, Entity<SurfaceView>>>,
     pub scrolls: RefCell<HashMap<String, ScrollHandle>>,
+    /// Panels the agent's extensions contribute (mounted), id and title.
+    pub contributed: RefCell<Vec<(String, String)>>,
 }
 impl pm_shell::integration::Integration for Dock {
+    fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
+        self.contributed.borrow().clone()
+    }
     fn observe(&self, _: &mut Context<Editor>) {}
     fn command(&self, _: &pm_shell::Command, _: &mut Window, _: &mut App) -> bool {
         false
@@ -128,9 +139,10 @@ impl pm_shell::integration::Integration for Dock {
 
 /// The film's timeline asks nothing of a host: its playhead is the
 /// film's, and there are no menus, drops or commands in a film.
-#[derive(Default)]
 struct FilmTimeline {
     time: std::cell::Cell<f64>,
+    /// The film's panels: extension clip painters run in their realms.
+    runtime: Arc<Builtins>,
 }
 impl crate::timeline_surface::Delegate for FilmTimeline {
     fn time(&self, _: &App) -> f64 {
@@ -144,12 +156,21 @@ impl crate::timeline_surface::Delegate for FilmTimeline {
     fn command(&self, _: &str, _: &mut App) {}
     fn menu(&self, _: Vec<Value>, _: &mut Window, _: &mut App, _: crate::timeline_surface::Choose) {
     }
+    fn painters_revision(&self, _: &App) -> u64 {
+        self.runtime.painters_revision()
+    }
+    fn paint_clips(&self, clips: Value, done: crate::timeline_surface::PaintDone, cx: &mut App) {
+        crate::builtins::paint_clips(self.runtime.clone(), clips, done, cx);
+    }
 }
 
 /// What the film's editor starts with, made off the main thread: the
 /// kernel, the agent's tools on a temporary profile, and the panels
 /// mounting.
 struct Started {
+    /// The agent's panel and layout tools, answered on the main thread
+    /// against the film's editor (`surfaces`).
+    calls: async_channel::Receiver<crate::panel_bridge::Call>,
     kernel: KernelHandle,
     runtime: Builtins,
     tools: crate::mcp::Connection,
@@ -157,6 +178,10 @@ struct Started {
     actor: KernelActor,
     profile: tempfile::TempDir,
     mounting: Vec<(String, pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>)>,
+    /// The film's extension host: what the agent publishes runs here, on
+    /// the film's kernel (v1–3 in its realm, v4 surfaces listed for the
+    /// panels' runtime), as a window's host runs the user's.
+    extensions: ExtensionHost,
 }
 fn start(project: Value) -> anyhow::Result<Started> {
     let profile = tempfile::Builder::new().prefix("pm-film-").tempdir()?;
@@ -172,9 +197,14 @@ fn start(project: Value) -> anyhow::Result<Started> {
         host.save(current, None)?;
     }
     let automation = crate::mcp::Tools::new(host, profile.path().join("exports"));
-    automation.automation.lock().unwrap().extensions = Some(Arc::new(
-        crate::extension_authoring::AppExtensions::new(profile.path().to_owned()),
-    ));
+    let (bridge, calls) = crate::panel_bridge::channel();
+    {
+        let mut a = automation.automation.lock().unwrap();
+        a.extensions = Some(Arc::new(crate::extension_authoring::AppExtensions::new(
+            profile.path().to_owned(),
+        )));
+        a.surfaces = Some(Arc::new(bridge));
+    }
     let tools = automation.connect();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {})?;
     // The film's agent: an API or local model connection whose host sends
@@ -213,7 +243,23 @@ fn start(project: Value) -> anyhow::Result<Started> {
     });
     // The panel's own provider choice, as its menu sends it.
     choose_film_provider(&runtime)?;
+    let extensions = ExtensionHost::start(HostConfig {
+        kernel: kernel.clone(),
+        project: PROJECT.into(),
+        roots: crate::extensions::roots(profile.path()),
+        cache: profile.path().join("extensions-build"),
+        owner: None,
+        text: None,
+        frames: None,
+        rasters: None,
+        vars: None,
+        clipboard: None,
+        // The stage draws every frame while the film runs: it looks.
+        wake: Arc::new(|| {}),
+    });
     Ok(Started {
+        extensions,
+        calls,
         kernel,
         runtime,
         tools,
@@ -222,6 +268,64 @@ fn start(project: Value) -> anyhow::Result<Started> {
         profile,
         mounting,
     })
+}
+
+/// One of the agent's panel or layout tools, on the film's editor: the
+/// app's own handlers where they need only the editor.
+fn film_surface(call: crate::panel_bridge::Call, editor: WeakEntity<Editor>, cx: &mut App) {
+    let Some(editor) = editor.upgrade() else {
+        call.answer(Err(pm_mcp::Error::unavailable("The film has ended.")));
+        return;
+    };
+    let args = call.args();
+    let result = match call.tool() {
+        "set_panel_layout" => crate::panel_bridge::set_panel_layout(&editor, args, cx),
+        "panel_begin" => crate::panel_bridge::begin_panel_slot(&editor, args, cx).map(|slot| {
+            editor.update(cx, |_, cx| cx.notify());
+            slot.answer()
+        }),
+        "panel_build" => film_panel_build(&editor, args, cx),
+        // The film opens only what its layout docks (a built panel is).
+        "open_panel" => {
+            let panel = args["panelId"].as_str().unwrap_or_default();
+            let e = editor.read(cx);
+            if !e.panels(cx).contains(panel) {
+                Err(pm_mcp::Error::invalid("Unknown panel ID."))
+            } else if e.layout.find(panel).is_none() {
+                Err(pm_mcp::Error::invalid("The film's editor opens docked panels only."))
+            } else {
+                Ok(serde_json::json!({"panelId": panel, "open": true}))
+            }
+        }
+        tool => Err(pm_mcp::Error::invalid(format!("The film's editor has no {tool}."))),
+    };
+    call.answer(result);
+}
+/// `panel_build` on the film's editor: plan and commit are accepted (the
+/// film draws no build sketch); ready docks the published panel in the slot;
+/// cancel and error give the slot up.
+fn film_panel_build(editor: &Entity<Editor>, args: &Value, cx: &mut App) -> pm_mcp::Result<Value> {
+    let id = args["build_id"].as_str().unwrap_or_default();
+    let event = args["event"].as_str().unwrap_or_default();
+    let target = args["panelId"].as_str().unwrap_or_default();
+    if !id.starts_with("panel-build-") || editor.read(cx).layout.find(id).is_none() {
+        return Err(pm_mcp::Error::invalid("Unknown build_id."));
+    }
+    match event {
+        "plan" => {}
+        "commit" if target.is_empty() => {}
+        "commit" => crate::panel_bridge::ready_target(editor, id, target, cx)?,
+        "ready" => {
+            crate::panel_bridge::ready_target(editor, id, target, cx)?;
+            crate::panel_bridge::dock_built_panel(editor, id, target, cx);
+        }
+        "cancel" | "error" => editor.update(cx, |e, cx| {
+            e.release_agent_panel(id);
+            cx.notify();
+        }),
+        _ => return Err(pm_mcp::Error::invalid("Unknown panel_build event.")),
+    }
+    Ok(serde_json::json!({"build_id": id, "event": event, "accepted": true}))
 }
 
 /// The film's model connection: saved, so the agent panel is ready, but
@@ -303,10 +407,38 @@ pub struct DemoEditor {
     agent: Option<Entity<SurfaceView>>,
     agent_first: Option<Publication>,
     typed: String,
+    calls: Option<async_channel::Receiver<crate::panel_bridge::Call>>,
+    /// The same calls, answered while a recording waits for a change.
+    waiting_calls: async_channel::Receiver<crate::panel_bridge::Call>,
+    extensions: ExtensionHost,
+    /// Mounted extension surfaces: id and the graph hash they run.
+    surfaces: HashMap<String, String>,
+    /// Surfaces mounting on a worker: (id, hash, title) and the result.
+    mounting_surfaces: Vec<(String, String, String, mpsc::Receiver<Result<(), String>>)>,
+    /// The host publication last read, and the timeline chrome last applied.
+    seen_revision: Option<u64>,
+    chrome: Option<String>,
+    /// What the viewer pictures: the project revision and definitions
+    /// generation it was given (none: the film's own document).
+    viewer: Option<(u64, u64)>,
+    resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
+    pictures: SharedPictures,
+    /// The film project's playhead, and the beat the panels were told.
+    time: Rc<Cell<f64>>,
+    told_beat: Option<i64>,
+    /// The project revision the film opened with.
+    seen_first: Option<u64>,
 }
 impl DemoEditor {
-    fn new(started: Started, tokens: pm_design::Tokens) -> Self {
+    fn new(
+        started: Started,
+        tokens: pm_design::Tokens,
+        pictures: SharedPictures,
+        time: Rc<Cell<f64>>,
+    ) -> Self {
         let Started {
+            extensions,
+            calls,
             kernel,
             runtime,
             tools,
@@ -348,6 +480,178 @@ impl DemoEditor {
             agent: None,
             agent_first: None,
             typed: String::new(),
+            waiting_calls: calls.clone(),
+            calls: Some(calls),
+            extensions,
+            surfaces: HashMap::new(),
+            mounting_surfaces: Vec::new(),
+            seen_revision: None,
+            chrome: None,
+            viewer: None,
+            resources: Default::default(),
+            pictures,
+            time,
+            told_beat: None,
+            seen_first: None,
+        }
+    }
+    /// Answers the agent's panel and layout calls waiting now (recordings,
+    /// whose main thread waits for a change to land).
+    fn answer_calls(&mut self, cx: &mut App) {
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        while let Ok(call) = self.waiting_calls.try_recv() {
+            film_surface(call, editor.downgrade(), cx);
+        }
+    }
+    /// Whether the extension `id` runs in the film (mounted, for a v4 one).
+    pub fn mounted_extension(&self, id: &str) -> bool {
+        self.surfaces.contains_key(id)
+    }
+    /// Whether the viewer draws with the definition `id` (a transition or
+    /// effect an extension registered).
+    pub fn draws_with(&self, id: &str) -> bool {
+        self.viewer.is_some() && self.resources.definitions.iter().any(|d| d.id.as_str() == id)
+    }
+    /// What the agent's extensions changed, taken in on the main thread
+    /// without waiting: new v4 surfaces mount on a worker (their panels and
+    /// clip painters), the timeline's chrome follows the workspace, the
+    /// viewer draws the project as it is now with what the extensions
+    /// define, and running extensions hear the playhead each beat.
+    fn take_extensions(&mut self, cx: &mut App) {
+        let publication = self.extensions.publication();
+        if self.seen_revision != Some(publication.revision) {
+            self.seen_revision = Some(publication.revision);
+            for surface in self.extensions.surfaces() {
+                let (Some(id), Some(hash)) = (surface["id"].as_str(), surface["graph"]["hash"].as_str())
+                else {
+                    continue;
+                };
+                if self.surfaces.get(id).map(String::as_str) == Some(hash)
+                    || self.mounting_surfaces.iter().any(|m| m.0 == id)
+                {
+                    continue;
+                }
+                let title = surface["manifest"]["name"].as_str().unwrap_or(id).to_owned();
+                let (tx, rx) = mpsc::channel();
+                let (runtime, id_, graph) = (self.runtime.clone(), id.to_owned(), surface["graph"].clone());
+                let replacing = self.surfaces.contains_key(id);
+                std::thread::Builder::new()
+                    .name("film-extension".into())
+                    .spawn(move || {
+                        if replacing {
+                            runtime.unmount_extension(&id_);
+                        }
+                        let result = runtime
+                            .mount_extension(&id_, &graph, None)
+                            .map_err(|e| e.to_string())
+                            .and_then(|ticket| {
+                                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                                crate::ticket::answer(ticket, deadline)
+                                    .ok_or_else(|| "it did not finish mounting".to_owned())?
+                                    .map(drop)
+                                    .map_err(|e| e.to_string())
+                            });
+                        let _ = runtime.publish();
+                        let _ = tx.send(result);
+                    })
+                    .expect("the film's extension mounts");
+                self.mounting_surfaces.push((id.to_owned(), hash.to_owned(), title, rx));
+            }
+        }
+        let mut arrived = false;
+        self.mounting_surfaces.retain(|(id, hash, title, rx)| match rx.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(()) => {
+                        self.surfaces.insert(id.clone(), hash.clone());
+                        if let Some(dock) = &self.dock {
+                            let mut contributed = dock.contributed.borrow_mut();
+                            contributed.retain(|(c, _)| c != id);
+                            contributed.push((id.clone(), title.clone()));
+                        }
+                        arrived = true;
+                    }
+                    Err(error) => eprintln!("The film's extension {id} could not start: {error}"),
+                }
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        if arrived && let Some(editor) = &self.editor {
+            editor.update(cx, |_, cx| cx.notify());
+        }
+        let Some(published) = self.kernel.published(PROJECT) else {
+            return;
+        };
+        // The timeline's chrome (`workspace.chrome.timeline`, which
+        // `timeline.chrome` writes).
+        let chrome = published
+            .workspace
+            .get("chrome")
+            .map(pm_model::json::to_canonical_string)
+            .unwrap_or_default();
+        if self.chrome.as_ref() != Some(&chrome) {
+            if self.chrome.is_some()
+                && let Some(timeline) = &self.timeline
+            {
+                let tokens = crate::builtins::timeline_chrome(
+                    self.tokens.clone(),
+                    &published.workspace,
+                    &Value::Null,
+                );
+                timeline.update(cx, |t, cx| t.set_tokens(tokens, cx));
+            }
+            self.chrome = Some(chrome);
+        }
+        // The viewer: the project as the agent left it, drawn with what its
+        // extensions define. Until either changes, the film's own document.
+        let definitions = crate::extensions::native_effect_definitions(
+            Some(&self.runtime),
+            publication
+                .contributions
+                .as_deref()
+                .map(crate::extensions::definitions)
+                .unwrap_or_default(),
+        );
+        if definitions != self.resources.definitions {
+            self.resources = Arc::new(pm_engine_service::resources::ResourceSnapshot {
+                generation: self.resources.generation + 1,
+                definitions,
+                ..Default::default()
+            });
+        }
+        let key = (published.revision(), self.resources.generation);
+        let changed = match self.viewer {
+            Some(at) => at != key,
+            // The first look: nothing changed yet unless something did.
+            None => self.resources.generation > 0 || self.seen_first.is_some_and(|r| r != key.0),
+        };
+        if self.seen_first.is_none() {
+            self.seen_first = Some(key.0);
+        }
+        if changed {
+            self.viewer = Some(key);
+            self.pictures
+                .0
+                .borrow_mut()
+                .set_viewer(&published, self.resources.clone());
+        }
+        // Running extensions hear the playhead once a beat (the film's
+        // music: 100 BPM), not every frame.
+        if !self.surfaces.is_empty() {
+            let time = self.time.get();
+            let beat = (time / 0.6).floor() as i64;
+            if self.told_beat != Some(beat) {
+                self.told_beat = Some(beat);
+                self.runtime.update_facts(serde_json::json!({
+                    "time": beat as f64 * 0.6 + 0.001, "playing": false,
+                    "stage": [1920., 1080.], "light": false,
+                }));
+                let _ = self.runtime.publish();
+            }
         }
     }
     /// Asks the script worker for `change`; the answer comes on the receiver.
@@ -415,7 +719,10 @@ impl DemoEditor {
                     self.kernel.clone(),
                     PROJECT.into(),
                     timeline_tokens,
-                    Rc::new(FilmTimeline::default()),
+                    Rc::new(FilmTimeline {
+                        time: Cell::new(0.),
+                        runtime: self.runtime.clone(),
+                    }),
                     natives.outline.clone(),
                     Default::default(),
                     cx,
@@ -446,6 +753,7 @@ impl DemoEditor {
                 pending: RefCell::new(pending),
                 views: RefCell::default(),
                 scrolls: RefCell::default(),
+                contributed: RefCell::default(),
             });
             let integration = dock.clone();
             let tokens = self.tokens.clone();
@@ -454,11 +762,23 @@ impl DemoEditor {
                 editor.integration = Some(integration);
                 editor
             });
+            // The agent's panel and layout tools act on this editor.
+            if let Some(calls) = self.calls.take() {
+                let target = editor.downgrade();
+                cx.spawn(async move |cx| {
+                    while let Ok(call) = calls.recv().await {
+                        let target = target.clone();
+                        let _ = cx.update(|cx| film_surface(call, target, cx));
+                    }
+                })
+                .detach();
+            }
             self.dock = Some(dock);
             self.timeline = Some(timeline);
             self.editor = Some(editor);
         }
         self.drain(cx);
+        self.take_extensions(cx);
         self.editor.clone()
     }
     /// The agent panel, whose composer the film types into.
@@ -561,6 +881,33 @@ impl Render for FilmViewer {
     }
 }
 
+/// The film project's playhead at `t` into the film: it plays from when the
+/// editor arrives, looping its 8 seconds, except through the light-leak
+/// beat, where it slows to sit across the cut (4 s) the leak is set on, so
+/// the transition plays as it lands.
+fn film_time(t: f64) -> f64 {
+    let sheet = pm_shell::stage::CueSheet::default();
+    let start = sheet
+        .start_of(pm_shell::stage::Scene::Beat(Change::GlassTimeline))
+        .unwrap_or(0.);
+    let leak = sheet
+        .start_of(pm_shell::stage::Scene::Beat(Change::LightLeak))
+        .unwrap_or(f64::INFINITY);
+    let length = pm_shell::stage::beats::BEAT_SECONDS;
+    let local = (t - start).max(0.);
+    let into_leak = t - leak;
+    let played = if into_leak <= 0. {
+        local
+    } else if into_leak < length {
+        (leak - start) + into_leak * SLOW
+    } else {
+        local - length * (1. - SLOW)
+    };
+    played % 8.
+}
+/// How fast the project plays through the light-leak beat.
+const SLOW: f64 = 0.15;
+
 /// The film's side of the stage: the real editor and composer, and each
 /// request applied through the agent's own tools.
 pub struct FilmDemo {
@@ -613,13 +960,33 @@ impl FilmDemo {
                 self.starting = None;
                 match started {
                     Ok(started) => {
-                        self.editor = Some(DemoEditor::new(started, self.tokens.clone()))
+                        self.editor = Some(DemoEditor::new(
+                            started,
+                            self.tokens.clone(),
+                            self.pictures.clone(),
+                            self.time.clone(),
+                        ))
                     }
                     Err(error) => eprintln!("The film's editor could not start: {error:#}"),
                 }
             }
         }
         self.editor.as_mut()
+    }
+    /// Whether `change` is on screen: its tools answered and what it made
+    /// runs (an extension mounted, the viewer drawing its transition).
+    fn arrived(&self, change: Change) -> bool {
+        use crate::film_script::{BEATS, GLASS, LEAK_TRANSITION};
+        match self.applied.get(&change) {
+            None => false,
+            Some(Err(_)) => true,
+            Some(Ok(())) => self.editor.as_ref().is_none_or(|e| match change {
+                Change::GlassTimeline => e.mounted_extension(GLASS),
+                Change::BeatMarkers => e.mounted_extension(BEATS),
+                Change::LightLeak => e.draws_with(LEAK_TRANSITION),
+                Change::ClassicLayout => true,
+            }),
+        }
     }
     fn collect(&mut self, wait: bool) {
         let changes: Vec<Change> = self.asked.keys().copied().collect();
@@ -709,26 +1076,57 @@ impl pm_shell::stage::Demo for FilmDemo {
         }
     }
     fn landed(&self, change: Change, _cx: &App) -> bool {
-        self.applied.contains_key(&change)
+        self.arrived(change)
     }
     fn site(&self, _change: Change, area: Size<Pixels>) -> Bounds<Pixels> {
         Bounds::new(point(px(0.), px(0.)), area)
     }
     fn at(&mut self, t: f64) {
-        // The film's project plays from when the editor arrives, looping.
-        let start = pm_shell::stage::CueSheet::default()
-            .start_of(pm_shell::stage::Scene::Beat(Change::GlassTimeline))
-            .unwrap_or(0.);
-        self.time.set((t - start).max(0.) % 8.);
+        self.time.set(film_time(t));
     }
     fn settle(&mut self, cx: &mut App) {
-        self.collect(true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         if let Some(editor) = self.started(true) {
             while !editor.mounted() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             let _ = editor.editor(cx);
+        }
+        // Each change asked for, until it is on screen: the agent's panel
+        // calls are answered here meanwhile (this thread is the editor's).
+        loop {
+            self.collect(false);
+            if let Some(editor) = self.editor.as_mut() {
+                editor.answer_calls(cx);
+                let _ = editor.editor(cx);
+            }
+            let waiting =
+                !self.asked.is_empty() || self.applied.keys().any(|c| !self.arrived(*c));
+            if !waiting || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::film_time;
+    use pm_shell::stage::{Change, CueSheet, Scene, beats};
+    #[test]
+    fn the_films_playhead_runs_on_and_sits_across_the_cut_while_the_leak_lands() {
+        let sheet = CueSheet::default();
+        let leak = sheet.start_of(Scene::Beat(Change::LightLeak)).unwrap();
+        // No jumps: the project plays on through the slowed beat.
+        for edge in [leak, leak + beats::BEAT_SECONDS] {
+            assert!((film_time(edge + 1e-3) - film_time(edge - 1e-3)).abs() < 0.01);
+        }
+        // From the wave to the beat's end the playhead is inside the 1.2 s
+        // transition on the 4 s cut.
+        for t in [leak + beats::LANDS, leak + beats::BEAT_SECONDS - 0.01] {
+            let at = film_time(t);
+            assert!((3.4..4.6).contains(&at), "{at}");
         }
     }
 }
