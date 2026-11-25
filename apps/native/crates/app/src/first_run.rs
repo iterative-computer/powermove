@@ -919,7 +919,7 @@ pub(crate) fn step_frame(
             back: Some("Back to Speech Model Choice".into()),
             title: "Bring your workspace".into(),
             outline: Some(steps_outline(Some(3))),
-            line: "Bring your panels and tools along.".into(),
+            line: "Your panels and tools come along.".into(),
             error,
             choices: vec![
                 row("import", "Bring my workspace", "Your After Effects panels and tools."),
@@ -966,7 +966,7 @@ fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
             "Work the way you already do.",
             "It builds what you ask for, in the editor.",
             "Captions and transcripts, on this Mac.",
-            "Bring your panels and tools along.",
+            "Your panels and tools come along.",
         ]
         .map(str::to_owned)
         .to_vec(),
