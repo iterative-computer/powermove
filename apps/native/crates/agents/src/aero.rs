@@ -182,6 +182,18 @@ impl Options {
             report: None,
         }
     }
+
+    /// A turn on a real model, as a person runs it: long edits with many tool
+    /// calls are normal, so the limits are generous. A silent stream still stops
+    /// after five minutes (the edge's idle limit), and Stop always works.
+    pub fn live(model: Model) -> Self {
+        Self {
+            model,
+            wall: Duration::from_secs(60 * 60),
+            steps: 400,
+            ..Self::development()
+        }
+    }
 }
 
 pub fn start(
@@ -921,14 +933,14 @@ fn drive(
                             ("cancelled", "Stopped.".into())
                         }
                         (Some("deadline"), _) => {
-                            ("deadline", "Powermove reached its wall-time limit.".into())
+                            ("deadline", "Powermove reached its time limit for one turn. Send a message to continue.".into())
                         }
                         (_, StopReason::EndTurn) => gate_exhausted.take().map_or_else(
                             || ("completed", std::mem::take(&mut text)),
                             |text| ("gate-exhausted", text),
                         ),
                         (_, StopReason::MaxSteps) => {
-                            ("step-limit", "Powermove reached its tool step limit.".into())
+                            ("step-limit", "Powermove reached its tool-step limit for one turn. Send a message to continue.".into())
                         }
                         // The edge's own words for a failed request (a
                         // dropped or silent stream) before the core's code.
@@ -1005,7 +1017,7 @@ fn drive(
                     if reason == "cancelled" {
                         "Stopped.".into()
                     } else {
-                        "Powermove reached its wall-time limit.".into()
+                        "Powermove reached its time limit for one turn. Send a message to continue.".into()
                     },
                 ));
                 break;
@@ -1033,4 +1045,20 @@ fn drive(
             .map_err(|_| "Powermove's tool worker panicked.")??;
     }
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn a_turn_on_a_real_model_is_not_held_to_the_development_limits() {
+        let dev = Options::development();
+        let live = Options::live(Model::fake(model::demo));
+        assert_eq!((dev.wall, dev.steps), (Duration::from_secs(120), 32));
+        assert!(live.wall >= Duration::from_secs(60 * 60), "{:?}", live.wall);
+        assert!(live.steps >= 400, "{}", live.steps);
+        assert_eq!(live.continuations, dev.continuations);
+        assert!(!live.skip_gate && !live.skip_review);
+    }
 }

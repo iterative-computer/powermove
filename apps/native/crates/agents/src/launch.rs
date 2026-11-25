@@ -460,15 +460,15 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
         let authority = request.clone();
         // A model from Providers runs on its provider; anything else
         // (the development switch's demo) on the fake model.
-        let mut options = crate::aero::Options::development();
-        match request.model.as_deref() {
+        let options = match request.model.as_deref() {
             Some(model) if crate::sources::Source::of(model).is_some() => {
                 let effort = request.effort.as_deref().unwrap_or("");
-                options.model = crate::aero::Model::live(crate::sources::live(environment, model, effort)?);
+                let model = crate::sources::live(environment, model, effort)?;
+                crate::aero::Options::live(crate::aero::Model::live(model))
             }
-            Some(crate::sources::FAKE_MODEL) => {}
+            Some(crate::sources::FAKE_MODEL) => crate::aero::Options::development(),
             _ => return Err("Choose a model for Powermove, or add a provider in Settings › Providers.".into()),
-        }
+        };
         let openai = request.model.as_deref().and_then(crate::sources::Source::of).is_some_and(|(source, _)| {
             matches!(source, crate::sources::Source::ChatGpt | crate::sources::Source::OpenAiKey)
         });
