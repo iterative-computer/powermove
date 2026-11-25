@@ -282,7 +282,9 @@ impl AgentLink {
             add(Source::AnthropicKey, accounts.anthropic().models);
         }
         add(Source::Custom, self.compatible_models());
-        let fake = self.environment().is_some_and(|env| env.vars.get("PM_AERO_FAKE_MODEL").is_some_and(|v| v == "1"));
+        let fake = self
+            .environment()
+            .is_some_and(|env| env.vars.get("PM_AERO_FAKE_MODEL").is_some_and(|v| v == "1"));
         if fake {
             out.push(pm_agents::account::Model {
                 id: pm_agents::sources::FAKE_MODEL.into(),
