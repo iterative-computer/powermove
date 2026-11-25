@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_aero_core::{
-    Answered, Error, HookAnswer, HookKind, HookKinds, HookLease, Host, Outcome, Runtime,
-    StopReason, Tool, ToolLease,
+    Answered, Error, HookAnswer, HookAnswerError, HookKind, HookKinds, HookLease, Host, Outcome,
+    Runtime, StopReason, Tool, ToolLease,
 };
 use support::{Driver, Model, Reply, Seen, config, on_worker, sse_text, sse_tool_calls};
 
@@ -131,13 +131,15 @@ fn pre_tool_blocks_rewrites_and_allows_before_the_call_is_made() {
         );
         assert_eq!(first.turn(), turn);
         // A stop answer is not one pre_tool takes: the lease stays open.
-        let (first, error) = first
-            .answer(HookAnswer::Continue("go on"))
-            .expect_err("wrong kind");
+        let Err(HookAnswerError::Open(first, error)) = first.answer(HookAnswer::Continue("go on"))
+        else {
+            panic!("wrong kind")
+        };
         assert_eq!(error, Error::Invalid);
-        let (first, error) = first
-            .answer(HookAnswer::Rewrite("[1]"))
-            .expect_err("not an object");
+        let Err(HookAnswerError::Open(first, error)) = first.answer(HookAnswer::Rewrite("[1]"))
+        else {
+            panic!("not an object")
+        };
         assert_eq!(error, Error::Invalid);
         assert!(matches!(
             first.answer(HookAnswer::Block("lookups of a are not allowed")),

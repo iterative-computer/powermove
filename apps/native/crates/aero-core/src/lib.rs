@@ -563,9 +563,174 @@ impl Drop for ToolLease {
         } else {
             "The host dropped this tool call without answering."
         };
-        let _ = self.send_unchecked(text, &[], true);
+        settle(Fallback::Tool {
+            handle: self.shared.handle(),
+            call: self.call,
+            text,
+        });
         self.shared.lease_closed();
     }
+}
+
+/// An answer a dropped lease owes the core, sent by [`settle`].
+#[derive(Clone, Copy, Debug)]
+enum Fallback {
+    Tool {
+        handle: u64,
+        call: u64,
+        text: &'static str,
+    },
+    Hook {
+        handle: u64,
+        question: u64,
+        kind: i32,
+        text: &'static str,
+    },
+}
+
+impl Fallback {
+    /// Sends it once; true when the core took it or can never take it
+    /// (consumed, stale, closed, stopped), false for a retryable answer.
+    fn send(self) -> bool {
+        let status = match self {
+            Fallback::Tool { handle, call, text } => {
+                let out = sys::fx_tool_output {
+                    text: sys::fx_str::of(text),
+                    images: std::ptr::null(),
+                    image_count: 0,
+                    is_error: true,
+                };
+                // SAFETY: `out` and `text` are valid for the call; the core copies.
+                unsafe { sys::fx_tool_result(handle, call, &out) }
+            }
+            Fallback::Hook {
+                handle,
+                question,
+                kind,
+                text,
+            } => hook_answer_status(handle, question, kind, text),
+        };
+        status != sys::FX_BUSY && status != sys::FX_E_OOM
+    }
+}
+
+/// Answers for a dropped lease, never left unsent (Sol's m2 item 5): sent at
+/// once off the main thread; one the core could not take yet (busy, out of
+/// memory), or one dropped on the main thread (which never calls the core),
+/// goes to the settler thread, which retries it until the core takes it or
+/// the runtime can take nothing (closed or stopped: the core is on its
+/// terminal path and destroy ends the question). The fallback reads none of
+/// the lease's borrowed strings, so the lease ends when it is handed over.
+fn settle(fallback: Fallback) {
+    if !on_main_thread() && fallback.send() {
+        return;
+    }
+    let sent = settler().is_some_and(|queue| {
+        queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(fallback)
+            .is_ok()
+    });
+    if !sent && !on_main_thread() {
+        // No settler thread could start: retry here.
+        let mut wait = Duration::from_micros(200);
+        while !fallback.send() {
+            std::thread::sleep(wait);
+            wait = (wait * 2).min(Duration::from_millis(50));
+        }
+    }
+}
+
+/// The process's settler thread (started off the main thread, by the first
+/// [`Runtime::create`]).
+fn settler() -> Option<&'static Mutex<std::sync::mpsc::Sender<Fallback>>> {
+    static SETTLER: std::sync::OnceLock<Option<Mutex<std::sync::mpsc::Sender<Fallback>>>> =
+        std::sync::OnceLock::new();
+    SETTLER
+        .get_or_init(|| {
+            if on_main_thread() {
+                return None;
+            }
+            let (send, receive) = std::sync::mpsc::channel::<Fallback>();
+            std::thread::Builder::new()
+                .name("aero-settler".into())
+                .spawn(move || {
+                    let mut waiting: Vec<Fallback> = Vec::new();
+                    let mut wait = Duration::from_micros(200);
+                    loop {
+                        let next = if waiting.is_empty() {
+                            receive.recv().map_err(|_| ())
+                        } else {
+                            match receive.recv_timeout(wait) {
+                                Ok(fallback) => Ok(fallback),
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(()),
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    if waiting.is_empty() {
+                                        return;
+                                    }
+                                    std::thread::sleep(wait);
+                                    Err(())
+                                }
+                            }
+                        };
+                        if let Ok(fallback) = next {
+                            waiting.push(fallback);
+                        }
+                        let before = waiting.len();
+                        waiting.retain(|fallback| !fallback.send());
+                        wait = if waiting.len() < before {
+                            Duration::from_micros(200)
+                        } else {
+                            (wait * 2).min(Duration::from_millis(50))
+                        };
+                    }
+                })
+                .ok()
+                .map(|_| Mutex::new(send))
+        })
+        .as_ref()
+}
+
+/// Test-only: the next `count` hook answers the wrapper sends (answers and
+/// fallbacks) fail with `status` without reaching the core, as FX_E_OOM or
+/// FX_BUSY from it would.
+static HOOK_ANSWER_FAULTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn fail_next_hook_answers(count: u32, status: sys::fx_status) {
+    HOOK_ANSWER_FAULTS.store(
+        (u64::from(count) << 32) | u64::from(status as u32),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+fn hook_answer_fault() -> Option<sys::fx_status> {
+    use std::sync::atomic::Ordering;
+    let mut current = HOOK_ANSWER_FAULTS.load(Ordering::Acquire);
+    loop {
+        if current >> 32 == 0 {
+            return None;
+        }
+        let next = current - (1 << 32);
+        match HOOK_ANSWER_FAULTS.compare_exchange(
+            current,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(current as u32 as sys::fx_status),
+            Err(seen) => current = seen,
+        }
+    }
+}
+
+fn hook_answer_status(handle: u64, question: u64, kind: i32, text: &str) -> sys::fx_status {
+    if let Some(status) = hook_answer_fault() {
+        return status;
+    }
+    // SAFETY: text is valid for the call; the core copies it.
+    unsafe { sys::fx_hook_answer(handle, question, kind, sys::fx_str::of(text)) }
 }
 
 unsafe extern "C" fn host_tool_call(ctx: *mut c_void, info: *const sys::fx_tool_call) {
@@ -714,11 +879,15 @@ impl HookLease {
         }
     }
 
-    /// Answers the question (text copied) and ends the lease. An answer the
-    /// question does not take (`Continue` to `pre_tool`, rewritten input
-    /// that is not a JSON object) is `Err(Invalid)` and the lease stays
-    /// open: answer again.
-    pub fn answer(mut self, answer: HookAnswer<'_>) -> Result<Answered, (HookLease, Error)> {
+    /// Answers the question (text copied) and ends the lease. When the core
+    /// does not take it the error says whether the question is still open:
+    /// [`HookAnswerError::Open`] hands the lease back (an answer the question
+    /// does not take, such as `Continue` to `pre_tool` or rewritten input
+    /// that is not a JSON object, and a busy or out-of-memory core: answer
+    /// again, or drop it for the fallback); [`HookAnswerError::Spent`] means
+    /// the runtime takes no answer any more (closed or stopped) and the lease
+    /// is gone, so nothing can read its released strings.
+    pub fn answer(mut self, answer: HookAnswer<'_>) -> Result<Answered, HookAnswerError> {
         assert_off_main();
         match self.send(answer) {
             Ok(answered) => {
@@ -726,12 +895,13 @@ impl HookLease {
                 self.shared.lease_closed();
                 Ok(answered)
             }
-            Err(Error::Invalid) => Err((self, Error::Invalid)),
+            Err(
+                error @ (Error::Invalid | Error::Unsupported | Error::Busy | Error::OutOfMemory),
+            ) => Err(HookAnswerError::Open(self, error)),
             Err(error) => {
-                // Nothing on this runtime can take it any more.
                 self.answered = true;
                 self.shared.lease_closed();
-                Err((self, error))
+                Err(HookAnswerError::Spent(error))
             }
         }
     }
@@ -743,35 +913,62 @@ impl HookLease {
             HookAnswer::Rewrite(text) => (sys::FX_ANSWER_REWRITE, text),
             HookAnswer::Continue(text) => (sys::FX_ANSWER_CONTINUE, text),
         };
-        // SAFETY: text is valid for the call; the core copies it.
-        let status = retry_busy(|| unsafe {
-            sys::fx_hook_answer(
-                self.shared.handle(),
-                self.question,
-                kind,
-                sys::fx_str::of(text),
-            )
-        });
+        let status =
+            retry_busy(|| hook_answer_status(self.shared.handle(), self.question, kind, text));
         match status {
             sys::FX_OK => Ok(Answered::Applied),
             sys::FX_STALE => Ok(Answered::Stale),
+            sys::FX_BUSY => Err(Error::Busy),
             other => Err(check(other).err().unwrap_or(Error::Unknown(other))),
         }
     }
 }
+
+/// Why [`HookLease::answer`] did not settle its question.
+#[derive(Debug)]
+pub enum HookAnswerError {
+    /// The question is still open and the lease is handed back: answer
+    /// again (differently, for `Invalid` or `Unsupported`), or drop it.
+    Open(HookLease, Error),
+    /// The runtime takes no answer any more (closed, or not running): the
+    /// lease is spent and its borrowed strings are released.
+    Spent(Error),
+}
+
+impl HookAnswerError {
+    pub fn error(&self) -> Error {
+        match self {
+            HookAnswerError::Open(_, error) | HookAnswerError::Spent(error) => *error,
+        }
+    }
+}
+
+impl fmt::Display for HookAnswerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error().fmt(f)
+    }
+}
+
+impl std::error::Error for HookAnswerError {}
 
 impl Drop for HookLease {
     fn drop(&mut self) {
         if self.answered {
             return;
         }
-        // Never leave the core waiting. A gate that failed fails closed for
-        // a tool call and lets the turn end.
-        let answer = match self.kind {
-            HookKind::PreTool => HookAnswer::Block("The host's pre_tool check failed."),
-            HookKind::Stop => HookAnswer::Allow,
+        // Never leave the core waiting, and never call it from the main
+        // thread (`settle`). A gate that failed fails closed for a tool call
+        // and lets the turn end.
+        let (kind, text) = match self.kind {
+            HookKind::PreTool => (sys::FX_ANSWER_BLOCK, "The host's pre_tool check failed."),
+            HookKind::Stop => (sys::FX_ANSWER_ALLOW, ""),
         };
-        let _ = self.send(answer);
+        settle(Fallback::Hook {
+            handle: self.shared.handle(),
+            question: self.question,
+            kind,
+            text,
+        });
         self.shared.lease_closed();
     }
 }
@@ -1338,6 +1535,8 @@ impl Runtime {
     /// `initialize`. Open its session with [`Runtime::open_session`].
     pub fn create(config: &Config<'_>, host: Arc<dyn Host>) -> Result<Runtime, Error> {
         assert_off_main();
+        // Dropped leases' fallbacks may need it, from any thread.
+        let _ = settler();
         let tools: Vec<sys::fx_tool_desc> = config
             .tools
             .iter()
