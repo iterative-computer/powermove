@@ -1,11 +1,14 @@
-//! The first-run stage: one borderless window over the whole display. The
-//! desktop dims, a quiet credit shows, the Powermove mark rises from below
-//! the bottom edge into the centre as a lit object, and the distortion wave
-//! draws the Welcome window out of the mark's light, once, on the window's
-//! own rectangle. The first-run steps change inside the window with a quick
-//! spring cross-fade; the last one hands off into the app: the window eases
-//! out while the room's lights come up. Timing is the cue sheet's (`cue`),
-//! Dia's opening measured; the room and the mark are `light`'s one pass.
+//! The first-run stage: one clear, borderless window over the whole display.
+//! The person's own desktop and windows dim under a black veil that fades in
+//! (Dia's measured opacity and curve), a quiet credit shows on the dim, the
+//! Powermove mark rises from below the bottom edge into the centre as a lit
+//! object, and the distortion wave draws the Welcome window out of the mark's
+//! light, once, on the window's own rectangle. Nothing paints a ground: the
+//! stage is the veil, the mark and its light (`light`'s one pass,
+//! premultiplied over clear), the credit and the window. The first-run steps
+//! change inside the window with a quick spring cross-fade; the last one
+//! hands off into the app: the window eases out as the veil fades away.
+//! Timing is the cue sheet's (`cue`), Dia's opening measured.
 pub mod cue;
 pub mod intro;
 pub mod light;
@@ -29,13 +32,12 @@ pub type OnSound = Rc<dyn Fn(&str, &mut App)>;
 /// What runs once the hand-off's lights are up (the stage closes).
 type AfterHandOff = Box<dyn FnOnce(&mut Window, &mut App)>;
 
-/// Seconds the room takes to fade in after a Skip.
+/// Seconds the window takes to fade in after a Skip.
 const SKIP_FADE: f64 = 0.35;
 /// The original's Reduce Motion cross-fade, seconds.
 const REDUCED_WAVE: f64 = 0.3;
-/// The hand-off: the window eases out while the lights come up.
+/// The hand-off: the window eases out while the veil fades (`cue::dim_out`).
 const WINDOW_OUT: f64 = 0.32;
-const LIGHTS_UP: f64 = 0.55;
 /// A step's content arrives from a few points below and leaves a few up.
 const SLIDE_IN: f32 = 10.;
 const SLIDE_OUT: f32 = 6.;
@@ -81,7 +83,8 @@ pub struct Stage {
     /// `StageEvent::WindowLive` was sent.
     live_sent: bool,
     /// A real window (`native_window`) holds the Welcome now: the stage
-    /// draws only the room, once that window has drawn its first frame.
+    /// draws only the veil and the light, once that window has drawn its
+    /// first frame.
     native: Option<AnyWindowHandle>,
     native_drawn: bool,
     /// The step made for the real window, drawn only there until it shows
@@ -254,8 +257,8 @@ impl Stage {
         self.wave.update(cx, |w, _| w.clear());
         cx.notify();
     }
-    /// The last step: the window eases out while the room's lights come up
-    /// on the app's first window behind the stage, then `done` runs.
+    /// The last step: the window eases out while the veil fades from the
+    /// app's first window behind the stage, then `done` runs.
     pub fn hand_off(
         &mut self,
         done: impl FnOnce(&mut Window, &mut App) + 'static,
@@ -271,12 +274,6 @@ impl Stage {
     }
     fn motion(&self) -> bool {
         !self.tokens.accessibility.reduce_motion
-    }
-    /// How far the stage has come up over the desktop (0–1).
-    fn dimmed(&self, opened: f64) -> f64 {
-        // The room's field is alive from the first frames; its own light then
-        // goes down on Dia's curve (`intro::light_at`).
-        smooth(opened / if self.motion() { 0.35 } else { 0.6 })
     }
     fn sounds(&mut self, t: f64, cx: &mut Context<Self>) {
         if t > self.last_t {
@@ -297,15 +294,15 @@ impl Stage {
         }
         self.last_t = t;
     }
-    /// The room and the mark at `t`, filling the stage.
+    /// The mark and its light at `t` (clear elsewhere), filling the stage.
     fn room(&mut self, t: f64, area: Size<Pixels>, scale: f32) -> AnyElement {
         let size = (
             (f32::from(area.width) * scale).round(),
             (f32::from(area.height) * scale).round(),
         );
-        // Once the wave has the window, the room holds the light it had at the
-        // hold (the wave draws over that very picture): nothing in the room
-        // changes as the window arrives. The mark itself is under the window.
+        // Once the wave has the window, the light holds as it was at the hold
+        // (the wave draws over that very picture): nothing around the window
+        // changes as it arrives. The mark itself is under the window.
         let at = if t >= self.sheet.length() {
             self.sheet.hold
         } else {
@@ -328,7 +325,8 @@ impl Stage {
         .inset_0()
         .into_any_element()
     }
-    /// The intro at `t`: the room and the mark, the credit, the wordmark.
+    /// The intro at `t`: the mark and its light, the credit, the wordmark,
+    /// on nothing (the veil under them is the stage's).
     fn intro(&mut self, t: f64, area: Size<Pixels>, scale: f32) -> AnyElement {
         let motion = self.motion();
         div()
@@ -336,7 +334,6 @@ impl Stage {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x000000))
             .child(self.room(t, area, scale))
             .child(intro::credit(t, &self.sheet, area, scale))
             .child(intro::words(t, &self.sheet, area, &self.tokens, motion))
@@ -400,7 +397,7 @@ impl Stage {
         }
         ground
     }
-    /// The window standing in the room at `t`.
+    /// The window standing on the dim at `t`.
     fn window_scene(
         &mut self,
         t: f64,
@@ -411,7 +408,6 @@ impl Stage {
         let room = div()
             .relative()
             .size_full()
-            .bg(rgb(0x000000))
             .child(self.room(t, area, scale));
         if self.native.is_some() && self.native_drawn {
             // The real window holds the Welcome (and eases itself out).
@@ -501,10 +497,36 @@ impl Stage {
         let radius = self.window_radius();
         let to = self.window(rect, 0.);
         let shadow = smooth((p - 0.2) / 0.3) as f32;
-        let mut stage = div()
-            .relative()
-            .size_full()
-            .child(self.intro(hold, area, scale));
+        // The intro around the window's rectangle only: inside it the wave
+        // draws its own picture of it (its light would otherwise add twice).
+        let mut stage = div().relative().size_full();
+        let (x0, y0) = (rect.origin.x, rect.origin.y);
+        let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+        for (l, t, w, h) in [
+            (px(0.), px(0.), area.width, y0),
+            (px(0.), y1, area.width, area.height - y1),
+            (px(0.), y0, x0, rect.size.height),
+            (x1, y0, area.width - x1, rect.size.height),
+        ] {
+            stage = stage.child(
+                div()
+                    .absolute()
+                    .left(l)
+                    .top(t)
+                    .w(w)
+                    .h(h)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .absolute()
+                            .left(-l)
+                            .top(-t)
+                            .w(area.width)
+                            .h(area.height)
+                            .child(self.intro(hold, area, scale)),
+                    ),
+            );
+        }
         if shadow > 0. {
             // The window's shadow comes in under the wave's last light.
             stage = stage.child(
@@ -629,22 +651,23 @@ impl Render for Stage {
         if self.clock.is_none() && !resting {
             window.request_animation_frame();
         }
-        // The house lights go down from when the stage opens.
+        // The desktop dims from when the stage opens: a black veil over the
+        // person's own windows (Reduce Transparency: the veil is solid). The
+        // same veil under Reduce Motion; only the motion is a cross-fade.
         let opened = self.raw();
-        let dimmed = self.dimmed(opened) as f32;
         let mut veil = if self.tokens.accessibility.reduce_transparency {
-            1.
+            self.sheet.dim.at(opened).min(1.) as f32
         } else {
-            0.94 * dimmed
+            self.sheet.veil(opened, t) as f32
         };
-        let mut stage_alpha = dimmed;
+        let mut stage_alpha = 1.;
         let picture: AnyElement = if let Some(hand_off) = self.hand_off.as_mut() {
             let since = t - hand_off.start;
             let out = smooth(since / WINDOW_OUT);
-            let up = smooth((since - WINDOW_OUT * 0.4) / LIGHTS_UP);
-            stage_alpha *= 1. - up as f32;
-            veil *= 1. - up as f32;
-            if up >= 1. {
+            let left = self.sheet.veil_left(since) as f32;
+            stage_alpha *= left;
+            veil *= left;
+            if left <= 0. {
                 if let Some(done) = hand_off.done.take() {
                     cx.defer_in(window, move |_, window, cx| done(window, cx));
                 }
@@ -676,7 +699,6 @@ impl Render for Stage {
             let scene = self.window_scene(t, area, scale, 0.);
             div()
                 .size_full()
-                .bg(rgb(0x000000))
                 .child(div().size_full().opacity(fade as f32).child(scene))
                 .into_any_element()
         } else if t >= self.sheet.hold {
@@ -740,9 +762,9 @@ impl Render for Stage {
     }
 }
 
-/// Opens the stage over the whole primary display: borderless, clear until
-/// its first frame draws the veil (never a white or half-drawn window),
-/// above the menu bar and the Dock.
+/// Opens the stage over the whole primary display: borderless and clear (the
+/// person's desktop shows through, under the veil), never a white or
+/// half-drawn window, above the menu bar and the Dock.
 pub fn open_stage(
     build: impl FnOnce(&mut Window, &mut Context<Stage>) -> Stage + 'static,
     cx: &mut App,
@@ -805,6 +827,12 @@ fn raise(window: &Window) {
     let Some(ns) = view.window() else { return };
     // NSStatusWindowLevel: over the menu bar (24) and the Dock (20).
     ns.setLevel(25);
+    // The whole screen, the menu bar's strip too (made at the normal level
+    // it was kept under it; GPUI leaves a status-level frame as asked): the
+    // veil dims all of it.
+    if let Some(screen) = ns.screen() {
+        ns.setFrame_display(screen.frame(), true);
+    }
     ns.setHasShadow(false);
     ns.setOpaque(false);
     ns.setBackgroundColor(Some(&NSColor::clearColor()));

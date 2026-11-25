@@ -85,10 +85,24 @@ impl Spring {
     }
 }
 
+/// The black veil's opacity over the desktop at its darkest, and as the
+/// window arrives (it lifts a touch; there is no further dim). Dia's,
+/// measured on the screen the way macOS blends a window (display-encoded:
+/// 1 − value under the veil / value before it): 0.741, then 0.675. Arc's
+/// peaks at 0.871 and lifts away once its window is up.
+pub const DIM_PEAK: f64 = 0.741;
+pub const DIM_WINDOW: f64 = 0.675;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueSheet {
-    /// The desktop dims (Dia's room light going down).
+    /// The desktop dims: a black veil fading in over the real desktop, on
+    /// Dia's measured curve (to `DIM_PEAK`).
     pub dim: Spring,
+    /// The veil lifts a touch as the window arrives (to `DIM_WINDOW`).
+    pub lift: Fade,
+    /// The hand-off: the veil fades out from the step's start (seconds from
+    /// the hand-off) as the window eases away (Dia's measured fade-out).
+    pub dim_out: Fade,
     /// The mark's top shows at the bottom edge and creeps up.
     pub creep: Fade,
     /// The credit's first line, its second, and both going.
@@ -126,10 +140,23 @@ impl Default for CueSheet {
     fn default() -> Self {
         let wave = wave_style();
         Self {
+            // Fitted to Dia's veil (30 fps, rms 0.0025 of opacity).
             dim: Spring {
-                at: 0.51,
-                omega: 2.42,
-                zeta: 1.07,
+                at: 0.52,
+                omega: 2.55,
+                zeta: 1.10,
+            },
+            // Dia's veil lifts from 7.05 s for 0.45 s, as its window comes.
+            lift: Fade {
+                at: 7.05,
+                seconds: 0.45,
+                curve: [0.42, 0., 0.58, 1.],
+            },
+            // Dia's veil goes in 1.35 s, fast first (rms 0.006 of opacity).
+            dim_out: Fade {
+                at: 0.,
+                seconds: 1.35,
+                curve: [0.3, 0.4, 0.1, 1.0],
             },
             creep: Fade {
                 at: 0.72,
@@ -232,6 +259,7 @@ impl CueSheet {
         let k = self.bpm / bpm.max(1.);
         let mut s = self.clone();
         for f in [
+            &mut s.lift,
             &mut s.creep,
             &mut s.credit.0,
             &mut s.credit.1,
@@ -256,6 +284,15 @@ impl CueSheet {
         }
         s.bpm = bpm;
         s
+    }
+    /// The veil's opacity `opened` seconds after the stage opened, at the
+    /// intro's time `t` (a Skip moves `t`, never the dim's own fade-in).
+    pub fn veil(&self, opened: f64, t: f64) -> f64 {
+        DIM_PEAK * self.dim.at(opened) - (DIM_PEAK - DIM_WINDOW) * self.lift.at(t)
+    }
+    /// The veil's share left `since` seconds into the hand-off (1 to 0).
+    pub fn veil_left(&self, since: f64) -> f64 {
+        1. - self.dim_out.at(since)
     }
     /// Sounds whose time falls in `(from, to]`.
     pub fn sounds_between(&self, from: f64, to: f64) -> impl Iterator<Item = &Sound> {
@@ -318,6 +355,30 @@ mod tests {
                 y(t)
             );
         }
+    }
+    #[test]
+    fn the_veil_follows_dias_measured_dim() {
+        // Dia's veil opacity, measured at 30 fps on the desktop it covers.
+        let s = CueSheet::default();
+        for (t, measured) in [
+            (0.5, 0.0),
+            (1.0, 0.249),
+            (1.5, 0.502),
+            (2.0, 0.628),
+            (3.0, 0.723),
+        ] {
+            let v = s.veil(t, t);
+            assert!((v - measured).abs() < 0.03, "{t}: {v} vs {measured}");
+        }
+        assert!((s.veil(30., 30.) - DIM_WINDOW).abs() < 1e-3);
+        assert!(s.veil(6.9, 6.9) > s.veil(30., 30.), "lifts, never deepens");
+        // Out: half gone in about 0.25 s, all of it by 1.35 s.
+        assert!(
+            (s.veil_left(0.25) - 0.5).abs() < 0.12,
+            "{}",
+            s.veil_left(0.25)
+        );
+        assert_eq!(s.veil_left(1.35), 0.);
     }
     #[test]
     fn retiming_scales_every_beat_and_keeps_the_silent_default() {

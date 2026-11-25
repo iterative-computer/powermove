@@ -3193,6 +3193,13 @@ unsafe extern "C" fn constrain_window_frame(
     if OFFSCREEN_CAPTURE.load(std::sync::atomic::Ordering::Relaxed) {
         return rect;
     }
+    // A window at the status level or above (Powermove's first-run stage)
+    // covers the whole screen, the menu bar's strip too: never kept under it.
+    // SAFETY: `this` is a GPUIWindow (an NSWindow) on the main thread.
+    let level: isize = unsafe { msg_send![this, level] };
+    if level >= 25 {
+        return rect;
+    }
     // SAFETY: registered on GPUIWindow, whose superclass is NSWindow.
     unsafe {
         let rect: Objc2NSRect = msg_send![

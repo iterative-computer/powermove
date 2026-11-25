@@ -1,15 +1,16 @@
-//! The stage's room and the Powermove mark as a lit object, drawn by one
+//! The Powermove mark as a lit object over the dimmed desktop, drawn by one
 //! Metal pass (`light.metal`) into GPUI textures: a warm gradient body with a
-//! bright rim under an exposure that starts white-hot, a bloom that breathes,
-//! the light it spills on the stage, the edge light, and grain. The mark is a
-//! signed distance field made once from its outline, on the worker that
-//! compiles the shader; nothing is made or read back per frame.
+//! bright rim under an exposure that starts white-hot, a bloom that breathes
+//! and the soft light it spills under it, all premultiplied over a clear
+//! ground (the stage's dim is a plain veil under it). The mark is a signed
+//! distance field made once from its outline, on the worker that compiles the
+//! shader; nothing is made or read back per frame.
 use crate::welcome;
 use gpui::{NativeTexture, TextureLease, Window};
 use metal::*;
 use std::sync::{Arc, mpsc};
 
-/// What one frame of the room shows (`light.metal`'s `Light`).
+/// What one frame of the mark shows (`light.metal`'s `Light`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Light {
@@ -21,24 +22,17 @@ pub struct Light {
     pub scale: f32,
     pub exposure: f32,
     pub bloom: f32,
-    pub edge: f32,
     pub pool: f32,
     pub mark: f32,
     pub time: f32,
     pub density: f32,
     /// The mark's resting height, device pixels: the size of its light.
     pub reach: f32,
-    /// The room's own light from above (0–1).
-    pub atmosphere: f32,
-    /// A window's flat ground (linear RGB), lit from its top; zero for the
-    /// room.
-    pub ground: [f32; 3],
     /// The outline's softness, device pixels (the light leading the shape).
     pub soft: f32,
     /// The body's slow colour drift (0–1).
     pub iris: f32,
-    /// The room's field of light (0–1; a window has none).
-    pub field: f32,
+    pub pad: [f32; 2],
     pub domain: [f32; 4],
 }
 
@@ -61,7 +55,7 @@ pub struct LightRenderer {
     value: u64,
     pipeline: RenderPipelineState,
     field: Texture,
-    /// Outputs by size (the room and the window), each free again once
+    /// Outputs by size, each free again once
     /// GPUI lets go of it.
     outputs: Vec<((u32, u32), Texture, Arc<OutputHandle>)>,
 }
@@ -107,7 +101,7 @@ impl LightRenderer {
             outputs: Vec::new(),
         })
     }
-    /// The room for `light` at its size; the texture is free again once
+    /// The mark for `light` at its size; the texture is free again once
     /// GPUI lets go of it. `None` while every output is still in use.
     pub fn render(&mut self, mut light: Light) -> Option<Arc<NativeTexture>> {
         let size = (light.size[0].round() as u32, light.size[1].round() as u32);
@@ -180,8 +174,7 @@ pub struct LightState {
     renderer: Option<LightRenderer>,
     warming: Option<mpsc::Receiver<Result<LightRenderer, String>>>,
     failed: bool,
-    /// The last frames (the room's and the window's): a held picture is
-    /// drawn once.
+    /// The last frames: a held picture is drawn once.
     last: Vec<(Light, Arc<NativeTexture>)>,
 }
 impl LightState {
@@ -204,7 +197,7 @@ impl LightState {
             Err(_) => self.failed = true,
         }
     }
-    /// The room at `light`; `wait` blocks for a renderer still being made
+    /// The mark at `light`; `wait` blocks for a renderer still being made
     /// (captures); a live frame paints nothing until it is ready.
     pub fn picture(&mut self, light: Light, wait: bool) -> Option<Arc<NativeTexture>> {
         if self.renderer.is_none() {
@@ -411,9 +404,10 @@ fn dt1(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
 mod tests {
     #[test]
     fn the_uniforms_match_the_shaders_layout() {
-        // `light.metal`'s `Light`: 14 floats, two packed float3s, a float4 at 80.
-        assert_eq!(std::mem::size_of::<super::Light>(), 96);
-        assert_eq!(std::mem::offset_of!(super::Light, domain), 80);
+        // `light.metal`'s `Light`: 16 floats (two of them padding), then a
+        // float4 at 64.
+        assert_eq!(std::mem::size_of::<super::Light>(), 80);
+        assert_eq!(std::mem::offset_of!(super::Light, domain), 64);
     }
     #[test]
     fn the_field_is_negative_inside_the_mark_and_grows_outside() {

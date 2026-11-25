@@ -88,11 +88,13 @@ Field fieldAt(constant Uniforms &uniforms, array<texture2d<float>, 6> tex, float
    from one pixel to the next, where the derivatives a plain texture() picks
    its mip level from are undefined: along each branch's boundary it would
    read a far smaller level, and draw the boundary as a thin dotted line. */
-float3 side(constant Uniforms &uniforms, array<texture2d<float>, 6> tex, texture2d<float> a, texture2d<float> b, texture2d<float> c, float2 s, float tn, float tf) {
+/* Premultiplied: a screen with clear parts (a picture over nothing) keeps
+   them clear through the lens and the blur; an opaque one reads as before. */
+float4 side(constant Uniforms &uniforms, array<texture2d<float>, 6> tex, texture2d<float> a, texture2d<float> b, texture2d<float> c, float2 s, float tn, float tf) {
   float2 uv = clamp(s, float2(0.5), uSize - 0.5) / uSize;
-  float3 col = a.sample(waveSampler, uv, level(0.0)).rgb;
-  if (tn > 0.0) col = mix(col, b.sample(waveSampler, uv, level(0.0)).rgb, tn);
-  if (tf > 0.0) col = mix(col, c.sample(waveSampler, uv, level(0.0)).rgb, tf);
+  float4 col = a.sample(waveSampler, uv, level(0.0));
+  if (tn > 0.0) col = mix(col, b.sample(waveSampler, uv, level(0.0)), tn);
+  if (tf > 0.0) col = mix(col, c.sample(waveSampler, uv, level(0.0)), tf);
   return col;
 }
 
@@ -100,15 +102,17 @@ constant float3 spectrum[5] = {
   float3(0.571, 0.0, 0.0), float3(0.343, 0.206, 0.0), float3(0.086, 0.588, 0.086), float3(0.0, 0.206, 0.343), float3(0.0, 0.0, 0.571)
 };
 
-float3 lensed(constant Uniforms &uniforms, array<texture2d<float>, 6> tex, int which, float2 s, float2 split, float tn, float tf) {
+float4 lensed(constant Uniforms &uniforms, array<texture2d<float>, 6> tex, int which, float2 s, float2 split, float tn, float tf) {
   if (dot(split, split) < 0.0625) {
     return which == 0 ? side(uniforms, tex, uC0, uC1, uC2, s, tn, tf) : side(uniforms, tex, uR0, uR1, uR2, s, tn, tf);
   }
-  float3 o = float3(0.0);
+  float4 o = float4(0.0);
   for (int i = 0; i < 5; i++) {
     float along = float(i) / 4.0 * 2.0 - 1.0;
-    float3 c = which == 0 ? side(uniforms, tex, uC0, uC1, uC2, s + split * along, tn, tf) : side(uniforms, tex, uR0, uR1, uR2, s + split * along, tn, tf);
-    o += c * spectrum[i];
+    float4 c = which == 0 ? side(uniforms, tex, uC0, uC1, uC2, s + split * along, tn, tf) : side(uniforms, tex, uR0, uR1, uR2, s + split * along, tn, tf);
+    // Each channel's weights sum to one across the spread; coverage is
+    // their mean.
+    o += float4(c.rgb * spectrum[i], c.a * 0.2);
   }
   return o;
 }
@@ -196,7 +200,7 @@ float4 wave_picture(float4 position, constant Uniforms &uniforms, array<texture2
     return mix(uC0.sample(waveSampler,p/uSize,level(0)),uR0.sample(waveSampler,p/uSize,level(0)),uniforms.v[103]);
   }
   if (uLive == 0) {
-    return float4(uRevealed == 1 ? uR0.sample(waveSampler, p / uSize, level(0.0)).rgb : uC0.sample(waveSampler, p / uSize, level(0.0)).rgb, 1.0);
+    return uRevealed == 1 ? uR0.sample(waveSampler, p / uSize, level(0.0)) : uC0.sample(waveSampler, p / uSize, level(0.0));
   }
 
   Field w = fieldAt(uniforms, tex, p);
@@ -239,7 +243,7 @@ float4 wave_picture(float4 position, constant Uniforms &uniforms, array<texture2
     if (uSame == 0 && uContent == 1) own = max(own, 1.0 - smoothstep(0.9, 1.0, cover));
   }
 
-  float3 col = float3(0.0);
+  float4 col = float4(0.0);
   if (own > 0.0) {
     if (uSame == 1) {
       col = lensed(uniforms, tex, 0, s, split, tn, tf);
@@ -256,7 +260,7 @@ float4 wave_picture(float4 position, constant Uniforms &uniforms, array<texture2
   float inset = max(-edgeSDF(uniforms, tex, c, uSize * 0.5, uCorner), 0.0);
   bool nearEdge = rim > 0.0 && inset < max(uRimWidth * 2.2 * (1.0 + 1.9 * uUneven), uHairW * 0.5 + 0.75);
   if (glow <= 0.0 && !nearEdge) {
-    return float4((col + dither(uniforms, tex, gl_FragCoord.xy) / 255.0) * own, own);
+    return float4((col.rgb + col.a * dither(uniforms, tex, gl_FragCoord.xy) / 255.0) * own, col.a * own);
   }
   bool ring = uF[15] > 0.5;
   float turn = atan2(w.q.y, w.q.x);
@@ -299,7 +303,7 @@ float4 wave_picture(float4 position, constant Uniforms &uniforms, array<texture2
   float a = 1.0 - (1.0 - bandA) * (1.0 - rimA);
   float total = 1.0 - (1.0 - a) * (1.0 - hairA);
   if (total <= 0.0005) {
-    return float4((col + dither(uniforms, tex, gl_FragCoord.xy) / 255.0) * own, own);
+    return float4((col.rgb + col.a * dither(uniforms, tex, gl_FragCoord.xy) / 255.0) * own, col.a * own);
   }
   float flow = 0.62 + (ring ? turn / (2.0 * PI) : along * 0.2) + time * 0.13 + d * 0.0015 + (ring ? 0.0 : 0.05 * sin(w.q.y * 0.009 + time));
   float3 lab = paletteAt(uniforms, tex, flow);
@@ -319,7 +323,7 @@ float4 wave_picture(float4 position, constant Uniforms &uniforms, array<texture2
   // The colour over the screens, as the band view over the transition —
   // premultiplied, so it lies as well over the page where the canvas is clear.
   float over = clamp(total + noise, 0.0, 1.0);
-  return float4(col * own * (1.0 - over) + clamp(rgb + noise, 0.0, 1.0) * over, 1.0 - (1.0 - own) * (1.0 - over));
+  return float4(col.rgb * own * (1.0 - over) + clamp(rgb + noise, 0.0, 1.0) * over, col.a * own * (1.0 - over) + over);
 }
 float cornerCoverage(float2 p, constant Uniforms &uniforms) {
   float2 halfSize=uSize*0.5;float r=min(uCorner,min(halfSize.x,halfSize.y));

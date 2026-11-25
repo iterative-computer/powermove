@@ -298,3 +298,7 @@ pipeline is added to GPUI for the wave itself.
 (Metal window and headless renderer): no readback, no CPU wait, no upload. A
 transition prepared from it waits on the event on the GPU, so its capture
 costs no stall.
+A window at the status level (25) or above keeps the frame it asks for:
+`constrainFrameRect:toScreen:` returns it unchanged, so Powermove's first-run
+stage covers the whole screen, the menu bar's strip too (AppKit otherwise kept
+the full-screen borderless window under the menu bar).

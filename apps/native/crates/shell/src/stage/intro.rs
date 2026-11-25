@@ -80,17 +80,16 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
     let creep = s.creep.at(t);
     let flare = s.flare.at(t) * (1. - s.fall.at(t));
     let settled = s.exposure.at(t);
-    let (exposure, bloom, edge, pool) = if motion {
+    let (exposure, bloom, pool) = if motion {
         (
             1. + 39. * (1. - settled),
             creep * (0.75 + 0.75 * flare - 0.35 * settled),
-            1.0 * creep * (1. - s.fall.at(t)) + 0.9 * flare,
             creep * (0.3 + 0.7 * s.rise.at(t)),
         )
     } else {
         // Still: the mark fades in where it rests as the credit goes.
         let up = smooth((t - s.credit.2.at) / 1.2);
-        (1., 0.4 * up, 0., up)
+        (1., 0.4 * up, up)
     };
     // The light leads the shape while it is white-hot: a soft outline that
     // resolves as the exposure comes down.
@@ -99,22 +98,12 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
     } else {
         0.
     };
-    // The room's light: Dia's room light going down, then down hard to
-    // near-black as the mark rises, so the mark is the only light (Dia's
-    // room drops to deep navy).
-    let atmosphere = if motion {
-        (1. - 0.57 * s.dim.at(t)) * (1. - 0.93 * smooth(1.6 * s.rise.at(t)))
-    } else {
-        // Still: the room goes down as the mark fades in.
-        0.3 * (1. - 0.85 * smooth((t - s.credit.2.at) / 1.2))
-    };
     Light {
         size: [size.0, size.1],
         centre: [(m.x * f64::from(size.0)) as f32, (m.y * h) as f32],
         scale: (m.unit * h) as f32,
         exposure: exposure as f32,
         bloom: bloom as f32,
-        edge: edge as f32,
         pool: pool as f32,
         // The body comes up with its glow as the creep begins: before it,
         // the swollen white-hot outline would show at the edge unlit.
@@ -127,15 +116,13 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
         time: if motion { t as f32 } else { 0. },
         density,
         reach: (REST_HEIGHT * h) as f32,
-        atmosphere: atmosphere as f32,
-        ground: [0.; 3],
         soft: soft as f32,
         iris: if motion {
             smooth((t - 5.0) / 1.4) as f32
         } else {
             1.
         },
-        field: 1.,
+        pad: [0.; 2],
         domain: [0.; 4],
     }
 }
@@ -294,11 +281,11 @@ pub fn words(
 }
 #[cfg(test)]
 mod tests {
-    /// The light pass on the GPU, read back: a dim warm room around a lit
-    /// mark, with and without motion (a uniform layout mismatch paints it a
-    /// flat red).
+    /// The light pass on the GPU, read back: a lit, opaque mark with
+    /// nothing around it but its light (clear: the desktop's dim shows),
+    /// with and without motion (a uniform layout mismatch paints it flat).
     #[test]
-    fn the_light_pass_draws_a_warm_room_and_a_lit_mark() {
+    fn the_light_pass_draws_a_lit_mark_on_a_clear_ground() {
         let s = super::CueSheet::default();
         let device = metal::Device::system_default().unwrap();
         let mut r = super::super::light::LightRenderer::new(&device).unwrap();
@@ -343,21 +330,19 @@ mod tests {
             );
             let at = |x: u64, y: u64| {
                 let i = ((y * t.width() + x) * 4) as usize;
-                [px[i + 2], px[i + 1], px[i]]
+                [px[i + 2], px[i + 1], px[i], px[i + 3]]
             };
             let (top, centre) = (at(151, 5), at(151, 92));
-            // The room is its dim warm field, never the flat red of a
-            // uniform layout mismatch (green near zero).
+            // Away from the mark: no ground, only a little of its light.
+            assert_eq!(top[3], 0, "{motion}: clear around the mark: {top:?}");
             assert!(
-                top.iter().all(|v| *v < 170),
-                "{motion}: the room is dim: {top:?}"
+                top[..3].iter().all(|v| *v < 90),
+                "{motion}: only light around the mark: {top:?}"
             );
+            // The mark: lit and opaque, never the flat red of a mismatch.
+            assert_eq!(centre[3], 255, "{motion}: the mark covers: {centre:?}");
             assert!(
-                u32::from(top[1]) * 5 > u32::from(top[0]),
-                "{motion}: not flat red: {top:?}"
-            );
-            assert!(
-                centre.iter().all(|v| *v > 170),
+                centre[..3].iter().all(|v| *v > 170),
                 "{motion}: the mark is lit: {centre:?}"
             );
         }
