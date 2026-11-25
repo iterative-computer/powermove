@@ -1489,6 +1489,16 @@ impl NativeControl {
     pub fn set_height(&mut self, height: f32) {
         self.height = height;
     }
+    /// A text field drawn by its view (a well around it): AppKit draws the
+    /// text and the caret only.
+    pub fn borderless(&mut self) {
+        if let Control::Text(v) = &self.control {
+            v.setBezeled(false);
+            v.setBordered(false);
+            v.setDrawsBackground(false);
+            self.height = v.fittingSize().height as f32;
+        }
+    }
     /// What VoiceOver calls it, when that is not its placeholder.
     pub fn describe(&self, label: &str) {
         self.control

@@ -996,6 +996,7 @@ impl WelcomeView {
                 field.set_height(CELL_HEIGHT);
                 field.describe("6-digit code");
             } else {
+                field.borderless();
                 field.describe("Email");
             }
             field
@@ -1096,21 +1097,38 @@ impl WelcomeView {
         match s.stage {
             SignInStage::Email => {
                 let field = self.text_field("email", window, cx);
-                field.update(cx, |f, cx| {
+                let focused = field.update(cx, |f, cx| {
                     f.host_text(&s.email, s.revision);
                     f.alpha = email_p.clamp(0., 1.);
                     if arrived {
                         f.focus_on_paint();
                     }
                     cx.notify();
+                    f.focused()
                 });
+                // The field's well, as the code's cells: a quiet fill and a
+                // hairline, the edge lifting while it has the keyboard.
                 block = block.child(
                     div()
+                        .id("welcome-email-well")
+                        .debug_selector(|| "welcome-email-well".into())
                         .w(px(PRIMARY_WIDTH))
+                        .h(px(FIELD_HEIGHT))
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(FIELD_RADIUS))
+                        .bg(rgba((c.text << 8) | 0x0d))
+                        .border_1()
+                        .border_color(if focused {
+                            rgb(c.focus)
+                        } else {
+                            rgba((c.text << 8) | 0x1c)
+                        })
                         .relative()
                         .top(px((1. - email_p) * 10.))
                         .opacity(email_p.clamp(0., 1.))
-                        .child(field),
+                        .child(div().flex_1().child(field)),
                 );
             }
             SignInStage::Code => {
@@ -1154,7 +1172,7 @@ impl WelcomeView {
                         .h(px(CELL_HEIGHT))
                         // The middle of the code: "123 456".
                         .when(i == CELLS / 2, |d| d.ml(px(8.)))
-                        .rounded(px(10.))
+                        .rounded(px(FIELD_RADIUS))
                         .bg(rgba((c.text << 8) | 0x0d))
                         .border_1()
                         .border_color(if current {
@@ -1875,6 +1893,9 @@ const CELLS: usize = 6;
 const CELL_WIDTH: f32 = 38.;
 const CELL_HEIGHT: f32 = 48.;
 const SHAKE_SECONDS: f32 = 0.45;
+/// The email's well; its corners and the cells' are one radius.
+const FIELD_HEIGHT: f32 = 40.;
+const FIELD_RADIUS: f32 = 10.;
 /// `Motion::values` keys: the sign-in's title by stage, and its parts.
 const TITLE_KEY: u64 = 0x5160_0000;
 const SIGN_IN_KEY: u64 = 0x5160_0010;

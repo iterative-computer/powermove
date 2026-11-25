@@ -1167,7 +1167,7 @@ fn sign_in_frame(s: &SignInFlow, powermove: Option<&str>, frame: &mut Frame) {
         });
         let (title, line, ready) = match s.stage {
             SignInStage::Email => (
-                "Create your Powermove account".to_owned(),
+                "Create your account".to_owned(),
                 frame.line.clone(),
                 plausible_email(&s.email),
             ),

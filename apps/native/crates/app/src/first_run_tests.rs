@@ -126,7 +126,7 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     // The Powermove account, before the agents: an email first, Continue
     // waiting for one that could be an address, and Not now.
     let account = flow.frame();
-    titled(&account, "Create your Powermove account");
+    titled(&account, "Create your account");
     assert_eq!(account.default_action(), None);
     assert!(account.buttons.iter().any(|b| b.id == "not_now"));
     assert_eq!(
@@ -144,7 +144,7 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
     flow.action("back");
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     flow.action("back");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
@@ -233,7 +233,7 @@ fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     flow.action("begin");
     titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
     flow.action("continue");
@@ -1343,7 +1343,7 @@ fn on_account() -> (tempfile::TempDir, Flow) {
     assert!(start(&mut flow).is_empty());
     flow.action("begin");
     flow.action("continue");
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     (temp, flow)
 }
 fn sign_in(frame: &Frame) -> &pm_shell::welcome::SignIn {
@@ -1433,7 +1433,7 @@ fn the_sixth_digit_checks_the_code_and_the_check_moves_on() {
     titled(&signed, "Your Powermove account");
     assert_eq!(signed.line, "Signed in as ana@example.com.");
     flow.action("use_other");
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     assert_eq!(sign_in(&flow.frame()).email, "");
     flow.action("escape");
     titled(&flow.frame(), "Your Powermove account");
@@ -1484,7 +1484,7 @@ fn network_errors_stay_inline_with_try_again() {
     flow.action("continue");
     flow.message(Message::CodeSent(Err("network".into())));
     let offline = flow.frame();
-    titled(&offline, "Create your Powermove account");
+    titled(&offline, "Create your account");
     assert_eq!(
         offline.error.as_deref(),
         Some("Couldn’t send a code. Check your connection and try again.")
@@ -1556,7 +1556,7 @@ fn change_and_escape_go_back_to_the_email_as_typed() {
     flow.action("field:code:12");
     flow.action("change");
     let email = flow.frame();
-    titled(&email, "Create your Powermove account");
+    titled(&email, "Create your account");
     let s = sign_in(&email);
     assert_eq!(
         (s.stage, s.email.as_str()),
@@ -1570,13 +1570,13 @@ fn change_and_escape_go_back_to_the_email_as_typed() {
     assert_eq!(sign_in(&flow.frame()).stage, SignInStage::Email);
     send(&mut flow, "ana@example.com");
     flow.action("back");
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     // A code checked after Change is not wanted.
     send(&mut flow, "ana@example.com");
     flow.action("field:code:123456");
     flow.action("change");
     flow.message(Message::Verified(Ok("ana@example.com".into())));
-    titled(&flow.frame(), "Create your Powermove account");
+    titled(&flow.frame(), "Create your account");
     // From the email, Back leaves the step.
     flow.action("back");
     titled(&flow.frame(), "Choose your timeline");
