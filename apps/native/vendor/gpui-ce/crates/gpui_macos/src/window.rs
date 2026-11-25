@@ -2543,13 +2543,15 @@ impl PlatformWindow for MacWindow {
         let mut this = self.0.lock();
         let traced = gpui_apple::metal_renderer::present_trace().then(std::time::Instant::now);
         let view = this.native_view.as_ptr() as usize;
+        // Whether the pending check saw this frame's moves beforehand.
+        let pend = gpui_apple::feel::frames() && crate::composition::pending(view, this.painted);
         let trace = |path: &str, moved: bool, acquire: f64| {
             // P-FEEL-FRAMES: every draw's decision, the frame it submitted (if
             // any) and where its slot regions' content then sits.
             if gpui_apple::feel::frames() {
                 let presented = !matches!(path, "defer" | "enter" | "wait" | "unprepared");
                 gpui_apple::feel::write(&format!(
-                    r#"{{"draw":{:.6},"path":"{path}","moved":{moved},"frame":{},"regions":[{}]}}"#,
+                    r#"{{"draw":{:.6},"path":"{path}","moved":{moved},"pend":{pend},"frame":{},"regions":[{}]}}"#,
                     gpui_apple::feel::now(),
                     if presented { gpui_apple::feel::frame() } else { 0 },
                     crate::slot_region::summary(view),
@@ -2640,6 +2642,16 @@ impl PlatformWindow for MacWindow {
         // the hosted views are published only when it will present; a frame
         // with no drawable or a failed encode leaves the picture and the views
         // on screen together and shows its scene on the next update.
+        // PM-696 experiment (PM_GPUI_PWT_EARLY=1): a frame that will move
+        // hosted views asks the layer for its drawable with
+        // presentsWithTransaction already set.
+        static EARLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *EARLY.get_or_init(|| std::env::var_os("PM_GPUI_PWT_EARLY").is_some_and(|v| v == "1"))
+            && !forced
+            && crate::composition::pending(view, this.painted)
+        {
+            this.renderer.set_presents_with_transaction(true);
+        }
         let prepared = this.renderer.prepare(scene);
         let Some((prepared, transaction)) =
             crate::composition::publish(view, &mut this.painted, prepared)

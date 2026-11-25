@@ -1152,7 +1152,14 @@ impl MetalRenderer {
         match mode {
             PresentMode::Transaction => {
                 command_buffer.commit();
-                measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
+                // PM-696 experiment: PM_GPUI_SYNC_COMPLETED=1 waits for the
+                // frame's commands to complete, not only to be scheduled.
+                static COMPLETED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *COMPLETED.get_or_init(|| std::env::var_os("PM_GPUI_SYNC_COMPLETED").is_some_and(|v| v == "1")) {
+                    measure_native("GPUI completed", || command_buffer.wait_until_completed());
+                } else {
+                    measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
+                }
                 drawable.present();
             }
             PresentMode::Link => {
