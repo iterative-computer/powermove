@@ -425,7 +425,7 @@ impl aero::Session for Held {
         let _ = self.release.recv();
         Ok(aero::ToolResult::text("retired"))
     }
-    fn failures(&mut self) -> Vec<String> {
+    fn failures(&mut self) -> Vec<aero::Failure> {
         Vec::new()
     }
     fn finish(&mut self) -> Result<(), String> {
@@ -816,7 +816,7 @@ impl aero::Session for Counted {
         }
         aero::Session::call(&mut self.tools, tool, input, approve)
     }
-    fn failures(&mut self) -> Vec<String> {
+    fn failures(&mut self) -> Vec<aero::Failure> {
         Vec::new()
     }
     fn finish(&mut self) -> Result<(), String> {
@@ -1041,7 +1041,7 @@ impl aero::Session for Gated {
         let _ = self.release.recv();
         aero::Session::call(&mut self.tools, tool, input, approve)
     }
-    fn failures(&mut self) -> Vec<String> {
+    fn failures(&mut self) -> Vec<aero::Failure> {
         aero::Session::failures(&mut self.tools)
     }
     fn finish(&mut self) -> Result<(), String> {
@@ -1253,9 +1253,9 @@ fn a_draft_survives_stop_after_a_compile_error_and_the_next_send() {
     let (result, _) = complete_with_progress(&second);
     match result {
         RunResult::Success { text, .. } => assert_eq!(text, "The draft is still there."),
-        RunResult::Failure { error, .. } => assert!(
-            error.contains("Unpublished staging changes in tint"),
-            "{error}"
+        RunResult::Failure { error, .. } => assert_eq!(
+            error,
+            "Powermove stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
         ),
     }
 }
@@ -1482,7 +1482,7 @@ impl aero::Session for HeldGate {
     ) -> Result<aero::ToolResult, String> {
         aero::Session::call(&mut self.tools, tool, input, approve)
     }
-    fn failures(&mut self) -> Vec<String> {
+    fn failures(&mut self) -> Vec<aero::Failure> {
         if !self.held {
             self.held = true;
             let _ = self.checking.send(());
@@ -1814,11 +1814,13 @@ fn a_problem_the_turn_adds_is_the_only_one_the_gate_names() {
         .filter(|v| v["type"] == "gate-continuation")
         .collect();
     assert_eq!(continued.len(), 1, "{continued:?}");
-    assert_eq!(
-        continued[0]["failures"],
-        json!([
-            "“Remove” is fully transparent wherever it plays in 0s–4s (its opacity or its group's opacity is 0), so it never shows."
-        ])
+    let failures = continued[0]["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].as_str().unwrap().starts_with(
+            "“Remove” is fully transparent wherever it plays in 0s–4s (its opacity or its group's opacity is 0), so it never shows. (layer flub"
+        ),
+        "{failures:?}"
     );
     let bodies = bodies.lock().unwrap();
     // The edit's own result warns about the new problem only.
@@ -1863,10 +1865,508 @@ fn an_exhausted_gate_ends_the_turn_in_plain_words() {
     );
     assert_eq!(
         error,
-        "Powermove stopped before its checks passed. Still wrong: “Remove” is fully transparent wherever it plays in 0s–4s (its opacity or its group's opacity is 0), so it never shows. Review the result before you continue."
+        "Powermove stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
     );
     assert!(
         !error.contains(['{', '[', '"']) && error.len() <= 400,
         "{error}"
+    );
+}
+
+/// The person's own edit through another session (the editor's writer).
+fn person_edits(fixture: &Fixture, commands: Value) {
+    let mut person = McpSession::new(fixture.host.clone());
+    person
+        .dispatch("start_session", &json!({"prompt":"The person edits"}))
+        .unwrap();
+    person
+        .dispatch("apply_commands", &json!({ "commands": commands }))
+        .unwrap();
+    person.finish(true).unwrap();
+}
+
+fn revision_now(host: &Arc<Mutex<Automation>>, project: &str) -> u64 {
+    host.lock().unwrap().revision(project).unwrap()
+}
+
+fn layer_value(fixture: &Fixture, id: &str, path: &str) -> Value {
+    let project = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap();
+    let layer = project["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|layer| layer["id"] == id)
+        .unwrap()
+        .clone();
+    path.split('/').fold(layer, |v, key| v[key].clone())
+}
+
+/// PM-730 P1-6: the turn's final words are a fixed sentence with counts.
+/// A plan item's wording (here JSON and a credential) never reaches them.
+#[test]
+fn an_exhausted_gate_never_quotes_a_plan_or_the_project() {
+    const SECRET: &str = "sk-live-PM730-never-shown";
+    let fixture = Fixture::new();
+    let revision = fixture.revision;
+    let index = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap()["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|layer| layer["id"] == "keeper")
+        .unwrap();
+    let pointer = format!("/layers/{index}/name");
+    let behavior = format!("Keep {{\"token\":\"{SECRET}\",\"list\":[1]}} \"Keep\"");
+    let (model, _) = recorded(move |step, _| match step {
+        0 => call(
+            "plan",
+            "add",
+            None,
+            json!({
+                "id":"first","behavior":behavior,"check":{"type":"state","pointer":pointer,"equals":"Keep"}
+            }),
+        ),
+        1 => call("plan", "verify", None, json!({"id":"first"})),
+        2 => call(
+            "edit",
+            "commands",
+            Some(revision),
+            json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Other"}}]}),
+        ),
+        _ => Reply::Text("Done.".into()),
+    });
+    let (turn, _) = fixture.start(model, |tools| Box::new(tools));
+    let result = complete(&turn);
+    let serialized = serde_json::to_string(&result).unwrap();
+    let RunResult::Failure { error, .. } = result else {
+        panic!("the regressed plan fails the turn");
+    };
+    assert_eq!(
+        error,
+        "Powermove stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
+    );
+    assert!(
+        error.len() <= 200 && !error.contains(['{', '[', '"']),
+        "{error}"
+    );
+    assert!(!serialized.contains(SECRET), "{serialized}");
+}
+
+/// PM-730 P1-2: a layer the person hides while the turn runs is their
+/// choice: no tool result and no gate round asks the model to change it.
+#[test]
+fn a_layer_the_person_hides_mid_turn_is_never_the_models_to_fix() {
+    let fixture = Arc::new(Fixture::new());
+    let person = fixture.clone();
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => {
+            person_edits(
+                &person,
+                json!([{"type":"set_property","target":"flub","path":"opacity","value":0}]),
+            );
+            let revision = revision_now(&person.host, &person.project);
+            call(
+                "edit",
+                "commands",
+                Some(revision),
+                json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Harness Title"}}]}),
+            )
+        }
+        _ => Reply::Text("Renamed.".into()),
+    });
+    let (turn, notes) = fixture.start(model, |tools| Box::new(tools));
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Renamed.".into(), Access::Project)
+    );
+    assert_eq!(
+        notes
+            .try_iter()
+            .filter(|v| v["type"] == "gate-continuation")
+            .count(),
+        0
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one edit, one answer, no repair round");
+    assert!(!bodies[1].contains("“Remove”"), "{}", bodies[1]);
+    assert_eq!(
+        layer_value(&fixture, "flub", "p/opacity/v").as_f64(),
+        Some(0.),
+        "the person's choice stays"
+    );
+}
+
+/// Holds the first gate check until released (so a steer queues a second
+/// prompt behind the turn), and otherwise is the real tools.
+struct FirstGateHeld {
+    tools: Tools,
+    checking: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+    held: bool,
+}
+impl aero::Session for FirstGateHeld {
+    fn context(&mut self) -> Result<Value, String> {
+        aero::Session::context(&mut self.tools)
+    }
+    fn call(
+        &mut self,
+        tool: &str,
+        input: &str,
+        approve: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<aero::ToolResult, String> {
+        aero::Session::call(&mut self.tools, tool, input, approve)
+    }
+    fn failures(&mut self) -> Vec<aero::Failure> {
+        if !self.held {
+            self.held = true;
+            let _ = self.checking.send(());
+            let _ = self.release.recv();
+        }
+        aero::Session::failures(&mut self.tools)
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        aero::Session::finish(&mut self.tools)
+    }
+    fn begin(&mut self) {
+        aero::Session::begin(&mut self.tools)
+    }
+}
+
+/// PM-730 P1-3: the person's next request, sent as the first one ends,
+/// owes nothing the first one fixed. The turn hid a layer and showed it
+/// again; the person then hides it and asks for a rename: no repair round.
+/// (The core joins a steer sent at the gate into the running turn; a fresh
+/// prompt's reset is a_fresh_prompt_forgets_what_the_last_turn_introduced.)
+#[test]
+fn a_request_sent_as_the_turn_ends_owes_nothing_the_turn_fixed() {
+    let fixture = Arc::new(Fixture::new());
+    let rev = fixture.revision;
+    let person = fixture.clone();
+    let (model, _) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_property","target":"flub","path":"opacity","value":0}]}),
+        ),
+        1 => call(
+            "edit",
+            "commands",
+            Some(rev + 1),
+            json!({"commands":[{"type":"set_property","target":"flub","path":"opacity","value":100}]}),
+        ),
+        2 => Reply::Text("Prompt one done.".into()),
+        3 => {
+            person_edits(
+                &person,
+                json!([{"type":"set_property","target":"flub","path":"opacity","value":0}]),
+            );
+            let revision = revision_now(&person.host, &person.project);
+            call(
+                "edit",
+                "commands",
+                Some(revision),
+                json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Harness Title"}}]}),
+            )
+        }
+        _ => Reply::Text("Renamed.".into()),
+    });
+    let (checking, at_gate) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (turn, notes) = fixture.start(model, move |tools| {
+        Box::new(FirstGateHeld {
+            tools,
+            checking,
+            release: held,
+            held: false,
+        })
+    });
+    at_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+    steer(&turn, "cut", "Steer: now rename Keep please");
+    release.send(()).unwrap();
+    let (result, _) = complete_with_progress(&turn);
+    assert_eq!(
+        result,
+        RunResult::success("Renamed.".into(), Access::Project)
+    );
+    assert_eq!(
+        notes
+            .try_iter()
+            .filter(|v| v["type"] == "gate-continuation")
+            .count(),
+        0
+    );
+    assert_eq!(
+        layer_value(&fixture, "flub", "p/opacity/v").as_f64(),
+        Some(0.)
+    );
+}
+
+/// The fixture with a composition `comp` the editor doesn't have open.
+fn with_composition(
+    fixture: Fixture,
+    comp: &str,
+    fps: f64,
+    duration: f64,
+    commands: Value,
+) -> Fixture {
+    {
+        let mut host = fixture.host.lock().unwrap();
+        let revision = host.revision(&fixture.project).unwrap();
+        host.apply_commands(
+            &fixture.project,
+            vec![
+                pm_kernel::CompCommand::Create {
+                    comp_id: comp.into(),
+                    settings: pm_kernel::commands::comps::NewComp {
+                        name: Some(comp.into()),
+                        fps: Some(fps),
+                        duration: Some(duration),
+                        ..Default::default()
+                    },
+                }
+                .into(),
+            ],
+            "Fixture",
+            pm_kernel::Origin::Mcp,
+            revision,
+            1,
+        )
+        .unwrap();
+    }
+    let mut seed = McpSession::new(fixture.host.clone());
+    seed.dispatch("start_session", &json!({"prompt":"Seed a composition"}))
+        .unwrap();
+    seed.dispatch(
+        "apply_commands",
+        &json!({"compositionId":comp,"commands":commands}),
+    )
+    .unwrap();
+    seed.finish(true).unwrap();
+    let revision = revision_now(&fixture.host, &fixture.project);
+    Fixture {
+        revision,
+        ..fixture
+    }
+}
+
+fn comp_layers(fixture: &Fixture, comp: &str) -> Vec<Value> {
+    let mut reader = McpSession::new(fixture.host.clone());
+    reader
+        .dispatch("start_session", &json!({"prompt":"Read"}))
+        .unwrap();
+    let state = reader
+        .dispatch(
+            "get_project_state",
+            &json!({"compositionId":comp,"indexOnly":true}),
+        )
+        .unwrap();
+    reader.finish(false).unwrap();
+    state["layers"].as_array().unwrap().clone()
+}
+
+/// PM-730 P1-1: an edit is checked in the composition it lands in. Deleting
+/// the only visual of a composition the editor doesn't show is refused.
+#[test]
+fn an_edit_in_a_closed_composition_is_checked_there() {
+    let fixture = with_composition(
+        Fixture::new(),
+        "pre",
+        30.,
+        4.,
+        json!([{"type":"add_layer","id":"inside","name":"Inside","layerType":"solid","from":0,"duration":4}]),
+    );
+    let rev = fixture.revision;
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"compositionId":"pre","commands":[{"type":"delete_layers","targets":["inside"]}]}),
+        ),
+        _ => Reply::Text("Done.".into()),
+    });
+    let (turn, _) = fixture.start(model, |tools| Box::new(tools));
+    complete(&turn);
+    let bodies = bodies.lock().unwrap();
+    // Refused for the blank frames it makes in "pre" (the open composition
+    // is unchanged). Whether the refused write is taken back in a
+    // composition the editor doesn't show is the kernel's abort: PM-731.
+    assert!(bodies[1].contains("Project check failed"), "{}", bodies[1]);
+    assert!(
+        bodies[1].contains("newly blank span totaling 4s"),
+        "{}",
+        bodies[1]
+    );
+}
+
+/// PM-730 P1-1: the person opening another composition mid-turn shows the
+/// model none of that composition's older findings.
+#[test]
+fn opening_another_composition_mid_turn_surfaces_nothing_from_it() {
+    let fixture = Arc::new(with_composition(
+        Fixture::new(),
+        "pre",
+        30.,
+        4.,
+        json!([
+            {"type":"add_layer","id":"inside","name":"Inside","layerType":"solid","from":0,"duration":4},
+            {"type":"add_layer","id":"preveil","name":"Pre veil","layerType":"solid","from":0,"duration":4},
+            {"type":"set_property","target":"preveil","path":"opacity","value":0}
+        ]),
+    ));
+    let rev = fixture.revision;
+    let person = fixture.clone();
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Harness Title"}}]}),
+        ),
+        1 => {
+            let mut host = person.host.lock().unwrap();
+            let revision = host.revision(&person.project).unwrap();
+            host.apply_commands(
+                &person.project,
+                vec![
+                    pm_kernel::CompCommand::Open {
+                        comp_id: "pre".into(),
+                    }
+                    .into(),
+                ],
+                "Open",
+                pm_kernel::Origin::Mcp,
+                revision,
+                1,
+            )
+            .unwrap();
+            Reply::Text("Renamed.".into())
+        }
+        _ => Reply::Text("Renamed again.".into()),
+    });
+    let (turn, notes) = fixture.start(model, |tools| Box::new(tools));
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Renamed.".into(), Access::Project)
+    );
+    assert_eq!(
+        notes
+            .try_iter()
+            .filter(|v| v["type"] == "gate-continuation")
+            .count(),
+        0
+    );
+    for body in bodies.lock().unwrap().iter() {
+        assert!(!body.contains("“Pre veil”"), "{body}");
+    }
+}
+
+/// A composition with 50 one-second layers two seconds apart: 50 blank
+/// ranges, more than the public check lists.
+fn strip() -> Fixture {
+    let layers: Vec<_> = (0..50)
+        .map(|k| {
+            json!({"type":"add_layer","id":format!("s{k}"),"name":format!("Strip {k}"),
+                "layerType":"solid","from":2 * k,"duration":1})
+        })
+        .collect();
+    let fixture = with_composition(Fixture::new(), "strip", 10., 100., json!(layers));
+    let mut reader = McpSession::new(fixture.host.clone());
+    reader
+        .dispatch("start_session", &json!({"prompt":"Read"}))
+        .unwrap();
+    let check = reader
+        .dispatch("check_project", &json!({"compositionId":"strip"}))
+        .unwrap();
+    reader.finish(false).unwrap();
+    let blank = check["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "empty-frames")
+        .unwrap()
+        .clone();
+    assert!(
+        blank["message"].as_str().unwrap().contains("in 50 spans"),
+        "{blank}"
+    );
+    fixture
+}
+
+fn strip_edit(command: Value) -> (Fixture, String) {
+    let fixture = strip();
+    let rev = fixture.revision;
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"compositionId":"strip","commands":[command]}),
+        ),
+        _ => Reply::Text("Done.".into()),
+    });
+    let (turn, _) = fixture.start(model, |tools| Box::new(tools));
+    complete(&turn);
+    let edit = bodies.lock().unwrap()[1].clone();
+    (fixture, edit)
+}
+
+/// PM-730 P1-4: closing the first blank range is no failure, though the
+/// project's 41st blank range then moves into the first forty.
+#[test]
+fn closing_a_gap_never_surfaces_the_projects_forty_first() {
+    let (fixture, edit) =
+        strip_edit(json!({"type":"set_layer","target":"s0","patch":{"duration":2}}));
+    assert!(!edit.contains("Project check failed"), "{edit}");
+    let s0 = comp_layers(&fixture, "strip")
+        .into_iter()
+        .find(|layer| layer["id"] == "s0")
+        .unwrap();
+    assert_eq!(s0["duration"].as_f64(), Some(2.), "{s0}");
+}
+
+/// PM-730 P1-4: a new blank range past the first forty is still caught.
+#[test]
+fn a_new_gap_past_the_first_forty_is_caught() {
+    let (fixture, edit) = strip_edit(json!({"type":"delete_layers","targets":["s47"]}));
+    assert!(edit.contains("Project check failed"), "{edit}");
+    assert!(edit.contains("[[94.0,95.0]]"), "only the new range: {edit}");
+    drop(fixture);
+}
+
+/// PM-730 P1-3: a fresh prompt in the same session starts owing nothing:
+/// what the last turn's own edits introduced is no longer the model's.
+#[test]
+fn a_fresh_prompt_forgets_what_the_last_turn_introduced() {
+    let fixture = Fixture::new();
+    let mut tools = fixture.tools(Access::Project);
+    tools
+        .call(
+            "edit",
+            &json!({"op":"commands","revision":fixture.revision,"args":{"commands":[
+                {"type":"set_property","target":"flub","path":"opacity","value":0}
+            ]}})
+            .to_string(),
+            &mut |_| false,
+        )
+        .unwrap();
+    let owed = aero::Session::failures(&mut tools);
+    assert_eq!(owed.len(), 1, "{owed:?}");
+    assert_eq!(owed[0].kind, aero::Failing::HiddenLayer);
+    aero::Session::begin(&mut tools);
+    assert_eq!(aero::Session::failures(&mut tools), Vec::new());
+    assert_eq!(
+        layer_value(&fixture, "flub", "p/opacity/v").as_f64(),
+        Some(0.)
     );
 }

@@ -216,8 +216,13 @@ fn groups<'a>(l: &'a Value, layers: &'a [Value]) -> Vec<&'a Value> {
     out
 }
 pub fn check(host: &Automation, id: &str) -> Result<Value> {
-    let mut out = findings(host, id)?;
+    let mut out = findings(host, id, host.read_document(id)?, None)?;
     let issues = out["issues"].as_array_mut().unwrap();
+    for issue in issues.iter_mut() {
+        if let Some(ranges) = issue["ranges"].as_array_mut() {
+            ranges.truncate(40);
+        }
+    }
     if issues.len() > 60 {
         let more = issues.len() - 60;
         issues.truncate(60);
@@ -226,12 +231,12 @@ pub fn check(host: &Automation, id: &str) -> Result<Value> {
     Ok(out)
 }
 
-/// The check with every finding, untruncated: a turn's completion gate
-/// compares the whole list with the one taken when the turn began.
-pub fn findings(host: &Automation, id: &str) -> Result<Value> {
+/// The check of one composition's document `p` with every finding and every
+/// blank range, untruncated (the public tool caps them). `stride` pins the
+/// sampling grid so two checks of a composition compare frame for frame.
+pub fn findings(host: &Automation, id: &str, p: Value, stride: Option<usize>) -> Result<Value> {
     // The kernel's id for the open project (layer loops below shadow `id`).
     let project = id;
-    let p = host.read_document(id)?;
     let mut ev = Evaluation::new(&p);
     let layers = p["layers"]
         .as_array()
@@ -423,9 +428,11 @@ pub fn findings(host: &Automation, id: &str) -> Result<Value> {
         }
     }
     let frames = (((span[1] - span[0]) * fps - 1e-6).ceil() as usize).max(1);
-    let stride = (frames.saturating_mul(visual.len().max(1)))
-        .div_ceil(400000)
-        .max(1);
+    let stride = stride.filter(|s| *s > 0).unwrap_or_else(|| {
+        (frames.saturating_mul(visual.len().max(1)))
+            .div_ceil(400000)
+            .max(1)
+    });
     let mut active = HashSet::new();
     let mut visible = HashSet::new();
     let mut gaps = vec![];
@@ -497,7 +504,7 @@ pub fn findings(host: &Automation, id: &str) -> Result<Value> {
                 round(total)
             )
         };
-        issues.insert(0,json!({"code":if all{"no-visuals"}else{"empty-frames"},"severity":"error","ranges":gaps.iter().take(40).collect::<Vec<_>>(),"message":message}));
+        issues.insert(0,json!({"code":if all{"no-visuals"}else{"empty-frames"},"severity":"error","ranges":gaps,"message":message}));
     }
     for (_, l) in &visual {
         let id = l["id"].as_str().unwrap_or("");
