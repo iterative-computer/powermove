@@ -161,7 +161,7 @@ impl AgentLink {
                 return if self.environment().is_some_and(|env| env.aero.is_some()) {
                     ("connected", String::new())
                 } else {
-                    ("unavailable", "Aero's development switch is off.".into())
+                    ("unavailable", "Powermove's development switch is off.".into())
                 };
             }
             Provider::Chatgpt => "ChatGPT",

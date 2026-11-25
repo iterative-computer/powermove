@@ -453,22 +453,22 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     if request.provider == Provider::Aero {
         use sha2::{Digest, Sha256};
         let crate::aero::Launcher(open) = environment.aero.clone()
-            .ok_or("Aero's development switch is off.")?;
-        let project = request.project.as_deref().ok_or("Open a composition before running Aero.")?;
+            .ok_or("Powermove's development switch is off.")?;
+        let project = request.project.as_deref().ok_or("Open a composition before running Powermove.")?;
         let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
         let scope = environment.profile.join("aero").join("sessions").join(&id);
         let authority = request.clone();
         // A model from Providers runs on its provider; anything else
         // (the development switch's demo) on the fake model.
-        let mut options = crate::aero::Options::development();
-        match request.model.as_deref() {
+        let options = match request.model.as_deref() {
             Some(model) if crate::sources::Source::of(model).is_some() => {
                 let effort = request.effort.as_deref().unwrap_or("");
-                options.model = crate::aero::Model::live(crate::sources::live(environment, model, effort)?);
+                let model = crate::sources::live(environment, model, effort)?;
+                crate::aero::Options::live(crate::aero::Model::live(model))
             }
-            Some(crate::sources::FAKE_MODEL) => {}
+            Some(crate::sources::FAKE_MODEL) => crate::aero::Options::development(),
             _ => return Err("Choose a model for Powermove, or add a provider in Settings › Providers.".into()),
-        }
+        };
         let openai = request.model.as_deref().and_then(crate::sources::Source::of).is_some_and(|(source, _)| {
             matches!(source, crate::sources::Source::ChatGpt | crate::sources::Source::OpenAiKey)
         });

@@ -65,7 +65,7 @@ pub type Open =
 pub struct Launcher(pub Open);
 impl std::fmt::Debug for Launcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Aero")
+        f.write_str("Powermove")
     }
 }
 
@@ -182,6 +182,18 @@ impl Options {
             report: None,
         }
     }
+
+    /// A turn on a real model, as a person runs it: long edits with many tool
+    /// calls are normal, so the limits are generous. A silent stream still stops
+    /// after five minutes (the edge's idle limit), and Stop always works.
+    pub fn live(model: Model) -> Self {
+        Self {
+            model,
+            wall: Duration::from_secs(60 * 60),
+            steps: 400,
+            ..Self::development()
+        }
+    }
 }
 
 pub fn start(
@@ -222,12 +234,32 @@ pub fn start(
             run: run_id,
             result,
         });
-        let _ = events.send(Event::Stopped("Aero's turn ended.".into()));
+        let _ = events.send(Event::Stopped("Powermove's turn ended.".into()));
     });
     handle
 }
 
 type End = (&'static str, String);
+
+/// The core's error for a failed model reply, in words a person can act on:
+/// it names Zig error codes (`IncompleteStream`), which the panel would
+/// otherwise show as they are. Messages already in words pass through.
+fn plain(message: &str) -> String {
+    let code = message.trim();
+    if code.is_empty() || !code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return message.to_owned();
+    }
+    match code {
+        "IncompleteStream" | "StreamClosed" | "ReadFailed" | "HostStreamFailed" => {
+            "The connection to the model dropped before its reply finished. Try again.".into()
+        }
+        "ContentFiltered" => "The provider's content filter stopped this reply.".into(),
+        "Refused" => "The model refused this request.".into(),
+        _ => format!(
+            "The model's reply couldn't be used ({code}). Try again, or choose another model in the picker."
+        ),
+    }
+}
 
 enum Callback {
     Tool(ToolLease),
@@ -344,7 +376,7 @@ fn wait_open(
         // Opening looks the model up in the provider's catalog.
         if let Some(fetch) = runtime.fetches.take().map_err(|e| e.to_string())? {
             if fetch.purpose != pm_aero_core::Purpose::Catalog {
-                return Err("Aero's core asked for the model before its session opened.".into());
+                return Err("Powermove's core asked for the model before its session opened.".into());
             }
             model::catalog(edge, remote, fetch.fetch, fetch.url, model, effort);
         }
@@ -376,7 +408,7 @@ fn wait_open(
                     return Ok(opened);
                 }
                 pm_aero_core::Event::ImagesNeeded { .. } => {
-                    return Err("Aero's saved session names images it no longer has.".into());
+                    return Err("Powermove's saved session names images it no longer has.".into());
                 }
                 pm_aero_core::Event::RequestDone {
                     request: done,
@@ -384,7 +416,7 @@ fn wait_open(
                     outcome: Err(error),
                 } if done == request => {
                     return Err(format!(
-                        "Aero couldn't open the session: {error}. {message}"
+                        "Powermove couldn't open the session: {error}. {message}"
                     ));
                 }
                 pm_aero_core::Event::Exited { message, .. } => return Err(message.into()),
@@ -393,7 +425,7 @@ fn wait_open(
         }
         wait_ready(runtime);
     }
-    Err("Aero timed out opening the session.".into())
+    Err("Powermove timed out opening the session.".into())
 }
 
 fn wait_ready(runtime: &Runtime) {
@@ -444,14 +476,14 @@ fn drive(
         }
     };
     let folder = opened_folder.map_err(|error| match error {
-        StoreError::Fenced => "This Aero session is already running elsewhere.".to_owned(),
+        StoreError::Fenced => "This Powermove session is already running elsewhere.".to_owned(),
         StoreError::TooLarge => {
-            "This Aero session's history is too large to reopen. Start a new thread.".to_owned()
+            "This Powermove session's history is too large to reopen. Start a new thread.".to_owned()
         }
         StoreError::Corrupt(detail) => {
-            format!("This Aero session's saved history is damaged ({detail}). Start a new thread.")
+            format!("This Powermove session's saved history is damaged ({detail}). Start a new thread.")
         }
-        StoreError::Io(error) => format!("Aero's session storage failed: {error}"),
+        StoreError::Io(error) => format!("Powermove's session storage failed: {error}"),
     })?;
     let writer = JournalWriter::start(folder).map_err(|e| e.to_string())?;
     let stored = SessionFolder::load(scope).map_err(|e| e.to_string())?;
@@ -480,7 +512,7 @@ fn drive(
             effort,
             endpoint_url: options.model.endpoint(),
             instructions: &instructions,
-            workspace_root: scope.to_str().ok_or("Aero needs a UTF-8 session path.")?,
+            workspace_root: scope.to_str().ok_or("Powermove needs a UTF-8 session path.")?,
             home: scope.to_str().unwrap(),
             tools: &registry,
             max_agent_steps: options.steps,
@@ -518,7 +550,7 @@ fn drive(
     let emit = |event| {
         events
             .send(event)
-            .map_err(|_| "Aero's run was closed.".to_owned())
+            .map_err(|_| "Powermove's run was closed.".to_owned())
     };
     let trace = |value| {
         emit(Event::Trace {
@@ -758,7 +790,7 @@ fn drive(
                 Callback::Tool(tool) if stopped.is_none() => {
                     tool_tx
                         .send(Work::Tool(tool))
-                        .map_err(|_| "Aero's tool worker stopped.")?;
+                        .map_err(|_| "Powermove's tool worker stopped.")?;
                     in_flight += 1;
                 }
                 Callback::Tool(tool) => {
@@ -784,7 +816,7 @@ fn drive(
                         stop_hook = Some(question);
                         tool_tx
                             .send(Work::Check)
-                            .map_err(|_| "Aero's completion check worker stopped.")?;
+                            .map_err(|_| "Powermove's completion check worker stopped.")?;
                     }
                 }
             }
@@ -849,6 +881,10 @@ fn drive(
                     model_call_id,
                     ..
                 } => {
+                    // Text before a tool call narrates that step (the panel
+                    // already shows it); the turn's answer is what the model
+                    // says after its last tool call, as with Codex and Claude.
+                    text.clear();
                     let id = format!("{turn}/{model_call_id}");
                     if opened.insert(id.clone()) {
                         report(json!({"type":"tool-started","callId":id,"name":name}));
@@ -897,27 +933,31 @@ fn drive(
                             ("cancelled", "Stopped.".into())
                         }
                         (Some("deadline"), _) => {
-                            ("deadline", "Aero reached its wall-time limit.".into())
+                            ("deadline", "Powermove reached its time limit for one turn. Send a message to continue.".into())
                         }
                         (_, StopReason::EndTurn) => gate_exhausted.take().map_or_else(
                             || ("completed", std::mem::take(&mut text)),
                             |text| ("gate-exhausted", text),
                         ),
                         (_, StopReason::MaxSteps) => {
-                            ("step-limit", "Aero reached its tool step limit.".into())
+                            ("step-limit", "Powermove reached its tool-step limit for one turn. Send a message to continue.".into())
                         }
+                        // The edge's own words for a failed request (a
+                        // dropped or silent stream) before the core's code.
                         _ => (
                             "error",
-                            diagnostic
-                                .take()
-                                .unwrap_or_else(|| format!("Aero ended the turn: {reason:?}")),
+                            options
+                                .model
+                                .take_failure()
+                                .or_else(|| diagnostic.take().map(|code: String| plain(&code)))
+                                .unwrap_or_else(|| format!("Powermove ended the turn: {reason:?}")),
                         ),
                     });
                 }
                 Core::Error { message, .. } => diagnostic = Some(message.to_owned()),
                 Core::Exited { message, .. } => {
                     outcome.get_or_insert_with(|| {
-                        ("error", format!("Aero's core stopped. {message}"))
+                        ("error", format!("Powermove's core stopped. {message}"))
                     });
                 }
                 _ => {}
@@ -977,7 +1017,7 @@ fn drive(
                     if reason == "cancelled" {
                         "Stopped.".into()
                     } else {
-                        "Aero reached its wall-time limit.".into()
+                        "Powermove reached its time limit for one turn. Send a message to continue.".into()
                     },
                 ));
                 break;
@@ -1002,7 +1042,23 @@ fn drive(
         runtime.close();
         let _ = session_worker
             .join()
-            .map_err(|_| "Aero's tool worker panicked.")??;
+            .map_err(|_| "Powermove's tool worker panicked.")??;
     }
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn a_turn_on_a_real_model_is_not_held_to_the_development_limits() {
+        let dev = Options::development();
+        let live = Options::live(Model::fake(model::demo));
+        assert_eq!((dev.wall, dev.steps), (Duration::from_secs(120), 32));
+        assert!(live.wall >= Duration::from_secs(60 * 60), "{:?}", live.wall);
+        assert!(live.steps >= 400, "{}", live.steps);
+        assert_eq!(live.continuations, dev.continuations);
+        assert!(!live.skip_gate && !live.skip_review);
+    }
 }

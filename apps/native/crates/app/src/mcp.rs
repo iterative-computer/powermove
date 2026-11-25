@@ -45,7 +45,7 @@ pub fn still(project: &str, time: f64, width: u32) -> std::result::Result<Vec<u8
 pub(crate) fn aero_launcher() -> pm_agents::aero::Launcher {
     pm_agents::aero::Launcher(Arc::new(|request, scope, token| {
         let host = STILLS.get().ok_or("Powermove's tool host is still starting.")?;
-        let project = request.project.as_deref().ok_or("Open a project to use Aero.")?;
+        let project = request.project.as_deref().ok_or("Open a project to use Powermove.")?;
         pm_mcp::session::aero_tools::Tools::open(
             host.clone(), project, None, scope, request.access, Some(token),
         )
