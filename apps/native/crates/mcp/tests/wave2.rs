@@ -189,6 +189,19 @@ fn video_every_operation_matches_tagged_body_and_rolls_back() {
         // v1 listed the call's `commands` (none): the reply names the edit.
         assert_eq!(expected["result"]["applied"], json!([]));
         expected["result"]["applied"] = json!([applied]);
+        if args["operation"] == "insert" {
+            // Newly created native video layers also carry neutral depth of field channels.
+            let before_layers = before["layers"].as_array().unwrap();
+            let inserted = expected["project"]["layers"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|layer| !before_layers.iter().any(|old| old["id"] == layer["id"]))
+                .unwrap();
+            for key in ["dofBlur", "dofFocus"] {
+                inserted["p"][key] = json!({"v": 0, "kf": [], "expr": null});
+            }
+        }
         let mut s = f.session();
         let result = ok(s.call("edit_video", args.clone()));
         let after = f.read();
@@ -740,6 +753,13 @@ fn scene_digest_matches_owner_selected_3d_source_fixtures() {
         let before = f.read();
         let mut expected = fixture["result"].clone();
         expected["revision"] = before["revision"].clone();
+        if !fixture["project"]["layers"].as_array().unwrap().iter().any(|layer| {
+            layer["d"]["definition"] == "powermove.3d.camera"
+        }) {
+            // Only the fallback camera moved to the center. Authored shots retain their position.
+            expected["scene"]["camera"]["p"]["x"]["v"] = json!(0);
+            expected["scene"]["camera"]["p"]["y"]["v"] = json!(0);
+        }
         let mut s = f.session();
         let actual = ok(s.call("get_3d_scene", fixture["arguments"].clone()));
         assert_json(&actual, &expected, "scene digest");

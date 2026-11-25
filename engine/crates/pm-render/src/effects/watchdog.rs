@@ -1653,8 +1653,8 @@ mod tests {
     /// `Renderer::render_into` does); whether it was timed on the GPU.
     /// With `keep`, the frame stays in flight holding its query slot;
     /// else it is dropped right away, as if judged.
-    fn encode(watchdog: &mut Watchdog, device: &wgpu::Device, keep: bool) -> bool {
-        let mut timer = watchdog.frame_timer(device);
+    fn encode(watchdog: &mut Watchdog, gpu: &pm_gpu::Gpu, keep: bool) -> bool {
+        let mut timer = watchdog.frame_timer(&gpu.device);
         let queries = timer.begin(Span::definition(
             DefinitionKind::Effect,
             "acme.dots",
@@ -1665,8 +1665,10 @@ mod tests {
         let timed = timer.gpu.is_some();
         assert_eq!(queries.is_some(), timed, "markers only in a timed frame");
         assert_eq!(timer.slot.is_some(), timed);
-        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
         watchdog.finish(&mut encoder, timer);
+        gpu.queue.submit([encoder.finish()]);
+        watchdog.submitted(&gpu.queue);
         let frame = watchdog.inflight.back().expect("every frame is followed");
         // The hang guard sees every frame's programs, timed or not.
         assert_eq!(frame.spans.len(), 1, "the span is recorded either way");
@@ -1677,8 +1679,8 @@ mod tests {
         timed
     }
 
-    fn frames(watchdog: &mut Watchdog, device: &wgpu::Device, n: usize) -> Vec<bool> {
-        (0..n).map(|_| encode(watchdog, device, false)).collect()
+    fn frames(watchdog: &mut Watchdog, gpu: &pm_gpu::Gpu, n: usize) -> Vec<bool> {
+        (0..n).map(|_| encode(watchdog, gpu, false)).collect()
     }
 
     #[test]
@@ -1692,7 +1694,7 @@ mod tests {
         // The clock stands still: only the count decides.
         held_clock(&mut watchdog);
         let n = SAMPLE_EVERY as usize;
-        let timed = frames(&mut watchdog, &gpu.device, 2 * n + 2);
+        let timed = frames(&mut watchdog, &gpu, 2 * n + 2);
         let expected: Vec<bool> = (0..2 * n + 2).map(|i| i % n == 0).collect();
         assert_eq!(timed, expected, "frames 0, {n} and {}", 2 * n);
     }
@@ -1706,7 +1708,7 @@ mod tests {
         let clock = held_clock(&mut watchdog);
         let at = |ms: u64, watchdog: &mut Watchdog| {
             clock.store(ms, Ordering::Relaxed);
-            encode(watchdog, &gpu.device, false)
+            encode(watchdog, &gpu, false)
         };
         assert!(at(0, &mut watchdog), "the first frame");
         assert!(!at(400, &mut watchdog));
@@ -1730,18 +1732,18 @@ mod tests {
         let mut budget = Watchdog::default();
         held_clock(&mut budget);
         budget.set_budget(Duration::from_millis(250));
-        assert!(frames(&mut budget, &gpu.device, n).iter().all(|t| *t));
+        assert!(frames(&mut budget, &gpu, n).iter().all(|t| *t));
         // Back to recording only: sampled again from the last timed frame.
         budget.clear_budget();
-        assert_eq!(frames(&mut budget, &gpu.device, 2), vec![false, false]);
+        assert_eq!(frames(&mut budget, &gpu, 2), vec![false, false]);
         let mut job = Watchdog::default();
         held_clock(&mut job);
         job.set_policy(super::Policy::Job);
-        assert!(frames(&mut job, &gpu.device, n).iter().all(|t| *t));
+        assert!(frames(&mut job, &gpu, n).iter().all(|t| *t));
         let mut every = Watchdog::default();
         held_clock(&mut every);
         every.set_sample_every(1);
-        assert!(frames(&mut every, &gpu.device, n).iter().all(|t| *t));
+        assert!(frames(&mut every, &gpu, n).iter().all(|t| *t));
         every.set_sample_every(0);
         assert_eq!(every.sample_every(), 1, "0 is every frame too");
     }
@@ -1753,18 +1755,18 @@ mod tests {
         };
         let mut watchdog = Watchdog::default();
         held_clock(&mut watchdog);
-        assert!(encode(&mut watchdog, &gpu.device, false));
-        assert!(!encode(&mut watchdog, &gpu.device, false));
+        assert!(encode(&mut watchdog, &gpu, false));
+        assert!(!encode(&mut watchdog, &gpu, false));
         // An untimed frame did not finish: the next hang it is in must
         // carry timestamps (cleared by them, or convicted).
         let span = Span::definition(DefinitionKind::Effect, "acme.dots", "l1", Some("f1"), false);
         watchdog.judge(std::slice::from_ref(&span), &[SpanTime::Unknown], true);
         assert!(watchdog.reports.is_empty(), "one strike turns nothing off");
-        assert!(frames(&mut watchdog, &gpu.device, 5).iter().all(|t| *t));
+        assert!(frames(&mut watchdog, &gpu, 5).iter().all(|t| *t));
         // A timed frame shows it finished: forgiven, sampled again.
         watchdog.judge(std::slice::from_ref(&span), &[ms(2.0)], false);
         assert!(watchdog.strikes.is_empty());
-        assert_eq!(frames(&mut watchdog, &gpu.device, 3), vec![false; 3]);
+        assert_eq!(frames(&mut watchdog, &gpu, 3), vec![false; 3]);
     }
 
     #[test]
@@ -1776,24 +1778,24 @@ mod tests {
         held_clock(&mut watchdog);
         let n = SAMPLE_EVERY as usize;
         // Frames 0 and n hold both query slots.
-        assert!(encode(&mut watchdog, &gpu.device, true));
+        assert!(encode(&mut watchdog, &gpu, true));
         assert_eq!(
-            frames(&mut watchdog, &gpu.device, n - 1),
+            frames(&mut watchdog, &gpu, n - 1),
             vec![false; n - 1]
         );
-        assert!(encode(&mut watchdog, &gpu.device, true));
+        assert!(encode(&mut watchdog, &gpu, true));
         assert_eq!(
-            frames(&mut watchdog, &gpu.device, n - 1),
+            frames(&mut watchdog, &gpu, n - 1),
             vec![false; n - 1]
         );
         // Due, but no slot is free: untimed, and still due after it.
-        assert_eq!(frames(&mut watchdog, &gpu.device, 2), vec![false, false]);
+        assert_eq!(frames(&mut watchdog, &gpu, 2), vec![false, false]);
         watchdog.inflight.clear();
         assert!(
-            encode(&mut watchdog, &gpu.device, false),
+            encode(&mut watchdog, &gpu, false),
             "due once a slot is free"
         );
-        assert!(!encode(&mut watchdog, &gpu.device, false));
+        assert!(!encode(&mut watchdog, &gpu, false));
     }
 
     #[test]
@@ -1831,8 +1833,9 @@ mod tests {
             timer.mark(&gpu.device, &mut encoder, &view, e);
             passes.push(scope.finish().get(pm_perf::Counter::ComputePasses));
             watchdog.finish(&mut encoder, timer);
-            watchdog.inflight.clear();
             gpu.queue.submit([encoder.finish()]);
+            watchdog.submitted(&gpu.queue);
+            watchdog.inflight.clear();
         }
         if pm_perf::ENABLED {
             assert_eq!(passes, vec![2, 0, 0]);

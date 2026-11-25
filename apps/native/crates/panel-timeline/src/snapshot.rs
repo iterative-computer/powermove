@@ -189,6 +189,9 @@ pub struct TimelineIndex {
     by_id: HashMap<String, usize>,
     locked_descendants: HashSet<String>,
     groups_with_children: HashSet<String>,
+    /// Legacy groups use the union of their leaf layers' timing.
+    group_extents: Vec<Option<(f64, f64)>>,
+    layer_time_bounds: (f64, f64),
     /// Key ids by layer position, [`KEY_BLOCK`] layers a block. A block whose
     /// layers are all reused is reused, so an edit re-indexes one block.
     key_blocks: Vec<Arc<KeyBlock>>,
@@ -254,6 +257,8 @@ impl Default for TimelineIndex {
             by_id: HashMap::new(),
             locked_descendants: HashSet::new(),
             groups_with_children: HashSet::new(),
+            group_extents: Vec::new(),
+            layer_time_bounds: (0., 0.),
             key_blocks: Vec::new(),
         }
     }
@@ -351,6 +356,8 @@ impl TimelineIndex {
             let layer = reused
                 .cloned()
                 .unwrap_or_else(|| Arc::new(Self::read_layer(layer, id, from, duration)));
+            result.layer_time_bounds.0 = result.layer_time_bounds.0.min(layer.from);
+            result.layer_time_bounds.1 = result.layer_time_bounds.1.max(layer.from + layer.duration);
             result.layers.push(layer);
         }
         result.groups_with_children.extend(
@@ -359,6 +366,9 @@ impl TimelineIndex {
                 .iter()
                 .filter_map(|layer| layer.group.as_ref().filter(|id| **id != layer.id).cloned()),
         );
+        if result.layers.iter().any(|layer| layer.kind == "group" && layer.duration == 0.) {
+            result.group_extents = result.group_extents();
+        }
         // Memoised group locks, bounded even on corrupt/cyclic input. Transform parents
         // do not imply group locks (kernel's lock policy).
         let mut locked = vec![None; result.layers.len()];
@@ -725,18 +735,10 @@ impl TimelineIndex {
     /// The latest time the timeline shows: the composition's end, or a
     /// layer or the work area running past it.
     pub fn maximum_time(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|l| l.from + l.duration)
-            .fold(self.duration, f64::max)
-            .max(self.work[1])
+        self.layer_time_bounds.1.max(self.duration).max(self.work[1])
     }
     pub fn minimum_time(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|l| l.from)
-            .fold(0., f64::min)
-            .min(self.work[0])
+        self.layer_time_bounds.0.min(self.work[0])
     }
     pub(crate) fn group_has_children(&self, id: &str) -> bool {
         self.groups_with_children.contains(id)
@@ -776,22 +778,58 @@ impl TimelineIndex {
         }
         roots
     }
+    /// Accumulate descendants once, from leaves to parents. On malformed
+    /// cycles, each participant can reach the same remaining subtree.
+    fn group_extents(&self) -> Vec<Option<(f64, f64)>> {
+        let parent: Vec<_> = self.layers.iter().enumerate().map(|(i, layer)| {
+            layer.group.as_ref().and_then(|id| self.by_id.get(id)).copied().filter(|p| *p != i)
+        }).collect();
+        let mut children = vec![0; self.layers.len()];
+        for p in parent.iter().flatten() {
+            children[*p] += 1;
+        }
+        let mut bounds: Vec<_> = self.layers.iter().map(|layer| {
+            (layer.kind != "group").then_some((layer.from, layer.from + layer.duration))
+        }).collect();
+        let combine = |a: Option<(f64, f64)>, b: Option<(f64, f64)>| match (a, b) {
+            (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+            _ => a.or(b),
+        };
+        let mut leaves: Vec<_> = children.iter().enumerate().filter_map(|(i, &n)| (n == 0).then_some(i)).collect();
+        while let Some(i) = leaves.pop() {
+            if let Some(p) = parent[i] {
+                bounds[p] = combine(bounds[p], bounds[i]);
+                children[p] -= 1;
+                if children[p] == 0 {
+                    leaves.push(p);
+                }
+            }
+        }
+        for start in 0..children.len() {
+            let mut cycle = Vec::new();
+            let mut extent = None;
+            let mut at = start;
+            while children[at] != 0 {
+                children[at] = 0;
+                cycle.push(at);
+                extent = combine(extent, bounds[at]);
+                at = parent[at].expect("remaining layers have a parent in their cycle");
+            }
+            for i in cycle {
+                bounds[i] = extent;
+            }
+        }
+        bounds
+    }
+
     /// Imported groups without saved timing display the extent of their members.
     pub fn strip_span(&self, layer: &Layer) -> (f64, f64) {
         if layer.kind != "group" || layer.duration > 0. {
             return (layer.from, layer.duration);
         }
-        let mut extent: Option<(f64, f64)> = None;
-        for id in self.expanded_ids(std::slice::from_ref(&layer.id)) {
-            let member = self.layer(&id).unwrap();
-            if member.kind != "group" {
-                let end = member.from + member.duration;
-                extent = Some(extent.map_or((member.from, end), |(start, stop)| {
-                    (start.min(member.from), stop.max(end))
-                }));
-            }
-        }
-        extent.map_or((0., self.duration), |(start, end)| (start, end - start))
+        self.by_id.get(&layer.id)
+            .and_then(|&i| self.group_extents.get(i).copied().flatten())
+            .map_or((0., self.duration), |(start, end)| (start, end - start))
     }
     pub fn expanded_ids(&self, roots: &[String]) -> Vec<String> {
         let children = self.children();

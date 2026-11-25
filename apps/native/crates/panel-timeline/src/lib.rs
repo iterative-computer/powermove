@@ -22,7 +22,7 @@ pub mod v4;
 mod v4_actions;
 
 pub use behaviour::*;
-pub use client::{ClientError, LayerPreviewFrame, TimelineClient};
+pub use client::{ClientError, KeyMovePreview, LayerPreviewFrame, TimelineClient};
 pub use interaction::*;
 pub use marquee::*;
 pub use reveal::{Disclosure, PropertyFacts, RevealState, RevealTarget};
@@ -154,8 +154,8 @@ pub struct TimelineModel {
     pub transition: Option<(String, crate::render::Edge)>,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
-    rows: Vec<Row>,
-    row_positions: HashMap<RowId, usize>,
+    rows: Arc<Vec<Row>>,
+    row_positions: Arc<HashMap<RowId, usize>>,
     track_layout: Arc<std::sync::Mutex<Option<CachedTrackLayout>>>,
     pub rebuilds: u64,
     /// Monotonic request, consumed once by the native scroll host.
@@ -245,7 +245,9 @@ impl TimelineModel {
 
     pub fn follows_publication(&self, published: &Published) -> bool {
         self.follows_snapshot(&published.snapshot)
-            && self.ui_seen.as_ref() == Some(&published.ui_state.timeline)
+            && self.ui_seen.as_ref().is_some_and(|seen| {
+                crate::session::same_model_ui(seen, &published.ui_state.timeline)
+            })
             && self.selection == published.selection
     }
 
@@ -267,7 +269,8 @@ impl TimelineModel {
             *self = Self::default();
         }
         let selection_changed = self.selection.layers() != published.selection.layers();
-        let keys_changed = self.selection.keys() != published.selection.keys();
+        let keys_changed = self.selection.keys() != published.selection.keys()
+            || self.selection.key_layers() != published.selection.key_layers();
         let selection_step = !changed
             && self.history_applied != published.history.applied
             && self.history_entries == published.history.entries;
@@ -325,7 +328,9 @@ impl TimelineModel {
         {
             self.transition = None;
         }
-        if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
+        if self.ui_seen.as_ref().is_none_or(|seen| {
+            !crate::session::same_model_ui(seen, &published.ui_state.timeline)
+        }) {
             self.ui_seen = Some(published.ui_state.timeline.clone());
             self.restore_ui(&published.ui_state);
         }
@@ -509,7 +514,7 @@ impl TimelineModel {
             }
             !collapsed
         });
-        self.rows.clear();
+        let mut rows = Vec::new();
         // Index parent links once; avoid an O(depth * layers) ancestor walk.
         let children = self.index.children();
         let roots = if let Some(gid) = self.active_focused_group() {
@@ -542,7 +547,7 @@ impl TimelineModel {
                 .flatten();
             // A closed layer with no search shows its row alone.
             if collapsed && query.is_empty() {
-                self.rows.push(Row {
+                rows.push(Row {
                     id: RowId::Layer(layer.id.clone()),
                     depth,
                 });
@@ -612,7 +617,7 @@ impl TimelineModel {
                 || layer.name.to_string_lossy().to_lowercase().contains(&query)
                 || !matching.is_empty();
             if include {
-                self.rows.push(Row {
+                rows.push(Row {
                     id: RowId::Layer(layer.id.clone()),
                     depth,
                 });
@@ -642,14 +647,14 @@ impl TimelineModel {
                                     })
                             });
                         if section != current_section && let Some(id) = &section {
-                            self.rows.push(Row {
+                            rows.push(Row {
                                 id: id.clone(),
                                 depth: depth + 1,
                             });
                         }
                         let property_depth = depth + if section.is_some() { 2 } else { 1 };
                         current_section = section;
-                        self.rows.push(Row {
+                        rows.push(Row {
                             id: RowId::Property {
                                 layer_id: layer.id.clone(),
                                 channel: path,
@@ -663,12 +668,12 @@ impl TimelineModel {
                 stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
             }
         }
-        self.row_positions = self
-            .rows
+        self.row_positions = Arc::new(rows
             .iter()
             .enumerate()
             .map(|(i, r)| (r.id.clone(), i))
-            .collect();
+            .collect());
+        self.rows = Arc::new(rows);
         self.rebuilds += 1;
     }
 

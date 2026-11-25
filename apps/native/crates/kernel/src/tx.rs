@@ -283,6 +283,13 @@ pub enum HistoryCall {
         keep_mine: bool,
         label: String,
     },
+    /// A run that reconnected can have several writers. Probe the entire
+    /// run in history order and commit all allowed inverses in one edit.
+    UndoWriters {
+        writers: Vec<Writer>,
+        keep_mine: bool,
+        label: String,
+    },
     /// Group this writer's segments without crossing another writer's entry.
     SquashSegments {
         mark: ActorHistoryMark,
@@ -1581,7 +1588,12 @@ impl Project {
                 writer: target,
                 keep_mine,
                 label,
-            } => self.undo_writer(caller, target, keep_mine, &label, None),
+            } => self.undo_writers(caller, &[target], keep_mine, &label, None),
+            HistoryCall::UndoWriters {
+                writers,
+                keep_mine,
+                label,
+            } => self.undo_writers(caller, &writers, keep_mine, &label, None),
             HistoryCall::SquashSegments {
                 mark,
                 label,
@@ -1686,7 +1698,7 @@ impl Project {
                         .get(&id)
                         .copied()
                         .unwrap_or(caller.writer);
-                    self.undo_writer(caller, owner, false, &label, Some(id))
+                    self.undo_writers(caller, &[owner], false, &label, Some(id))
                 } else {
                     Reply::Bool(false)
                 }
@@ -1709,7 +1721,7 @@ impl Project {
                         .get(&id)
                         .copied()
                         .unwrap_or(caller.writer);
-                    self.undo_writer(caller, owner, false, &label, Some(id))
+                    self.undo_writers(caller, &[owner], false, &label, Some(id))
                 } else {
                     Reply::Bool(false)
                 }
@@ -1730,10 +1742,10 @@ impl Project {
         Handled::reply(self.ack(txid, None, None, reply))
     }
 
-    fn undo_writer(
+    fn undo_writers(
         &mut self,
         caller: Caller,
-        target: Writer,
+        targets: &[Writer],
         keep_mine: bool,
         label: &str,
         only_entry: Option<u64>,
@@ -1760,7 +1772,10 @@ impl Project {
                         .map_err(|e| e.to_string())?
                         .0;
                 }
-                if self.record_writers.get(&record.id) != Some(&target)
+                if !self
+                    .record_writers
+                    .get(&record.id)
+                    .is_some_and(|writer| targets.contains(writer))
                     || only_entry.is_some_and(|id| id != record.id)
                 {
                     continue;
@@ -1844,7 +1859,7 @@ impl Project {
                 if let Some(id) = only_entry {
                     self.record_writers.remove(&id);
                 } else {
-                    self.record_writers.retain(|_, owner| *owner != target);
+                    self.record_writers.retain(|_, owner| !targets.contains(owner));
                 }
                 Reply::Applied {
                     revision: self.revision(),

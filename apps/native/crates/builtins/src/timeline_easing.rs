@@ -59,12 +59,24 @@ pub(crate) async fn dispatch(kernel: &KernelHandle, input: &Value) -> Result<(),
             let library = read(source.clone())?;
             let change = match action {
                 "addGroup" => library.add_group(text(input, "id")?, text(input, "name")?),
-                "save" => library.save_preset(
-                    text(input, "group")?,
-                    text(input, "id")?,
-                    text(input, "name")?,
-                    input["curve"].clone(),
-                ),
+                "save" => {
+                    let group = text(input, "group")?;
+                    let id = text(input, "id")?;
+                    let name = text(input, "name")?;
+                    let curve = input["curve"].clone();
+                    // Imported libraries can exist without the panel's built-in group.
+                    // Create that group and save the curve in the same settings update.
+                    let groups = library.source()["groups"].as_array().unwrap();
+                    if group == "default" && !groups.iter().any(|g| g["id"] == group) {
+                        library.add_group(group, "1").and_then(|added| {
+                            Library::read(added.preview().clone())
+                                .map_err(|e| e.problem)?
+                                .save_preset(group, id, name, curve)
+                        })
+                    } else {
+                        library.save_preset(group, id, name, curve)
+                    }
+                }
                 "duplicate" => library.duplicate_preset(
                     text(input, "id")?,
                     text(input, "newId")?,
@@ -138,55 +150,148 @@ pub(crate) fn preset_name(id: &str) -> String {
     name
 }
 
-/// Read only the selected properties, using the same temporal math as playback.
-pub(crate) fn selected_curve(root: &pm_model::Node, ids: &[String]) -> (Option<[f64; 4]>, bool) {
-    use pm_model::NodeKind;
-    fn visit(node: &pm_model::Node, ids: &[String], curves: &mut Vec<[f64; 4]>) {
+#[derive(Default)]
+pub(crate) struct SelectedEase<'a> {
+    pub curve: Option<[f64; 4]>,
+    pub mixed: bool,
+    pub interpolation: Option<&'a str>,
+}
+
+fn string(node: Option<&pm_model::Node>) -> Option<&str> {
+    match node?.kind() {
+        pm_model::NodeKind::String(value) => value.as_str(),
+        _ => None,
+    }
+}
+
+fn interpolation(key: &pm_model::Node) -> &str {
+    let flag = |name| {
+        matches!(
+            key.get(name).map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(true))
+        )
+    };
+    if flag("autoBezier") {
+        "auto"
+    } else if flag("hold") {
+        "hold"
+    } else if flag("continuous") {
+        "continuous"
+    } else {
+        string(key.get("outInterp")).unwrap_or("linear")
+    }
+}
+
+/// Read the selected keys directly from layers in the open composition.
+pub(crate) fn selected_ease<'a>(
+    root: &'a pm_model::Node,
+    selection: &pm_kernel::selection::Selection,
+) -> SelectedEase<'a> {
+    use pm_kernel::model::{comp_node, layers_of, open_comp_id};
+    use pm_model::{Node, NodeKind};
+    use std::collections::{HashMap, HashSet};
+
+    let mut selected = SelectedEase::default();
+    if selection.keys().is_empty() {
+        return selected;
+    }
+    let Some(comp) = comp_node(root, open_comp_id(root).as_deref()) else {
+        return selected;
+    };
+    let ranks: HashMap<_, _> = selection
+        .keys()
+        .iter()
+        .map(String::as_str)
+        .enumerate()
+        .map(|(rank, id)| (id, rank))
+        .collect();
+    let mut owners: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (layer, key) in selection.key_layers() {
+        owners.entry(key).or_default().insert(layer);
+    }
+    let has_unqualified_keys = owners.len() < ranks.len();
+    let mut layer_ids: HashSet<_> = selection
+        .key_layers()
+        .iter()
+        .map(|(layer, _)| layer.as_str())
+        .collect();
+    if has_unqualified_keys {
+        layer_ids.extend(selection.layers().iter().map(String::as_str));
+    }
+    let all_layers = has_unqualified_keys && selection.layers().is_empty();
+
+    fn visit<'a>(node: &'a Node, read: &mut impl FnMut(&'a [Node], usize)) {
         match node.kind() {
             NodeKind::Object(members) => {
                 for (name, child) in members.iter() {
                     if name.as_str() == Some("kf") {
                         if let NodeKind::Array(keys) = child.kind() {
-                            for (i, key) in keys.iter().enumerate() {
-                                let selected = key
-                                    .get("i")
-                                    .and_then(|n| match n.kind() {
-                                        NodeKind::String(s) => s.as_str(),
-                                        _ => None,
-                                    })
-                                    .is_some_and(|id| ids.iter().any(|s| s == id));
-                                if !selected {
-                                    continue;
-                                }
-                                if let Some(c) = key_curve(keys, i) {
-                                    curves.push(c);
-                                }
+                            for i in 0..keys.len() {
+                                read(keys, i);
                             }
                         }
                     } else {
-                        visit(child, ids, curves);
+                        visit(child, read);
                     }
                 }
             }
             NodeKind::Array(items) => {
                 for child in items.iter() {
-                    visit(child, ids, curves);
+                    visit(child, read);
                 }
             }
             _ => {}
         }
     }
-    let mut curves = vec![];
-    if !ids.is_empty() {
-        visit(root, ids, &mut curves);
+
+    let mut curve_rank = usize::MAX;
+    let mut first_curve = None;
+    let mut interpolation_rank = usize::MAX;
+    for layer in layers_of(comp) {
+        let layer_id = string(layer.get("id"));
+        if !all_layers && !layer_id.is_some_and(|id| layer_ids.remove(id)) {
+            continue;
+        }
+        visit(layer, &mut |keys, i| {
+            let key = &keys[i];
+            let Some(id) = string(key.get("i")) else {
+                return;
+            };
+            let Some(&rank) = ranks.get(id) else { return };
+            if owners
+                .get(id)
+                .is_some_and(|allowed| !layer_id.is_some_and(|id| allowed.contains(id)))
+            {
+                return;
+            }
+            if rank < interpolation_rank {
+                selected.interpolation = Some(interpolation(key));
+                interpolation_rank = rank;
+            }
+            if let Some(curve) = key_curve(keys, i) {
+                let first = first_curve.get_or_insert(curve);
+                selected.mixed |= curve
+                    .iter()
+                    .zip(first.iter())
+                    .any(|(a, b)| (a - b).abs() > 1e-5);
+                if rank < curve_rank {
+                    selected.curve = Some(curve);
+                    curve_rank = rank;
+                }
+            }
+        });
+        if !all_layers && layer_ids.is_empty() {
+            break;
+        }
     }
-    let first = curves.first().copied();
-    let mixed = first.is_some_and(|a| {
-        curves
-            .iter()
-            .any(|b| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-5))
-    });
-    (first, mixed)
+    selected
+}
+
+#[cfg(test)]
+fn selected_curve(root: &pm_model::Node, ids: &[String]) -> (Option<[f64; 4]>, bool) {
+    let selection = pm_kernel::selection::Selection::from_parts(vec![], ids.to_vec(), None);
+    let selected = selected_ease(root, &selection);
+    (selected.curve, selected.mixed)
 }
 // A key owns both handles, measured against its previous/next spans, as
 // SetEasing writes them. Reading the next key's incoming handle would lose
@@ -267,5 +372,41 @@ mod panel_tests {
         }
         assert!(selected_curve(root, &["a".into(), "c".into()]).1);
         assert_eq!(preset_name("expoOut"), "Expo Out");
+    }
+    #[test]
+    fn selected_ease_reads_curve_and_interpolation_only_from_selected_layers() {
+        let value = crate::data::model(&json!({
+            "compId": "current",
+            "comps": {
+                "current": {"layers": [
+                    {"id":"unselected","p":{"x":{"kf":[{"i":"a","t":0,"v":0,"hold":true}]}}},
+                    {"id":"selected","p":{"x":{"kf":[
+                        {"i":"a","t":0,"v":0,"continuous":true,"outInterp":"bezier","eo":[0.4,0],"ei":[0.6,1]},
+                        {"i":"b","t":1,"v":1,"autoBezier":true}
+                    ]}}}
+                ]},
+                "other": {"layers":[{"id":"selected","p":{"x":{"kf":[{"i":"c","t":0,"v":0,"hold":true}]}}}]}
+            }
+        })).unwrap();
+        let document = pm_model::Document::new(Some(value), 1);
+        let root = document.root().unwrap();
+        let selection = |layers: &[&str], keys: &[&str]| {
+            pm_kernel::selection::Selection::from_parts(
+                layers.iter().map(|s| (*s).into()).collect(),
+                keys.iter().map(|s| (*s).into()).collect(),
+                None,
+            )
+        };
+
+        let selected = selected_ease(root, &selection(&["selected"], &["a", "b", "c"]));
+        assert_eq!(selected.interpolation, Some("continuous"));
+        assert_eq!(selected.curve, Some([0.4, 0., 0.6, 1.]));
+        assert!(selected.mixed);
+        let fallback = selected_ease(root, &selection(&[], &["b", "c"]));
+        assert_eq!(fallback.interpolation, Some("auto"));
+        assert!(!fallback.mixed);
+        let other_comp = selected_ease(root, &selection(&[], &["c"]));
+        assert_eq!(other_comp.interpolation, None);
+        assert_eq!(other_comp.curve, None);
     }
 }

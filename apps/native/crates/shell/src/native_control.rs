@@ -18,6 +18,133 @@ use objc2_app_kit::*;
 use objc2_foundation::{NSDate, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use serde_json::{Value, json};
 use std::{cell::Cell, rc::Rc};
+
+/// The slider is normalized to 0..1. Its target translates this position
+/// into the panel's value only when the left button releases it.
+struct SliderDrag {
+    start: f64,
+    anchor: f64,
+    points_to_value: f64,
+    cancelled: bool,
+}
+
+impl SliderDrag {
+    fn sample(&self, x: f64) -> Option<f64> {
+        (!self.cancelled).then(|| {
+            (self.start + (x - self.anchor) * self.points_to_value).clamp(0., 1.)
+        })
+    }
+
+    fn cancel(&mut self) -> f64 {
+        self.cancelled = true;
+        self.start
+    }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn slider_right_click_restores_the_start_and_suppresses_release() {
+    let mut drag = SliderDrag {
+        start: 0.25,
+        anchor: 25.,
+        points_to_value: 1. / 100.,
+        cancelled: false,
+    };
+    assert_eq!(drag.sample(75.), Some(0.75));
+    assert_eq!(drag.cancel(), 0.25);
+    assert_eq!(drag.sample(200.), None);
+    assert_eq!(drag.sample(50.), None, "a release sends no change");
+}
+
+define_class!(
+    #[unsafe(super(NSSlider))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMV4Slider"]
+    #[ivars = ()]
+    struct Slider;
+
+    impl Slider {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if !self.isEnabled() {
+                return;
+            }
+            let Some(window) = self.window() else {
+                return;
+            };
+            let Some(cell) = self.cell().and_then(|cell| cell.downcast::<NSSliderCell>().ok()) else {
+                return;
+            };
+            let start = self.doubleValue();
+            let track = cell.trackRect();
+            let knob = cell.knobRectFlipped(self.isFlipped());
+            let travel = track.size.width - knob.size.width;
+            if travel <= 0. {
+                unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
+                return;
+            }
+            let start_x = self.convertPoint_fromView(event.locationInWindow(), None).x;
+            let center = knob.origin.x + knob.size.width / 2.;
+            let grab = start_x - center;
+            let anchor = if grab.abs() <= knob.size.width / 2. { start_x } else { center };
+            let direction = if self.userInterfaceLayoutDirection() == NSUserInterfaceLayoutDirection::RightToLeft {
+                -1.
+            } else {
+                1.
+            };
+            let mut drag = SliderDrag {
+                start,
+                anchor,
+                points_to_value: direction / travel,
+                cancelled: false,
+            };
+            let sample = |drag: &SliderDrag, event: &NSEvent| {
+                let x = self.convertPoint_fromView(event.locationInWindow(), None).x;
+                let Some(value) = drag.sample(x) else {
+                    return false;
+                };
+                self.setDoubleValue(value);
+                self.displayIfNeeded();
+                true
+            };
+            cell.setHighlighted(true);
+            sample(&drag, event);
+            // AppKit's standard slider consumes left drag/up in a nested
+            // tracking loop. Include the secondary button in that same loop
+            // so it can stop tracking before the slider sends its action.
+            let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp
+                | NSEventMask::RightMouseDown | NSEventMask::RightMouseUp;
+            let deadline = NSDate::distantFuture();
+            while let Some(next) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                mask,
+                Some(&deadline),
+                unsafe { NSEventTrackingRunLoopMode },
+                true,
+            ) {
+                match next.r#type() {
+                    NSEventType::RightMouseDown => {
+                        cell.setHighlighted(false);
+                        self.setDoubleValue(drag.cancel());
+                        self.displayIfNeeded();
+                    }
+                    NSEventType::LeftMouseDragged => {
+                        sample(&drag, &next);
+                    }
+                    NSEventType::LeftMouseUp => {
+                        if sample(&drag, &next) {
+                            unsafe { self.sendAction_to(self.action(), self.target().as_deref()) };
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            cell.setHighlighted(false);
+            NSView::setNeedsDisplay(self, true);
+        }
+    }
+);
+
 define_class!(
     #[unsafe(super(NSSegmentedControl))]
     #[thread_kind = MainThreadOnly]
@@ -1077,19 +1204,17 @@ fn make_control(
             Control::Segmented(v)
         }
         Kind::Slider => {
-            let v = unsafe {
-                NSSlider::sliderWithValue_minValue_maxValue_target_action(
-                    0.,
-                    0.,
-                    1.,
-                    Some(&target),
-                    Some(sel!(act:)),
-                    mtm,
-                )
+            let v: Retained<Slider> = unsafe {
+                msg_send![super(Slider::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
             };
-            // One change per pull, so a drag is one Undo.
+            v.setMinValue(0.);
+            v.setMaxValue(1.);
             v.setContinuous(false);
-            Control::Slider(v)
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
+            }
+            Control::Slider(Retained::into_super(v))
         }
         Kind::Checkbox | Kind::Radio | Kind::Push => {
             // Not `buttonWithTitle:target:action:`, which sizes the

@@ -594,7 +594,7 @@ const ROLES: &[(&str, &str)] = &[
     ),
     (
         "translucency.ground",
-        "Window tint over the behind-window blur, darker than `window` so panels step above the composite",
+        "Tint over the behind-window blur, initialized from `colors.window`",
     ),
     ("translucency.edge", "Panel hairline edge in `text` ink"),
     (
@@ -902,10 +902,11 @@ fn contrast_rules_from_language() {
             );
             assert_eq!(t.metrics.border, 2.);
         }
-        // Elevation: floating surfaces sit above panels, panels above the window,
-        // and the viewer is the deepest neutral in dark.
+        // Floating surfaces sit above panels in both appearances.
         if t.scheme == Scheme::Dark {
-            assert!(lum(c.floating) > lum(c.panel) && lum(c.panel) > lum(c.window));
+            assert!(lum(c.floating) > lum(c.panel));
+            assert!(lum(c.panel) > lum(c.panel_secondary));
+            assert!(lum(c.panel_secondary) > lum(c.window));
             assert!(lum(c.viewer) <= lum(c.window));
             assert!(lum(c.field) > lum(c.panel));
         } else {
@@ -918,7 +919,12 @@ fn contrast_rules_from_language() {
 fn neutrals_are_one_ink_over_a_ground() {
     for t in variants() {
         let c = &t.colors;
-        // No neutral carries more chroma than its appearance's ink and grounds.
+        // Dark neutrals are achromatic. Light neutrals carry a subtle cool tint.
+        let chroma_limit = if t.scheme == Scheme::Dark {
+            1e-6
+        } else {
+            0.016
+        };
         for v in [
             c.window,
             c.panel,
@@ -938,19 +944,18 @@ fn neutrals_are_one_ink_over_a_ground() {
             c.fill_strong,
             c.hairline,
             c.focus,
+            t.translucency.ground,
         ] {
             let (_, chroma, _) = pm_design::color::to_oklch(v);
-            assert!(chroma < 0.016, "#{v:06x} is tinted ({chroma:.3})");
+            assert!(chroma < chroma_limit, "#{v:06x} has chroma {chroma}");
         }
         // The text steps descend toward the panel: text, secondary, muted, faint.
         let steps = [c.text, c.secondary, c.muted, c.faint].map(|v| contrast(v, c.panel));
         assert!(steps.windows(2).all(|w| w[0] > w[1]), "{steps:?}");
         assert!(steps[3] >= 2., "faint still reads as text");
     }
-    // Dark is warm stone, light is cool paper: the identity v1 established.
-    let hue = |scheme| pm_design::color::to_oklch(Colors::of(scheme).panel).2;
-    assert!((30. ..90.).contains(&hue(Scheme::Dark)));
-    assert!((250. ..300.).contains(&hue(Scheme::Light)));
+    let light_panel_hue = pm_design::color::to_oklch(Colors::of(Scheme::Light).panel).2;
+    assert!((250. ..300.).contains(&light_panel_hue));
     assert_eq!(pm_design::color::oklch(1., 0., 0.), 0xffffff);
     assert_eq!(pm_design::color::oklch(0., 0., 0.), 0x000000);
 }

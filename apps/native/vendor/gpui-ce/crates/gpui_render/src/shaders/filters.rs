@@ -111,6 +111,7 @@ pub mod blur {
         pub padding1: u32,
         pub padding2: u32,
         pub dots: Vec4f,
+        // DotMatrix: normalized accent RGB. DotAurora: three packed RGB24 stops and fade.
         pub dot_accent: Vec4f,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
@@ -163,15 +164,24 @@ pub mod blur {
         v
     }
 
+    pub fn unpack_aurora_color(packed: f32) -> Vec3f {
+        let rgb = packed as u32;
+        vec3f(
+            ((rgb >> 16u32) & 255u32) as f32,
+            ((rgb >> 8u32) & 255u32) as f32,
+            (rgb & 255u32) as f32,
+        ) / 255.0
+    }
+
     pub fn blur_composite_color(position: Vec2f, coverage: f32) -> Vec4f {
         let params = get!(BLUR_LOCALS).dots;
-        // GPU-rendered Powermove-orange dot-matrix aurora (params.x < 0.0).
+        // GPU-rendered dot-matrix aurora (params.x < 0.0).
         // Zero CPU quads, zero texture samples.
         if params.w > 0.0 && params.x < 0.0 {
             let scale = params.w;
             let age = params.y;
             let opening = params.z;
-            let fade = get!(BLUR_LOCALS).dot_accent.w;
+            let palette = get!(BLUR_LOCALS).dot_accent;
             let size = max(get!(BLUR_LOCALS).bounds.size / scale, vec2f(1.0, 1.0));
             let local = (position - get!(BLUR_LOCALS).bounds.origin) / scale;
             let cell = floor((local - vec2f(1.0, 1.0)) / 3.0 + vec2f(0.5, 0.5));
@@ -224,14 +234,14 @@ pub mod blur {
             let s = clamp(swirl, 0.0, 1.0);
             let s2 = s * s;
             let dot_alpha = min(0.02 + 0.1 * s + 0.88 * s2 * s2, 1.0);
-            let accent = get!(BLUR_LOCALS).dot_accent.xyz();
-            let bright = min(accent * 1.18 + vec3f(0.06, 0.02, 0.0), vec3f(1.0, 1.0, 1.0));
-            let deep = accent * 0.56;
+            let gold = unpack_aurora_color(palette.x);
+            let accent = unpack_aurora_color(palette.y);
+            let rose = unpack_aurora_color(palette.z);
             let t1 = clamp(rise / 0.35, 0.0, 1.0);
-            let t2 = clamp((rise - 0.45) / 0.55, 0.0, 1.0) * 0.55;
-            let mid = bright * (1.0 - t1) + accent * t1;
-            let color = mid * (1.0 - t2) + deep * t2;
-            let a = dot_alpha * dot_cov * fade * coverage * get!(BLUR_LOCALS).opacity;
+            let t2 = clamp((rise - 0.45) / 0.55, 0.0, 1.0) * 0.45;
+            let warm = gold * (1.0 - t1) + accent * t1;
+            let color = warm * (1.0 - t2) + rose * t2;
+            let a = dot_alpha * dot_cov * palette.w * coverage * get!(BLUR_LOCALS).opacity;
             return vec4f(color.x * a, color.y * a, color.z * a, a);
         }
         let mut blurred = texture_sample_level(
@@ -275,12 +285,10 @@ pub mod blur {
                 let a = disk * vis * smoothstep(0.04, 0.35, cov);
                 if a > best.w {
                     let base = sample.xyz() / max(cov, 0.001);
-                    let accent = get!(BLUR_LOCALS).dot_accent.xyz();
-                    let hot = min(
-                        accent * (0.94 + 0.14 * cov) + vec3f(0.03, 0.01, 0.0) * cov,
-                        vec3f(1.0, 1.0, 1.0),
-                    );
-                    let color = min(base * 0.16 + hot * 0.84, vec3f(1.0, 1.0, 1.0));
+                    let heat = 0.18 + 0.1 * cov;
+                    let hot = get!(BLUR_LOCALS).dot_accent.xyz() * (1.0 - heat)
+                        + vec3f(1.0, 1.0, 1.0) * heat;
+                    let color = min((base * 0.2 + hot * 0.8) * 1.12, vec3f(1.0, 1.0, 1.0));
                     best = vec4f(color.x * a, color.y * a, color.z * a, a);
                 }
             }

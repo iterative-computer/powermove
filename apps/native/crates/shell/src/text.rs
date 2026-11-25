@@ -135,9 +135,9 @@ impl TextField {
         }
     }
     /// The lines a multi-line field shows: its text as it wraps in the
-    /// field's width, between two and [`MULTILINE_MOST`] (a line of source
-    /// counts from one). Past the most, the editor scrolls.
-    fn lines(&self, window: &mut Window, least: usize) -> f32 {
+    /// field's width, between one and [`MULTILINE_MOST`] lines.
+    /// Past the most, the editor scrolls.
+    fn lines(&self, window: &mut Window) -> f32 {
         let text = self.slot.value();
         let size = px(self.tokens.typography.body);
         let room = self.width.get() - 2. * MULTILINE_TEXT_ORIGIN.0;
@@ -170,8 +170,7 @@ impl TextField {
                 lines += (f32::from(width) / room).floor() as usize;
             }
         }
-        let least = if self.code.is_some() { 1 } else { least };
-        lines.clamp(least, MULTILINE_MOST.max(least)) as f32
+        lines.clamp(1, MULTILINE_MOST) as f32
     }
     /// A multiline editor in `family` (code editors use the mono face) that
     /// fills its parent's height.
@@ -614,11 +613,10 @@ impl Render for TextField {
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
-            .then(|| self.lines(window, 2));
+            .then(|| self.lines(window));
         // A composer grows with its wrapped lines too, not only its returns:
         // a long request stays in view while it is typed.
-        let composer =
-            (self.kind == TextKind::Composer && !self.fill).then(|| self.lines(window, 1));
+        let composer = (self.kind == TextKind::Composer && !self.fill).then(|| self.lines(window));
         let seen = self.width.clone();
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);

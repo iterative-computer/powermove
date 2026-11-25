@@ -468,6 +468,30 @@ impl GizmoSurface {
         }
         true
     }
+    /// End the edit while retaining the starting handles until the kernel
+    /// publishes the cancellation. The picker can stay open for another edit.
+    pub(super) fn effects_release_drag(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(drag) = self.effect_drag.take() else {
+            return;
+        };
+        if commit {
+            if drag.removed {
+                self.effect_stop = None;
+                self.effect_picker = None;
+            }
+        } else {
+            self.effect_controls[drag.index] = drag.original;
+        }
+        if drag.active {
+            self.queue.push_back(Job::Finish(commit));
+            self.pump(cx);
+        }
+        if commit {
+            self.effects_reread(cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn effects_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
         if self.effect_drag.is_some() && self.host.playing(cx) {
             if self.effect_colour.is_some() {
@@ -795,6 +819,7 @@ impl GizmoSurface {
                     cx.notify();
                 }
             }
+            Edit::CancelDrag => g.effects_release_drag(false, cx),
             Edit::Finish(commit) => g.effects_finish_colour(*commit, cx),
             Edit::Sample => (),
         });
@@ -811,11 +836,7 @@ impl GizmoSurface {
             }
         }
         self.effect_picker = None;
-        if self.effect_drag.take().is_some_and(|d| d.active) {
-            self.queue.push_back(Job::Finish(commit));
-            self.pump(cx);
-        }
-        self.effects_reread(cx);
+        self.effects_release_drag(commit, cx);
         cx.notify();
     }
     pub(super) fn effects_picker_element(&self, cx: &App) -> Option<AnyElement> {

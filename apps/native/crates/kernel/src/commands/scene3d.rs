@@ -212,8 +212,23 @@ fn apply(
     if !time.is_finite() {
         return Err(invalid("Invalid 3D time"));
     }
-    let mut json = pm_scene3d::from_model(&cx.comp_node(comp)?.to_value()).map_err(invalid)?;
-    let args = pm_scene3d::from_model(args).map_err(invalid)?;
+    let composition = cx.comp_node(comp)?;
+    let mut json = pm_scene3d::from_model(&composition.to_value()).map_err(invalid)?;
+    let mut args = pm_scene3d::from_model(args).map_err(invalid)?;
+    if args["operation"] == "add_camera"
+        && args.get("camera").is_none()
+        && args.get("patch").is_none()
+        && pm_eval::space3d::uses_default_25d_camera(crate::model::layers_of(composition))
+        && !crate::model::layers_of(composition).any(|layer| {
+            pm_eval::parenting::Role3d::of(layer) == Some(pm_eval::parenting::Role3d::Camera)
+        })
+    {
+        let width = json["w"].as_f64().unwrap_or(1920.);
+        let height = json["h"].as_f64().unwrap_or(1080.);
+        let camera = pm_eval::space3d::default_camera_25d(width, height);
+        args["camera"] =
+            serde_json::json!({"p":{"z":camera.position[2],"fov":camera.fov.clamp(1., 150.)}});
+    }
     if pm_scene3d::geometry::needs_geometry(&args) {
         let geometry = geometry
             .ok_or_else(|| invalid("Prepare evaluated 3D geometry on a worker before editing"))?;

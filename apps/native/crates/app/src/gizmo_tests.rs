@@ -1155,6 +1155,41 @@ fn dragging_a_group_with_its_member_moves_the_member_once(cx: &mut TestAppContex
     assert_eq!((x("g"), x("l1")), (40., 450.));
 }
 #[gpui::test]
+fn right_click_cancels_a_viewer_gizmo_drag_and_then_opens_menus_normally(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let history = s.rig.kernel.published(PROJECT).unwrap().history.entries;
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    let moved = at + point(px(50.), px(50.));
+    let outside = point(px(-5.), px(-5.));
+    let none = Modifiers::none();
+    s.vcx.simulate_mouse_down(at, MouseButton::Left, none);
+    s.vcx.simulate_mouse_move(moved, MouseButton::Left, none);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_some());
+    s.vcx.simulate_mouse_down(outside, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(outside, MouseButton::Right, none);
+    s.vcx.simulate_mouse_move(moved, MouseButton::Left, none);
+    s.vcx.simulate_mouse_up(moved, MouseButton::Left, none);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, history);
+    s.refresh(cx);
+    assert_eq!(s.pose().scale, before.scale);
+    assert_eq!(s.recorder.menus.get(), 0);
+
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_mouse_down(at, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(at, MouseButton::Right, none);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.menus.get() == 1);
+    assert_eq!(s.recorder.menus.get(), 1);
+}
+
+#[gpui::test]
 fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &pair());
     let at = s.point_of([460., 160.]);
@@ -3307,6 +3342,54 @@ fn studio_view_commands_run_after_the_controller_update(cx: &mut TestAppContext)
     assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }
 
+#[gpui::test]
+fn flat_3d_layers_keep_shot_gizmos_and_support_navigation_and_fly(cx: &mut TestAppContext) {
+    let project =
+        project_of("shape").replace(r#""type":"shape""#, r#""type":"shape","threeD":true"#);
+    let mut stage = stage_on(cx, &project);
+    let shot = stage.pose().corners;
+    let revision = stage.rig.kernel.published(PROJECT).unwrap().revision();
+    stage.surface.update(&mut stage.vcx, |g, cx| {
+        assert!(g.studio_active());
+        assert!(!g.studio_free());
+        g.studio_setting("look", "free", cx);
+        let front = g.studio_free_pose().unwrap();
+        g.studio_setting("nav", "orbit-right", cx);
+        let orbited = g.studio_free_pose().unwrap();
+        assert_ne!(orbited.position, front.position);
+        g.studio_setting("nav", "pan-right", cx);
+        let panned = g.studio_free_pose().unwrap();
+        assert_ne!(panned.target, orbited.target);
+        g.studio_setting("nav", "zoom-in", cx);
+        assert_ne!(g.studio_free_pose().unwrap().position, panned.position);
+        g.studio_frame(cx);
+        assert_ne!(g.studio_free_pose().unwrap().target, panned.target);
+        g.studio_setting("look", "camera", cx);
+    });
+    assert_eq!(stage.pose().corners, shot);
+    stage.surface.update(&mut stage.vcx, |g, cx| {
+        g.studio_setting("fly", "", cx);
+        assert!(g.studio_flying());
+        g.studio_fly_end(false, cx);
+        assert!(!g.studio_flying());
+        assert!(!g.studio_free());
+        g.studio_setting("fly", "", cx);
+        let start = g.studio_free_pose().unwrap();
+        g.studio_fly_advance(2., 1., cx);
+        let end = g.studio_free_pose().unwrap();
+        assert_ne!(end.position, start.position);
+        g.studio_fly_end(true, cx);
+        assert_eq!(g.studio_free_pose(), Some(end));
+        assert!(!g.studio_flying());
+        assert!(g.studio_free());
+    });
+    assert_eq!(
+        stage.rig.kernel.published(PROJECT).unwrap().revision(),
+        revision
+    );
+    assert!(stage.recorder.reports.borrow().is_empty());
+}
+
 /// Fly navigation (Shift+`, Blender's Fly) through the shot camera: confirm
 /// stores the flight on the camera as one Undo (the camera and its point of
 /// interest move together, so it looks where the flight ended).
@@ -3490,6 +3573,38 @@ fn the_middle_button_orbits_pans_and_zooms(cx: &mut TestAppContext) {
     assert!(d.target == c.target && (reach(d) - reach(c)).abs() > 1e-6, "zoom");
     assert!(s.recorder.navigation.borrow().is_empty(), "the 2D view never panned");
 }
+#[gpui::test]
+fn right_click_restores_the_3d_view_after_orbit_pan_or_dolly(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let history = applied(&s);
+    let from = s.point_of([300., 180.]);
+    let to = from + point(px(30.), px(40.));
+    // Starting in the shot, even the switch into Free View is reverted.
+    let none = Modifiers::none();
+    s.vcx.simulate_mouse_down(from, MouseButton::Middle, none);
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, none);
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    s.vcx.simulate_mouse_down(to, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(to, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, none);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+
+    in_3d(&mut s, cx);
+    let before = view(&s);
+    for modifiers in [Modifiers::alt(), Modifiers { alt: true, shift: true, ..none }, Modifiers { alt: true, control: true, ..none }] {
+        s.vcx.simulate_mouse_down(from, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, modifiers);
+        assert_ne!(view(&s), before);
+        s.vcx.simulate_mouse_down(to, MouseButton::Right, none);
+        s.vcx.simulate_mouse_up(to, MouseButton::Right, none);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_up(to, MouseButton::Left, none);
+        assert_eq!(view(&s), before);
+    }
+    assert_eq!(applied(&s), history);
+    assert_eq!(s.recorder.menus.get(), 0);
+}
+
 /// In camera view a scroll navigates the view (the viewer's own zoom), and
 /// a middle drag leaves for the editor view from where the camera stands
 /// (Blender with Lock Camera to View off): the authored camera never moves

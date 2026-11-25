@@ -98,17 +98,26 @@ fn fbm(mut p: [f32; 2]) -> f32 {
     }
     v
 }
+/// The aurora's gold, accent, and rose stops in packed sRGB.
+pub fn aurora_palette(accent: u32, text: u32, muted: u32) -> [u32; 3] {
+    let (l, c, h) = super::color::to_oklch(accent);
+    let gold = super::mix(
+        super::color::oklch_fit((l + 0.16).min(0.92), c, h + 35.),
+        text,
+        0.12,
+    );
+    let rose = super::mix(super::color::oklch_fit(l, c, h - 35.), muted, 0.12);
+    [gold, accent, rose]
+}
+
 /// Four drifting curtains, visible only through a fixed 3pt dot matrix.
-/// Pure Powermove-orange highlights, midtones, and deep embers derived from `accent`.
+/// Gold/ember/rose are derived from the theme accent and text, never fixed RGB.
 pub fn aurora(size: [f32; 2], age: f32, accent: u32, text: u32, muted: u32) -> Vec<Dot> {
     let mut dots = Vec::new();
     if size.iter().any(|n| !n.is_finite() || *n <= 0.) {
         return dots;
     }
-    let _ = (text, muted);
-    let (l, c, h) = super::color::to_oklch(accent);
-    let bright = super::color::oklch_fit((l + 0.09).min(0.84), c, h + 3.);
-    let deep = super::color::oklch_fit((l - 0.16).max(0.28), (c * 0.92).min(0.32), h - 4.);
+    let [gold, accent, rose] = aurora_palette(accent, text, muted);
     for y in (1..size[1].min(4096.) as usize).step_by(3) {
         for x in (1..size[0].min(4096.) as usize).step_by(3) {
             let xn = x as f32 / size[0] * 2.2;
@@ -144,9 +153,9 @@ pub fn aurora(size: [f32; 2], age: f32, accent: u32, text: u32, muted: u32) -> V
             }
             let s = swirl.clamp(0., 1.);
             let color = super::mix(
-                super::mix(bright, accent, (rise / 0.35).clamp(0., 1.)),
-                deep,
-                ((rise - 0.45) / 0.55).clamp(0., 1.) * 0.55,
+                super::mix(gold, accent, (rise / 0.35).clamp(0., 1.)),
+                rose,
+                ((rise - 0.45) / 0.55).clamp(0., 1.) * 0.45,
             );
             dots.push(Dot {
                 center: [x as f32, y as f32],
@@ -192,17 +201,10 @@ mod tests {
     }
     #[test]
     fn field_is_deterministic_and_drifting() {
-        let a = aurora([60., 40.], 1., 0xff6b1a, 0xffffff, 0x888888);
-        assert_eq!(a, aurora([60., 40.], 1., 0xff6b1a, 0xffffff, 0x888888));
-        assert_ne!(a, aurora([60., 40.], 2., 0xff6b1a, 0xffffff, 0x888888));
+        let a = aurora([60., 40.], 1., 0xff8800, 0xffffff, 0x888888);
+        assert_eq!(a, aurora([60., 40.], 1., 0xff8800, 0xffffff, 0x888888));
+        assert_ne!(a, aurora([60., 40.], 2., 0xff8800, 0xffffff, 0x888888));
         assert!(a.iter().all(|d| d.radius == 0.7));
-        // Powermove orange palette: every dot stays warm orange (R > G > B).
-        for d in &a {
-            let r = (d.color >> 16) & 255;
-            let g = (d.color >> 8) & 255;
-            let b = d.color & 255;
-            assert!(r > g && g > b, "expected Powermove orange, got #{:06x}", d.color);
-        }
     }
 }
 

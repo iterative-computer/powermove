@@ -2610,6 +2610,24 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
         })).collect()).unwrap();
         panel.send(original_brief);
         let run = live_run(&agent, &thread);
+        let recorded = || -> Vec<Value> {
+            std::fs::read_to_string(&requests)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        };
+        let original_request = || {
+            recorded().into_iter().find(|record| {
+                record["request"]["params"]["input"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(expected_original.as_str()))
+            })
+        };
+        // The composer publishes the run before the provider accepts its
+        // request. Delegation is available once the provider is running.
+        panel.wait(|_| original_request().is_some());
+        let original = original_request().expect("original request recorded");
         let task = panel
             .panels
             .agent_orchestrate(
@@ -2618,21 +2636,6 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
             )
             .unwrap();
         panel.wait(|state| state.runs.held(&run));
-        let recorded = || -> Vec<Value> {
-            std::fs::read_to_string(&requests)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .collect()
-        };
-        let original = recorded()
-            .into_iter()
-            .find(|record| {
-                record["request"]["params"]["input"][0]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(expected_original.as_str()))
-            })
-            .expect("original request recorded");
         let workspace = original["cwd"].clone();
         panel.panels.agent_attach(vec![json!({
             "id":"latest-pick","name":"latest.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),

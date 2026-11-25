@@ -18,9 +18,17 @@ fn schema_matches_independent_owner_source_cases() {
             continue;
         }
         if c["ok"] == true {
+            let mut expected = c["output"].clone();
+            // The native default camera faces straight down the Z axis.
+            // Keep the upstream fixture and account for the two newer defaults.
+            for axis in ["x", "y"] {
+                if c["input"]["camera"]["p"].get(axis).is_none() {
+                    expected["camera"]["p"][axis]["v"] = Value::from(0);
+                }
+            }
             assert_eq!(
                 canonical(&actual.unwrap_or_else(|e| panic!("case {case}: {e}"))),
-                canonical(&c["output"]),
+                canonical(&expected),
                 "source case {case}"
             );
         } else {

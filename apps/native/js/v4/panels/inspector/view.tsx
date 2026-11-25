@@ -13,6 +13,7 @@ import {
   SegmentedControl,
   TextField,
   ToolbarItem,
+  TreeItem,
   token,
 } from "../../src/components";
 import type { SurfaceProps } from "../../src/jsx-runtime";
@@ -22,6 +23,7 @@ import type {
   Finish,
   Binding,
   MenuItem,
+  PartsSectionData,
   Row,
   RowAction,
   SectionAction,
@@ -165,6 +167,8 @@ function Action(props: {
   symbol?: string;
   tabIndex?: number;
   style?: SurfaceProps["style"];
+  onFocus?: SurfaceProps["onFocus"];
+  onBlur?: SurfaceProps["onBlur"];
   /** It opens a menu: VoiceOver says so, and the menu hangs from it. */
   menu?: boolean;
 }) {
@@ -379,94 +383,6 @@ function Field({
         />
       );
     case "choice":
-      if (control.picker === "model-part" && control.layer && control.parts) {
-        const layer = control.layer;
-        const parts = control.parts;
-        const currentKey =
-          typeof control.value === "string" ? control.value : null;
-        const currentPart = currentKey
-          ? parts.find((p) => p.v === currentKey)
-          : undefined;
-        const label = currentPart ? currentPart.label : "Whole Model";
-        const parentKey = control.parent ?? null;
-        const canStepUp = !!control.hasSelectedPart;
-        return (
-          <div style={{ ...horizontal, flexGrow: 1, gap: token("metrics.border") }}>
-            <Action
-              {...common}
-              disabled={bound.disabled}
-              style={{ ...menuWell, flexGrow: 1 }}
-              menu
-              children={[
-                ...(control.swatch
-                  ? [
-                      <div
-                        key="swatch"
-                        role="presentation"
-                        style={{
-                          width: token("metrics.gap"),
-                          height: token("metrics.gap"),
-                          borderRadius: token("metrics.inner_radius"),
-                          background: control.swatch,
-                          flexShrink: 0,
-                        }}
-                      />,
-                    ]
-                  : []),
-                ...menuValue(label),
-              ]}
-              onActivate={(event) =>
-                session.nativeRequest({
-                  type: "part-menu",
-                  row: row.id,
-                  layer,
-                  anchor: event.currentTarget,
-                  current: currentKey,
-                  parts,
-                })
-              }
-            />
-            <Action
-              id={`part-up:${row.id}`}
-              label="Select Parent Part"
-              tooltip="Select parent part"
-              symbol="arrow.up"
-              disabled={bound.disabled || !canStepUp}
-              style={{
-                ...well,
-                color: token(canStepUp ? "colors.text" : "colors.muted"),
-                symbolSize: token("metrics.symbol_inline"),
-              }}
-              onActivate={() =>
-                session.send({
-                  type: "set-value",
-                  row: row.id,
-                  value: parentKey,
-                })
-              }
-            />
-            <Action
-              id={`part-pick:${row.id}`}
-              label="Pick Part from Viewport"
-              tooltip="Pick part from 3D viewport (or double-click model)"
-              symbol="scope"
-              disabled={bound.disabled}
-              style={{
-                ...well,
-                color: token("colors.text"),
-                symbolSize: token("metrics.symbol_inline"),
-              }}
-              onActivate={() =>
-                session.nativeRequest({
-                  type: "part-pick",
-                  row: row.id,
-                  layer,
-                })
-              }
-            />
-          </div>
-        );
-      }
       return (
         <PopUpButton
           {...bound}
@@ -555,9 +471,11 @@ function Field({
 function Property({
   row,
   session,
+  partTransform,
 }: {
   row: Row;
   session: InspectorSession;
+  partTransform?: boolean;
   key?: string;
 }) {
   const disabled = !!row.locked || !!row.disabled;
@@ -572,7 +490,12 @@ function Property({
       type: "row-menu",
       anchor: event.currentTarget,
       row: row.id,
-      items: rowMenu(row),
+      items: partTransform
+        ? rowMenu(row).filter(
+            ({ action }) =>
+              action === "add-key" || action === "remove-animation",
+          )
+        : rowMenu(row),
     });
   return (
     <div
@@ -581,75 +504,19 @@ function Property({
         if (event.button === 2) requestMenu(event);
       }}
     >
-      {row.control.kind === "choice" &&
-      row.control.picker === "model-part" &&
-      row.control.hasSelectedPart &&
-      row.control.breadcrumbs &&
-      row.control.breadcrumbs.length > 1 ? (
-        <div
-          style={{
-            ...horizontal,
-            gap: token("metrics.border"),
-            paddingLeft: token("metrics.inset"),
-            paddingRight: token("metrics.inset"),
-            paddingBottom: token("metrics.border"),
-            flexWrap: "wrap",
-          }}
-        >
-          {row.control.breadcrumbs.flatMap((crumb, index, all) => {
-            const isLast = index === all.length - 1;
-            const sep =
-              index > 0
-                ? [
-                    <text
-                      key={`sep:${index}`}
-                      style={{
-                        color: token("colors.muted"),
-                        fontSize: token("typography.minimum"),
-                      }}
-                    >
-                      ›
-                    </text>,
-                  ]
-                : [];
-            return [
-              ...sep,
-              <Action
-                key={`crumb:${crumb.v ?? "whole"}`}
-                id={`crumb:${row.id}:${crumb.v ?? "whole"}`}
-                label={`Select ${crumb.label}`}
-                disabled={disabled || isLast}
-                style={{
-                  color: token(isLast ? "colors.text" : "colors.muted"),
-                  fontSize: token("typography.minimum"),
-                }}
-                children={crumb.label}
-                onActivate={() =>
-                  session.send({
-                    type: "set-value",
-                    row: row.id,
-                    value: crumb.v,
-                  })
-                }
-              />,
-            ];
-          })}
-        </div>
-      ) : null}
       <InspectorRow
         label={row.label}
         // The label is its own tooltip when it is cut; the row says only
         // why it cannot be edited.
         title={row.locked ? "Locked layers can’t be edited." : undefined}
-        // A multi-line editor grows its row; the label and diamond sit at its top.
+        // A multi-line editor grows its row from the standard one-line height.
         style={
           row.control.kind === "text" && row.control.multiline
             ? {
                 height: null,
                 minHeight: token("metrics.row"),
-                alignItems: "start",
-                paddingTop: token("metrics.inner_radius"),
-                paddingBottom: token("metrics.inner_radius"),
+                paddingTop: token("metrics.pill_inset"),
+                paddingBottom: token("metrics.pill_inset"),
               }
             : undefined
         }
@@ -678,7 +545,7 @@ function Property({
               // Option-click adds (or edits) an expression, as Option-click
               // on After Effects' stopwatch does (PM-502).
               onActivate={(event) =>
-                event.altKey
+                event.altKey && !partTransform
                   ? session.send({
                       type: "row-action",
                       row: row.id,
@@ -756,6 +623,291 @@ function Property({
         </div>
       ) : null}
     </div>
+  );
+}
+/** An explicit disclosure choice takes priority over automatic expansion. */
+const expandedParts = new Map<string, boolean>();
+const partRow = {
+  ...horizontal,
+  flexShrink: 0,
+  borderRadius: token("metrics.inner_radius"),
+  paddingLeft: token("metrics.gap"),
+  paddingRight: token("metrics.gap"),
+};
+const partName = {
+  flexGrow: 1,
+  flexShrink: 1,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: token("typography.label"),
+};
+const partIcon = {
+  color: token("colors.muted"),
+  symbolSize: token("metrics.symbol_inline"),
+  flexShrink: 0,
+};
+const disclosureSpace = { width: token("metrics.hit"), flexShrink: 0 };
+
+function PartsTree({
+  parts,
+  rows,
+  locked,
+  session,
+}: {
+  parts: PartsSectionData;
+  rows: Row[];
+  locked: boolean;
+  session: InspectorSession;
+}) {
+  const [, redraw] = useState(0);
+  const [hovered, setHovered] = useState<string>();
+  const [focusedEye, setFocusedEye] = useState<string>();
+  const { layer, active, activeName, activeEdited, items } = parts;
+  const byKey = new Map(items.map((part) => [part.v, part]));
+  const siblings = new Map<string | null, number>();
+  for (const { parent } of items)
+    siblings.set(parent, (siblings.get(parent) ?? 0) + 1);
+
+  const isOpen = (key: string) => {
+    const remembered = expandedParts.get(`${layer}:${key}`);
+    if (remembered !== undefined) return remembered;
+    if (active === key || active?.startsWith(`${key}_`)) return true;
+    const part = byKey.get(key);
+    return (
+      !!part &&
+      (siblings.get(part.parent) === 1 ||
+        (part.depth === 0 && items.length <= 24))
+    );
+  };
+  const setOpen = (key: string, open: boolean) => {
+    expandedParts.set(`${layer}:${key}`, open);
+    redraw((version) => version + 1);
+  };
+  const shown = items.filter(({ parent }) => {
+    for (let key = parent; key !== null; key = byKey.get(key)?.parent ?? null)
+      if (!isOpen(key)) return false;
+    return true;
+  });
+  const setValue = (row: string, value: string | boolean | null) => {
+    const target = session.inspect().target;
+    if (target.kind === "layers" && target.first.id === layer)
+      session.send({ type: "set-value", row, value });
+  };
+
+  return (
+    <>
+      <scroll
+        id="parts:scroll"
+        role="tree"
+        label="Model parts"
+        style={{
+          ...column,
+          maxHeight: token("metrics.sidebar"),
+          overflow: "scroll",
+          marginLeft: token("metrics.dock_gap"),
+          marginRight: token("metrics.dock_gap"),
+          paddingTop: token("metrics.pill_inset"),
+          paddingBottom: token("metrics.pill_inset"),
+        }}
+      >
+        <TreeItem
+          id="parts:whole"
+          label="Whole Model"
+          metadata={{ selectionRingOnly: true }}
+          selected={active === null}
+          onSelect={() => setValue("3d.part.select", null)}
+          style={{
+            ...partRow,
+            background: token(
+              active === null ? "colors.accent_wash" : "colors.panel",
+            ),
+          }}
+        >
+          <div style={disclosureSpace} />
+          <text
+            attr={{ symbol: "cube" }}
+            style={{
+              ...partIcon,
+              color: token(
+                active === null ? "colors.accent_text" : "colors.muted",
+              ),
+            }}
+          />
+          <text
+            style={{
+              ...partName,
+              paddingLeft: token("metrics.gap"),
+              color: token(
+                active === null ? "colors.accent_text" : "colors.text",
+              ),
+            }}
+          >
+            Whole Model
+          </text>
+        </TreeItem>
+        {shown.map((part) => {
+          const open = isOpen(part.v);
+          const selected = part.v === active;
+          const hasChildren = part.children > 0;
+          const eyeShown =
+            !part.visible || hovered === part.v || focusedEye === part.v;
+          return (
+            <TreeItem
+              key={part.v}
+              id={`parts:item:${part.v}`}
+              label={part.label}
+              value={part.edited ? "Changed" : undefined}
+              title={part.label}
+              metadata={{ selectionRingOnly: true }}
+              selected={selected}
+              expanded={hasChildren ? open : undefined}
+              onExpand={
+                hasChildren ? (next) => setOpen(part.v, next) : undefined
+              }
+              onSelect={() => setValue("3d.part.select", part.v)}
+              onPointerEnter={() => setHovered(part.v)}
+              onPointerLeave={() => setHovered(undefined)}
+              style={{
+                ...partRow,
+                background: token(
+                  selected
+                    ? "colors.accent_wash"
+                    : hovered === part.v
+                      ? "colors.hover"
+                      : "colors.panel",
+                ),
+              }}
+            >
+              {Array.from({ length: part.depth + 1 }, (_, level) => (
+                <div
+                  key={level}
+                  style={{ width: token("metrics.tree_indent"), flexShrink: 0 }}
+                />
+              ))}
+              {hasChildren ? (
+                <Action
+                  id={`parts:expand:${part.v}`}
+                  label={`${open ? "Collapse" : "Expand"} ${part.label}`}
+                  symbol={open ? "chevron.down" : "chevron.right"}
+                  style={partIcon}
+                  onActivate={(event) => {
+                    event.stopPropagation();
+                    setOpen(part.v, !open);
+                  }}
+                />
+              ) : (
+                <div style={disclosureSpace} />
+              )}
+              <text
+                style={{
+                  ...partName,
+                  color: token(
+                    !part.visible
+                      ? "colors.muted"
+                      : selected
+                        ? "colors.accent_text"
+                        : "colors.text",
+                  ),
+                }}
+              >
+                {part.label}
+              </text>
+              {part.edited ? (
+                <div
+                  title="Moved or animated"
+                  style={{
+                    width: token("metrics.gap"),
+                    height: token("metrics.gap"),
+                    borderRadius: token("metrics.inner_radius"),
+                    background: token("colors.accent"),
+                    flexShrink: 0,
+                  }}
+                />
+              ) : null}
+              <Action
+                id={`parts:visible:${part.v}`}
+                label={`${part.visible ? "Hide" : "Show"} ${part.label}`}
+                symbol={part.visible ? "eye" : "eye.slash"}
+                active={!part.visible}
+                disabled={locked}
+                style={{ ...partIcon, opacity: eyeShown ? 1 : 0 }}
+                onFocus={() => setFocusedEye(part.v)}
+                onBlur={() => setFocusedEye(undefined)}
+                onActivate={(event) => {
+                  event.stopPropagation();
+                  setValue(`3d.part.${part.v}.visible`, !part.visible);
+                }}
+              />
+            </TreeItem>
+          );
+        })}
+      </scroll>
+      {active !== null ? (
+        <>
+          <div
+            style={{
+              ...horizontal,
+              height: token("metrics.row"),
+              marginTop: token("metrics.gap"),
+              borderTopWidth: token("metrics.border"),
+              borderColor: token("colors.separator"),
+              paddingLeft: token("metrics.inset"),
+              paddingRight: token("metrics.inset"),
+            }}
+          >
+            <text
+              style={{
+                ...partName,
+                color: token("colors.text"),
+                fontWeight: token("typography.semibold_weight"),
+              }}
+            >
+              {activeName}
+            </text>
+            {activeEdited ? (
+              <Action
+                id="parts:reset"
+                label={`Reset ${activeName}`}
+                tooltip={`Put ${activeName} back where the model file has it`}
+                disabled={locked}
+                style={{
+                  color: token("colors.muted"),
+                  fontSize: token("typography.label"),
+                }}
+                onActivate={() => setValue(`3d.part.${active}.reset`, null)}
+              >
+                Reset
+              </Action>
+            ) : null}
+          </div>
+          {rows
+            .filter((row) => !row.hidden)
+            .map((row) => (
+              <Property
+                key={row.id}
+                row={row}
+                session={session}
+                partTransform
+              />
+            ))}
+        </>
+      ) : (
+        <text
+          style={{
+            color: token("colors.muted"),
+            fontSize: token("typography.label"),
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            paddingTop: token("metrics.pill_inset"),
+            paddingBottom: token("metrics.pill_inset"),
+          }}
+        >
+          Double-click the model in the viewer to pick a part, then drag it with
+          the handles.
+        </text>
+      )}
+    </>
   );
 }
 /** 3d-studio.md §8 Finish shelf: `m.row` squares, `m.gap` apart, with a
@@ -1142,11 +1294,21 @@ export function InspectorPanel({
                 <Property key={row.id} row={row} session={session} />
               )),
             ])}
-            {section.rows
-              .filter((row) => !row.hidden)
-              .map((row) => (
-                <Property key={row.id} row={row} session={session} />
-              ))}
+            {section.parts ? (
+              <PartsTree
+                key={section.parts.layer}
+                parts={section.parts}
+                rows={section.rows}
+                session={session}
+                locked={target.kind === "layers" && target.first.locked}
+              />
+            ) : (
+              section.rows
+                .filter((row) => !row.hidden)
+                .map((row) => (
+                  <Property key={row.id} row={row} session={session} />
+                ))
+            )}
             {section.note ? (
               <text
                 style={{
@@ -1208,9 +1370,7 @@ export function InspectorPanel({
         >
           Properties
         </text>
-        {!effects &&
-        target.kind === "layers" &&
-        target.first.acceptsEffects ? (
+        {!effects && target.kind === "layers" && target.first.acceptsEffects ? (
           <Action
             id="inspector:add-effect"
             label="Add Effect"

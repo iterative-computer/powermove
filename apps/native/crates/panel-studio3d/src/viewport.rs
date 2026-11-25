@@ -7,6 +7,13 @@
 //! reaches the viewer. Imported models use their retained import bounds before
 //! geometry loads, with a unit envelope only for older unmeasured imports.
 use crate::{Result, invalid};
+use pm_eval::{
+    parenting::transform_aim,
+    space3d::{
+        Camera3d, default_camera_25d, multiply, pixel_to_scene, scene_units_per_pixel,
+        uses_default_25d_camera,
+    },
+};
 use pm_kernel::Published;
 use pm_scene3d::{
     from_model,
@@ -22,6 +29,8 @@ pub struct Item {
     pub role: Role,
     /// True for 3D Null layers (empty scene-unit transform locators).
     pub is_null: bool,
+    /// A flat 3D layer uses the ordinary selection tools through the shot.
+    pub is_plane: bool,
     pub name: String,
     pub locked: bool,
     /// Evaluated world transform matrix (column-major 4×4).
@@ -50,7 +59,7 @@ pub struct Item {
     pub position: Vec3,
     pub rotation: Vec3,
     pub scale: Vec3,
-    /// Extruded text and shapes keep composition-pixel channels (y down, z
+    /// Flat 3D layers and extrusions keep composition-pixel channels (y down, z
     /// into the screen): scene units per pixel, `None` for Studio layers.
     pub pixels: Option<f64>,
 }
@@ -58,6 +67,8 @@ pub struct Item {
 pub struct Scene {
     /// The composition's camera pose (the shot).
     pub shot: Pose,
+    /// An active authored camera can store camera navigation.
+    pub has_camera: bool,
     pub lens: Lens,
     /// Perspective lens retained separately from an orthographic shot camera.
     pub editor_lens: Lens,
@@ -213,10 +224,37 @@ impl Scene {
     }
     /// The nearest layer the ray meets, with the face it meets.
     pub fn pick(&self, ray: &Ray) -> Option<Hit> {
+        self.pick_where(ray, |_| true)
+    }
+
+    pub fn pick_where(&self, ray: &Ray, include: impl Fn(&Item) -> bool) -> Option<Hit> {
         self.items
             .iter()
+            .filter(|item| include(item))
             .filter_map(|item| {
-                let (t, normal) = slab(ray, item.bounds)?;
+                let (t, normal) = if item.is_plane {
+                    let c = item.box_corners?;
+                    let (x, y) = (sub(c[1], c[0]), sub(c[2], c[0]));
+                    let normal = normalize(cross(x, y));
+                    let facing = dot(ray.dir, normal);
+                    if facing.abs() < 1e-12 {
+                        return None;
+                    }
+                    let t = dot(sub(c[0], ray.origin), normal) / facing;
+                    let p = sub(add(ray.origin, mul(ray.dir, t)), c[0]);
+                    let xx = dot(x, x);
+                    let yy = dot(y, y);
+                    let xy = dot(x, y);
+                    let area = xx * yy - xy * xy;
+                    let u = (dot(p, x) * yy - dot(p, y) * xy) / area;
+                    let v = (dot(p, y) * xx - dot(p, x) * xy) / area;
+                    if t < 0. || !(0. ..=1.).contains(&u) || !(0. ..=1.).contains(&v) {
+                        return None;
+                    }
+                    (t, normal)
+                } else {
+                    slab(ray, item.bounds)?
+                };
                 Some(Hit {
                     id: item.id.clone(),
                     point: add(ray.origin, mul(ray.dir, t)),
@@ -274,8 +312,7 @@ fn translation(m: &[f64; 16]) -> Vec3 {
     )
     .map_or([0.; 3], |b| b.min)
 }
-/// Whether a composition node has a 3D object, light, camera, or Studio 3D null
-/// layer (read from the nodes).
+/// Whether the composition supports 3D navigation, read from its layer nodes.
 fn has_roles(comp: &pm_model::Node) -> bool {
     let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
     else {
@@ -292,20 +329,11 @@ fn has_roles(comp: &pm_model::Node) -> bool {
                 }
                 _ => false,
             });
-        let is_studio_null = matches!(
-            layer.get("type").map(pm_model::Node::kind),
-            Some(pm_model::NodeKind::String(s)) if s.as_str() == Some("null")
-        ) && matches!(
-            layer.get("threeD").map(pm_model::Node::kind),
-            Some(pm_model::NodeKind::Bool(true))
-        ) && matches!(
-            layer
-                .get("d")
-                .and_then(|d| d.get("studio3d"))
-                .map(pm_model::Node::kind),
-            Some(pm_model::NodeKind::Bool(true))
-        );
-        is_role || is_studio_null
+        is_role
+            || matches!(
+                layer.get("threeD").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true))
+            )
     })
 }
 /// Read on a worker from one publication at `time`.
@@ -401,7 +429,7 @@ pub fn model_part(
 fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> Eye {
     let cam = &r.scene["camera"];
     let n = |k: &str, d: f64| cam["p"][k]["v"].as_f64().unwrap_or(d);
-    let pose = Pose {
+    let mut pose = Pose {
         ortho: false,
         roll: 0.,
         position: r
@@ -415,6 +443,18 @@ fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> E
             .unwrap_or([n("targetX", 0.), n("targetY", 0.), n("targetZ", 0.)]),
         zoom: n("zoom", 1.),
     };
+    if let Some(up) = r.camera_up {
+        pose.roll = Camera3d {
+            position: pose.position,
+            target: pose.target,
+            roll: 0.,
+            fov: n("fov", 45.),
+            zoom: pose.zoom,
+            ortho: false,
+            ortho_height: 6.,
+        }
+        .roll_from_up(up);
+    }
     let width = comp["w"].as_f64().unwrap_or(1920.);
     let height = comp["h"].as_f64().unwrap_or(1080.);
     let lens = if cam["projection"] == "orthographic" {
@@ -465,6 +505,18 @@ pub fn pick_part_at(
     Ok(best)
 }
 pub fn scene(p: &Published, time: f64) -> Result<Scene> {
+    let mut mirror = pm_kernel::QueryMirror::new(p);
+    scene_with_bounds(p, time, |id| {
+        mirror.queries().bounds(None, id, time).ok().flatten()
+    })
+}
+
+/// Build the viewport with the host's typography-aware bounds query.
+pub fn scene_with_bounds(
+    p: &Published,
+    time: f64,
+    mut bounds_of: impl FnMut(&str) -> Option<pm_kernel::Bounds>,
+) -> Result<Scene> {
     let comp_id = p.snapshot.open_comp();
     let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
@@ -474,6 +526,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
     if !has_roles(comp) {
         return Err(invalid("No 3D layers"));
     }
+    let default_25d = uses_default_25d_camera(pm_kernel::model::layers_of(comp));
     let comp = from_model(&comp.to_value())?;
     let layers = comp["layers"].as_array().cloned().unwrap_or_default();
     let r = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp_id.as_deref(), time)
@@ -485,24 +538,38 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
             .unwrap_or(pm_model::Value::Null),
     )?;
     let Eye {
-        pose: shot,
-        lens,
+        pose: mut shot,
+        mut lens,
         width,
         height,
     } = eye_of(&r, &comp);
     let n = |key: &str, default| r.scene["camera"]["p"][key]["v"].as_f64().unwrap_or(default);
+    let default_camera = default_camera_25d(width, height);
+    let locked = pm_kernel::model::list_layers(root, comp_id.as_deref())
+        .into_iter()
+        .filter(|layer| layer.effectively_locked)
+        .map(|layer| layer.id)
+        .collect::<std::collections::HashSet<_>>();
+    let legacy_framing = default_25d && r.camera_id.is_none();
     let editor_lens = Lens::Perspective {
-        fov: n("fov", 45.),
+        fov: if legacy_framing {
+            default_camera.fov
+        } else {
+            n("fov", 45.)
+        },
         aspect: width / height,
         near: n("near", 0.01).max(1e-4),
         far: n("far", 1000.).max(1.),
     };
+    if legacy_framing {
+        shot.position = default_camera.position;
+        shot.target = default_camera.target;
+        lens = editor_lens;
+    }
     let mut mirror = pm_kernel::QueryMirror::new(p);
-    let mut channels = |id: &str, keys: [&str; 3], d: f64| -> Vec3 {
+    let channels = |q: &mut pm_kernel::QueryContext, id: &str, keys: [&str; 3], d: f64| -> Vec3 {
         std::array::from_fn(|i| {
-            mirror
-                .queries()
-                .evaluate(None, id, keys[i], time)
+            q.evaluate(None, id, keys[i], time)
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(d)
@@ -555,13 +622,29 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                 .collect::<Option<Vec<Vec3>>>()
                 .and_then(|v| v.try_into().ok());
             items.push(Item {
-                position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
-                rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
-                scale: channels(&id, ["scale.x", "scale.y", "scale.z"], 100.),
+                position: channels(
+                    mirror.queries(),
+                    &id,
+                    ["position.x", "position.y", "position.z"],
+                    0.,
+                ),
+                rotation: channels(
+                    mirror.queries(),
+                    &id,
+                    ["rotation.x", "rotation.y", "rotation"],
+                    0.,
+                ),
+                scale: channels(
+                    mirror.queries(),
+                    &id,
+                    ["scale.x", "scale.y", "scale.z"],
+                    100.,
+                ),
                 pixels: None,
                 id,
                 role: Role::Object,
                 is_null: true,
+                is_plane: false,
                 name,
                 locked,
                 world: *world,
@@ -577,6 +660,68 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
             continue;
         }
         let Some(role) = schema::role(l) else {
+            let Some(id) = l["id"].as_str() else { continue };
+            let q = mirror.queries();
+            if matches!(l["type"].as_str(), Some("group" | "audio" | "adjustment"))
+                || pm_scene3d::extrusion::enabled(l)
+                || !q.is_3d_layer(None, id, time).unwrap_or(false)
+                || !q.active(None, id, time).unwrap_or(false)
+            {
+                continue;
+            }
+            let (Some(local), Ok(pixel_world), Ok(position_world)) = (
+                bounds_of(id),
+                q.world_3d(None, id, time, false),
+                q.world_3d(None, id, time, true),
+            ) else {
+                continue;
+            };
+            let position = channels(q, id, ["position.x", "position.y", "position.z"], 0.);
+            let bridge = pixel_to_scene(width, height);
+            let world = multiply(&bridge, &pixel_world);
+            let parent = multiply(
+                &position_world,
+                &pm_eval::space3d::translation(0., 0., -position[2]),
+            );
+            let parent_world = multiply(&bridge, &parent);
+            let local = Bounds {
+                min: [local.x0, local.y0, 0.],
+                max: [local.x1, local.y1, 0.],
+            };
+            let Ok(bounds) = pm_scene3d::geometry::transform(local, world) else {
+                continue;
+            };
+            let corners = std::array::from_fn(|n| {
+                let p = std::array::from_fn(|i| {
+                    if n & (1 << i) == 0 {
+                        local.min[i]
+                    } else {
+                        local.max[i]
+                    }
+                });
+                transform_aim(&world, &p)
+            });
+            items.push(Item {
+                id: id.into(),
+                role: Role::Object,
+                is_null: false,
+                is_plane: true,
+                name: l["name"].as_str().unwrap_or_default().into(),
+                locked: locked.contains(id),
+                world,
+                parent_world,
+                bounds,
+                box_corners: Some(corners),
+                pivot: transform_aim(&parent_world, &position),
+                target: None,
+                aim: None,
+                light: None,
+                shape: [0.; 3],
+                position,
+                rotation: channels(q, id, ["rotation.x", "rotation.y", "rotation"], 0.),
+                scale: channels(q, id, ["scale.x", "scale.y", "scale.z"], 100.),
+                pixels: Some(scene_units_per_pixel(height)),
+            });
             continue;
         };
         let id = l["id"].as_str().unwrap_or_default().to_string();
@@ -628,13 +773,29 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     .collect::<Option<Vec<Vec3>>>()
                     .and_then(|v| v.try_into().ok());
                 items.push(Item {
-                    position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
-                    rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
-                    scale: channels(&id, ["scale.x", "scale.y", "scale.z"], 100.),
+                    position: channels(
+                        mirror.queries(),
+                        &id,
+                        ["position.x", "position.y", "position.z"],
+                        0.,
+                    ),
+                    rotation: channels(
+                        mirror.queries(),
+                        &id,
+                        ["rotation.x", "rotation.y", "rotation"],
+                        0.,
+                    ),
+                    scale: channels(
+                        mirror.queries(),
+                        &id,
+                        ["scale.x", "scale.y", "scale.z"],
+                        100.,
+                    ),
                     pixels: None,
                     id,
                     role,
                     is_null: false,
+                    is_plane: false,
                     name,
                     locked,
                     world: *world,
@@ -655,13 +816,24 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                 let pivot = translation(world);
                 let s = 0.18;
                 items.push(Item {
-                    position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
-                    rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
+                    position: channels(
+                        mirror.queries(),
+                        &id,
+                        ["position.x", "position.y", "position.z"],
+                        0.,
+                    ),
+                    rotation: channels(
+                        mirror.queries(),
+                        &id,
+                        ["rotation.x", "rotation.y", "rotation"],
+                        0.,
+                    ),
                     scale: [100.; 3],
                     pixels: None,
                     id: id.clone(),
                     role,
                     is_null: false,
+                    is_plane: false,
                     name,
                     locked,
                     world: *world,
@@ -695,6 +867,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
     }
     Ok(Scene {
         shot,
+        has_camera: r.camera_id.is_some(),
         lens,
         editor_lens,
         width,
@@ -764,6 +937,37 @@ mod tests {
         }
     }
     #[test]
+    fn flat_3d_layers_enable_navigation_with_the_legacy_eye() {
+        let value = serde_json::json!({"w":800,"h":500,"layers":[{"id":"flat","type":"solid","threeD":true}]});
+        let root =
+            pm_model::Node::from_value(pm_model::json::parse(&value.to_string()).unwrap(), 1);
+        assert!(has_roles(&root));
+        assert!(uses_default_25d_camera(pm_kernel::model::layers_of(&root)));
+        let camera = default_camera_25d(800., 500.);
+        let eye = Eye {
+            pose: Pose {
+                position: camera.position,
+                target: camera.target,
+                roll: camera.roll,
+                ortho: camera.ortho,
+                zoom: camera.zoom,
+            },
+            lens: Lens::Perspective {
+                fov: camera.fov,
+                aspect: 800. / 500.,
+                near: 0.01,
+                far: 1000.,
+            },
+            width: 800.,
+            height: 500.,
+        };
+        let world = transform_aim(&pixel_to_scene(800., 500.), &[120., 75., 0.]);
+        let (at, _) = eye.project(world).unwrap();
+        assert!((at[0] - 120.).abs() < 1e-9);
+        assert!((at[1] - 75.).abs() < 1e-9);
+    }
+
+    #[test]
     fn imported_outline_uses_retained_geometry_before_loading_the_mesh() {
         let record = serde_json::json!({"kind":"model", "native3dBounds":{
             "version":1, "bounds":[-0.2,-1.0,-0.2,0.2,1.0,0.2]
@@ -816,6 +1020,7 @@ mod tests {
             id: id.into(),
             role: Role::Object,
             is_null: false,
+            is_plane: false,
             name: id.into(),
             locked: false,
             bounds: b(z),
@@ -834,6 +1039,7 @@ mod tests {
         };
         let scene = Scene {
             shot: e.pose,
+            has_camera: true,
             lens: e.lens,
             editor_lens: e.lens,
             width: 1920.,
@@ -882,6 +1088,7 @@ mod tests {
                 far: 1000.,
             },
             shot: pose,
+            has_camera: true,
             lens: Lens::Perspective {
                 fov: 45.,
                 aspect: 1.,
@@ -956,6 +1163,7 @@ mod tests {
             id: id.into(),
             role: Role::Object,
             is_null,
+            is_plane: false,
             name: id.into(),
             locked: false,
             bounds: Bounds {
@@ -977,6 +1185,7 @@ mod tests {
         };
         let scene = Scene {
             shot: e.pose,
+            has_camera: true,
             lens: e.lens,
             editor_lens: e.lens,
             width: 1920.,

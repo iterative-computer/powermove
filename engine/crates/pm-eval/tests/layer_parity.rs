@@ -15,12 +15,13 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use pm_eval::bounds::Bounds;
 use pm_model::json::{Value, parse};
 
 #[path = "support/layer_replay.rs"]
 mod layer_replay;
 
-use layer_replay::{V, replay_with};
+use layer_replay::{V, bounds_obj, get, replay_with};
 
 #[derive(Default)]
 struct Stats {
@@ -131,10 +132,39 @@ fn memoized_layer_queries_match_typescript() {
     layer_queries_match(true);
 }
 
+// Native 3D group bounds use the members' full transforms. The frozen
+// TypeScript vectors describe their older 2D bounds. Keep both witnesses
+// and use the native reference only for the affected recorded queries.
+fn native_group_bounds(reference: &Value, label: &str) -> Option<V> {
+    let (composition, case) = label.split_once(" bounds ")?;
+    let case = parse(case).ok()?;
+    let layer = get(&case, "layer")?.as_f64()? as usize;
+    let time = get(&case, "t")?.as_str()?;
+    let corners = get(reference, &format!("{composition}:{layer}:{time}"))?.as_array()?;
+    let [Value::Number(x0), Value::Number(y0), Value::Number(x1), Value::Number(y1)] = corners.as_slice() else {
+        panic!("native group bounds must contain four corners");
+    };
+    Some(bounds_obj(&Bounds {
+        x0: *x0,
+        y0: *y0,
+        x1: *x1,
+        y1: *y1,
+        w: x1 - x0,
+        h: y1 - y0,
+        ax: 0.0,
+        ay: 0.0,
+        z: None,
+    }))
+}
+
 fn layer_queries_match(memoize: bool) {
     let vectors = load();
     let mut stats = Stats::default();
     let (mut fragile, mut fragile_differ) = (0, 0);
+    let native_bounds = std::env::var_os("PM_LAYER_VECTORS").is_none().then(|| {
+        parse(include_str!("vectors/native-group-bounds.json")).unwrap()
+    });
+    let mut native_cases = 0;
     replay_with(&vectors, memoize, &mut |op, what, ours, want| {
         *stats.ops.entry(op.to_owned()).or_default() += 1;
         if op.ends_with("(fragile)") {
@@ -146,9 +176,17 @@ fn layer_queries_match(memoize: bool) {
                 fragile_differ += 1;
             }
         } else {
-            stats.check(what, ours, want);
+            let native = native_bounds
+                .as_ref()
+                .filter(|_| op == "bounds")
+                .and_then(|reference| native_group_bounds(reference, &what()));
+            native_cases += usize::from(native.is_some());
+            stats.check(what, ours, native.as_ref().unwrap_or(want));
         }
     });
+    if let Some(Value::Object(reference)) = native_bounds {
+        assert_eq!(native_cases, reference.len(), "native group bounds coverage");
+    }
 
     eprintln!(
         "layer vectors: {} numbers ({} bit-identical, {} angles equal modulo 360, max relative error {:.3e}), {} other values ({} error messages)",

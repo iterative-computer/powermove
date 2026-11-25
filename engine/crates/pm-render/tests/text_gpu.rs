@@ -25,6 +25,11 @@ fn main() {
             None,
         ))
     };
+    if std::env::var_os("PM_LARGE_GROUP_TEST_ONLY").is_some() {
+        frame_prefix_large_plane_groups_under_adjustment();
+        return;
+    }
+    frame_prefix_large_plane_groups_under_adjustment();
     packed_glow_specialization_preserves_gpu_bits();
     density_replay_keeps_compat_passthrough_layers(fonts());
     a_base_text_window_reads_the_same_texels_as_the_whole_canvas(fonts());
@@ -1435,5 +1440,215 @@ fn density_replay_keeps_compat_passthrough_layers(fonts: Box<dyn pm_render::text
     assert!(
         draw(&mut renderer) == expected,
         "native overrides preserve the density replay"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn frame_prefix_large_plane_groups_under_adjustment() {
+    use pm_model::{
+        Document,
+        json::{Value, parse},
+        patch::{Patch, PathPart},
+    };
+    use pm_protocol::{color::Precision, common::Size};
+    use pm_render::{MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use std::time::Instant;
+    use support::doc::{ch, layer, no_fill, project};
+
+    let renderer = |reuse| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&pm_render::builtin_definitions())
+            .unwrap();
+        r.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+            None,
+        ))));
+        r.set_draw_reuse(reuse);
+        r
+    };
+    let (mut cached, mut fresh) = (renderer(true), renderer(false));
+    let mut adjustment = layer("adjustment", "adjustment", json!({}), 0., 0., 10.);
+    adjustment["fx"] = json!([{"id":"glow","type":"glow","on":true,"p":{
+        "radius": ch(json!(12)), "threshold": ch(json!(20)), "intensity": ch(json!(150))
+    }}]);
+    let mut mover = layer("mover", "null", json!({}), 0., 0., 10.);
+    mover["threeD"] = json!(true);
+    let mut wash = layer(
+        "wash",
+        "solid",
+        json!({"w":160,"h":100,"color":"#884455"}),
+        50.,
+        80.,
+        10.,
+    );
+    wash["parent"] = json!("mover");
+    wash["threeD"] = json!(true);
+    let mut layers = vec![adjustment, mover, wash];
+    for (name, duration) in [("active", 10.), ("inactive", 6.)] {
+        let mut group = layer(name, "group", json!({}), 0., 0., duration);
+        group["threeD"] = json!(true);
+        group["p"]["opacity"] = ch(json!(92));
+        layers.push(group);
+        for i in 0..300 {
+            let (ty, data) = if i < 280 && i % 42 == 1 {
+                (
+                    "shader",
+                    json!({
+                        "w": 36, "h": 20,
+                        "code": "uniform float gain;\nvoid main(){fragColor=vec4(gain,abs(sin(iTime)),0.5,1.0);}",
+                        "uniforms": {"gain":ch(json!(0.3))}
+                    }),
+                )
+            } else if i % 12 == 0 {
+                (
+                    "text",
+                    json!({"text":"Menu","font":"Helvetica","size":16,"color":"#f2f2f2"}),
+                )
+            } else {
+                (
+                    "shape",
+                    json!({"shape":"ellipse","w":30,"h":18,"color":"#3080a0"}),
+                )
+            };
+            let mut child = layer(
+                &format!("{name}-{i}"),
+                ty,
+                data,
+                30. + (i % 24) as f64 * 72.,
+                35. + (i / 24) as f64 * 70.,
+                duration,
+            );
+            child["group"] = json!(name);
+            child["threeD"] = json!(i % 2 == 0);
+            layers.push(child);
+        }
+    }
+    let mut doc = Document::new(
+        Some(parse(&project(1920, 1080, 10., no_fill(), layers).to_string()).unwrap()),
+        1,
+    );
+    let paths = MapResolver::default();
+    let key = |k: &str| PathPart::Key(k.into());
+    let request = RenderRequest::at_scale(Size::new(1920, 1080), 1., Precision::Float16);
+    let time = support::ticks(6.2);
+    let draw = |renderer: &mut Renderer, doc: &Document| {
+        let start = Instant::now();
+        let frame = renderer
+            .render(doc, "Ptest-root", time, &request, &paths)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let submission = start.elapsed().as_secs_f64() * 1000.;
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        (pixels, submission, start.elapsed().as_secs_f64() * 1000.)
+    };
+    for _ in 0..3 {
+        draw(&mut cached, &doc);
+        draw(&mut fresh, &doc);
+    }
+    let mut cached_ms = Vec::new();
+    let mut fresh_ms = Vec::new();
+    let before = cached.draw_reuse_stats();
+    for step in 0..8 {
+        let (index, x) = if step == 7 {
+            (4, 48.)
+        } else {
+            (1, step as f64 * 3. + 1.)
+        };
+        let mut path = vec![key("layers"), PathPart::Index(index as f64)];
+        path.extend(["p", "position.x", "v"].map(key));
+        // Viewer publications keep immutable snapshots alive across edits.
+        let mut next = doc.clone();
+        next.apply(&[Patch::set(path, Value::Number(x))]).unwrap();
+        let step_before = cached.draw_reuse_stats();
+        doc = next;
+        let (a, a_submit, a_total) = draw(&mut cached, &doc);
+        let (b, b_submit, b_total) = draw(&mut fresh, &doc);
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+            "step {step}"
+        );
+        let stats = cached.draw_reuse_stats();
+        if step == 7 {
+            assert_eq!(
+                stats.group_hits, step_before.group_hits,
+                "the changed group must redraw"
+            );
+            assert!(stats.planned > step_before.planned + 1);
+        } else {
+            cached_ms.push((a_submit, a_total));
+            fresh_ms.push((b_submit, b_total));
+        }
+    }
+    let after = cached.draw_reuse_stats();
+    assert!(
+        after.reused >= before.reused + 14,
+        "{before:?} -> {after:?}"
+    );
+    assert!(
+        after.group_hits >= before.group_hits + 7,
+        "{before:?} -> {after:?}"
+    );
+    assert!(
+        after.planned <= before.planned + 320,
+        "{before:?} -> {after:?}"
+    );
+
+    let mut path = vec![key("layers"), PathPart::Index(5.)];
+    path.extend(["d", "uniforms", "gain", "v"].map(key));
+    doc.apply(&[Patch::set(path, Value::Number(0.75))]).unwrap();
+    let (a, ..) = draw(&mut cached, &doc);
+    let (b, ..) = draw(&mut fresh, &doc);
+    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+    assert_eq!(cached.draw_reuse_stats().group_hits, after.group_hits);
+
+    // At full opacity a collapsed group is flattened. Reuse its plain
+    // prefix before the same adjustment, including the text and planes.
+    let mut path = vec![key("layers"), PathPart::Index(3.)];
+    path.extend(["p", "opacity", "v"].map(key));
+    doc.apply(&[Patch::set(path, Value::Number(100.))]).unwrap();
+    // Limit work to the viewer's visible region; the glow expands its
+    // accumulator, so a kept prefix must cover that expanded region.
+    let mut request = request;
+    request.region = Some(pm_protocol::common::PixelRect {
+        x: 30,
+        y: 20,
+        width: 900,
+        height: 700,
+    });
+    let draw_roi = |renderer: &mut Renderer, doc: &Document| {
+        let frame = renderer
+            .render(doc, "Ptest-root", time, &request, &paths)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        (renderer.read_rgba(&frame).unwrap(), frame.legend)
+    };
+    for _ in 0..2 {
+        assert_eq!(draw_roi(&mut cached, &doc), draw_roi(&mut fresh, &doc));
+    }
+    let before_prefix = cached.draw_reuse_stats();
+    for x in [27., 36.] {
+        let mut path = vec![key("layers"), PathPart::Index(1.)];
+        path.extend(["p", "position.x", "v"].map(key));
+        doc.apply(&[Patch::set(path, Value::Number(x))]).unwrap();
+        assert_eq!(draw_roi(&mut cached, &doc), draw_roi(&mut fresh, &doc));
+    }
+    let after_prefix = cached.draw_reuse_stats();
+    assert!(
+        after_prefix.prefix_frames > before_prefix.prefix_frames,
+        "{before_prefix:?} -> {after_prefix:?}"
+    );
+    let median = |samples: &[(f64, f64)], metric: fn(&(f64, f64)) -> f64| {
+        let mut sorted: Vec<_> = samples.iter().map(metric).collect();
+        sorted.sort_by(f64::total_cmp);
+        sorted[sorted.len() / 2]
+    };
+    eprintln!(
+        "600 layers, submission {:.1} -> {:.1} ms, render + readback {:.1} -> {:.1} ms, \
+         cache {before:?} -> {after:?}, prefix {before_prefix:?} -> {after_prefix:?}",
+        median(&fresh_ms, |t| t.0),
+        median(&cached_ms, |t| t.0),
+        median(&fresh_ms, |t| t.1),
+        median(&cached_ms, |t| t.1),
     );
 }

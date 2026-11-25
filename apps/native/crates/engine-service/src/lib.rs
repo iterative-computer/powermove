@@ -3895,7 +3895,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // again for it under the stamp it shows (an export estimate holds
         // that stamp).
         let ask = ask.filter(|ask| {
-            if !shared.disk.draws_studio(&ask.scene) {
+            if !shared.disk.draws_studio(&ask.scene)
+                && state
+                    .views
+                    .get(&ask.id)
+                    .is_none_or(|view| view.studio_view == studio::ViewCamera::Active)
+            {
                 return true;
             }
             if let (Some(v), Some(r)) = (state.views.get_mut(&ask.id), runtime.get_mut(&ask.id))

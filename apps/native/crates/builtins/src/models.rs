@@ -1872,26 +1872,23 @@ impl Backend {
         }
     }
     /// The Easing panel's view: how many keyframes are selected (what its
-    /// actions change) and the preset curves it offers, in v1's order.
+    /// actions change) and the kernel preset curves it offers.
     pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
-        self.sync()?;
         let Some(p) = self.published() else {
             return Ok(json!({"open": false, "count": 0, "presets": easing_presets(), "library": crate::timeline_easing::inspect(&self.kernel)}));
         };
-        let (curve, mixed) = p.snapshot.root().map(|root| crate::timeline_easing::selected_curve(root, p.selection.keys())).unwrap_or((None, false));
-        let interpolation = p.selection.keys().first().and_then(|id| {
-            let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
-            let key = wire(&index.key(id)?.2.stored.to_value());
-            Some(if key["autoBezier"] == true { "auto".to_owned() }
-                else if key["hold"] == true { "hold".to_owned() }
-                else { key["outInterp"].as_str().unwrap_or("linear").to_owned() })
-        });
+        let selected = p
+            .snapshot
+            .root()
+            .map(|root| crate::timeline_easing::selected_ease(root, &p.selection))
+            .unwrap_or_default();
         Ok(json!({
             "open": true,
-            "curve": curve,
-            "mixed": mixed,
-            "interpolation": interpolation,
+            "curve": selected.curve,
+            "mixed": selected.mixed,
+            "interpolation": selected.interpolation,
             "count": p.selection.keys().len(),
+            "selection": [p.snapshot.doc_id, p.selection.keys(), p.selection.key_layers()],
             "revision": p.revision().to_string(),
             "presets": easing_presets(),
             "library": crate::timeline_easing::inspect(&self.kernel),

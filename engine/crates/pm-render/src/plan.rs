@@ -241,11 +241,11 @@ pub enum Source {
         composition_rate: pm_time::Rate,
     },
     /// A nested composition (precomp) or a group's compositing boundary.
-    Comp(Box<CompPlan>),
+    Comp(Arc<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
     /// Shape content (`crate::vector`).
-    Vector(Box<crate::vector::VectorSource>),
+    Vector(Arc<crate::vector::VectorSource>),
     /// A shader layer or an extension fragment layer
     /// (`crate::shader_layers`).
     Shader(Box<crate::shader_layers::ShaderSource>),
@@ -256,7 +256,7 @@ pub enum Source {
     Compat(CompatDraw),
     /// Motion-blur samples accumulated with additive blending into a
     /// transparent target in the parent's pixel space (`crate::motion`).
-    Accumulate(Box<CompPlan>),
+    Accumulate(Arc<CompPlan>),
 }
 
 /// An SVG image layer of a frame.
@@ -409,13 +409,24 @@ impl Build<'_> {
         }
         scaled_world(scope, layer, time, scale, self.origin)
     }
-    fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
+    pub(crate) fn can_reuse_draws(&self) -> bool {
+        !self.compat_probe_only
+            && self.material.is_none()
+            && self.source_raster.is_none()
+            && self.options3d.studio.is_none()
+            && self.compat.is_none_or(|raster| {
+                !raster.producing(crate::compat::CompatSource::RasterOverride)
+            })
+    }
+
+    fn pass_facts(&mut self, comp: &Comp<'_>, all: &[&Node]) -> std::sync::Arc<PassFacts> {
+        let layers = comp.layers();
         let key = (layers.as_ptr() as usize, layers.len());
         if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
             return facts.clone();
         }
         let facts = match self.reuse.as_deref_mut() {
-            Some(reuse) => reuse.pass_facts(layers, all),
+            Some(reuse) => reuse.pass_facts(comp, all),
             None => std::sync::Arc::new(PassFacts::of(all)),
         };
         self.passes.push((key, facts.clone()));
@@ -585,7 +596,7 @@ pub(crate) fn build_reusing<'r>(
     assets: &'r dyn AssetResolver,
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
-    text: Option<&'r mut crate::text::TextContext>,
+    mut text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
@@ -599,7 +610,13 @@ pub(crate) fn build_reusing<'r>(
             crate::reuse::BuildKey {
                 sampling: options.sampling,
                 blur: options.blur,
-                view_override: options3d.view.is_some(),
+                view: options3d.view.clone(),
+                plane_camera: options3d.plane_camera,
+                text: text.as_deref_mut().map(crate::text::TextContext::reuse_generation),
+                preview: options.preview,
+                keep_empty_groups: options.keep_empty_groups,
+                offline_cards: options.offline_cards,
+                studio: options3d.studio.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
                 final_output: options.final_output,
                 read_ahead: options.read_ahead,
@@ -645,6 +662,7 @@ pub(crate) fn build_reusing<'r>(
         focus_group: options.focus_group,
     };
     let mut scope = Scope::new(ev, root_comp, project);
+    scope.view_camera = b.options3d.plane_camera;
     // One frame at one time: each layer's local matrix once per scope.
     scope.memoize_transforms();
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -873,7 +891,7 @@ pub(crate) fn comp_pass<'d>(
                     matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
                     content: Content::Placed(Box::new(Placed {
                         content: Content::Texture {
-                            source: Source::Comp(Box::new(inner)),
+                            source: Source::Comp(Arc::new(inner)),
                             uv: [0.0, 0.0, 1.0, 1.0],
                             alpha: 1.0,
                         },
@@ -914,7 +932,7 @@ pub(crate) fn comp_pass<'d>(
         return plan;
     }
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
-    let facts = b.pass_facts(scope.layers(), &all);
+    let facts = b.pass_facts(scope.comp, &all);
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
         // `PM.transitionDef`: a host knows its registered transitions.
@@ -997,7 +1015,10 @@ pub(crate) fn comp_pass<'d>(
     }
     let solo = facts.solo;
     let mut text_run = TextDrawRun::default();
-    let batch_text = !b.compat_probe_only
+    // Repeated paused frames keep finalized text draws. The first pass at
+    // a time still batches any cold glyph work as a wave.
+    let batch_text = !(b.can_reuse_draws() && b.reuse.as_ref().is_some_and(|r| r.active()))
+        && !b.compat_probe_only
         && pm_text::render::scene::CanvasRows::available()
         && b.text.as_deref().is_some_and(|text| text.has_fonts())
         && b.material.is_none()
@@ -1032,8 +1053,9 @@ pub(crate) fn comp_pass<'d>(
         {
             text_run.flush(b, &mut plan.draws);
         }
-        let drawn =
-            crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
+        let drawn = crate::reuse::draw(
+            scope, b, layer, &ty, time, width, height, scale, &facts,
+            |s, b| {
                 pm_perf::bump(pm_perf::Counter::LayersPlanned);
                 draw_layer(
                     s,
@@ -1047,7 +1069,8 @@ pub(crate) fn comp_pass<'d>(
                     &all,
                     candidate.then_some(&mut text_run),
                 )
-            });
+            },
+        );
         let draws = match drawn {
             Ok(draws) => draws,
             Err(e) => {
@@ -1098,19 +1121,12 @@ fn group_contains_solo<'d>(
 fn group_contains_id<'d>(
     scope: &mut Scope<'_, 'd>,
     group: &'d Node,
-    target_id: &pm_eval::JsValue,
-    all: &[&'d Node],
+    target: &'d Node,
 ) -> JsResult<bool> {
     if js::layer_type(group) != "group" {
         return Ok(false);
     }
     let gid = node::get(group, b"id").to_js();
-    let Some(&target) = all
-        .iter()
-        .find(|&&l| pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), target_id))
-    else {
-        return Ok(false);
-    };
     for a in scope.group_ancestors(target)? {
         if pm_eval::js_sem::strict_eq(&node::get(a, b"id").to_js(), &gid) {
             return Ok(true);
@@ -1146,19 +1162,24 @@ fn draw_layer<'d>(
         && !b.forced_on.is_some_and(|p| std::ptr::eq(p, layer))
         && let Some(focus) = b.focus_group.as_deref()
     {
-        let focus_js = pm_eval::JsValue::String(focus.into());
-        let focus_exists = all.iter().any(|&l| {
-            js::layer_type(l) == "group"
-                && pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), &focus_js)
-        });
-        if focus_exists {
-            let is_focus = pm_eval::js_sem::strict_eq(&node::get(layer, b"id").to_js(), &focus_js);
-            if !is_focus {
+        let focus_id = JsString::from(focus);
+        if let Some(&(i, duplicate)) = scope.layer_index().strings.get(&focus_id) {
+            let focus_layer = &scope.layers()[i];
+            let focus_js = JsValue::String(focus_id);
+            let is_focus_group = js::layer_type(focus_layer) == "group"
+                || (duplicate
+                    && all.iter().any(|&l| {
+                        js::layer_type(l) == "group"
+                            && pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), &focus_js)
+                    }));
+            if is_focus_group
+                && !pm_eval::js_sem::strict_eq(&node::get(layer, b"id").to_js(), &focus_js)
+            {
                 let ancestors = scope.group_ancestors(layer)?;
                 let under_focus = ancestors
                     .iter()
                     .any(|g| pm_eval::js_sem::strict_eq(&node::get(g, b"id").to_js(), &focus_js));
-                if !under_focus && !group_contains_id(scope, layer, &focus_js, all)? {
+                if !under_focus && !group_contains_id(scope, layer, focus_layer)? {
                     return Ok(None);
                 }
             }
@@ -1457,7 +1478,7 @@ fn draw_layer<'d>(
                 layer: id.clone(),
                 matrix: mul(&world, &[e.width, 0., 0., e.height, e.x, e.y]),
                 content: Content::Texture {
-                    source: Source::Comp(Box::new(plan)),
+                    source: Source::Comp(Arc::new(plan)),
                     uv: [0., 0., 1., 1.],
                     alpha: opacity,
                 },
@@ -1468,7 +1489,7 @@ fn draw_layer<'d>(
                 layer: id.clone(),
                 matrix: full,
                 content: Content::Texture {
-                    source: Source::Accumulate(Box::new(CompPlan {
+                    source: Source::Accumulate(Arc::new(CompPlan {
                         composition: comp_id.clone(),
                         group: true,
                         width,
@@ -1551,7 +1572,7 @@ fn draw_layer<'d>(
             layer: id.clone(),
             matrix: full,
             content: Content::Texture {
-                source: Source::Comp(Box::new(inner.clone())),
+                source: Source::Comp(Arc::new(inner)),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha,
             },
@@ -1967,7 +1988,7 @@ fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bo
             *h = rect.height as f64 * sy;
             match source {
                 Source::Vector(v) => {
-                    if let crate::vector::VectorSource::Scene { rect: r, .. } = &mut **v {
+                    if let crate::vector::VectorSource::Scene { rect: r, .. } = Arc::make_mut(v) {
                         *r = rect;
                     }
                 }
@@ -2495,7 +2516,7 @@ fn native_content_quad<'d>(
             b.windowed = outer_windowed;
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
-                source: Source::Comp(Box::new(inner)),
+                source: Source::Comp(Arc::new(inner)),
                 w,
                 h: hh,
                 ax: 0.0,
@@ -3114,7 +3135,7 @@ fn playback_shape<'d>(
         return Ok(None);
     }
     Ok(Some(Quad::Texture {
-        source: Source::Vector(Box::new(source)),
+        source: Source::Vector(Arc::new(source)),
         w: f64::from(rect.width) / density,
         h: f64::from(rect.height) / density,
         ax: -f64::from(rect.x) / density,
@@ -3186,7 +3207,7 @@ fn local_level2<'d>(
                 && rect.height <= 4096
             {
                 return Ok(Some(Quad::Texture {
-                    source: Source::Vector(Box::new(crate::vector::VectorSource::Scene {
+                    source: Source::Vector(Arc::new(crate::vector::VectorSource::Scene {
                         scene: local_scene,
                         rect,
                     })),
@@ -3226,7 +3247,7 @@ fn local_level2<'d>(
     };
     let crate::vector::VectorQuad::Device { source, rect } = second;
     Ok(Some(Quad::Texture {
-        source: Source::Vector(Box::new(source)),
+        source: Source::Vector(Arc::new(source)),
         w: f64::from(rect.width) / dx,
         h: f64::from(rect.height) / dy,
         ax: -f64::from(rect.x) / dx,
@@ -3239,7 +3260,7 @@ fn local_level2<'d>(
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
-            source: Source::Vector(Box::new(source)),
+            source: Source::Vector(Arc::new(source)),
             rect: [
                 f64::from(rect.x),
                 f64::from(rect.y),
@@ -4036,7 +4057,7 @@ fn effect_inputs_once<'d>(
                         &[e.width, 0., 0., e.height, e.x, e.y],
                     ),
                     content: Content::Texture {
-                        source: Source::Comp(Box::new(plan)),
+                        source: Source::Comp(Arc::new(plan)),
                         uv: [0., 0., 1., 1.],
                         alpha: 1.,
                     },
@@ -4361,14 +4382,18 @@ mod tests {
                 draws(
                     &effects,
                     &document(json!([dots(), gradient()]), 5., none),
-                    o
+                    o.clone()
                 ),
                 1
             );
             // A non-normal blend.
             let multiply = |g: &mut Value| g["blend"] = json!("multiply");
             assert_eq!(
-                draws(&effects, &document(json!([dots()]), 5., multiply), o),
+                draws(
+                    &effects,
+                    &document(json!([dots()]), 5., multiply),
+                    o.clone()
+                ),
                 1
             );
             // `dot-matrix-resolve` from another source (one byte changed):
@@ -4378,7 +4403,11 @@ mod tests {
             changed.replace_range(at..at + 1, "6");
             let unreviewed = host(&changed);
             assert_eq!(
-                draws(&unreviewed, &document(json!([dots()]), 5., none), o),
+                draws(
+                    &unreviewed,
+                    &document(json!([dots()]), 5., none),
+                    o.clone()
+                ),
                 1
             );
             assert_eq!(

@@ -210,7 +210,7 @@ fn restrictions_cover_camera_sun_and_bulb() {
     let (a, mut s) = fixture();
     for (kind, disabled) in [
         ("camera", vec!["scale"]),
-        ("sun", vec!["move", "scale"]),
+        ("sun", vec!["scale"]),
         ("point", vec!["rotate", "scale"]),
     ] {
         drive(&mut s, "add", json!(kind));

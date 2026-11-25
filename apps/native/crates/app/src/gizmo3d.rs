@@ -129,6 +129,9 @@ enum Nav {
 }
 struct NavDrag {
     mode: Nav,
+    was_free: bool,
+    prev_free: Option<View>,
+    had_cam_nav: bool,
     start: View,
     origin: Point<Pixels>,
 }
@@ -270,6 +273,9 @@ fn parent_vector(parent_world: [f64; 16], w: Vec3) -> Vec3 {
 /// units for Studio layers (including 3D nulls and parented objects/lights);
 /// pixels with y and z flipped for extruded text and shapes.
 fn channel_delta(item: &Item, w: Vec3) -> Vec3 {
+    if item.is_plane {
+        return parent_vector(item.parent_world, w);
+    }
     match item.pixels {
         Some(u) if u > 0. => [w[0] / u, -w[1] / u, -w[2] / u],
         _ => parent_vector(item.parent_world, w),
@@ -277,7 +283,7 @@ fn channel_delta(item: &Item, w: Vec3) -> Vec3 {
 }
 /// The item's oriented world axes (accounting for any rotated parent null).
 fn world_basis(item: &Item) -> [Vec3; 3] {
-    if item.pixels.is_some() {
+    if item.pixels.is_some() && !item.is_plane {
         return object_basis(item.rotation);
     }
     let m = &item.world;
@@ -332,6 +338,9 @@ impl State {
             || self.fly.is_some()
             || self.cam_nav.is_some()
     }
+    pub(super) fn pointer_drag_held(&self) -> bool {
+        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some()
+    }
     fn view(&self) -> Option<View> {
         let scene = self.scene.as_ref()?;
         Some(if self.free_look {
@@ -350,7 +359,7 @@ impl State {
     fn eye(&self) -> Option<Eye> {
         let scene = self.scene.as_ref()?;
         let mut eye = scene.eye(self.free_look.then(|| self.view()).flatten());
-        if self.cam_nav.is_some() {
+        if self.cam_nav.is_some() || self.fly.as_ref().is_some_and(|run| run.camera) {
             eye.lens = scene.lens;
         }
         Some(eye)
@@ -363,7 +372,9 @@ impl State {
         scene
             .items
             .iter()
-            .filter(|i| self.selected.contains(&i.id) && !i.locked)
+            .filter(|i| {
+                self.selected.contains(&i.id) && !i.locked && (self.free_look || !i.is_plane)
+            })
             .filter(|i| match (i.role, i.light.as_deref(), self.tool) {
                 // Blender-style lights: Point moves; Sun moves & rotates;
                 // Area & Spot move, rotate, and scale (width/height or cone spread).
@@ -418,7 +429,8 @@ impl GizmoSurface {
         let view = if self.studio.free_look {
             self.studio.free.map(|v| {
                 // Camera-view navigation retains the shot's fixed ortho span.
-                let shot_ortho = self.studio.cam_nav.is_some()
+                let shot_ortho = (self.studio.cam_nav.is_some()
+                    || self.studio.fly.as_ref().is_some_and(|run| run.camera))
                     && self
                         .studio
                         .scene
@@ -549,6 +561,7 @@ impl GizmoSurface {
             if key == "studioLook" && *v == "free" {
                 self.studio_go_free(cx);
                 self.studio_push_view(cx);
+                self.draw(cx);
                 return;
             }
             if key == "studioLook" && *v == "camera" && self.studio.free_look {
@@ -682,7 +695,7 @@ impl GizmoSurface {
         });
         self.studio.fly = Some(FlyRun {
             fly: super::fly::Fly::new(start),
-            camera: !was_free,
+            camera: !was_free && scene.has_camera,
             was_free,
             prev_free,
             last: std::time::Instant::now(),
@@ -795,7 +808,9 @@ impl GizmoSurface {
         // Kept in the editor view, the view simply stays where it flew to.
         // Otherwise back to the look it began in: the shot (now carrying the
         // flight, on confirm) or the editor view exactly as it was.
-        if !(keep && !run.camera) {
+        if keep && !run.camera {
+            self.studio_ui("studioLook", "free", cx);
+        } else {
             self.studio.free_look = run.was_free;
             self.studio.look_pending = Some(run.was_free);
             self.studio.free = run.prev_free;
@@ -1398,11 +1413,11 @@ impl GizmoSurface {
         let accent = rgb(t.colors.accent);
         // During a drag only the active handle stays (§5), with its guide.
         let drag = self.studio.drag.as_ref().filter(|d| d.active);
-        for item in scene
-            .items
-            .iter()
-            .filter(|i| self.studio.selected.contains(&i.id) && i.role != Role::Light)
-        {
+        for item in scene.items.iter().filter(|i| {
+            self.studio.selected.contains(&i.id)
+                && i.role != Role::Light
+                && (self.studio.free_look || !i.is_plane)
+        }) {
             if drag.is_some() {
                 break;
             }
@@ -1795,6 +1810,9 @@ impl GizmoSurface {
             }
         };
         if let Some(mode) = nav {
+            let was_free = self.studio.free_look;
+            let prev_free = self.studio.free;
+            let had_cam_nav = self.studio.cam_nav.is_some();
             if middle || alt || view_tool.is_some() {
                 self.studio_leave_camera(cx);
             }
@@ -1803,6 +1821,9 @@ impl GizmoSurface {
             };
             self.studio.nav = Some(NavDrag {
                 mode,
+                was_free,
+                prev_free,
+                had_cam_nav,
                 start,
                 origin: event.position,
             });
@@ -1947,6 +1968,25 @@ impl GizmoSurface {
         // the box pick as the fallback while no frame can answer.
         let scene = self.studio.scene.clone().unwrap();
         let shift = event.modifiers.shift;
+        let ray = eye.ray(at);
+        let free = self.studio.free_look;
+        let press = super::Press {
+            at,
+            shift,
+            deep: event.modifiers.platform || event.modifiers.control,
+            time: self.host.time(cx),
+            inside: false,
+        };
+        let plane_hit = free
+            .then(|| scene.pick_where(&ray, |i| i.is_plane && !i.locked))
+            .flatten();
+        if scene.items.iter().all(|i| i.is_plane) {
+            if let Some(hit) = plane_hit {
+                self.studio_select(hit.id, shift, cx);
+                return true;
+            }
+            return false;
+        }
         let lights = Scene {
             items: scene
                 .items
@@ -1978,7 +2018,10 @@ impl GizmoSurface {
             (at[1] / frame.size[1]) as f32,
         ];
         if let Some(rx) = self.host.pick_surface(uv, cx) {
-            let null_hit_id = null_hit.as_ref().map(|h| (h.id.clone(), h.distance));
+            let fallback = match (null_hit, plane_hit) {
+                (Some(a), Some(b)) => Some(if a.distance <= b.distance { a } else { b }),
+                (a, b) => a.or(b),
+            };
             cx.spawn(async move |this, cx| {
                 let reply = rx.recv().await;
                 let _ = this.update(cx, |s, cx| {
@@ -1988,7 +2031,11 @@ impl GizmoSurface {
                             (h.layer, dist)
                         })),
                         // A stale frame: the box pick answers instead.
-                        _ => Err(s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)))),
+                        _ => Err(s
+                            .studio
+                            .scene
+                            .as_ref()
+                            .and_then(|sc| sc.pick_where(&ray, |i| free || !i.is_plane))),
                     };
                     // A locked layer isn't picked (the click goes through it).
                     let scene = s.studio.scene.clone();
@@ -1997,10 +2044,10 @@ impl GizmoSurface {
                     };
                     match hit {
                         Ok(Some((layer, dist))) => {
-                            if let Some((null_id, null_dist)) = null_hit_id.as_ref()
-                                && *null_dist < dist
+                            if let Some(hit) = fallback.as_ref()
+                                && hit.distance < dist
                             {
-                                s.studio_select(null_id.clone(), shift, cx);
+                                s.studio_select(hit.id.clone(), shift, cx);
                                 return;
                             }
                             match unlocked(layer) {
@@ -2014,18 +2061,19 @@ impl GizmoSurface {
                             }
                         }
                         Ok(None) => {
-                            if let Some((null_id, _)) = null_hit_id {
-                                s.studio_select(null_id, shift, cx);
-                            } else if !shift {
-                                s.queue.push_back(Job::Select(None));
-                                s.pump(cx);
+                            if let Some(hit) = fallback {
+                                s.studio_select(hit.id, shift, cx);
+                            } else {
+                                s.pick(press, cx);
                             }
                         }
                         Err(hit) => {
                             if let Some(id) = hit.and_then(|h| unlocked(h.id)) {
-                                let is_null = scene
-                                    .as_ref()
-                                    .is_some_and(|sc| sc.items.iter().any(|i| i.id == id && i.is_null));
+                                let is_null = scene.as_ref().is_some_and(|sc| {
+                                    sc.items
+                                        .iter()
+                                        .any(|i| i.id == id && (i.is_null || i.is_plane))
+                                });
                                 if part && !is_null {
                                     s.studio_part(id, eye, at, cx);
                                 } else {
@@ -2039,13 +2087,13 @@ impl GizmoSurface {
             .detach();
             return true;
         }
-        let Some(hit) = scene.pick(&eye.ray(at)).filter(|h| !locked(&scene, &h.id)) else {
+        let Some(hit) = scene.pick_where(&ray, |i| (free || !i.is_plane) && !i.locked) else {
             return false;
         };
         let is_null = scene
             .items
             .iter()
-            .any(|i| i.id == hit.id && i.is_null);
+            .any(|i| i.id == hit.id && (i.is_null || i.is_plane));
         if part && !is_null {
             self.studio_part(hit.id, eye, at, cx);
         } else {
@@ -2798,14 +2846,20 @@ impl GizmoSurface {
             return true;
         }
         if let Some(nav) = self.studio.nav.take() {
-            if !commit {
-                // Esc returns the view to where the gesture began.
-                self.studio.free = Some(nav.start);
+            if commit {
+                self.studio_cam_nav_end(true, cx);
+            } else if nav.had_cam_nav {
+                // Resume settling the camera move from before this drag.
+                self.studio_nav_set(nav.start, true, cx);
+            } else {
+                self.studio.cam_nav = None;
+                self.studio.free = nav.prev_free;
+                if self.studio.free_look != nav.was_free {
+                    self.studio.free_look = nav.was_free;
+                    self.studio.look_pending = Some(nav.was_free);
+                    self.studio_ui("studioLook", if nav.was_free { "free" } else { "camera" }, cx);
+                }
                 self.studio_push_view(cx);
-            }
-            // In camera view the release stores the move on the camera.
-            if self.studio.cam_nav.is_some() {
-                self.studio_cam_nav_end(commit, cx);
             }
             self.cursor = CursorStyle::Arrow;
             cx.notify();
@@ -3158,6 +3212,7 @@ mod light_marker_tests {
             id: "child".into(),
             role: super::Role::Object,
             is_null: false,
+            is_plane: false,
             name: "Child".into(),
             locked: false,
             bounds: pm_scene3d::navigation::Bounds { min: [-1.; 3], max: [1.; 3] },

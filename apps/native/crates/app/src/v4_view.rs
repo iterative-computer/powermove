@@ -404,7 +404,8 @@ struct ScrubDrag {
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
-    // Local input previews, then one change on release; opt-in controls only.
+    grade_original: Option<crate::v4_compile::Kit>,
+    // Local input previews, then one change on release.
     local_commit: Option<(Value, Value)>,
 }
 struct GainScrub {
@@ -446,6 +447,7 @@ struct Capture {
     /// Where the press was: an item that drags lifts once the pointer has
     /// moved past the drag threshold from here.
     origin: Point<Pixels>,
+    moved: bool,
     /// Native layer reorder owns this captured pointer, including its moves.
     layer_drag: bool,
 }
@@ -538,6 +540,7 @@ pub struct SurfaceView {
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
+    cancelled_press: bool,
     /// Each virtual list's width last told to its panel.
     list_widths: HashMap<Id, (f32, f32)>,
     /// Each virtual list's last `rangechange` (range, width, its geometry):
@@ -554,6 +557,9 @@ pub struct SurfaceView {
     grade_drawn: grade::Drawn,
     /// Each wheel's puck on its way to where its values put it.
     grade_motion: grade::Motion,
+    /// The starting drawing until the cancellation is published. Its
+    /// publication ticket is set once the kernel finishes cancelling.
+    grade_reverted: Option<(Id, crate::v4_compile::Kit, Option<u64>)>,
     /// Each easing curve's preview run and the curve its drag left, until
     /// the panel publishes it.
     ease: grade::EaseState,
@@ -760,6 +766,7 @@ impl SurfaceView {
             wheel_lifted: false,
             scrub_ops: VecDeque::new(),
             dragging: None,
+            cancelled_press: false,
             list_widths: HashMap::new(),
             sent_ranges: HashMap::new(),
             pending_ranges: HashMap::new(),
@@ -770,6 +777,7 @@ impl SurfaceView {
             scrub_settled: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
+            grade_reverted: None,
             ease: Default::default(),
             pointer_move: None,
             statuses: None,
@@ -1132,6 +1140,12 @@ impl SurfaceView {
         }
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        if self.grade_reverted.as_ref().is_some_and(|(id, _, finished_at)| {
+            finished_at.is_some_and(|ticket| compiled.ticket > ticket)
+                || self.prepared.node(*id).is_none()
+        }) {
+            self.grade_reverted = None;
+        }
         if self.scrub_settled.is_some_and(|(id, value, ticket)| {
             compiled.ticket > ticket || self.prepared.node(id).and_then(|n| n.number)
                 .is_none_or(|n| n.text(n.value) == n.text(value))
@@ -1196,6 +1210,7 @@ impl SurfaceView {
         self.truncated.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
+        self.grade_reverted = None;
         self.scrub_shown = None;
         self.scrub_settled = None;
         self.pointer_move = None;
@@ -3002,8 +3017,10 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let source = self.natives.sample_color.borrow().clone();
         let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
+        let bound_edit = Cell::new(false);
         let subscription = cx.subscribe(&picker, move |v, _, edit, cx| match edit {
             Edit::Begin if binding.is_some() => {
+                bound_edit.set(true);
                 let name = v.undo_name(id);
                 v.scrub_ops.push_back(ScrubOp::Begin(name));
                 v.scrub_pump(cx);
@@ -3014,12 +3031,23 @@ impl SurfaceView {
                         .push_back(ScrubOp::Value(binding.clone(), json!(color)));
                     v.scrub_pump(cx);
                 } else {
-                    v.change(id, json!(color), cx);
+                    v.change_sample(id, json!(color), cx);
+                }
+            }
+            Edit::CancelDrag => {
+                if bound_edit.replace(false) {
+                    while matches!(v.scrub_ops.back(), Some(ScrubOp::Value(..))) {
+                        v.scrub_ops.pop_back();
+                    }
+                    v.scrub_ops.push_back(ScrubOp::Finish(false));
+                    v.scrub_pump(cx);
+                } else if binding.is_none() {
+                    v.change_sample(id, initial.clone(), cx);
                 }
             }
             Edit::Finish(commit) => {
                 if !commit && binding.is_none() {v.change(id,initial.clone(),cx);}
-                if v.scrub_busy || v.scrub_gesture.is_some() || !v.scrub_ops.is_empty() {
+                if bound_edit.replace(false) {
                     v.scrub_ops.push_back(ScrubOp::Finish(*commit));
                     v.scrub_pump(cx);
                 }
@@ -3249,6 +3277,7 @@ impl SurfaceView {
             target: id,
             button,
             origin: event.position,
+            moved: false,
             layer_drag: layer.is_some(),
         });
         let detail = self.detail(
@@ -3573,6 +3602,7 @@ impl SurfaceView {
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
+            grade_original: None,
             local_commit: node.commit_on_release.then(|| {
                 let value = json!(number.value);
                 (value.clone(), value)
@@ -3667,6 +3697,12 @@ impl SurfaceView {
             return;
         };
         if self.finish_gain_scrub(drag.id, commit, cx) {
+            if !commit {
+                self.scrub_settled = Some((drag.id, drag.number.value, self.latest));
+                if let Some(field) = self.fields.get(&drag.id) {
+                    field.update(cx, |f, cx| f.set_value(&drag.number.text(drag.number.value), cx));
+                }
+            }
             return;
         }
         if let Some((from, live)) = drag.local_commit {
@@ -3702,15 +3738,9 @@ impl SurfaceView {
                 } else {
                     value
                 };
-                self.pointer(
-                    drag.id,
-                    "input",
-                    EventDetail {
-                        value: Some(observed),
-                        ..Default::default()
-                    },
-                    cx,
-                );
+                self.control_sample(drag.id, "input", observed, cx);
+            } else if changed && drag.grade.is_some() {
+                self.change(drag.id, value, cx);
             } else if changed {
                 self.pointer(
                     drag.id,
@@ -3724,6 +3754,11 @@ impl SurfaceView {
             }
             cx.notify();
             return;
+        }
+        if !commit && drag.active && let Some(kit) = drag.grade_original {
+            self.grade_motion.borrow_mut().remove(&drag.id);
+            self.grade_reverted = Some((drag.id, kit, None));
+            cx.notify();
         }
         if drag.active {
             if !commit && drag.grade.is_none() {
@@ -3790,6 +3825,7 @@ impl SurfaceView {
         let panel = self.publication.panel.clone();
         let gesture = self.scrub_gesture;
         let finishing = matches!(op, ScrubOp::Finish(_));
+        let cancelling = matches!(op, ScrubOp::Finish(false));
         crate::interaction_work::spawn!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -3819,6 +3855,15 @@ impl SurfaceView {
                 if finishing {
                     v.scrub_gesture = None;
                 }
+                if cancelling {
+                    if finished {
+                        if let Some((_, _, finished_at)) = &mut v.grade_reverted {
+                            *finished_at = Some(v.latest);
+                        }
+                    } else {
+                        v.grade_reverted = None;
+                    }
+                }
                 match result {
                     Ok(ack) => match ack.reply {
                         pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
@@ -3840,6 +3885,32 @@ impl SurfaceView {
         })
         .detach();
     }
+    fn cancel_pointer_drag(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.scrub.as_ref().is_some_and(|d| d.active || d.grade.is_some()) {
+            self.scrub_release(false, cx);
+            self.capture = None;
+        } else if self.dragging.is_some() {
+            cx.stop_active_drag(window);
+            self.end_drag(cx);
+        } else if let Some(capture) = self.capture.filter(|c| !c.layer_drag && c.button == 0 && c.moved)
+            && self.publication.surface.node(capture.target)
+                .is_some_and(|node| node.listeners.contains_key("pointercancel"))
+        {
+            self.capture = None;
+            let detail = self.detail(event.position, Some(capture.button), 0, 0, event.modifiers);
+            self.pointer(capture.target, "pointercancel", detail, cx);
+        } else {
+            return false;
+        }
+        self.cancelled_press = true;
+        true
+    }
+
     /// Capture-phase window listeners: a pressed pointer keeps its target until
     /// release, wherever it travels, like AppKit drag tracking.
     fn tracking(cx: &mut Context<Self>, origin: Rc<Cell<Point<Pixels>>>) -> impl IntoElement {
@@ -3875,6 +3946,10 @@ impl SurfaceView {
                     }
                     let mut row_move = None;
                     let _ = moved.update(cx, |v, cx| {
+                        if v.cancelled_press && event.pressed_button.is_some() {
+                            cx.stop_propagation();
+                            return;
+                        }
                         // The button is up: a release that never reached this
                         // window ends the gesture here, and the window's other
                         // listeners see this move (owner feedback W4, W5).
@@ -3889,9 +3964,12 @@ impl SurfaceView {
                             v.scrub_move(event, cx);
                             return;
                         }
-                        let Some(capture) = v.capture else {
+                        let Some(capture) = v.capture.as_mut() else {
                             return;
                         };
+                        let threshold = v.table.tokens.metrics.drag_threshold;
+                        capture.moved |= (event.position - capture.origin).magnitude() > threshold as f64;
+                        let capture = *capture;
                         // A row reorder is native. Forward its captured moves before
                         // generic panel capture can consume them; native listener
                         // ordering may change when a cached surface is repainted.
@@ -3903,11 +3981,10 @@ impl SurfaceView {
                         // A press on an item that drags (`onDragStart`) gives
                         // the pointer up past the threshold: the move goes on
                         // to the item, which lifts it (GPUI's drag).
-                        let threshold = v.table.tokens.metrics.drag_threshold;
                         if v.prepared
                             .node(capture.target)
                             .is_some_and(|n| n.events.drag_start)
-                            && (event.position - capture.origin).magnitude() > threshold as f64
+                            && capture.moved
                         {
                             v.capture = None;
                             return;
@@ -3937,11 +4014,21 @@ impl SurfaceView {
                 // never came) ends that gesture first, so the press does its
                 // own work and the window's moves are no longer held.
                 let pressed = weak.clone();
-                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = pressed.update(cx, |v, cx| {
+                        if event.button == MouseButton::Right {
+                            if v.cancelled_press || v.cancel_pointer_drag(event, window, cx) {
+                                cx.stop_propagation();
+                            }
+                            return;
+                        }
+                        if event.button != MouseButton::Left {
+                            return;
+                        }
+                        v.cancelled_press = false;
                         if v.scrub.is_some() || v.capture.is_some() {
                             v.release_pointer(event.position, 1, event.modifiers, cx);
                         }
@@ -3949,10 +4036,21 @@ impl SurfaceView {
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                    if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
+                        if event.button == MouseButton::Right && v.cancelled_press {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if event.button != MouseButton::Left {
+                            return;
+                        }
+                        if std::mem::take(&mut v.cancelled_press) {
+                            cx.stop_propagation();
+                            return;
+                        }
                         if v.scrub.as_ref().is_some_and(|drag| drag.grade.is_none()) {
                             v.scrub_at(event.position.x, event.modifiers, cx);
                         }
@@ -7083,14 +7181,52 @@ impl SurfaceView {
                 .is_some_and(|n| n.component.is_none() && words(n))
         })
     }
+    /// Tool-only headers still need the panel's name when there is no dock tab.
+    pub(crate) fn fallback_header_title(
+        &self,
+        title: Option<Id>,
+        tabbed: bool,
+    ) -> Option<&'static str> {
+        let panel = &self.publication.panel;
+        if tabbed || title.is_some() || panel == "viewer" {
+            return None;
+        }
+        pm_builtins::builtin_panel(panel).map(|panel| panel.title.as_str())
+    }
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabbed = self.tabbed;
         let header = self.view.update(cx, |v, cx| match v.prepared.header {
             Some(id) => {
-                let skip = if tabbed { v.header_title(id) } else { None };
-                v.element(id, window, cx, skip)
+                let title = v.header_title(id);
+                let content = v.element(id, window, cx, if tabbed { title } else { None });
+                if let Some(fallback) = v.fallback_header_title(title, tabbed) {
+                    let t = &v.table.tokens;
+                    return div()
+                        .flex()
+                        .items_center()
+                        .gap(px(t.metrics.gap))
+                        .pl(px(if v.publication.panel == "agent" {
+                            t.metrics.pill_inset
+                        } else {
+                            t.metrics.inset
+                        }))
+                        .w_full()
+                        .h(px(t.metrics.header))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(pm_design::TEXT_FONT)
+                                .text_size(px(t.typography.title))
+                                .font_weight(FontWeight(t.typography.semibold_weight))
+                                .text_color(rgb(t.colors.text))
+                                .child(fallback),
+                        )
+                        .child(div().flex_1().min_w(px(0.)).h_full().child(content))
+                        .into_any_element();
+                }
+                content
             }
             None => div().into_any_element(),
         });

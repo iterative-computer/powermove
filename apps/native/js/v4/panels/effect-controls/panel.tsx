@@ -177,11 +177,21 @@ export function EffectControls(props: PanelProps) {
             display: "flex",
             flexDirection: "row",
             alignItems: "center",
-            justifyContent: "end",
+            justifyContent: "space-between",
             height: t("metrics.header"),
             paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
           }}
         >
+          <text
+            style={{
+              color: t("colors.text"),
+              fontSize: t("typography.title"),
+              fontWeight: t("typography.semibold_weight"),
+            }}
+          >
+            {PANEL_TITLE}
+          </text>
           {p.target === "Layer" && (
             <UI.ToolbarItem
               id={`${PANEL_ID}:add`}

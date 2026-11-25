@@ -171,7 +171,7 @@ export function ViewerPanel({
   const tierLabel = studioTiers.find((t) => t.v === tier)?.label ?? "Fast";
   const popups = (
     <>
-      {m.studio && !source ? (
+      {m.studio && m.studio.hasScene !== false && !source ? (
         <PopUpButton
           id="viewer.studio.tier"
           data-pm-variant="inline"
@@ -270,7 +270,7 @@ export function ViewerPanel({
   );
   // 3d-studio.md §3 status capsule: Quality's progress, bottom-trailing over
   // the image. Hidden in Fast and while Live; "Clean" shows briefly, then goes.
-  const refine = m.studio?.tier === "refine" ? m.studio?.refine : undefined;
+  const refine = m.studio?.hasScene !== false && m.studio?.tier === "refine" ? m.studio.refine : undefined;
   const [clean, setClean] = useState(false);
   const stage = refine?.stage;
   useEffect(() => {
@@ -289,6 +289,7 @@ export function ViewerPanel({
   // Before the first sample lands (a heavy scene can take a while) the
   // capsule says so, rather than leave a dark stage that looks broken.
   const pending =
+    m.studio?.hasScene !== false &&
     m.studio?.tier === "refine" &&
     (m.studio?.pending === true || (stage === "sampling" && refine?.samplesDone === 0));
   const capsuleText =

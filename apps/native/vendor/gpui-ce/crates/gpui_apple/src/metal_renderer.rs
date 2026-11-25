@@ -35,7 +35,7 @@ enum DotPass {
         age: f32,
         opening: f32,
         fade: f32,
-        accent: u32,
+        palette: [u32; 3],
         scale: f32,
     },
 }
@@ -1611,13 +1611,13 @@ impl MetalRenderer {
                                 age,
                                 opening,
                                 fade,
-                                accent,
+                                palette,
                                 scale,
                             } => Some(DotPass::Aurora {
                                 age: *age,
                                 opening: *opening,
                                 fade: *fade,
-                                accent: *accent,
+                                palette: *palette,
                                 scale: *scale,
                             }),
                             _ => None,
@@ -1886,14 +1886,15 @@ impl MetalRenderer {
                     age,
                     opening,
                     fade,
-                    accent,
+                    palette: [gold, accent, rose],
                     scale,
                 } => {
                     composite_uniforms.dots = wgsl_rs::std::vec4f(-1.0, age, opening, scale);
+                    // Each packed RGB24 stop fits exactly in one f32, preserving the uniform layout.
                     composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
-                        ((accent >> 16) & 255) as f32 / 255.0,
-                        ((accent >> 8) & 255) as f32 / 255.0,
-                        (accent & 255) as f32 / 255.0,
+                        (gold & 0x00ff_ffff) as f32,
+                        (accent & 0x00ff_ffff) as f32,
+                        (rose & 0x00ff_ffff) as f32,
                         fade,
                     );
                 }

@@ -1141,3 +1141,77 @@ fn media_stamp(facts: &Value) -> u64 {
     facts["settingsHeader"].to_string().hash(&mut hash);
     hash.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{Builtins, tests::finish};
+    use pm_kernel::{Caller, KernelActor, KernelConfig, OpenSource, Request, SelectionCall};
+    use serde_json::Value;
+
+    #[test]
+    fn properties_show_text_after_many_selection_changes() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(
+            r##"{
+                "id":"synthetic","name":"Text test","compId":"c",
+                "w":1920,"h":1080,"fps":30,"dur":60,"bg":"#000000","assets":{},"comps":{},
+                "layers":[{
+                    "id":"title","type":"text","name":"Headline","from":0,"dur":60,"on":true,
+                    "p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},
+                    "d":{"text":"Headline","font":"Helvetica","weight":400,"align":"left",
+                         "size":72,"tracking":0,"leading":1.2,"color":"#FFFFFF"},
+                    "fx":[]
+                }]
+            }"##,
+        )
+        .unwrap();
+        kernel
+            .open("synthetic", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+
+        let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+        finish(panels.mount("inspector").unwrap());
+        let publish = |selection, visible: &str| {
+            kernel
+                .call("synthetic", Request::new(Caller::native(), selection))
+                .wait()
+                .unwrap()
+                .unwrap();
+            for (_, ticket) in panels.publish() {
+                finish(ticket.unwrap());
+            }
+            let errors = panels.take_errors();
+            assert!(errors.is_empty(), "{errors:?}");
+            let publications = panels.take_publications();
+            let surface = &publications
+                .last()
+                .expect("updated Properties panel")
+                .surface;
+            assert!(
+                surface
+                    .nodes()
+                    .values()
+                    .any(|node| node.props.get("id").and_then(Value::as_str) == Some(visible)),
+                "Properties did not show {visible}"
+            );
+        };
+
+        // Each selection admits a new set of binding handles and releases the
+        // previous set. This crosses the old 4,096-request lifetime cap.
+        for _ in 0..100 {
+            publish(
+                SelectionCall::Layers {
+                    ids: vec!["title".into()],
+                    add: false,
+                },
+                "value:content.text",
+            );
+            publish(SelectionCall::Clear, "section:composition");
+        }
+        panels.close();
+        actor.shutdown();
+    }
+}

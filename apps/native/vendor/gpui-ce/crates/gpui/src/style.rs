@@ -553,8 +553,8 @@ pub enum Filter {
         opening: f32,
         /// Overall opacity multiplier (`0.0..=1.0`).
         fade: f32,
-        /// Accent color packed as `0xRRGGBB`.
-        accent: u32,
+        /// Gold, accent, and rose stops, each packed as `0xRRGGBB`.
+        palette: [u32; 3],
     },
 }
 
@@ -592,12 +592,12 @@ impl Filter {
                 age,
                 opening,
                 fade,
-                accent,
+                palette,
             } => ScaledFilter::DotAurora {
                 age: *age,
                 opening: *opening,
                 fade: *fade,
-                accent: *accent,
+                palette: *palette,
                 scale: factor,
             },
         }
@@ -634,8 +634,8 @@ pub enum ScaledFilter {
         opening: f32,
         /// Overall opacity multiplier (`0.0..=1.0`).
         fade: f32,
-        /// Accent color packed as `0xRRGGBB`.
-        accent: u32,
+        /// Gold, accent, and rose stops, each packed as `0xRRGGBB`.
+        palette: [u32; 3],
         /// Window display scale factor.
         scale: f32,
     },

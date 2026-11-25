@@ -5901,41 +5901,88 @@ fn properties_select_model_nodes_and_keyframe_their_transform() {
             .cloned()
             .unwrap()
     };
+    let parts = |p: &Value| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["id"] == "3d.part")
+            .unwrap()
+            .clone()
+    };
+    let send = |presenter: &mut properties::Properties, intent: Value, time: f64| {
+        let request = presenter
+            .intent(&mut inspector(), native, &intent, time)
+            .unwrap()
+            .unwrap();
+        run(request);
+    };
+    let select = |value| json!({"type":"set-value","row":"3d.part.select","value":value});
     let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
-    let selector = row(&p, "3d.part.select");
-    assert_eq!(selector["control"]["options"][0]["label"], "Whole Model");
-    assert_eq!(selector["control"]["options"][1]["v"], "0");
-    let handle = selector["control"]["binding"]["handle"].as_str().unwrap();
-    run(presenter
-        .write(
-            &mut inspector(),
-            native,
-            handle,
-            data::model(&json!("0")).unwrap(),
-            0.,
-        )
-        .unwrap());
+    let section = parts(&p);
+    assert_eq!(section["title"], "Parts");
+    assert_eq!(section["parts"]["layer"], "model");
+    assert_eq!(section["parts"]["active"], Value::Null);
+    assert_eq!(section["rows"], json!([]));
+    let item = section["parts"]["items"][0].clone();
+    let name = item["label"].as_str().unwrap();
+    assert_eq!(
+        item,
+        json!({
+            "v":"0","label":name,"parent":null,"depth":0,"children":0,"visible":true,"edited":false,
+        })
+    );
+    send(&mut presenter, select(json!("0")), 0.);
 
     let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
-    assert_eq!(row(&p, "3d.part.select")["control"]["value"], "0");
-    assert_eq!(
-        row(&p, "3d.part.0.scale")["control"]["axes"][0]["value"],
-        100.
-    );
+    assert_eq!(parts(&p)["parts"]["active"], "0");
+    assert_eq!(parts(&p)["parts"]["activeName"], name);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+    assert_eq!(parts(&p)["rows"].as_array().unwrap().len(), 3);
+    let position = row(&p, "3d.part.0.position");
+    let rotation = row(&p, "3d.part.0.rotation");
+    let scale = row(&p, "3d.part.0.scale");
+    for (index, (axis, path)) in [("X", "x"), ("Y", "y"), ("Z", "z")].into_iter().enumerate() {
+        let field = &position["control"]["axes"][index];
+        assert_eq!(field["axis"], axis);
+        assert_eq!(
+            field["binding"]["channels"],
+            json!([format!("3d.part.0.{path}")])
+        );
+        assert_eq!(field["step"], 0.01);
+        assert_eq!(field["precision"], 2);
+        assert_eq!(rotation["control"]["axes"][index]["axis"], axis);
+        assert_eq!(rotation["control"]["axes"][index]["unit"], "°");
+    }
+    assert_eq!(scale["control"]["axes"][0]["value"], 100.);
+    assert_eq!(scale["control"]["axes"][0]["unit"], "%");
+    assert_eq!(scale["control"]["axes"][0]["min"], 0);
+    assert_eq!(scale["control"]["axes"][0]["max"], 10000);
     assert!(row(&p, "3d.part.0.roughness")["control"].is_object());
-    run(presenter
-        .intent(
-            &mut inspector(),
-            native,
-            &json!({"type":"key","row":"3d.part.0.x"}),
-            0.,
-        )
-        .unwrap()
-        .unwrap());
+
+    let visibility = |value| json!({"type":"set-value","row":"3d.part.0.visible","value":value});
+    send(&mut presenter, visibility(false), 0.);
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], false);
+    assert_eq!(parts(&p)["parts"]["items"][0]["edited"], true);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], true);
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], true);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+
+    let key = json!({"type":"key","row":"3d.part.0.position"});
+    send(&mut presenter, key.clone(), 0.);
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    assert_eq!(row(&p, "3d.part.0.rotation")["animation"], "static");
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    let x = row(&p, "3d.part.0.x");
-    assert_eq!(x["animation"], "animated");
-    let handle = x["control"]["axes"][0]["binding"]["handle"]
+    let position = row(&p, "3d.part.0.position");
+    assert_eq!(position["animation"], "animated");
+    let handle = position["control"]["axes"][0]["binding"]["handle"]
         .as_str()
         .unwrap();
     run(presenter
@@ -5948,12 +5995,59 @@ fn properties_select_model_nodes_and_keyframe_their_transform() {
         )
         .unwrap());
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 2.);
-    assert_eq!(row(&p, "3d.part.0.x")["animation"], "key-at-playhead");
-    let history = pm_kernel::HistoryCall::Undo;
-    run(Request::new(native, history));
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        2.
+    );
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "animated");
+    send(&mut presenter, key.clone(), 1.);
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 0.);
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        2.
+    );
+    send(&mut presenter, key, 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "animated");
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+
+    send(&mut presenter, visibility(false), 1.);
+    send(&mut presenter, visibility(true), 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], true);
+    send(
+        &mut presenter,
+        json!({"type":"set-value","row":"3d.part.0.reset","value":null}),
+        1.,
+    );
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "static");
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        0.
+    );
+    let record = data::wire(&inspector().layer("model").unwrap());
+    assert!(record["d"]["data"]["object"]["parts"].get("0").is_none());
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    send(&mut presenter, select(Value::Null), 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["active"], Value::Null);
+    assert_eq!(parts(&p)["rows"], json!([]));
 }
 
 /// Playing, Properties shows a keyframed value at the playhead: the time the
@@ -6339,7 +6433,7 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
         .iter()
         .filter(|(c, _)| c == "ease-thumbnail")
         .count();
-    assert_eq!(thumbnails, 27, "a thumbnail per preset");
+    assert_eq!(thumbnails, 38, "a thumbnail per built-in preset");
     let labels: Vec<String> = publication
         .surface
         .nodes()
@@ -6351,19 +6445,47 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
                 .map(str::to_owned)
         })
         .collect();
-    assert!(!labels.iter().any(|l| l == "Apply Curve"));
-    for label in ["Expo Out", "Easy Ease", "Interpolation", "Outgoing influence (%)"] {
+    for label in ["Expo Out", "Easy Ease", "Apply curve", "Influence and interpolation"] {
         assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
     }
-    // Save Current uses the existing durable library service from this panel,
-    // without requiring the Timeline panel or a prior library import.
-    let save = publication.surface.nodes().values().find(|node|
-        node.props.get("id").and_then(Value::as_str) == Some("easing:save")
-    ).unwrap().id;
-    finish(panels.event("easing", publication.generation, publication.surface.revision(), save, "click", Default::default()).unwrap());
+    // Saving a named preset opens the editor, then persists through the same
+    // service as the Timeline without requiring a prior library import.
+    let fire = |publication: &Publication, name: &str, event, detail| {
+        let node = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|node| node.props.get("id").and_then(Value::as_str) == Some(name))
+            .unwrap();
+        finish(
+            panels
+                .event(
+                    "easing",
+                    publication.generation,
+                    publication.surface.revision(),
+                    node.id,
+                    event,
+                    detail,
+                )
+                .unwrap(),
+        );
+    };
+    fire(&publication, "easing:save-preset", "click", Default::default());
+    let editor = panels.take_publications().pop().unwrap();
+    fire(
+        &editor,
+        "easing:save-name",
+        "input",
+        EventDetail {
+            value: Some(json!("Test preset")),
+            ..Default::default()
+        },
+    );
+    let edited = panels.take_publications().pop().unwrap();
+    fire(&edited, "easing:save", "click", Default::default());
     let stored = data::wire(&kernel.state().settings[crate::timeline_easing::STORAGE]);
     let library = &stored[pm_services::surfaces::easing::STORAGE_KEY];
-    assert_eq!(library["groups"][0]["presets"][0]["name"], "Custom easing");
+    assert_eq!(library["groups"][0]["presets"][0]["name"], "Test preset");
     assert_eq!(library["groups"][0]["presets"].as_array().unwrap().len(), 1);
 }
 #[test]

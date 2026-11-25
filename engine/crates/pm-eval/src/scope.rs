@@ -34,6 +34,9 @@ pub struct Scope<'a, 'd> {
     /// `PM.proj`: the open composition (the same as `comp` unless a nested
     /// composition is being evaluated).
     pub project: &'a Comp<'d>,
+    /// Transient editor camera for this composition.
+    pub view_camera: Option<crate::space3d::Camera3d>,
+    pub(crate) active_camera: Option<(u64, Option<crate::space3d::Camera3d>)>,
     /// Local matrices and group ancestry computed in this scope, when
     /// memoized ([`Scope::memoize_transforms`]).
     pub(crate) local_memo: Option<LocalMemo<'d>>,
@@ -112,6 +115,8 @@ impl<'a, 'd> Scope<'a, 'd> {
             ev,
             comp,
             project,
+            view_camera: None,
+            active_camera: None,
             local_memo: None,
         }
     }
@@ -122,6 +127,8 @@ impl<'a, 'd> Scope<'a, 'd> {
             ev,
             comp,
             project: comp,
+            view_camera: None,
+            active_camera: None,
             local_memo: None,
         }
     }

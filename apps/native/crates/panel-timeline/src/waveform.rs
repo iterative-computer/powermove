@@ -1,9 +1,10 @@
 //! A clip's waveform as the timeline draws it: the loudness of what the clip
 //! plays, read at any zoom from a pyramid of levels, on a square-root scale,
 //! one value per drawn column (two columns per point: the device pixels of a
-//! Retina display), carried to the painter as a compact string.
+//! Retina display). Wire paint plans carry a compact string. Native plans
+//! carry softened peak heights directly.
 //!
-//! The painter softens the columns ([`soften`]) and fills one smooth shape
+//! The painter fills one smooth shape
 //! standing on the strip's floor, in a pale tint of the strip's own hue:
 //! light caught inside the glass (pm-design `Strip::wave`).
 use std::sync::Arc;
@@ -87,6 +88,10 @@ impl Levels {
 /// span touches; a span narrower than the finest bucket reads the finest
 /// level between bucket centres, so a zoomed-in waveform stays smooth.
 pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
+    sample_column::<true>(p, rate, t0, t1)
+}
+
+fn sample_column<const RMS: bool>(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
     let Some(finest) = p.peak.first().filter(|l| !l.is_empty()) else {
         return (0., 0.);
     };
@@ -106,7 +111,7 @@ pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
             };
             get(i) * (1. - f) + get(i + 1.) * f
         };
-        return (lerp(finest), lerp(&p.rms[0]));
+        return (lerp(finest), if RMS { lerp(&p.rms[0]) } else { 0. });
     }
     // Exactly the buckets the span touches, each level taking its odd ends:
     // a loud moment never bleeds into the next column.
@@ -117,10 +122,12 @@ pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
     }
     let (mut top, mut squares, mut count) = (0f32, 0f64, 0f64);
     let mut take = |level: usize, i: usize| {
-        let width = (1usize << level) as f64;
         top = top.max(p.peak[level][i]);
-        squares += f64::from(p.rms[level][i]).powi(2) * width;
-        count += width;
+        if RMS {
+            let width = (1usize << level) as f64;
+            squares += f64::from(p.rms[level][i]).powi(2) * width;
+            count += width;
+        }
     };
     let mut level = 0;
     while a < b && level < p.peak.len() {
@@ -142,7 +149,14 @@ pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
         b /= 2;
         level += 1;
     }
-    (top, (squares / count.max(1.)).sqrt() as f32)
+    (
+        top,
+        if RMS {
+            (squares / count.max(1.)).sqrt() as f32
+        } else {
+            0.
+        },
+    )
 }
 
 /// A linear level as drawn: its square root, so quiet speech keeps a shape
@@ -151,7 +165,9 @@ pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
 /// would draw every exponential decay as a straight ramp, a sawtooth. Below
 /// [`FLOOR_DB`] is silence.
 pub fn perceptual(level: f32) -> f32 {
-    if level <= 10f32.powf(-FLOOR_DB / 20.) {
+    static FLOOR: std::sync::LazyLock<f32> =
+        std::sync::LazyLock::new(|| 10f32.powf(-FLOOR_DB / 20.));
+    if level <= *FLOOR {
         return 0.;
     }
     level.min(1.).sqrt()
@@ -180,6 +196,26 @@ pub fn columns(
         rms.push(q(mean));
     }
     (peaks, rms)
+}
+
+/// The native glass fill uses peak heights only. Keep the same quantization
+/// as the wire format without computing RMS or round-tripping through hex.
+pub(crate) fn native_peaks(
+    p: &Pyramid,
+    rate: f64,
+    source: &dyn Fn(f64) -> f64,
+    left: f64,
+    step: f64,
+    count: usize,
+) -> Vec<f32> {
+    let peaks: Vec<_> = (0..count)
+        .map(|i| {
+            let t = left + i as f64 * step;
+            let (peak, _) = sample_column::<false>(p, rate, source(t), source(t + step));
+            (perceptual(peak) * 255.).round() / 255.
+        })
+        .collect();
+    soften(&peaks)
 }
 
 /// Bytes as the op carries them (two hex digits each).
@@ -225,18 +261,23 @@ const LOUD_ENOUGH: f32 = 0.25;
 /// height).
 pub fn soften(values: &[f32]) -> Vec<f32> {
     let reach = (3. * SOFTEN).ceil() as isize;
-    let weights: Vec<f32> = (-reach..=reach)
-        .map(|d| (-(d * d) as f32 / (2. * SOFTEN * SOFTEN)).exp())
-        .collect();
-    let total: f32 = weights.iter().sum();
+    static WINDOW: std::sync::LazyLock<(Vec<f32>, f32)> = std::sync::LazyLock::new(|| {
+        let reach = (3. * SOFTEN).ceil() as isize;
+        let weights: Vec<_> = (-reach..=reach)
+            .map(|d| (-(d * d) as f32 / (2. * SOFTEN * SOFTEN)).exp())
+            .collect();
+        let total = weights.iter().sum();
+        (weights, total)
+    });
+    let (weights, total) = &*WINDOW;
     let n = values.len() as isize;
     let soft: Vec<f32> = (0..n)
         .map(|i| {
             (-reach..=reach)
-                .zip(&weights)
+                .zip(weights)
                 .map(|(d, w)| values[(i + d).clamp(0, n - 1) as usize] * w)
                 .sum::<f32>()
-                / total
+                / *total
         })
         .collect();
     let loudest = soft.iter().copied().fold(0., f32::max).max(LOUD_ENOUGH);
@@ -269,6 +310,20 @@ mod tests {
     fn pyramid(peaks: Vec<f32>) -> Pyramid {
         let rms = peaks.iter().map(|p| p * 0.5).collect();
         Pyramid::new(peaks, rms)
+    }
+
+    #[test]
+    fn native_peaks_match_the_wire_waveform_at_each_zoom() {
+        let p = pyramid((0..512).map(|i| ((i % 79) as f32 / 79.).powi(3)).collect());
+        for step in [0.0005, 0.0025, 0.02, 0.12] {
+            for source in [|t: f64| t + 0.13, |t: f64| 1.25 - t] {
+                let (wire, _) = columns(&p, 400., &source, -0.1, step, 300);
+                assert_eq!(
+                    native_peaks(&p, 400., &source, -0.1, step, 300),
+                    soften(&decode(&encode(&wire))),
+                );
+            }
+        }
     }
 
     /// Quiet sound has a shape: a level 40 dB down still draws a quarter of

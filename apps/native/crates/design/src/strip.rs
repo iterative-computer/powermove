@@ -291,6 +291,8 @@ impl Tokens {
         } else {
             pale().or_else(shade)
         }
+        // A saturated shade can miss the contrast target where black clears it.
+        .or_else(|| holds(0x000000).then_some(0x000000))
         .unwrap_or(0xffffff);
         // The rim's light is the palest tint of the hue; under the pointer
         // it brightens toward white, selected it is white.

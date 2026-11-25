@@ -905,6 +905,64 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
     assert!(!p.history.can_undo, "the whole scrub was one undo step");
 }
+#[gpui::test]
+fn right_click_cancels_a_number_scrub_without_undo_or_a_click(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 1);
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    vcx.run_until_parked();
+    let name = view.read_with(&vcx, |v, _| v.first_number()).unwrap();
+    let field = bounds(&mut vcx, &name);
+    let at = field.center();
+    let far = at + point(px(-80.), field.size.height + px(25.));
+    let before = rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
+    let none = Modifiers::none();
+    vcx.simulate_mouse_down(at, MouseButton::Left, none);
+    vcx.simulate_mouse_move(far, MouseButton::Left, none);
+    let kernel = rig.kernel.clone();
+    let original = before.clone();
+    settle(cx, move |_| {
+        let published = kernel.published(PROJECT).unwrap();
+        published.entry.is_some() && published.snapshot.root().unwrap().to_value() != original
+    });
+    let live = rig.kernel.published(PROJECT).unwrap();
+    assert!(live.snapshot.root().unwrap().to_value() != before);
+    vcx.simulate_mouse_down(far, MouseButton::Right, none);
+    vcx.simulate_mouse_up(far, MouseButton::Right, none);
+    vcx.simulate_mouse_move(at, MouseButton::Left, none);
+    vcx.simulate_mouse_up(at, MouseButton::Left, none);
+    let kernel = rig.kernel.clone();
+    settle(cx, move |_| kernel.published(PROJECT).unwrap().entry.is_none());
+    let after = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.snapshot.root().unwrap().to_value(), before);
+    assert!(after.entry.is_none());
+    assert!(!after.history.can_undo);
+    view.read_with(&vcx, |v, _| {
+        assert!(!v.scrubbing());
+        assert!(!v.number_edit_requested(&name));
+        assert!(!v.log.iter().any(|(_, event, _)| event == "contextmenu" || event == "click"));
+    });
+}
+
 /// Headless input: panel handoff, phase filtering and one kernel undo.
 #[gpui::test]
 fn horizontal_wheel_scrub_is_one_undo_and_ignores_momentum(cx: &mut TestAppContext) {
@@ -1305,7 +1363,6 @@ fn a_scroller_keeps_the_rows_its_panel_asks_for_in_a_short_body(cx: &mut TestApp
 #[gpui::test]
 fn scroll_preserves_authored_min_height_above_smaller_row_floor(cx: &mut TestAppContext) {
     let rig = rig("export", 1);
-    let _ = publication(&rig);
     let column = json!({"display":"flex","flexDirection":"column","width":420,"height":420});
     let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
     ops.extend(node_ops(
@@ -1943,6 +2000,11 @@ fn a_tabbed_panel_header_leaves_out_its_title(cx: &mut TestAppContext) {
     });
     assert_eq!(header, Some(2));
     assert_eq!(title, Some(3), "the title is its first text, not a control");
+    view.read_with(&vcx, |v, _| {
+        assert_eq!(v.fallback_header_title(title, false), None);
+        assert_eq!(v.fallback_header_title(None, false), Some("Timeline"));
+        assert_eq!(v.fallback_header_title(None, true), None);
+    });
 }
 
 /// A tooltip says what is not in view: a row titled with the name it
@@ -2619,7 +2681,7 @@ fn easing_selection_and_preset_preserve_height_and_body_offset(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
+fn easing_local_scrub_commits_or_reverts_on_right_click(cx: &mut TestAppContext) {
     for (curve, commit) in [(false, true), (false, false), (true, true), (true, false)] {
         let r = rig("viewer", 1);
         let _ = publication(&r);
@@ -2653,9 +2715,17 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             props,
             &["input", "change"],
         ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "div",
+            json!({"id":"drag-menu","style":{"width":200,"height":24}}),
+            &["contextmenu"],
+        ));
         let (view, mut vcx) = window(cx, &r, synthetic(&r, ops), Default::default());
         vcx.run_until_parked();
         let b = bounds(&mut vcx, "local-scrub");
+        let menu = bounds(&mut vcx, "drag-menu").center();
         let at = if curve {
             let t = tokens();
             let inset = px(t.metrics.keyframe / 2. + t.metrics.border);
@@ -2686,7 +2756,12 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             "preview must not commit"
         );
         if !commit {
-            assert!(view.update(&mut vcx, |view, cx| view.cancel_gesture(cx)));
+            let outside = menu;
+            assert!(!b.contains(&outside));
+            vcx.simulate_mouse_down(outside, MouseButton::Right, Modifiers::none());
+            vcx.simulate_mouse_up(outside, MouseButton::Right, Modifiers::none());
+            vcx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+            assert!(!view.read_with(&vcx, |view, _| view.scrubbing()));
         }
         vcx.simulate_mouse_up(
             at + point(px(40.), px(-20.)),
@@ -2702,6 +2777,7 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             if commit { 1 } else { 0 }
         );
         if !commit {
+            assert!(!after.iter().any(|(_, event, _)| event == "contextmenu"));
             let restored = after
                 .iter()
                 .find(|(_, event, _)| event == "input")
@@ -2718,6 +2794,8 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
                     json!("10")
                 }
             );
+            vcx.simulate_mouse_down(menu, MouseButton::Right, Modifiers::none());
+            assert!(events(&view, &mut vcx).iter().any(|(_, event)| event == "contextmenu"));
         }
     }
 }

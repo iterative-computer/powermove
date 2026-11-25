@@ -506,6 +506,7 @@ pub struct Renderer {
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
+    groups: crate::frame_prefix::GroupCache,
     /// Frames read back one after another (exports): the staging buffer, a
     /// frame target given back with [`Renderer::recycle`] and pixels given
     /// back with [`Renderer::give_rgba`] (docs/engine/perfbench.md). Held
@@ -569,6 +570,7 @@ impl Renderer {
             svg_warned: Default::default(),
             channel_memo: true,
             prefix: Default::default(),
+            groups: Default::default(),
             frame_reuse: FrameReuse::default(),
             source_reuse: source::SourceReuse::default(),
             material: Default::default(),
@@ -631,6 +633,7 @@ impl Renderer {
     pub fn clear_draw_reuse(&mut self) {
         self.reuse.clear();
         self.prefix.clear(&mut self.pool);
+        self.groups.clear();
     }
 
     /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
@@ -664,6 +667,7 @@ impl Renderer {
         crate::reuse::ReuseStats {
             prefix_frames: self.prefix.reused_frames,
             prefix_draws: self.prefix.reused_draws,
+            group_hits: self.groups.hits,
             ..self.reuse.stats()
         }
     }
@@ -742,6 +746,10 @@ impl Renderer {
         Ok(refused)
     }
 
+    pub fn set_plane_camera(&mut self, camera: Option<pm_eval::space3d::Camera3d>) {
+        self.options3d.plane_camera = camera;
+    }
+
     /// Attach an immutable, worker-safe Studio source for viewer and exports.
     /// Replacing it retires presented scenes and draws, retaining immutable BLASes.
     pub fn set_studio_source(
@@ -749,6 +757,9 @@ impl Renderer {
         source: Option<Arc<dyn crate::scene3d::provider::Source>>,
         settings: crate::scene3d::provider::Settings,
     ) {
+        if source.is_none() && self.scene3d.provider.is_none() {
+            return;
+        }
         self.options3d.studio = source.as_ref().map(|_| settings);
         match (self.scene3d.provider.as_mut(), source) {
             (Some(pass), Some(source)) => pass.replace_source(source),
@@ -1329,6 +1340,7 @@ impl Renderer {
     /// layers are unsupported and route to the legacy renderer). Dropping
     /// or replacing them clears the glyph and raster caches.
     pub fn set_text_fonts(&mut self, fonts: Option<Box<dyn crate::text::TextFonts>>) {
+        self.clear_draw_reuse();
         self.text.set_fonts(fonts);
         self.text_gpu.clear();
     }
@@ -1339,6 +1351,7 @@ impl Renderer {
         if let Some(fonts) = self.text.fonts.as_deref_mut() {
             fonts.set_seed_scope(scope);
         }
+        self.clear_draw_reuse();
     }
 
     /// Text layout and rendering state (profiles, the captions switch).
@@ -1382,7 +1395,7 @@ impl Renderer {
 
     /// Nominal texel bytes retained by reusable intermediate targets.
     pub fn target_pool_bytes(&self) -> u64 {
-        self.pool.bytes()
+        self.pool.bytes() + self.prefix.bytes() + self.groups.bytes()
     }
 
     /// Reusable targets currently idle in the pool.
@@ -1419,6 +1432,9 @@ impl Renderer {
     /// view's resolution instead of the source's. CLI exact/reference and
     /// export paths keep native source resolution and precision by default.
     pub fn set_preview_media(&mut self, stills: bool, video: bool) {
+        if self.media.preview_media != stills {
+            self.prefix.clear(&mut self.pool);
+        }
         self.media.preview_media = stills;
         self.media.preview_video = video;
         self.media.draw_edge = None;
@@ -1458,7 +1474,8 @@ impl Renderer {
     /// targets' part of the same allowance.
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
         let (targets, pyramids, binds) = target_shares(bytes);
-        self.pool.set_free_budget(targets);
+        let retained = self.prefix.bytes() + self.groups.bytes();
+        self.pool.set_free_budget(targets.saturating_sub(retained));
         self.pyramids.set_budget(pyramids);
         self.binds.set_budget(binds);
     }
@@ -1466,7 +1483,7 @@ impl Renderer {
     /// Bytes the pooled targets, kept pyramids and kept bindings hold now
     /// (bindings with their compatibility uploads).
     pub fn target_store_bytes(&self) -> (u64, u64, u64) {
-        (self.pool.bytes(), self.pyramids.bytes(), self.binding_cache_bytes())
+        (self.target_pool_bytes(), self.pyramids.bytes(), self.binding_cache_bytes())
     }
 
     /// Visible play shares a 128 MiB ceiling across both kinds of retention.
@@ -1746,7 +1763,14 @@ impl Renderer {
         // next frame allocates them again).
         self.release_frame_reuse();
         self.source_reuse.trim(bytes);
-        let bytes = bytes.saturating_sub(self.source_reuse.bytes());
+        let retained = self.prefix.bytes() + self.groups.bytes();
+        if retained > bytes {
+            self.prefix.clear(&mut self.pool);
+            self.groups.clear();
+        }
+        let bytes = bytes.saturating_sub(
+            self.source_reuse.bytes() + self.prefix.bytes() + self.groups.bytes(),
+        );
         // Playback's pool/cache grant was funded separately by the governor.
         let pool_bytes = if self.pool.playback_retention() {
             0
@@ -2370,20 +2394,20 @@ impl Renderer {
                 )
             },
             self.compat.as_deref(),
-            self.reuse_enabled.then_some(&mut self.reuse),
+            (self.reuse_enabled && !request.export).then_some(&mut self.reuse),
         );
         self.evaluator.close_channel_memo();
         if !request.background {
             plan.background = Background::Transparent;
         }
         let quads = LayerQuad::of_plan(&plan);
-        // Only the viewer's own frames (the reuse is on around them) keep
-        // their bottom; never with the depth and id surface, exports, or
-        // compositing nodes at the top level.
+        // The viewer can preserve an accumulator underneath an adjustment.
+        // Depth/id and sliced or exported frames require every draw.
         let prefix = self.reuse_enabled
             && depth_id.is_none()
+            && !request.depth_id
             && !request.export
-            && !crate::composite::has_nodes(&plan);
+            && self.effects.slices.is_none();
         let mut failures = build.failures;
         let svg_layers = build.svg_layers;
         let mut planned_unsupported = build.unsupported;
@@ -2454,6 +2478,24 @@ impl Renderer {
                 && self.effects.slices.is_none()
                 && std::env::var_os("PM_SHADER_OUTPUT_CACHE").is_none_or(|v| v != "0"),
         );
+        let prefix_key = prefix.then(|| crate::frame_prefix::PrefixKey {
+            composition: composition.to_owned(),
+            width: size.width,
+            height: size.height,
+            format: working_format(precision),
+            region,
+            precision,
+            working: color.working,
+            blend_domain: color.blend_domain,
+            background: plan.background.clone(),
+            plan_size: (plan.width, plan.height),
+            view: plan.view,
+            sampling: request.sampling,
+            final_output: request.output_kind == crate::OutputKind::Final,
+        });
+        if let Some(key) = &prefix_key {
+            self.groups.begin(key, self.prefix.bytes());
+        }
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.effects.uniforms.reset();
             self.binds.begin_frame();
@@ -2490,6 +2532,7 @@ impl Renderer {
                 unsupported: Vec::new(),
                 twins: crate::exec::comp_twins(&plan),
                 comps: Vec::new(),
+                groups: prefix.then_some(&mut self.groups),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
@@ -2508,35 +2551,25 @@ impl Renderer {
             let gl_rows = pooled_gl_rows.as_ref().unwrap_or(target);
             // The viewer's frames draw from the kept bottom of the last one
             // when they start with the same draws (`crate::frame_prefix`).
-            let (resolved, kept_legend) = if prefix {
-                let key = crate::frame_prefix::PrefixKey {
-                    composition: composition.to_owned(),
-                    width: size.width,
-                    height: size.height,
-                    format: gl_rows.format(),
-                    region,
-                    precision,
-                    working: color.working,
-                    blend_domain: color.blend_domain,
-                    background: plan.background.clone(),
-                    plan_size: (plan.width, plan.height),
-                    sampling: request.sampling,
-                    final_output: request.output_kind == crate::OutputKind::Final,
-                };
-                crate::frame_prefix::render(
-                    &mut exec,
-                    &mut encoder,
-                    &plan,
-                    region,
-                    gl_rows,
-                    &mut self.prefix,
-                    key,
-                )
+            let (resolved, kept_legend) = if let Some(key) = prefix_key {
+                if crate::composite::has_nodes(&plan) {
+                    exec.render_comp_nodes(
+                        &mut encoder, &plan, region, gl_rows, Some((&mut self.prefix, key)),
+                    )
+                } else {
+                    let (start, mut resolved, legend) = crate::frame_prefix::seed(
+                        &mut exec, &mut encoder, &plan, region, gl_rows, &mut self.prefix, key,
+                    );
+                    if start == 0 || start < plan.draws.len() {
+                        resolved.extend(exec.render_draws(
+                            &mut encoder, &plan, &plan.draws[start..], region, gl_rows,
+                            crate::pipelines::PassBlend::Over, start == 0,
+                        ));
+                    }
+                    (resolved, legend)
+                }
             } else {
-                (
-                    exec.render_comp(&mut encoder, &plan, region, gl_rows),
-                    Vec::new(),
-                )
+                (exec.render_comp(&mut encoder, &plan, region, gl_rows), Vec::new())
             };
             // Something met at exec time is unsupported (media facts the
             // plan could not see): the frame fails, and the caller's
@@ -2653,11 +2686,15 @@ impl Renderer {
             if unsupported.is_empty()
                 && pending.is_empty()
                 && !abandoned
+                && !held
                 && !self.media.still_pending
+                && self.effects.fallback.fatal.is_none()
             {
+                self.groups.finish();
                 self.prefix.remember(std::mem::take(&mut plan.draws));
             } else {
                 self.prefix.clear(&mut self.pool);
+                self.groups.clear();
             }
         }
         self.media.flush();
@@ -3016,7 +3053,7 @@ impl Renderer {
                 self.isolate_layers,
             ),
             self.compat.as_deref(),
-            self.reuse_enabled.then_some(&mut self.reuse),
+            (self.reuse_enabled && !request.export).then_some(&mut self.reuse),
         );
         self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {

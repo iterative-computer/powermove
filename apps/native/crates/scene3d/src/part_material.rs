@@ -56,18 +56,51 @@ pub fn valid_part_key(key: &str) -> bool {
     steps.clone().count() <= 64 && steps.all(valid)
 }
 
-/// Install neutral channels once, leaving an existing part's keys intact.
-pub fn install_part(layer: &Value, key: &str, name: &str) -> Result<Option<Value>> {
+/// Whether Reset would change any of the part’s transform or visibility channels.
+pub fn edited(part: &Value, defaults: &Value) -> bool {
+    part["p"].as_object().is_some_and(|channels| {
+        channels.iter().any(|(field, channel)| {
+            channel["kf"]
+                .as_array()
+                .is_some_and(|keys| !keys.is_empty())
+                || channel["expr"]
+                    .as_str()
+                    .is_some_and(|expr| !expr.is_empty())
+                || match (channel["v"].as_f64(), defaults[field]["v"].as_f64()) {
+                    (Some(value), Some(neutral)) => value != neutral,
+                    _ => channel["v"] != defaults[field]["v"],
+                }
+        })
+    })
+}
+
+fn editable_part(layer: &Value, key: &str) -> Result<()> {
     if !is_model(layer) || !valid_part_key(key) {
         return fail("Choose a model part");
     }
     if layer["lock"] == true {
         return fail("Layer is locked");
     }
+    Ok(())
+}
+
+pub fn reset_part(layer: &Value, key: &str) -> Result<Option<Value>> {
+    editable_part(layer, key)?;
     let mut data = layer["d"]["data"].clone();
-    if data["object"]["parts"].get(key).is_some() {
+    let removed = data["object"]
+        .get_mut("parts")
+        .and_then(Value::as_object_mut)
+        .and_then(|parts| parts.remove(key));
+    Ok(removed.map(|_| data))
+}
+
+/// Install neutral channels once, leaving an existing part's keys intact.
+pub fn install_part(layer: &Value, key: &str, name: &str) -> Result<Option<Value>> {
+    editable_part(layer, key)?;
+    if layer["d"]["data"]["object"]["parts"].get(key).is_some() {
         return Ok(None);
     }
+    let mut data = layer["d"]["data"].clone();
     let name: String = name.trim().chars().take(40).collect();
     data["object"]["parts"][key] = json!({
         "name": if name.is_empty() { format!("Part {}", key.replace('_', ".")).chars().take(160).collect::<String>() } else { name },

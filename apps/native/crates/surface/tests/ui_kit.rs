@@ -701,10 +701,10 @@ fn design_review_shapes_follow_the_panel_specs() {
     let well = Recipe::new(Component::ColourWell, &t, false);
     assert_eq!(well.visual_height, Some(t.metrics.field));
     assert_eq!(well.radius, Some(t.metrics.control_radius));
-    assert_eq!(
-        Recipe::new(Component::ListItem, &t, false).radius,
-        Some(t.metrics.control_radius)
-    );
+    let row_radius = (t.metrics.panel_radius - t.metrics.gap).max(t.radius.sm);
+    for component in [Component::ListItem, Component::TreeItem] {
+        assert_eq!(Recipe::new(component, &t, false).radius, Some(row_radius));
+    }
     assert_eq!(
         Recipe::new(Component::Toggle, &t, false).widget,
         Widget::Checkbox

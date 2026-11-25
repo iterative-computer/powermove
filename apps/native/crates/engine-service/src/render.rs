@@ -586,7 +586,7 @@ pub struct Engine {
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(
-        usize,
+        u64,
         u64,
         String,
         crate::studio::Preview,
@@ -1727,6 +1727,12 @@ impl Engine {
             .map_err(anyhow::Error::msg)
     }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        self.renderer.set_plane_camera(crate::studio::plane_camera(
+            &self.studio_view,
+            &scene.doc,
+            &scene.comp,
+            time.get(),
+        ));
         // A new scene's fonts are asked for now, off this thread, so no
         // frame met later (while playing) waits for the registry's first
         // answer; the same scene costs a comparison. Before the effects:
@@ -1735,11 +1741,19 @@ impl Engine {
             self.font_warm.request(&scene.doc, &scene.comp, fonts);
         }
         let key = (
-            Arc::as_ptr(&scene.doc) as usize,
+            // A flat scene does not keep a Studio source holding its document.
+            // A new snapshot must still be distinct if it reuses the allocation.
+            scene.doc.edition(),
             scene.content,
             scene.comp.clone(),
             self.studio_preview,
-            self.studio_view.key(),
+            // The frame cache still keys on every view. A flat composition's
+            // custom camera changes only its projected layer vertices.
+            if self.studio_view == crate::studio::ViewCamera::Active || self.draws_studio(scene) {
+                self.studio_view.key()
+            } else {
+                crate::studio::ViewCamera::Active.key()
+            },
             self.fonts.as_ref().map(|f| f.generation()),
             // A model or environment file saved again is read again.
             self.observed_media(scene),
@@ -1798,24 +1812,28 @@ impl Engine {
         }
         if self.studio_content.as_ref() != Some(&key) {
             #[cfg(feature = "kernel")]
-            crate::studio::attach_with_camera_fonts_progress(
-                &mut self.renderer,
-                scene.doc.clone(),
-                scene.media.as_ref(),
-                &crate::studio::SceneRequest {
-                    composition: scene.comp.clone(),
-                    revision: scene.doc.revision(),
-                    ticks: time.get(),
-                    width: 1,
-                    height: 1,
-                },
-                self.studio_preview,
-                self.studio_view.clone(),
-                self.fonts.as_ref(),
-                self.studio_progress.clone(),
-                Some(self.studio_resources.clone()),
-            )
-            .map_err(anyhow::Error::msg)?;
+            if self.draws_studio(scene) {
+                crate::studio::attach_with_camera_fonts_progress(
+                    &mut self.renderer,
+                    scene.doc.clone(),
+                    scene.media.as_ref(),
+                    &crate::studio::SceneRequest {
+                        composition: scene.comp.clone(),
+                        revision: scene.doc.revision(),
+                        ticks: time.get(),
+                        width: 1,
+                        height: 1,
+                    },
+                    self.studio_preview,
+                    self.studio_view.clone(),
+                    self.fonts.as_ref(),
+                    self.studio_progress.clone(),
+                    Some(self.studio_resources.clone()),
+                )
+                .map_err(anyhow::Error::msg)?;
+            } else {
+                self.renderer.set_studio_source(None, Default::default());
+            }
             // A document's first frame compiles the frame and text pipelines
             // it draws with, so no frame met while playing does (built ones
             // are kept: later documents pay nothing).
@@ -2102,7 +2120,8 @@ impl Engine {
         let looked = hit.is_none()
             && shown.is_none()
             && !spec.exact
-            && self.focus_group.is_none();
+            && self.focus_group.is_none()
+            && self.studio_view == crate::studio::ViewCamera::Active;
         // A playing or paused frame waits a moment for its frame on disk
         // rather than drawing what was rendered because it can't be drawn
         // in time (a dragged one never waits).
@@ -2222,6 +2241,7 @@ impl Engine {
                     && zoom_whole_size.is_none()
                     && spec.final_picture(scene)
                     && !self.draws_studio(scene)
+                    && self.studio_view == crate::studio::ViewCamera::Active
                     && self.text_grid_scale(scene, &spec.output).is_none()
                 {
                     return Err(SettledPending.into());

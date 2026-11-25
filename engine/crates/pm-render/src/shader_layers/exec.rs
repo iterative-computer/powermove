@@ -295,6 +295,22 @@ const PROGRAMS: usize = 256;
 const UPLOADS: usize = 8;
 
 impl ShaderState {
+    pub(crate) fn can_reuse_pixels(
+        &self,
+        key: &Key,
+        watchdog: &crate::effects::watchdog::Watchdog,
+    ) -> bool {
+        use crate::effects::watchdog::Subject;
+        let subject = Subject::Code(*key);
+        self.programs
+            .get(key)
+            .is_some_and(|(program, _)| program.output_cache_safe)
+            && !super::translate::native_failed(key)
+            && !watchdog.is_code_disabled(key)
+            && !watchdog.is_held(&subject)
+            && watchdog.permits_shader_output_reuse(&subject)
+    }
+
     /// Programs built.
     pub fn programs(&self) -> usize {
         self.programs.len()

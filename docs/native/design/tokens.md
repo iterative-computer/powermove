@@ -23,19 +23,19 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 |---|---|---|---|---|---|
 | `colors.accent` | Powermove orange: primary button, playhead, selection marks | `#F0580C` | `#FA6310` | `#F0580C` | `#FA6310` |
 | `colors.accent_text` | Accent as text or a thin mark on panels (4.5:1) | `#B93800` | `#FF8B4D` | `#9A2F00` | `#FFA073` |
-| `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FCEDE6` | `#402617` | `#FCEDE6` | `#402617` |
+| `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FCEDE6` | `#3F271A` | `#FCEDE6` | `#3F271A` |
 | `colors.channel_blue` | Blue channel ink on panels (curves, channel values) | `#3263C3` | `#70ADFB` | `#3263C3` | `#70ADFB` |
 | `colors.channel_green` | Green channel ink on panels (curves, channel values) | `#1D7D3E` | `#6FD087` | `#1D7D3E` | `#6FD087` |
 | `colors.channel_red` | Red channel ink on panels (curves, channel values) | `#BA3630` | `#F47B74` | `#BA3630` | `#F47B74` |
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
-| `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#6A6867` | `#9FA0A3` | `#6A6867` |
-| `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#282523` | `#F3F3F4` | `#282523` |
-| `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#292624` | `#EBEBED` | `#322F2D` |
-| `colors.fill_strong` | Selected tab or segment over a raised track, never the accent (derived) | `#EFEFF0` | `#3D3A39` | `#E4E4E5` | `#4A4645` |
-| `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#292524` | `#FFFFFF` | `#292524` |
-| `colors.focus` | Keyboard focus ring | `#898A8D` | `#9A9997` | `#383A3F` | `#DBDBD9` |
-| `colors.hairline` | Opaque control and card edge (derived) | `#EBEBED` | `#2B2826` | `#86878B` | `#807E7D` |
-| `colors.hover` | Pointer hover fill on rows and borderless buttons | `#ECECED` | `#2E2C2A` | `#ECECED` | `#2E2C2A` |
+| `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#696969` | `#9FA0A3` | `#696969` |
+| `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#262626` | `#F3F3F4` | `#262626` |
+| `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#272727` | `#EBEBED` | `#303030` |
+| `colors.fill_strong` | Selected tab or segment over a raised track, never the accent (derived) | `#EFEFF0` | `#3B3B3B` | `#E4E4E5` | `#474747` |
+| `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#262626` | `#FFFFFF` | `#262626` |
+| `colors.focus` | Keyboard focus ring | `#898A8D` | `#999999` | `#383A3F` | `#DBDBDB` |
+| `colors.hairline` | Opaque control and card edge (derived) | `#EBEBED` | `#292929` | `#86878B` | `#7F7F7F` |
+| `colors.hover` | Pointer hover fill on rows and borderless buttons | `#ECECED` | `#2D2D2D` | `#ECECED` | `#2D2D2D` |
 | `colors.labels.blue` | Label: default for text and shape layers | `#C9D4E8` | `#3B4250` | `#C9D4E8` | `#3B4250` |
 | `colors.labels.gray` | Label: guides, nulls, cameras | `#DCDCE0` | `#3A3A3A` | `#DCDCE0` | `#3A3A3A` |
 | `colors.labels.green` | Label: audio | `#C5E3D1` | `#24503A` | `#C5E3D1` | `#24503A` |
@@ -45,29 +45,29 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.labels.violet` | Label: adjustment and effect layers | `#D8CFF0` | `#4A3B6B` | `#D8CFF0` | `#4A3B6B` |
 | `colors.labels.yellow` | Label: user colour | `#EFE0B2` | `#5C4A17` | `#EFE0B2` | `#5C4A17` |
 | `colors.media_badge` | Badge fill over media (duration, offline); always dark | `#000000` | `#000000` | `#000000` | `#000000` |
-| `colors.muted` | Captions, metadata, placeholder, units | `#66676B` | `#9C9B99` | `#57595D` | `#BDBCBB` |
-| `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1C1917` | `#FDFDFE` | `#1C1917` |
-| `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#151311` | `#F5F5F7` | `#151311` |
-| `colors.raised` | Raised neutral surface: selected segment or tab, neutral button, card (derived) | `#FFFFFF` | `#373433` | `#FFFFFF` | `#373433` |
+| `colors.muted` | Captions, metadata, placeholder, units | `#66676B` | `#9D9D9D` | `#57595D` | `#BCBCBC` |
+| `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1A1A1A` | `#FDFDFE` | `#1A1A1A` |
+| `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#131313` | `#F5F5F7` | `#131313` |
+| `colors.raised` | Raised neutral surface: selected segment or tab, neutral button, card (derived) | `#FFFFFF` | `#343434` | `#FFFFFF` | `#343434` |
 | `colors.scope_blue` | Blue channel scope trace on the dark viewer | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` |
 | `colors.scope_green` | Green channel scope trace on the dark viewer | `#4FD58A` | `#4FD58A` | `#4FD58A` | `#4FD58A` |
 | `colors.scope_red` | Red channel scope trace on the dark viewer | `#FF6B62` | `#FF6B62` | `#FF6B62` | `#FF6B62` |
-| `colors.secondary` | Row labels, secondary text | `#515257` | `#B4B3B2` | `#3C3E43` | `#D7D6D5` |
+| `colors.secondary` | Row labels, secondary text | `#515257` | `#B3B3B3` | `#3C3E43` | `#D6D6D6` |
 | `colors.selected_danger` | Danger words on a selected row | `#A82319` | `#FF8A80` | `#A82319` | `#FF8A80` |
-| `colors.selected_fill` | Neutral selected row / segment fill | `#E6E6E7` | `#363332` | `#E6E6E7` | `#363332` |
-| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#515257` | `#B4B3B2` | `#3C3E43` | `#D7D6D5` |
+| `colors.selected_fill` | Neutral selected row / segment fill | `#E6E6E7` | `#343434` | `#E6E6E7` | `#343434` |
+| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#515257` | `#B3B3B3` | `#3C3E43` | `#D6D6D6` |
 | `colors.selected_text` | Text and glyphs on an accent fill | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
-| `colors.separator` | Hairline separators and panel edges | `#DCDDDE` | `#363332` | `#86878B` | `#807E7D` |
+| `colors.separator` | Hairline separators and panel edges | `#DCDDDE` | `#343434` | `#86878B` | `#7F7F7F` |
 | `colors.success` | Completed, online, rendered | `#107A52` | `#40CF8E` | `#107A52` | `#40CF8E` |
-| `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F4` | `#1D1F25` | `#F5F5F4` |
-| `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#452818` | `#FBDFD2` | `#452818` |
-| `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#522D18` | `#FAD5C3` | `#522D18` |
+| `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F5` | `#1D1F25` | `#F5F5F5` |
+| `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#43291A` | `#FBDFD2` | `#43291A` |
+| `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#512D1A` | `#FAD5C3` | `#512D1A` |
 | `colors.verified` | A verified publisher's seal (Store), the system blue | `#007AFF` | `#0A84FF` | `#007AFF` | `#0A84FF` |
-| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#090807` | `#E6E6EA` | `#090807` |
+| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#080808` | `#E6E6EA` | `#080808` |
 | `colors.viewer_grid` | The viewer's grid over the picture | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` |
 | `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
 | `colors.warning` | Warnings, missing-but-recoverable states | `#A15C01` | `#F59E0A` | `#A15C01` | `#F59E0A` |
-| `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
+| `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0A0A0A` | `#EEEEF1` | `#0A0A0A` |
 | `metrics.agent_attachment` | Square draft attachment thumbnail edge | 56 | 56 | 56 | 56 |
 | `metrics.agent_attachment_sent` | Square sent attachment thumbnail edge | 40 | 40 | 40 | 40 |
 | `metrics.agent_effort_width` | Fixed composer effort pop-up width | 72 | 72 | 72 | 72 |
@@ -275,7 +275,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `translucency.glass_menu` | Floating colour under a palette's or menu's rows on system glass | 0.84 | 0.72 | 0.84 | 0.72 |
 | `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.6 | 0.9 | 0.6 | 0.9 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
-| `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
+| `translucency.ground` | Tint over the behind-window blur, initialized from `colors.window` | `#EEEEF1` | `#0A0A0A` | `#EEEEF1` | `#0A0A0A` |
 | `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.offline_hatch` | Media Offline hatch on timeline clips, as `danger` ink | 0.28 | 0.28 | 0.28 | 0.28 |

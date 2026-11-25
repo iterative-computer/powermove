@@ -1634,7 +1634,7 @@ fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
     assert_eq!(camera["name"], "Camera");
     assert_eq!(camera["threeD"], true);
     assert_eq!(camera["d"]["definition"], "powermove.3d.camera");
-    for (key, expected) in [("position.x", 3.), ("position.y", 2.), ("position.z", 6.)] {
+    for (key, expected) in [("position.x", 0.), ("position.y", 0.), ("position.z", 6.)] {
         assert_eq!(camera["p"][key]["v"].as_f64(), Some(expected));
     }
     assert_eq!(

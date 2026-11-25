@@ -544,7 +544,11 @@ impl Exec<'_> {
         plan: &CompPlan,
         region: Option<Region>,
         target: &Target,
-    ) -> Vec<Resolved> {
+        prefix: Option<(
+            &mut crate::frame_prefix::FramePrefix,
+            crate::frame_prefix::PrefixKey,
+        )>,
+    ) -> (Vec<Resolved>, Vec<String>) {
         let full = (plan.width, plan.height);
         let want = region.unwrap_or(Region::full(full.0, full.1));
         let padding = plan
@@ -581,10 +585,15 @@ impl Exec<'_> {
         } else {
             self.take_scoped(rect)
         };
+        let (start, mut ids, legend) = prefix.map_or_else(
+            || (0, Vec::new(), Vec::new()),
+            |(prefix, key)| {
+                crate::frame_prefix::seed(self, encoder, plan, pass_region, &acc, prefix, key)
+            },
+        );
         let mut pending = Pending::default();
-        let mut cleared = false;
-        let mut ids: Vec<Resolved> = Vec::new();
-        let mut remaining = plan.draws.as_slice();
+        let mut cleared = start != 0;
+        let mut remaining = &plan.draws[start..];
         while !remaining.is_empty() {
             let run_len = remaining
                 .iter()
@@ -824,7 +833,7 @@ impl Exec<'_> {
         if owned {
             self.release(acc);
         }
-        ids
+        (ids, legend)
     }
 
     /// Draws `pending` into the accumulator in one pass (cleared to the
@@ -1071,7 +1080,7 @@ impl Exec<'_> {
                 continue;
             }
             let target = self.take_rect(Region::full(producer.plan.width, producer.plan.height));
-            self.render_comp_nodes(encoder, &producer.plan, None, &target);
+            self.render_comp_nodes(encoder, &producer.plan, None, &target, None);
             ready.push(crate::effects::resources::Ready {
                 source_extent: producer.source_extent,
                 request: producer.request.clone(),
@@ -1093,7 +1102,7 @@ impl Exec<'_> {
                     layer: "brush".into(),
                     matrix: [asset.width as f64, 0., 0., asset.height as f64, 0., 0.],
                     content: crate::plan::Content::Texture {
-                        source: crate::plan::Source::Vector(Box::new(
+                        source: crate::plan::Source::Vector(std::sync::Arc::new(
                             asset.vector.as_ref().unwrap().clone(),
                         )),
                         uv: [0., 0., 1., 1.],
@@ -1101,7 +1110,7 @@ impl Exec<'_> {
                     },
                 }],
             };
-            self.render_comp_nodes(encoder, &plan, None, &target);
+            self.render_comp_nodes(encoder, &plan, None, &target, None);
             ready.push(crate::effects::resources::Ready {
                 source_extent: None,
                 request: asset.request(),
@@ -1596,7 +1605,7 @@ mod tests {
             layer: "g".into(),
             matrix: FULL,
             content: Content::Texture {
-                source: Source::Comp(Box::new(child)),
+                source: Source::Comp(std::sync::Arc::new(child)),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha,
             },

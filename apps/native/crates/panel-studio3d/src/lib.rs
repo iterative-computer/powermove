@@ -19,7 +19,7 @@ pub mod properties {
     pub use crate::view::{
         NATURE, QUALITY, SKIES, about, active_part, add_layer, add_models, dof_focus_options,
         estimate_seconds_per_frame, export_quality, fly_camera, new_menu, part_commands,
-        scatter_options, scene_summary, select_part, set_up_studio, shots,
+        part_control, scatter_options, scene_summary, select_part, set_up_studio, shots,
     };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};

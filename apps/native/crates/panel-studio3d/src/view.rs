@@ -480,8 +480,19 @@ pub fn part_commands(
         .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
         .cloned()
         .ok_or_else(|| invalid("Model disappeared"))?;
+    part_edits(&record, time, layer, key, name, values)
+}
+
+fn part_edits(
+    record: &Value,
+    time: f64,
+    layer: &str,
+    key: &str,
+    name: &str,
+    values: &Value,
+) -> Result<Vec<Command>> {
     let mut out = vec![];
-    if let Some(data) = pm_scene3d::part_material::install_part(&record, key, name)? {
+    if let Some(data) = pm_scene3d::part_material::install_part(record, key, name)? {
         out.push(
             Scene3dCommand::SetData {
                 layer_id: layer.into(),
@@ -506,6 +517,61 @@ pub fn part_commands(
         out.push(pm_kernel::PropertyCommand::Set(set).into());
     }
     Ok(out)
+}
+
+pub fn part_control(
+    p: &Published,
+    time: f64,
+    key: &str,
+    field: &str,
+    name: &str,
+    arg: Value,
+) -> Result<(String, Vec<Command>)> {
+    use pm_scene3d::part_material::{TRANSFORM_FIELDS, reset_part};
+    let record = selected(p)?;
+    let layer = record["id"]
+        .as_str()
+        .ok_or_else(|| invalid("Missing layer ID"))?;
+    let fallback = format!("Part {}", key.replace('_', "."));
+    let name = if name.is_empty() {
+        record["d"]["data"]["object"]["parts"][key]["name"]
+            .as_str()
+            .unwrap_or(&fallback)
+    } else {
+        name
+    };
+    if field == "reset" {
+        if !arg.is_null() && arg != true {
+            return Err(invalid("Expected a reset"));
+        }
+        let commands = reset_part(&record, key)?
+            .into_iter()
+            .map(|data| {
+                Scene3dCommand::SetData {
+                    layer_id: layer.into(),
+                    data: to_model(&data),
+                }
+                .into()
+            })
+            .collect();
+        return Ok((format!("Reset {name}"), commands));
+    }
+    let (_, label) = TRANSFORM_FIELDS
+        .iter()
+        .find(|(property, _)| *property == field)
+        .ok_or_else(|| invalid("Unknown part property"))?;
+    let label = if field == "visible" {
+        let visible = arg
+            .as_bool()
+            .ok_or_else(|| invalid("Expected visibility"))?;
+        format!("{} {name}", if visible { "Show" } else { "Hide" })
+    } else {
+        format!("Part {label}")
+    };
+    Ok((
+        label,
+        part_edits(&record, time, layer, key, name, &json!({(field):arg}))?,
+    ))
 }
 
 pub fn select_part(layer: &str, key: Option<&str>) -> Result<pm_kernel::SelectionCall> {
@@ -643,21 +709,12 @@ pub(crate) fn commands(
     }
     if let Some(control) = id.strip_prefix("part.") {
         if let Some((key, field)) = control.split_once('.')
-            && let Some((_, label)) = pm_scene3d::part_material::TRANSFORM_FIELDS
-                .iter()
-                .find(|(property, _)| *property == field)
+            && (field == "reset"
+                || pm_scene3d::part_material::TRANSFORM_FIELDS
+                    .iter()
+                    .any(|(property, _)| *property == field))
         {
-            let record = selected(p)?;
-            let layer = record["id"]
-                .as_str()
-                .ok_or_else(|| invalid("Missing layer ID"))?;
-            let name = record["d"]["data"]["object"]["parts"][key]["name"]
-                .as_str()
-                .unwrap_or("");
-            return Ok((
-                format!("Part {label}"),
-                part_commands(p, time, layer, key, name, &json!({(field):arg}))?,
-            ));
+            return part_control(p, time, key, field, "", arg);
         }
         return crate::extrude::part_commands(p, time, control, arg);
     }

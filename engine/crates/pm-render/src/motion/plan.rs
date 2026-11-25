@@ -92,7 +92,7 @@ pub(crate) fn blur_layer<'d>(
         layer: js::layer_id(layer),
         matrix: full(width, height),
         content: Content::Texture {
-            source: Source::Accumulate(Box::new(accumulation(
+            source: Source::Accumulate(std::sync::Arc::new(accumulation(
                 scope,
                 width,
                 height,
@@ -135,7 +135,7 @@ pub(crate) fn blur_group<'d>(
             layer: js::layer_id(group),
             matrix: full(width, height),
             content: Content::Texture {
-                source: Source::Comp(Box::new(pass)),
+                source: Source::Comp(std::sync::Arc::new(pass)),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha: 1.0 / f64::from(n),
             },
@@ -148,7 +148,7 @@ pub(crate) fn blur_group<'d>(
         layer: js::layer_id(group),
         matrix: full(width, height),
         content: Content::Texture {
-            source: Source::Accumulate(Box::new(accumulation(
+            source: Source::Accumulate(std::sync::Arc::new(accumulation(
                 scope,
                 width,
                 height,

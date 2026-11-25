@@ -30,6 +30,7 @@ struct PanelDrag {
     stack: bool,
     start: Point<Pixels>,
     original: Layout,
+    original_maximized: Option<String>,
     at: Point<Pixels>,
     moved: bool,
     preview: Option<DropPreview>,
@@ -133,6 +134,7 @@ pub struct Editor {
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
+    cancelled_press: bool,
     panel_undo: Vec<(Layout, Layout)>,
     panel_redo: Vec<(Layout, Layout)>,
     focus: FocusHandle,
@@ -310,6 +312,7 @@ impl Editor {
             dismissed_panels: workspace::dismissed_panels(&record),
             dock_bounds: Rect::default(),
             gesture: None,
+            cancelled_press: false,
             panel_undo: Vec::new(),
             panel_redo: Vec::new(),
             focus: cx.focus_handle(),
@@ -413,7 +416,11 @@ impl Editor {
             return;
         };
         let moved = matches!(&g, Gesture::Panel(d) if d.moved);
-        if !matches!(g, Gesture::Panel(_)) {
+        if let Gesture::Panel(drag) = g {
+            if drag.live {
+                self.maximized_panel = drag.original_maximized;
+            }
+        } else {
             self.layout = g.original();
         }
         self.resize_live = false;
@@ -1909,6 +1916,7 @@ impl Editor {
             stack,
             start: at,
             original: self.layout.clone(),
+            original_maximized: self.maximized_panel.clone(),
             at,
             moved: false,
             preview: None,
@@ -3568,6 +3576,12 @@ impl Editor {
             )
             .on_mouse_move_all({
                 let listener = cx.listener(|this, (e, phase): &(MouseMoveEvent, DispatchPhase), _, cx| {
+                    if *phase == DispatchPhase::Capture
+                        && this.cancelled_press && e.pressed_button.is_some()
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     // An already-pressed shell gesture owns motion even over
                     // a panel whose own pointer handlers consume the bubble.
                     if (*phase == DispatchPhase::Capture) != this.gesture.is_some() {
@@ -3671,6 +3685,17 @@ impl Editor {
             })
             .on_mouse_up_all({
                 let listener = cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                    if e.button == MouseButton::Right && this.cancelled_press {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if e.button != MouseButton::Left {
+                        return;
+                    }
+                    if std::mem::take(&mut this.cancelled_press) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if let Some(Gesture::Area(drag)) = &mut this.gesture {
                         drag.at = e.position;
                         if drag.moved {
@@ -3687,22 +3712,37 @@ impl Editor {
                     this.end_gesture(Some(e.position), cx);
                 });
                 move |e: &MouseUpEvent, phase, _, w, cx| {
-                    if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
+                    if phase == DispatchPhase::Capture {
                         listener(e, w, cx);
                     }
                 }
             })
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                crate::input::noted();
-                // A drag still in flight (its release never came) ends where
-                // it showed before this press is handled, never on it.
-                if this.gesture.is_some() {
-                    this.end_gesture(None, cx);
+            .on_mouse_down_all({
+                let listener = cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    crate::input::noted();
+                    if e.button == MouseButton::Right
+                        && (this.gesture.is_some() || this.cancelled_press)
+                    {
+                        this.cancel_gesture(cx);
+                        this.cancelled_press = true;
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if e.button == MouseButton::Left {
+                        this.cancelled_press = false;
+                        // A release that never came ends where the drag showed.
+                        this.end_gesture(None, cx);
+                    }
+                    if this.ringed_panel.take().is_some() {
+                        cx.notify();
+                    }
+                });
+                move |e, phase, _, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        listener(e, window, cx);
+                    }
                 }
-                if this.ringed_panel.take().is_some() {
-                    cx.notify();
-                }
-            }))
+            })
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     this.cancel_gesture(cx);
@@ -3874,9 +3914,8 @@ impl Editor {
                     tint(c.panel, t.translucency.panel)
                 });
             }
-            // A panel may supply its own header content (viewer: pop-ups, no
-            // title; timeline: transport). The shell keeps the tab strip only
-            // when the group has more than one tab.
+            // Most custom headers supply a solo title. The Viewer
+            // deliberately has none, and the native Scopes header is tools only.
             let own_ground = self
                 .integration
                 .as_ref()
@@ -3937,13 +3976,14 @@ impl Editor {
                     }),
                 );
             let multi = tabs.len() > 1;
-            if custom.is_some() && !multi {
+            let shell_title = multi || custom.is_none() || id == "scopes";
+            if !shell_title {
                 header = header.px(px(0.));
             }
             if multi {
                 header = header.pl(px(0.)).pr(px(t.space.hair)).gap(px(t.space.xs));
             }
-            if multi || custom.is_none() {
+            if shell_title {
                 // Quiet text tabs (language §9): the active title in `text`, the
                 // rest in `muted`; a pill appears only on hover. The whole tab is
                 // the drag handle. A single panel shows its title the same way.
@@ -7758,6 +7798,54 @@ mod tests {
         });
         cx.simulate_mouse_up(at((from.0 + 6., from.1)), gpui::MouseButton::Left, drag_none());
         view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+    }
+
+    #[gpui::test]
+    fn right_click_cancels_a_dock_tab_drag_and_a_splitter_resize(cx: &mut TestAppContext) {
+        use gpui::MouseButton;
+
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        let writes = view.read_with(cx, |v, _| v.outbox.len());
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        let target = view.read_with(cx, |v, _| stack_rect(v, "assets"));
+        let to = (target.x + target.w / 2., target.y + target.h * 0.9);
+        let cancel = |cx: &mut gpui::VisualTestContext, at| {
+            cx.simulate_mouse_down(at, MouseButton::Right, drag_none());
+            cx.simulate_mouse_up(at, MouseButton::Right, drag_none());
+            cx.simulate_mouse_move(at, MouseButton::Left, drag_none());
+            cx.simulate_mouse_up(at, MouseButton::Left, drag_none());
+        };
+        press(cx, from);
+        pull(cx, from, to);
+        assert!(view.read_with(cx, |v, _| v.dragging_panel()));
+        cancel(cx, at(to));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before);
+            assert_eq!(v.outbox.len(), writes);
+        });
+
+        let d = view.read_with(cx, |v, _| {
+            v.geometry.dividers.iter().find(|d| !d.horizontal).unwrap().clone()
+        });
+        let from = (d.rect.x + d.rect.w / 2., d.rect.y + d.rect.h / 2.);
+        let to = (from.0 + 50., from.1);
+        press(cx, from);
+        pull(cx, from, to);
+        view.read_with(cx, |v, _| {
+            assert!(v.resize_live);
+            assert!(v.layout != before);
+        });
+        cancel(cx, at(to));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert!(!v.resize_live);
+            assert_eq!(v.layout, before);
+            assert_eq!(v.outbox.len(), writes);
+        });
     }
 
     /// Each kind of drop (a tab position, a column position beside a panel,

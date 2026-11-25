@@ -3,7 +3,7 @@
 //! `graph-presentation.ts`). Evaluated curve segments and the value domain
 //! come from the native evaluator; the renderer never fits, samples or
 //! changes a curve.
-use crate::render::{Error, Op, Rect, Viewport};
+use crate::render::{Error, Op, Rect, SceneSelection, Viewport};
 use pm_design::Tokens;
 use pm_kernel::commands::keyframes::EaseSide;
 use serde_json::json;
@@ -702,6 +702,31 @@ impl Graph {
             && span > 0.
             && (self.max - self.min) >= span * 0.5
     }
+    /// Keys whose drawn centres the box covers, in curve and time order.
+    pub fn marquee_keys(&self, v: Viewport, region: Rect, area: Rect) -> Vec<(String, String)> {
+        let plot = plot(region);
+        let from = v.scroll_time + (area.x.max(v.layer_column) - v.layer_column) / v.pps;
+        let to = v.scroll_time
+            + ((area.x + area.width).min(v.width) - v.layer_column) / v.pps;
+        let mut keys = Vec::new();
+        if from > to {
+            return keys;
+        }
+        for curve in &self.curves {
+            let Some((layer, _)) = curve.id.rsplit_once(':') else { continue };
+            let start = curve.points.partition_point(|key| key.point.seconds < from);
+            let end = curve.points.partition_point(|key| key.point.seconds <= to);
+            for key in &curve.points[start..end] {
+                let y = plot.y + plot.height
+                    - (key.point.value - self.min) / (self.max - self.min) * plot.height;
+                if y >= area.y && y <= area.y + area.height {
+                    keys.push((layer.to_owned(), key.id.clone()));
+                }
+            }
+        }
+        keys
+    }
+
     /// The graph drawn into `region` (the whole graph, legend included),
     /// v1's way, with each curve's value marked where the playhead crosses.
     pub fn prepare(
@@ -710,6 +735,17 @@ impl Graph {
         region: Rect,
         t: &Tokens,
         playhead: Option<f64>,
+    ) -> Result<Vec<Op>, Error> {
+        self.prepare_with_selection(v, region, t, playhead, None)
+    }
+
+    pub fn prepare_with_selection(
+        &self,
+        v: Viewport,
+        region: Rect,
+        t: &Tokens,
+        playhead: Option<f64>,
+        selection: Option<&SceneSelection>,
     ) -> Result<Vec<Op>, Error> {
         if !v.valid()
             || ![region.x, region.y, region.width, region.height]
@@ -799,10 +835,13 @@ impl Graph {
             let start = curve.points.partition_point(|key| key.point.seconds < from);
             let stop = curve.points.partition_point(|key| key.point.seconds <= to);
             let mut marks = vec![];
+            let layer = curve.id.rsplit_once(':').map(|(layer, _)| layer);
             for key in &curve.points[start..stop] {
+                let selected = selection.zip(layer)
+                    .map_or(key.selected, |(selection, layer)| selection.key(layer, &key.id));
                 let p = point(key.point);
                 // Tangents: dashed, a hollow knob; a selected key's in yellow.
-                let handle_ink = if key.selected { t.graph_handle_selected() } else { ink };
+                let handle_ink = if selected { t.graph_handle_selected() } else { ink };
                 for (side, handle) in &key.handles {
                     let h = point(*handle);
                     let side_name = side_name(*side);
@@ -820,7 +859,7 @@ impl Graph {
                         format!("graph-handle:{}:{side_name}", key.id),
                         "circle",
                         Rect::new(h[0] - 3., h[1] - 3., 6., 6.),
-                        if key.selected { handle_ink } else { c.panel },
+                        if selected { handle_ink } else { c.panel },
                     );
                     dot.detail = json!({"keyline":handle_ink,"keylineWidth":1.});
                     dot.clip = Some(body);
@@ -834,7 +873,7 @@ impl Graph {
                     ink,
                 );
                 mark.detail =
-                    json!({"kind":key.shape.name(),"ring":key.selected.then(|| t.graph_key_selected())});
+                    json!({"kind":key.shape.name(),"ring":selected.then(|| t.graph_key_selected())});
                 mark.clip = Some(body);
                 marks.push(mark);
             }

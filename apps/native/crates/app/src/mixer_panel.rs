@@ -104,6 +104,7 @@ pub struct State {
     heard: Vec<String>,
     rails: HashMap<String, Bounds<Pixels>>,
     drag: Option<Drag>,
+    cancelled_press: bool,
     /// The document and revision last drawn.
     drawn: Option<(u64, u64)>,
 }
@@ -482,16 +483,36 @@ fn render(
         .overflow_x_scroll();
     // A live drag follows the pointer anywhere in the window and always
     // sees its release, as the gizmos do.
-    if v.mixer.drag.is_some() {
+    if v.mixer.drag.is_some() || v.mixer.cancelled_press {
         let this = this.clone();
         row = row.child(
             canvas(
                 |_, _, _| (),
                 move |_, _, window, _| {
+                    let pressed = this.clone();
+                    window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        pressed.update(cx, |v, cx| {
+                            if e.button == MouseButton::Left {
+                                v.mixer.cancelled_press = false;
+                            } else if e.button == MouseButton::Right
+                                && (v.mixer.cancelled_press || v.mixer_cancel(cx))
+                            {
+                                v.mixer.cancelled_press = true;
+                                cx.stop_propagation();
+                            }
+                        });
+                    });
                     let moved = this.clone();
                     window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                         if phase == DispatchPhase::Capture {
                             moved.update(cx, |v, cx| {
+                                if v.mixer.cancelled_press && e.pressed_button.is_some() {
+                                    cx.stop_propagation();
+                                    return;
+                                }
                                 let key = v.mixer.drag.as_ref().map(|d| {
                                     d.strip
                                         .as_ref()
@@ -504,10 +525,21 @@ fn render(
                         }
                     });
                     let released = this.clone();
-                    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                        if phase == DispatchPhase::Capture {
-                            released.update(cx, |v, cx| v.mixer_release(cx));
+                    window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
                         }
+                        released.update(cx, |v, cx| match e.button {
+                            MouseButton::Right if v.mixer.cancelled_press => cx.stop_propagation(),
+                            MouseButton::Left => {
+                                if std::mem::take(&mut v.mixer.cancelled_press) {
+                                    cx.stop_propagation();
+                                } else {
+                                    v.mixer_release(cx);
+                                }
+                            }
+                            _ => {}
+                        });
                     });
                 },
             )

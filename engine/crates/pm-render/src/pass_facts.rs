@@ -1,7 +1,6 @@
 //! Composition pass facts kept across property edits. These values read
-//! only group, matteSource, and solo; a layer drag changes none of them.
-//! Node revisions plus member addresses prove the same values and order
-//! without rebuilding LayerOwners or allocating a matte set each frame.
+//! group, matteSource, solo and the layer addresses resolved by group
+//! reuse. Scalar equality also handles copy-on-write layer lists.
 
 use crate::js;
 use pm_eval::{JsValue, node};
@@ -24,40 +23,50 @@ impl PassFacts {
     }
 }
 
-const FIELDS: [&str; 3] = ["group", "matteSource", "solo"];
+// A group cache also depends on stack order, stable ids and parent
+// resolution, including a missing parent that could become available.
+const FIELDS: [&str; 6] = ["group", "matteSource", "solo", "id", "parent", "type"];
 const MAX_ENTRIES: usize = 128;
 
 struct Entry {
-    layers: usize,
+    comp: (JsString, bool),
     revision: u64,
-    members: Vec<[usize; 3]>,
+    members: Vec<[Option<Node>; FIELDS.len()]>,
     facts: Arc<PassFacts>,
 }
 
 #[derive(Default)]
 pub(crate) struct FactsCache(Vec<Entry>);
 
-fn members(layer: &Node) -> [usize; 3] {
-    FIELDS.map(|key| node::member(Some(layer), key).map_or(0, |v| v as *const Node as usize))
-}
-
 impl FactsCache {
     pub(crate) fn clear(&mut self) {
         self.0.clear();
     }
 
-    pub(crate) fn get(&mut self, layers: &[Node], all: &[&Node], revision: u64) -> Arc<PassFacts> {
-        let address = layers.as_ptr() as usize;
-        let at = self.0.iter().position(|e| e.layers == address);
+    pub(crate) fn get(
+        &mut self,
+        comp: &pm_eval::Comp<'_>,
+        all: &[&Node],
+        revision: u64,
+    ) -> Arc<PassFacts> {
+        let key = (comp.id().clone(), comp.at_root());
+        let at = self.0.iter().position(|e| e.comp == key);
         if let Some(at) = at {
             let mut entry = self.0.remove(at);
             let valid = entry.revision <= revision
-                && entry.members.len() == layers.len()
-                && layers.iter().zip(&entry.members).all(|(layer, old)| {
-                    FIELDS.iter().zip(old).all(|(key, address)| {
-                        let value = node::member(Some(layer), key);
-                        value.map_or(0, |v| v as *const Node as usize) == *address
-                            && value.is_none_or(|v| v.rev() <= entry.revision)
+                && entry.members.len() == all.len()
+                && all.iter().zip(&entry.members).all(|(&layer, old)| {
+                    FIELDS.iter().zip(old).all(|(key, previous)| {
+                        match (node::member(Some(layer), key), previous) {
+                            (None, None) => true,
+                            (Some(n), Some(old)) => match n.kind() {
+                                pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_) => {
+                                    false
+                                }
+                                _ => n.kind() == old.kind(),
+                            },
+                            _ => false,
+                        }
                     })
                 });
             if valid {
@@ -72,9 +81,12 @@ impl FactsCache {
             self.0.remove(0);
         }
         self.0.push(Entry {
-            layers: address,
+            comp: key,
             revision,
-            members: layers.iter().map(members).collect(),
+            members: all
+                .iter()
+                .map(|l| FIELDS.map(|k| node::member(Some(l), k).cloned()))
+                .collect(),
             facts: facts.clone(),
         });
         facts

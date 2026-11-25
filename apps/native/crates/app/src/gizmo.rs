@@ -486,7 +486,9 @@ pub struct GizmoSurface {
     picking: Option<Point<Pixels>>,
     picks: usize,
     controls: bool,
-    panning: Option<Point<Pixels>>,
+    panning: Option<(Point<Pixels>, Point<Pixels>)>,
+    pointer_button: MouseButton,
+    cancelled_press: Option<MouseButton>,
     /// Space is held over the viewer: a press pans whatever the tool, and
     /// whether it did decides if the key's release plays.
     space_hand: bool,
@@ -560,43 +562,19 @@ pub(crate) fn project_plane(m: &[f64; 9], p: [f64; 2]) -> Option<[f64; 2]> {
     let y = (m[1] * p[0] + m[4] * p[1] + m[7]) / w;
     (x.is_finite() && y.is_finite()).then_some([x, y])
 }
-fn project_3d_point(
-    world3d: &[f64; 16],
-    p: [f64; 3],
-    cx: f64,
-    cy: f64,
-    focal: f64,
-) -> Option<[f64; 2]> {
-    let wx = world3d[0] * p[0] + world3d[4] * p[1] + world3d[8] * p[2] + world3d[12];
-    let wy = world3d[1] * p[0] + world3d[5] * p[1] + world3d[9] * p[2] + world3d[13];
-    let wz = world3d[2] * p[0] + world3d[6] * p[1] + world3d[10] * p[2] + world3d[14];
-    let w = 1.0 + wz / focal;
-    if !w.is_finite() || w <= 1e-4 {
-        return None;
-    }
-    let x = cx + (wx - cx) / w;
-    let y = cy + (wy - cy) / w;
-    (x.is_finite() && y.is_finite()).then_some([x, y])
-}
-
-/// Composition center and focal length (`max(1, w) * perspective / 36`) matching
-/// `pm_eval::space3d::plane_matrix` (outermost 3D group owns perspective).
-fn comp_perspective(
+/// Legacy focal length in pixels (the outermost 3D group owns perspective).
+fn comp_focal_length(
     root: &pm_model::Node,
     list: &[pm_kernel::model::LayerInfo],
     id: &str,
     mirror: &mut QueryMirror,
     time: f64,
-) -> (f64, f64, f64) {
+) -> f64 {
     let comp = pm_kernel::model::comp_node(root, None).unwrap_or(root);
     let w = comp
         .get("w")
         .and_then(|v| v.to_value().as_f64())
         .unwrap_or(1920.0);
-    let h = comp
-        .get("h")
-        .and_then(|v| v.to_value().as_f64())
-        .unwrap_or(1080.0);
     let mut owner = id.to_owned();
     let mut cur = list
         .iter()
@@ -629,7 +607,7 @@ fn comp_perspective(
         .filter(|v| v.is_finite())
         .unwrap_or(50.0)
         .max(0.001);
-    (w / 2.0, h / 2.0, w.max(1.0) * perspective / 36.0)
+    w.max(1.0) * perspective / 36.0
 }
 
 /// Active non-group descendants of `group_id` in `list`.
@@ -911,7 +889,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 continue;
             };
             let plane_pos = mirror.queries().plane_matrix(None, id, time, true).ok();
-            let (cx, cy, focal) = comp_perspective(root, &list, id, &mut mirror, time);
+            let focal = comp_focal_length(root, &list, id, &mut mirror, time);
             let world3d = mirror.queries().world_3d(None, id, time, false).ok();
             if own_3d
                 && let Ok(world_pos) = mirror.queries().world_3d(None, id, time, true)
@@ -941,11 +919,9 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                     });
                 }
             }
-            let anchor_3d = world3d
-                .as_ref()
-                .and_then(|w3| {
-                    project_3d_point(w3, [local_anchor[0], local_anchor[1], local_anchor_z], cx, cy, focal)
-                })
+            let anchor_3d = plane_pos
+                .filter(|_| own_3d)
+                .and_then(|positioning| project_plane(&positioning, [px, py]))
                 .or_else(|| project_plane(&plane, local_anchor));
             // For a 3D group: if any active descendant has independent 3D depth/tilt
             // (or the group plane itself is edge-on so corners can't project on Z=0),
@@ -1170,6 +1146,8 @@ impl GizmoSurface {
             part_assets: None,
             controls: true,
             panning: None,
+            pointer_button: MouseButton::Left,
+            cancelled_press: None,
             space_hand: false,
             space_panned: false,
             rulers: viewer_rulers::Rulers { guides_locked: pm_shell::viewer_preference("PowermoveGuidesLocked", false), ..Default::default() },
@@ -1250,7 +1228,13 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     // 3D layers get 3D handles; their 2D boxes would mislead.
-                    let mut scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
+                    let mut scene =
+                        pm_panel_studio3d::viewport::scene_with_bounds(&p, time, |id| {
+                            crate::text_host::query(&p, |q| q.bounds(None, id, time))
+                                .ok()
+                                .flatten()
+                        })
+                        .ok();
                     let mut poses = read_at(&p, time).unwrap_or_default();
                     // Extruded text and shapes are 3D too: their box in the
                     // scene, from the layer's flat box, its z and its depth.
@@ -1268,7 +1252,9 @@ impl GizmoSurface {
                     // Extruded text and shapes are drawn by the 3D renderer too:
                     // their flat box would sit somewhere else.
                     poses.retain(|pose| {
-                        !three_d.contains(&pose.id)
+                        !scene
+                            .as_ref()
+                            .is_some_and(|s| s.items.iter().any(|i| i.id == pose.id && !i.is_plane))
                             && !is_studio(&p, &pose.id)
                             && !is_extruded(&p, &pose.id)
                     });
@@ -1428,17 +1414,22 @@ impl GizmoSurface {
             return;
         };
         let editing = self.text_session().is_some();
-        let poses: &[Pose] = if self.controls && !editing {
-            &self.poses
-        } else {
-            &[]
-        };
-        let (mut lines, mut marks) = overlay(poses, frame, &self.tokens);
+        let poses = self.view_poses();
+        let (mut lines, mut marks) = overlay(
+            if self.controls && !editing && !self.studio_flying() {
+                &poses
+            } else {
+                &[]
+            },
+            frame,
+            &self.tokens,
+        );
         // The hover outline: the accent at 60% (viewer-chrome.md), never
         // over a gesture or on a layer the selection already outlines.
         if let Some((id, c)) = &self.hover_box
             && self.controls
             && !editing
+            && !self.studio.free_look
             && self.drag.is_none()
             && !self.poses.iter().any(|p| &p.id == id)
         {
@@ -1574,7 +1565,7 @@ impl GizmoSurface {
         if self.studio.active() {
             return;
         }
-        self.panning = Some(event.position);
+        self.panning = Some((event.position, event.position));
         self.set_cursor(CursorStyle::ClosedHand, cx);
     }
     /// The cursor promises what a press here does.
@@ -1619,7 +1610,12 @@ impl GizmoSurface {
             && !handle
             && ruler.is_none()
             && self.text_session().is_none()
-            && !self.studio.active()
+            && !self.studio.free_look
+            && self
+                .studio
+                .scene
+                .as_ref()
+                .is_none_or(|scene| scene.items.iter().all(|item| item.is_plane))
             && self.marquee.is_none()
         {
             let press = Press {
@@ -1664,7 +1660,7 @@ impl GizmoSurface {
             Some(_) => CursorStyle::Arrow,
             // Inside a layer's box or the selection's common box, a drag moves.
             None if self.transformable()
-                && (self.poses.iter().any(|p| inside(&p.corners, at))
+                && (self.view_poses().iter().any(|p| inside(&p.corners, at))
                     || self.handle_pose().is_some_and(|p| inside(&p.corners, at))) =>
             {
                 CursorStyle::Move
@@ -1733,14 +1729,30 @@ impl GizmoSurface {
         })
         .detach();
     }
+    /// Free View draws and edits the projected planes with the scene handles.
+    fn view_poses(&self) -> std::borrow::Cow<'_, [Pose]> {
+        if self.studio.free_look && self.poses.iter().any(|pose| pose.plane.is_some()) {
+            std::borrow::Cow::Owned(
+                self.poses
+                    .iter()
+                    .filter(|p| p.plane.is_none())
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(self.poses.as_slice())
+        }
+    }
+
     /// A selection holding a locked layer owns its geometry but does not move.
     fn transformable(&self) -> bool {
-        !self.poses.is_empty() && self.poses.iter().all(|p| !p.locked)
+        let poses = self.view_poses();
+        !poses.is_empty() && poses.iter().all(|p| !p.locked)
     }
     /// The box whose handles a press can take: the one layer's, or the
     /// common box of an unlocked multiple selection.
     fn handle_pose(&self) -> Option<Pose> {
-        match self.poses.as_slice() {
+        match self.view_poses().as_ref() {
             [pose] => Some(pose.clone()),
             poses => group_pose(poses),
         }
@@ -1779,7 +1791,7 @@ impl GizmoSurface {
         self.unhover(cx);
         // Space held over the viewer: the hand, whatever the tool.
         if self.space_hand {
-            self.panning = Some(event.position);
+            self.panning = Some((event.position, event.position));
             self.set_cursor(CursorStyle::ClosedHand, cx);
             return;
         }
@@ -1818,7 +1830,11 @@ impl GizmoSurface {
             hit,
             origin: event.position,
             active: false,
-            poses: self.poses.clone(),
+            poses: if self.studio.free_look {
+                Arc::new(self.view_poses().into_owned())
+            } else {
+                self.poses.clone()
+            },
             time,
             click,
             snaps: None,
@@ -1848,7 +1864,7 @@ impl GizmoSurface {
                 return;
             }
             Tool::Hand => {
-                self.panning = Some(event.position);
+                self.panning = Some((event.position, event.position));
                 return;
             }
             Tool::Shape => {
@@ -1865,10 +1881,9 @@ impl GizmoSurface {
                 self.zoom_view(Navigate::Zoom { factor, at }, cx);
                 return;
             }
-            Tool::Rotate => {
-                (self.poses.len() == 1 && self.transformable()).then(|| start(Hit::Rotate, None))
-            }
-            Tool::Anchor => match self.poses.as_slice() {
+            Tool::Rotate => (self.view_poses().len() == 1 && self.transformable())
+                .then(|| start(Hit::Rotate, None)),
+            Tool::Anchor => match self.view_poses().as_ref() {
                 [pose]
                     if !pose.locked
                         && (pose.anchor[0] - at[0]).hypot(pose.anchor[1] - at[1])
@@ -1886,7 +1901,7 @@ impl GizmoSurface {
                 // A layer's own box, or the common box of a multiple
                 // selection (its gaps included), owns the press
                 // (viewer.ts pointInSelection).
-                let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at))
+                let inside_selection = self.view_poses().iter().any(|p| inside(&p.corners, at))
                     || self.handle_pose().is_some_and(|p| inside(&p.corners, at));
                 if let Some(hit) = self.handle_at(at, frame.scale) {
                     Some(start(hit, None))
@@ -2030,6 +2045,7 @@ impl GizmoSurface {
         // The 2D picker can't measure Studio 3D layers; their own picking ran
         // first, so a 2D failure over a 3D scene is empty canvas.
         let studio = self.studio.active();
+        let free = self.studio.free_look;
         self.picks += 1;
         cx.spawn(async move |this, cx| {
             let poses = cx
@@ -2037,6 +2053,15 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     let target = match pick_target(&p, press) {
+                        Some(Some(id))
+                            if free
+                                && QueryMirror::new(&p)
+                                    .queries()
+                                    .is_3d_layer(None, &id, press.time)
+                                    .unwrap_or(false) =>
+                        {
+                            None
+                        }
                         Some(target) => target,
                         None if studio => None,
                         None => return None,
@@ -2174,8 +2199,8 @@ impl GizmoSurface {
         if self.studio_move(event, cx) {
             return;
         }
-        if let Some(last) = self.panning {
-            self.panning = Some(event.position);
+        if let Some((start, last)) = self.panning {
+            self.panning = Some((start, event.position));
             if event.position != last {
                 self.space_panned |= self.space_hand;
             }
@@ -2344,21 +2369,27 @@ impl GizmoSurface {
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         if self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_some()) { return; }
-        if let Some(drag) = self.effect_drag.take() {
-            if drag.removed { self.effect_stop = None; self.effect_picker = None; }
-            if drag.active { self.queue.push_back(Job::Finish(commit)); self.pump(cx); }
-            self.effects_reread(cx);
+        if self.effect_drag.is_some() {
+            self.effects_release_drag(commit, cx);
             return;
         }
         if self.rulers.dragging.is_some() {
             let at = window
                 .as_ref()
                 .map_or(Point::default(), |w| w.mouse_position());
-            self.rulers_up(at);
+            if commit {
+                self.rulers_up(at);
+            } else {
+                self.rulers_cancel();
+            }
             cx.notify();
             return;
         }
-        if self.panning.take().is_some() {
+        if let Some((start, last)) = self.panning.take() {
+            if !commit {
+                self.host.navigate(Navigate::Pan(start - last), cx);
+                self.draw(cx);
+            }
             let open = if self.space_hand || self.host.tool(cx) == Tool::Hand {
                 CursorStyle::OpenHand
             } else {
@@ -2398,6 +2429,10 @@ impl GizmoSurface {
                 let ids = copies.into_iter().map(|(_, copy)| copy).collect();
                 self.queue.push_back(Job::SelectLayers(ids));
             }
+            if !commit {
+                self.poses = drag.poses;
+                self.draw(cx);
+            }
             self.queue.push_back(Job::Finish(commit));
             self.pump(cx);
         } else if let Some(press) = drag.click.filter(|_| commit) {
@@ -2411,7 +2446,15 @@ impl GizmoSurface {
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A marquee or a shape or text box being drawn, or a press whose
         // pick has not answered yet, waits for the release as a drag does.
-        let held = self.drag.is_some()
+        let held = self.pointer_button == MouseButton::Left && self.pointer_drag_held();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
+    }
+
+    fn pointer_drag_held(&self) -> bool {
+        self.drag.is_some()
             || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
             || self.pen_drag.is_some()
             || matches!(
@@ -2423,11 +2466,8 @@ impl GizmoSurface {
             || self.marquee.is_some()
             || self.sketch.is_some()
             || self.text_sketch.is_some()
-            || self.picking.is_some();
-        if held {
-            self.on_up(true, Some(window), cx);
-        }
-        held
+            || self.picking.is_some()
+            || self.studio.pointer_drag_held()
     }
     /// A pointer gesture Escape would cancel (not a text session): ending
     /// one reads the controller (its tool, its frame), so the controller
@@ -2579,6 +2619,7 @@ impl GizmoSurface {
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         let (started, kind) = (std::time::Instant::now(), job.kind());
+        let cancelled = matches!(job, Job::Finish(false));
         crate::interaction_work::submit!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2680,8 +2721,9 @@ impl GizmoSurface {
                     s.gesture = None;
                 }
                 s.pump(cx);
-                // Clicks the Pen holds act once its own work has landed.
-                if !s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty() {
+                // A cancelled gesture reads back its restored state. Clicks
+                // the Pen holds act once its own work has landed.
+                if cancelled || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty()) {
                     s.refresh(cx);
                 }
             });
@@ -3735,11 +3777,15 @@ impl Render for GizmoSurface {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.pointer_button = event.button;
+                    s.on_down(event, window, cx);
+                }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    s.pointer_button = event.button;
                     if let Some(frame) = s.host.frame(s.bounds, cx) {
                         let at = s.to_comp(event.position, frame);
                         s.studio_down(event, at, frame, None, cx);
@@ -3793,18 +3839,50 @@ impl Render for GizmoSurface {
                                 s.rulers_paint(frame, window, cx);
                             }
                         });
+                        let pressed = this.clone();
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = pressed.update(cx, |s, cx| {
+                                if matches!(e.button, MouseButton::Left | MouseButton::Middle) {
+                                    s.cancelled_press = None;
+                                } else if e.button == MouseButton::Right && !s.studio_flying()
+                                    && (s.cancelled_press.is_some() || s.pointer_drag_held())
+                                {
+                                    s.cancelled_press = Some(s.pointer_button);
+                                    s.on_up(false, None, cx);
+                                    cx.stop_propagation();
+                                }
+                            });
+                        });
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = moved.update(cx, |s, cx| s.on_move(e, cx));
+                                let _ = moved.update(cx, |s, cx| {
+                                    if s.cancelled_press.is_some() && e.pressed_button.is_some() {
+                                        cx.stop_propagation();
+                                    } else {
+                                        s.on_move(e, cx);
+                                    }
+                                });
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ =
-                                    released.update(cx, |s, cx| s.on_up(true, Some(window), cx));
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
                             }
+                            let _ = released.update(cx, |s, cx| {
+                                if e.button == MouseButton::Right && s.cancelled_press.is_some() {
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press == Some(e.button) {
+                                    s.cancelled_press = None;
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press.is_none() && s.pointer_button == e.button {
+                                    s.on_up(true, Some(window), cx);
+                                }
+                            });
                         });
                     },
                 )
@@ -3889,6 +3967,7 @@ fn extruded_item(
         id: pose.id.clone(),
         role: pm_scene3d::schema::Role::Object,
         is_null: false,
+        is_plane: false,
         name,
         locked: pose.locked,
         world: IDENTITY,

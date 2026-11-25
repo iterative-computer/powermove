@@ -47,7 +47,9 @@ pub(super) struct AudioState {
     baseline_capture: bool,
     drag: Option<Drag>,
     pub(super) pending_gain: Option<u64>,
-    base: Option<Arc<Frame>>,
+    values: RefCell<Option<AudioValues>>,
+    #[cfg(test)]
+    pub(super) query_builds: std::cell::Cell<usize>,
     ops: Vec<Op>,
     meters: [Meter; 2],
     // Font size and measured text width of the clock in the same header.
@@ -57,25 +59,20 @@ pub(super) struct AudioState {
     painted: Option<Instant>,
     running: bool,
 }
+struct AudioValues {
+    snapshot: pm_kernel::Snapshot,
+    query: pm_kernel::QueryContext,
+    layers: BTreeMap<String, AudioLayerValues>,
+}
+#[derive(Default)]
+struct AudioLayerValues {
+    start: Option<(f64, [f64; 3])>,
+    animated_gain: std::collections::HashMap<u64, f64>,
+}
+
 struct AudioFrame {
     viewport: Viewport,
     ops: Vec<Op>,
-}
-fn audio_geometry(base: &Frame) -> AudioFrame {
-    AudioFrame {
-        viewport: base.viewport,
-        ops: base
-            .ops
-            .iter()
-            .filter(|o| o.id.starts_with("clip:") || o.shape == "waveform")
-            .map(|o| {
-                let mut geometry = op(o.id.clone(), o.bounds, o.color);
-                geometry.shape = o.shape;
-                geometry.clip = o.clip;
-                geometry
-            })
-            .collect(),
-    }
 }
 struct Drag {
     layer: String,
@@ -101,6 +98,7 @@ fn op(id: String, bounds: Rect, color: u32) -> Op {
         text: None,
         font_size: 11.,
         detail: serde_json::Value::Null,
+        waveform: None,
         clip: None,
         covered: false,
         decorative: false,
@@ -182,7 +180,7 @@ fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64
 }
 impl TimelineSurface {
     pub(super) fn invalidate_audio(&mut self) {
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
     }
 
@@ -192,7 +190,7 @@ impl TimelineSurface {
         }
         self.release_gain_preview(cx);
         self.audio.drag = None;
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -263,58 +261,62 @@ impl TimelineSurface {
         .size_full()
         .into_any_element()
     }
-    pub(super) fn update_audio(&mut self, base: Arc<Frame>, cx: &mut Context<Self>) {
-        // Copy geometry only: never clone waveform JSON or key arrays for meter ticks.
-        let mut frame = audio_geometry(&base);
-        if self
-            .audio
-            .base
-            .as_ref()
-            .is_some_and(|previous| Arc::ptr_eq(previous, &base))
-        {
-            frame
+    pub(super) fn update_audio(&mut self, base: &Frame, cx: &mut Context<Self>) {
+        let mut frame = AudioFrame {
+            viewport: base.viewport,
+            ops: base
                 .ops
-                .extend(self.audio.ops.iter().filter(|o| clip_control(o)).cloned());
-        } else {
-            self.audio_controls(&mut frame);
-        }
+                .iter()
+                .filter(|o| clip_control(o))
+                .cloned()
+                .collect(),
+        };
         self.audio_frame(&mut frame, cx);
         self.audio.ops = frame
             .ops
             .into_iter()
             .filter(|o| o.id.starts_with("audio-"))
             .collect();
-        self.audio.base = Some(base);
     }
-    fn audio_controls(&self, frame: &mut AudioFrame) {
-        if let Some(mut published) = self.kernel.published(&self.project) {
-            if let Some(snapshot) = &self.gain_picture {
-                Arc::make_mut(&mut published).snapshot = snapshot.clone();
-            }
-            let mut mirror = QueryMirror::new(&published);
-            let mut q = mirror.queries();
-            let clips: Vec<_> = frame
-                .ops
-                .iter()
-                .filter(|o| o.id.starts_with("clip:"))
-                .cloned()
-                .collect();
-            for clip in clips {
-                let id = clip.id.trim_start_matches("clip:");
-                let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+    fn audio_controls(&self, base: &Frame) -> Vec<Op> {
+        let mut ops = Vec::new();
+        let view = base.viewport;
+        if let Some(published) = self.kernel.published(&self.project) {
+            let snapshot = self.gain_picture.as_ref().unwrap_or(&published.snapshot);
+            let mut cache = self.audio.values.borrow_mut();
+            for clip in &base.ops {
+                let Some(id) = clip.id.strip_prefix("clip:") else {
+                    continue;
+                };
+                let Some(layer) = self.model.index.layer(id) else {
                     continue;
                 };
                 if !matches!(layer.kind.as_str(), "audio" | "video") {
                     continue;
                 }
                 if layer.kind == "video"
-                    && !frame
-                        .ops
+                    && !base.ops
                         .iter()
                         .any(|o| o.id == format!("clip-content:{id}") && o.shape == "waveform")
                 {
                     continue;
                 }
+                if cache.as_ref().is_none_or(|values| {
+                    values.snapshot.doc_id != snapshot.doc_id
+                        || values.snapshot.revision != snapshot.revision
+                        || !Arc::ptr_eq(&values.snapshot.document, &snapshot.document)
+                }) {
+                    #[cfg(test)]
+                    self.audio
+                        .query_builds
+                        .set(self.audio.query_builds.get() + 1);
+                    *cache = Some(AudioValues {
+                        snapshot: snapshot.clone(),
+                        query: pm_kernel::QueryContext::new(&snapshot.document),
+                        layers: BTreeMap::new(),
+                    });
+                }
+                let AudioValues { query, layers, .. } = cache.as_mut().unwrap();
                 let r = clip.bounds;
                 let gain_path = if layer.kind == "audio" {
                     "c.gain"
@@ -334,7 +336,31 @@ impl TimelineSurface {
                 let animated_gain = gain_channel.is_some_and(|channel| {
                     !channel.keys.is_empty() || channel.expression.is_some()
                 });
-                let base_gain = value(&mut q, gain_path, layer.from, 1.);
+                let layer_values = layers.entry(id.to_owned()).or_default();
+                if layer_values.start.is_none_or(|(at, _)| at != layer.from) {
+                    layer_values.start = Some((
+                        layer.from,
+                        [
+                            value(query, gain_path, layer.from, 1.),
+                            value(query, "c.fadeIn", layer.from, 0.),
+                            value(query, "c.fadeOut", layer.from, 0.),
+                        ],
+                    ));
+                    layer_values.animated_gain.clear();
+                }
+                let (_, [base_gain, fade_in, fade_out]) = layer_values.start.unwrap();
+                let mut gain_at = |time: f64| {
+                    if !animated_gain {
+                        return base_gain;
+                    }
+                    if layer_values.animated_gain.len() >= 8192 {
+                        layer_values.animated_gain.clear();
+                    }
+                    *layer_values
+                        .animated_gain
+                        .entry(time.to_bits())
+                        .or_insert_with(|| value(query, gain_path, time, base_gain))
+                };
                 let interactive = self.hover_clip.as_ref().is_some_and(|(clip, _)| clip == id)
                     || self
                         .model
@@ -354,8 +380,8 @@ impl TimelineSurface {
                     .as_ref()
                     .filter(|d| d.layer == id && d.path == gain_path)
                     .map(|d| d.value);
-                let fade_in = value(&mut q, "c.fadeIn", layer.from, 0.).clamp(0., layer.duration);
-                let fade_out = value(&mut q, "c.fadeOut", layer.from, 0.).clamp(0., layer.duration);
+                let fade_in = fade_in.clamp(0., layer.duration);
+                let fade_out = fade_out.clamp(0., layer.duration);
                 let fade_in = self
                     .audio
                     .drag
@@ -368,49 +394,59 @@ impl TimelineSurface {
                     .as_ref()
                     .filter(|d| d.layer == id && d.path == "c.fadeOut")
                     .map_or(fade_out, |d| d.value);
-                let x0 = r.x.max(frame.viewport.layer_column);
-                let x1 = (r.x + r.width).min(frame.viewport.width);
-                for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
-                    let local = ((x as f64 - frame.viewport.layer_column) / frame.viewport.pps
-                        + frame.viewport.scroll_time
-                        - layer.from)
-                        .clamp(0., layer.duration);
-                    let gain = dragged.unwrap_or_else(|| {
-                        if animated_gain {
-                            value(&mut q, gain_path, layer.from + local, base_gain)
-                        } else {
-                            base_gain
-                        }
-                    });
-                    let fade = if fade_in > 0. {
-                        (local / fade_in).min(1.)
-                    } else {
-                        1.
-                    };
-                    let fade = fade.min(if fade_out > 0. {
-                        ((layer.duration - local) / fade_out).min(1.)
-                    } else {
-                        1.
-                    });
-                    let Some(opacity) = resting.or_else(|| (fade < 1.).then_some(0.38)) else {
-                        continue;
-                    };
-                    let y = gain_y(gain * fade.max(0.), r);
+                let x0 = r.x.max(view.layer_column);
+                let x1 = (r.x + r.width).min(view.width);
+                let mut level = |x: f64, width: f64, gain: f64, fade: f64, opacity: f64| {
                     let mut line = op(
                         format!("audio-level:{id}"),
-                        Rect::new(x as f64, y, 1., 1.),
+                        Rect::new(x, gain_y(gain * fade.max(0.), r), width, 1.),
                         self.tokens.colors.text,
                     );
                     line.opacity = opacity;
                     line.detail = serde_json::json!({"layer":id,"path":gain_path,"gain":gain,"interactive":interactive});
                     line.clip = clip.clip;
-                    frame.ops.push(line);
+                    ops.push(line);
+                };
+                if fade_in == 0. && fade_out == 0. && (!animated_gain || dragged.is_some()) {
+                    if let Some(opacity) = resting
+                        && x1.ceil() > x0.ceil()
+                    {
+                        level(
+                            x0.ceil(),
+                            x1.ceil() - x0.ceil(),
+                            dragged.unwrap_or(base_gain),
+                            1.,
+                            opacity,
+                        );
+                    }
+                } else {
+                    for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
+                        let local = ((x as f64 - view.layer_column) / view.pps
+                            + view.scroll_time
+                            - layer.from)
+                            .clamp(0., layer.duration);
+                        let fade_in = if fade_in > 0. {
+                            (local / fade_in).min(1.)
+                        } else {
+                            1.
+                        };
+                        let fade_out = if fade_out > 0. {
+                            ((layer.duration - local) / fade_out).min(1.)
+                        } else {
+                            1.
+                        };
+                        let fade = fade_in.min(fade_out);
+                        if let Some(opacity) = resting.or_else(|| (fade < 1.).then_some(0.38)) {
+                            let gain = dragged.unwrap_or_else(|| gain_at(layer.from + local));
+                            level(x as f64, 1., gain, fade, opacity);
+                        }
+                    }
                 }
                 if interactive && let Some(channel) = gain_channel {
                     for key in &channel.keys {
                         let t = layer.from + key.time;
-                        let x = frame.viewport.layer_column
-                            + (t - frame.viewport.scroll_time) * frame.viewport.pps;
+                        let x = view.layer_column
+                            + (t - view.scroll_time) * view.pps;
                         if x < x0 || x > x1 {
                             continue;
                         }
@@ -424,8 +460,7 @@ impl TimelineSurface {
                         } else {
                             fade
                         };
-                        let gain =
-                            dragged.unwrap_or_else(|| value(&mut q, gain_path, t, base_gain));
+                        let gain = dragged.unwrap_or_else(|| gain_at(t));
                         let y = gain_y(gain * fade.max(0.), r);
                         let mut dot = op(
                             format!("audio-key:{id}:{}", key.id),
@@ -434,24 +469,24 @@ impl TimelineSurface {
                         );
                         dot.shape = "circle";
                         dot.clip = clip.clip;
-                        frame.ops.push(dot);
+                        ops.push(dot);
                     }
                 }
                 if interactive && layer.kind == "audio" {
                     for (path, x) in [
                         (
                             "c.fadeIn",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + fade_in)
-                                    * frame.viewport.pps
+                            view.layer_column
+                                + (layer.from - view.scroll_time + fade_in)
+                                    * view.pps
                                 + 4.,
                         ),
                         (
                             "c.fadeOut",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + layer.duration
+                            view.layer_column
+                                + (layer.from - view.scroll_time + layer.duration
                                     - fade_out)
-                                    * frame.viewport.pps
+                                    * view.pps
                                 - 4.,
                         ),
                     ] {
@@ -465,11 +500,12 @@ impl TimelineSurface {
                         );
                         handle.detail = serde_json::json!({"layer":id,"path":path,"gain":if path == "c.fadeIn" {fade_in} else {fade_out},"interactive":true});
                         handle.clip = clip.clip;
-                        frame.ops.push(handle);
+                        ops.push(handle);
                     }
                 }
             }
         }
+        ops
     }
     pub(super) fn audio_rows(&self, frame: &mut Frame) {
         #[cfg(test)]
@@ -477,11 +513,8 @@ impl TimelineSurface {
             self.baseline_waveform_ops(frame);
             return;
         }
-        let mut audio = audio_geometry(frame);
-        self.audio_controls(&mut audio);
-        frame
-            .ops
-            .extend(audio.ops.into_iter().filter(|o| clip_control(o)));
+        let controls = self.audio_controls(frame);
+        frame.ops.extend(controls);
     }
     /// Before-crop replay of cea9fdb46's waveform ops, not a running release screenshot.
     /// The native panel/fixture stay identical; only the original sampler/opacity
@@ -496,7 +529,7 @@ impl TimelineSurface {
             let Some(id) = op.id.strip_prefix("clip-content:") else {
                 continue;
             };
-            let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+            let Some(layer) = self.model.index.layer(id) else {
                 continue;
             };
             let Some(asset) = &layer.asset else {
@@ -666,7 +699,11 @@ impl TimelineSurface {
     }
     pub(super) fn audio_hit(&self, x: f64, y: f64) -> Option<&Op> {
         self.audio.ops.iter().rev().find(|o| {
-            ((clip_control(o) && o.detail["interactive"] == true) || o.id == "audio-clip-latch")
+            ((clip_control(o)
+                && y >= self.tokens.metrics.ruler as f64
+                && y < f32::from(self.bounds.size.height) as f64
+                && o.detail["interactive"] == true)
+                || o.id == "audio-clip-latch")
                 && o.clip.is_none_or(|c| {
                     x >= c.x && x <= c.x + c.width && y >= c.y && y <= c.y + c.height
                 })
@@ -708,7 +745,7 @@ impl TimelineSurface {
         let Some(id) = hit.detail["layer"].as_str() else {
             return false;
         };
-        let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+        let Some(layer) = self.model.index.layer(id) else {
             return false;
         };
         if layer.effectively_locked {
@@ -789,7 +826,7 @@ impl TimelineSurface {
                 cx,
             );
         }
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -816,7 +853,7 @@ impl TimelineSurface {
             });
             self.pump(cx);
         }
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -1143,19 +1180,12 @@ mod captures {
                 }
                 cx.update(|cx| {
                     let s = surface.read(cx);
-                    assert!(
-                        s.frame
-                            .as_ref()
-                            .unwrap()
-                            .ops
-                            .iter()
-                            .any(|o| o.shape == "waveform"
-                                && o.detail["peak"].as_str().is_some_and(|peak| {
-                                    pm_panel_timeline::waveform::decode(peak)
-                                        .iter()
-                                        .any(|v| *v > 0.)
-                                }))
-                    );
+                    assert!(s.frame.as_ref().unwrap().ops.iter().any(|o| {
+                        o.shape == "waveform"
+                            && o.waveform
+                                .as_ref()
+                                .is_some_and(|peaks| peaks.iter().flatten().any(|v| *v > 0.))
+                    }));
                     assert!(s.audio.ops.iter().any(|o| o.id == "audio-level:audio"));
                     let gains: Vec<f64> = s
                         .audio

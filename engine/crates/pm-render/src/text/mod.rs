@@ -455,6 +455,11 @@ impl TextContext {
     /// Before a layer: the fonts catch up with their registry, and a new
     /// font generation makes every later raster key new (cached rasters of
     /// the old fonts are never reused).
+    pub(crate) fn reuse_generation(&mut self) -> u64 {
+        self.sync_fonts();
+        self.generation
+    }
+
     fn sync_fonts(&mut self) {
         self.sync_fonts_before_reset(|_| {});
     }

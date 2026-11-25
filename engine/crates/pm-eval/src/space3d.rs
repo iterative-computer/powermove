@@ -16,6 +16,7 @@ use pm_model::Node;
 use crate::js_sem::{JsResult, JsThrow};
 use crate::math;
 use crate::node;
+use crate::parenting::{Role3d, transform_aim};
 use crate::scope::{Scope, flag, js_hypot, js_max, same};
 use crate::transform::Mat2d;
 
@@ -23,6 +24,175 @@ use crate::transform::Mat2d;
 pub type Mat4 = [f64; 16];
 /// A column-major 3×3 homography.
 pub type Mat3 = [f64; 9];
+
+/// A camera in Studio scene units (Y up, looking down its local −Z).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Camera3d {
+    pub position: [f64; 3],
+    pub target: [f64; 3],
+    pub roll: f64,
+    /// Vertical field of view, in degrees, before zoom.
+    pub fov: f64,
+    pub zoom: f64,
+    pub ortho: bool,
+    /// Full vertical span, before zoom.
+    pub ortho_height: f64,
+}
+
+/// The pixel-space bridge shared by flat 3D layers and Studio extrusions.
+pub fn scene_units_per_pixel(height: f64) -> f64 {
+    6.0 / height.max(1.0)
+}
+
+pub fn pixel_to_scene(width: f64, height: f64) -> Mat4 {
+    let u = scene_units_per_pixel(height);
+    [
+        u,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -u,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -u,
+        0.0,
+        -width * u / 2.0,
+        3.0,
+        0.0,
+        1.0,
+    ]
+}
+
+/// Use legacy framing for the editor when only flat planes need a camera.
+pub fn uses_default_25d_camera<'a>(layers: impl IntoIterator<Item = &'a Node>) -> bool {
+    let mut planes = false;
+    for layer in layers {
+        if Role3d::of(layer) == Some(Role3d::Object) {
+            return false;
+        }
+        if flag(layer, "threeD")
+            && Role3d::of(layer).is_none()
+            && !node::is_str(layer.get("type"), "null")
+        {
+            let data = layer.get("d").and_then(|d| d.get("extrusion"));
+            if data.is_some_and(|d| flag(d, "enabled")) {
+                return false;
+            }
+            planes = true;
+        }
+    }
+    planes
+}
+
+/// The legacy 50 mm / 36 mm horizontal film gate, expressed in scene units.
+pub fn default_camera_25d(width: f64, height: f64) -> Camera3d {
+    let focal = width.max(1.0) * 50.0 / 36.0;
+    Camera3d {
+        position: [0.0, 0.0, focal * scene_units_per_pixel(height)],
+        target: [0.0; 3],
+        roll: 0.0,
+        fov: (2.0 * (height / (2.0 * focal)).atan()).to_degrees(),
+        zoom: 1.0,
+        ortho: false,
+        ortho_height: 6.0,
+    }
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalized(v: [f64; 3]) -> [f64; 3] {
+    let length = dot(v, v).sqrt();
+    if length > 0.0 {
+        v.map(|x| x / length)
+    } else {
+        v
+    }
+}
+
+impl Camera3d {
+    fn forward(&self) -> [f64; 3] {
+        normalized(std::array::from_fn(|i| self.target[i] - self.position[i]))
+    }
+
+    pub fn basis(&self) -> [[f64; 3]; 3] {
+        let forward = self.forward();
+        let right = cross(forward, [0.0, 1.0, 0.0]);
+        let right = if dot(right, right) < 1e-12 {
+            [1.0, 0.0, 0.0]
+        } else {
+            normalized(right)
+        };
+        let up = cross(right, forward);
+        let (s, c) = self.roll.to_radians().sin_cos();
+        [
+            forward,
+            std::array::from_fn(|i| right[i] * c + up[i] * s),
+            std::array::from_fn(|i| up[i] * c - right[i] * s),
+        ]
+    }
+
+    /// Recover the shot's roll from its parented world-space up axis.
+    pub fn roll_from_up(&self, up: [f64; 3]) -> f64 {
+        let [_, right, base_up] = Self { roll: 0.0, ..*self }.basis();
+        let x = -dot(up, right);
+        let y = dot(up, base_up);
+        if x.hypot(y) < 1e-6 {
+            0.0
+        } else {
+            x.atan2(y).to_degrees()
+        }
+    }
+
+    /// Maps an affine layer plane to homogeneous composition pixels.
+    /// Positive w is in front of the eye, including when viewing the back.
+    pub fn project_plane(&self, world: &Mat4, width: f64, height: f64) -> Mat3 {
+        let scene = multiply(&pixel_to_scene(width, height), world);
+        let [forward, right, up] = self.basis();
+        let lens_height = if self.ortho {
+            self.ortho_height
+        } else {
+            2.0 * (self.fov.to_radians() / 2.0).tan()
+        };
+        let focal = height * self.zoom / lens_height;
+        if self.ortho {
+            let origin = std::array::from_fn(|i| scene[12 + i] - self.position[i]);
+            if dot(origin, forward) <= 0.0
+                && dot([scene[0], scene[1], scene[2]], forward).abs() < 1e-12
+                && dot([scene[4], scene[5], scene[6]], forward).abs() < 1e-12
+            {
+                // A screen-parallel orthographic plane has a single depth.
+                return [0., 0., 0., 0., 0., 0., 0., 0., -1.];
+            }
+        }
+        let mut plane = [0.0; 9];
+        for (i, c) in [0, 4, 12].into_iter().enumerate() {
+            let v =
+                std::array::from_fn(|j| scene[c + j] - if i == 2 { self.position[j] } else { 0.0 });
+            let w = if self.ortho {
+                if i == 2 { 1.0 } else { 0.0 }
+            } else {
+                dot(v, forward)
+            };
+            plane[i * 3] = focal * dot(v, right) + width / 2.0 * w;
+            plane[i * 3 + 1] = -focal * dot(v, up) + height / 2.0 * w;
+            plane[i * 3 + 2] = w;
+        }
+        plane
+    }
+}
 
 /// The 3D transform channels and their defaults (`CHANNELS_3D`).
 pub const CHANNELS_3D: [(&str, f64); 11] = [
@@ -168,6 +338,10 @@ pub struct Rect {
     pub y0: f64,
     pub x1: f64,
     pub y1: f64,
+}
+
+fn camera_data(layer: &Node) -> Option<&Node> {
+    layer.get("d")?.get("data")?.get("camera")
 }
 
 impl<'d> Scope<'_, 'd> {
@@ -328,6 +502,81 @@ impl<'d> Scope<'_, 'd> {
         Ok(Some((focus, blur.clamp(0.0, 100.0))))
     }
 
+    /// The first enabled Camera in stack order, as in the Studio renderer.
+    pub fn active_camera_3d(&mut self, time: f64) -> JsResult<Option<Camera3d>> {
+        let key = time.to_bits();
+        if let Some((last, camera)) = self.active_camera
+            && last == key
+        {
+            return Ok(camera);
+        }
+        let mut camera = None;
+        for layer in self.layers() {
+            // Studio's saved camera schema always names its projection.
+            // Legacy camera-shaped extensions keep the original plane matrix.
+            let projection = camera_data(layer).and_then(|node| node.get("projection"));
+            if Role3d::of(layer) == Some(Role3d::Camera)
+                && (node::is_str(projection, "perspective") || node::is_str(projection, "orthographic"))
+                && self.active(layer, time)?
+            {
+                camera = Some(self.camera_3d(layer, time)?);
+                break;
+            }
+        }
+        self.active_camera = Some((key, camera));
+        Ok(camera)
+    }
+
+    /// A Studio Camera at this time, using the same parented eye/aim as meshes.
+    pub fn camera_3d(&mut self, layer: &'d Node, time: f64) -> JsResult<Camera3d> {
+        let node = camera_data(layer);
+        let mut channel = |key: &str, fallback: f64| -> JsResult<f64> {
+            let Some(prop) = node.and_then(|n| n.get("p")).and_then(|p| p.get(key)) else {
+                return Ok(fallback);
+            };
+            let n = self
+                .channel_p(layer, Some(prop), time, &format!("camera.{key}"))?
+                .to_number();
+            Ok(if n.is_finite() { n } else { fallback })
+        };
+        let aim = [
+            channel("targetX", 0.0)?,
+            channel("targetY", 0.0)?,
+            channel("targetZ", 0.0)?,
+        ];
+        let fov = channel("fov", 45.0)?.clamp(1.0, 150.0);
+        let zoom = channel("zoom", 1.0)?.clamp(0.001, 1000.0);
+        let world = self.world3d(layer, time, false)?;
+        let parent = self.parent3d(layer, time, None)?;
+        let position = [world[12], world[13], world[14]];
+        let mut target = transform_aim(&parent, &aim);
+        let delta: [f64; 3] = std::array::from_fn(|i| target[i] - position[i]);
+        let distance = js_hypot(&delta);
+        if node::is_str(node.and_then(|n| n.get("autoOrient")), "off") || distance < 1e-6 {
+            let forward = normalized([-world[8], -world[9], -world[10]]);
+            let distance = if distance > 1e-6 { distance } else { 10.0 };
+            target = std::array::from_fn(|i| position[i] + forward[i] * distance);
+        }
+        let mut camera = Camera3d {
+            position,
+            target,
+            roll: 0.0,
+            fov,
+            zoom,
+            ortho: node::is_str(node.and_then(|n| n.get("projection")), "orthographic"),
+            ortho_height: 6.0,
+        };
+        camera.roll = camera.roll_from_up([world[4], world[5], world[6]]);
+        Ok(camera)
+    }
+
+    pub fn projection_camera_3d(&mut self, time: f64) -> JsResult<Option<Camera3d>> {
+        match self.view_camera {
+            Some(camera) => Ok(Some(camera)),
+            None => self.active_camera_3d(time),
+        }
+    }
+
     /// `planeMatrix(PM, L, T, positioning)`: layer pixels to composition
     /// pixels.
     pub fn plane_matrix(
@@ -342,6 +591,9 @@ impl<'d> Scope<'_, 'd> {
         }
         let m = self.world3d(layer, time, positioning)?;
         let (w, h) = self.comp_size();
+        if let Some(camera) = self.projection_camera_3d(time)? {
+            return Ok(camera.project_plane(&m, w, h));
+        }
         let cx = w / 2.0;
         let cy = h / 2.0;
         let f = js_max(1.0, w) * self.perspective_amount(layer, time)? / 36.0;
@@ -397,6 +649,8 @@ impl<'d> Scope<'_, 'd> {
         if !flags.iter().any(|f| *f) {
             return Ok(result);
         }
+        let camera = self.projection_camera_3d(time)?;
+        let (width, height) = self.comp_size();
         let mut start = 0;
         while start < result.len() {
             if !flags[start] {
@@ -451,6 +705,14 @@ impl<'d> Scope<'_, 'd> {
                     0.0
                 };
                 let depth = m[2] * ax + m[6] * ay + m[10] * az + m[14];
+                let depth = camera.map_or(depth, |camera| {
+                    let anchor = transform_aim(&m, &[ax, ay, az]);
+                    let p = transform_aim(&pixel_to_scene(width, height), &anchor);
+                    dot(
+                        std::array::from_fn(|i| p[i] - camera.position[i]),
+                        camera.forward(),
+                    )
+                });
                 surfaces.push(Surface {
                     plane,
                     layers: vec![layer],
@@ -647,5 +909,131 @@ impl Walk3d {
             self.matrix = multiply(&self.matrix, &local);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Comp, Evaluator};
+
+    fn root(layers: serde_json::Value) -> Node {
+        let value = serde_json::json!({"id":"c","w":800,"h":500,"fps":30,"dur":10,"layers":layers});
+        Node::from_value(pm_model::json::parse(&value.to_string()).unwrap(), 1)
+    }
+
+    fn close(value: (f64, f64), expected: (f64, f64)) {
+        assert!(
+            (value.0 - expected.0).abs() < 1e-9,
+            "{value:?} != {expected:?}"
+        );
+        assert!(
+            (value.1 - expected.1).abs() < 1e-9,
+            "{value:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_matrix_is_unchanged_and_default_free_view_matches_it() {
+        let root = root(serde_json::json!([{
+            "id":"plane","threeD":true,"on":true,"from":0,"dur":10,
+            "p":{"position.x":{"v":420},"position.y":{"v":205},"position.z":{"v":125}}
+        }]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let layer = &comp.layers()[0];
+        let focal = 800.0 * 50.0 / 36.0;
+        let legacy = scope.plane_matrix(layer, 0., false).unwrap();
+        assert_eq!(
+            legacy,
+            [
+                1.,
+                0.,
+                0.,
+                0.,
+                1.,
+                0.,
+                420. + 400. * 125. / focal,
+                205. + 250. * 125. / focal,
+                1. + 125. / focal,
+            ]
+        );
+        scope.view_camera = Some(default_camera_25d(800., 500.));
+        let free = scope.plane_matrix(layer, 0., false).unwrap();
+        close(
+            project_point(&free, 50., -12.),
+            project_point(&legacy, 50., -12.),
+        );
+    }
+
+    #[test]
+    fn editor_eye_projects_pitched_planes_and_sorts_by_its_forward_axis() {
+        let root = root(serde_json::json!([
+            {"id":"a","threeD":true,"p":{"position.x":{"v":600},"position.y":{"v":250}}},
+            {"id":"b","threeD":true,"p":{"position.x":{"v":200},"position.z":{"v":-100}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let [a, b] = [&comp.layers()[0], &comp.layers()[1]];
+        let mut camera = Camera3d {
+            position: [0., 6., 8.],
+            target: [0.; 3],
+            fov: 90.,
+            ..default_camera_25d(800., 500.)
+        };
+        scope.view_camera = Some(camera);
+        let plane = scope.plane_matrix(a, 0., false).unwrap();
+        // (1, 1, 0) in scene space is 9.4 units forward, 1 right and 0.8 up.
+        let u = scene_units_per_pixel(500.);
+        close(
+            project_point(&plane, 400. + 1. / u - 600., -1. / u),
+            (400. + 250. / 9.4, 250. - 200. / 9.4),
+        );
+
+        camera.position = [10., 0., 0.];
+        scope.view_camera = Some(camera);
+        assert!(same(scope.depth_ordered_layers(&[a, b], 0.).unwrap()[0], a));
+        scope.view_camera = None;
+        assert!(same(scope.depth_ordered_layers(&[a, b], 0.).unwrap()[0], b));
+
+        camera.position = [0., 0., -6.];
+        scope.view_camera = Some(camera);
+        let back = scope.plane_matrix(a, 0., false).unwrap();
+        assert!(back[8] > 0.);
+        assert!(project_point(&back, 0., 0.).0 < 400.);
+        camera.target = [0., 0., -12.];
+        scope.view_camera = Some(camera);
+        let behind = scope.plane_matrix(a, 0., false).unwrap();
+        assert!(behind[8] < 0.);
+    }
+
+    #[test]
+    fn plane_follows_only_the_enabled_parented_camera() {
+        let root = root(serde_json::json!([
+            {"id":"disabled","threeD":true,"on":false,"from":0,"dur":10,
+             "d":{"definition":"powermove.3d.camera"}},
+            {"id":"rig","type":"null","threeD":true,"on":true,"from":0,"dur":10,
+             "p":{"position.x":{"v":2},"position.y":{"v":1}}},
+            {"id":"camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,"parent":"rig",
+             "p":{"position.z":{"v":6}},
+             "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"orthographic",
+                 "p":{"targetX":{"v":0},"targetY":{"v":0},"targetZ":{"v":0},"zoom":{"v":2}}}}}},
+            {"id":"plane","threeD":true,"on":true,"from":0,"dur":10,
+             "p":{"position.x":{"v":400},"position.y":{"v":250}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let camera = scope.active_camera_3d(0.).unwrap().unwrap();
+        assert_eq!(camera.position, [2., 1., 6.]);
+        assert_eq!(camera.target, [2., 1., 0.]);
+        assert!(camera.ortho);
+        let plane = scope.plane_matrix(&comp.layers()[3], 0., false).unwrap();
+        close(
+            project_point(&plane, 0., 0.),
+            (400. - 500. * 2. / 3., 250. + 500. / 3.),
+        );
     }
 }

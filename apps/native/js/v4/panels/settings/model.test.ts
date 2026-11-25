@@ -51,9 +51,8 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
   );
   expect(model.rows.find((r) => r.id === "cloud-media")?.value).toBe(false);
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
-  // Projects open in tabs unless Separate Windows was chosen.
   expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
-    "tabs",
+    "windows",
   );
 });
 test("preferences persist immediately through serialized v4 host acknowledgements", async () => {
@@ -62,13 +61,13 @@ test("preferences persist immediately through serialized v4 host acknowledgement
   expect(await model.write("preview-memory", 0)).toBe(true);
   expect(await model.write("cloud-media", true)).toBe(true);
   expect(await model.write("restore-windows", false)).toBe(true);
-  expect(await model.write("open-projects-in", "windows")).toBe(true);
+  expect(await model.write("open-projects-in", "tabs")).toBe(true);
   expect([...settings]).toEqual([
     ["themeMode", "dark"],
     ["previewMemoryMiB", 0],
     ["autoDownloadCloudMedia", true],
     ["restoreWindows", false],
-    ["openProjectsIn", "windows"],
+    ["openProjectsIn", "tabs"],
   ]);
   expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3, 4]);
 });

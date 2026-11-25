@@ -38,6 +38,7 @@ pub struct Properties {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     slots: BTreeMap<String, Vec<Value>>,
     model_parts: BTreeMap<String, Vec<pm_scene3d::geometry::ModelPart>>,
+    part_names: BTreeMap<String, String>,
     /// The model part a viewer double-click focused, `(layer, slot)`, and
     /// the request number it came with (each request opens its section once).
     part_focus: Option<(String, u64)>,
@@ -55,6 +56,12 @@ pub struct RegisteredTransition {
     pub definition: pm_kernel::commands::effects::TransitionDefinition,
     pub labels: BTreeMap<String, String>,
 }
+const PART_TRANSFORMS: &[(&str, &str, &[&str], &str, f64)] = &[
+    ("position", "Position", &["x", "y", "z"], "", 0.01),
+    ("rotation", "Rotation", &["rx", "ry", "rz"], "°", 1.),
+    ("scale", "Scale", &["scale"], "%", 1.),
+];
+
 /// The two transition fields and their slot names.
 const TRANSITION_EDGES: [(&str, &str, pm_kernel::commands::effects::Edge); 2] = [
     (
@@ -174,6 +181,7 @@ impl Properties {
                 .ok_or("Properties identity exhausted")?;
             self.key = format!("properties:{}:{}", model.document_id(), self.sequence);
         }
+        self.part_names.clear();
         let target = if let Some(id) = model.primary() {
             let layer = model.layer(id).map_err(|e| e.to_string())?;
             let kind = layer
@@ -1191,78 +1199,62 @@ impl Properties {
     }
     fn part_transform_rows(
         &mut self,
-        model: &Inspector,
-        record: &Value,
+        model: &mut Inspector,
+        part: &Value,
+        defaults: &Value,
         layer: &str,
         key: &str,
         time: f64,
-    ) -> Result<Vec<Value>, String> {
-        let p = model.published();
-        let evaluated = pm_kernel::commands::scene3d::resolve_scene(
-            &p.snapshot,
-            p.snapshot.open_comp().as_deref(),
-            time,
-        )
-        .map_err(|error| error.to_string())?;
-        let values = evaluated.scene["objects"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|object| object["id"] == layer)
-            .map(|object| &object["parts"][key]["p"]);
-        let defaults =
-            pm_scene3d::schema::properties("part", None).map_err(|error| error.to_string())?;
-        let saved = &record["d"]["data"]["object"]["parts"][key]["p"];
-        let local = time - record["from"].as_f64().unwrap_or(0.);
-        let fps = p
-            .snapshot
-            .root()
-            .and_then(|root| root.get("fps"))
-            .and_then(|v| v.to_value().as_f64())
-            .filter(|fps| *fps > 0.)
-            .unwrap_or(30.);
-        let mut rows = vec![];
-        for &(field, label) in pm_scene3d::part_material::TRANSFORM_FIELDS {
-            let id = format!("3d.part.{key}.{field}");
-            let lease = self.control_lease(&id);
-            let value = values
-                .and_then(|values| values.get(field))
-                .map(|channel| channel.get("v").unwrap_or(channel))
-                .or_else(|| saved[field].get("v"))
-                .unwrap_or(&defaults[field]["v"]);
-            let keys = saved[field]["kf"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let animation = if keys.iter().any(|k| {
-                k["t"]
-                    .as_f64()
-                    .is_some_and(|t| (t - local).abs() < 0.5 / fps)
-            }) {
-                "key-at-playhead"
-            } else if keys.is_empty() {
-                "static"
-            } else {
-                "animated"
-            };
-            let control = if field == "visible" {
-                json!({"kind":"toggle","binding":lease,"value":value})
-            } else {
-                let unit = match field {
-                    "scale" => "%",
-                    "rx" | "ry" | "rz" => "°",
-                    _ => "",
+    ) -> Vec<Value> {
+        let locked = !model.editable(layer);
+        let mut rows = Vec::with_capacity(PART_TRANSFORMS.len());
+        for &(group, label, fields, unit, step) in PART_TRANSFORMS {
+            let mut animated = false;
+            let mut at_key = true;
+            let mut axes = Vec::with_capacity(fields.len());
+            for (index, &field) in fields.iter().enumerate() {
+                let id = format!("3d.part.{key}.{field}");
+                let channel = &part["p"][field];
+                let state = if !channel.is_null() {
+                    let binding = Binding::Property(PropertyId::new(
+                        layer,
+                        format!("pt.{key}.{field}"),
+                    ));
+                    model.binding_state(&binding, time).ok()
+                } else {
+                    None
                 };
-                let mut axis = json!({"binding":lease,"value":value,"unit":unit,"step":if unit.is_empty() {0.1} else {1.},"precision":2});
-                if field == "scale" {
+                animated |= state.as_ref().is_some_and(|s| s.animated);
+                at_key &= state.as_ref().is_some_and(|s| s.key_at_playhead);
+                let value = state
+                    .and_then(|s| s.value.as_f64())
+                    .or_else(|| channel["v"].as_f64())
+                    .unwrap_or_else(|| defaults[field]["v"].as_f64().unwrap_or(0.));
+                let mut axis = json!({
+                    "binding":self.control_lease(&id), "value":value, "unit":unit,
+                    "step":step, "precision":2,
+                });
+                if fields.len() > 1 {
+                    axis["axis"] = json!(["X", "Y", "Z"][index]);
+                } else {
                     axis["min"] = json!(0);
                     axis["max"] = json!(10000);
                 }
-                json!({"kind":"number","axes":[axis]})
+                axes.push(axis);
+            }
+            let animation = if at_key {
+                "key-at-playhead"
+            } else if animated {
+                "animated"
+            } else {
+                "static"
             };
-            rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":control}));
+            rows.push(json!({
+                "id":format!("3d.part.{key}.{group}"), "label":label,
+                "locked":locked, "animation":animation, "control":{"kind":"number","axes":axes},
+            }));
         }
-        Ok(rows)
+        rows
     }
 
     /// Pick one node and expose its transform and source material slot.
@@ -1314,81 +1306,69 @@ impl Properties {
         let selected = active
             .as_deref()
             .and_then(|key| parts.iter().find(|part| part.key == key));
-        let mut options = vec![json!({"v":null,"label":"Whole Model"})];
-        options.extend(
+        let saved = &object["parts"];
+        let defaults =
+            pm_scene3d::schema::properties("part", None).map_err(|error| error.to_string())?;
+        self.part_names.extend(
             parts
                 .iter()
-                .map(|part| json!({"v":part.key,"label":part.name})),
+                .map(|part| (part.key.clone(), part.name.clone())),
         );
-        let saved_parts = object["parts"].as_object();
-        let saved_mat_props = object["sourceMaterialProperties"].as_object();
-        let saved_mats = object["sourceMaterials"].as_object();
-        let rich_parts: Vec<Value> = parts
+        let mut children = BTreeMap::new();
+        for parent in parts.iter().filter_map(|part| part.parent.as_deref()) {
+            *children.entry(parent).or_insert(0) += 1;
+        }
+        let items: Vec<Value> = parts
             .iter()
             .map(|part| {
-                let transform_modified = saved_parts
-                    .and_then(|map| map.get(&part.key))
-                    .is_some_and(|v| v.is_object() && !v.as_object().unwrap().is_empty());
-                let material_modified = part.material.is_some_and(|slot| {
-                    let k = slot.to_string();
-                    saved_mat_props.is_some_and(|m| m.contains_key(&k))
-                        || saved_mats.is_some_and(|m| m.contains_key(&k))
-                });
+                let channel = &saved[&part.key]["p"]["visible"];
+                let visibility = if channel["kf"]
+                    .as_array()
+                    .is_some_and(|keys| !keys.is_empty())
+                    || channel["expr"]
+                        .as_str()
+                        .is_some_and(|expr| !expr.is_empty())
+                {
+                    let binding = Binding::Property(PropertyId::new(
+                        layer,
+                        format!("pt.{}.visible", part.key),
+                    ));
+                    model
+                        .binding_state(&binding, time)
+                        .ok()
+                        .and_then(|state| state.value.as_bool())
+                } else {
+                    None
+                };
                 json!({
-                    "v": part.key,
-                    "label": part.name,
-                    "rawName": part.raw_name,
-                    "parent": part.parent,
-                    "depth": part.depth,
-                    "material": part.material_name,
-                    "swatch": part.swatch,
-                    "modified": transform_modified || material_modified,
+                    "v":part.key, "label":part.name, "parent":part.parent, "depth":part.depth,
+                    "children":children.get(part.key.as_str()).copied().unwrap_or(0),
+                    "visible":visibility.or_else(|| channel["v"].as_bool()).unwrap_or(true),
+                    "edited":pm_scene3d::part_material::edited(&saved[&part.key], &defaults),
                 })
             })
             .collect();
-        let mut breadcrumbs = vec![json!({"v": null, "label": "Whole Model"})];
-        if let Some(sel) = selected {
-            let mut chain = Vec::new();
-            let mut cursor = Some(sel);
-            let mut guard = 0;
-            while let Some(part) = cursor
-                && guard < 16
-            {
-                chain.push(json!({"v": part.key, "label": part.name}));
-                cursor = part
-                    .parent
-                    .as_deref()
-                    .and_then(|pkey| parts.iter().find(|p| p.key == pkey));
-                guard += 1;
-            }
-            chain.reverse();
-            breadcrumbs.extend(chain);
-        }
-        let id = "3d.part.select";
-        let lease = self.control_lease(id);
-        let mut rows = vec![json!({
-            "id": id,
-            "label": "Edit",
-            "control": {
-                "kind": "choice",
-                "picker": "model-part",
-                "layer": layer,
-                "binding": lease,
-                "value": selected.map(|p| &p.key),
-                "swatch": selected.and_then(|p| p.swatch.as_deref()),
-                "parent": selected.and_then(|p| p.parent.as_deref()),
-                "hasSelectedPart": selected.is_some(),
-                "breadcrumbs": breadcrumbs,
-                "parts": rich_parts,
-                "options": options,
-            }
+        let rows = selected
+            .map(|part| {
+                self.part_transform_rows(
+                    model,
+                    &saved[&part.key],
+                    &defaults,
+                    layer,
+                    &part.key,
+                    time,
+                )
+            })
+            .unwrap_or_default();
+        let mut sections = vec![json!({
+            "id":"3d.part", "title":"Parts", "collapsed":self.collapsed.get("3d.part").copied().unwrap_or(false),
+            "parts":{
+                "layer":layer, "active":selected.map(|p| &p.key), "activeName":selected.map(|p| &p.name),
+                "activeEdited":selected.is_some_and(|p| pm_scene3d::part_material::edited(&saved[&p.key], &defaults)),
+                "items":items,
+            },
+            "rows":rows,
         })];
-        if let Some(part) = selected {
-            rows.extend(self.part_transform_rows(model, record, layer, &part.key, time)?);
-        }
-        let mut sections = vec![
-            json!({"id":"3d.part","title":"Model Part","collapsed":self.collapsed.get("3d.part").copied().unwrap_or(false),"rows":rows}),
-        ];
         let Some(index) = selected
             .and_then(|part| part.material)
             .map(|slot| slot as u64)
@@ -3250,22 +3230,21 @@ impl Properties {
                     Some(format!("studioSurface:{surface}:{layer}")),
                 ).user()));
             }
-            if control == "part.select" {
-                let key = value.as_str();
-                if key.is_none() && !matches!(value, pm_model::Value::Null) {
-                    return Err("Choose a model part".into());
-                }
-                let layer = model.primary().ok_or("Choose a model")?;
-                let select = pm_panel_studio3d::properties::select_part(layer, key)
-                    .map_err(|error| error.to_string())?;
-                return Ok(Request::new(caller, select.user()));
+            let value = super::data::wire(&value);
+            let (label, commands) = if let Some((key, field)) = control
+                .strip_prefix("part.")
+                .and_then(|part| part.split_once('.'))
+                && let Some(name) = self.part_names.get(key)
+                && pm_scene3d::part_material::TRANSFORM_FIELDS
+                    .iter()
+                    .any(|(axis, _)| *axis == field)
+            {
+                pm_panel_studio3d::properties::part_control(
+                    &published, time, key, field, name, value,
+                )
+            } else {
+                pm_panel_studio3d::properties::command(&published, time, control, value)
             }
-            let (label, commands) = pm_panel_studio3d::properties::command(
-                &published,
-                time,
-                control,
-                super::data::wire(&value),
-            )
             .map_err(|e| e.to_string())?;
             return Ok(Request::new(
                 caller,
@@ -3280,6 +3259,20 @@ impl Properties {
             .set(model, caller, handle, &[value], time)
             .map_err(|e| e.to_string())
     }
+    fn parts_layer<'a>(&self, model: &'a Inspector) -> Result<&'a str, String> {
+        let [layer] = model.selected_layers() else {
+            return Err("Choose one model".into());
+        };
+        if self.part_names.is_empty()
+            || self.selection != model.selected_layers()
+            || self.document != Some(model.document_id())
+            || model.published().selection.layers() != model.selected_layers()
+        {
+            return Err("The selection changed".into());
+        }
+        Ok(layer)
+    }
+
     pub fn intent(
         &mut self,
         model: &mut Inspector,
@@ -3526,63 +3519,138 @@ impl Properties {
             );
             return Ok(None);
         }
-        if let Some((key, field)) = path
-            .strip_prefix("3d.part.")
-            .and_then(|p| p.split_once('.'))
-            && pm_scene3d::part_material::TRANSFORM_FIELDS
-                .iter()
-                .any(|(name, _)| *name == field)
-            && self.handles.contains_key(path)
-            && (intent["type"] == "key"
-                || matches!(
-                    intent["action"].as_str(),
-                    Some("add-key" | "remove-animation")
-                ))
-        {
+        if intent["type"] == "set-value" && row == "3d.part.select" {
+            let layer = self.parts_layer(model)?;
+            let key = match intent.get("value") {
+                Some(Value::Null) => None,
+                Some(Value::String(key)) if self.part_names.contains_key(key) => Some(key.as_str()),
+                _ => return Err("Choose a model part".into()),
+            };
+            return pm_panel_studio3d::properties::select_part(layer, key)
+                .map(|selection| Some(Request::new(caller, selection.user())))
+                .map_err(|error| error.to_string());
+        }
+        if let Some((key, field)) = row.strip_prefix("3d.part.").and_then(|p| p.split_once('.')) {
             let p = model.published();
-            let layer = model.primary().ok_or("Choose a model")?;
-            if p.selection.layers() != model.selected_layers() {
-                return Err("The selection changed".into());
+            let active = pm_panel_studio3d::properties::active_part(&p.selection)
+                .is_some_and(|(_, selected)| selected == key);
+            if intent["type"] == "set-value" && matches!(field, "visible" | "reset") {
+                let layer = self.parts_layer(model)?;
+                let name = self.part_names.get(key).ok_or("Choose a model part")?;
+                if !model.editable(layer) || (field == "reset" && !active) {
+                    return Err("Choose an editable model part".into());
+                }
+                let value = intent.get("value").ok_or("Expected a model part value")?;
+                let (label, commands) = pm_panel_studio3d::properties::part_control(
+                    p,
+                    time,
+                    key,
+                    field,
+                    name,
+                    value.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(Some(Request::new(
+                    caller,
+                    pm_kernel::Call::Transact {
+                        label: Some(label),
+                        expected_revision: Some(model.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                )));
             }
-            let mut commands =
-                pm_panel_studio3d::properties::part_commands(p, time, layer, key, "", &json!({}))
-                    .map_err(|error| error.to_string())?;
-            let layer_id = layer.into();
-            let channel = format!("pt.{key}.{field}");
-            let key_id = pm_kernel::new_id("kf");
-            let command =
-                if intent["removeAnimation"] == true || intent["action"] == "remove-animation" {
-                    pm_kernel::KeyframeCommand::ClearAll {
-                        layer_id,
-                        channel,
-                        time,
+            if let Some(&(_, label, fields, _, _)) =
+                PART_TRANSFORMS.iter().find(|spec| spec.0 == field)
+                && (intent["type"] == "key"
+                    || matches!(
+                        intent["action"].as_str(),
+                        Some("add-key" | "remove-animation")
+                    ))
+            {
+                let layer = self.parts_layer(model)?.to_owned();
+                let name = self.part_names.get(key).ok_or("Choose a model part")?;
+                if !model.editable(&layer) || !active {
+                    return Err("Choose an editable model part".into());
+                }
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let saved = &record["d"]["data"]["object"]["parts"][key]["p"];
+                let states: Vec<_> = fields
+                    .iter()
+                    .map(|field| {
+                        let binding =
+                            Binding::Property(PropertyId::new(&layer, format!("pt.{key}.{field}")));
+                        model.binding_state(&binding, time).ok()
+                    })
+                    .collect();
+                let clear =
+                    intent["removeAnimation"] == true || intent["action"] == "remove-animation";
+                let remove = intent["type"] == "key"
+                    && states
+                        .iter()
+                        .all(|s| s.as_ref().is_some_and(|s| s.key_at_playhead));
+                let label = format!(
+                    "{} {label}",
+                    if clear {
+                        "Remove animation for"
+                    } else if remove {
+                        "Remove keyframe for"
+                    } else {
+                        "Add keyframe for"
                     }
-                } else if intent["action"] == "add-key" {
-                    pm_kernel::KeyframeCommand::Add {
-                        layer_id,
-                        channel,
-                        time,
-                        key_id,
-                        value: None,
-                    }
-                } else {
-                    pm_kernel::KeyframeCommand::Toggle {
-                        layer_id,
-                        channel,
-                        time,
-                        key_id,
-                        value: None,
-                    }
-                };
-            commands.push(command.into());
-            return Ok(Some(Request::new(
-                caller,
-                pm_kernel::Call::Transact {
-                    label: Some("Keyframe Model Part".into()),
-                    expected_revision: Some(model.revision()),
-                    body: pm_kernel::WriteBody::Commands(commands),
-                },
-            )));
+                );
+                let mut commands = pm_panel_studio3d::properties::part_commands(
+                    model.published(),
+                    time,
+                    &layer,
+                    key,
+                    name,
+                    &json!({}),
+                )
+                .map_err(|error| error.to_string())?;
+                for (&field, state) in fields.iter().zip(states) {
+                    let layer_id = layer.clone();
+                    let channel = format!("pt.{key}.{field}");
+                    let key_id = pm_kernel::new_id("kf");
+                    let command = if clear {
+                        pm_kernel::KeyframeCommand::ClearAll {
+                            layer_id,
+                            channel,
+                            time,
+                        }
+                    } else if remove {
+                        pm_kernel::KeyframeCommand::Toggle {
+                            layer_id,
+                            channel,
+                            time,
+                            key_id,
+                            value: None,
+                        }
+                    } else {
+                        // The first edit installs all channels. Its first key is at or after layer start.
+                        let time = if saved.get(field).is_none() {
+                            time.max(record["from"].as_f64().unwrap_or(0.))
+                        } else {
+                            time
+                        };
+                        pm_kernel::KeyframeCommand::Add {
+                            layer_id,
+                            channel,
+                            time,
+                            key_id,
+                            value: state.map(|s| s.value),
+                        }
+                    };
+                    commands.push(command.into());
+                }
+                return Ok(Some(Request::new(
+                    caller,
+                    pm_kernel::Call::Transact {
+                        label: Some(label),
+                        expected_revision: Some(model.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                )));
+            }
         }
         let handle = self.handles.get(path).ok_or("Unknown property row")?;
         if intent["type"] == "set-value" {

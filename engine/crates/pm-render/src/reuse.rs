@@ -12,54 +12,25 @@
 //!
 //! # What a layer's draws depend on
 //!
-//! Only layers whose draws provably depend on nothing else are kept:
+//! Cached layers must produce self-contained native draws. Their transforms
+//! and activity can depend on parents and enclosing groups, and a 2.5D
+//! pass also depends on its camera. Groups additionally depend on their
+//! members in stack order, including members that produced no draw.
 //!
-//! - solid layers and raster image layers (not SVG: its plan reads the
-//!   file), in 2D, through today's fast path: no effects, masks,
-//!   transitions, track matte, blend mode, motion blur, or 2.5D plane, and
-//!   no expression anywhere in the layer or in the layers it depends on;
-//! - nothing the build reported for the layer (no failure, no unsupported
-//!   feature);
-//! - built outside a track matte's pass, outside motion-blur samples, and
-//!   in a pass without solo layers.
-//!
-//! What such a layer's draws read: its own subtree; the layers its
-//! transform and activity go through (its parent chain and enclosing
-//! groups, and theirs, transitively: the *closure*); the composition's own
-//! fields, the open composition's, and the document root's (assets,
-//! project settings; `Comp::member` falls back to the root); the
-//! composition time, the pass's size and scale, the build's options; and,
-//! for an image, the media path the asset resolver answers.
-//!
-//! # Validity
-//!
-//! Every node remembers the revision its subtree last changed at
-//! (`pm_model::doc`). Entries are kept for one revision (the last frame's,
-//! the *stamp*) and given back only when:
-//!
-//! - the closure, found again in this revision's document, is the same
-//!   nodes (address and id) and every one of them is unchanged since the
-//!   stamp (`rev <= stamp`), with every id unique in the composition (a
-//!   unique id found again unchanged is the same logical layer, the
-//!   argument `pm-eval`'s interned properties make);
-//! - the composition's, the open composition's, and the root's fields
-//!   other than `layers` and `comps` are unchanged since the stamp;
-//! - the pass (composition, time, size, scale, precomp depth) and the
-//!   build's options are the same, and so is the image's media path.
-//!
-//! Anything else plans the layer as before. A build at another time than
-//! the last one does not look up or keep anything (playback pays one
-//! comparison per frame), and a different document (root address, project
-//! id, or a revision going back) or other build options drop every entry.
-//! Entries a frame did not use are dropped after it.
+//! Snapshot edits can copy the layer list. Retain the layer's object
+//! identity, which survives that copy, and check its revision as well.
+//! Shared identity prevents an unrelated document or a same-revision
+//! replacement from matching an old layer. Non-layer composition fields
+//! and build options are checked independently.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use pm_eval::{JsResult, Scope, node};
 use pm_model::{JsString, Node, NodeKind};
 
-use crate::plan::{Build, Content, Draw, Source};
+use crate::plan::{Build, Draw};
 
 /// Counters of the reuse (tests and `compose_bench`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +50,8 @@ pub struct ReuseStats {
     /// again.
     pub prefix_frames: u64,
     pub prefix_draws: u64,
+    /// Offscreen group passes loaded from a preceding viewer frame.
+    pub group_hits: u64,
 }
 
 /// The build options a layer's draws depend on.
@@ -86,7 +59,13 @@ pub struct ReuseStats {
 pub(crate) struct BuildKey {
     pub sampling: crate::sampling::Sampling,
     pub blur: Option<crate::motion::Blur>,
-    pub view_override: bool,
+    pub view: Option<crate::scene3d::View3d>,
+    pub plane_camera: Option<pm_eval::space3d::Camera3d>,
+    pub text: Option<u64>,
+    pub preview: Option<crate::compat_crop::PreviewWindow>,
+    pub keep_empty_groups: bool,
+    pub offline_cards: bool,
+    pub studio: bool,
     /// The output origin (bits): every draw of the top level and its
     /// groups moves with it.
     pub origin: Option<(u64, u64)>,
@@ -97,16 +76,6 @@ pub(crate) struct BuildKey {
     pub read_ahead: bool,
     /// Interactive viewer group focus (`RenderRequest::focus_group`).
     pub focus_group: Option<String>,
-}
-
-/// Which document the entries belong to.
-#[derive(Debug, Clone, PartialEq)]
-struct DocKey {
-    root: usize,
-    /// The first member of the root: a replaced document is built while
-    /// the old one is alive, so its members are elsewhere.
-    first: usize,
-    project: Option<JsString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,8 +90,12 @@ struct PassKey {
 
 struct Entry {
     draws: Option<Vec<Draw>>,
-    /// The closure: node address and id, the layer first.
-    closure: Vec<(usize, JsString)>,
+    /// The closure: layer id and its shared object.
+    closure: Vec<(JsString, Node)>,
+    /// Group membership and layer dependencies, including inactive children.
+    group: Option<Arc<crate::pass_facts::PassFacts>>,
+    camera: Option<pm_eval::space3d::Camera3d>,
+    shaders: Vec<pm_glsl::Key>,
     /// An image's asset and the path its resolver answered.
     media: Option<(String, PathBuf)>,
     /// The build that last used the entry.
@@ -132,7 +105,7 @@ struct Entry {
 /// The reuse state a renderer keeps across frames.
 #[derive(Default)]
 pub struct DrawReuse {
-    doc: Option<DocKey>,
+    project: Option<JsString>,
     build: Option<BuildKey>,
     /// The revision the entries were validated at.
     stamp: u64,
@@ -148,7 +121,9 @@ pub struct DrawReuse {
     revision: u64,
     /// Compositions whose fields were found unchanged in this build, by
     /// composition node address.
-    fields_unchanged: Vec<(usize, bool)>,
+    fields_unchanged: HashMap<usize, bool>,
+    fields: HashMap<(JsString, bool), Fields>,
+    next_fields: HashMap<(JsString, bool), Fields>,
     stats: ReuseStats,
     facts: crate::pass_facts::FactsCache,
 }
@@ -156,6 +131,10 @@ pub struct DrawReuse {
 impl DrawReuse {
     pub fn new() -> DrawReuse {
         DrawReuse::default()
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.active
     }
 
     pub fn stats(&self) -> ReuseStats {
@@ -166,7 +145,9 @@ impl DrawReuse {
     pub fn clear(&mut self) {
         self.passes.clear();
         self.facts.clear();
-        self.doc = None;
+        self.project = None;
+        self.fields.clear();
+        self.next_fields.clear();
         self.build = None;
         self.time = None;
     }
@@ -175,36 +156,25 @@ impl DrawReuse {
     pub(crate) fn begin(&mut self, root: &Node, revision: u64, time: f64, build: BuildKey) {
         self.builds += 1;
         self.fields_unchanged.clear();
-        let first = match root.kind() {
-            NodeKind::Object(map) => map
-                .values()
-                .next()
-                .map_or(0, |n| std::ptr::from_ref(n) as usize),
-            _ => 0,
-        };
-        let doc = DocKey {
-            root: std::ptr::from_ref(root) as usize,
-            first,
-            project: node::string(node::member(Some(root), "id")).cloned(),
-        };
-        if self.doc.as_ref() != Some(&doc) || revision < self.stamp {
+        self.next_fields.clear();
+        let project = node::string(node::member(Some(root), "id")).cloned();
+        let same_doc = project.is_some() && project == self.project && revision >= self.stamp;
+        if !same_doc {
             self.facts.clear();
+            self.fields.clear();
         }
         let time = time.to_bits();
-        let same = self.doc.as_ref() == Some(&doc)
-            && self.build.as_ref() == Some(&build)
-            && self.time == Some(time)
-            && revision >= self.stamp;
-        if !same {
+        let same_time = same_doc && self.time == Some(time);
+        if !same_time || self.build.as_ref() != Some(&build) {
             self.passes.clear();
         }
         // The first build at a time stores nothing: playback never pays
         // for entries it would not use.
-        self.active = same || (self.doc.as_ref() == Some(&doc) && self.time == Some(time));
+        self.active = same_time;
         if !self.active {
             self.stats.cold_builds += 1;
         }
-        self.doc = Some(doc);
+        self.project = project;
         self.build = Some(build);
         self.time = Some(time);
         self.revision = revision;
@@ -222,45 +192,82 @@ impl DrawReuse {
         } else {
             self.passes.clear();
         }
+        std::mem::swap(&mut self.fields, &mut self.next_fields);
+        self.next_fields.clear();
         self.stamp = self.revision;
         self.active = false;
     }
 
     pub(crate) fn pass_facts(
         &mut self,
-        layers: &[Node],
+        comp: &pm_eval::Comp<'_>,
         all: &[&Node],
     ) -> std::sync::Arc<crate::pass_facts::PassFacts> {
-        self.facts.get(layers, all, self.revision)
+        self.facts.get(comp, all, self.revision)
     }
 
     /// Whether `comp`'s own fields (and the root's, and the open
     /// composition's) are unchanged since the stamp, the layer lists and
     /// the project's provenance aside.
     fn fields_unchanged(&mut self, scope: &Scope<'_, '_>) -> bool {
-        let stamp = self.stamp;
-        let mut check = |node: &Node, skip: &[&[u8]]| -> bool {
-            let address = std::ptr::from_ref(node) as usize;
-            if let Some(&(_, ok)) = self.fields_unchanged.iter().find(|(a, _)| *a == address) {
+        let mut check = |n: &Node, id: &JsString, root: bool| {
+            let address = std::ptr::from_ref(n) as usize;
+            if let Some(&ok) = self.fields_unchanged.get(&address) {
                 return ok;
             }
-            let ok = match node.kind() {
-                NodeKind::Object(map) => map
-                    .iter()
-                    .all(|(k, v)| skip.contains(&k.as_bytes()) || v.rev() <= stamp),
-                _ => node.rev() <= stamp,
-            };
-            self.fields_unchanged.push((address, ok));
+            let key = (id.clone(), root);
+            let fields = Fields::of(n);
+            let ok = self.fields.get(&key).is_some_and(|old| {
+                fields.0.len() == old.0.len()
+                    && fields.0.iter().zip(&old.0).all(|((k, v), (old_k, old_v))| {
+                        k == old_k && v.rev() <= self.stamp && same_field(v, old_v)
+                    })
+            });
+            self.next_fields.insert(key, fields);
+            self.fields_unchanged.insert(address, ok);
             ok
         };
-        // The project's provenance (`revision`, the `edits` log), which every
-        // editor edit writes (`legacy/core/editing.ts`), is read by nothing
-        // that draws: an inspector edit keeps the other layers' draws.
-        const SKIP: &[&[u8]] = &[b"layers", b"comps", b"revision", b"edits"];
-        check(scope.comp.node(), SKIP)
-            && check(scope.project.node(), SKIP)
-            && check(scope.comp.root(), SKIP)
+        let comp = check(scope.comp.node(), scope.comp.id(), scope.comp.at_root());
+        let project = check(
+            scope.project.node(),
+            scope.project.id(),
+            scope.project.at_root(),
+        );
+        let root = check(scope.comp.root(), scope.project.id(), true);
+        comp && project && root
     }
+}
+
+struct Fields(Vec<(JsString, Node)>);
+
+impl Fields {
+    fn of(n: &Node) -> Self {
+        // Layer lists are validated by the entry. The editing provenance
+        // is updated on every edit and is not a rendering input.
+        const SKIP: &[&[u8]] = &[b"layers", b"comps", b"revision", b"edits"];
+        Self(match n.kind() {
+            NodeKind::Object(map) => map
+                .iter()
+                .filter(|(k, _)| !SKIP.contains(&k.as_bytes()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+}
+
+fn same_field(current: &Node, old: &Node) -> bool {
+    match (current.kind(), old.kind()) {
+        (NodeKind::Object(a), NodeKind::Object(b)) => Arc::ptr_eq(a, b),
+        (NodeKind::Array(a), NodeKind::Array(b)) => Arc::ptr_eq(a, b),
+        (a, b) => a == b,
+    }
+}
+
+fn unchanged(current: &Node, old: &Node, stamp: u64) -> bool {
+    current.rev() <= stamp
+        && matches!((current.kind(), old.kind()),
+            (NodeKind::Object(a), NodeKind::Object(b)) if Arc::ptr_eq(a, b))
 }
 
 /// The layers `layer`'s draws read besides itself: parents and enclosing
@@ -312,24 +319,27 @@ fn empty_list(layer: &Node, key: &str) -> bool {
     }
 }
 
-/// Draws a reused layer may hold: today's fast path in 2D.
-fn keepable_draws(draws: &Option<Vec<Draw>>) -> bool {
-    let simple = |content: &Content| match content {
-        Content::Solid(_) => true,
-        Content::Texture { source, .. } => matches!(source, Source::Image { .. }),
-        _ => false,
-    };
+/// Draws which contain only native geometry, text and stills. A kept
+/// group deliberately excludes media: its paths are not resolved again
+/// when we skip planning the entire pass.
+fn keepable_draws(draws: &Option<Vec<Draw>>, group: bool) -> bool {
     draws.as_ref().is_none_or(|ds| {
-        ds.iter().all(|d| match &d.content {
-            Content::Placed(p) => p.plane.is_none() && simple(&p.content),
-            // A level 2 solid's scene at output resolution.
-            Content::Texture {
-                source: Source::Vector(v),
-                ..
-            } => matches!(**v, crate::vector::VectorSource::Scene { .. }),
-            other => simple(other),
+        ds.iter().all(|d| {
+            if group {
+                crate::frame_prefix::stable(&d.content, false)
+            } else {
+                crate::frame_prefix::stable(&d.content, true)
+            }
         })
     })
+}
+
+fn simple_layer(layer: &Node) -> bool {
+    empty_list(layer, "fx")
+        && empty_list(layer, "masks")
+        && ["transitionIn", "transitionOut", "matteSource"]
+            .into_iter()
+            .all(|key| !node::truthy(node::member(Some(layer), key)))
 }
 
 /// The image asset of a layer and the path its resolver answers now.
@@ -349,14 +359,16 @@ pub(crate) fn draw<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     layer: &'d Node,
+    ty: &str,
     time: f64,
     width: u32,
     height: u32,
     scale: (f64, f64),
-    solo: bool,
+    facts: &Arc<crate::pass_facts::PassFacts>,
     plan: impl FnOnce(&mut Scope<'_, 'd>, &mut Build<'_>) -> JsResult<Option<Vec<Draw>>>,
 ) -> JsResult<Option<Vec<Draw>>> {
-    let eligible = !solo
+    let eligible = !facts.solo
+        && b.can_reuse_draws()
         && b.forced_on.is_none()
         && b.matte_depth == 0
         && b.video_center.is_none()
@@ -364,27 +376,22 @@ pub(crate) fn draw<'d>(
     if !eligible {
         return plan(scope, b);
     }
-    let ty = crate::js::layer_type(layer);
     let Some(id) = node::string(node::member(Some(layer), "id")).cloned() else {
         return plan(scope, b);
     };
-    if !matches!(ty.as_str(), "solid" | "image") {
+    let group = ty == "group";
+    if !matches!(
+        ty,
+        "solid" | "image" | "shape" | "text" | "shader" | "group"
+    ) {
         return plan(scope, b);
     }
     let Some(nodes) = closure(scope, layer) else {
         return plan(scope, b);
     };
-    let index = scope.layer_index();
-    let mut ids: Vec<(usize, JsString)> = Vec::with_capacity(nodes.len());
-    for n in &nodes {
-        let Some(nid) = node::string(node::member(Some(n), "id")) else {
-            return plan(scope, b);
-        };
-        if !matches!(index.strings.get(nid), Some((_, false))) {
-            return plan(scope, b);
-        }
-        ids.push((std::ptr::from_ref(*n) as usize, nid.clone()));
-    }
+    let Ok(camera) = scope.projection_camera_3d(time) else {
+        return plan(scope, b);
+    };
     let pass = (
         scope.comp.id().clone(),
         PassKey {
@@ -405,11 +412,34 @@ pub(crate) fn draw<'d>(
     let fields = reuse.fields_unchanged(scope);
     let stamp = reuse.stamp;
     let build = reuse.builds;
+    let index = scope.layer_index();
+    let current = |id: &JsString| match index.strings.get(id) {
+        Some(&(i, false)) => scope.layers().get(i),
+        _ => None,
+    };
     if fields
         && let Some(entry) = reuse.passes.get_mut(&pass).and_then(|p| p.get_mut(&id))
-        && entry.closure == ids
         && entry.media == media
-        && nodes.iter().all(|n| n.rev() <= stamp)
+        && entry.camera == camera
+        && entry
+            .shaders
+            .iter()
+            .all(|key| !crate::shader_layers::translate::native_failed(key))
+        && match &entry.group {
+            Some(old) => Arc::ptr_eq(old, facts),
+            None => {
+                entry.closure.len() == nodes.len()
+                    && entry
+                        .closure
+                        .iter()
+                        .zip(&nodes)
+                        .all(|((id, _), node)| current(id).is_some_and(|n| std::ptr::eq(n, *node)))
+            }
+        }
+        && entry
+            .closure
+            .iter()
+            .all(|(id, old)| current(id).is_some_and(|n| unchanged(n, old, stamp)))
     {
         entry.used = build;
         reuse.stats.reused += 1;
@@ -432,27 +462,60 @@ pub(crate) fn draw<'d>(
     let keep = !reported
         && !svg
         && (ty != "image" || media.is_some())
-        && keepable_draws(&draws)
-        && empty_list(layer, "fx")
-        && empty_list(layer, "masks")
-        && !node::truthy(node::member(Some(layer), "transitionIn"))
-        && !node::truthy(node::member(Some(layer), "transitionOut"))
-        && !node::truthy(node::member(Some(layer), "matteSource"))
-        && !node::truthy(node::member(Some(layer), "threeD"))
-        && !nodes.iter().any(|n| has_expression(n))
-        && scope.is_3d_layer(layer).is_ok_and(|three| !three);
-    if keep {
+        && keepable_draws(&draws, group)
+        && simple_layer(layer);
+    if keep && let Some(closure) = dependencies(scope, nodes, group.then_some(facts), &id) {
         let reuse = b.reuse.as_mut().expect("eligible");
         reuse.stats.stored += 1;
         reuse.passes.entry(pass).or_default().insert(
             id,
             Entry {
+                shaders: crate::frame_prefix::shader_keys(draws.as_deref().unwrap_or_default()),
                 draws: draws.clone(),
-                closure: ids,
+                closure,
+                group: group.then(|| facts.clone()),
+                camera,
                 media,
                 used: build,
             },
         );
     }
     Ok(draws)
+}
+
+/// Validate all inputs of a boundary group, including the parents of its
+/// children outside the group. The pass facts identify moves and reorders
+/// even when the layers themselves retain their revisions.
+fn dependencies<'d>(
+    scope: &mut Scope<'_, 'd>,
+    mut nodes: Vec<&'d Node>,
+    group: Option<&Arc<crate::pass_facts::PassFacts>>,
+    id: &JsString,
+) -> Option<Vec<(JsString, Node)>> {
+    if let Some(facts) = group {
+        for layer in facts.owners.descendants(scope.layers(), id)? {
+            if !matches!(
+                crate::js::layer_type(layer).as_str(),
+                "group" | "solid" | "shape" | "text" | "shader" | "null" | "audio"
+            ) || !simple_layer(layer)
+            {
+                return None;
+            }
+            nodes.extend(closure(scope, layer)?);
+        }
+    }
+    let index = scope.layer_index();
+    let mut checked = HashSet::new();
+    let mut result = Vec::new();
+    for n in nodes {
+        if !checked.insert(std::ptr::from_ref(n)) {
+            continue;
+        }
+        let id = node::string(node::member(Some(n), "id"))?;
+        if !matches!(index.strings.get(id), Some((_, false))) || has_expression(n) {
+            return None;
+        }
+        result.push((id.clone(), n.clone()));
+    }
+    Some(result)
 }

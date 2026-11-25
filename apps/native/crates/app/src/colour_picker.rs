@@ -24,6 +24,7 @@ pub enum Edit {
     Begin,
     Value(String),
     Finish(bool),
+    CancelDrag,
     Sample,
 }
 #[derive(Clone, Copy)]
@@ -32,6 +33,15 @@ enum Track {
     Alpha,
     Hue,
 }
+#[derive(Clone, Copy)]
+struct Drag {
+    track: Track,
+    bounds: Bounds<Pixels>,
+    color: Color,
+    hue: f32,
+    was_active: bool,
+}
+
 pub struct Picker {
     /// Full precision picker state. Read this on `Edit::Value` when a caller
     /// stores normalized RGBA rather than the document hex representation.
@@ -53,7 +63,8 @@ pub struct Picker {
     p3: bool,
     notation: &'static str,
     hue_mode: u8,
-    drag: Option<(Track, Bounds<Pixels>)>,
+    drag: Option<Drag>,
+    cancelled_press: bool,
     focus: FocusHandle,
     fields: Vec<Entity<TextField>>,
     subscriptions: Vec<Subscription>,
@@ -99,6 +110,7 @@ impl Picker {
             notation,
             hue_mode,
             drag: None,
+            cancelled_press: false,
             focus,
             fields: vec![],
             subscriptions: vec![],
@@ -642,6 +654,23 @@ impl Picker {
         self.cancel_pending();
         cx.emit(Edit::Finish(commit));
     }
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        let changed = self.color != drag.color;
+        self.color = drag.color;
+        self.hue = drag.hue;
+        if !drag.was_active && self.active {
+            self.active = false;
+            cx.emit(Edit::CancelDrag);
+        } else if changed {
+            cx.emit(Edit::Value(self.color.hex()));
+        }
+        self.sync_fields(cx);
+        cx.notify();
+    }
+
     fn pick(&mut self, at: Point<Pixels>, kind: Track, b: Bounds<Pixels>, cx: &mut Context<Self>) {
         let x = (f32::from(at.x - b.origin.x) / f32::from(b.size.width)).clamp(0., 1.);
         let y = (f32::from(at.y - b.origin.y) / f32::from(b.size.height)).clamp(0., 1.);
@@ -751,7 +780,13 @@ impl Picker {
                                     p.apply_active(cx);
                                     p.stops[i].focus(window, cx);
                                     p.focus_index = i;
-                                    p.drag = Some((kind, bounds));
+                                    p.drag = Some(Drag {
+                                        track: kind,
+                                        bounds,
+                                        color: p.color,
+                                        hue: p.hue,
+                                        was_active: p.active,
+                                    });
                                     p.pick(e.position, kind, bounds, cx);
                                 });
                             }
@@ -900,36 +935,58 @@ impl Render for Picker {
             move |_, _, window, _| {
                 let sample = weak.clone();
                 window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Capture || e.button != MouseButton::Left {
+                    if phase != DispatchPhase::Capture {
                         return;
                     }
-                    let _ = sample.update(cx, |p, cx| {
-                        if !p.sampling {
-                            return;
+                    let _ = sample.update(cx, |p, cx| match e.button {
+                        MouseButton::Right if p.drag.is_some() || p.cancelled_press => {
+                            p.cancel_drag(cx);
+                            p.cancelled_press = true;
+                            cx.stop_propagation();
                         }
-                        cx.stop_propagation();
-                        p.request_sample(e.position, cx);
+                        MouseButton::Left => {
+                            p.cancelled_press = false;
+                            if p.sampling {
+                                cx.stop_propagation();
+                                p.request_sample(e.position, cx);
+                            }
+                        }
+                        _ => {}
                     });
                 });
                 let moved = weak.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         let _ = moved.update(cx, |p, cx| {
+                            if p.cancelled_press && e.pressed_button.is_some() {
+                                cx.stop_propagation();
+                                return;
+                            }
                             if e.pressed_button != Some(MouseButton::Left) {
                                 p.drag = None;
                                 return;
                             }
-                            if let Some((k, b)) = p.drag {
-                                p.pick(e.position, k, b, cx);
+                            if let Some(drag) = p.drag {
+                                p.pick(e.position, drag.track, drag.bounds, cx);
                             }
                         });
                     }
                 });
                 let up = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                        let _ = up.update(cx, |p, _| p.drag = None);
+                    if phase != DispatchPhase::Capture {
+                        return;
                     }
+                    let _ = up.update(cx, |p, cx| match event.button {
+                        MouseButton::Right if p.cancelled_press => cx.stop_propagation(),
+                        MouseButton::Left => {
+                            if std::mem::take(&mut p.cancelled_press) {
+                                cx.stop_propagation();
+                            }
+                            p.drag = None;
+                        }
+                        _ => {}
+                    });
                 });
             },
         )
@@ -1200,7 +1257,10 @@ impl Render for Picker {
                     _ => {}
                 }
             }))
-            .on_mouse_down_out(cx.listener(|p, _, _, cx| {
+            .on_mouse_down_out(cx.listener(|p, e: &MouseDownEvent, _, cx| {
+                if e.button == MouseButton::Right && (p.drag.is_some() || p.cancelled_press) {
+                    return;
+                }
                 if !p.sampling {
                     p.finish(true, cx);
                 }

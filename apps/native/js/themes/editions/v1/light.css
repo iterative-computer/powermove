@@ -3,36 +3,36 @@
   color-scheme:light;
 }
 :root{
-  --ink-rgb:27 29 35;
+  --ink-rgb:29 31 37;
   --paper-rgb:255 255 255;
   --bg-window:#eeeef1;
   --bg-rail:#eeeef1;
   --bg-panel:#fdfdfe;
   --bg-panel-2:#f5f5f7;
-  --bg-sunken:#e4e4e4;
+  --bg-sunken:#e6e6ea;
   --bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));
-  --bg-row-hi:#ebebef;
-  --bg-field:#f3f3f6;
+  --bg-row-hi:#ececed;
+  --bg-field:#f3f3f4;
   --bg-float:#ffffff;
   --ink-1:rgb(var(--ink-rgb) / .045);
   --ink-2:rgb(var(--ink-rgb) / .08);
   --ink-3:rgb(var(--ink-rgb) / .16);
-  --line:#d4d4d8;
+  --line:#dcddde;
   --line-2:rgb(var(--ink-rgb) / .11);
   --line-strong:rgb(var(--ink-rgb) / .2);
   --section-line:rgb(var(--ink-rgb) / .09);
-  --tx:#1b1d23;
-  --tx-2:#52545a;
-  --tx-3:#62646a;
+  --tx:#1d1f25;
+  --tx-2:#515257;
+  --tx-3:#66676b;
   --tx-4:rgb(var(--ink-rgb) / .32);
-  --accent:#f0580a;
+  --accent:#f0580c;
   --accent-hover:color-mix(in srgb,var(--accent) 90%,white);
   --accent-dim:color-mix(in srgb,var(--accent) 12%,transparent);
   --accent-tx:color-mix(in oklab,var(--accent) 82%,var(--tx));
   --on-accent:#ffffff;
   --danger:#c22a1f;
-  --warning:#a15c00;
-  --success:#117a52;
+  --warning:#a15c01;
+  --success:#107a52;
   --blue:#2B6FE3;
   --blue-deep:#2B4FD8;
   --cream:#A89B76;
@@ -42,9 +42,9 @@
   --green:var(--success);
   --red:var(--danger);
   --yellow:var(--warning);
-  --r-base:2.6666666666666665px;
-  --r-xs:4px;
-  --r-sm:calc(var(--r-base) * 2.25);
+  --r-base:4px;
+  --r-xs:6px;
+  --r-sm:calc(var(--r-base) * 2);
   --r-md:calc(var(--r-base) * 2);
   --r-lg:calc(var(--r-base) * 3);
   --r-xl:calc(var(--r-base) * 4);
@@ -75,7 +75,7 @@
   --ctl-raised:var(--ink-1);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #76767c;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #898a8d;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
     0 1px 1px rgb(var(--ink-rgb) / .04),

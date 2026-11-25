@@ -77,6 +77,61 @@ impl FreeView {
         h.finish()
     }
 }
+/// The editor's Studio camera, converted to the flat-layer projector's lens.
+pub(crate) fn plane_camera(
+    view: &ViewCamera,
+    doc: &pm_model::Document,
+    composition: &str,
+    ticks: i64,
+) -> Option<pm_eval::space3d::Camera3d> {
+    use pm_eval::space3d::{Camera3d, default_camera_25d, uses_default_25d_camera};
+    if *view == ViewCamera::Active {
+        return None;
+    }
+    let comp = pm_eval::Comp::resolve(doc, composition).ok()?;
+    let mut ev = pm_eval::Evaluator::new()
+        .with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = pm_eval::Scope::open(&mut ev, &comp);
+    let time = comp.seconds_at(ticks);
+    if let ViewCamera::Layer { id } = view {
+        let layer = scope.layers().iter().find(|layer| {
+            pm_eval::parenting::Role3d::of(layer) == Some(pm_eval::parenting::Role3d::Camera)
+                && matches!(layer.get("id").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::String(value)) if value.as_str() == Some(id.as_str()))
+        })?;
+        return scope.camera_3d(layer, time).ok();
+    }
+    let pose = view.pose()?;
+    let (width, height) = scope.comp_size();
+    let fov = scope.active_camera_3d(time).ok().flatten().map_or_else(
+        || {
+            if uses_default_25d_camera(scope.layers()) {
+                default_camera_25d(width, height).fov
+            } else {
+                45.
+            }
+        },
+        |camera| camera.fov,
+    );
+    let distance = (0..3)
+        .map(|i| (pose.eye[i] - pose.target[i]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let ortho_height = match view {
+        ViewCamera::Orthographic { span, .. } => *span,
+        _ => 2. * distance * (fov.to_radians() / 2.).tan(),
+    };
+    Some(Camera3d {
+        position: pose.eye,
+        target: pose.target,
+        roll: pose.roll,
+        fov,
+        zoom: pose.zoom,
+        ortho: pose.ortho || matches!(view, ViewCamera::Orthographic { .. }),
+        ortho_height,
+    })
+}
+
 /// Transient viewer state. Final uses the composition's saved noise/sample
 /// policy; selecting a tier never edits the composition or export override.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

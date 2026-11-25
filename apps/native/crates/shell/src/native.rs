@@ -794,8 +794,13 @@ define_class!(
     impl Target {
         #[unsafe(method(coedit:))]
         fn coedit(&self, sender: &NSButton) {
-            let name=match sender.tag() {1=>"agent.undoTurn",2=>"agent.pause",3=>"agent.stop",_=>"agent.steer"};
-            self.send(Command{name:name.into(),args:vec![],token:None});
+            let name = match sender.tag() {
+                1 => "agent.undoTurn",
+                2 => "agent.pause",
+                3 => "agent.stop",
+                _ => "agent.steer",
+            };
+            self.send(Command { name: name.into(), args: vec![], token: None });
         }
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
@@ -2072,15 +2077,19 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
     button.highlight(true);
     let mut target = index;
     let mut dragging = false;
+    let mut cancelled = false;
     const SCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
     let mut next_scroll = None;
     let mut at = start;
     let inside = loop {
         let step = scroll
             .as_ref()
-            .filter(|_| dragging && !torn)
+            .filter(|_| dragging && !torn && !cancelled)
             .map_or(0., |view| view.drag_step_at(at));
-        let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+        let mut mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+        if dragging {
+            mask |= NSEventMask::RightMouseDown | NSEventMask::RightMouseUp;
+        }
         let event = if step == 0. {
             next_scroll = None;
             window.nextEventMatchingMask(mask)
@@ -2096,6 +2105,27 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             )
         };
         if let Some(event) = event {
+            if event.r#type() == NSEventType::RightMouseDown && !cancelled {
+                cancelled = true;
+                settle(index, None);
+                carry(false);
+                tab.setAlphaValue(1.);
+                if let Some(layer) = tab.layer() {
+                    layer.setZPosition(0.);
+                }
+                if let Some(scroll) = &scroll {
+                    scroll.drag_scroll(start_offset - scroll.offset());
+                }
+            }
+            if cancelled {
+                if event.r#type() == NSEventType::LeftMouseUp {
+                    break false;
+                }
+                continue;
+            }
+            if event.r#type() == NSEventType::RightMouseUp {
+                continue;
+            }
             at = event.locationInWindow();
             if event.r#type() == NSEventType::LeftMouseUp {
                 let local = button.convertPoint_fromView(at, None);
@@ -2156,6 +2186,9 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         }
     };
     button.highlight(false);
+    if cancelled {
+        return;
+    }
     if !dragging {
         if inside {
             unsafe {
@@ -3025,6 +3058,7 @@ impl ToolbarDelegate {
             let view = CoeditPresence::new(mtm, target, t);
             item.setView(Some(&view));
             item.setLabel(&NSString::from_str("Agent presence"));
+            item.setAutovalidates(false);
             return Some(item);
         }
         if name == "add" {
@@ -3177,8 +3211,13 @@ pub struct AgentStatus {
     pub additional_runs: usize,
     pub paused: bool,
     pub held: bool,
+    pub undo_document: Option<u64>,
+    pub undo_available: bool,
+    pub undo_feedback: Option<&'static str>,
 }
 impl AgentStatus {
+    pub const UNDOING: &'static str = "Undoing…";
+    pub const UNDONE: &'static str = "Undone";
     pub fn tooltip(&self) -> String {
         if self.attention {
             "Agent needs your answer".into()
@@ -3400,7 +3439,9 @@ impl Host {
             .items()
             .iter()
             .position(|i| i.itemIdentifier().to_string() == "agentPresence");
-        if status.working && existing.is_none() {
+        let feedback = status.undo_feedback;
+        let feedback_changed = feedback != self.agent_status.undo_feedback;
+        if (status.working || feedback.is_some()) && existing.is_none() {
             let index = self
                 ._toolbar
                 .items()
@@ -3410,16 +3451,20 @@ impl Host {
             self._toolbar
                 .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index as isize);
         }
-        if status.working && !was_working {
+        let document_changed = status.undo_document != self.agent_status.undo_document;
+        if status.working != was_working || feedback_changed || document_changed {
             self.agent_presence_generation
                 .set(self.agent_presence_generation.get() + 1);
         }
-        if (status.working || existing.is_some())
+        if (status.working || feedback.is_some() || existing.is_some())
             && let Some(launcher) = agent_launcher_button(&self._toolbar)
         {
             launcher.set_presence_visible(true);
         }
-        if !status.working && was_working {
+        if !status.working && feedback != Some(AgentStatus::UNDOING)
+            && (was_working || feedback_changed || document_changed && existing.is_some())
+        {
+            let delay = if feedback.is_some() && !status.undo_available { 2.5 } else { 6. };
             let toolbar = self._toolbar.clone();
             let generation = self.agent_presence_generation.clone();
             let version = generation.get();
@@ -3440,7 +3485,7 @@ impl Host {
                     }
                 });
             let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(delay, false, &step)
             };
             unsafe {
                 objc2_foundation::NSRunLoop::mainRunLoop()
@@ -3450,7 +3495,52 @@ impl Host {
     }
 
     /// Updates the co-editing chip, project tab and Agent tooltip.
-    pub fn set_agent_status(&mut self, status: AgentStatus) {
+    pub fn set_agent_status(&mut self, mut status: AgentStatus) {
+        if !status.working
+            && status.undo_document == self.agent_status.undo_document
+            && self.agent_status.undo_feedback.is_some()
+        {
+            status.undo_feedback = self.agent_status.undo_feedback;
+            status.undo_available = self.agent_status.undo_available;
+        }
+        self.apply_agent_status(status);
+    }
+
+    pub fn begin_agent_undo(&mut self, document: Option<u64>) -> Option<u64> {
+        if self.agent_status.working || self.agent_status.undo_feedback == Some(AgentStatus::UNDOING) {
+            return None;
+        }
+        let mut status = self.agent_status.clone();
+        status.undo_document = document;
+        status.undo_feedback = Some(AgentStatus::UNDOING);
+        self.apply_agent_status(status);
+        Some(self.agent_presence_generation.get())
+    }
+
+    pub fn agent_undo_pending(&self, document: Option<u64>, version: u64) -> bool {
+        self.agent_presence_generation.get() == version
+            && self.agent_status.undo_document == document
+            && self.agent_status.undo_feedback == Some(AgentStatus::UNDOING)
+    }
+
+    pub fn finish_agent_undo(
+        &mut self,
+        document: Option<u64>,
+        version: u64,
+        title: &'static str,
+        retry: bool,
+    ) -> bool {
+        if !self.agent_undo_pending(document, version) {
+            return false;
+        }
+        let mut status = self.agent_status.clone();
+        status.undo_feedback = Some(title);
+        status.undo_available = retry;
+        self.apply_agent_status(status);
+        true
+    }
+
+    fn apply_agent_status(&mut self, status: AgentStatus) {
         if status == self.agent_status {
             return;
         }
@@ -3493,7 +3583,8 @@ impl Host {
             || status.working != self.agent_status.working
             || status.attention != self.agent_status.attention
             || status.paused != self.agent_status.paused
-            || status.held != self.agent_status.held;
+            || status.held != self.agent_status.held
+            || status.undo_feedback != self.agent_status.undo_feedback;
         let turning = presence.is_some()
             && status.working
             && !status.attention
@@ -4975,7 +5066,7 @@ impl Host {
             self.sync_project_bar()
         }
     }
-    /// Tabs mode (the default): the toolbar's tabs are the windows of this
+    /// In Tabs mode, the toolbar's tabs are the windows of this
     /// window's tab group (a lone window is one tab), then New Project.
     /// AppKit's own tab bar stays hidden; the group remains the model, so a
     /// tab is selected, closed and moved to its own window exactly as before.

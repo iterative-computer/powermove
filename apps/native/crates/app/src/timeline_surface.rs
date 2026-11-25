@@ -8,15 +8,18 @@ use crate::v4_view::{Outline, TimelineOutline};
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use pm_engine_service::audio::GainPreview;
-use pm_kernel::{Caller, KernelHandle, Published, QueryMirror, SelectionCall};
+use pm_kernel::{Call, Caller, KernelHandle, Published, QueryMirror, SelectionCall};
 use pm_panel_timeline::{
     Context as MenuContext, DragKind, DragSample, EditTool, GraphDisplay, HostEffect,
-    MarqueeSession, Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient,
-    TimelineMode, TimelineModel,
+    KeyMovePreview, MarqueeSession, Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub,
+    TimelineClient, TimelineMode, TimelineModel,
     footer::Part,
     frame,
     graph_render::{self, Graph},
-    render::{BarState, Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
+    render::{
+        BarState, Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, SceneSelection,
+        Viewport, WaveformCache,
+    },
 };
 use std::{
     cell::RefCell,
@@ -274,6 +277,7 @@ impl TransformBox {
 }
 enum Job {
     Sync,
+    RebuildPresentation,
     Disclosure(String),
     SelectLayer(String, Mods),
     PaletteSelectLayer {
@@ -301,6 +305,11 @@ enum Job {
     SwitchStep(Vec<pm_kernel::Command>),
     SwitchFinish(bool),
     Apply(Plan),
+    FinishMarquee {
+        plan: Plan,
+        composition: Option<String>,
+        selection: Option<Arc<SceneSelection>>,
+    },
     CommitGain(Plan, u64),
     Command {
         id: String,
@@ -344,6 +353,7 @@ struct Built {
     graph: Option<Arc<Graph>>,
     model: Arc<TimelineModel>,
     outline_requested: bool,
+    selection_only: bool,
     /// Audio clips whose waveforms the scene drew as still reading.
     wanted: Vec<crate::waveforms::Key>,
 }
@@ -417,7 +427,11 @@ enum Gesture {
         handle: Option<f64>,
     },
     /// A ruler scrub and the frame time it last sought.
-    Scrub(Scrub, f64),
+    Scrub {
+        scrub: Scrub,
+        sought: f64,
+        before: f64,
+    },
     Marquee {
         session: MarqueeSession,
         origin: Point<Pixels>,
@@ -481,6 +495,7 @@ pub struct TimelineSurface {
     busy: bool,
     sample_scheduled: bool,
     viewer_previewing: bool,
+    key_preview: Option<Arc<KeyMovePreview>>,
     gain_previewing: Option<u64>,
     gain_picture: Option<pm_kernel::Snapshot>,
     /// Assets this editor's viewer cannot read: their clips show Media
@@ -516,6 +531,11 @@ pub struct TimelineSurface {
     /// The drag readout's text and where the pointer is (surface points).
     readout: Option<(String, f64, f64)>,
     frame: Option<Arc<Frame>>,
+    frame_reach: f64,
+    waveforms: WaveformCache,
+    outline_geometry: Option<(f32, f32, Option<(usize, usize)>)>,
+    service_dirty: bool,
+    zooming: bool,
     transition_selected: Option<(String, String)>,
     /// The rows a viewport past each edge, and while `sideways` the tracks
     /// and the ruler the tracks' width past each side (`Scene::prepare_wide`,
@@ -554,6 +574,10 @@ pub struct TimelineSurface {
     /// shows all of it from 0, the view refits to the new length.
     fit_duration: f64,
     gesture: Gesture,
+    gesture_view: Option<(Viewed, bool)>,
+    drag_scene: Option<(Arc<Scene>, Arc<pm_panel_timeline::TimelineIndex>)>,
+    suppress_left_up: bool,
+    marquee_selection: Option<Arc<SceneSelection>>,
     cursor: CursorStyle,
     /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
     tip: Option<(SharedString, (f64, f64))>,
@@ -652,6 +676,7 @@ impl TimelineSurface {
             busy: true,
             sample_scheduled: false,
             viewer_previewing: false,
+            key_preview: None,
             gain_previewing: None,
             gain_picture: None,
             offline: Arc::new(offline),
@@ -671,6 +696,11 @@ impl TimelineSurface {
             graph_axis: false,
             readout: None,
             frame: None,
+            frame_reach: 0.,
+            waveforms: WaveformCache::default(),
+            outline_geometry: None,
+            service_dirty: true,
+            zooming: false,
             transition_selected: None,
             rows: None,
             rows_handle: ScrollHandle::new(),
@@ -686,6 +716,10 @@ impl TimelineSurface {
             fitted: false,
             fit_duration: 0.,
             gesture: Gesture::Idle,
+            gesture_view: None,
+            drag_scene: None,
+            suppress_left_up: false,
+            marquee_selection: None,
             cursor: CursorStyle::Arrow,
             tip: None,
             tip_wait: None,
@@ -888,6 +922,9 @@ impl TimelineSurface {
             });
             self.focused_layer = None;
             self.pending_scene = None;
+            self.key_preview = None;
+            self.marquee_selection = None;
+            self.outline_geometry = None;
             self.scene = None;
             self.frame = None;
             self.graph = None;
@@ -900,6 +937,13 @@ impl TimelineSurface {
         }
         self.pump(cx);
     }
+    fn rebuild_presentation(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.queue.back(), Some(Job::RebuildPresentation)) {
+            self.queue.push_back(Job::RebuildPresentation);
+        }
+        self.pump(cx);
+    }
+
     pub(crate) fn palette_select_layer(
         &mut self,
         published: &pm_kernel::Published,
@@ -925,7 +969,7 @@ impl TimelineSurface {
     pub fn set_offline_media(&mut self, offline: BTreeSet<String>, cx: &mut Context<Self>) {
         if *self.offline != offline {
             self.offline = Arc::new(offline);
-            self.published(cx);
+            self.rebuild_presentation(cx);
         }
     }
     /// Readable audio originals by asset id: their clips draw waveforms.
@@ -936,7 +980,7 @@ impl TimelineSurface {
     ) {
         if *self.sources != sources {
             self.sources = Arc::new(sources);
-            self.published(cx);
+            self.rebuild_presentation(cx);
         }
     }
     pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
@@ -954,7 +998,7 @@ impl TimelineSurface {
                 self.changed(false, cx);
             }
             self.frame = None;
-            self.published(cx);
+            self.rebuild_presentation(cx);
         }
     }
     /// Keymap and menu entry: the same model command the panel used to reach.
@@ -1062,6 +1106,7 @@ impl TimelineSurface {
     /// Escape also leaves the split tool, even when no pointer gesture is active.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         let cancelled = self.cancel_pointer_gesture(cx);
+        self.suppress_left_up |= cancelled;
         if self.model.edit_tool != EditTool::Split {
             return cancelled;
         }
@@ -1078,13 +1123,29 @@ impl TimelineSurface {
     fn cancel_pointer_gesture(&mut self, cx: &mut Context<Self>) -> bool {
         self.pointer_timeout = None;
         self.row_scroll = None;
-        if self.audio_cancel(cx) {
-            return true;
-        }
+        let cancelled_audio = self.audio_cancel(cx);
         let gesture = std::mem::replace(&mut self.gesture, Gesture::Idle);
+        let before_view = self.gesture_view.take();
+        let drag_scene = self.drag_scene.take();
         if matches!(gesture, Gesture::Idle) {
-            return false;
+            return cancelled_audio;
         }
+        let restore_saved_view = matches!(
+            gesture,
+            Gesture::Zoom | Gesture::Navigate { .. } | Gesture::Rows { .. }
+        );
+        if let Some((view, fitted)) = before_view
+            && (self.view != view || self.fitted != fitted)
+        {
+            self.view = view;
+            self.fitted = fitted;
+            if restore_saved_view {
+                self.idle_persist = None;
+                self.zooming = false;
+            }
+            self.changed(restore_saved_view, cx);
+        }
+        self.snap_guide = None;
         self.finish_key_gain(None, cx);
         self.cursor = CursorStyle::Arrow;
         self.lit = None;
@@ -1094,6 +1155,24 @@ impl TimelineSurface {
         self.outline.layer_dragged.set(false);
         match gesture {
             Gesture::Dragging { .. } => {
+                if self.key_preview.take().is_some() {
+                    self.frame = None;
+                }
+                if self.viewer_previewing {
+                    self.delegate.timing_preview(None, cx);
+                    self.viewer_previewing = false;
+                    if let Some((scene, index)) = drag_scene
+                        && Arc::ptr_eq(&index, &self.model.index)
+                    {
+                        let mut scene = Scene::clone(&scene);
+                        scene.preview_selection(Arc::new(SceneSelection::new(
+                            self.model.selection.layers(),
+                            &self.model.selected_key_pairs(),
+                        )));
+                        self.scene = Some(self.with_focus(Arc::new(scene)));
+                        self.frame = None;
+                    }
+                }
                 self.queue.retain(|job| !matches!(job, Job::Sample(_)));
                 self.sample_scheduled = false;
                 self.queue.push_back(Job::Finish(false));
@@ -1108,14 +1187,21 @@ impl TimelineSurface {
                 self.rows = None;
                 self.queue.push_back(Job::Sync);
             }
-            Gesture::Marquee { session, .. } => {
-                self.queue.push_back(Job::Apply(session.cancel()));
+            Gesture::Marquee { .. } => {
+                if self.marquee_selection.take().is_some() {
+                    self.frame = None;
+                }
             }
             Gesture::SwitchPaint { .. } => {
                 self.queue.retain(|job| !matches!(job, Job::SwitchStep(_)));
                 self.queue.push_back(Job::SwitchFinish(false));
             }
-            Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
+            Gesture::Scrub { before, sought, .. } => {
+                if before != sought && self.current_composition(&self.model) {
+                    self.delegate.seek(before, cx);
+                }
+                self.delegate.scrubbing(false, cx);
+            }
             _ => {}
         }
         cx.notify();
@@ -1125,6 +1211,10 @@ impl TimelineSurface {
 
     fn start_pointer_gesture(&mut self, cx: &mut Context<Self>) {
         self.cancel_pointer_gesture(cx);
+        if self.marquee_selection.take().is_some() {
+            self.frame = None;
+        }
+        self.gesture_view = Some((self.view, self.fitted));
         self.last_pointer_activity = std::time::Instant::now();
         self.pointer_timeout = Some(cx.spawn(async move |timeline, cx| {
             const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1177,9 +1267,14 @@ impl TimelineSurface {
         self.changed(true, cx);
     }
     fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
+        let scale = (self.view.pps * factor).clamp(self.least_pps(), PPS.1);
+        if scale == self.view.pps || !scale.is_finite() {
+            return;
+        }
         self.sideways = false;
+        self.zooming = true;
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
-        self.view.pps = (self.view.pps * factor).clamp(self.least_pps(), PPS.1);
+        self.view.pps = scale;
         self.view.scroll_time = anchor - (x - self.view.layer_column) / self.view.pps;
         self.clamp_time();
         self.fitted = true;
@@ -1407,7 +1502,8 @@ impl TimelineSurface {
     /// when a layer has to draw (a step past its recording, a gesture or a
     /// graph on screen, the skimmer showing on a sideways step, the layer off).
     fn step_layers(&mut self, sideways: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !matches!(self.gesture, Gesture::Idle)
+        if !self.record_scroll_layers()
+            || !matches!(self.gesture, Gesture::Idle)
             || self.graph_region().is_some()
             || self.media_over.is_some()
             || self.effect_over.is_some()
@@ -1440,7 +1536,8 @@ impl TimelineSurface {
         }
         self.frame = None;
         let bounds = self.bounds;
-        self.prepared(bounds, cx);
+        self.outline_geometry = Some((y, self.view.layer_column as f32, self.visible_rows()));
+        self.prepared(bounds, false, cx);
         true
     }
     /// Writes the view once the gesture rests, drawing it again too unless
@@ -1452,6 +1549,11 @@ impl TimelineSurface {
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.idle_persist = None;
+                if std::mem::take(&mut s.zooming)
+                    && let Some(pointer) = s.pointer
+                {
+                    s.reskim(s.local(pointer).0, cx);
+                }
                 if draw {
                     s.changed(true, cx);
                 } else {
@@ -1490,16 +1592,35 @@ impl TimelineSurface {
     }
     fn changed(&mut self, persist: bool, cx: &mut Context<Self>) {
         self.frame = None;
-        self.outline.scrolled(
-            self.view.scroll_y as f32,
-            self.view.layer_column as f32,
-            self.visible_rows(),
-            cx,
-        );
+        if let Some((y, column, rows)) = self.changed_outline_geometry() {
+            self.outline.scrolled(y, column, rows, cx);
+        }
         if persist {
             self.persist(cx);
         }
         cx.notify();
+    }
+    fn changed_outline_geometry(&mut self) -> Option<(f32, f32, Option<(usize, usize)>)> {
+        let geometry = (
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+        );
+        (self.outline_geometry.replace(geometry) != Some(geometry)).then_some(geometry)
+    }
+    fn record_scroll_layers(&self) -> bool {
+        !self.zooming
+            && self.key_preview.is_none()
+            && !matches!(
+                self.gesture,
+                Gesture::Dragging { .. }
+                    | Gesture::Marquee { .. }
+                    | Gesture::Pan { .. }
+                    | Gesture::Column
+                    | Gesture::Zoom
+                    | Gesture::Navigate { .. }
+                    | Gesture::Rows { .. }
+            )
     }
     fn visible_rows(&self) -> Option<(usize, usize)> {
         let height = f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64;
@@ -1536,6 +1657,10 @@ impl TimelineSurface {
         while matches!(job, Job::Sample(_)) && matches!(self.queue.front(), Some(Job::Sample(_))) {
             job = self.queue.pop_front().unwrap();
         }
+        let marquee_commit = match &job {
+            Job::FinishMarquee { selection, .. } => selection.clone(),
+            _ => None,
+        };
         let gain_commit = match &job {
             Job::CommitGain(_, gesture) => Some(*gesture),
             _ => None,
@@ -1547,8 +1672,21 @@ impl TimelineSurface {
             .as_ref()
             .map(|scene| (scene.clone(), self.model.clone()));
         let previous_mode = self.model.mode;
+        let can_reuse_scene = self.pending_scene.is_none() && !self.viewer_previewing
+            && self.key_preview.is_none() && !matches!(self.gesture, Gesture::Transition(_));
+        let sync = matches!(&job, Job::Sync);
+        let persist = matches!(&job, Job::Persist(_));
+        let disclosure = matches!(&job, Job::Disclosure(_));
+        let selection_job = match &job {
+            Job::Sync | Job::SelectLayer(..) | Job::SelectKey { .. } | Job::SelectAll(..) => true,
+            Job::FinishMarquee { .. } => true,
+            Job::Apply(plan) => plan.calls.iter().all(|call| matches!(call, Call::Selection(_))),
+            _ => false,
+        };
+        let previous_graph = self.graph_fitted.clone();
         let outline = self.outline_runtime.upgrade();
         let preview_update = matches!(&job, Job::Sample(_));
+        let can_preview_keys = matches!(&job, Job::Begin(..) | Job::Sample(_));
         let finish_gain = matches!(&job, Job::Finish(true));
         let (tokens, offline, sources) = (
             self.tokens.clone(),
@@ -1556,7 +1694,7 @@ impl TimelineSurface {
             self.sources.clone(),
         );
         crate::interaction_work::timeline!(cx, job, Job, async move |this, cx| {
-            let (client, effects, built, preview) = cx
+            let (client, effects, built, preview, keys) = cx
                 .background_executor()
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
@@ -1564,29 +1702,93 @@ impl TimelineSurface {
                         .as_ref()
                         .ok()
                         .and_then(|_| client.layer_preview().cloned());
-                    let built = if let Some(frame) =
-                        preview.as_ref().filter(|p| p.gain_commands.is_some() || p.trimmed)
+                    let keys = client.key_preview().cloned();
+                    let built = if persist {
+                        // This view was already drawn; storing its position has no
+                        // effect on the scene or the outline.
+                        None
+                    } else if can_preview_keys
+                        && effects.is_ok()
+                        && keys.is_some()
+                        && previous_scene.as_ref().is_some_and(|(_, model)| {
+                            Arc::ptr_eq(&model.index, &client.model.index)
+                                && model.mode == client.model.mode
+                                && model.rebuilds == client.model.rebuilds
+                                && model.selection == client.model.selection
+                        }) {
+                        None
+                    } else if let Some(frame) = preview
+                        .as_ref()
+                        .filter(|p| p.gain_commands.is_some() || p.trimmed)
                     {
-                        build_with(&client, &tokens, offline, sources, Some(&frame.snapshot), None)
+                        build_with(
+                            &client,
+                            &tokens,
+                            offline,
+                            sources,
+                            Some(&frame.snapshot),
+                            None,
+                            None,
+                        )
                     } else if preview_update
                         && preview.is_some()
-                        && let Some((scene, model)) = previous_scene
+                        && let Some((scene, model)) = previous_scene.as_ref()
                         && Arc::ptr_eq(&model.index, &client.model.index)
                         && model.mode == client.model.mode
                         && model.rebuilds == client.model.rebuilds
                     {
-                        let mut scene = (*scene).clone();
+                        let mut scene = Scene::clone(scene);
                         scene.preview_times(&client.model, &preview.as_ref().unwrap().starts);
                         Some(Built {
                             scene: Arc::new(scene),
                             graph: None,
                             model: Arc::new(client.model.clone()),
                             outline_requested: false,
+                            selection_only: false,
                             wanted: vec![],
                         })
+                    } else if selection_job && can_reuse_scene && preview.is_none()
+                        && let Some((scene, old)) = previous_scene.as_ref()
+                        && same_timeline_layout(old, &client.model)
+                    {
+                        let changed = old.selection != client.model.selection;
+                        if sync && !changed && old.key_selection_active == client.model.key_selection_active
+                            && old.transition == client.model.transition
+                        {
+                            None
+                        } else {
+                            let mut scene = Scene::clone(scene);
+                            if changed {
+                                let model = &client.model;
+                                let selection = SceneSelection::new(
+                                    model.selection.layers(), &model.selected_key_pairs(),
+                                );
+                                scene.preview_selection(Arc::new(selection));
+                            }
+                            let graph = if changed {
+                                client.kernel.published(&client.project)
+                                    .and_then(|published| build_graph(&client.model, &published, &tokens))
+                            } else {
+                                previous_graph
+                            };
+                            Some(Built {
+                                scene: Arc::new(scene),
+                                graph,
+                                model: Arc::new(client.model.clone()),
+                                outline_requested: false,
+                                selection_only: true,
+                                wanted: vec![],
+                            })
+                        }
                     } else {
-                        let outline = outline.as_deref().map(|runtime| (runtime, previous_mode));
-                        let mut built = build_with(&client, &tokens, offline, sources, None, outline);
+                        let outline = outline.as_deref().map(|runtime| (runtime, previous_mode, disclosure));
+                        let previous = previous_scene.as_ref()
+                            .filter(|(_, old)| disclosure && can_reuse_scene
+                                && old.mode == TimelineMode::Layers
+                                && client.model.mode == TimelineMode::Layers
+                                && Arc::ptr_eq(&old.index, &client.model.index))
+                            .map(|(scene, _)| scene.as_ref());
+                        let mut built = build_with(&client, &tokens, offline, sources, None, outline, previous);
                         if let (Some(built), Some(preview)) = (&mut built, &preview) {
                             Arc::make_mut(&mut built.scene)
                                 .preview_times(&client.model, &preview.starts);
@@ -1594,7 +1796,7 @@ impl TimelineSurface {
                         built
                     };
                     remember_shown(&mut client, &built);
-                    (client, effects, built, preview)
+                    (client, effects, built, preview, keys)
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
@@ -1602,9 +1804,24 @@ impl TimelineSurface {
                 s.snap_guide = client
                     .active_drag()
                     .and_then(|d| d.snap_target_in(shown_index));
+                // A canceled in-flight sample must not put the preview back.
+                let canceled = s.queue.iter().any(|job| matches!(job, Job::Finish(false)));
+                let keys = keys.filter(|_| !canceled && s.current_composition(&client.model));
+                let keys_changed = match (&s.key_preview, &keys) {
+                    (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if keys_changed {
+                    s.key_preview = keys;
+                    s.frame = None;
+                    cx.notify();
+                }
                 let gain_revision = client.model.index.revision;
                 s.client = Some(client);
                 s.busy = false;
+                let had_preview = preview.is_some();
+                let preview = preview.filter(|_| !canceled);
                 let gain_preview = preview.as_ref().is_some_and(|p| p.gain_commands.is_some());
                 match preview {
                     Some(preview) if preview.gain_commands.is_some() => {
@@ -1634,7 +1851,16 @@ impl TimelineSurface {
                     }
                     None => (),
                 }
-                s.install(built, work_update, cx);
+                if let Some(selection) = marquee_commit
+                    && s.marquee_selection.as_ref().is_some_and(|current| Arc::ptr_eq(current, &selection))
+                {
+                    s.marquee_selection = None;
+                    s.frame = None;
+                    cx.notify();
+                }
+                if !canceled || !had_preview {
+                    s.install(built, work_update, cx);
+                }
                 if !gain_preview && s.gain_previewing.is_some() {
                     let revision =
                         (finish_gain && effects.is_ok()).then_some(s.model.index.revision);
@@ -1673,6 +1899,20 @@ impl TimelineSurface {
             return;
         }
         let model = built.model.clone();
+        if built.selection_only {
+            self.model = model.clone();
+            self.scene = Some(self.with_focus(built.scene));
+            self.outline.set_scene(self.scene.clone());
+            self.install_graph(built.graph);
+            self.frame = None;
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| {
+                delegate.tracks_view(model.clone(), cx);
+                delegate.timeline_outline(model, false, cx);
+            });
+            cx.notify();
+            return;
+        }
         let outline_requested = built.outline_requested;
         self.pending_scene = Some((built, hold_time_mapping));
         self.show_pending_scene(cx);
@@ -1809,6 +2049,24 @@ impl TimelineSurface {
         }
     }
 
+    fn install_graph(&mut self, graph: Option<Arc<Graph>>) {
+        self.graph = steady_graph(&self.gesture, self.graph.as_deref(), graph.clone());
+        // A range the wheel panned to stays for its view.
+        let panned = match (&self.graph, &self.graph_view) {
+            (Some(g), Some((view, min, max))) if g.view == *view => {
+                Some(Some(Arc::new((**g).clone().with_range(*min, *max))))
+            }
+            (_, Some(_)) => Some(None),
+            _ => None,
+        };
+        match panned {
+            Some(Some(graph)) => self.graph = Some(graph),
+            Some(None) => self.graph_view = None,
+            None => {}
+        }
+        self.graph_fitted = graph;
+    }
+
     fn install_scene(&mut self, built: Built, hold_time_mapping: bool, cx: &mut Context<Self>) {
         for key in built.wanted {
             if self.reading.insert(key.clone()) {
@@ -1822,7 +2080,7 @@ impl TimelineSurface {
                     let _ = wait.recv().await;
                     let _ = this.update(cx, |s, cx| {
                         s.reading.remove(&key);
-                        s.published(cx);
+                        s.rebuild_presentation(cx);
                     });
                 })
                 .detach();
@@ -1838,21 +2096,7 @@ impl TimelineSurface {
         let view = self.model.clone();
         cx.defer(move |cx| delegate.tracks_view(view, cx));
         self.scene = Some(self.with_focus(built.scene.clone()));
-        self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());
-        // A range the wheel panned to stays for its view.
-        let panned = match (&self.graph, &self.graph_view) {
-            (Some(g), Some((view, min, max))) if g.view == *view => {
-                Some(Some(Arc::new((**g).clone().with_range(*min, *max))))
-            }
-            (_, Some(_)) => Some(None),
-            _ => None,
-        };
-        match panned {
-            Some(Some(graph)) => self.graph = Some(graph),
-            Some(None) => self.graph_view = None,
-            None => {}
-        }
-        self.graph_fitted = built.graph;
+        self.install_graph(built.graph);
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
@@ -1860,12 +2104,7 @@ impl TimelineSurface {
         // Tracks at the same offset kept the outline's old window and offset,
         // and the header column drew nothing beside the tracks until a scroll
         // (PM-477).
-        self.outline.scrolled(
-            self.view.scroll_y as f32,
-            self.view.layer_column as f32,
-            self.visible_rows(),
-            cx,
-        );
+        self.outline_geometry = None;
         // The writer may still be applying the last queued sample after the
         // mouse was released. Test the kernel gesture, not just the UI gesture.
         let work_editing = hold_time_mapping
@@ -1951,7 +2190,12 @@ impl TimelineSurface {
             layer_column: self.view.layer_column,
         })
     }
-    fn prepared(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) -> Option<Arc<Frame>> {
+    fn prepared(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        record: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Frame>> {
         let mut moved = self.bounds != bounds;
         if moved {
             self.bounds = bounds;
@@ -1965,17 +2209,46 @@ impl TimelineSurface {
             self.clamp_time();
             // The viewport can clamp vertical scroll without a wheel event.
             // Publish its native geometry after this render releases the view.
-            let (outline, y, column, rows) = (self.outline.clone(), self.view.scroll_y as f32,
-                self.view.layer_column as f32, self.visible_rows());
-            cx.defer(move |cx| outline.scrolled(y, column, rows, cx));
+            if let Some((y, column, rows)) = self.changed_outline_geometry() {
+                let outline = self.outline.clone();
+                cx.defer(move |cx| outline.scrolled(y, column, rows, cx));
+            }
         }
-        if self.frame.is_none() {
+        let reach = if record && !self.sideways && self.graph_region().is_none() {
+            self.row_viewport_height()
+        } else {
+            0.
+        };
+        let rebuild_frame = self.frame.is_none() || self.frame_reach != reach;
+        if rebuild_frame {
             let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
             moved |= shown != self.shown;
             self.shown = shown;
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
+            let preview = self.marquee_selection.as_ref().map(|selection| {
+                let mut scene = Scene::clone(scene);
+                scene.preview_selection(selection.clone());
+                scene
+            });
+            let scene = preview.as_ref().unwrap_or(scene);
             let _span = crate::diag::span("timeline.prepare");
-            self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
+            let mut frame = scene
+                .prepare_native(
+                    viewport,
+                    &self.tokens,
+                    reach,
+                    0.,
+                    &mut self.waveforms,
+                    self.key_preview.as_deref(),
+                )
+                .ok()?;
+            self.audio_rows(&mut frame);
+            self.frame = Some(Arc::new(frame));
+            self.frame_reach = reach;
+            self.service_dirty = true;
+        }
+        if self.service_dirty && self.record_scroll_layers() {
+            self.service_dirty = false;
             self.tell_service(cx);
         }
         if moved {
@@ -1996,7 +2269,9 @@ impl TimelineSurface {
                 );
             }
         }
-        self.update_audio(frame.clone(), cx);
+        if rebuild_frame || !matches!(self.gesture, Gesture::Marquee { .. }) {
+            self.update_audio(&frame, cx);
+        }
         Some(frame)
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
@@ -2009,32 +2284,48 @@ impl TimelineSurface {
     /// clips, so rows and strips a step brings in arrive decorated.
     fn rows_frame(&mut self, cx: &mut Context<Self>) -> Option<(Arc<Frame>, f64, Vec<pm_panel_timeline::agent_ink::DotGroup>, f64)> {
         let base = self.frame.clone()?;
+        let v = base.viewport;
+        let record = self.record_scroll_layers();
+        let reach_x = if record && self.sideways {
+            (v.width - v.layer_column).max(0.)
+        } else {
+            0.
+        };
         if let Some((of, rows, reach)) = &self.rows
+            && *reach == reach_x
             && Arc::ptr_eq(of, &base)
         {
             let started = std::time::Instant::now();
             let groups = self.row_dot_groups(rows);
             return Some((rows.clone(), *reach, groups, started.elapsed().as_secs_f64() * 1000.));
         }
-        let reach = if self.graph_region().is_some() {
-            0.
+        let rows = if reach_x > 0. {
+            let reach = if self.graph_region().is_none() {
+                self.row_viewport_height()
+            } else {
+                0.
+            };
+            let mut rows = self
+                .scene
+                .as_ref()?
+                .prepare_native(
+                    v,
+                    &self.tokens,
+                    reach,
+                    reach_x,
+                    &mut self.waveforms,
+                    self.key_preview.as_deref(),
+                )
+                .ok()?;
+            self.audio_rows(&mut rows);
+            Arc::new(rows)
         } else {
-            (base.viewport.height - self.tokens.metrics.ruler as f64).max(0.)
+            base.clone()
         };
-        let v = base.viewport;
-        let reach_x = if self.sideways {
-            (v.width - v.layer_column).max(0.)
-        } else {
-            0.
-        };
-        let mut rows = self
-            .scene
-            .as_ref()?
-            .prepare_wide(v, &self.tokens, reach, reach_x)
-            .ok()?;
-        self.audio_rows(&mut rows);
-        let rows = Arc::new(rows);
-        self.ask_painters(&rows, cx);
+        self.waveforms.retain(&rows);
+        if record {
+            self.ask_painters(&rows, cx);
+        }
         // What the layers record shows this time at their left edge.
         self.drawn.1 = v.scroll_time;
         self.rows = Some((base, rows.clone(), reach_x));
@@ -2780,9 +3071,10 @@ impl TimelineSurface {
                     scrub.update(time, event.modifiers.shift, self.snap_radius())
             {
                 let time = frame_time(&self.model, time);
+                let before = self.delegate.time(cx);
                 self.delegate.scrubbing(true, cx);
                 self.delegate.seek(time, cx);
-                self.gesture = Gesture::Scrub(scrub, time);
+                self.gesture = Gesture::Scrub { scrub, sought: time, before };
             }
             return;
         }
@@ -3519,11 +3811,12 @@ impl TimelineSurface {
     fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
         self.graph
             .as_ref()?
-            .prepare(
+            .prepare_with_selection(
                 self.viewport()?,
                 self.graph_region()?,
                 &self.tokens,
                 playhead,
+                self.marquee_selection.as_deref(),
             )
             .ok()
     }
@@ -3564,6 +3857,9 @@ impl TimelineSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.suppress_left_up && event.pressed_button.is_some() {
+            return true;
+        }
         if event.pressed_button.is_none() {
             self.cancel_pointer_gesture(cx);
         } else {
@@ -3686,9 +3982,7 @@ impl TimelineSurface {
             if let Some(hit_id) = hit
                 && let Some(cur_idx) = self
                     .model
-                    .rows()
-                    .iter()
-                    .position(|row| matches!(&row.id, RowId::Layer(id) if id.as_str() == hit_id.as_str()))
+                    .row_position(&RowId::Layer(hit_id))
             {
                 let start = last_row.unwrap_or(cur_idx);
                 let (lo, hi) = if start <= cur_idx {
@@ -3959,6 +4253,7 @@ impl TimelineSurface {
                     self.agent_drag_touch = Some(id);
                 }
                 self.queue.push_back(Job::Begin(spec, time));
+                self.drag_scene = self.scene.clone().map(|scene| (scene, self.model.index.clone()));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
@@ -4097,7 +4392,7 @@ impl TimelineSurface {
                     // on_next_frame already wakes the platform; pointer input is outside paint.
                 }
             }
-            Gesture::Scrub(scrub, sought) => {
+            Gesture::Scrub { scrub, sought, .. } => {
                 let (x, _) = {
                     let at = event.position - self.bounds.origin;
                     (f32::from(at.x) as f64, 0.)
@@ -4117,7 +4412,7 @@ impl TimelineSurface {
             }
             Gesture::Marquee { at, .. } => {
                 *at = event.position;
-                self.marquee(cx);
+                self.marquee();
                 cx.notify();
             }
             Gesture::Pan { at } => {
@@ -4154,69 +4449,53 @@ impl TimelineSurface {
             .max(self.model.index.minimum_time());
         self.changed(false, cx);
     }
-    fn marquee(&mut self, cx: &mut Context<Self>) {
-        let (origin, at, in_graph) = match &self.gesture {
-            Gesture::Marquee {
-                session,
-                origin,
-                at,
-            } => (*origin, *at, session.in_graph()),
-            _ => return,
+    fn marquee(&mut self) {
+        let Gesture::Marquee { session, origin, at } = &mut self.gesture else {
+            return;
         };
-        let (a, b) = (origin - self.bounds.origin, at - self.bounds.origin);
-        let (ax, ay, bx, by) = (
-            f32::from(a.x.min(b.x)) as f64,
-            f32::from(a.y.min(b.y)) as f64,
-            f32::from(a.x.max(b.x)) as f64,
-            f32::from(a.y.max(b.y)) as f64,
+        let (a, b) = (*origin - self.bounds.origin, *at - self.bounds.origin);
+        let area = Rect::new(
+            f64::from(a.x.min(b.x)),
+            f64::from(a.y.min(b.y)),
+            f64::from((a.x - b.x).abs()),
+            f64::from((a.y - b.y).abs()),
         );
-        if bx - ax < self.tokens.metrics.drag_threshold as f64
-            && by - ay < self.tokens.metrics.drag_threshold as f64
-        {
+        let in_graph = session.in_graph();
+        if area.width.max(area.height) < f64::from(self.tokens.metrics.drag_threshold) {
+            if self.marquee_selection.take().is_some() {
+                self.frame = None;
+            }
+            // If the next sample moves out again, recompute against the original pick.
+            session.reset();
             return;
         }
-        let area = Rect::new(ax, ay, bx - ax, by - ay);
-        let (Some(frame), Some(scene)) = (&self.frame, &self.scene) else {
+        let Some(viewport) = self.viewport() else {
             return;
         };
-        let covered = scene.marquee(frame.viewport, &self.tokens, area);
-        // In the graph a box picks the curves' keys it covers, as they are
-        // drawn there (the rows under the graph are not shown).
-        let keys = if in_graph {
-            let graph = self.graph.clone();
-            self.graph_ops(None)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|o| {
-                    let id = o.id.strip_prefix("graph-key:")?;
-                    let (x, y) = (
-                        o.bounds.x + o.bounds.width / 2.,
-                        o.bounds.y + o.bounds.height / 2.,
-                    );
-                    let inside = x >= area.x
-                        && x <= area.x + area.width
-                        && y >= area.y
-                        && y <= area.y + area.height;
-                    let layer = graph.as_ref()?.key_layer(id)?.to_owned();
-                    inside.then(|| (layer, id.to_owned()))
-                })
-                .collect()
+        let (keys, layers) = if in_graph {
+            let keys = self.graph.as_ref().zip(self.graph_region()).map_or_else(Vec::new, |(graph, region)| {
+                graph.marquee_keys(viewport, region, area)
+            });
+            (keys, Vec::new())
         } else {
-            covered.keys
+            let Some(scene) = &self.scene else { return };
+            let covered = scene.marquee(viewport, &self.tokens, area);
+            (covered.keys, covered.clips)
         };
         let Gesture::Marquee { session, .. } = &mut self.gesture else {
             return;
         };
-        // The layers whose bars (Layers) or clips (Tracks) the box touches;
-        // the session takes them only when it covers no keys (v1's rule).
-        let plan = session.update(keys, if in_graph { vec![] } else { covered.clips });
-        self.queue.retain(|j| !matches!(j, Job::Apply(_)));
-        self.queue.push_back(Job::Apply(plan));
-        self.pump(cx);
+        if session.preview(keys, layers) {
+            let (layers, keys) = session.current();
+            self.marquee_selection = Some(Arc::new(SceneSelection::new(layers, keys)));
+            self.frame = None;
+        }
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
         self.pointer_timeout = None;
         self.row_scroll = None;
+        self.gesture_view = None;
+        self.drag_scene = None;
         if self.audio_up(cx) { return true; }
         self.transform = None;
         self.readout = None;
@@ -4321,7 +4600,7 @@ impl TimelineSurface {
                 self.readout = None;
                 self.queue.push_back(Job::Finish(true))
             }
-            Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
+            Gesture::Scrub { .. } => self.delegate.scrubbing(false, cx),
             Gesture::Marquee {
                 session,
                 origin,
@@ -4331,7 +4610,18 @@ impl TimelineSurface {
                 let moved = f32::from(delta.x).abs().max(f32::from(delta.y).abs())
                     >= self.tokens.metrics.drag_threshold;
                 if moved {
-                    self.queue.push_back(Job::Apply(session.finish()));
+                    let plan = session.finish_local();
+                    if plan.calls.is_empty() {
+                        if self.marquee_selection.take().is_some() {
+                            self.frame = None;
+                        }
+                    } else {
+                        self.queue.push_back(Job::FinishMarquee {
+                            plan,
+                            composition: self.model.index.comp_id.clone(),
+                            selection: self.marquee_selection.clone(),
+                        });
+                    }
                 } else {
                     self.queue.push_back(Job::Apply(Plan {
                         calls: vec![SelectionCall::Clear.user().into()],
@@ -4369,7 +4659,6 @@ impl TimelineSurface {
         if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
             if x >= self.view.layer_column {
                 self.zoom_at(x, (dy * WHEEL_ZOOM).exp(), cx);
-                self.reskim(x, cx);
             }
             return;
         }
@@ -4933,10 +5222,9 @@ impl TimelineSurface {
                 (id.clone(), mid.is_some_and(|mid| *x < mid))
             })
         };
+        let hover_clip_changed = hovered.as_ref().map(|(id, _)| id)
+            != self.hover_clip.as_ref().map(|(id, _)| id);
         if side(&hovered) != side(&self.hover_clip) {
-            if hovered.as_ref().map(|(id, _)| id) != self.hover_clip.as_ref().map(|(id, _)| id) {
-                self.invalidate_audio();
-            }
             cx.notify();
         }
         self.hover_clip = hovered;
@@ -5022,6 +5310,9 @@ impl TimelineSurface {
                     });
                 })
             });
+        }
+        if hover_clip_changed {
+            self.invalidate_audio();
         }
     }
     /// v1's graph cursors (timeline.ts onMove), in the order a press takes
@@ -5157,6 +5448,14 @@ impl TimelineSurface {
         self.frame.clone()
     }
     #[cfg(test)]
+    pub(crate) fn painted_rows_for_test(&self) -> Option<&Arc<Frame>> {
+        self.rows.as_ref().map(|(_, rows, _)| rows)
+    }
+    #[cfg(test)]
+    pub(crate) fn audio_query_builds_for_test(&self) -> usize {
+        self.audio.query_builds.get()
+    }
+    #[cfg(test)]
     pub fn idle(&self) -> bool {
         !self.busy && self.queue.is_empty() && self.client.is_some()
     }
@@ -5170,7 +5469,7 @@ impl TimelineSurface {
             Gesture::Idle => "idle".into(),
             Gesture::Column => "column divider".into(),
             Gesture::Marquee { .. } => "marquee".into(),
-            Gesture::Scrub(..) => "scrub".into(),
+            Gesture::Scrub { .. } => "scrub".into(),
             Gesture::Pressed(press) => format!("pressed {:?}", press.spec),
             Gesture::Dragging { .. } => "dragging".into(),
             _ => "other gesture".into(),
@@ -5240,7 +5539,7 @@ fn frame_time(model: &TimelineModel, time: f64) -> f64 {
 async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, String> {
     let text = |e: pm_panel_timeline::ClientError| e.to_string();
     match job {
-        Job::Sync => {
+        Job::Sync | Job::RebuildPresentation => {
             client.sync().map_err(text)?;
             client.adopt_view().map_err(text)?;
             Ok(vec![])
@@ -5329,7 +5628,9 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Begin(spec, time) => {
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            if client.is_gain_drag(&kind) || kind.is_strip_trim()
+            if client.is_gain_drag(&kind)
+                || kind.is_strip_trim()
+                || matches!(&kind, DragKind::Keys { .. })
                 || (matches!(&kind, DragKind::Layers { .. })
                     && client.model.mode == TimelineMode::Layers
                     && client.model.graph_display == GraphDisplay::DopeSheet)
@@ -5381,6 +5682,13 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         Job::SwitchFinish(commit) => {
             client.finish_switch_paint(commit).await.map_err(text)?;
             Ok(vec![])
+        }
+        Job::FinishMarquee { plan, composition, .. } => {
+            client.sync().map_err(text)?;
+            if client.model.index.comp_id != composition {
+                return Ok(vec![]);
+            }
+            client.dispatch(plan).await.map_err(text)
         }
         Job::Apply(plan) | Job::CommitGain(plan, _) => client.dispatch(plan).await.map_err(text),
         Job::PasteKeys(tracks, time) => {
@@ -5507,8 +5815,10 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Edge::In => ProEdge::In,
         Edge::Out => ProEdge::Out,
     };
-    let lanes = pm_panel_timeline::tracks::layout(&model.index, &model.reveal);
+    let lanes = std::cell::OnceCell::new();
     let neighbours = |id: &str| {
+        let lanes =
+            lanes.get_or_init(|| pm_panel_timeline::tracks::layout(&model.index, &model.reveal));
         let item = lanes.item(id).ok_or("Clip is not on a track")?;
         let same = |other: &&pm_panel_timeline::tracks::Item| {
             other.id != id && other.area == item.area && other.lane == item.lane
@@ -5734,13 +6044,15 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         }
     })
 }
-struct Presenter {
+struct Presenter<'a> {
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     wanted: RefCell<Vec<crate::waveforms::Key>>,
-    published: Arc<Published>,
+    published: &'a Published,
+    layers: std::collections::HashMap<String, &'a pm_model::Node>,
+    composition: Option<&'a str>,
 }
-impl ModelPresenter for Presenter {
+impl ModelPresenter for Presenter<'_> {
     fn accessibility_label(&self, row: &RowId) -> String {
         match row {
             RowId::Layer(id) => id.clone(),
@@ -5778,15 +6090,17 @@ impl ModelPresenter for Presenter {
             .snapshot
             .root()
             .and_then(|root| root.get("assets")?.get(asset));
-        let trim = self.published.snapshot.root()
-            .and_then(|root| crate::waveforms::layer_timing(root, &layer.id))
-            .map_or(layer.trim, |(trim, _)| trim);
+        let node = self.layers.get(&layer.id)?;
+        let trim = node.get("d").and_then(|d| d.get("trim"))
+            .and_then(|trim| trim.get("v").unwrap_or(trim).to_value().as_f64())
+            .filter(|trim| trim.is_finite())
+            .map_or(layer.trim, |trim| trim.max(0.));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
             Some(levels) => Some(pm_panel_timeline::render::Waveform {
                 levels,
                 trim,
-                map: time_map(&self.published, &layer.id, layer.from, layer.duration),
+                map: time_map(self.published, node, self.composition, layer.from, layer.duration),
             }),
             None => {
                 self.wanted.borrow_mut().push(key);
@@ -5798,13 +6112,7 @@ impl ModelPresenter for Presenter {
         if layer.kind != "captions" {
             return vec![];
         }
-        let Some(root) = self.published.snapshot.root() else {
-            return vec![];
-        };
-        let Some(node) = pm_kernel::model::find_layer(root, &layer.id).and_then(|at| {
-            let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref())?;
-            pm_kernel::model::layers_of(comp).nth(at.index)
-        }) else {
+        let Some(node) = self.layers.get(&layer.id) else {
             return vec![];
         };
         let Some(cues) = node.get("d").and_then(|d| d.get("cues")) else {
@@ -5830,12 +6138,7 @@ impl ModelPresenter for Presenter {
         if layer.kind != "text" {
             return vec![];
         }
-        let Some(root) = self.published.snapshot.root() else {
-            return vec![];
-        };
-        let Some(node) = pm_kernel::model::find_layer(root, &layer.id)
-            .and_then(|at| pm_kernel::model::layer_at(root, &at))
-        else {
+        let Some(node) = self.layers.get(&layer.id) else {
             return vec![];
         };
         let Some(animators) = node.get("d").and_then(|d| d.get("animators")) else {
@@ -5851,7 +6154,7 @@ impl ModelPresenter for Presenter {
         }) {
             return vec![];
         }
-        crate::text_host::query(&self.published, |q| {
+        crate::text_host::query(self.published, |q| {
             let layout = q.text_layout(None, &layer.id, time)?;
             let lines: Vec<pm_model::JsString> = layout
                 .get("lines")
@@ -5973,7 +6276,7 @@ fn build(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
 ) -> Option<Built> {
-    build_with(client, tokens, offline, sources, None, None)
+    build_with(client, tokens, offline, sources, None, None, None)
 }
 fn build_with(
     client: &TimelineClient,
@@ -5981,7 +6284,8 @@ fn build_with(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     preview: Option<&pm_kernel::Snapshot>,
-    outline: Option<(&pm_builtins::Builtins, pm_panel_timeline::TimelineMode)>,
+    outline: Option<(&pm_builtins::Builtins, TimelineMode, bool)>,
+    previous: Option<&Scene>,
 ) -> Option<Built> {
     let mut published = client.kernel.published(&client.project)?;
     let mut model = client.model.clone();
@@ -5990,18 +6294,30 @@ fn build_with(
     }
     model.sync(&published);
     let model = Arc::new(model);
-    // Run the outline worker and scene build in parallel on a mode switch.
-    // The host still swaps them together after verifying the row identities.
-    let outline_requested = outline.is_some_and(|(runtime, previous_mode)| {
-        model.mode != previous_mode && runtime.update_timeline_outline(model.clone(), true)
+    // Disclosure and mode switches change the row window. Start fetching
+    // its outline while the scene is built, then swap after checking row IDs.
+    let outline_requested = outline.is_some_and(|(runtime, previous_mode, disclosure)| {
+        (disclosure || model.mode != previous_mode)
+            && runtime.update_timeline_outline(model.clone(), true)
     });
+    let layers = published.snapshot.root()
+        .and_then(|root| pm_kernel::model::comp_node(root, model.index.comp_id.as_deref()))
+        .into_iter()
+        .flat_map(pm_kernel::model::layers_of)
+        .filter_map(|node| {
+            let id = node.get("id")?.to_value().as_str()?.to_owned();
+            Some((id, node))
+        })
+        .collect();
     let presenter = Presenter {
         offline,
         sources,
         wanted: Default::default(),
-        published: published.clone(),
+        published: &published,
+        layers,
+        composition: model.index.comp_id.as_deref(),
     };
-    let mut scene = match Scene::from_model(&model, &presenter, tokens, 0.) {
+    let mut scene = match Scene::from_model_reusing(&model, &presenter, tokens, 0., previous) {
         Ok(scene) => scene,
         Err(error) => {
             eprintln!(
@@ -6012,11 +6328,35 @@ fn build_with(
         }
     };
     scene.bars = crate::render_frames::bars(model.index.comp_id.as_deref());
-    let graph = (model.graph_display != GraphDisplay::DopeSheet)
+    let graph = build_graph(&model, &published, tokens);
+    let wanted = presenter.wanted.into_inner();
+    Some(Built {
+        scene: Arc::new(scene),
+        graph,
+        model,
+        outline_requested,
+        selection_only: false,
+        wanted,
+    })
+}
+fn same_timeline_layout(old: &TimelineModel, next: &TimelineModel) -> bool {
+    Arc::ptr_eq(&old.index, &next.index)
+        && std::ptr::eq(old.rows(), next.rows())
+        && old.mode == next.mode
+        && old.graph_display == next.graph_display
+        && old.graph_mode == next.graph_mode
+        && old.graph_focus == next.graph_focus
+        && old.graph_merge == next.graph_merge
+        && old.focused_group == next.focused_group
+        && old.reveal_serial == next.reveal_serial
+}
+
+fn build_graph(model: &TimelineModel, published: &Published, tokens: &Tokens) -> Option<Arc<Graph>> {
+    (model.graph_display != GraphDisplay::DopeSheet)
         .then(|| {
-            let mut mirror = QueryMirror::new(&published);
+            let mut mirror = QueryMirror::new(published);
             let comp = model.index.comp_id.clone();
-            graph_render::sample(&model, tokens, |layer, path, time| {
+            graph_render::sample(model, tokens, |layer, path, time| {
                 mirror
                     .queries()
                     .evaluate(comp.as_deref(), layer, path, time)
@@ -6024,15 +6364,10 @@ fn build_with(
                     .as_f64()
             })
         })
-        .flatten();
-    Some(Built {
-        scene: Arc::new(scene),
-        graph: graph.map(Arc::new),
-        model,
-        outline_requested,
-        wanted: presenter.wanted.into_inner(),
-    })
+        .flatten()
+        .map(Arc::new)
 }
+
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
@@ -6061,7 +6396,7 @@ impl Render for TimelineSurface {
             ops
         });
         let snap_target = match &self.gesture {
-            Gesture::Scrub(scrub, _) => scrub.snap_target(),
+            Gesture::Scrub { scrub, .. } => scrub.snap_target(),
             Gesture::Dragging { .. } => self.snap_guide,
             _ => None,
         };
@@ -6252,13 +6587,20 @@ impl Render for TimelineSurface {
         let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
         let scroll_y = self.view.scroll_y as f32;
         self.rows_handle.set_offset(point(px(0.), px(-scroll_y)));
-        // The tracks and the ruler draw `SIDEWAYS` of their widths in, the
-        // time at their left edge now.
+        // A sideways scroll leaves room for the recorded tracks and ruler
+        // to replay either side of the viewport.
         let track_w = (f32::from(self.body.size.width) - column as f32).max(0.);
-        let tracks_x = -(SIDEWAYS as f32) * track_w;
+        let record = self.record_scroll_layers();
+        let horizontal_reach = record && self.sideways;
+        let tracks_x = if horizontal_reach {
+            -(SIDEWAYS as f32) * track_w
+        } else {
+            0.
+        };
         self.drawn = (tracks_x, self.view.scroll_time);
-        let wide = track_w * (2. * SIDEWAYS as f32 + 1.);
-        self.tracks_handle.set_offset(point(px(tracks_x), px(-scroll_y)));
+        let wide = track_w - 2. * tracks_x;
+        self.tracks_handle
+            .set_offset(point(px(tracks_x), px(-scroll_y)));
         self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
         let rows_weak = this.clone();
         let tracks_weak = this.clone();
@@ -6310,7 +6652,7 @@ impl Render for TimelineSurface {
             })
             .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, cx| {
                 let radius = s.snap_radius();
-                if let Gesture::Scrub(scrub, _) = &mut s.gesture {
+                if let Gesture::Scrub { scrub, .. } = &mut s.gesture {
                     if let Ok(HostEffect::Seek(time)) = scrub.modifiers(event.modifiers.shift, radius) {
                         s.delegate.seek(frame_time(&s.model, time), cx);
                     }
@@ -6393,7 +6735,8 @@ impl Render for TimelineSurface {
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(|s, event: &MouseDownEvent, _, _| {
+                cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    s.start_pointer_gesture(cx);
                     s.gesture = Gesture::Pan { at: event.position };
                 }),
             )
@@ -6419,7 +6762,7 @@ impl Render for TimelineSurface {
                                         let _ = again.update(cx, |_, cx| cx.notify());
                                     });
                                 }
-                                s.prepared(Self::above_bar(bounds, &s.tokens), cx)
+                                s.prepared(Self::above_bar(bounds, &s.tokens), record, cx)
                             })
                             .ok()
                             .flatten();
@@ -6477,9 +6820,8 @@ impl Render for TimelineSurface {
                     .left_0()
                     .w(px(column as f32))
                     .bottom(px(layout_bar))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.rows_handle)
-                    .scroll_layer_driven()
+                    .overflow_hidden()
+                    .when(record, |layer| layer.overflow_y_scroll().track_scroll(&self.rows_handle).scroll_layer_driven())
                     .child(
                         canvas(
                             move |_, _, cx| {
@@ -6495,7 +6837,7 @@ impl Render for TimelineSurface {
                                 let v = frame.viewport;
                                 let origin = point(
                                     bounds.origin.x,
-                                    bounds.origin.y + px(v.scroll_y as f32 - rows_ruler),
+                                    bounds.origin.y + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
                                 );
                                 let cull = Cull::reaching(column, v.height, v.height);
                                 let ops = &frame.ops[frame.fixed..];
@@ -6503,7 +6845,8 @@ impl Render for TimelineSurface {
                             },
                         )
                         .w_full()
-                        .h(px(content)),
+                        .when(record, |canvas| canvas.h(px(content)))
+                        .when(!record, |canvas| canvas.h_full()),
                     ),
             )
             // The tracks (strips, keys, lanes, the time grid) in a layer the
@@ -6516,9 +6859,8 @@ impl Render for TimelineSurface {
                     .left(px(column as f32))
                     .right_0()
                     .bottom(px(layout_bar))
-                    .overflow_scroll()
-                    .track_scroll(&self.tracks_handle)
-                    .scroll_layer_driven()
+                    .overflow_hidden()
+                    .when(record, |layer| layer.overflow_scroll().track_scroll(&self.tracks_handle).scroll_layer_driven())
                     .child(
                         canvas(
                             move |_, _, cx| {
@@ -6532,10 +6874,10 @@ impl Render for TimelineSurface {
                                 // tracks' left edge (where the content is
                                 // offset from), less the layer column.
                                 let v = frame.viewport;
-                                let left = bounds.origin.x - tracks_handle.offset().x;
+                                let left = bounds.origin.x - if horizontal_reach { tracks_handle.offset().x } else { px(0.) };
                                 let origin = point(
                                     left - px((column + reach) as f32),
-                                    bounds.origin.y + px(v.scroll_y as f32 - rows_ruler),
+                                    bounds.origin.y + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
                                 );
                                 let above = region.map(|r| {
                                     Bounds::from_corners(
@@ -6544,7 +6886,7 @@ impl Render for TimelineSurface {
                                     )
                                 });
                                 let started = crate::diag::enabled().then(std::time::Instant::now);
-                                let reach_y = (v.height - rows_ruler as f64).max(0.);
+                                let reach_y = if record && region.is_none() { (v.height - rows_ruler as f64).max(0.) } else { 0. };
                                 let cull = Cull::tracks(column, v.width, v.height, reach_y.max(v.height));
                                 // The grid and the markers' lines run the
                                 // rows' reach up and down too.
@@ -6609,8 +6951,10 @@ impl Render for TimelineSurface {
                                 }
                             },
                         )
-                        .w(px(wide))
-                        .h(px(content)),
+                        .w_full()
+                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
+                        .when(record, |canvas| canvas.h(px(content)))
+                        .when(!record, |canvas| canvas.h_full()),
                     ),
             )
             // The ruler in a layer the wheel moves sideways, as the tracks.
@@ -6622,9 +6966,8 @@ impl Render for TimelineSurface {
                     .left(px(column as f32))
                     .right_0()
                     .h(px(ruler))
-                    .overflow_x_scroll()
-                    .track_scroll(&self.ruler_handle)
-                    .scroll_layer_driven()
+                    .overflow_hidden()
+                    .when(record, |layer| layer.overflow_x_scroll().track_scroll(&self.ruler_handle).scroll_layer_driven())
                     .child(
                         canvas(
                             move |_, _, cx| {
@@ -6635,7 +6978,7 @@ impl Render for TimelineSurface {
                                     return;
                                 };
                                 let v = frame.viewport;
-                                let left = bounds.origin.x - ruler_handle.offset().x;
+                                let left = bounds.origin.x - if horizontal_reach { ruler_handle.offset().x } else { px(0.) };
                                 let origin = point(left - px((column + reach) as f32), bounds.origin.y);
                                 // The skimmer's timecode stands in the ruler: a
                                 // time label it would cut through is left out,
@@ -6674,7 +7017,8 @@ impl Render for TimelineSurface {
                                 paint_ops(&ops, origin, column, None, &cull, chip, &ruler_tokens, window, cx);
                             },
                         )
-                        .w(px(wide))
+                        .w_full()
+                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
                         .h(px(ruler)),
                     ),
             )
@@ -6814,10 +7158,41 @@ impl Render for TimelineSurface {
                                 });
                             }
                         });
+                        let pressed = this.clone();
+                        window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = pressed.update(cx, |s, cx| match event.button {
+                                    MouseButton::Left => s.suppress_left_up = false,
+                                    MouseButton::Right if s.cancel_pointer_gesture(cx) => {
+                                        s.suppress_left_up = true;
+                                        cx.stop_propagation();
+                                    }
+                                    _ => {}
+                                });
+                            }
+                        });
                         let released = this.clone();
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = released.update(cx, |s, cx| {
+                                    if event.button == MouseButton::Left
+                                        && std::mem::take(&mut s.suppress_left_up)
+                                    {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    let pan = matches!(s.gesture, Gesture::Pan { .. });
+                                    if (event.button != MouseButton::Left || pan)
+                                        && (event.button != MouseButton::Middle || !pan)
+                                    {
+                                        return;
+                                    }
+                                    if let Gesture::Marquee { at, .. } = &mut s.gesture
+                                        && *at != event.position
+                                    {
+                                        *at = event.position;
+                                        s.marquee();
+                                    }
                                     if let Gesture::ParentPick { ids, .. } = &s.gesture {
                                         let next = s.parent_target(ids, event.position);
                                         if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
@@ -7666,7 +8041,17 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             let strength = d["waveAlpha"].as_f64().unwrap_or(0.5) * op.opacity;
             let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
             let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
-            let Some(peak) = d["peak"].as_str() else {
+            let wire_peaks;
+            let peaks = if let Some(peaks) = &op.waveform {
+                peaks.as_ref()
+            } else if let Some(peak) = d["peak"].as_str() {
+                wire_peaks = [Some(peak), d["peak2"].as_str()]
+                    .into_iter()
+                    .flatten()
+                    .map(|peak| soften(&decode(peak)))
+                    .collect::<Vec<_>>();
+                &wire_peaks
+            } else {
                 window.paint_quad(
                     PaintQuad::new(Bounds::new(
                         point(px(x0), px(top + (h / 2.).floor())),
@@ -7696,37 +8081,32 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 };
                 (inner_top + lift, floor - lift)
             };
-            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
-                // A tall stereo row: the left above, the right below.
-                Some(peak2) => {
-                    let half = (floor - inner_top) / 2.;
-                    vec![
-                        (soften(&decode(peak)), inner_top + half, half),
-                        (soften(&decode(peak2)), floor, half),
-                    ]
-                }
-                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
-            };
-            // Only the columns the window shows (a frame is prepared wider
-            // than the view): the path's work stays the screen's width.
-            let shown = f32::from(window.viewport_size().width);
-            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
-            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+            let lane_h = (floor - inner_top) / peaks.len() as f32;
+            // In an idle scroll recording, the mask extends to its replay
+            // reach. During zoom or dragging it is just the visible track.
+            let mask = window.content_mask().bounds;
+            let first =
+                (((f32::from(mask.left()) - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+            let last = (((f32::from(mask.right()) - x0) * per).ceil().max(0.) as usize) + 2;
             let x = |i: usize| x0 + (first + i) as f32 / per;
-            for (values, lane_floor, lane_h) in lanes {
+            for (lane, values) in peaks.iter().enumerate() {
+                let lane_floor = inner_top + (lane + 1) as f32 * lane_h;
                 let end_at = last.min(values.len());
                 if first >= end_at {
                     continue;
                 }
                 let values = &values[first..end_at];
-                // The haze along the floor, then the shape over it: more
-                // opaque at its base than at its tips.
-                let haze = vec![WAVE_HAZE; values.len()];
-                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
+                if let Some(path) = glass_fill(values.len(), |_| WAVE_HAZE, &x, lane_floor, &inside)
+                {
                     window.paint_path(path, shade(tone, strength * 0.55));
                 }
-                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
-                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                if let Some(path) = glass_fill(
+                    values.len(),
+                    |i| values[i] * LOUDEST * lane_h,
+                    &x,
+                    lane_floor,
+                    &inside,
+                ) {
                     window.paint_path(
                         path,
                         linear_gradient(
@@ -7908,6 +8288,7 @@ mod cull_tests {
             text: None,
             font_size: 0.,
             detail: serde_json::json!({"half": null}),
+            waveform: None,
             clip: None,
             covered,
             decorative: false,
@@ -8082,14 +8463,13 @@ impl Drop for TimelineSurface {
 /// through them (`waveform::mapped`). `None` for a clip at speed 1.
 fn time_map(
     published: &pm_kernel::Published,
-    layer_id: &str,
+    layer: &pm_model::Node,
+    composition: Option<&str>,
     from: f64,
     duration: f64,
 ) -> Option<std::sync::Arc<[f64]>> {
     const SAMPLES: usize = 256;
     let root = published.snapshot.root()?;
-    let loc = pm_kernel::model::find_layer(root, layer_id)?;
-    let layer = pm_kernel::model::layer_at(root, &loc)?;
     let d = layer.get("d")?;
     let remapped = d
         .get("timeRemap")
@@ -8108,11 +8488,9 @@ fn time_map(
     if !remapped && unit || duration <= 0. {
         return None;
     }
-    let comp_id = loc
-        .comp_id
-        .clone()
-        .or_else(|| root.get("id").and_then(|n| n.to_value().as_str().map(str::to_owned)))?;
-    let comp = pm_eval::Comp::in_root(root, &comp_id, published.revision()).ok()?;
+    let root_id = root.get("id").map(pm_model::Node::to_value);
+    let comp_id = composition.or_else(|| root_id.as_ref().and_then(pm_model::Value::as_str))?;
+    let comp = pm_eval::Comp::in_root(root, comp_id, published.revision()).ok()?;
     let mut ev = pm_eval::Evaluator::new();
     let mut cache = pm_eval::retime::RetimeCache::new();
     let mut map = Vec::with_capacity(SAMPLES + 1);
@@ -8134,83 +8512,50 @@ fn shade(rgb: u32, alpha: f64) -> Rgba {
 /// The waveform's haze along the floor, in points: about two device pixels.
 const WAVE_HAZE: f32 = 0.9;
 
-/// A waveform shape: `heights` (points above `base`, one per column at
-/// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so
-/// the strip's rounded corners cut it. Its top is a monotone cubic through
-/// the columns (no overshoot, no corner); `None` when nothing shows.
+/// Fill between the rounded strip floor and the softened heights. The
+/// samples are already spaced at device-pixel pitch on Retina, so connecting
+/// adjacent samples directly preserves the envelope without CPU tessellation.
 fn glass_fill(
-    heights: &[f32],
+    count: usize,
+    height: impl Fn(usize) -> f32,
     x: &dyn Fn(usize) -> f32,
     base: f32,
     inside: &dyn Fn(f32) -> (f32, f32),
 ) -> Option<Path<Pixels>> {
-    let n = heights.len();
-    if n < 2 {
+    if count < 2 {
         return None;
     }
-    let mut tops = Vec::with_capacity(n);
-    let mut floors = Vec::with_capacity(n);
-    for (i, height) in heights.iter().enumerate() {
-        let (ceiling, floor) = inside(x(i));
+    let column = |i| {
+        let x = x(i);
+        let (ceiling, floor) = inside(x);
         let floor = floor.min(base);
-        floors.push(floor);
-        tops.push((base - height).max(ceiling).min(floor));
-    }
-    if tops.iter().zip(&floors).all(|(t, f)| f - t < 0.05) {
-        return None;
-    }
-    let xs: Vec<f32> = (0..n).map(x).collect();
-    let tangents = monotone_tangents(&xs, &tops);
-    let mut path = PathBuilder::fill();
-    path.move_to(point(px(xs[0]), px(floors[0])));
-    path.line_to(point(px(xs[0]), px(tops[0])));
-    for k in 0..n - 1 {
-        let third = (xs[k + 1] - xs[k]) / 3.;
-        path.cubic_bezier_to(
-            point(px(xs[k + 1]), px(tops[k + 1])),
-            point(px(xs[k] + third), px(tops[k] + tangents[k] * third)),
-            point(px(xs[k + 1] - third), px(tops[k + 1] - tangents[k + 1] * third)),
-        );
-    }
-    // Back along the floor: only where it bends round a corner.
-    for k in (0..n).rev() {
-        let bent = |j: usize| floors[j] < base - 0.01;
-        if k == n - 1 || k == 0 || bent(k) || bent(k + 1) || bent(k - 1) {
-            path.line_to(point(px(xs[k]), px(floors[k])));
+        let top = (base - height(i)).max(ceiling).min(floor);
+        (point(px(x), px(top)), point(px(x), px(floor)))
+    };
+    let mut path = Path::new(column(0).0);
+    let mut previous = column(0);
+    let mut next = column(1);
+    let fill = (point(0., 1.), point(0., 1.), point(0., 1.));
+    for i in 1..count {
+        let after = (i + 1 < count).then(|| column(i + 1));
+        // One trapezoid suffices across a flat run, including the haze.
+        let flat = |a: (Point<Pixels>, Point<Pixels>), b: (Point<Pixels>, Point<Pixels>)| {
+            a.0.y == b.0.y && a.1.y == b.1.y
+        };
+        if !after.is_some_and(|after| flat(previous, next) && flat(next, after)) {
+            let (top, floor) = previous;
+            let (new_top, new_floor) = next;
+            if top.y < floor.y {
+                path.push_triangle((top, floor, new_top), fill);
+            }
+            if new_top.y < new_floor.y {
+                path.push_triangle((new_top, floor, new_floor), fill);
+            }
+            previous = next;
+        }
+        if let Some(after) = after {
+            next = after;
         }
     }
-    path.close();
-    path.build().ok()
-}
-
-/// Fritsch–Carlson tangents: a cubic through `(xs, ys)` with them never
-/// overshoots or turns a corner between columns.
-fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
-    let n = xs.len();
-    let slope: Vec<f32> = (0..n - 1)
-        .map(|k| (ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]).max(1e-6))
-        .collect();
-    let mut m: Vec<f32> = (0..n)
-        .map(|k| match k {
-            0 => slope[0],
-            k if k == n - 1 => slope[n - 2],
-            k if slope[k - 1] * slope[k] <= 0. => 0.,
-            k => (slope[k - 1] + slope[k]) / 2.,
-        })
-        .collect();
-    for k in 0..n - 1 {
-        if slope[k] == 0. {
-            m[k] = 0.;
-            m[k + 1] = 0.;
-            continue;
-        }
-        let (a, b) = (m[k] / slope[k], m[k + 1] / slope[k]);
-        let r = a * a + b * b;
-        if r > 9. {
-            let t = 3. / r.sqrt();
-            m[k] = t * a * slope[k];
-            m[k + 1] = t * b * slope[k];
-        }
-    }
-    m
+    (!path.vertices.is_empty()).then_some(path)
 }

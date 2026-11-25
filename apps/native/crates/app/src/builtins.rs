@@ -328,6 +328,7 @@ pub struct Host {
     pub agent_docked: bool,
     pub agent_shown: bool,
     pub agent_parked: bool,
+    agent_working: bool,
     /// Where the Agent popover was last put down, from its editor's
     /// top-left corner (GPUI points): it reopens there in this window.
     pub agent_place: Option<(f32, f32)>,
@@ -625,7 +626,13 @@ impl Controller {
             }
             Ok(png)
         }));
-        runtime.set_agent_completion(Arc::new(crate::mcp::completion));
+        let coedit_host = self.mcp.clone();
+        runtime.set_agent_completion(Arc::new(move |operation, project, run, payload| {
+            if operation == "begin" {
+                coedit_host.begin_builtin_turn(project, run);
+            }
+            crate::mcp::completion(operation, project, run, payload)
+        }));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         crate::media_thumbs::set_agent_cache(self.profile.join("caches").join("agent-thumbnails"));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
@@ -1903,6 +1910,17 @@ impl Controller {
         let shown = self.builtins.agent_shown || self.builtins.windows.get("agent")
             .is_some_and(|window| cx.windows().contains(window));
         let (working, attention, elapsed, background, unread, failed) = runtime.agent_status_with_notice(shown);
+        let was_working = std::mem::replace(&mut self.builtins.agent_working, working);
+        let undo_document = self.session.as_ref()
+            .and_then(|s| self.kernel.published(&s.project))
+            .map(|view| view.snapshot.doc_id);
+        if was_working && !working
+            && let Some((session, document)) = self.session.as_ref().zip(undo_document)
+        {
+            self.mcp.finish_builtin_turn(&session.project, document);
+        }
+        let undo_available = self.session.as_ref().zip(undo_document)
+            .is_some_and(|(session, document)| self.mcp.latest_turn(&session.project, document).is_some());
         self.host
             .borrow_mut()
             .set_agent_status(pm_shell::AgentStatus {
@@ -1916,6 +1934,9 @@ impl Controller {
                 additional_runs,
                 paused: self.session.as_ref().is_some_and(|s| self.mcp.is_paused(&s.project)),
                 held: self.session.as_ref().is_some_and(|s| self.mcp.is_held(&s.project)),
+                undo_document,
+                undo_available,
+                undo_feedback: None,
             });
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
@@ -2736,6 +2757,7 @@ impl Controller {
                             panel,
                             keys,
                             drag: None,
+                            cancelled_press: false,
                             editor: parent,
                             chrome: None,
                         }
@@ -4443,6 +4465,7 @@ struct SurfaceWindow {
     keys: PopoverKeys,
     /// The Agent popover's header drag in progress.
     drag: Option<crate::popover_drag::HeaderDrag>,
+    cancelled_press: bool,
     /// The editor window it belongs to (its drop targets, its bounds).
     editor: Option<AnyWindowHandle>,
     /// Settings' AppKit chrome (the owner holds it too, to update it).
@@ -4748,19 +4771,40 @@ impl Render for SurfaceWindow {
             .children(body)
             // While a drag is held: every move and the release are the
             // popover's, never the header's controls' or anything else's.
-            .when(self.drag.is_some(), |d| {
+            .when(self.drag.is_some() || self.cancelled_press, |d| {
                 let this = cx.entity().downgrade();
                 d.child(
                     canvas(
                         |_, _, _| (),
                         move |_, _, window, _| {
+                            let pressed = this.clone();
+                            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let _ = pressed.update(cx, |v, cx| {
+                                    if e.button == MouseButton::Left {
+                                        v.cancelled_press = false;
+                                    } else if e.button == MouseButton::Right
+                                        && (v.cancelled_press || v.drag.is_some_and(|drag| drag.moved))
+                                    {
+                                        v.cancel_drag(window, cx);
+                                        v.cancelled_press = true;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                });
+                            });
                             let moved = this.clone();
-                            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                                 if phase != DispatchPhase::Capture {
                                     return;
                                 }
                                 if moved
-                                    .update(cx, |v, cx| v.drag_to(window, cx))
+                                    .update(cx, |v, cx| {
+                                        (v.cancelled_press && e.pressed_button.is_some())
+                                            || v.drag_to(window, cx)
+                                    })
                                     .unwrap_or(false)
                                 {
                                     cx.stop_propagation();
@@ -4768,17 +4812,26 @@ impl Render for SurfaceWindow {
                             });
                             let released = this.clone();
                             window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
-                                if phase != DispatchPhase::Capture || e.button != MouseButton::Left
-                                {
+                                if phase != DispatchPhase::Capture {
                                     return;
                                 }
-                                let moved = released
-                                    .update(cx, |v, _| v.drag.is_some_and(|d| d.moved))
-                                    .unwrap_or(false);
-                                let _ = released.update(cx, |v, cx| v.end_drag(window, cx));
-                                if moved {
-                                    cx.stop_propagation();
-                                }
+                                let _ = released.update(cx, |v, cx| {
+                                    if e.button == MouseButton::Right && v.cancelled_press {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if e.button != MouseButton::Left {
+                                        return;
+                                    }
+                                    if std::mem::take(&mut v.cancelled_press) {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if v.drag.is_some_and(|d| d.moved) {
+                                        cx.stop_propagation();
+                                    }
+                                    v.end_drag(window, cx);
+                                });
                             });
                         },
                     )

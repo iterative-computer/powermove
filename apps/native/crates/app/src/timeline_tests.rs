@@ -35,6 +35,7 @@ pub(crate) struct Recorder {
     pub skimming: std::cell::Cell<bool>,
     /// How often the panel said the time under it moved (scroll, zoom, size).
     pub moved: std::cell::Cell<usize>,
+    pub view_facts: std::cell::Cell<usize>,
     /// Effects dropped from the Effects panel.
     pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
     /// Finder files and Project items dropped on the timeline.
@@ -86,6 +87,9 @@ impl Delegate for Recording {
     }
     fn scrubbing(&self, on: bool, _: &mut App) {
         self.0.scrubs.borrow_mut().push(on);
+    }
+    fn view_facts(&self, _: serde_json::Value, _: &mut App) {
+        self.0.view_facts.set(self.0.view_facts.get() + 1);
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
@@ -488,6 +492,68 @@ fn dragging_a_keyframe_moves_it_and_undo_restores_it(cx: &mut TestAppContext) {
     assert_eq!(key_time(&s, &ids[0]), 0.5);
 }
 #[gpui::test]
+fn a_key_drag_previews_on_the_existing_scene_and_commits_the_last_sample(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1., 1.5]);
+    let from = property_key_center(&mut s, "l0", "opacity");
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let scene = s.surface.read_with(&s.vcx, |t, _| t.scene().unwrap());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let painted_keys = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame()
+                .unwrap()
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    op.id
+                        .starts_with("key:")
+                        .then(|| (op.id.clone(), op.detail["seconds"].as_f64().unwrap()))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for destination in [1.5, 1.] {
+        let at = from + point(px(((destination - 0.5) * pps) as f32), px(0.));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().revision(),
+            before.revision()
+        );
+        assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+        assert!(s.recorder.timing_previews.borrow().is_empty());
+        assert!(s.surface.read_with(&s.vcx, |t, _| std::sync::Arc::ptr_eq(
+            &scene,
+            &t.scene().unwrap()
+        )));
+        let keys = painted_keys(&s);
+        let moved = keys.iter().find(|(id, _)| id.ends_with("\"k0\"]")).unwrap();
+        assert_eq!(moved.1, destination);
+        assert_eq!(
+            keys.iter().filter(|(_, time)| *time == destination).count(),
+            1
+        );
+    }
+    let release = from + point(px((0.5 * pps) as f32), px(0.));
+    s.vcx
+        .simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(key_time(&s, &ids[0]), 1.);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().index.key(&ids[1]).is_none())
+    );
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[0]), 0.5);
+    assert_eq!(key_time(&s, &ids[1]), 1.);
+}
+
+#[gpui::test]
 fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
     let mut s = stage(cx, 2);
     keyed(&mut s, cx, &[0.5, 1.]);
@@ -510,6 +576,140 @@ fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
     assert_eq!(selected, 2);
     assert!(s.recorder.seeks.borrow().is_empty());
 }
+#[gpui::test]
+fn marquee_on_600_layers_previews_locally_and_shares_rows_on_commit(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 600);
+    keyed(&mut s, cx, &[0.5, 0.8, 1., 1.2]);
+    let first_key = property_key_center(&mut s, "l0", "opacity");
+    let origin = s.origin();
+    let start = point(s.at(0, 4.).x, first_key.y);
+    let through = first_key - point(px(10.), px(0.));
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let model = s.surface.read_with(&s.vcx, |t, _| t.model());
+    let scene = s.surface.read_with(&s.vcx, |t, _| t.scene().unwrap());
+    assert_eq!(model.index.layers.len(), 600);
+    let selected_on_screen = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame().unwrap().ops.iter().filter(|op| {
+                op.id.starts_with("key:") && !op.detail["keyline"].is_null()
+            }).count()
+        })
+    };
+    s.vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(through, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(selected_on_screen(&s), 4);
+    let painted = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    for i in 1..5 {
+        let at = through - point(px(i as f32), px(0.));
+        assert!(at.x > origin.x + px(painted.viewport.layer_column as f32));
+        s.vcx.simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.vcx.run_until_parked();
+        assert!(s.surface.read_with(&s.vcx, |t, _| {
+            std::sync::Arc::ptr_eq(&painted, &t.frame().unwrap())
+        }));
+    }
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.selection, before.selection);
+    assert_eq!(during.history.entries, before.history.entries);
+    s.vcx.simulate_mouse_up(through, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let after = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(after.selection.keys().len(), 4);
+    assert_eq!(after.history.entries, before.history.entries + 1);
+    assert_eq!(selected_on_screen(&s), 4);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(std::ptr::eq(model.rows(), t.model().rows()));
+        let updated = t.scene().unwrap();
+        assert!(std::ptr::eq(scene.span(599).unwrap().0, updated.span(599).unwrap().0));
+    });
+}
+
+#[gpui::test]
+fn timeline_right_click_cancels_a_key_or_clip_drag(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let clip = s.at(0, 1.5);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    for from in [key, clip] {
+        let to = from + point(px(44.), px(0.));
+        s.vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert!(s.surface.read_with(&s.vcx, |t, _| t.gesture_state() == "dragging"));
+        // The right-up occurs while the original button is still held.
+        s.vcx.simulate_mouse_down(to, MouseButton::Right, Modifiers::none());
+        s.vcx.simulate_mouse_up(to, MouseButton::Right, Modifiers::none());
+        s.vcx.simulate_mouse_move(to + point(px(20.), px(0.)), MouseButton::Left, Modifiers::none());
+        s.vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(key_time(&s, &ids[0]), 0.5);
+        assert_eq!(s.start_of("l0"), 0.);
+        let after = s.rig.kernel.published(PROJECT).unwrap();
+        assert_eq!(after.revision(), before.revision());
+        assert!(after.entry.is_none());
+        assert!(s.recorder.menus.borrow().is_empty());
+        assert!(s.recorder.reports.borrow().is_empty());
+    }
+    s.vcx.simulate_mouse_down(clip, MouseButton::Right, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.menus.borrow().len(), 1);
+}
+
+#[gpui::test]
+fn timeline_right_click_cancels_marquee_and_ignores_the_left_release(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l1".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let start = point(s.at(0, 4.).x, key.y);
+    let to = key - point(px(12.), px(0.));
+    let highlights = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame().unwrap().ops.iter().filter(|op| {
+                op.id.starts_with("key:") && !op.detail["keyline"].is_null()
+            }).count()
+        })
+    };
+    s.vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(highlights(&s), 2);
+    s.vcx.simulate_mouse_down(key, MouseButton::Right, Modifiers::none());
+    s.vcx.simulate_mouse_up(key, MouseButton::Right, Modifiers::none());
+    s.vcx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_up(key, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let after = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.selection, before.selection);
+    assert_eq!(after.history.entries, before.history.entries);
+    assert_eq!(highlights(&s), 0);
+    assert!(s.recorder.menus.borrow().is_empty());
+    s.vcx.simulate_click(start, Modifiers::none());
+    s.idle(cx);
+    assert!(s.rig.kernel.published(PROJECT).unwrap().selection.is_empty());
+}
+
 /// v1: a marquee from empty track space over layer bars (no keys inside)
 /// selects the layers it touches, in Layers mode as in Tracks; a click on
 /// empty space clears them again.
@@ -2625,6 +2825,53 @@ fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(s.surface.read_with(&s.vcx, |t, _| t.pps()) > after);
 }
+#[gpui::test]
+fn audio_zoom_uses_one_frame_and_defers_view_publication(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(6)).unwrap();
+    project["layers"][0]["type"] = serde_json::json!("audio");
+    project["layers"][0]["dur"] = serde_json::json!(10.);
+    project["layers"][0]["d"] = serde_json::json!({"gain":0.5,"fadeIn":0,"fadeOut":0});
+    let mut s = stage_project(cx, project.to_string());
+    s.vcx.update(|window, _| window.activate());
+    let at = s.at(0, 2.);
+    s.recorder.skimming.set(true);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.vcx
+        .simulate_mouse_move(at + point(px(2.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().iter().any(Option::is_some));
+    s.recorder.skims.borrow_mut().clear();
+    let facts = s.recorder.view_facts.get();
+    let query_builds = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.audio_query_builds_for_test());
+    assert!(query_builds > 0);
+    for _ in 0..5 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(12.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| {
+            assert!(std::sync::Arc::ptr_eq(
+                &t.frame().unwrap(),
+                t.painted_rows_for_test().unwrap()
+            ));
+            assert_eq!(t.audio_query_builds_for_test(), query_builds);
+        });
+        assert!(s.recorder.skims.borrow().is_empty());
+        assert_eq!(s.recorder.view_facts.get(), facts);
+    }
+    s.vcx
+        .executor()
+        .advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
+    s.idle(cx);
+    assert_eq!(s.recorder.view_facts.get(), facts + 1);
+}
+
 /// Scrolling and zooming stay on the timeline's time: a long sweep right
 /// stops a little past the end, and zooming out stops once the whole of it
 /// fits the time area (the view never sits on empty time past the end).

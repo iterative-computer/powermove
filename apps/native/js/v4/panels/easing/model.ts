@@ -2,7 +2,7 @@
  * The Easing panel's model: what the native side says about the selected
  * keyframes (`easing.state`) and the actions it takes on them
  * (`panel.easing`, one Undo step each). The keyframes are the timeline's
- * selection; this panel keeps only its custom curve.
+ * selection. The panel can also edit and save a draft curve.
  */
 export const PANEL_ID = "easing";
 export const PANEL_TITLE = "Easing";
@@ -17,6 +17,7 @@ export interface EasingState {
   open: boolean;
   /** Selected keyframes: what every action changes. */
   count: number;
+  selection?: [number, string[], [string, string][]];
   presets: Preset[];
   library?: { stateRevision: string; source: any };
   curve?: Curve | null;
@@ -24,10 +25,16 @@ export interface EasingState {
   interpolation?: Interpolation | null;
 }
 export type Side = "both" | "in" | "out";
-export type Interpolation = "linear" | "bezier" | "hold" | "auto";
+export type Interpolation =
+  | "linear"
+  | "bezier"
+  | "hold"
+  | "auto"
+  | "continuous";
 export type EasingAction =
   | { type: "preset"; preset: string }
-  | { type: "save"; name: string; curve: Curve }
+  | { type: "save"; group: string; name: string; curve: Curve }
+  | { type: "addGroup"; id: string; name: string }
   | { type: "curve"; curve: Curve; name?: string }
   | { type: "easyEase"; side: Side }
   | { type: "interpolation"; interpolation: Interpolation; side: Side };
@@ -49,11 +56,16 @@ export function presetName(id: string): string {
 export function status(state: EasingState, message: string): string {
   if (message) return message;
   if (!state.open) return "Open a project to ease its keyframes.";
-  if (state.count === 0)
-    return "Select keyframes in the timeline to ease them.";
-  return state.count === 1
-    ? "1 keyframe selected"
-    : `${state.count} keyframes selected`;
+  if (state.count === 0) return "Select keyframes to apply easing";
+  const count =
+    state.count === 1
+      ? "1 keyframe selected"
+      : `${state.count} keyframes selected`;
+  return state.mixed ? `${count} · Mixed curves` : count;
+}
+
+export function selectionKey(state: EasingState): string {
+  return JSON.stringify(state.selection ?? state.count);
 }
 
 /** Reads and drives the native side, one request at a time. */
@@ -61,6 +73,10 @@ export class EasingModel {
   private current = emptyState();
   private listeners = new Set<() => void>();
   private serial: Promise<unknown> = Promise.resolve();
+  private pendingEdits = 0;
+  get applying() {
+    return this.pendingEdits > 0;
+  }
   /** The last refusal or result, until the selection changes. */
   message = "";
   constructor(
@@ -84,7 +100,7 @@ export class EasingModel {
   refresh() {
     try {
       const next = this.read();
-      if (next.count !== this.current.count) this.message = "";
+      if (selectionKey(next) !== selectionKey(this.current)) this.message = "";
       this.current = next;
     } catch (error) {
       this.report(error);
@@ -92,25 +108,41 @@ export class EasingModel {
     this.notify();
   }
   send(action: EasingAction) {
+    const library = action.type === "save" || action.type === "addGroup";
+    const selection = selectionKey(this.current);
+    if (!library) this.pendingEdits++;
     this.serial = this.serial.then(async () => {
       try {
+        if (!library && selection !== selectionKey(this.current)) return;
         await this.run(action);
-        this.message = "";
+        this.message = action.type === "save" ? "Preset saved" : "";
       } catch (error) {
         this.message = String(
           error instanceof Error ? error.message : error,
         ).replace(/^Error: /, "");
+      } finally {
+        if (!library) this.pendingEdits--;
+        this.refresh();
       }
-      this.refresh();
     });
   }
+}
+
+const DEFAULT_GROUP = "default";
+
+function emptyLibrary() {
+  return {
+    version: 1,
+    active: DEFAULT_GROUP,
+    groups: [{ id: DEFAULT_GROUP, name: "1", presets: [] }],
+  };
 }
 
 function librarySource(source: any) {
   return typeof source === "string" ? JSON.parse(source) : source;
 }
 /** The stored library remains authoritative; cubic tiles are a projection. */
-export function customPresets(source: any): (Preset & { name: string })[] {
+export function customPresets(source: any, group?: string): NamedPreset[] {
   let library;
   try {
     library = librarySource(source);
@@ -118,40 +150,131 @@ export function customPresets(source: any): (Preset & { name: string })[] {
     return [];
   }
   if (!Array.isArray(library?.groups)) return [];
-  return library.groups.flatMap((g: any) =>
-    (Array.isArray(g?.presets) ? g.presets : []).flatMap((p: any) => {
-      const points = p?.curve?.points;
-      if (
-        !Array.isArray(points) ||
-        points.length !== 2 ||
-        typeof p.id !== "string" ||
-        typeof p.name !== "string"
-      )
-        return [];
-      const [a, b] = points;
-      if (
-        !a ||
-        !b ||
-        !["linear", "bezier"].includes(a.outInterp) ||
-        !["linear", "bezier"].includes(b.inInterp)
-      )
-        return [];
-      // v1's resolved linear handle uses one third, regardless of stored ease.
-      const x = a.outInterp === "linear" ? 1 / 3 : a.outEase?.influence / 100,
-        incoming = b.inInterp === "linear" ? 1 / 3 : b.inEase?.influence / 100;
-      const curve: Curve = [
-        x,
-        a.outInterp === "bezier" ? x * a.outEase?.speed : x,
-        1 - incoming,
-        b.inInterp === "bezier" ? 1 - incoming * b.inEase?.speed : 1 - incoming,
-      ];
-      return curve.every(Number.isFinite)
-        ? [{ id: `saved:${p.id}`, name: p.name, curve }]
-        : [];
-    }),
-  );
+  return library.groups
+    .filter((g: any) => group === undefined || g?.id === group)
+    .flatMap((g: any) =>
+      (Array.isArray(g?.presets) ? g.presets : []).flatMap((p: any) => {
+        const points = p?.curve?.points;
+        if (
+          !Array.isArray(points) ||
+          points.length !== 2 ||
+          typeof p.id !== "string" ||
+          typeof p.name !== "string"
+        )
+          return [];
+        const [a, b] = points;
+        if (
+          !a ||
+          !b ||
+          !["linear", "bezier"].includes(a.outInterp) ||
+          !["linear", "bezier"].includes(b.inInterp)
+        )
+          return [];
+        // v1's resolved linear handle uses one third, regardless of stored ease.
+        const x = a.outInterp === "linear" ? 1 / 3 : a.outEase?.influence / 100,
+          incoming =
+            b.inInterp === "linear" ? 1 / 3 : b.inEase?.influence / 100;
+        const curve: Curve = [
+          x,
+          a.outInterp === "bezier" ? x * a.outEase?.speed : x,
+          1 - incoming,
+          b.inInterp === "bezier"
+            ? 1 - incoming * b.inEase?.speed
+            : 1 - incoming,
+        ];
+        return curve.every(Number.isFinite)
+          ? [{ id: `saved:${p.id}`, name: p.name, curve }]
+          : [];
+      }),
+    );
 }
-export function librarySave(state: EasingState, name: string, curve: Curve) {
+type NamedPreset = Preset & { name: string };
+export type PresetTile = NamedPreset & { native?: boolean };
+export interface PresetGroup {
+  id: string;
+  name: string;
+  presets: PresetTile[];
+}
+
+const electronCurves: NamedPreset[] = [
+  ...[33, 50, 66, 80, 90].map(
+    (influence): NamedPreset => ({
+      id: `ease-${influence}`,
+      name: `Ease ${influence}`,
+      curve: [influence / 100, 0, (100 - influence) / 100, 1],
+    }),
+  ),
+  { id: "steep-in", name: "Ease In", curve: [0.7, 0, 1, 1] },
+  { id: "steep-out", name: "Ease Out", curve: [0, 0, 0.3, 1] },
+  { id: "soft", name: "Soft", curve: [0.2, 0, 0.2, 1] },
+  { id: "smooth", name: "Smooth", curve: [0.6, 0, 0.1, 1] },
+  { id: "fast-out", name: "Fast Out", curve: [0, 0, 0.1, 1] },
+  { id: "fast-in", name: "Fast In", curve: [0.9, 0, 1, 1] },
+];
+
+export function presetGroups(state: EasingState): {
+  groups: PresetGroup[];
+  active?: string;
+} {
+  let library;
+  try {
+    library = librarySource(state.library?.source);
+  } catch {
+    // Malformed stored data remains untouched.
+  }
+  const groups: PresetGroup[] = Array.isArray(library?.groups)
+    ? library.groups.flatMap((g: any) =>
+        typeof g?.id === "string" && typeof g.name === "string"
+          ? [{ id: g.id, name: g.name, presets: customPresets(library, g.id) }]
+          : [],
+      )
+    : [];
+  const first = groups.find((g) => g.id === DEFAULT_GROUP) ??
+    groups.find((g) => g.id === "custom" && g.name === "Custom") ?? {
+      id: DEFAULT_GROUP,
+      name: "1",
+      presets: [],
+    };
+  return {
+    active: library?.active,
+    groups: [
+      {
+        id: first.id,
+        name: "1",
+        presets: [
+          ...electronCurves,
+          ...state.presets.map((p) => ({
+            ...p,
+            name: presetName(p.id),
+            native: true,
+          })),
+          ...first.presets,
+        ],
+      },
+      ...groups.filter((g) => g.id !== first.id),
+    ],
+  };
+}
+
+export function libraryAddGroup(state: EasingState, id: string, name: string) {
+  const base = {
+    type: "easingLibrary",
+    stateRevision: state.library?.stateRevision,
+  };
+  if (state.library?.source != null)
+    return { ...base, action: "addGroup", id, name };
+  const source = emptyLibrary();
+  source.groups.push({ id, name, presets: [] });
+  source.active = id;
+  return { ...base, action: "import", source, ids: [] };
+}
+
+export function librarySave(
+  state: EasingState,
+  name: string,
+  curve: Curve,
+  groupId?: string,
+) {
   const point = (t: number, v: number) => ({
     t,
     v,
@@ -175,30 +298,26 @@ export function librarySave(state: EasingState, name: string, curve: Curve) {
     throw new Error(
       "The saved easing library could not be read; it has been retained.",
     );
-  const source = structuredClone(
-    existing ?? {
-      version: 1,
-      active: "custom",
-      groups: [{ id: "custom", name: "Custom", presets: [] }],
-    },
-  );
+  const source = existing ?? emptyLibrary();
   const group =
-    source.groups.find((g: any) => g.id === source.active) ?? source.groups[0];
+    groupId ??
+    source.groups.find((g: any) => g.id === source.active)?.id ??
+    source.groups[0].id;
   const preset = {
-    id: `curve-${Date.now()}`,
+    id: `curve-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     name,
     color: "",
     curve: { points: [a, b] },
   };
-  if (state.library?.source)
+  if (existing)
     return {
       type: "easingLibrary",
       action: "save",
       stateRevision: state.library.stateRevision,
-      group: group.id,
+      group,
       ...preset,
     };
-  group.presets.push(preset);
+  source.groups[0].presets.push(preset);
   return {
     type: "easingLibrary",
     action: "import",
