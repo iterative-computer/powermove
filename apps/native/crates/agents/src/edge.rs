@@ -215,6 +215,65 @@ pub fn fetch(net: &dyn Net, request: &NetRequest<'_>) -> Result<(u16, Vec<u8>), 
     Ok((status, body))
 }
 
+/// How long a model's stream may go without a byte before Powermove gives up
+/// on it: Codex's stream idle timeout. A provider that hangs mid-reply ends
+/// the turn with a clear error instead of leaving it working for an hour.
+pub const STREAM_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// `inner`, stopped when no byte has arrived for `after` (headers count).
+#[derive(Debug)]
+pub struct Idle {
+    pub inner: Arc<dyn Net>,
+    pub after: std::time::Duration,
+}
+impl Net for Idle {
+    fn stream(
+        &self,
+        request: &NetRequest<'_>,
+        stop: &AtomicBool,
+        on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        use std::time::Instant;
+        let last = Mutex::new(Instant::now());
+        let (ended, quiet, halt) = (
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+        );
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !ended.load(Ordering::Acquire) {
+                    if stop.load(Ordering::Acquire) {
+                        halt.store(true, Ordering::Release);
+                    } else if last.lock().unwrap().elapsed() >= self.after {
+                        quiet.store(true, Ordering::Release);
+                        halt.store(true, Ordering::Release);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            });
+            let result = self.inner.stream(request, &halt, &mut |chunk| {
+                *last.lock().unwrap() = Instant::now();
+                on(chunk)
+            });
+            ended.store(true, Ordering::Release);
+            result
+        });
+        if quiet.load(Ordering::Acquire) {
+            let seconds = self.after.as_secs();
+            let span = if seconds >= 60 && seconds % 60 == 0 {
+                format!("{} minutes", seconds / 60)
+            } else {
+                format!("{:.1} seconds", self.after.as_secs_f64())
+            };
+            return Err(format!(
+                "The model stopped responding: nothing arrived for {span}. Try again."
+            ));
+        }
+        result
+    }
+}
+
 /// Plain HTTP/1.1 to 127.0.0.1 only: the local fakes.
 #[derive(Debug)]
 pub struct Loopback;
@@ -391,6 +450,51 @@ impl Net for Reroute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle stop counts silence, not the whole request: a reply that keeps
+    /// trickling in for longer than the limit is never cut.
+    #[test]
+    fn a_slow_but_steady_stream_outlives_the_idle_limit() {
+        #[derive(Debug)]
+        struct Trickle;
+        impl Net for Trickle {
+            fn stream(
+                &self,
+                _: &NetRequest<'_>,
+                stop: &AtomicBool,
+                on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+            ) -> Result<(), String> {
+                on(Chunk::Status(200))?;
+                for _ in 0..8 {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    if stop.load(Ordering::Acquire) {
+                        return Err("Stopped.".into());
+                    }
+                    on(Chunk::Data(b"x"))?;
+                }
+                Ok(())
+            }
+        }
+        let idle = Idle {
+            inner: Arc::new(Trickle),
+            after: std::time::Duration::from_millis(200),
+        };
+        let request = NetRequest {
+            method: "POST",
+            url: "http://127.0.0.1:9/",
+            headers: &[],
+            body: b"",
+        };
+        let mut bytes = 0;
+        idle.stream(&request, &AtomicBool::new(false), &mut |chunk| {
+            if let Chunk::Data(data) = chunk {
+                bytes += data.len();
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bytes, 8);
+    }
 
     /// P1-3: a lane's fake-store setting that is missing or invalid closes
     /// the Keychain instead of reaching the real one.

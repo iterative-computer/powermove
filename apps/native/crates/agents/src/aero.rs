@@ -910,10 +910,14 @@ fn drive(
                         (_, StopReason::MaxSteps) => {
                             ("step-limit", "Aero reached its tool step limit.".into())
                         }
+                        // The edge's own words for a failed request (a
+                        // dropped or silent stream) before the core's code.
                         _ => (
                             "error",
-                            diagnostic
-                                .take()
+                            options
+                                .model
+                                .take_failure()
+                                .or_else(|| diagnostic.take())
                                 .unwrap_or_else(|| format!("Aero ended the turn: {reason:?}")),
                         ),
                     });

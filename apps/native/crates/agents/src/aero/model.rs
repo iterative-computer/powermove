@@ -9,6 +9,9 @@ use url::{Host as UrlHost, Url};
 #[derive(Clone)]
 pub struct Model {
     transport: Transport,
+    /// Why the latest provider request failed, in plain words: the core only
+    /// hears that it failed, and would show its own error code instead.
+    failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 type Fake = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
@@ -41,7 +44,10 @@ pub struct Live {
 
 pub enum Reply {
     Text(String),
-    Tool { name: String, args: Value },
+    Tool {
+        name: String,
+        args: Value,
+    },
     /// Text the model streams before its reply in the same step (a tool
     /// call's narration).
     Said(String, Box<Reply>),
@@ -52,6 +58,7 @@ impl Model {
     pub fn fake(f: impl Fn(&[u8]) -> Reply + Send + Sync + 'static) -> Self {
         Self {
             transport: Transport::Fake(Arc::new(f)),
+            failure: Default::default(),
         }
     }
 
@@ -75,13 +82,20 @@ impl Model {
         }
         Ok(Self {
             transport: Transport::Replay(url),
+            failure: Default::default(),
         })
     }
 
     pub fn live(live: Live) -> Self {
         Self {
             transport: Transport::Live(Arc::new(live)),
+            failure: Default::default(),
         }
+    }
+
+    /// Why the latest provider request failed, once.
+    pub fn take_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().take()
     }
 
     pub fn endpoint(&self) -> &str {
@@ -166,7 +180,17 @@ pub(super) fn deliver(
     body: &[u8],
 ) {
     let result = match &model.transport {
-        Transport::Live(live) => deliver_live(live, remote, fetch, url, headers, body),
+        Transport::Live(live) => {
+            let result = deliver_live(live, remote, fetch, url, headers, body);
+            let mut failure = model.failure.lock().unwrap();
+            match &result {
+                Ok(()) => *failure = None,
+                Err(_) if remote.fetch_disposition(fetch) == Disposition::Retired => {}
+                Err(error) => *failure = Some(error.clone()),
+            }
+            drop(failure);
+            result
+        }
         Transport::Fake(fake) => {
             let content = response(fake(body), body);
             if let Some(content) = content {
@@ -316,7 +340,17 @@ fn deliver_live(
         if live.identity.as_ref().is_some_and(|i| !i.current()) {
             return Err("The OpenAI sign-in changed during this turn.".into());
         }
-        streamed?;
+        if let Err(error) = streamed {
+            return Err(if error.starts_with("The model stopped responding") {
+                error
+            } else if (200..300).contains(&code) {
+                "The connection to the model dropped before its reply finished. Try again.".into()
+            } else {
+                format!(
+                    "Powermove couldn't reach the model ({error}). Check Settings › Providers and try again."
+                )
+            });
+        }
         if retry {
             rejected = bearer.map(|b| b.trim_start_matches("Bearer ").to_owned());
             continue;

@@ -253,6 +253,71 @@ fn a_turn_that_narrates_before_its_tool_calls_ends_with_its_last_answer_alone() 
     );
 }
 
+/// A provider stream that drops mid-reply, or goes silent, ends the turn
+/// with words a person understands: the panel said "IncompleteStream" (the
+/// core's error code), and a stalled stream kept the turn working for an
+/// hour (2026-11-25, emulate's disconnect and stall faults).
+#[test]
+fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
+    use pm_agents::edge::{Chunk, Idle, Net, NetRequest};
+    use std::sync::atomic::AtomicBool;
+    #[derive(Debug)]
+    struct Broken {
+        silent: bool,
+    }
+    impl Net for Broken {
+        fn stream(
+            &self,
+            _: &NetRequest<'_>,
+            stop: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            on(Chunk::Status(200))?;
+            on(Chunk::Data(
+                br#"data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Thinking"},"finish_reason":null}]}
+
+"#,
+            ))?;
+            if !self.silent {
+                return Err("connection reset by peer".into());
+            }
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err("Stopped.".into())
+        }
+    }
+    for (silent, expected) in [
+        (
+            false,
+            "The connection to the model dropped before its reply finished. Try again.",
+        ),
+        (
+            true,
+            "The model stopped responding: nothing arrived for 0.3 seconds. Try again.",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let configured = json!({"custom":{"protocol":"openai-chat-completions",
+            "base_url":"http://127.0.0.1:9/v1","auth":{"type":"none"},"tool_choice_mode":"send",
+            "model_metadata":{"m":{"supports_tool_use":true}}}});
+        let live = aero::Live {
+            identity: None,
+            provider: "custom".into(),
+            configured: configured.to_string(),
+            model: "m".into(),
+            catalog: None,
+            net: Arc::new(Idle {
+                inner: Arc::new(Broken { silent }),
+                after: Duration::from_millis(300),
+            }),
+            credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
+        };
+        let (turn, _notes) = fixture.start(Model::live(live), |tools| Box::new(tools));
+        assert_eq!(complete(&turn), RunResult::failure(expected, false));
+    }
+}
+
 #[test]
 fn stale_revisions_and_read_access_leave_the_project_untouched() {
     let fixture = Fixture::new();

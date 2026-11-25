@@ -177,10 +177,13 @@ fn chat_model(id: &str) -> bool {
 pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
     let (source, model) = Source::of(id).ok_or("Choose a model in the picker.")?;
     let secrets = env.secrets.clone().ok_or("The Keychain is unavailable.")?;
-    let net = env
-        .net
-        .clone()
-        .ok_or("Powermove's network client is unavailable.")?;
+    let net: Arc<dyn Net> = Arc::new(crate::edge::Idle {
+        inner: env
+            .net
+            .clone()
+            .ok_or("Powermove's network client is unavailable.")?,
+        after: crate::edge::STREAM_IDLE,
+    });
     let metadata = |efforts: &[String]| {
         let mut entry = json!({"supports_tool_use": true, "supports_vision": true});
         if !efforts.is_empty() {
