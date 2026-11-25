@@ -7,14 +7,31 @@ pub enum ComposerPicker {
     Model,
     Effort,
     Access,
+    /// The composer's "+": attachments, Select Part of the Screen and the
+    /// Approvals choice.
+    Add,
 }
 impl ComposerPicker {
+    /// The kind a panel's menu request names (`picker`).
+    pub fn named(name: Option<&str>) -> Option<Self> {
+        match name? {
+            "model" => Some(Self::Model),
+            "effort" => Some(Self::Effort),
+            "access" => Some(Self::Access),
+            "add" => Some(Self::Add),
+            _ => None,
+        }
+    }
     pub fn width(self) -> f32 {
         match self {
             Self::Model => 260.,
             Self::Effort => 156.,
-            Self::Access => 360.,
+            Self::Access | Self::Add => 360.,
         }
+    }
+    /// Its rows carry their description under the label (Approvals').
+    pub fn describes(self) -> bool {
+        matches!(self, Self::Access | Self::Add)
     }
 }
 

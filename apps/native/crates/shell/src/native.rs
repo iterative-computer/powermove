@@ -8384,6 +8384,11 @@ impl Popup {
         }) as f64 + 2. * POPUP_SHADOW_PAD;
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
             model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
+        } else if self.composer == Some(ComposerPicker::Add) {
+            // "+" lists its attachment rows above Approvals' described rows:
+            // all of it shows, up to the window's room, never scrolled past
+            // its first row to reach the checked one.
+            interior.h
         } else if self.composer.is_some() {
             m.field_menu_height.min(interior.h)
         } else {
@@ -9355,8 +9360,17 @@ impl PopupLayout<'_> {
             } else {
                 c.detail.as_str()
             };
-            let description = (!detail.is_empty() && self.composer == Some(ComposerPicker::Access))
-                .then(|| popup_description(detail, caption, t.colors.secondary, (width - edge - lead).max(1.), mtm));
+            let description = (!detail.is_empty()
+                && self.composer.is_some_and(ComposerPicker::describes))
+            .then(|| {
+                popup_description(
+                    detail,
+                    caption,
+                    t.colors.secondary,
+                    (width - edge - lead).max(1.),
+                    mtm,
+                )
+            });
             let item_h = row_h
                 + if detail.is_empty() {
                     0.
@@ -9744,12 +9758,7 @@ pub fn capture_agent_picker(
 ) -> Option<(Vec<u8>, crate::layout::Rect, Vec<String>)> {
     use crate::layout::Rect;
     let mtm = MainThreadMarker::new()?;
-    let kind = match input["picker"].as_str() {
-        Some("model") => Some(ComposerPicker::Model),
-        Some("effort") => Some(ComposerPicker::Effort),
-        Some("access") => Some(ComposerPicker::Access),
-        _ => None,
-    };
+    let kind = ComposerPicker::named(input["picker"].as_str());
     let searchable = kind.is_none() || input["search"] == true;
     let surface = Surface::Menu;
     let available = if kind.is_some() { composer_picker_interior(owner) } else { owner };
