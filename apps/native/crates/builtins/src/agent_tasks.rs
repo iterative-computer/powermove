@@ -150,7 +150,7 @@ fn display(provider: Provider) -> &'static str {
         Provider::Chatgpt => "ChatGPT",
         Provider::Claude => "Claude",
         Provider::Compatible => "Connected model",
-        Provider::Aero => "Aero",
+        Provider::Aero => "Powermove",
     }
 }
 /// Main's `orchestrationProviders`, from the composer's own catalog.

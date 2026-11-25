@@ -9,6 +9,9 @@ use url::{Host as UrlHost, Url};
 #[derive(Clone)]
 pub struct Model {
     transport: Transport,
+    /// Why the latest provider request failed, in plain words: the core only
+    /// hears that it failed, and would show its own error code instead.
+    failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 type Fake = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
@@ -17,11 +20,37 @@ type Fake = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
 enum Transport {
     Fake(Fake),
     Replay(Url),
+    Live(Arc<Live>),
+}
+
+/// A real provider through Providers (`crate::sources::live`): the
+/// core's provider and its description (no credential), and the credential
+/// the edge adds for `origin` only. `credentials` gets the bearer a backend
+/// just refused, so it can refresh once.
+pub struct Live {
+    /// The OpenAI identity a turn started on: its requests stop when that
+    /// identity is signed out or replaced (P1-4).
+    pub identity: Option<Arc<crate::codex_auth::Identity>>,
+    pub provider: String,
+    pub configured: String,
+    pub model: String,
+    /// The Codex catalog's answer, for the ChatGPT route.
+    pub catalog: Option<Value>,
+    pub net: Arc<dyn crate::edge::Net>,
+    #[allow(clippy::type_complexity)]
+    pub credentials:
+        Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
 }
 
 pub enum Reply {
     Text(String),
-    Tool { name: String, args: Value },
+    Tool {
+        name: String,
+        args: Value,
+    },
+    /// Text the model streams before its reply in the same step (a tool
+    /// call's narration).
+    Said(String, Box<Reply>),
     Hold,
 }
 
@@ -29,6 +58,7 @@ impl Model {
     pub fn fake(f: impl Fn(&[u8]) -> Reply + Send + Sync + 'static) -> Self {
         Self {
             transport: Transport::Fake(Arc::new(f)),
+            failure: Default::default(),
         }
     }
 
@@ -47,18 +77,52 @@ impl Model {
             || url.fragment().is_some()
         {
             return Err(
-                "Aero replay requires an explicit HTTP URL on a numeric loopback address.".into(),
+                "Powermove replay requires an explicit HTTP URL on a numeric loopback address.".into(),
             );
         }
         Ok(Self {
             transport: Transport::Replay(url),
+            failure: Default::default(),
         })
+    }
+
+    pub fn live(live: Live) -> Self {
+        Self {
+            transport: Transport::Live(Arc::new(live)),
+            failure: Default::default(),
+        }
+    }
+
+    /// Why the latest provider request failed, once.
+    pub fn take_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().take()
     }
 
     pub fn endpoint(&self) -> &str {
         match &self.transport {
             Transport::Fake(_) => "http://127.0.0.1:1/aero-fake",
             Transport::Replay(url) => url.as_str(),
+            Transport::Live(_) => "",
+        }
+    }
+    /// The core's provider id ("" is the Gateway the fakes stand behind).
+    pub fn provider(&self) -> &str {
+        match &self.transport {
+            Transport::Live(live) => &live.provider,
+            _ => "",
+        }
+    }
+    pub fn configured(&self) -> &str {
+        match &self.transport {
+            Transport::Live(live) => &live.configured,
+            _ => "",
+        }
+    }
+    /// The model the core is given: a live source's own id, else `requested`.
+    pub fn name<'a>(&'a self, requested: &'a str) -> &'a str {
+        match &self.transport {
+            Transport::Live(live) => &live.model,
+            _ => requested,
         }
     }
 }
@@ -68,6 +132,32 @@ impl Model {
 /// reach it (the core refuses images to a model without vision), and the
 /// session's effort as its one reasoning option (the core refuses an effort
 /// the model does not list).
+/// A catalog GET: a live Codex route's own answer, else the fakes'.
+pub(super) fn catalog(
+    edge: &Model,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    model: &str,
+    effort: &str,
+) {
+    let Transport::Live(live) = &edge.transport else {
+        return answer_catalog(remote, fetch, model, effort);
+    };
+    let body = live.catalog.as_ref().map(|catalog| {
+        if url.starts_with("https://registry.npmjs.org/") {
+            json!({"version": catalog["version"]}).to_string()
+        } else {
+            json!({"models": catalog["models"]}).to_string()
+        }
+    });
+    let ok = match body {
+        Some(body) => status(remote, fetch, 200).and_then(|_| push(remote, fetch, body.as_bytes())),
+        None => status(remote, fetch, 404),
+    };
+    let _ = remote.fetch_finish(fetch, ok.is_ok());
+}
+
 pub(super) fn answer_catalog(remote: Remote, fetch: u64, model: &str, effort: &str) {
     let mut entry = json!({"id":model,"type":"language","tags":["tool-use","vision"],
         "context_window":200000,"max_tokens":8000});
@@ -81,8 +171,26 @@ pub(super) fn answer_catalog(remote: Remote, fetch: u64, model: &str, effort: &s
     let _ = remote.fetch_finish(fetch, ok.is_ok());
 }
 
-pub(super) fn deliver(model: &Model, remote: Remote, fetch: u64, url: &str, body: &[u8]) {
+pub(super) fn deliver(
+    model: &Model,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) {
     let result = match &model.transport {
+        Transport::Live(live) => {
+            let result = deliver_live(live, remote, fetch, url, headers, body);
+            let mut failure = model.failure.lock().unwrap();
+            match &result {
+                Ok(()) => *failure = None,
+                Err(_) if remote.fetch_disposition(fetch) == Disposition::Retired => {}
+                Err(error) => *failure = Some(error.clone()),
+            }
+            drop(failure);
+            result
+        }
         Transport::Fake(fake) => {
             let content = response(fake(body), body);
             if let Some(content) = content {
@@ -109,7 +217,7 @@ fn deliver_replay(
 ) -> Result<(), String> {
     let url = Url::parse(url).map_err(|e| e.to_string())?;
     if &url != base {
-        return Err("Aero refused a model request outside the configured replay endpoint.".into());
+        return Err("Powermove refused a model request outside the configured replay endpoint.".into());
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -137,13 +245,167 @@ fn deliver_replay(
     Ok(())
 }
 
+/// Sends the core's request with the source's credential when `url` is on
+/// the credential's origin (header rule 13), streaming the answer back. A
+/// 401 before any byte reached the core asks for a fresh credential once.
+fn deliver_live(
+    live: &Live,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(), String> {
+    use crate::edge::{Chunk, NetRequest};
+    let origin = pm_aero_core::origin_of(url);
+    let mut rejected: Option<String> = None;
+    for attempt in 0..2 {
+        let (trusted, credentials) = match (live.credentials)(rejected.as_deref()) {
+            Ok(found) => found,
+            Err(reason) => {
+                // The core reads why from the body of a refusal.
+                let body =
+                    json!({"error":{"message":reason,"code":"powermove_account"}}).to_string();
+                return status(remote, fetch, 401)
+                    .and_then(|_| push(remote, fetch, body.as_bytes()));
+            }
+        };
+        let mut all: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(name, _)| {
+                !credentials
+                    .iter()
+                    .any(|(c, _)| c.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .collect();
+        let bearer = credentials
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone());
+        if origin.as_deref() == Some(trusted.as_str()) {
+            all.extend(credentials);
+        }
+        let mut retry = false;
+        let request = NetRequest {
+            method: "POST",
+            url,
+            headers: &all,
+            body,
+        };
+        // Stops the request when the core retires it, or when the identity
+        // this turn started on is signed out or replaced (P1-4).
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (stop, done, identity) = (stop.clone(), done.clone(), live.identity.clone());
+            thread::spawn(move || {
+                use std::sync::atomic::Ordering::{Acquire, Release};
+                while !done.load(Acquire) {
+                    let gone = identity.as_ref().is_some_and(|i| !i.current());
+                    if gone || remote.fetch_disposition(fetch) == Disposition::Retired {
+                        stop.store(true, Release);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            });
+        }
+        let mut code = 0;
+        let mut failure = Vec::new();
+        let streamed = live.net.stream(&request, &stop, &mut |chunk| match chunk {
+            Chunk::Status(401) if attempt == 0 && bearer.is_some() => {
+                retry = true;
+                Ok(())
+            }
+            Chunk::Status(got) => {
+                code = got;
+                // A failure's status goes with its safe body, below.
+                if (200..300).contains(&got) {
+                    status(remote, fetch, got)
+                } else {
+                    Ok(())
+                }
+            }
+            Chunk::Data(_) if retry => Ok(()),
+            Chunk::Data(bytes) if !(200..300).contains(&code) => {
+                if failure.len() < 64 * 1024 {
+                    failure.extend_from_slice(bytes);
+                }
+                Ok(())
+            }
+            Chunk::Data(bytes) => push(remote, fetch, bytes),
+        });
+        done.store(true, std::sync::atomic::Ordering::Release);
+        if live.identity.as_ref().is_some_and(|i| !i.current()) {
+            return Err("The OpenAI sign-in changed during this turn.".into());
+        }
+        if let Err(error) = streamed {
+            return Err(if error.starts_with("The model stopped responding") {
+                error
+            } else if (200..300).contains(&code) {
+                "The connection to the model dropped before its reply finished. Try again.".into()
+            } else {
+                format!(
+                    "Powermove couldn't reach the model ({error}). Check Settings › Providers and try again."
+                )
+            });
+        }
+        if retry {
+            rejected = bearer.map(|b| b.trim_start_matches("Bearer ").to_owned());
+            continue;
+        }
+        if !(200..300).contains(&code) {
+            // Never the provider's own bytes: a careless server may repeat the
+            // credential it was sent (P1-6, ABI rule 13).
+            let shown: Vec<&str> = all.iter().map(|(_, v)| v.as_str()).collect();
+            let safe = safe_failure(code, &failure, &shown);
+            return status(remote, fetch, code).and_then(|_| push(remote, fetch, &safe));
+        }
+        return Ok(());
+    }
+    Err("The provider refused the refreshed credential.".into())
+}
+
+/// What the core hears of a failed provider response: the status and, when
+/// it is a plain identifier that repeats none of the request's header
+/// values, the provider's error code. Nothing else of its body.
+pub(crate) fn safe_failure(code: u16, body: &[u8], sent: &[&str]) -> Vec<u8> {
+    let value: Value = serde_json::from_slice(body).unwrap_or_default();
+    let kind = [
+        &value["error"]["code"],
+        &value["error"]["type"],
+        &value["error"],
+    ]
+    .into_iter()
+    .find_map(Value::as_str)
+    .filter(|kind| {
+        !kind.is_empty()
+            && kind.len() <= 48
+            && kind
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+            && !sent.iter().any(|value| {
+                let value = value.trim_start_matches("Bearer ");
+                !value.is_empty() && (value.contains(kind) || kind.contains(value))
+            })
+    });
+    let message = match kind {
+        Some(kind) => format!("The provider refused the request (HTTP {code}, {kind})."),
+        None => format!("The provider refused the request (HTTP {code})."),
+    };
+    json!({"error": {"message": message, "type": kind}})
+        .to_string()
+        .into_bytes()
+}
+
 fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
     match remote
         .fetch_status(fetch, code, None)
         .map_err(|e| e.to_string())?
     {
         Outcome::Applied => Ok(()),
-        other => Err(format!("Aero's fetch status was rejected: {other:?}")),
+        other => Err(format!("Powermove's fetch status was rejected: {other:?}")),
     }
 }
 
@@ -154,7 +416,7 @@ fn push(remote: Remote, fetch: u64, bytes: &[u8]) -> Result<(), String> {
                 Outcome::Applied => break,
                 Outcome::Stale => return Ok(()),
                 Outcome::Backpressure | Outcome::Busy => thread::sleep(Duration::from_millis(2)),
-                other => return Err(format!("Aero's fetch bytes were rejected: {other:?}")),
+                other => return Err(format!("Powermove's fetch bytes were rejected: {other:?}")),
             }
         }
     }
@@ -168,7 +430,13 @@ fn response(reply: Reply, request: &[u8]) -> Option<String> {
         out.push_str(&value.to_string());
         out.push_str("\n\n");
     };
+    let mut reply = reply;
+    while let Reply::Said(text, then) = reply {
+        sse(json!({"type":"text-delta","id":"0","delta":text}));
+        reply = *then;
+    }
     let reason = match reply {
+        Reply::Said(..) => unreachable!("narration was streamed above"),
         Reply::Hold => return None,
         Reply::Text(text) => {
             sse(json!({"type":"text-delta","id":"0","delta":text}));
@@ -198,8 +466,8 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
     if text.contains("Completion checks failed") {
         return Reply::Text("The synthetic run reached the completion checks.".into());
     }
-    if text.contains("Aero demo edit") {
-        return Reply::Text("Renamed the first layer to Aero demo edit.".into());
+    if text.contains("Powermove demo edit") {
+        return Reply::Text("Renamed the first layer to Powermove demo edit.".into());
     }
     let request: Value = serde_json::from_slice(bytes).unwrap_or_default();
     if let Some(header) = find_text(&request, "Project at session start\n")
@@ -212,11 +480,11 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
         return Reply::Tool {
             name: "edit".into(),
             args: json!({"op":"commands","revision":revision,
-            "args":{"label":"Aero demo edit","commands":[{"type":"set_layer","target":id,
-            "patch":{"name":"Aero demo edit"}}]}}),
+            "args":{"label":"Powermove demo edit","commands":[{"type":"set_layer","target":id,
+            "patch":{"name":"Powermove demo edit"}}]}}),
         };
     }
-    Reply::Text("Aero is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
+    Reply::Text("Powermove is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
 }
 
 fn find_text<'a>(value: &'a Value, marker: &str) -> Option<&'a str> {
@@ -283,14 +551,16 @@ pub fn evaluate(
     impl Host for NoTools {}
     let err = |e: pm_aero_core::Error| e.to_string();
     let dir = scope.to_str().ok_or("Invalid reviewer session path")?;
+    let name = model.name("fake/model");
     let mut runtime = Runtime::create(&Config {
-        model: "fake/model", endpoint_url: model.endpoint(), home: dir, workspace_root: dir,
+        provider: model.provider(), configured_providers_json: model.configured(),
+        model: name, endpoint_url: model.endpoint(), home: dir, workspace_root: dir,
         instructions: "You are an independent evaluator. Use only the provided result, captures and rubric. Score each criterion with specific evidence. Return the evaluation as JSON.",
         ..Config::default()
     }, Arc::new(NoTools)).map_err(err)?;
     let opening = runtime.open_session("").map_err(err)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    wait_open(&mut runtime, opening, ("fake/model", ""), deadline)?;
+    wait_open(&mut runtime, model, opening, (name, ""), deadline)?;
     runtime
         .prompt_input(
             &pm_aero_core::Input {
@@ -305,11 +575,15 @@ pub fn evaluate(
     while Instant::now() < deadline {
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {
-                answer_catalog(remote, fetch.fetch, "fake/model", "");
+                catalog(model, remote, fetch.fetch, fetch.url, name, "");
             } else {
                 let (id, url, body) = (fetch.fetch, fetch.url.to_owned(), fetch.body.to_vec());
+                let headers: Vec<_> = fetch
+                    .headers()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect();
                 let model = model.clone();
-                thread::spawn(move || deliver(&model, remote, id, &url, &body));
+                thread::spawn(move || deliver(&model, remote, id, &url, &headers, &body));
             }
         }
         for event in runtime.events.drain().map_err(err)? {

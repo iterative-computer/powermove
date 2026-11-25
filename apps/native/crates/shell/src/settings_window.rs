@@ -934,6 +934,15 @@ fn art(id: &str, dark: bool) -> Option<Art> {
             ["#e5fcee", "#dbfbe7", "#0018088c"],
             ["#1b905c", "#ffffff", "#1155368c"]
         ),
+        "providers" => Art {
+            drawn: None,
+            ..art!(
+                "general",
+                "key.fill",
+                ["#f1f5fc", "#edf2fc", "#0e12198c"],
+                ["#6d7b94", "#ffffff", "#3f48578c"]
+            )
+        },
         "privacy" => Art {
             drawn: None,
             ..art!(

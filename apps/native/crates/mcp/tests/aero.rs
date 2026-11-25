@@ -221,6 +221,108 @@ fn fake_model_cuts_through_the_real_kernel_and_reports_usage() {
     assert!(notes.iter().any(|note| note["type"] == "usage"));
 }
 
+/// A model that narrates before each tool call (as real models do) ends with
+/// its last answer, not every step's text run together: the Agent panel
+/// showed "Reading the layer first.Renaming it…" after the reply (2026-11-25).
+#[test]
+fn a_turn_that_narrates_before_its_tool_calls_ends_with_its_last_answer_alone() {
+    let fixture = Fixture::new();
+    let rev = fixture.revision;
+    let (turn, _notes) = fixture.start(
+        scripted(move |step, _| match step {
+            0 => Reply::Said(
+                "Reading the project first.".into(),
+                Box::new(call("project", "summary", None, json!({}))),
+            ),
+            1 => Reply::Said(
+                "Cutting the flubbed take.".into(),
+                Box::new(call(
+                    "edit",
+                    "commands",
+                    Some(rev),
+                    json!({"commands":[{"type":"delete_layers","targets":["flub"]}]}),
+                )),
+            ),
+            _ => Reply::Text("Cut the flubbed take.".into()),
+        }),
+        |tools| Box::new(tools),
+    );
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Cut the flubbed take.".into(), Access::Project)
+    );
+}
+
+/// A provider stream that drops mid-reply, or goes silent, ends the turn
+/// with words a person understands: the panel said "IncompleteStream" (the
+/// core's error code), and a stalled stream kept the turn working for an
+/// hour (2026-11-25, emulate's disconnect and stall faults).
+#[test]
+fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
+    use pm_agents::edge::{Chunk, Idle, Net, NetRequest};
+    use std::sync::atomic::AtomicBool;
+    /// How the stream breaks after its first chunk: the connection errors,
+    /// the body just ends (emulate's disconnect), or nothing more arrives.
+    #[derive(Debug, Clone, Copy)]
+    enum Broken {
+        Reset,
+        Ends,
+        Silent,
+    }
+    impl Net for Broken {
+        fn stream(
+            &self,
+            _: &NetRequest<'_>,
+            stop: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            on(Chunk::Status(200))?;
+            on(Chunk::Data(
+                br#"data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Thinking"},"finish_reason":null}]}
+
+"#,
+            ))?;
+            match self {
+                Broken::Reset => return Err("connection reset by peer".into()),
+                Broken::Ends => return Ok(()),
+                Broken::Silent => {}
+            }
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err("Stopped.".into())
+        }
+    }
+    let dropped = "The connection to the model dropped before its reply finished. Try again.";
+    for (broken, expected) in [
+        (Broken::Reset, dropped),
+        (Broken::Ends, dropped),
+        (
+            Broken::Silent,
+            "The model stopped responding: nothing arrived for 0.3 seconds. Try again.",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let configured = json!({"custom":{"protocol":"openai-chat-completions",
+            "base_url":"http://127.0.0.1:9/v1","auth":{"type":"none"},"tool_choice_mode":"send",
+            "model_metadata":{"m":{"supports_tool_use":true}}}});
+        let live = aero::Live {
+            identity: None,
+            provider: "custom".into(),
+            configured: configured.to_string(),
+            model: "m".into(),
+            catalog: None,
+            net: Arc::new(Idle {
+                inner: Arc::new(broken),
+                after: Duration::from_millis(300),
+            }),
+            credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
+        };
+        let (turn, _notes) = fixture.start(Model::live(live), |tools| Box::new(tools));
+        assert_eq!(complete(&turn), RunResult::failure(expected, false));
+    }
+}
+
 #[test]
 fn stale_revisions_and_read_access_leave_the_project_untouched() {
     let fixture = Fixture::new();

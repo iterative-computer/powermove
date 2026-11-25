@@ -165,6 +165,7 @@ pub(crate) mod keychain {
             item: *mut Item,
         ) -> i32;
         fn SecKeychainItemDelete(item: Item) -> i32;
+        fn SecKeychainCopyDomainDefault(domain: i32, keychain: *mut Item) -> i32;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -173,11 +174,20 @@ pub(crate) mod keychain {
     const NOT_FOUND: i32 = -25300;
     /// The password, and the item when `keep` asks for it (released by the caller).
     fn find(service: &str, account: &str, keep: bool) -> Result<Option<(Vec<u8>, Item)>, String> {
+        find_in(ptr::null_mut(), service, account, keep)
+    }
+    /// In `keychain` (null: the search list).
+    fn find_in(
+        keychain: Item,
+        service: &str,
+        account: &str,
+        keep: bool,
+    ) -> Result<Option<(Vec<u8>, Item)>, String> {
         let (mut len, mut data, mut item) = (0u32, ptr::null_mut(), ptr::null_mut());
         // SAFETY: explicit lengths; the data is owned by Security until freed.
         let status = unsafe {
             SecKeychainFindGenericPassword(
-                ptr::null_mut(),
+                keychain,
                 service.len() as u32,
                 service.as_ptr(),
                 account.len() as u32,
@@ -201,10 +211,48 @@ pub(crate) mod keychain {
         unsafe { SecKeychainItemFreeContent(ptr::null_mut(), data) };
         Ok(Some((bytes, item)))
     }
+    /// Every Keychain call goes through here first. A development build
+    /// launched against the local fakes answers from their fake store, and a
+    /// missing or invalid fake-store setting closes the Keychain instead of
+    /// falling through to the real one (`pm_agents::edge::keychain_mode`).
+    fn fake() -> Option<Box<dyn pm_agents::edge::Secrets>> {
+        use pm_agents::edge::{KeychainMode, RefusedKeychain, keychain_mode};
+        let vars = std::env::vars().filter(|(k, _)| k.starts_with("PM_")).collect();
+        match keychain_mode(&vars) {
+            KeychainMode::Real => None,
+            KeychainMode::Fake(store) => Some(Box::new(store)),
+            KeychainMode::Refused(why) => Some(Box::new(RefusedKeychain(why))),
+        }
+    }
+    /// Codex's item, read as Codex 0.169 reads it: in the default User-domain
+    /// keychain (its macOS keyring backend), not the whole search list.
+    pub fn read_user_default(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.read(service, account);
+        }
+        let mut keychain = ptr::null_mut();
+        // SAFETY: kSecPreferencesDomainUser (0); the keychain is released below.
+        let status = unsafe { SecKeychainCopyDomainDefault(0, &mut keychain) };
+        if status != 0 || keychain.is_null() {
+            return Err(format!("Keychain open failed ({status})"));
+        }
+        let found = find_in(keychain, service, account, false);
+        unsafe { CFRelease(keychain) };
+        Ok(found?.map(|(bytes, _)| bytes))
+    }
     pub fn read(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.read(service, account);
+        }
         Ok(find(service, account, false)?.map(|(bytes, _)| bytes))
     }
     pub fn delete(service: &str, account: &str) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.delete(service, account);
+        }
         if let Some((_, item)) = find(service, account, true)? {
             let status = unsafe { SecKeychainItemDelete(item) };
             unsafe { CFRelease(item) };
@@ -215,6 +263,10 @@ pub(crate) mod keychain {
         Ok(())
     }
     pub fn write(service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.write(service, account, bytes);
+        }
         delete(service, account)?;
         let status = unsafe {
             SecKeychainAddGenericPassword(

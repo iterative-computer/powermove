@@ -272,7 +272,11 @@ export class SettingsModel {
   }
   get availableSections() {
     return sections.filter(
-      (s) => s !== "project" || !!this.publication.project,
+      (s) =>
+        (s !== "project" || !!this.publication.project) &&
+        // Providers is published by the development switch's Powermove harness.
+        (s !== "providers" ||
+          (this.publication.rows ?? []).some((r) => r.section === "providers")),
     );
   }
   get visibleSections() {

@@ -436,15 +436,27 @@ impl Controller {
             pm_mcp::catalog::names(),
             pm_mcp::catalog::composition_names(),
         );
-        if cfg!(debug_assertions) && (environment.vars.get("PM_AERO_DEV").is_some_and(|value| value == "1")
-            || self.mcp.profile.join("aero-dev").is_file()) {
+        if cfg!(feature = "aero-trial")
+            || (cfg!(debug_assertions)
+                && (environment
+                    .vars
+                    .get("PM_AERO_DEV")
+                    .is_some_and(|value| value == "1")
+                    || self.mcp.profile.join("aero-dev").is_file()))
+        {
             environment.aero = Some(crate::mcp::aero_launcher());
-        } else {
-            environment.compatible = Some(Arc::new(crate::providers::Chat {
-                profile: self.mcp.profile.clone(),
-            }));
         }
-        runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
+        environment.compatible = Some(Arc::new(crate::providers::Chat {
+            profile: self.mcp.profile.clone(),
+        }));
+        // Settings › Providers' Keychain and network only with the switch on:
+        // with it off, nothing new is read or fetched (P1-5).
+        let open = if environment.aero.is_some() {
+            crate::provider_keys::attach(&mut environment)
+        } else {
+            Arc::new(pm_agents::account::open_in_browser)
+        };
+        runtime.set_agent_environment(environment, open);
         let observation_kernel = self.kernel.clone();
         runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {
             let matches = || {
