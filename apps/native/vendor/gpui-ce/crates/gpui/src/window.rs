@@ -1369,8 +1369,6 @@ pub struct Window {
     scroll_layer_pending_deferred: Vec<usize>,
     /// Layers resting, and the frame each records again.
     scroll_layer_rest: FxHashMap<crate::scroll_layer::ScrollLayerKey, u64>,
-    /// The edge fades of the scroll layer about to begin (set by its div).
-    pub(crate) scroll_layer_edges: Option<crate::scroll_layer::EdgeFades>,
     /// Powermove P-SLOT-REGION: scrolling divs' regions (`crate::slot_region`).
     pub(crate) slot_regions: FxHashMap<usize, crate::slot_region::RegionRecord>,
     pub(crate) slot_regions_open: Vec<crate::slot_region::OpenRegion>,
@@ -2177,7 +2175,6 @@ impl Window {
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
             scroll_layer_rest: FxHashMap::default(),
-            scroll_layer_edges: None,
             slot_regions: FxHashMap::default(),
             slot_regions_open: Vec::new(),
             slot_regions_sent: false,
@@ -4174,7 +4171,6 @@ impl Window {
     /// come from its recording, shifted to its offset now.
     fn reuse_hitboxes(&mut self, range: Range<usize>) {
         let previous = self.scroll_layer_frame - 1;
-        let scale_factor = self.scale_factor();
         let mut inside: Vec<(usize, crate::scroll_layer::ScrollLayerKey)> = self
             .scroll_layers
             .iter()
@@ -4199,7 +4195,7 @@ impl Window {
                 .extend(self.rendered_frame.hitboxes[at..start].iter().cloned());
             let begin = self.next_frame.hitboxes.len();
             if layer.shiftable {
-                self.next_frame.hitboxes.extend(layer.shifted_hitboxes(scale_factor));
+                self.next_frame.hitboxes.extend(layer.shifted_hitboxes());
             } else {
                 self.next_frame.hitboxes.extend(
                     self.rendered_frame.hitboxes[start..layer.hitbox_range.end]
@@ -4224,17 +4220,6 @@ impl Window {
         driven: bool,
     ) -> Option<crate::scroll_layer::ScrollLayerKey> {
         let key = crate::scroll_layer::key(offset);
-        let edges = self.scroll_layer_edges.take().filter(|e| e.key == key);
-        // Nothing to scroll (content no larger than the div): no wheel step
-        // can move it, so it records nothing and a layer inside it stays a
-        // layer of its own (PM-710: a panel's body that fits its slot made the
-        // panel's own scroller a nested layer, which draws its view again).
-        // A driven layer is stepped by its owner whatever its extent (the
-        // timeline steps its rows layer on every vertical wheel event).
-        if !driven && self.last_scroll_max.x <= px(0.) && self.last_scroll_max.y <= px(0.) {
-            self.scroll_layers.remove(&key);
-            return None;
-        }
         let frame_now = self.scroll_layer_frame;
         if self.scroll_layer_rest.get(&key).is_some_and(|until| *until > frame_now) {
             return None;
@@ -4254,7 +4239,6 @@ impl Window {
         let mask = crate::scroll_layer::recording_mask(&clip, reach);
         let max = self.last_scroll_max;
         let view = self.current_view();
-        let element_offset = self.element_offset();
         let frame = self.scroll_layer_frame;
         let start = self.next_frame.hitboxes.len();
         let deferred = self.next_frame.deferred_draws.len();
@@ -4268,8 +4252,6 @@ impl Window {
                 reach,
                 max,
                 clip: clip.clone(),
-                edges: None,
-                base: Point::default(),
                 ops: Vec::new(),
                 hitboxes: Vec::new(),
                 hitbox_range: 0..0,
@@ -4283,11 +4265,9 @@ impl Window {
         layer.view = view;
         layer.offset = offset.clone();
         layer.recorded = *offset.borrow();
-        layer.base = element_offset - layer.recorded;
         layer.reach = reach;
         layer.max = max;
         layer.clip = clip;
-        layer.edges = edges;
         layer.hitbox_range = start..start;
         layer.frame = frame;
         layer.recorded_at = layer.generation;
@@ -4399,7 +4379,7 @@ impl Window {
             }
             return false;
         };
-        self.scroll_layer_step(key, view, false, cx)
+        self.scroll_layer_step(key, view, cx)
     }
 
     /// A wheel step on a scroll layer that only moves its offset: when the
@@ -4411,7 +4391,6 @@ impl Window {
         &mut self,
         key: crate::scroll_layer::ScrollLayerKey,
         view: EntityId,
-        edges_changed: bool,
         cx: &mut App,
     ) -> bool {
         let refused = |why: &str| {
@@ -4437,9 +4416,6 @@ impl Window {
             return refused("reach");
         }
         *layer.offset.borrow_mut() = offset;
-        if !layer.fit_edges(edges_changed) {
-            return refused("edges");
-        }
         layer.generation += 1;
         let generation = layer.generation;
         self.scroll_layer_moving = true;

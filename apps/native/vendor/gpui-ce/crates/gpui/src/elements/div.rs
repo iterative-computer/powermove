@@ -3190,21 +3190,6 @@ impl Interactivity {
                 }
 
                 let scroll_offset = self.clamp_scroll_position(bounds, &style, window, cx);
-                // P-SCROLL-LAYER: a layer that fades at its scroll edges keeps
-                // the masks its clip is made from, to move the fades itself.
-                if let Some(offset) = self.scroll_layer_cell()
-                    && self.scroll_edge_fade_y > px(0.)
-                    && self.tracked_scroll_handle.is_some()
-                {
-                    window.scroll_layer_edges = style
-                        .overflow_mask(bounds, window.rem_size())
-                        .map(|own| crate::scroll_layer::EdgeFades {
-                            key: crate::scroll_layer::key(&offset),
-                            parent: window.content_mask(),
-                            own,
-                            fade: self.scroll_edge_fade_y,
-                        });
-                }
                 window.with_text_style(style.text_style().cloned(), |window| {
                     window.with_content_mask(
                         self.scroll_content_mask(&style, bounds, window.rem_size()),
@@ -3257,7 +3242,7 @@ impl Interactivity {
     }
 
     fn vertical_scroll_edges(offset: Pixels, maximum: Pixels) -> (bool, bool) {
-        crate::scroll_layer::vertical_edges(offset, maximum)
+        (maximum > px(1.) && -offset > px(1.), maximum > px(1.) && maximum + offset > px(1.))
     }
 
     fn scroll_content_mask(
@@ -4357,9 +4342,8 @@ impl Interactivity {
                             && Self::vertical_scroll_edges(old_scroll_offset.y, scroll_max.y)
                                 != Self::vertical_scroll_edges(scroll_offset.y, scroll_max.y);
                         drop(scroll_offset);
-                        // A layer moves its edge fades with the step.
-                        let moved = layer.is_some_and(|key| {
-                            window.scroll_layer_step(key, current_view, new_edges, cx)
+                        let moved = !new_edges && layer.is_some_and(|key| {
+                            window.scroll_layer_step(key, current_view, cx)
                         });
                         if !moved {
                             cx.notify(current_view);

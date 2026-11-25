@@ -361,11 +361,6 @@ impl Case {
             "frame_over_4ms": frames.iter().filter(|ms| **ms > MAIN_SLICE_MS).count(),
             "cadence_120hz": cadence_120(&frame).to_json(),
             "within_pacing": self.within_pacing(),
-            // `PM_UI_LATENCY_STEPS=1`: every step's instructions, in order
-            // (which step of a gesture is the slow one).
-            "steps_minstr": std::env::var_os("PM_UI_LATENCY_STEPS").map(|_| {
-                self.samples.iter().map(|s| s.main_minstr).collect::<Vec<_>>()
-            }),
             "extra": Value::Object(self.extra.clone()),
         })
     }
