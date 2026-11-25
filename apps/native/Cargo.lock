@@ -4918,7 +4918,7 @@ dependencies = [
  "flate2",
  "libc",
  "pm-aero-core",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
