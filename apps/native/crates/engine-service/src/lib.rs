@@ -2227,6 +2227,7 @@ struct Flight {
     submission: render::Submission,
     /// The completion callback has run, even if the drawable has yet to present.
     gpu_done: bool,
+    drag_bytes: Option<u64>,
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
@@ -2250,20 +2251,28 @@ impl Flight {
         FlightSlot {
             viewer: self.id,
             done: self.gpu_done,
-            drag_bytes: (self.spec.moment == Moment::Scrub && !self.spec.exact)
-                .then(|| self.spec.render_size())
-                .and_then(|size| drag_working_bytes(self.spec.output, size.width, size.height)),
+            drag_bytes: self.drag_bytes,
         }
     }
 }
 
 /// Keep the two overlapping working sets within this allowance. Charge
-/// four RGBA16F working targets and one output per device pixel. Cropped
-/// work can allocate on the larger logical canvas, so it still flies solo.
+/// four working targets at the project's precision and one RGBA16F output
+/// per pixel. A cropped frame can allocate on its larger canvas.
 const DRAG_WORKING_BUDGET: u64 = 640 << 20;
 
-fn drag_working_bytes(output: Output, width: u32, height: u32) -> Option<u64> {
-    (!output.is_zoomed()).then(|| u64::from(width) * u64::from(height) * (5 * 8))
+fn drag_working_bytes(output: Output, width: u32, height: u32, working_bpp: u64) -> Option<u64> {
+    (!output.is_zoomed()).then(|| u64::from(width) * u64::from(height) * (4 * working_bpp + 8))
+}
+
+fn drag_working_pixel_bytes(doc: &pm_model::Document) -> u64 {
+    match doc
+        .root()
+        .and_then(|root| pm_render::composite::project_color(root).ok())
+    {
+        Some(color) if color.precision == pm_protocol::color::Precision::Float32 => 16,
+        _ => 8, // Even eight-bit delivery renders into floating-point targets.
+    }
 }
 
 fn layer_drag_bytes(view: &View, runtime: &Runtime, now: f64) -> Option<u64> {
@@ -2272,7 +2281,14 @@ fn layer_drag_bytes(view: &View, runtime: &Runtime, now: f64) -> Option<u64> {
         && !view.capture
         && runtime.refine_at.is_none_or(|at| at > now))
     .then_some(view.config.output)
-    .and_then(|out| drag_working_bytes(out, out.width, out.height))
+    .and_then(|out| {
+        let doc = &view
+            .transient_snapshot
+            .as_ref()
+            .unwrap_or(&view.config.snapshot)
+            .document;
+        drag_working_bytes(out, out.width, out.height, drag_working_pixel_bytes(doc))
+    })
 }
 
 /// An uncropped layer drag can start its next frame while the prior one
@@ -4377,6 +4393,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             settled: spec.final_picture(&scene),
                             submission: s,
                             gpu_done: false,
+                            drag_bytes: (spec.moment == Moment::Scrub && !spec.exact)
+                                .then(|| spec.render_size())
+                                .and_then(|size| {
+                                    drag_working_bytes(
+                                        spec.output,
+                                        size.width,
+                                        size.height,
+                                        drag_working_pixel_bytes(&scene.doc),
+                                    )
+                                }),
                             input,
                             audio_host,
                             pipeline,
@@ -4926,10 +4952,12 @@ mod worker_tests {
         let first = slot(1, false);
         assert!(!has_render_slot([first].into_iter(), 1, false, None));
         assert!(!has_render_slot([first].into_iter(), 1, false, Some(1)));
-        for (width, height, fits) in [
-            (2000, 1120, true), // 1000 × 560 pt at 2×
-            (3840, 2160, true),
-            (5120, 2880, false),
+        for (width, height, working_bpp, fits) in [
+            (2000, 1120, 8, true), // 1000 × 560 pt at 2×
+            (2000, 1120, 16, true),
+            (3840, 2160, 8, true),
+            (3840, 2160, 16, false),
+            (5120, 2880, 8, false),
         ] {
             let output = Output {
                 width,
@@ -4938,7 +4966,7 @@ mod worker_tests {
                 display: 1,
                 crop: None,
             };
-            let drag_bytes = drag_working_bytes(output, width, height);
+            let drag_bytes = drag_working_bytes(output, width, height, working_bpp);
             let drag = FlightSlot {
                 drag_bytes,
                 ..first
@@ -4966,6 +4994,7 @@ mod worker_tests {
                     },
                     width,
                     height,
+                    working_bpp,
                 )
                 .is_none()
             );
