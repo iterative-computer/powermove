@@ -3044,6 +3044,13 @@ impl Window {
         self.rendered_frame.scene.quads.clone()
     }
 
+    /// The filter and opacity groups in the most recently rendered frame's
+    /// scene (tests), as [`Self::painted_quads`].
+    #[cfg(any(test, feature = "headless-support"))]
+    pub fn painted_filter_boundaries(&self) -> Vec<crate::FilterBoundary> {
+        self.rendered_frame.scene.filter_boundaries.clone()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);

@@ -866,3 +866,137 @@ fn a_driven_layer_with_nothing_to_scroll_still_replays_its_owners_steps(cx: &mut
     vcx.run_until_parked();
     assert_eq!(staged.borrow().paints, paints, "not painted again");
 }
+
+/// A Project grid of missing-media tiles: each a rounded tile that clips,
+/// grey, with its red-brown tint over it (an absolutely placed fill drawn
+/// at an opacity).
+struct Tiles {
+    handle: ScrollHandle,
+    layer: bool,
+}
+impl Render for Tiles {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let tile = |i: usize| {
+            div().flex_none().h(px(70.)).w_full().p(px(5.)).child(
+                div()
+                    .id(("tile", i))
+                    .relative()
+                    .overflow_hidden()
+                    .rounded(px(8.))
+                    .w(px(80.))
+                    .h(px(60.))
+                    .bg(rgb(0x2a2a2a))
+                    .child(div().absolute().inset_0().bg(rgb(0x5a2a20)).opacity(0.6)),
+            )
+        };
+        div()
+            .id("tiles")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .when(self.layer, |d| d.scroll_layer())
+            .children((0..20).map(tile))
+    }
+}
+
+/// Every quad drawn, in device pixels: bounds, clip and colour.
+fn scene(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|window, _| {
+        let mut quads: Vec<String> = window
+            .painted_quads()
+            .into_iter()
+            .map(|q| {
+                // A clip's shape matters only where it rounds corners.
+                let m = &q.content_mask;
+                let rounded = m.corner_radii.top_left.0 > 0.
+                    || m.corner_radii.top_right.0 > 0.
+                    || m.corner_radii.bottom_right.0 > 0.
+                    || m.corner_radii.bottom_left.0 > 0.;
+                let shape = rounded.then(|| format!("{:?} {:?}", m.shape, m.corner_radii));
+                format!(
+                    "{:?} clip {:?} fade {:?} {shape:?} radii {:?} {:?}",
+                    q.bounds, m.bounds, m.fade_out, q.corner_radii, q.background
+                )
+            })
+            .collect();
+        quads.extend(window.painted_filter_boundaries().into_iter().map(|b| {
+            format!(
+                "group {:?} clip {:?} opacity {} start {}",
+                b.bounds, b.content_mask.bounds, b.opacity, b.is_start
+            )
+        }));
+        quads.sort();
+        quads
+    })
+}
+
+/// The tiles in a window of their own, drawn at `offset` as a plain
+/// scroller: the picture each replayed step must reproduce.
+fn plain_tiles(cx: &mut TestAppContext, offset: Point<Pixels>) -> Vec<String> {
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| Tiles {
+            handle: handle.clone(),
+            layer: false,
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    handle.set_offset(offset);
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    scene(&mut vcx)
+}
+
+/// PM-710 on screen: an upward flick over the Project grid's missing-media
+/// tiles replays each step exactly as a plain draw at its offset draws the
+/// tiles, their tint included (it was drawn about 40 pt off its tile).
+#[gpui::test]
+fn an_upward_flick_replays_missing_media_tiles_as_drawn(cx: &mut TestAppContext) {
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| Tiles {
+            handle: handle.clone(),
+            layer: true,
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    // Down the grid, then settled: drawn in full there.
+    wheel(&mut vcx, -150.);
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    for dy in [25.5, 18.3, 12.1, 7.7, 3.2, 1.4] {
+        wheel(&mut vcx, dy);
+        let offset = handle.offset();
+        let (replayed, plain) = (scene(&mut vcx), plain_tiles(cx, offset));
+        let only = |a: &Vec<String>, b: &Vec<String>| -> Vec<String> {
+            a.iter().filter(|q| !b.contains(q)).cloned().collect()
+        };
+        assert_eq!(
+            (only(&replayed, &plain), only(&plain, &replayed)),
+            (vec![], vec![]),
+            "a step of {dy} up, at {offset:?}: replayed as a plain draw draws it"
+        );
+    }
+}

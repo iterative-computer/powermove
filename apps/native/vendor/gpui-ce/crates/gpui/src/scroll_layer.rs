@@ -196,6 +196,14 @@ impl ScrollLayer {
             ),
         );
         self.ops.iter().filter_map(move |op| match op {
+            // An opacity group spans the window, not its content (the
+            // viewport, `Window::with_element_opacity`): a plain draw places it
+            // there at any offset. Moved with the content it cut off what it
+            // groups by the step (PM-710 on screen: a missing-media tile's
+            // tint drew from partway down its tile).
+            PaintOperation::Primitive(Primitive::FilterBoundary(b)) if b.filters.is_empty() => {
+                Some(op.clone())
+            }
             PaintOperation::Primitive(primitive) => {
                 let mut primitive = primitive.clone();
                 shift(&mut primitive, delta);
