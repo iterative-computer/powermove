@@ -1,5 +1,7 @@
-// Powermove notice: modified from upstream fx (patch P-PANIC): the prompt
-// worker starts in its runtime's panic context (core/shared/panic_context.zig).
+// Powermove notice: modified from upstream fx (patches P-PANIC, P-STOP): the
+// prompt worker starts in its runtime's panic context
+// (core/shared/panic_context.zig), and an embedder's lifecycle hooks
+// (Config.host_hooks) are registered before the hook runtime freezes.
 const std = @import("std");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const managed_execution = @import("../core/execution/managed_execution.zig");
@@ -1147,6 +1149,11 @@ pub fn runWithTransport(
     }
 
     var lifecycle_runtime = hooks.Runtime.init(alloc);
+    // Powermove (P-STOP, P-PRETOOL): the embedder's handlers, before freezing.
+    if (cfg.host_hooks) |registrar| registrar.register(&lifecycle_runtime) catch |err| {
+        lifecycle_runtime.deinit();
+        return err;
+    };
     const lifecycle_view = lifecycle_runtime.freeze();
     var state = ServerState{
         .alloc = alloc,

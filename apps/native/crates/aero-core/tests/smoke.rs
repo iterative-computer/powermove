@@ -37,7 +37,7 @@ fn a_prompt_streams_typed_text_to_turn_end() {
         let start = driver
             .seen
             .iter()
-            .position(|e| matches!(e, Seen::TurnStart { turn: t, message_id } if *t == turn && message_id == "prompt-1"))
+            .position(|e| matches!(e, Seen::TurnStart { turn: t, message_id, .. } if *t == turn && message_id == "prompt-1"))
             .expect("TURN_START");
         let text = driver
             .seen

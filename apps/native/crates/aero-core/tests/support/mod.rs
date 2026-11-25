@@ -201,6 +201,9 @@ pub enum Reply {
     Hold,
     /// The loopback fake server answers (the smoke test's path).
     Server,
+    /// A 200 whose body arrives in these pieces, `gap` apart; it stops when
+    /// the core retires the fetch.
+    Chunks(Vec<String>, Duration),
 }
 
 pub type Model = Arc<dyn Fn(&ModelCall) -> Reply + Send + Sync>;
@@ -212,6 +215,36 @@ pub fn sse_text(text: &str) -> String {
          data: {{\"type\":\"finish\",\"finishReason\":{{\"unified\":\"stop\",\"raw\":\"stop\"}},\"usage\":{{\"inputTokens\":{{\"total\":1}},\"outputTokens\":{{\"total\":1}}}}}}\n\n\
          data: [DONE]\n\n",
         json_string(text)
+    )
+}
+
+/// Gateway SSE pieces: one text delta per piece, then the finish.
+pub fn sse_pieces(pieces: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = pieces
+        .iter()
+        .map(|piece| {
+            format!(
+                "data: {{\"type\":\"text-delta\",\"id\":\"0\",\"delta\":{}}}\n\n",
+                json_string(piece)
+            )
+        })
+        .collect();
+    out.push(
+        "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"},\"usage\":{\"inputTokens\":{\"total\":1},\"outputTokens\":{\"total\":1}}}\n\n\
+         data: [DONE]\n\n"
+            .to_string(),
+    );
+    out
+}
+
+/// Gateway SSE: reasoning, then a text reply.
+pub fn sse_reasoning(reasoning: &str, text: &str) -> String {
+    format!(
+        "data: {{\"type\":\"reasoning-start\",\"id\":\"r1\"}}\n\n\
+         data: {{\"type\":\"reasoning-delta\",\"id\":\"r1\",\"delta\":{}}}\n\n\
+         data: {{\"type\":\"reasoning-end\",\"id\":\"r1\"}}\n\n{}",
+        json_string(reasoning),
+        sse_text(text)
     )
 }
 
@@ -261,6 +294,8 @@ pub enum Seen {
     Opened {
         request: u64,
         session: String,
+        resumable: bool,
+        turns: u64,
     },
     RequestDone {
         request: u64,
@@ -270,10 +305,37 @@ pub enum Seen {
     TurnStart {
         turn: u64,
         message_id: String,
+        repeated: bool,
+        resumed: bool,
     },
     Text {
         turn: u64,
         text: String,
+    },
+    Thought {
+        turn: u64,
+        text: String,
+    },
+    Usage {
+        turn: u64,
+        used: u64,
+        size: u64,
+    },
+    Recovery {
+        request: u64,
+        kind: i32,
+        text: String,
+        text2: String,
+        bytes: Vec<u8>,
+    },
+    Checkpoint {
+        request: u64,
+        at_seq: u64,
+        bytes: Vec<u8>,
+    },
+    ImagesNeeded {
+        request: u64,
+        names: Vec<String>,
     },
     ToolStart {
         turn: u64,
@@ -316,10 +378,49 @@ impl Seen {
             Event::SessionOpened {
                 request,
                 session_id,
+                resumable,
+                turns,
                 ..
             } => Seen::Opened {
                 request,
                 session: session_id.to_string(),
+                resumable,
+                turns,
+            },
+            Event::ThoughtDelta { turn, text } => Seen::Thought {
+                turn,
+                text: text.to_string(),
+            },
+            Event::Usage { turn, usage } => Seen::Usage {
+                turn,
+                used: usage.context_used,
+                size: usage.context_size,
+            },
+            Event::Recovery {
+                request,
+                kind,
+                text,
+                text2,
+                bytes,
+            } => Seen::Recovery {
+                request,
+                kind,
+                text: text.to_string(),
+                text2: text2.to_string(),
+                bytes: bytes.to_vec(),
+            },
+            Event::Checkpoint {
+                request,
+                at_seq,
+                bytes,
+            } => Seen::Checkpoint {
+                request,
+                at_seq,
+                bytes: bytes.to_vec(),
+            },
+            Event::ImagesNeeded { request, names, .. } => Seen::ImagesNeeded {
+                request,
+                names: names.iter().map(str::to_string).collect(),
             },
             Event::RequestDone {
                 request,
@@ -331,10 +432,15 @@ impl Seen {
                 message: message.to_string(),
             },
             Event::TurnStart {
-                turn, message_id, ..
+                turn,
+                message_id,
+                repeated,
+                resumed,
             } => Seen::TurnStart {
                 turn,
                 message_id: message_id.to_string(),
+                repeated,
+                resumed,
             },
             Event::TextDelta { turn, text } => Seen::Text {
                 turn,
@@ -575,6 +681,7 @@ impl Driver {
             Seen::Opened {
                 request: r,
                 session,
+                ..
             } => {
                 assert_eq!(r, request);
                 session
@@ -638,6 +745,19 @@ fn serve(
                     return;
                 }
                 push_all(remote, seen.fetch, text.as_bytes());
+                let _ = remote.fetch_finish(seen.fetch, true);
+            }
+            Reply::Chunks(pieces, gap) => {
+                if remote.fetch_status(seen.fetch, 200, None) != Ok(Outcome::Applied) {
+                    return;
+                }
+                for piece in pieces {
+                    if remote.fetch_disposition(seen.fetch) == Disposition::Retired {
+                        return;
+                    }
+                    push_all(remote, seen.fetch, piece.as_bytes());
+                    std::thread::sleep(gap);
+                }
                 let _ = remote.fetch_finish(seen.fetch, true);
             }
             Reply::Server => {

@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-EVENTS): with
+// Config.host_event_sink, context usage goes to the sink as values.
 const std = @import("std");
 const builtin = @import("builtin");
 const io_mod = @import("../core/shared/io.zig");
@@ -2075,6 +2077,8 @@ pub fn sendActiveSessionUsageUpdate(state: *server.ServerState, alloc: Allocator
         provider_bundle.fallbackModelCapabilities(active.model),
     );
     const context_window = capabilities.context_window orelse return;
+    // Powermove (P-EVENTS): context use reaches the host as values.
+    if (state.cfg.host_event_sink) |sink| return sink.usage(used, context_window);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();

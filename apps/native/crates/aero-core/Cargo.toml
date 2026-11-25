@@ -10,3 +10,4 @@ build = "build.rs"
 
 [dependencies]
 libc = "0.2"
+sha2 = "0.10"

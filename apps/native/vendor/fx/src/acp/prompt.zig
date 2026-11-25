@@ -1,6 +1,9 @@
-// Powermove notice: modified from upstream fx (patches P-TOOLS, P-STEPS): a
-// host tool call goes to Config.host_tool_bridge when the embedder installed
-// one, and a turn the step limit ended stops as max_model_turns.
+// Powermove notice: modified from upstream fx (patches P-TOOLS, P-STEPS,
+// P-EVENTS): a host tool call goes to Config.host_tool_bridge when the
+// embedder installed one, a turn the step limit ended stops as
+// max_model_turns, and with Config.host_event_sink the updates a turn streams
+// (text, reasoning, tool cards, a joined steer) go to the sink as values
+// instead of as session/update JSON.
 const std = @import("std");
 const observation = @import("../core/agent/runtime/observation.zig");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
@@ -453,6 +456,8 @@ const AcpContext = struct {
     fn sendAgentText(self: *AcpContext, message_id: []const u8, text: []const u8) !void {
         const plain = try stripAnsiAlloc(self.alloc, text);
         defer if (plain.ptr != text.ptr) self.alloc.free(plain);
+        // Powermove (P-EVENTS): the reply reaches the host as a value.
+        if (self.state.cfg.host_event_sink) |sink| return sink.text(.reply, plain);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeAgentMessageChunk(&out.writer, message_id, plain);
@@ -521,6 +526,18 @@ const AcpContext = struct {
         const registry = self.toolRegistry();
         // A toolbox run shows as the tool it runs.
         const shown = try tool_call_presentation.shownCall(arena, call);
+        // Powermove (P-EVENTS): the card opens as a value, its input unparsed.
+        if (self.state.cfg.host_event_sink) |sink| {
+            try self.published_tool_calls.ensureUnusedCapacity(self.alloc, 1);
+            const owned_id = try self.alloc.dupe(u8, call.id);
+            errdefer self.alloc.free(owned_id);
+            try sink.toolStart(owned_id, acpToolName(shown.name));
+            self.published_tool_calls.putAssumeCapacity(
+                owned_id,
+                if (tool_presentation.isProviderSearchAlias(call.name)) .awaiting_provider_terminal else .open,
+            );
+            return owned_id;
+        }
         const mcp_identity = if (registry.lookup(shown.name) == null) self.mcpToolIdentity(arena, shown.name) else null;
         if (mcp_identity) |identity| self.rememberToolIdentity(shown.name, identity);
         const presentation = tool_call_presentation.describeToolCall(registry, arena, shown, mcp_identity);
@@ -634,6 +651,10 @@ const AcpContext = struct {
     }
 
     fn sendToolCallCompletedWithCommandResult(self: *AcpContext, tool_call_id: []const u8, result_text: ?[]const u8, command_result_json: ?[]const u8) !void {
+        if (self.state.cfg.host_event_sink) |sink| {
+            try sink.toolEnd(tool_call_id, false);
+            return self.markCardFinished(tool_call_id);
+        }
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .completed, result_text, command_result_json);
@@ -646,6 +667,10 @@ const AcpContext = struct {
     }
 
     fn sendToolCallErrorWithCommandResult(self: *AcpContext, tool_call_id: []const u8, err_text: []const u8, command_result_json: ?[]const u8) !void {
+        if (self.state.cfg.host_event_sink) |sink| {
+            try sink.toolEnd(tool_call_id, true);
+            return self.markCardFinished(tool_call_id);
+        }
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .failed, err_text, command_result_json);
@@ -2492,6 +2517,7 @@ fn acceptHostSteering(ctx: *AcpContext, taken: []const js_host_steering.Taken) !
 }
 
 fn publishSteeringReplay(ctx: *AcpContext, text: []const u8, request_id: ?jsonrpc.RequestId, input_id: ?[]const u8) !void {
+    if (ctx.state.cfg.host_event_sink) |sink| return sink.steerJoined(text, input_id);
     var message_id_storage: acp_types.MessageIdBuffer = undefined;
     const message_id = acp_types.generateMessageId(&message_id_storage);
     var update: std.Io.Writer.Allocating = .init(ctx.alloc);
@@ -3778,6 +3804,7 @@ fn pushText(raw_ctx: *anyopaque, emission: agent_runtime.TextEmission) !void {
 
 fn pushReasoningDelta(raw_ctx: *anyopaque, delta: []const u8) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+    if (ctx.state.cfg.host_event_sink) |sink| return sink.text(.thought, delta);
     var update: std.Io.Writer.Allocating = .init(ctx.alloc);
     defer update.deinit();
     try acp_types.writeAgentThoughtChunk(&update.writer, delta);

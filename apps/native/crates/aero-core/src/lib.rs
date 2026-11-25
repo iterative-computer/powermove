@@ -203,6 +203,65 @@ pub struct Tool<'a> {
     pub writes: bool,
 }
 
+/// An image as raw encoded bytes: PNG, JPEG, GIF or WebP, whose bytes must
+/// be the type `mime` names. Never base64 (P-IMAGES).
+#[derive(Clone, Copy, Debug)]
+pub struct Image<'a> {
+    pub mime: &'a str,
+    pub data: &'a [u8],
+}
+
+impl Image<'_> {
+    fn raw(&self) -> sys::fx_image {
+        sys::fx_image {
+            mime: sys::fx_str::of(self.mime),
+            data: sys::fx_bytes {
+                ptr: if self.data.is_empty() {
+                    std::ptr::null()
+                } else {
+                    self.data.as_ptr()
+                },
+                len: self.data.len(),
+            },
+        }
+    }
+}
+
+/// An image's name in the host's image store: the lowercase hex SHA-256 of
+/// its raw bytes (header, "Images").
+pub fn image_name(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// What a prompt or steer carries: text and images (copied by the core).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Input<'a> {
+    pub text: &'a str,
+    pub images: &'a [Image<'a>],
+}
+
+/// How [`Runtime::open`] opens the session: new, or from a journal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenArgs<'a> {
+    /// Empty: the core makes one.
+    pub session_id: &'a str,
+    /// The stored journal events after the checkpoint (a JSON array), or empty.
+    pub journal_json: &'a str,
+    /// The stored checkpoint ([`Event::Checkpoint`]'s bytes), or empty.
+    pub checkpoint: &'a [u8],
+    /// The host stores every prompt and steer before handing it in.
+    pub inputs_durable: bool,
+    /// The host stores every image under [`image_name`] before handing it in.
+    pub image_store: bool,
+}
+
 /// What a runtime is made with. Empty strings and zero limits pick the
 /// core's defaults (see the header).
 #[derive(Clone, Copy, Debug, Default)]
@@ -242,6 +301,27 @@ pub trait Host: Send + Sync + 'static {
     /// A journal append, borrowed for the call: copy what you keep, store it
     /// in order, and acknowledge with [`Remote::journal_ack`] once durable.
     fn journal_append(&self, _append: JournalAppend<'_>) {}
+    /// The hook questions this host answers (registered at create): the
+    /// completion gate (`stop`) and `pre_tool`. Questions of a kind it does
+    /// not take are allowed at once, without a call.
+    fn hook_kinds(&self) -> HookKinds {
+        HookKinds::default()
+    }
+    /// A hook question: answer the lease, from any thread. Dropping it
+    /// unanswered blocks a `pre_tool` call (fail closed) and lets a turn end
+    /// at `stop`. A cancelled turn's question still needs its answer.
+    fn hook(&self, question: HookLease) {
+        drop(question);
+    }
+}
+
+/// Which hook questions a [`Host`] answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HookKinds {
+    /// Before a host tool runs: allow, block, or rewrite its input.
+    pub pre_tool: bool,
+    /// Before a turn ends: allow it, or continue with a message.
+    pub stop: bool,
 }
 
 /// What the runtime's leases and teardown share.
@@ -324,6 +404,7 @@ fn drop_payload(payload: Box<dyn Any + Send>) {
 struct HostBox {
     host: Arc<dyn Host>,
     shared: Arc<Shared>,
+    kinds: HookKinds,
 }
 
 /// A tool call the core waits on. Its strings are the core's own (the
@@ -401,25 +482,58 @@ impl ToolLease {
     }
 
     /// Answers the call (text copied once) and ends the lease.
-    pub fn answer(mut self, text: &str, is_error: bool) -> Result<Answered, Error> {
+    pub fn answer(self, text: &str, is_error: bool) -> Result<Answered, Error> {
+        self.answer_with(text, &[], is_error)
+    }
+
+    /// Answers with images the model sees: raw encoded bytes (PNG, JPEG,
+    /// GIF or WebP), never base64 on this side. A malformed image is
+    /// `Err(Invalid)`, which still ends the lease (the call is answered with
+    /// an error); images past the core's bounds are `TooLarge` (the model
+    /// reads that they were).
+    pub fn answer_with(
+        mut self,
+        text: &str,
+        images: &[Image<'_>],
+        is_error: bool,
+    ) -> Result<Answered, Error> {
         self.answered = true;
-        let result = self.send(text, is_error);
+        assert_off_main();
+        let mut result = self.send_unchecked(text, images, is_error);
+        if result == Err(Error::Invalid) && !images.is_empty() {
+            let _ = self.send_unchecked(
+                "The host tool returned an image the core cannot use.",
+                &[],
+                true,
+            );
+            result = Err(Error::Invalid);
+        }
         self.shared.lease_closed();
         result
     }
 
     fn send(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
         assert_off_main();
-        self.send_unchecked(text, is_error)
+        self.send_unchecked(text, &[], is_error)
     }
 
     /// `send` without the main-thread assertion, for the drop path, which
     /// must not panic while a panic unwinds.
-    fn send_unchecked(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
+    fn send_unchecked(
+        &self,
+        text: &str,
+        images: &[Image<'_>],
+        is_error: bool,
+    ) -> Result<Answered, Error> {
+        let raw: Vec<sys::fx_image> = images.iter().map(Image::raw).collect();
         let out = sys::fx_tool_output {
             text: sys::fx_str::of(text),
-            images: std::ptr::null(),
-            image_count: 0,
+            images: if raw.is_empty() {
+                std::ptr::null()
+            } else {
+                raw.as_ptr()
+            },
+            image_count: raw.len(),
             is_error,
         };
         // SAFETY: `out` and `text` are valid for the call; the core copies.
@@ -448,7 +562,7 @@ impl Drop for ToolLease {
         } else {
             "The host dropped this tool call without answering."
         };
-        let _ = self.send_unchecked(text, true);
+        let _ = self.send_unchecked(text, &[], true);
         self.shared.lease_closed();
     }
 }
@@ -514,6 +628,196 @@ unsafe extern "C" fn host_journal_append(ctx: *mut c_void, info: *const sys::fx_
     contain(|| host.host.journal_append(append));
 }
 
+/// What a hook question is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookKind {
+    PreTool,
+    Stop,
+}
+
+/// An answer to a hook question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookAnswer<'a> {
+    /// `pre_tool`: run the call unchanged. `stop`: end the turn.
+    Allow,
+    /// `pre_tool`: do not run it; the model reads the reason.
+    Block(&'a str),
+    /// `pre_tool`: run it with this input JSON (an object) instead.
+    Rewrite(&'a str),
+    /// `stop`: continue the turn; the model reads the message.
+    Continue(&'a str),
+}
+
+/// A hook question the core waits on (header rule 9): its strings are the
+/// core's, valid on any thread until the lease is answered.
+pub struct HookLease {
+    shared: Arc<Shared>,
+    question: u64,
+    kind: HookKind,
+    turn: u64,
+    call: u64,
+    name: sys::fx_str,
+    input_json: sys::fx_str,
+    final_text: sys::fx_str,
+    continuations: u32,
+    answered: bool,
+}
+
+// SAFETY: as ToolLease: the core keeps the strings valid until the answer,
+// which takes the lease by value.
+unsafe impl Send for HookLease {}
+
+impl fmt::Debug for HookLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HookLease")
+            .field("question", &self.question)
+            .field("kind", &self.kind)
+            .field("turn", &self.turn)
+            .finish()
+    }
+}
+
+impl HookLease {
+    pub fn question(&self) -> u64 {
+        self.question
+    }
+    pub fn kind(&self) -> HookKind {
+        self.kind
+    }
+    pub fn turn(&self) -> u64 {
+        self.turn
+    }
+    /// `pre_tool`: the id the call gets if it runs ([`ToolLease::call`]).
+    pub fn call(&self) -> u64 {
+        self.call
+    }
+    /// `pre_tool`: the tool's name.
+    pub fn name(&self) -> &str {
+        str_in(self, self.name)
+    }
+    /// `pre_tool`: the input the tool would get, as the core holds it.
+    pub fn input_json(&self) -> &str {
+        str_in(self, self.input_json)
+    }
+    /// `stop`: the reply the model ended with.
+    pub fn final_text(&self) -> &str {
+        str_in(self, self.final_text)
+    }
+    /// `stop`: how many times this turn was continued already.
+    pub fn continuations(&self) -> u32 {
+        self.continuations
+    }
+    pub fn remote(&self) -> Remote {
+        Remote {
+            handle: self.shared.handle(),
+        }
+    }
+
+    /// Answers the question (text copied) and ends the lease. An answer the
+    /// question does not take (`Continue` to `pre_tool`, rewritten input
+    /// that is not a JSON object) is `Err(Invalid)` and the lease stays
+    /// open: answer again.
+    pub fn answer(mut self, answer: HookAnswer<'_>) -> Result<Answered, (HookLease, Error)> {
+        assert_off_main();
+        match self.send(answer) {
+            Ok(answered) => {
+                self.answered = true;
+                self.shared.lease_closed();
+                Ok(answered)
+            }
+            Err(Error::Invalid) => Err((self, Error::Invalid)),
+            Err(error) => {
+                // Nothing on this runtime can take it any more.
+                self.answered = true;
+                self.shared.lease_closed();
+                Err((self, error))
+            }
+        }
+    }
+
+    fn send(&self, answer: HookAnswer<'_>) -> Result<Answered, Error> {
+        let (kind, text) = match answer {
+            HookAnswer::Allow => (sys::FX_ANSWER_ALLOW, ""),
+            HookAnswer::Block(text) => (sys::FX_ANSWER_BLOCK, text),
+            HookAnswer::Rewrite(text) => (sys::FX_ANSWER_REWRITE, text),
+            HookAnswer::Continue(text) => (sys::FX_ANSWER_CONTINUE, text),
+        };
+        // SAFETY: text is valid for the call; the core copies it.
+        let status = retry_busy(|| unsafe {
+            sys::fx_hook_answer(
+                self.shared.handle(),
+                self.question,
+                kind,
+                sys::fx_str::of(text),
+            )
+        });
+        match status {
+            sys::FX_OK => Ok(Answered::Applied),
+            sys::FX_STALE => Ok(Answered::Stale),
+            other => Err(check(other).err().unwrap_or(Error::Unknown(other))),
+        }
+    }
+}
+
+impl Drop for HookLease {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        // Never leave the core waiting. A gate that failed fails closed for
+        // a tool call and lets the turn end.
+        let answer = match self.kind {
+            HookKind::PreTool => HookAnswer::Block("The host's pre_tool check failed."),
+            HookKind::Stop => HookAnswer::Allow,
+        };
+        let _ = self.send(answer);
+        self.shared.lease_closed();
+    }
+}
+
+unsafe extern "C" fn host_hook(
+    ctx: *mut c_void,
+    info: *const sys::fx_hook_question,
+) -> sys::fx_hook_verdict {
+    // SAFETY: as host_tool_call; info is valid for the callback and its
+    // strings for the lease.
+    let (host, info) = unsafe { (&*(ctx as *const HostBox), &*info) };
+    let kind = match info.kind {
+        sys::FX_HOOK_PRE_TOOL => HookKind::PreTool,
+        sys::FX_HOOK_STOP => HookKind::Stop,
+        _ => return sys::FX_HOOK_ALLOW,
+    };
+    let wanted = match kind {
+        HookKind::PreTool => host.kinds.pre_tool,
+        HookKind::Stop => host.kinds.stop,
+    };
+    if !wanted {
+        return sys::FX_HOOK_ALLOW;
+    }
+    let mut lease = HookLease {
+        shared: host.shared.clone(),
+        question: info.question,
+        kind,
+        turn: info.turn,
+        call: info.call,
+        name: info.name,
+        input_json: info.input_json,
+        final_text: info.final_text,
+        continuations: info.continuations,
+        answered: false,
+    };
+    if !host.shared.lease_opened() {
+        // Teardown has started: answer at once, without the host.
+        lease.answered = true;
+        return sys::FX_HOOK_ALLOW;
+    }
+    // A panic stops at `contain`; the lease, dropped while unwinding,
+    // answers the question. An answer from inside the call wins over the
+    // PENDING returned here (header rule 1).
+    contain(|| host.host.hook(lease));
+    sys::FX_HOOK_PENDING
+}
+
 /// Why a turn ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
@@ -575,11 +879,16 @@ pub enum Event<'a> {
         request: u64,
         session_id: &'a str,
         journaled: bool,
+        /// A turn the crash left open can resume ([`Runtime::resume`]).
         resumable: bool,
+        /// Turns in the session's history.
+        turns: u64,
     },
     ImagesNeeded {
         request: u64,
         count: usize,
+        /// Every missing image's name.
+        names: Names<'a>,
     },
     RequestDone {
         request: u64,
@@ -673,10 +982,20 @@ impl<'a> Event<'a> {
                 session_id: text,
                 journaled: event.flags & sys::FX_OPENED_JOURNALED != 0,
                 resumable: event.flags & sys::FX_OPENED_RESUMABLE != 0,
+                turns: event.id,
             },
             sys::FX_EVENT_IMAGES_NEEDED => Event::ImagesNeeded {
                 request: event.request,
                 count: event.name_count,
+                names: Names {
+                    names: if event.name_count == 0 || event.names.is_null() {
+                        &[]
+                    } else {
+                        // SAFETY: the core hands out `name_count` strings,
+                        // borrowed as long as the event.
+                        unsafe { std::slice::from_raw_parts(event.names, event.name_count) }
+                    },
+                },
             },
             sys::FX_EVENT_REQUEST_DONE => Event::RequestDone {
                 request: event.request,
@@ -753,6 +1072,25 @@ impl<'a> Event<'a> {
             },
             kind => Event::Unknown { kind },
         }
+    }
+}
+
+/// Image names an event carries, borrowed as long as the event.
+#[derive(Clone, Copy, Debug)]
+pub struct Names<'a> {
+    names: &'a [sys::fx_str],
+}
+
+impl PartialEq for Names<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl<'a> Names<'a> {
+    pub fn iter(&self) -> impl Iterator<Item = &'a str> + 'a {
+        let names = self.names;
+        names.iter().map(move |name| str_in(names, *name))
     }
 }
 
@@ -1039,6 +1377,7 @@ impl Runtime {
             flags: 0,
         };
         let journaled = host.journaled();
+        let kinds = host.hook_kinds();
         let callbacks = sys::fx_host {
             struct_size: std::mem::size_of::<sys::fx_host>() as u32,
             reserved: 0,
@@ -1057,7 +1396,11 @@ impl Runtime {
             } else {
                 None
             },
-            hook: None,
+            hook: if kinds.pre_tool || kinds.stop {
+                Some(host_hook)
+            } else {
+                None
+            },
         };
         let shared = Arc::new(Shared {
             handle: std::sync::atomic::AtomicU64::new(0),
@@ -1067,6 +1410,7 @@ impl Runtime {
         let host = Box::into_raw(Box::new(HostBox {
             host,
             shared: shared.clone(),
+            kinds,
         }));
         let mut handle = 0u64;
         // SAFETY: every pointer is valid for the call; the core copies cfg
@@ -1137,18 +1481,67 @@ impl Runtime {
     /// Opens the runtime's new session. Answered by
     /// [`Event::SessionOpened`] or [`Event::RequestDone`] with the request id.
     pub fn open_session(&mut self, session_id: &str) -> Result<u64, Error> {
+        self.open(&OpenArgs {
+            session_id,
+            ..OpenArgs::default()
+        })
+    }
+
+    /// Opens the session, new or from a journal (a journaled host only).
+    /// A journal reports what it found as [`Event::Recovery`] before
+    /// [`Event::SessionOpened`]; one that names images the core does not
+    /// hold ends with [`Event::ImagesNeeded`]: stage them with
+    /// [`Runtime::stage_images`], then open again with the same arguments.
+    pub fn open(&mut self, args: &OpenArgs<'_>) -> Result<u64, Error> {
         assert_off_main();
-        let args = sys::fx_session_open_args {
+        let raw = sys::fx_session_open_args {
             struct_size: std::mem::size_of::<sys::fx_session_open_args>() as u32,
-            flags: 0,
-            session_id: sys::fx_str::of(session_id),
-            journal_json: sys::fx_str::EMPTY,
-            checkpoint: sys::fx_bytes::EMPTY,
+            flags: if args.inputs_durable {
+                sys::FX_OPEN_INPUTS_DURABLE
+            } else {
+                0
+            } | if args.image_store {
+                sys::FX_OPEN_IMAGE_STORE
+            } else {
+                0
+            },
+            session_id: sys::fx_str::of(args.session_id),
+            journal_json: sys::fx_str::of(args.journal_json),
+            checkpoint: sys::fx_bytes {
+                ptr: if args.checkpoint.is_empty() {
+                    std::ptr::null()
+                } else {
+                    args.checkpoint.as_ptr()
+                },
+                len: args.checkpoint.len(),
+            },
         };
         let mut request = 0u64;
-        // SAFETY: args and request are valid for the call; the core copies.
+        // SAFETY: raw and request are valid for the call; the core copies.
         applied(retry_busy(|| unsafe {
-            sys::fx_session_open(self.handle(), &args, &mut request)
+            sys::fx_session_open(self.handle(), &raw, &mut request)
+        }))?;
+        Ok(request)
+    }
+
+    /// Stages one batch of images an open named, `(name, raw bytes)`.
+    /// Answered by [`Event::RequestDone`].
+    pub fn stage_images(&mut self, images: &[(&str, &[u8])]) -> Result<u64, Error> {
+        assert_off_main();
+        let raw: Vec<sys::fx_named_bytes> = images
+            .iter()
+            .map(|(name, bytes)| sys::fx_named_bytes {
+                name: sys::fx_str::of(name),
+                bytes: sys::fx_bytes {
+                    ptr: bytes.as_ptr(),
+                    len: bytes.len(),
+                },
+            })
+            .collect();
+        let mut request = 0u64;
+        // SAFETY: valid for the call; the core copies.
+        applied(retry_busy(|| unsafe {
+            sys::fx_session_stage_images(self.handle(), raw.as_ptr(), raw.len(), &mut request)
         }))?;
         Ok(request)
     }
@@ -1156,40 +1549,72 @@ impl Runtime {
     /// Starts a turn; returns its id, which its events carry. A refused
     /// prompt is an error, never a turn id.
     pub fn prompt(&mut self, text: &str, message_id: &str) -> Result<u64, Error> {
+        self.prompt_input(&Input { text, images: &[] }, message_id)
+    }
+
+    /// Starts a turn with text and images. A retry with the id of the turn
+    /// that ended last runs nothing ([`Event::TurnStart`] `repeated`); the
+    /// open turn's id after a crash continues it.
+    pub fn prompt_input(&mut self, input: &Input<'_>, message_id: &str) -> Result<u64, Error> {
         assert_off_main();
-        let input = sys::fx_input {
-            text: sys::fx_str::of(text),
-            images: std::ptr::null(),
-            image_count: 0,
-        };
+        let images: Vec<sys::fx_image> = input.images.iter().map(Image::raw).collect();
+        let raw = raw_input(input, &images);
         let mut turn = 0u64;
         // SAFETY: valid for the call; the core copies.
         applied(retry_busy(|| unsafe {
-            sys::fx_turn_prompt(
-                self.handle(),
-                &input,
-                sys::fx_str::of(message_id),
-                &mut turn,
-            )
+            sys::fx_turn_prompt(self.handle(), &raw, sys::fx_str::of(message_id), &mut turn)
         }))?;
         Ok(turn)
     }
 
+    /// Continues the turn a crash left open ([`Event::SessionOpened`]
+    /// `resumable`). A call it left running is not run again.
+    pub fn resume(&mut self) -> Result<u64, Error> {
+        assert_off_main();
+        let mut turn = 0u64;
+        // SAFETY: valid for the call.
+        applied(retry_busy(|| unsafe {
+            sys::fx_turn_resume(self.handle(), &mut turn)
+        }))?;
+        Ok(turn)
+    }
+
+    /// Asks for a checkpoint of the journaled session: [`Event::Checkpoint`]
+    /// or [`Event::RequestDone`] with an error.
+    pub fn checkpoint(&mut self) -> Result<u64, Error> {
+        assert_off_main();
+        let mut request = 0u64;
+        // SAFETY: valid for the call.
+        applied(retry_busy(|| unsafe {
+            sys::fx_checkpoint(self.handle(), &mut request)
+        }))?;
+        Ok(request)
+    }
+
     /// Steers running turn `turn` with text.
     pub fn steer(&mut self, turn: u64, text: &str, message_id: &str) -> Result<Steered, Error> {
+        self.steer_input(turn, &Input { text, images: &[] }, message_id)
+    }
+
+    /// Steers with text and images. A steer with images never joins: the
+    /// turn ends at its next safe point and it comes back as
+    /// [`Event::SteerReturned`], to be sent as a prompt.
+    pub fn steer_input(
+        &mut self,
+        turn: u64,
+        input: &Input<'_>,
+        message_id: &str,
+    ) -> Result<Steered, Error> {
         assert_off_main();
-        let input = sys::fx_input {
-            text: sys::fx_str::of(text),
-            images: std::ptr::null(),
-            image_count: 0,
-        };
+        let images: Vec<sys::fx_image> = input.images.iter().map(Image::raw).collect();
+        let raw = raw_input(input, &images);
         let mut request = 0u64;
         // SAFETY: valid for the call; the core copies.
         match applied(retry_busy(|| unsafe {
             sys::fx_turn_steer(
                 self.handle(),
                 turn,
-                &input,
+                &raw,
                 sys::fx_str::of(message_id),
                 &mut request,
             )
@@ -1232,6 +1657,18 @@ impl Runtime {
     #[doc(hidden)]
     pub fn arm_fault(&self, point: u32, skip: u32) -> Result<(), Error> {
         self.remote().arm_fault(point, skip)
+    }
+}
+
+fn raw_input(input: &Input<'_>, images: &[sys::fx_image]) -> sys::fx_input {
+    sys::fx_input {
+        text: sys::fx_str::of(input.text),
+        images: if images.is_empty() {
+            std::ptr::null()
+        } else {
+            images.as_ptr()
+        },
+        image_count: images.len(),
     }
 }
 

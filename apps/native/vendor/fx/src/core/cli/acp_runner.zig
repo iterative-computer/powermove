@@ -1,5 +1,7 @@
-// Powermove notice: modified from upstream fx (patch P-TOOLS): Config gains
-// host_tool_bridge (core/tooling/host_tool_bridge.zig).
+// Powermove notice: modified from upstream fx (patches P-TOOLS, P-EVENTS,
+// P-STOP): Config gains host_tool_bridge (core/tooling/host_tool_bridge.zig),
+// host_event_sink (core/hosts/host_event_sink.zig) and host_hooks
+// (core/hooks/host_hooks.zig).
 const std = @import("std");
 const config_runtime = @import("../config/config_runtime.zig");
 const process_provider = @import("../execution/process_provider.zig");
@@ -79,6 +81,12 @@ pub const Config = struct {
     /// Powermove (P-TOOLS): host tool calls go to this executor directly
     /// instead of as `libfx/tool_call` requests. Null keeps the ACP path.
     host_tool_bridge: ?@import("../tooling/host_tool_bridge.zig").Bridge = null,
+    /// Powermove (P-EVENTS): the session updates a turn streams go to this
+    /// typed sink instead of as `session/update` frames. Null keeps ACP.
+    host_event_sink: ?@import("../hosts/host_event_sink.zig").Sink = null,
+    /// Powermove (P-STOP, P-PRETOOL): registers the embedder's stop and
+    /// pre_tool handlers on the server's lifecycle hooks before they freeze.
+    host_hooks: ?@import("../hooks/host_hooks.zig").Registrar = null,
 };
 
 pub const RunFn = *const fn (?*anyopaque, Allocator, Config) anyerror!void;

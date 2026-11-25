@@ -241,7 +241,7 @@ fn outputs_strides_and_precedence() {
         }
         assert_eq!(opened, Some(request));
         // A second open is refused; withdraw and cancel of a turn that never
-        // ran are stale; the 2b calls answer Unsupported.
+        // ran are stale; resume, checkpoint and staging have nothing to act on.
         assert_eq!(runtime.open_session(""), Err(Error::State));
         assert_eq!(
             runtime.remote().cancel(42),
@@ -252,11 +252,13 @@ fn outputs_strides_and_precedence() {
         // SAFETY: valid outs.
         unsafe {
             let mut out = 9u64;
-            assert_eq!(sys::fx_turn_resume(handle, &mut out), sys::FX_E_UNSUPPORTED);
-            assert_eq!(sys::fx_checkpoint(handle, &mut out), sys::FX_E_UNSUPPORTED);
+            // No turn was left open; the session is not journaled; an
+            // empty batch stages nothing.
+            assert_eq!(sys::fx_turn_resume(handle, &mut out), sys::FX_E_STATE);
+            assert_eq!(sys::fx_checkpoint(handle, &mut out), sys::FX_E_STATE);
             assert_eq!(
                 sys::fx_session_stage_images(handle, std::ptr::null(), 0, &mut out),
-                sys::FX_E_UNSUPPORTED
+                sys::FX_E_INVALID
             );
             assert_eq!(out, 0);
             assert_eq!(

@@ -1,17 +1,23 @@
 //! Powermove notice: new file, not in upstream fx (patches P-CAPI, P-PANIC,
-//! P-TOOLS). The C ABI entry of the libfx core, beside upstream's N-API and
+//! P-TOOLS, P-EVENTS, P-IMAGES, P-STOP, P-PRETOOL). The C ABI entry of the libfx core, beside upstream's N-API and
 //! WebAssembly entries. It implements include/fx_core.h (ABI 2). The
 //! runtime, input queue, attachment table, fetch bridge and runtime slots are
 //! the N-API entry's, extracted verbatim into libfx_core_runtime.zig; the
 //! Node-API surface is replaced. The host is Rust (crate pm-aero-core), which
 //! takes the place of sdk/engine.js.
 //!
-//! The core still speaks ACP JSON-RPC for sessions, turns and their updates:
-//! the host's calls become frames on the input queue, and the frames the
-//! core writes become typed events inside its writer callback (patch
-//! P-EVENTS replaces that parse in milestone 2b). Host tool calls bypass ACP
-//! (P-TOOLS): the core calls `bridgeToolCall` with the model's input in
-//! place, and the host's answer is copied once into the call's record.
+//! The core still speaks ACP JSON-RPC for sessions and turns: the host's
+//! calls become frames on the input queue, and the core's answers come back
+//! through its writer callback. What a turn streams (text, reasoning, tool
+//! cards, usage, a joined steer) never becomes JSON: the core hands it to the
+//! typed sink (P-EVENTS, `sink*` below), and the writer drops session/update
+//! frames unparsed. Host tool calls bypass ACP (P-TOOLS): the core calls
+//! `bridgeToolCall` with the model's input in place, and the host's answer is
+//! copied once into the call's record. Images cross as raw bytes through the
+//! attachment table (prompts, staging) or straight into the tool result
+//! (P-IMAGES); the stop gate and pre_tool are lifecycle hook handlers the
+//! core calls where fx's own Stop and PreToolUse hooks run (P-STOP,
+//! P-PRETOOL).
 //!
 //! Liveness (header rules 2 and 12). Host calls take the locks core threads
 //! share only through `hostLock`, which gives up when the runtime panics or
@@ -25,6 +31,13 @@ const core = @import("libfx_core_runtime.zig");
 const panic_context = @import("core/shared/panic_context.zig");
 const host_tool_bridge = @import("core/tooling/host_tool_bridge.zig");
 const tool_dispatch = @import("core/tooling/tool_dispatch.zig");
+const host_event_sink = @import("core/hosts/host_event_sink.zig");
+const host_hooks = @import("core/hooks/host_hooks.zig");
+const hook_runtime = @import("core/hooks/runtime.zig");
+const hook_defs = @import("core/hooks/definitions.zig");
+const image_data = @import("core/images/image_data.zig");
+const session_codec = @import("core/session/session_codec.zig");
+const core_types = @import("core/shared/types.zig");
 const acp_server = core.acp_server;
 const jsonrpc = core.jsonrpc;
 const io_mod = core.io_mod;
@@ -306,7 +319,24 @@ const EventKind = enum(u32) {
 
 const FX_OPENED_JOURNALED: u32 = 1 << 0;
 const FX_OPENED_RESUMABLE: u32 = 1 << 1;
+const FX_OPENED_YIELDED: u32 = 1 << 2;
+const FX_TURN_REPEATED: u32 = 1 << 0;
+const FX_TURN_RESUMED: u32 = 1 << 1;
 const FX_EXITED_EVENTS_LOST: u32 = 1 << 0;
+
+const FX_RECOVERY_OPEN_TURN: i32 = 1;
+const FX_RECOVERY_LAST_TURN: i32 = 2;
+const FX_RECOVERY_CALL: i32 = 3;
+const FX_RECOVERY_FOLLOW_UP: i32 = 4;
+
+const FX_HOOK_PRE_TOOL: u32 = 1;
+const FX_HOOK_STOP: u32 = 2;
+const FX_HOOK_ALLOW: i32 = 0;
+const FX_HOOK_PENDING: i32 = 1;
+const FX_ANSWER_ALLOW: i32 = 0;
+const FX_ANSWER_BLOCK: i32 = 1;
+const FX_ANSWER_REWRITE: i32 = 2;
+const FX_ANSWER_CONTINUE: i32 = 3;
 
 const StopReason = enum(i32) {
     end_turn = 0,
@@ -373,6 +403,21 @@ const max_event_bytes = 16 * 1024 * 1024;
 const max_queued_events = 65536;
 const max_configured_providers_bytes = 1024 * 1024;
 const max_tool_result_limit = 16 * 1024 * 1024;
+const max_prompt_images = 8;
+const max_stage_batch = 8;
+const max_stage_batch_bytes = 8 * 1024 * 1024;
+const max_image_bytes = 8 * 1024 * 1024;
+/// The core's own bounds on what reaches a model (image_attachments.zig,
+/// image_data.zig): an image's base64 is at most 5 MiB, a prompt's raw
+/// images 6 MiB, a tool result's base64 images 8 MiB. Beyond them a call
+/// returns FX_E_TOO_LARGE, as beyond the header's FX_MAX_* limits.
+const max_model_image_bytes = image_data.max_encoded_image_bytes / 4 * 3;
+const max_prompt_images_bytes = 6 * 1024 * 1024;
+/// A hook answer's text: the core's own bounds for a block reason, a
+/// continuation and rewritten input (core/hooks/definitions.zig).
+const max_hook_reason = hook_defs.Limits.reason_bytes;
+const max_hook_context = hook_defs.Limits.context_bytes;
+const max_hook_arguments = hook_defs.Limits.arguments_json_bytes;
 const max_concurrent_tools_limit = 16;
 const busy_bound_ms = 250;
 /// How often a core thread waiting on the host re-checks cancellation and
@@ -709,8 +754,31 @@ const EventQueue = struct {
 const Pending = struct {
     kind: Kind,
     request: u64,
+    /// Inbound attachments the frame names; dropped when it is answered, so
+    /// a frame the core refused leaves nothing in the table.
+    attachments: Attachments = .{},
 
-    const Kind = enum { initialize, libfx_new, journal_open, prompt, steer, withdraw };
+    const Kind = enum { initialize, libfx_new, journal_open, prompt, steer, withdraw, handoff, journal_images, snapshot };
+};
+
+const Attachments = struct {
+    ids: [max_prompt_images]u32 = @splat(0),
+    count: u8 = 0,
+
+    fn slice(self: *const Attachments) []const u32 {
+        return self.ids[0..self.count];
+    }
+};
+
+/// A hook question the core waits on (P-STOP, P-PRETOOL); it lives on the
+/// stack of the core thread that asked, in `questions` until answered.
+const HookRecord = struct {
+    id: u64,
+    turn: u64,
+    kind: u32,
+    answered: bool = false,
+    answer: i32 = FX_ANSWER_ALLOW,
+    text: ?[]u8 = null,
 };
 
 /// A host tool call the core waits on; it lives on the stack of the core
@@ -719,8 +787,10 @@ const ToolRecord = struct {
     id: u64,
     turn: u64,
     writes: bool,
-    /// The host's answer: text copied once by fx_tool_result.
+    /// The host's answer: text copied once by fx_tool_result, and its images
+    /// (raw bytes, base64-encoded once into the core's own form, P-IMAGES).
     result: ?[]u8 = null,
+    images: ?[]core_types.ToolImage = null,
     is_error: bool = false,
     answered: bool = false,
     cancel_requested: bool = false,
@@ -729,6 +799,9 @@ const ToolRecord = struct {
 const Steer = struct {
     request: u64,
     message_id: []u8,
+    /// A steer with images: it never joins; the turn hands off at its next
+    /// safe point and the steer comes back (P-IMAGES).
+    handoff: bool = false,
 };
 
 const Tool = struct {
@@ -821,8 +894,38 @@ const Runtime = struct {
     next_call: u64 = 1,
     pending: std.AutoHashMapUnmanaged(i64, Pending) = .empty,
     session_id: ?[]u8 = null,
-    session: enum { none, opening, open } = .none,
+    /// `created`: the core holds the session but its journal is not open (an
+    /// open that met missing images, or a refused journal): open again.
+    session: enum { none, opening, created, open } = .none,
     journaled: bool = false,
+    /// The journal_open fx_session_open asked for, sent once libfx/new answers.
+    open_params: ?[]u8 = null,
+    open_attachments: Attachments = .{},
+    open_request: u64 = 0,
+    /// The session's journal names stored images (FX_OPEN_IMAGE_STORE).
+    image_store: bool = false,
+    /// Recovery (header, "Open versus resume"): the turn a crash left open,
+    /// and the message id of the turn that ended last.
+    resumable: bool = false,
+    open_turn_id: ?[]u8 = null,
+    last_turn_id: ?[]u8 = null,
+    /// The running turn's message id.
+    turn_message_id: ?[]u8 = null,
+    next_attachment: u32 = 1,
+    /// P-EVENTS: tool card names by ACP call id, for TOOL_END.
+    tool_names: std.StringHashMapUnmanaged([]u8) = .empty,
+    /// P-STOP, P-PRETOOL: questions waiting for fx_hook_answer.
+    questions: std.AutoHashMapUnmanaged(u64, *HookRecord) = .empty,
+    next_question: u64 = 1,
+    /// The stop gate's asks of the running turn.
+    stop_turn: u64 = 0,
+    stop_asks: u32 = 0,
+    /// Answers handed to the core's hook dispatch, which copies them; freed
+    /// once the turn has ended.
+    hook_texts: std.ArrayList([]u8) = .empty,
+    /// Tool call ids pre_tool asked about, by model call id: the call it
+    /// allows is made with the id its question named.
+    reserved_calls: std.StringHashMapUnmanaged(u64) = .empty,
     /// The running turn, or 0. It stays set until the turn's TURN_END is
     /// queued, so no later turn's events can come first.
     turn: u64 = 0,
@@ -1155,6 +1258,15 @@ const Runtime = struct {
                 .minimal_kernel = true,
                 .host_attachments = self.attachments.store(),
                 .host_tool_bridge = if (self.host.tool_call != null) .{ .context = self, .call_fn = bridgeToolCall } else null,
+                .host_event_sink = .{
+                    .context = self,
+                    .text_fn = sinkText,
+                    .tool_start_fn = sinkToolStart,
+                    .tool_end_fn = sinkToolEnd,
+                    .usage_fn = sinkUsage,
+                    .steer_joined_fn = sinkSteerJoined,
+                },
+                .host_hooks = if (self.host.hook != null) .{ .context = self, .register_fn = registerHooks } else null,
             },
             jsonrpc.Reader.initCallback(self, Runtime.readInput),
             jsonrpc.Writer.initCallback(self, Runtime.writeOutput),
@@ -1189,6 +1301,19 @@ const Runtime = struct {
         self.taking.deinit();
         if (self.journal_failed) |reason| alloc_c.free(reason);
         if (self.session_id) |id| alloc_c.free(id);
+        if (self.open_params) |params| alloc_c.free(params);
+        for ([_]?[]u8{ self.open_turn_id, self.last_turn_id, self.turn_message_id }) |id| if (id) |bytes| alloc_c.free(bytes);
+        var names = self.tool_names.iterator();
+        while (names.next()) |entry| {
+            alloc_c.free(entry.key_ptr.*);
+            alloc_c.free(entry.value_ptr.*);
+        }
+        self.tool_names.deinit(alloc_c);
+        self.questions.deinit(alloc_c);
+        self.freeHookTexts();
+        self.hook_texts.deinit(alloc_c);
+        self.clearReservedCalls();
+        self.reserved_calls.deinit(alloc_c);
         for (self.tools) |tool| alloc_c.free(tool.name);
         alloc_c.free(self.tools);
         alloc_c.free(self.initialize_frame);
@@ -1203,6 +1328,57 @@ const Runtime = struct {
         self.alloc.destroy(self);
     }
 
+    fn freeHookTexts(self: *Runtime) void {
+        for (self.hook_texts.items) |text| alloc_c.free(text);
+        self.hook_texts.clearRetainingCapacity();
+    }
+
+    fn clearReservedCalls(self: *Runtime) void {
+        var keys = self.reserved_calls.keyIterator();
+        while (keys.next()) |key| alloc_c.free(key.*);
+        self.reserved_calls.clearRetainingCapacity();
+    }
+
+    /// Copies `bytes` into the inbound attachment table under a new id
+    /// (`id_out`), for the frame the caller sends next. A host call; the
+    /// caller holds `lock`.
+    fn attach(self: *Runtime, bytes: []const u8, id_out: *u32) Status {
+        if (bytes.len > core.max_attachment_bytes) return FX_E_TOO_LARGE;
+        const table = &self.attachments;
+        const got = hostLock(self, &table.mutex);
+        if (got != .locked) return acquireStatus(got);
+        defer table.mutex.unlock(io_mod.getIo());
+        if (table.inbound.count() >= core.max_inbound_attachments or
+            bytes.len > core.max_inbound_attachment_bytes - table.inbound_bytes) return FX_E_TOO_LARGE;
+        var id = self.next_attachment;
+        while (table.inbound.contains(id)) id = if (id == std.math.maxInt(u32)) 1 else id + 1;
+        const owned = alloc_c.dupe(u8, bytes) catch return FX_E_OOM;
+        table.inbound.put(alloc_c, id, owned) catch {
+            alloc_c.free(owned);
+            return FX_E_OOM;
+        };
+        table.inbound_bytes += owned.len;
+        self.next_attachment = if (id == std.math.maxInt(u32)) 1 else id + 1;
+        id_out.* = id;
+        return FX_OK;
+    }
+
+    /// Drops inbound attachments a frame named, if the core did not take
+    /// them (it refused the frame, or never read it).
+    fn dropAttachments(self: *Runtime, ids: []const u32) void {
+        if (ids.len == 0) return;
+        const table = &self.attachments;
+        const io = io_mod.getIo();
+        if (tl_guard != null) {
+            if (hostLock(self, &table.mutex) != .locked) return;
+        } else table.mutex.lockUncancelable(io);
+        defer table.mutex.unlock(io);
+        for (ids) |id| if (table.inbound.fetchRemove(id)) |entry| {
+            table.inbound_bytes -= entry.value.len;
+            alloc_c.free(entry.value);
+        };
+    }
+
     // --- ids and frames -----------------------------------------------------
 
     fn nextRequest(self: *Runtime) u64 {
@@ -1211,9 +1387,13 @@ const Runtime = struct {
         return id;
     }
 
+    const Side = enum { host, core };
+
     /// Writes one request frame to the core and records what it answers.
-    /// The caller holds `lock`.
-    fn sendRequest(self: *Runtime, kind: Pending.Kind, request: u64, method: []const u8, params: []const u8) Status {
+    /// The caller holds `lock`. From a host call (`.host`) the input queue's
+    /// bound applies; a request the core's thread sends for the host
+    /// (`.core`) bypasses it.
+    fn sendRequestWith(self: *Runtime, kind: Pending.Kind, request: u64, method: []const u8, params: []const u8, attachments: Attachments, side: Side) Status {
         const rpc_id = self.next_rpc_id;
         var frame: std.Io.Writer.Allocating = .init(alloc_c);
         defer frame.deinit();
@@ -1222,15 +1402,37 @@ const Runtime = struct {
         frame.writer.writeAll(",\"params\":") catch return FX_E_OOM;
         frame.writer.writeAll(params) catch return FX_E_OOM;
         frame.writer.writeAll("}\n") catch return FX_E_OOM;
-        if (frame.written().len > core.max_input_bytes) return FX_E_TOO_LARGE;
-        self.pending.put(alloc_c, rpc_id, .{ .kind = kind, .request = request }) catch return FX_E_OOM;
-        const status = self.hostInput(frame.written(), .request);
+        if (side == .host and frame.written().len > core.max_input_bytes) return FX_E_TOO_LARGE;
+        self.pending.put(alloc_c, rpc_id, .{ .kind = kind, .request = request, .attachments = attachments }) catch return FX_E_OOM;
+        const status = switch (side) {
+            .host => self.hostInput(frame.written(), .request),
+            .core => self.coreInput(frame.written()),
+        };
         if (status != FX_OK) {
             _ = self.pending.remove(rpc_id);
             return status;
         }
         self.next_rpc_id += 1;
         return FX_OK;
+    }
+
+    fn sendRequest(self: *Runtime, kind: Pending.Kind, request: u64, method: []const u8, params: []const u8) Status {
+        return self.sendRequestWith(kind, request, method, params, .{}, .host);
+    }
+
+    /// Sends libfx/journal_open for the session with `tail` (journalOpenParams).
+    /// The caller holds `lock`.
+    fn sendJournalOpen(self: *Runtime, request: u64, tail: []const u8, attachments: Attachments, on_host: bool) Status {
+        var params: std.Io.Writer.Allocating = .init(alloc_c);
+        defer params.deinit();
+        params.writer.writeAll("{\"sessionId\":") catch return FX_E_OOM;
+        jsonrpc.writeJsonStr(self.session_id orelse "", &params.writer) catch return FX_E_OOM;
+        if (tail.len > 0) {
+            params.writer.writeByte(',') catch return FX_E_OOM;
+            params.writer.writeAll(tail) catch return FX_E_OOM;
+        }
+        params.writer.writeAll("}") catch return FX_E_OOM;
+        return self.sendRequestWith(.journal_open, request, "libfx/journal_open", params.written(), attachments, if (on_host) .host else .core);
     }
 
     /// Answers a request the core made, from a core thread or a host call.
@@ -1262,6 +1464,10 @@ const Runtime = struct {
     // --- frames from the core (core-owned threads) ---------------------------
 
     fn onFrame(self: *Runtime, frame: []const u8) !void {
+        // What a turn streams reaches the host through the typed sink; the
+        // session/update frames left (notices, recovery status) are not the
+        // host's and are dropped without a parse (P-EVENTS).
+        if (std.mem.startsWith(u8, frame, "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\"")) return;
         var arena: std.heap.ArenaAllocator = .init(alloc_c);
         defer arena.deinit();
         const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), frame, .{}) catch return;
@@ -1274,9 +1480,7 @@ const Runtime = struct {
             if (id) |rpc_id| self.onResponse(arena.allocator(), rpc_id, root.get("result"), root.get("error"));
             return;
         }
-        if (std.mem.eql(u8, method, "session/update")) {
-            if (params) |value| self.onUpdate(value);
-        } else if (std.mem.eql(u8, method, "libfx/journal_append")) {
+        if (std.mem.eql(u8, method, "libfx/journal_append")) {
             if (params) |value| self.onJournalAppend(arena.allocator(), value);
         } else if (std.mem.eql(u8, method, "libfx/journal_flush")) {
             if (id) |rpc_id| self.onJournalFlush(rpc_id);
@@ -1299,6 +1503,8 @@ const Runtime = struct {
             return;
         };
         const pending = entry.value;
+        // What the core did not take of the frame's attachments goes now.
+        self.dropAttachments(pending.attachments.slice());
         const message = errorMessage(err);
         switch (pending.kind) {
             .initialize => {
@@ -1309,8 +1515,14 @@ const Runtime = struct {
                 }
             },
             .libfx_new => {
+                const tail = self.open_params;
+                self.open_params = null;
+                defer if (tail) |owned| alloc_c.free(owned);
+                const attachments = self.open_attachments;
+                self.open_attachments = .{};
                 if (err != null) {
                     self.session = .none;
+                    self.dropAttachments(attachments.slice());
                     self.lock.unlock(io);
                     self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message }, .control);
                     return;
@@ -1319,14 +1531,13 @@ const Runtime = struct {
                 if (self.session_id) |old| alloc_c.free(old);
                 self.session_id = alloc_c.dupe(u8, session_id) catch null;
                 if (self.journaled) {
-                    var params: std.Io.Writer.Allocating = .init(arena);
-                    params.writer.writeAll("{\"sessionId\":") catch {};
-                    jsonrpc.writeJsonStr(session_id, &params.writer) catch {};
-                    params.writer.writeAll("}") catch {};
                     // The core asked for nothing: this request is ours, sent
                     // from the core's thread, so it bypasses the bound.
-                    const status = self.sendCoreRequest(.journal_open, pending.request, "libfx/journal_open", params.written());
-                    if (status != FX_OK) self.session = .none;
+                    const status = self.sendJournalOpen(pending.request, tail orelse "", attachments, false);
+                    if (status != FX_OK) {
+                        self.session = .created;
+                        self.dropAttachments(attachments.slice());
+                    }
                     self.lock.unlock(io);
                     if (status != FX_OK) self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = "could not open the journal" }, .control);
                     return;
@@ -1335,25 +1546,7 @@ const Runtime = struct {
                 self.lock.unlock(io);
                 self.queueEvent(.{ .kind = .session_opened, .request = pending.request }, .{ .text = session_id }, .control);
             },
-            .journal_open => {
-                if (err != null) {
-                    self.session = .none;
-                    self.lock.unlock(io);
-                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = message }, .control);
-                    return;
-                }
-                self.session = .open;
-                const session_id = arena.dupe(u8, self.session_id orelse "") catch "";
-                self.lock.unlock(io);
-                var flags: u32 = FX_OPENED_JOURNALED;
-                if (boolField(result, "resumable")) flags |= FX_OPENED_RESUMABLE;
-                self.queueEvent(.{
-                    .kind = .session_opened,
-                    .request = pending.request,
-                    .flags = flags,
-                    .id = @intCast(@max(0, intField(result, "turns") orelse 0)),
-                }, .{ .text = session_id }, .control);
-            },
+            .journal_open => self.onJournalOpened(arena, pending.request, result, err, message),
             .prompt => {
                 const turn = pending.request;
                 // Steers still queued when the turn ends come back first.
@@ -1362,18 +1555,22 @@ const Runtime = struct {
                     returned.append(arena, self.steers.items[0]) catch break;
                     _ = self.steers.orderedRemove(0);
                 }
+                // The core's hook dispatch copied every answer it was handed.
+                self.freeHookTexts();
+                self.clearReservedCalls();
                 self.lock.unlock(io);
                 for (returned.items) |steer| {
                     self.queueEvent(.{ .kind = .steer_returned, .turn = turn, .request = steer.request }, .{ .text2 = steer.message_id }, .control);
                     alloc_c.free(steer.message_id);
                 }
+                var reason: StopReason = .@"error";
                 if (err != null) {
                     self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
                     self.queueEvent(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.@"error") }, .{}, .control);
                 } else {
                     // The step limit arrives typed, as max_model_turns
                     // (patch P-STEPS), never read from the reply's text.
-                    const reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
+                    reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
                     self.queueEvent(.{
                         .kind = .turn_end,
                         .turn = turn,
@@ -1383,7 +1580,22 @@ const Runtime = struct {
                 }
                 // Only now may a later turn start (its TURN_START comes after).
                 self.lock.lockUncancelable(io);
-                if (self.turn == turn) self.turn = 0;
+                if (self.turn == turn) {
+                    self.turn = 0;
+                    // A turn that ended, however, is the one a retry of its
+                    // message id names ("Deduplication"); a failed or yielded
+                    // one is not.
+                    const ended = self.turn_message_id;
+                    self.turn_message_id = null;
+                    if (reason != .@"error" and reason != .yielded) {
+                        if (self.last_turn_id) |old| alloc_c.free(old);
+                        self.last_turn_id = ended;
+                    } else if (ended) |id| alloc_c.free(id);
+                    // A crash's open turn is resumed or interrupted by now.
+                    self.resumable = false;
+                    if (self.open_turn_id) |id| alloc_c.free(id);
+                    self.open_turn_id = null;
+                }
                 self.lock.unlock(io);
             },
             .steer => {
@@ -1397,6 +1609,14 @@ const Runtime = struct {
                 self.lock.unlock(io);
                 self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
             },
+            .handoff => {
+                // A steer with images: queued as the handoff; it comes back
+                // at the turn's end.
+                const status: Status = if (err == null) FX_OK else FX_E_FAILED;
+                if (err != null) self.dropSteer(pending.request);
+                self.lock.unlock(io);
+                self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
+            },
             .withdraw => {
                 var status: Status = FX_E_FAILED;
                 if (err == null) {
@@ -1406,27 +1626,85 @@ const Runtime = struct {
                 self.lock.unlock(io);
                 self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
             },
+            .journal_images => {
+                self.lock.unlock(io);
+                const status = if (err == null) FX_OK else journalErrorStatus(message);
+                self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_OK) "" else message }, .control);
+            },
+            .snapshot => {
+                self.lock.unlock(io);
+                const id = intField(result, "snapshotAttachment");
+                if (err != null or id == null or id.? <= 0 or id.? > std.math.maxInt(u32)) {
+                    const why = if (err != null) message else if (stringField(result, "skipped")) |skipped| skipped else "the session is not quiet (a turn is open or a follow-up waits)";
+                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = if (err != null) FX_E_FAILED else FX_E_STATE }, .{ .text = why }, .control);
+                    return;
+                }
+                const bytes = self.attachments.takeOutbound(@intCast(id.?)) orelse {
+                    self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = FX_E_FAILED }, .{ .text = "the core's checkpoint was not in the attachment table" }, .control);
+                    return;
+                };
+                defer alloc_c.free(bytes);
+                const at_seq: u64 = @intCast(@max(0, intField(result, "atSeq") orelse 0));
+                self.queueEvent(.{ .kind = .checkpoint, .request = pending.request, .id = at_seq }, .{ .bytes = bytes }, .control);
+            },
         }
     }
 
-    /// Sends a request from a core thread. The caller holds `lock`.
-    fn sendCoreRequest(self: *Runtime, kind: Pending.Kind, request: u64, method: []const u8, params: []const u8) Status {
-        const rpc_id = self.next_rpc_id;
-        var frame: std.Io.Writer.Allocating = .init(alloc_c);
-        defer frame.deinit();
-        frame.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":", .{rpc_id}) catch return FX_E_OOM;
-        jsonrpc.writeJsonStr(method, &frame.writer) catch return FX_E_OOM;
-        frame.writer.writeAll(",\"params\":") catch return FX_E_OOM;
-        frame.writer.writeAll(params) catch return FX_E_OOM;
-        frame.writer.writeAll("}\n") catch return FX_E_OOM;
-        self.pending.put(alloc_c, rpc_id, .{ .kind = kind, .request = request }) catch return FX_E_OOM;
-        const status = self.coreInput(frame.written());
-        if (status != FX_OK) {
-            _ = self.pending.remove(rpc_id);
-            return status;
+    /// libfx/journal_open's answer. The caller holds `lock`; this releases it.
+    fn onJournalOpened(self: *Runtime, arena: Allocator, request: u64, result: ?std.json.Value, err: ?std.json.Value, message: []const u8) void {
+        const io = io_mod.getIo();
+        if (err != null) {
+            // The core holds the session; another open may succeed.
+            self.session = .created;
+            self.lock.unlock(io);
+            self.queueEvent(.{ .kind = .request_done, .request = request, .status = journalErrorStatus(message) }, .{ .text = message }, .control);
+            return;
         }
-        self.next_rpc_id += 1;
-        return FX_OK;
+        if (arrayField(result, "imagesNeeded")) |needed| {
+            self.session = .created;
+            self.lock.unlock(io);
+            var names: std.ArrayList([]const u8) = .empty;
+            for (needed) |value| if (value == .string) names.append(arena, value.string) catch {};
+            self.queueEvent(.{ .kind = .images_needed, .request = request }, .{ .names = names.items }, .control);
+            return;
+        }
+        self.session = .open;
+        const resumable = boolField(result, "resumable");
+        const open_turn = if (resumable) stringField(result, "openTurnId") else null;
+        const last_turn = stringField(result, "lastTurnId");
+        self.resumable = resumable and open_turn != null;
+        for ([_]struct { *?[]u8, ?[]const u8 }{ .{ &self.open_turn_id, open_turn }, .{ &self.last_turn_id, last_turn } }) |slot| {
+            if (slot[0].*) |old| alloc_c.free(old);
+            slot[0].* = if (slot[1]) |id| alloc_c.dupe(u8, id) catch null else null;
+        }
+        const session_id = arena.dupe(u8, self.session_id orelse "") catch "";
+        self.lock.unlock(io);
+        // What the crash left, then the open (header, "Open versus resume").
+        const recovery = EventKind.recovery;
+        if (open_turn) |id| self.queueEvent(.{ .kind = recovery, .request = request, .code = FX_RECOVERY_OPEN_TURN }, .{ .text = id }, .control);
+        if (last_turn) |id| self.queueEvent(.{ .kind = recovery, .request = request, .code = FX_RECOVERY_LAST_TURN }, .{ .text = id }, .control);
+        if (resumable) if (arrayField(result, "runningCalls")) |calls| for (calls) |call| {
+            self.queueEvent(.{ .kind = recovery, .request = request, .code = FX_RECOVERY_CALL }, .{
+                .text = stringField(call, "name") orelse "",
+                .text2 = stringField(call, "id") orelse "",
+                .bytes = stringField(call, "arguments") orelse "",
+            }, .control);
+        };
+        if (arrayField(result, "followUps")) |follow_ups| for (follow_ups) |follow_up| {
+            self.queueEvent(.{ .kind = recovery, .request = request, .code = FX_RECOVERY_FOLLOW_UP }, .{
+                .text = stringField(follow_up, "text") orelse "",
+                .text2 = stringField(follow_up, "id") orelse "",
+            }, .control);
+        };
+        var flags: u32 = FX_OPENED_JOURNALED;
+        if (self.resumable) flags |= FX_OPENED_RESUMABLE;
+        if (boolField(result, "yielded")) flags |= FX_OPENED_YIELDED;
+        self.queueEvent(.{
+            .kind = .session_opened,
+            .request = request,
+            .flags = flags,
+            .id = @intCast(@max(0, intField(result, "turns") orelse 0)),
+        }, .{ .text = session_id }, .control);
     }
 
     /// Forgets the steer `request`. The caller holds `lock`.
@@ -1443,61 +1721,6 @@ const Runtime = struct {
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
         return self.turn;
-    }
-
-    fn onUpdate(self: *Runtime, params: std.json.Value) void {
-        if (params != .object) return;
-        const update = params.object.get("update") orelse return;
-        if (update != .object) return;
-        const kind = stringField(update, "sessionUpdate") orelse return;
-        const turn = self.currentTurn();
-        if (std.mem.eql(u8, kind, "agent_message_chunk") or std.mem.eql(u8, kind, "agent_thought_chunk")) {
-            const content = update.object.get("content") orelse return;
-            const text = stringField(content, "text") orelse return;
-            if (text.len == 0) return;
-            const thought = kind[6] == 't';
-            // engine.js drops the core's context notices from the reply.
-            if (!thought and std.mem.startsWith(u8, text, "[context]")) return;
-            self.fault(.streaming);
-            self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text }, .delta);
-        } else if (std.mem.eql(u8, kind, "user_message_chunk")) {
-            const content = update.object.get("content") orelse return;
-            const text = stringField(content, "text") orelse return;
-            const meta = update.object.get("_meta") orelse return;
-            const fx = objectField(meta, "fx") orelse return;
-            const steering = objectField(fx, "steering") orelse return;
-            const input_id = stringField(steering, "inputId") orelse "";
-            // The steer joined: it no longer comes back at the turn's end.
-            var request: u64 = 0;
-            const io = io_mod.getIo();
-            self.lock.lockUncancelable(io);
-            for (self.steers.items, 0..) |steer, index| if (std.mem.eql(u8, steer.message_id, input_id)) {
-                request = steer.request;
-                alloc_c.free(steer.message_id);
-                _ = self.steers.orderedRemove(index);
-                break;
-            };
-            self.lock.unlock(io);
-            self.queueEvent(.{ .kind = .steer_joined, .turn = turn, .request = request }, .{ .text = text, .text2 = input_id }, .control);
-        } else if (std.mem.eql(u8, kind, "tool_call")) {
-            const name = stringField(update, "name") orelse stringField(update, "toolName") orelse stringField(update, "title") orelse "tool";
-            self.queueEvent(.{ .kind = .tool_start, .turn = turn }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" }, .control);
-        } else if (std.mem.eql(u8, kind, "tool_call_update")) {
-            const status = stringField(update, "status") orelse return;
-            const failed = std.mem.eql(u8, status, "failed");
-            if (!failed and !std.mem.eql(u8, status, "completed")) return;
-            const name = stringField(update, "name") orelse stringField(update, "title") orelse "";
-            self.queueEvent(.{
-                .kind = .tool_end,
-                .turn = turn,
-                .status = if (failed) FX_E_FAILED else FX_OK,
-            }, .{ .text = name, .text2 = stringField(update, "toolCallId") orelse "" }, .control);
-        } else if (std.mem.eql(u8, kind, "usage_update")) {
-            self.queueEvent(.{ .kind = .usage, .turn = turn, .usage = .{
-                .context_used = @intCast(@max(0, intField(update, "used") orelse 0)),
-                .context_size = @intCast(@max(0, intField(update, "size") orelse 0)),
-            } }, .{}, .delta);
-        }
     }
 
     fn onJournalAppend(self: *Runtime, arena: Allocator, params: std.json.Value) void {
@@ -1551,6 +1774,257 @@ const Runtime = struct {
 const host_managed_credential = "host-managed";
 
 // ---------------------------------------------------------------------------
+// The typed event sink (P-EVENTS), on the core thread that streams
+// ---------------------------------------------------------------------------
+
+fn sinkRuntime(raw: *anyopaque) *Runtime {
+    return @ptrCast(@alignCast(raw));
+}
+
+fn sinkText(raw: *anyopaque, kind: host_event_sink.TextKind, text: []const u8) host_event_sink.Error!void {
+    const self = sinkRuntime(raw);
+    if (text.len == 0) return;
+    const thought = kind == .thought;
+    // engine.js drops the core's context notices from the reply.
+    if (!thought and std.mem.startsWith(u8, text, "[context]")) return;
+    const turn = self.currentTurn();
+    if (!thought) self.fault(.streaming);
+    self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text }, .delta);
+}
+
+fn sinkToolStart(raw: *anyopaque, call_id: []const u8, name: []const u8) host_event_sink.Error!void {
+    const self = sinkRuntime(raw);
+    self.parkIfPanicked();
+    const io = io_mod.getIo();
+    self.lock.lockUncancelable(io);
+    const turn = self.turn;
+    // The card's end names the tool too: remember it by the call's id.
+    remember: {
+        if (self.tool_names.contains(call_id)) break :remember;
+        const key = alloc_c.dupe(u8, call_id) catch break :remember;
+        const value = alloc_c.dupe(u8, name) catch {
+            alloc_c.free(key);
+            break :remember;
+        };
+        self.tool_names.put(alloc_c, key, value) catch {
+            alloc_c.free(key);
+            alloc_c.free(value);
+        };
+    }
+    self.lock.unlock(io);
+    self.queueEvent(.{ .kind = .tool_start, .turn = turn }, .{ .text = name, .text2 = call_id }, .control);
+}
+
+fn sinkToolEnd(raw: *anyopaque, call_id: []const u8, failed: bool) host_event_sink.Error!void {
+    const self = sinkRuntime(raw);
+    self.parkIfPanicked();
+    const io = io_mod.getIo();
+    self.lock.lockUncancelable(io);
+    const turn = self.turn;
+    const entry = self.tool_names.fetchRemove(call_id);
+    self.lock.unlock(io);
+    defer if (entry) |known| {
+        alloc_c.free(known.key);
+        alloc_c.free(known.value);
+    };
+    self.queueEvent(.{
+        .kind = .tool_end,
+        .turn = turn,
+        .status = if (failed) FX_E_FAILED else FX_OK,
+    }, .{ .text = if (entry) |known| known.value else "", .text2 = call_id }, .control);
+}
+
+fn sinkUsage(raw: *anyopaque, used: u64, size: u64) host_event_sink.Error!void {
+    const self = sinkRuntime(raw);
+    const turn = self.currentTurn();
+    self.queueEvent(.{ .kind = .usage, .turn = turn, .usage = .{ .context_used = used, .context_size = size } }, .{}, .delta);
+}
+
+fn sinkSteerJoined(raw: *anyopaque, text: []const u8, input_id: ?[]const u8) host_event_sink.Error!void {
+    const self = sinkRuntime(raw);
+    self.parkIfPanicked();
+    const id = input_id orelse "";
+    // The steer joined: it no longer comes back at the turn's end.
+    var request: u64 = 0;
+    const io = io_mod.getIo();
+    self.lock.lockUncancelable(io);
+    const turn = self.turn;
+    for (self.steers.items, 0..) |steer, index| if (std.mem.eql(u8, steer.message_id, id)) {
+        request = steer.request;
+        alloc_c.free(steer.message_id);
+        _ = self.steers.orderedRemove(index);
+        break;
+    };
+    self.lock.unlock(io);
+    self.queueEvent(.{ .kind = .steer_joined, .turn = turn, .request = request }, .{ .text = text, .text2 = id }, .control);
+}
+
+// ---------------------------------------------------------------------------
+// Hooks (P-STOP, P-PRETOOL), on the core thread that reaches them
+// ---------------------------------------------------------------------------
+
+fn registerHooks(raw: *anyopaque, hooks: *hook_runtime.Runtime) anyerror!void {
+    try hooks.registerPreToolUse(.{ .name = "powermove.pre_tool", .ctx = raw, .run = preToolHook });
+    try hooks.registerStop(.{ .name = "powermove.stop", .ctx = raw, .run = stopHook });
+}
+
+const Asked = struct { answer: i32, text: ?[]u8 };
+
+/// Asks the host `info` and waits for the answer: from the callback (ALLOW),
+/// or from fx_hook_answer. The question's strings are the core's, valid
+/// until this returns (the lease, header rule 9). Null when the runtime is
+/// closing; a cancelled turn's question still waits for its answer.
+fn askHost(self: *Runtime, info: *HookQuestion) ?Asked {
+    const callback = self.host.hook orelse return .{ .answer = FX_ANSWER_ALLOW, .text = null };
+    const io = io_mod.getIo();
+    var record: HookRecord = .{ .id = 0, .turn = 0, .kind = info.kind };
+    self.lock.lockUncancelable(io);
+    if (self.panicked()) {
+        self.lock.unlock(io);
+        park();
+    }
+    if (self.closing.load(.acquire)) {
+        self.lock.unlock(io);
+        return null;
+    }
+    record.id = self.next_question;
+    record.turn = self.turn;
+    self.questions.put(alloc_c, record.id, &record) catch {
+        self.lock.unlock(io);
+        return null;
+    };
+    self.next_question += 1;
+    self.lock.unlock(io);
+    defer {
+        self.lock.lockUncancelable(io);
+        _ = self.questions.remove(record.id);
+        self.lock.unlock(io);
+    }
+    info.question = record.id;
+    info.turn = record.turn;
+    if (!self.enterCallback()) return null;
+    const verdict = callback(self.host_ctx, info);
+    self.leaveCallback();
+
+    self.lock.lockUncancelable(io);
+    defer self.lock.unlock(io);
+    // Answering ALLOW from the callback consumes the question at once; an
+    // answer it already gave with fx_hook_answer wins.
+    if (!record.answered and verdict != FX_HOOK_PENDING) return .{ .answer = FX_ANSWER_ALLOW, .text = null };
+    while (!record.answered) {
+        if (self.panicked()) {
+            self.lock.unlock(io);
+            park();
+        }
+        // Destroy ends the question without an answer (rule 10).
+        if (self.closing.load(.acquire)) return null;
+        self.calls_changed.waitTimeout(io, &self.lock, pulse) catch {};
+    }
+    return .{ .answer = record.answer, .text = record.text };
+}
+
+/// Keeps `text` until the turn ends: the core's dispatch copies it after the
+/// handler returns. The caller holds no lock.
+fn keepHookText(self: *Runtime, text: []u8) []const u8 {
+    const io = io_mod.getIo();
+    self.lock.lockUncancelable(io);
+    defer self.lock.unlock(io);
+    self.hook_texts.append(alloc_c, text) catch {
+        // Kept for the process instead: a leak of one answer beats a use
+        // after free.
+    };
+    return text;
+}
+
+fn hostToolFlags(self: *const Runtime, name: []const u8) ?u32 {
+    for (self.tools) |tool| if (std.mem.eql(u8, tool.name, name)) return tool.flags;
+    return null;
+}
+
+fn preToolHook(raw: *anyopaque, input: hook_defs.PreToolUseInput) hook_defs.HandlerError!hook_defs.PreToolUseAction {
+    const self: *Runtime = @ptrCast(@alignCast(raw));
+    self.parkIfPanicked();
+    // Only the host's own tools are the host's to gate.
+    if (hostToolFlags(self, input.tool_name) == null) return .continue_;
+    const io = io_mod.getIo();
+    // The call it would make gets its id now, so the question can name it.
+    self.lock.lockUncancelable(io);
+    const call = self.next_call;
+    self.next_call += 1;
+    const key = alloc_c.dupe(u8, input.call_id) catch null;
+    if (key) |owned| {
+        if (self.reserved_calls.fetchRemove(owned)) |old| alloc_c.free(old.key);
+        self.reserved_calls.put(alloc_c, owned, call) catch alloc_c.free(owned);
+    }
+    self.lock.unlock(io);
+    var info: HookQuestion = .{
+        .kind = FX_HOOK_PRE_TOOL,
+        .question = 0,
+        .turn = 0,
+        .call = call,
+        .name = Str.of(input.tool_name),
+        .input_json = Str.of(input.arguments_json),
+        .final_text = .{},
+        .continuations = 0,
+        .reserved = 0,
+    };
+    const asked = askHost(self, &info) orelse return error.Cancelled;
+    switch (asked.answer) {
+        FX_ANSWER_BLOCK => {
+            self.lock.lockUncancelable(io);
+            if (self.reserved_calls.fetchRemove(input.call_id)) |old| alloc_c.free(old.key);
+            self.lock.unlock(io);
+            const reason = asked.text orelse return .{ .block = "The host's pre_tool check blocked this call." };
+            return .{ .block = keepHookText(self, reason) };
+        },
+        FX_ANSWER_REWRITE => return .{ .rewrite_arguments = keepHookText(self, asked.text.?) },
+        else => {
+            if (asked.text) |text| alloc_c.free(text);
+            return .continue_;
+        },
+    }
+}
+
+fn stopHook(raw: *anyopaque, input: hook_defs.StopInput) hook_defs.HandlerError!hook_defs.StopAction {
+    const self: *Runtime = @ptrCast(@alignCast(raw));
+    self.parkIfPanicked();
+    if (!input.can_continue) return .allow;
+    const io = io_mod.getIo();
+    self.lock.lockUncancelable(io);
+    if (self.stop_turn != self.turn) {
+        self.stop_turn = self.turn;
+        self.stop_asks = 0;
+    }
+    const asks = self.stop_asks;
+    // Asked at most max_stop_continuations + 1 times a turn.
+    const last = asks >= self.max_stop_continuations;
+    if (asks > self.max_stop_continuations) {
+        self.lock.unlock(io);
+        return .allow;
+    }
+    self.stop_asks += 1;
+    self.lock.unlock(io);
+    var info: HookQuestion = .{
+        .kind = FX_HOOK_STOP,
+        .question = 0,
+        .turn = 0,
+        .call = 0,
+        .name = .{},
+        .input_json = .{},
+        .final_text = Str.of(input.assistant_text),
+        .continuations = asks,
+        .reserved = 0,
+    };
+    const asked = askHost(self, &info) orelse return error.Cancelled;
+    if (asked.answer == FX_ANSWER_CONTINUE and !last) {
+        const text = asked.text orelse return .allow;
+        return .{ .continue_once = keepHookText(self, text) };
+    }
+    if (asked.text) |text| alloc_c.free(text);
+    return .allow;
+}
+
+// ---------------------------------------------------------------------------
 // Host tool calls (P-TOOLS), on the core thread that makes them
 // ---------------------------------------------------------------------------
 
@@ -1591,9 +2065,16 @@ fn bridgeToolCall(
         if (free) break;
         self.calls_changed.waitTimeout(io, &self.lock, pulse) catch {};
     }
-    record.id = self.next_call;
+    // A call pre_tool asked about keeps the id its question named.
+    record.id = if (self.reserved_calls.fetchRemove(call_id)) |reserved| id: {
+        alloc_c.free(reserved.key);
+        break :id reserved.value;
+    } else id: {
+        const id = self.next_call;
+        self.next_call += 1;
+        break :id id;
+    };
     record.turn = self.turn;
-    self.next_call += 1;
     self.calls.put(alloc_c, record.id, &record) catch {
         self.lock.unlock(io);
         return error.OutOfMemory;
@@ -1604,6 +2085,9 @@ fn bridgeToolCall(
     defer {
         self.lock.lockUncancelable(io);
         _ = self.calls.remove(record.id);
+        // An answer that landed after this thread stopped waiting.
+        if (record.result) |late| alloc_c.free(late);
+        if (record.images) |late| core_types.freeToolImages(alloc_c, late);
         self.calls_outstanding -= 1;
         if (writes) self.writer_outstanding = false;
         self.calls_changed.broadcast(io);
@@ -1652,6 +2136,8 @@ fn bridgeToolCall(
     const answered = record.answered;
     const result = record.result;
     record.result = null;
+    const images = record.images;
+    record.images = null;
     const is_error = record.is_error;
     const cancel_requested = record.cancel_requested;
     self.lock.unlock(io);
@@ -1659,7 +2145,20 @@ fn bridgeToolCall(
     const text = result orelse return error.Cancelled;
     if (!answered or cancel_requested or cancelled(cancel_flag)) {
         alloc_c.free(text);
+        if (images) |list| core_types.freeToolImages(alloc_c, list);
         return error.Cancelled;
+    }
+    if (images) |list| {
+        // Images are the core's from here, without another copy when its
+        // allocator is the C allocator.
+        if (alloc.vtable == alloc_c.vtable) return .{ .rich = .{ .text = text, .images = list, .is_error = is_error } };
+        defer {
+            alloc_c.free(text);
+            core_types.freeToolImages(alloc_c, list);
+        }
+        const owned_text = try alloc.dupe(u8, text);
+        errdefer alloc.free(owned_text);
+        return .{ .rich = .{ .text = owned_text, .images = try core_types.dupeToolImages(alloc, list), .is_error = is_error } };
     }
     // The host's text was copied once into `text`; it becomes the result
     // without another copy when the core's allocator is the C allocator.
@@ -1836,6 +2335,21 @@ fn stringField(value: ?std.json.Value, name: []const u8) ?[]const u8 {
     if (object != .object) return null;
     const field = object.object.get(name) orelse return null;
     return if (field == .string) field.string else null;
+}
+
+fn arrayField(value: ?std.json.Value, name: []const u8) ?[]const std.json.Value {
+    const object = value orelse return null;
+    if (object != .object) return null;
+    const field = object.object.get(name) orelse return null;
+    return if (field == .array) field.array.items else null;
+}
+
+/// The status a refused journal open or staging carries, by the core's
+/// exact message (as engine.js reads them).
+fn journalErrorStatus(message: []const u8) Status {
+    if (std.mem.find(u8, message, "newer fx") != null) return FX_E_UNSUPPORTED;
+    if (std.mem.find(u8, message, "too large") != null or std.mem.find(u8, message, "holds more than") != null) return FX_E_TOO_LARGE;
+    return FX_E_INVALID;
 }
 
 fn intField(value: ?std.json.Value, name: []const u8) ?i64 {
@@ -2474,37 +2988,154 @@ fn sessionOpenBody(runtime: ?*Runtime, a: anytype) Status {
     const session_id = args.session_id.slice() orelse return FX_E_INVALID;
     if (session_id.len > max_session_id_bytes or !isUtf8(session_id)) return FX_E_INVALID;
     if (args.flags & ~(FX_OPEN_INPUTS_DURABLE | FX_OPEN_IMAGE_STORE) != 0) return FX_E_UNSUPPORTED;
-    if (args.journal_json.slice() == null or args.checkpoint.slice() == null) return FX_E_INVALID;
-    // Resume from a journal or checkpoint, and image stores: milestone 2b.
-    if (args.journal_json.len > 0 or args.checkpoint.len > 0 or args.flags & FX_OPEN_IMAGE_STORE != 0) return FX_E_UNSUPPORTED;
-    if (self.session != .none) return FX_E_STATE;
-    var params: std.Io.Writer.Allocating = .init(alloc_c);
-    defer params.deinit();
-    if (session_id.len > 0) {
-        params.writer.writeAll("{\"sessionId\":") catch return FX_E_OOM;
-        jsonrpc.writeJsonStr(session_id, &params.writer) catch return FX_E_OOM;
-        params.writer.writeAll("}") catch return FX_E_OOM;
-    } else {
-        params.writer.writeAll("{}") catch return FX_E_OOM;
+    const journal = args.journal_json.slice() orelse return FX_E_INVALID;
+    const checkpoint = args.checkpoint.slice() orelse return FX_E_INVALID;
+    // A journal, a checkpoint and the store flags need a journaled session.
+    if (!self.journaled and (journal.len > 0 or checkpoint.len > 0 or args.flags != 0)) return FX_E_INVALID;
+    if (journal.len > core.agent_checkpoint.max_checkpoint_bytes or checkpoint.len > core.agent_checkpoint.max_checkpoint_bytes) return FX_E_TOO_LARGE;
+    if (self.session == .opening or self.session == .open) return FX_E_STATE;
+    // The journal and the checkpoint cross as raw bytes beside the frame.
+    var attachments: Attachments = .{};
+    var params: ?[]u8 = null;
+    if (self.journaled) {
+        params = journalOpenParams(self, journal, checkpoint, args.flags, &attachments) catch |err| {
+            self.dropAttachments(attachments.slice());
+            return switch (err) {
+                error.OutOfMemory => FX_E_OOM,
+                error.TooLarge => FX_E_TOO_LARGE,
+                error.Busy => FX_BUSY,
+                error.Failed => FX_E_FAILED,
+            };
+        };
     }
     const id = self.nextRequest();
-    status = self.sendRequest(.libfx_new, id, "libfx/new", params.written());
-    if (status != FX_OK) return status;
+    if (self.session == .created) {
+        // The core holds the session already: open its journal again.
+        status = self.sendJournalOpen(id, params.?, attachments, true);
+        alloc_c.free(params.?);
+        if (status != FX_OK) {
+            self.dropAttachments(attachments.slice());
+            return status;
+        }
+    } else {
+        var new_params: std.Io.Writer.Allocating = .init(alloc_c);
+        defer new_params.deinit();
+        const built = build: {
+            if (session_id.len == 0) break :build new_params.writer.writeAll("{}");
+            new_params.writer.writeAll("{\"sessionId\":") catch |err| break :build err;
+            jsonrpc.writeJsonStr(session_id, &new_params.writer) catch |err| break :build err;
+            break :build new_params.writer.writeAll("}");
+        };
+        status = if (built) |_| self.sendRequest(.libfx_new, id, "libfx/new", new_params.written()) else |_| FX_E_OOM;
+        if (status != FX_OK) {
+            if (params) |owned| alloc_c.free(owned);
+            self.dropAttachments(attachments.slice());
+            return status;
+        }
+        // Sent from the core's thread once libfx/new names the session.
+        if (self.open_params) |old| alloc_c.free(old);
+        self.open_params = params;
+        self.open_attachments = attachments;
+    }
     self.session = .opening;
+    self.open_request = id;
+    self.image_store = args.flags & FX_OPEN_IMAGE_STORE != 0;
     a[1].* = id;
     return FX_OK;
+}
+
+/// libfx/journal_open's params after the session id: `"inputsDurable":..,
+/// "imageStore":..,"journalAttachment":N,"snapshotAttachment":N`, without
+/// braces. Attaches the journal and the checkpoint.
+fn journalOpenParams(self: *Runtime, journal: []const u8, checkpoint: []const u8, flags: u32, attachments: *Attachments) error{ OutOfMemory, TooLarge, Busy, Failed }![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc_c);
+    defer out.deinit();
+    const w = &out.writer;
+    w.print("\"inputsDurable\":{s},\"imageStore\":{s}", .{
+        if (flags & FX_OPEN_INPUTS_DURABLE != 0) "true" else "false",
+        if (flags & FX_OPEN_IMAGE_STORE != 0) "true" else "false",
+    }) catch return error.OutOfMemory;
+    const parts = [_]struct { []const u8, []const u8 }{ .{ "journalAttachment", journal }, .{ "snapshotAttachment", checkpoint } };
+    for (parts) |part| {
+        if (part[1].len == 0) continue;
+        var id: u32 = 0;
+        switch (self.attach(part[1], &id)) {
+            FX_OK => {},
+            FX_E_TOO_LARGE => return error.TooLarge,
+            FX_E_OOM => return error.OutOfMemory,
+            FX_BUSY => return error.Busy,
+            else => return error.Failed,
+        }
+        attachments.ids[attachments.count] = id;
+        attachments.count += 1;
+        w.print(",\"{s}\":{d}", .{ part[0], id }) catch return error.OutOfMemory;
+    }
+    return alloc_c.dupe(u8, out.written()) catch error.OutOfMemory;
 }
 
 export fn fx_session_stage_images(handle: u64, images: ?[*]align(1) const NamedBytes, count: usize, request_out: ?*align(1) u64) callconv(.c) Status {
     const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
     if (count > 0 and (images == null or !aligned(NamedBytes, @intFromPtr(images)))) return FX_E_INVALID;
-    _ = request;
-    return hostCall(handle, .{}, struct {
-        fn body(runtime: ?*Runtime, _: anytype) Status {
-            if (!runtime.?.running()) return FX_E_FAILED;
-            return FX_E_UNSUPPORTED;
+    const list: []const NamedBytes = if (count == 0) &.{} else @as([*]const NamedBytes, @ptrCast(@alignCast(images.?)))[0..count];
+    return hostCall(handle, .{ list, request }, stageBody);
+}
+
+fn stageBody(runtime: ?*Runtime, a: anytype) Status {
+    const self = runtime.?;
+    const list: []const NamedBytes = a[0];
+    var status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    if (list.len == 0) return FX_E_INVALID;
+    if (list.len > max_stage_batch) return FX_E_TOO_LARGE;
+    var total: usize = 0;
+    for (list) |item| {
+        const name = item.name.slice() orelse return FX_E_INVALID;
+        const bytes = item.bytes.slice() orelse return FX_E_INVALID;
+        if (session_codec.imageName(name) == null or bytes.len == 0) return FX_E_INVALID;
+        if (bytes.len > max_image_bytes) return FX_E_TOO_LARGE;
+        total += bytes.len;
+    }
+    if (total > max_stage_batch_bytes) return FX_E_TOO_LARGE;
+    // Staging serves the next open of a session whose open named images.
+    if (self.session != .created) return FX_E_STATE;
+    var attachments: Attachments = .{};
+    var params: std.Io.Writer.Allocating = .init(alloc_c);
+    defer params.deinit();
+    const w = &params.writer;
+    const built = build: {
+        w.writeAll("{\"sessionId\":") catch break :build false;
+        jsonrpc.writeJsonStr(self.session_id orelse "", w) catch break :build false;
+        w.writeAll(",\"images\":[") catch break :build false;
+        break :build true;
+    };
+    if (!built) return FX_E_OOM;
+    for (list, 0..) |item, index| {
+        var id: u32 = 0;
+        status = self.attach(item.bytes.slice().?, &id);
+        if (status != FX_OK) {
+            self.dropAttachments(attachments.slice());
+            return status;
         }
-    }.body);
+        attachments.ids[attachments.count] = id;
+        attachments.count += 1;
+        w.print("{s}{{\"name\":\"{s}\",\"attachment\":{d}}}", .{ if (index > 0) "," else "", item.name.slice().?, id }) catch {
+            self.dropAttachments(attachments.slice());
+            return FX_E_OOM;
+        };
+    }
+    w.writeAll("]}") catch {
+        self.dropAttachments(attachments.slice());
+        return FX_E_OOM;
+    };
+    const id = self.nextRequest();
+    status = self.sendRequestWith(.journal_images, id, "libfx/journal_images", params.written(), attachments, .host);
+    if (status != FX_OK) {
+        self.dropAttachments(attachments.slice());
+        return status;
+    }
+    a[1].* = id;
+    return FX_OK;
 }
 
 const PromptArgs = struct { input: *const Input, message_id: Str, turn: *u64 };
@@ -2526,57 +3157,176 @@ fn promptBody(runtime: ?*Runtime, args: PromptArgs) Status {
     if (text.len > max_prompt_text_bytes) return FX_E_TOO_LARGE;
     const id = args.message_id.slice() orelse return FX_E_INVALID;
     if (!validMessageId(id)) return FX_E_INVALID;
-    if (args.input.image_count > 0 and args.input.images == null) return FX_E_INVALID;
-    // Prompt images cross with P-IMAGES (milestone 2b).
-    if (args.input.image_count > 0) return FX_E_UNSUPPORTED;
+    const images = inputImages(args.input) orelse return FX_E_INVALID;
+    checkImages(images, max_prompt_images, max_prompt_images_bytes) catch |err| return switch (err) {
+        error.Invalid => FX_E_INVALID,
+        error.TooLarge => FX_E_TOO_LARGE,
+        error.OutOfMemory => FX_E_OOM,
+    };
+    if (text.len == 0 and images.len == 0) return FX_E_INVALID;
     if (self.session != .open or self.turn != 0 or self.journal_failed != null) return FX_E_STATE;
+    // A retry of the turn that ended last runs nothing ("Deduplication").
+    if (self.last_turn_id) |last| if (std.mem.eql(u8, last, id)) return repeatTurn(self, id, args.turn);
+    // The open turn's own id continues it, as fx_turn_resume does.
+    if (self.resumable) if (self.open_turn_id) |open| if (std.mem.eql(u8, open, id)) return resumeTurn(self, args.turn);
+    var attachments: Attachments = .{};
     var params: std.Io.Writer.Allocating = .init(alloc_c);
     defer params.deinit();
     const w = &params.writer;
     const built = build: {
         w.writeAll("{\"sessionId\":") catch break :build false;
         jsonrpc.writeJsonStr(self.session_id orelse "", w) catch break :build false;
-        w.writeAll(",\"prompt\":[{\"type\":\"text\",\"text\":") catch break :build false;
-        jsonrpc.writeJsonStr(text, w) catch break :build false;
-        w.writeAll("}]") catch break :build false;
-        if (self.journaled) {
-            w.writeAll(",\"_meta\":{\"fx\":{\"turnId\":") catch break :build false;
-            jsonrpc.writeJsonStr(id, w) catch break :build false;
-            w.writeAll("}}") catch break :build false;
+        w.writeAll(",\"prompt\":[") catch break :build false;
+        if (text.len > 0) {
+            w.writeAll("{\"type\":\"text\",\"text\":") catch break :build false;
+            jsonrpc.writeJsonStr(text, w) catch break :build false;
+            w.writeAll("}") catch break :build false;
         }
-        w.writeAll("}") catch break :build false;
         break :build true;
     };
     if (!built) return FX_E_OOM;
-    // TURN_START's room is had before the turn starts, so a started turn is
-    // always reported and FX_BUSY or FX_E_OOM start nothing. Lock order:
-    // `lock`, the event lock, the input lock.
+    // Images cross raw beside the frame (P-IMAGES); an image store names them.
+    for (images, 0..) |image, index| {
+        var attachment: u32 = 0;
+        status = self.attach(image.data.slice().?, &attachment);
+        if (status != FX_OK) {
+            self.dropAttachments(attachments.slice());
+            return status;
+        }
+        attachments.ids[attachments.count] = attachment;
+        attachments.count += 1;
+        const written = written: {
+            w.print("{s}{{\"type\":\"image\",\"mimeType\":\"{s}\",\"_meta\":{{\"fx\":{{\"attachment\":{d}", .{
+                if (index > 0 or text.len > 0) "," else "",
+                image.mime.slice().?,
+                attachment,
+            }) catch break :written false;
+            if (self.image_store) {
+                const name = session_codec.imageNameOf(image.data.slice().?);
+                w.print(",\"stored\":\"{s}\"", .{&name}) catch break :written false;
+            }
+            w.writeAll("}}}") catch break :written false;
+            break :written true;
+        };
+        if (!written) {
+            self.dropAttachments(attachments.slice());
+            return FX_E_OOM;
+        }
+    }
+    const closed = close: {
+        w.writeAll("]") catch break :close false;
+        if (self.journaled) {
+            w.writeAll(",\"_meta\":{\"fx\":{\"turnId\":") catch break :close false;
+            jsonrpc.writeJsonStr(id, w) catch break :close false;
+            w.writeAll("}}") catch break :close false;
+        }
+        w.writeAll("}") catch break :close false;
+        break :close true;
+    };
+    if (!closed) {
+        self.dropAttachments(attachments.slice());
+        return FX_E_OOM;
+    }
+    status = startTurn(self, params.written(), id, 0, attachments, args.turn);
+    if (status != FX_OK) self.dropAttachments(attachments.slice());
+    return status;
+}
+
+/// The input's images, or null for a malformed array.
+fn inputImages(input: *const Input) ?[]const Image {
+    if (input.image_count == 0) return &.{};
+    const images = input.images orelse return null;
+    if (!aligned(Image, @intFromPtr(images))) return null;
+    return images[0..input.image_count];
+}
+
+/// Sends the turn's session/prompt and queues its TURN_START. The caller
+/// holds `lock`. TURN_START's room is had before the turn starts, so a
+/// started turn is always reported and FX_BUSY or FX_E_OOM start nothing.
+/// Lock order: `lock`, the event lock, the input lock.
+fn startTurn(self: *Runtime, params: []const u8, message_id: []const u8, flags: u32, attachments: Attachments, turn_out: *u64) Status {
+    const io = io_mod.getIo();
+    const queue = &self.events;
+    const owned_id = alloc_c.dupe(u8, message_id) catch return FX_E_OOM;
+    const got = hostLock(self, &queue.mutex);
+    if (got != .locked) {
+        alloc_c.free(owned_id);
+        return acquireStatus(got);
+    }
+    defer queue.mutex.unlock(io);
+    const ready = ready: {
+        if (queue.closed) break :ready FX_E_FAILED;
+        queue.events.ensureUnusedCapacity(alloc_c, 1) catch break :ready FX_E_OOM;
+        queue.pending_bytes.ensureUnusedCapacity(alloc_c, message_id.len) catch break :ready FX_E_OOM;
+        break :ready FX_OK;
+    };
+    if (ready != FX_OK) {
+        alloc_c.free(owned_id);
+        return ready;
+    }
+    const turn = self.nextRequest();
+    const status = self.sendRequestWith(.prompt, turn, "session/prompt", params, attachments, .host);
+    if (status != FX_OK) {
+        alloc_c.free(owned_id);
+        return status;
+    }
+    self.turn = turn;
+    if (self.turn_message_id) |old| alloc_c.free(old);
+    self.turn_message_id = owned_id;
+    // Queued before `lock` is released: the turn's first update waits for
+    // `lock` to learn its turn, so TURN_START is always first.
+    const was_empty = queue.appendLocked(.{ .kind = .turn_start, .turn = turn, .flags = flags }, .{ .text = message_id }) catch unreachable;
+    if (was_empty) self.ready.notify();
+    turn_out.* = turn;
+    return FX_OK;
+}
+
+/// A prompt repeating the last ended turn's id: TURN_START flagged
+/// FX_TURN_REPEATED, then its TURN_END; the core runs nothing. The caller
+/// holds `lock`.
+fn repeatTurn(self: *Runtime, message_id: []const u8, turn_out: *u64) Status {
     const io = io_mod.getIo();
     const queue = &self.events;
     const got = hostLock(self, &queue.mutex);
     if (got != .locked) return acquireStatus(got);
     defer queue.mutex.unlock(io);
     if (queue.closed) return FX_E_FAILED;
-    queue.events.ensureUnusedCapacity(alloc_c, 1) catch return FX_E_OOM;
-    queue.pending_bytes.ensureUnusedCapacity(alloc_c, id.len) catch return FX_E_OOM;
+    queue.events.ensureUnusedCapacity(alloc_c, 2) catch return FX_E_OOM;
+    queue.pending_bytes.ensureUnusedCapacity(alloc_c, message_id.len) catch return FX_E_OOM;
     const turn = self.nextRequest();
-    status = self.sendRequest(.prompt, turn, "session/prompt", params.written());
-    if (status != FX_OK) return status;
-    self.turn = turn;
-    // Queued before `lock` is released: the turn's first update waits for
-    // `lock` to learn its turn, so TURN_START is always first.
-    const was_empty = queue.appendLocked(.{ .kind = .turn_start, .turn = turn }, .{ .text = id }) catch unreachable;
+    const was_empty = queue.appendLocked(.{ .kind = .turn_start, .turn = turn, .flags = FX_TURN_REPEATED }, .{ .text = message_id }) catch unreachable;
+    _ = queue.appendLocked(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.end_turn) }, .{}) catch unreachable;
     if (was_empty) self.ready.notify();
-    args.turn.* = turn;
+    turn_out.* = turn;
     return FX_OK;
 }
 
+/// Continues the turn a crash left open. The caller holds `lock`. A call it
+/// left running is never run again: the model reads that it may have run.
+fn resumeTurn(self: *Runtime, turn_out: *u64) Status {
+    const open = self.open_turn_id orelse return FX_E_STATE;
+    var params: std.Io.Writer.Allocating = .init(alloc_c);
+    defer params.deinit();
+    const w = &params.writer;
+    w.writeAll("{\"sessionId\":") catch return FX_E_OOM;
+    jsonrpc.writeJsonStr(self.session_id orelse "", w) catch return FX_E_OOM;
+    w.writeAll(",\"prompt\":[],\"_meta\":{\"fx\":{\"continueRecovery\":true,\"freshOutput\":true}}}") catch return FX_E_OOM;
+    const status = startTurn(self, params.written(), open, FX_TURN_RESUMED, .{}, turn_out);
+    if (status == FX_OK) self.resumable = false;
+    return status;
+}
+
 export fn fx_turn_resume(handle: u64, turn_out: ?*align(1) u64) callconv(.c) Status {
-    _ = outU64(@intFromPtr(turn_out)) orelse return FX_E_INVALID;
-    return hostCall(handle, .{}, struct {
-        fn body(runtime: ?*Runtime, _: anytype) Status {
-            if (!runtime.?.running()) return FX_E_FAILED;
-            return FX_E_UNSUPPORTED;
+    const turn = outU64(@intFromPtr(turn_out)) orelse return FX_E_INVALID;
+    return hostCall(handle, .{turn}, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            const self = runtime.?;
+            const status = lockLive(self);
+            if (status != FX_OK) return status;
+            defer unlock(self);
+            if (self.session != .open or self.turn != 0 or self.journal_failed != null) return FX_E_STATE;
+            if (!self.resumable) return FX_E_STATE;
+            return resumeTurn(self, a[0]);
         }
     }.body);
 }
@@ -2596,17 +3346,26 @@ fn steerBody(runtime: ?*Runtime, args: SteerArgs) Status {
     if (status != FX_OK) return status;
     defer unlock(self);
     const text = args.input.text.slice() orelse return FX_E_INVALID;
-    if (text.len == 0 or !isUtf8(text)) return FX_E_INVALID;
+    if (!isUtf8(text)) return FX_E_INVALID;
     if (text.len > max_steer_text_bytes) return FX_E_TOO_LARGE;
     const id = args.message_id.slice() orelse return FX_E_INVALID;
     if (!validMessageId(id)) return FX_E_INVALID;
-    if (args.input.image_count > 0 and args.input.images == null) return FX_E_INVALID;
-    if (args.input.image_count > 0) return FX_E_UNSUPPORTED;
+    const images = inputImages(args.input) orelse return FX_E_INVALID;
+    checkImages(images, max_prompt_images, max_prompt_images_bytes) catch |err| return switch (err) {
+        error.Invalid => FX_E_INVALID,
+        error.TooLarge => FX_E_TOO_LARGE,
+        error.OutOfMemory => FX_E_OOM,
+    };
+    if (text.len == 0 and images.len == 0) return FX_E_INVALID;
     if (self.session != .open) return FX_E_STATE;
     // A steer for a turn that is not running reaches nothing (Sol's item 3).
     if (args.turn == 0 or args.turn != self.turn) return FX_STALE;
+    // A steer with images cannot join: the turn hands off at its next safe
+    // point and the steer comes back to be sent as a prompt (P-IMAGES). The
+    // host keeps its images; the core never sees them.
+    const handoff = images.len > 0;
     const owned_id = alloc_c.dupe(u8, id) catch return FX_E_OOM;
-    self.steers.append(alloc_c, .{ .request = 0, .message_id = owned_id }) catch {
+    self.steers.append(alloc_c, .{ .request = 0, .message_id = owned_id, .handoff = handoff }) catch {
         alloc_c.free(owned_id);
         return FX_E_OOM;
     };
@@ -2615,15 +3374,22 @@ fn steerBody(runtime: ?*Runtime, args: SteerArgs) Status {
     const built = build: {
         extra.writer.writeAll("{\"sessionId\":") catch break :build false;
         jsonrpc.writeJsonStr(self.session_id orelse "", &extra.writer) catch break :build false;
-        extra.writer.writeAll(",\"text\":") catch break :build false;
-        jsonrpc.writeJsonStr(text, &extra.writer) catch break :build false;
-        extra.writer.writeAll(",\"id\":") catch break :build false;
-        jsonrpc.writeJsonStr(id, &extra.writer) catch break :build false;
+        if (!handoff) {
+            extra.writer.writeAll(",\"text\":") catch break :build false;
+            jsonrpc.writeJsonStr(text, &extra.writer) catch break :build false;
+            extra.writer.writeAll(",\"id\":") catch break :build false;
+            jsonrpc.writeJsonStr(id, &extra.writer) catch break :build false;
+        }
         extra.writer.writeAll("}") catch break :build false;
         break :build true;
     };
     const request = self.nextRequest();
-    status = if (built) self.sendRequest(.steer, request, "libfx/steer", extra.written()) else FX_E_OOM;
+    status = if (!built)
+        FX_E_OOM
+    else if (handoff)
+        self.sendRequest(.handoff, request, "libfx/handoff", extra.written())
+    else
+        self.sendRequest(.steer, request, "libfx/steer", extra.written());
     if (status != FX_OK) {
         _ = self.steers.pop();
         alloc_c.free(owned_id);
@@ -2717,11 +3483,25 @@ fn cancelBody(runtime: ?*Runtime, args: anytype) Status {
 }
 
 export fn fx_checkpoint(handle: u64, request_out: ?*align(1) u64) callconv(.c) Status {
-    _ = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
-    return hostCall(handle, .{}, struct {
-        fn body(runtime: ?*Runtime, _: anytype) Status {
-            if (!runtime.?.running()) return FX_E_FAILED;
-            return FX_E_UNSUPPORTED;
+    const request = outU64(@intFromPtr(request_out)) orelse return FX_E_INVALID;
+    return hostCall(handle, .{request}, struct {
+        fn body(runtime: ?*Runtime, a: anytype) Status {
+            const self = runtime.?;
+            var status = lockLive(self);
+            if (status != FX_OK) return status;
+            defer unlock(self);
+            if (self.session != .open or !self.journaled or self.journal_failed != null) return FX_E_STATE;
+            // libfx's journal snapshot: what the host stores beside the events.
+            var params: std.Io.Writer.Allocating = .init(alloc_c);
+            defer params.deinit();
+            params.writer.writeAll("{\"sessionId\":") catch return FX_E_OOM;
+            jsonrpc.writeJsonStr(self.session_id orelse "", &params.writer) catch return FX_E_OOM;
+            params.writer.writeAll("}") catch return FX_E_OOM;
+            const id = self.nextRequest();
+            status = self.sendRequest(.snapshot, id, "libfx/snapshot", params.written());
+            if (status != FX_OK) return status;
+            a[0].* = id;
+            return FX_OK;
         }
     }.body);
 }
@@ -2892,22 +3672,89 @@ fn toolResultBody(runtime: ?*Runtime, args: ToolResultArgs) Status {
         return if (args.call == 0 or args.call >= self.next_call) FX_E_INVALID else FX_STALE;
     if (record.answered) return FX_STALE;
     if (!isUtf8(text)) return FX_E_INVALID;
-    // Tool images cross with P-IMAGES (milestone 2b).
-    if (args.out.image_count > 0) return FX_E_UNSUPPORTED;
-    var outcome: Status = FX_OK;
-    const copy = if (text.len > self.max_tool_result_bytes) copy: {
-        outcome = FX_E_TOO_LARGE;
-        record.is_error = true;
-        break :copy alloc_c.dupe(u8, "Host tool result exceeded the configured limit") catch return FX_E_OOM;
-    } else copy: {
-        record.is_error = args.out.is_error;
-        // The one copy of the host's result (header rule 7).
-        break :copy alloc_c.dupe(u8, text) catch return FX_E_OOM;
+    const raw_images: []const Image = if (args.out.image_count == 0) &.{} else images: {
+        if (!aligned(Image, @intFromPtr(args.out.images.?))) return FX_E_INVALID;
+        break :images args.out.images.?[0..args.out.image_count];
     };
+    var outcome: Status = FX_OK;
+    var images: ?[]core_types.ToolImage = null;
+    if (raw_images.len > 0 and text.len <= self.max_tool_result_bytes) {
+        images = toolImages(raw_images, self.image_store) catch |err| switch (err) {
+            error.Invalid => return FX_E_INVALID,
+            error.OutOfMemory => return FX_E_OOM,
+            error.TooLarge => null,
+        };
+        if (images == null) outcome = FX_E_TOO_LARGE;
+    }
+    const source = if (text.len > self.max_tool_result_bytes)
+        "Host tool result exceeded the configured limit"
+    else if (outcome == FX_E_TOO_LARGE)
+        "Host tool images exceeded the limit"
+    else
+        text;
+    if (source.ptr != text.ptr) outcome = FX_E_TOO_LARGE;
+    // The one copy of the host's result (header rule 7).
+    const copy = alloc_c.dupe(u8, source) catch {
+        if (images) |list| core_types.freeToolImages(alloc_c, list);
+        return FX_E_OOM;
+    };
+    record.is_error = if (outcome == FX_E_TOO_LARGE) true else args.out.is_error;
     record.result = copy;
+    record.images = images;
     record.answered = true;
     self.calls_changed.broadcast(io_mod.getIo());
     return outcome;
+}
+
+/// The image type `bytes` start as, or null.
+fn imageMime(bytes: []const u8) ?[]const u8 {
+    return image_data.detectMediaTypeFromBytes(bytes);
+}
+
+const ImageError = error{ Invalid, TooLarge, OutOfMemory };
+
+/// Checks host images: each a supported type whose bytes are that type,
+/// within the header's FX_MAX_IMAGE_BYTES and the core's model bounds.
+fn checkImages(images: []const Image, max_count: usize, max_total: usize) ImageError!void {
+    if (images.len > max_count) return error.TooLarge;
+    var total: usize = 0;
+    for (images) |image| {
+        const mime = image.mime.slice() orelse return error.Invalid;
+        const data = image.data.slice() orelse return error.Invalid;
+        if (!image_data.supportedMediaType(mime) or data.len == 0) return error.Invalid;
+        const detected = imageMime(data) orelse return error.Invalid;
+        if (!std.mem.eql(u8, detected, mime)) return error.Invalid;
+        if (data.len > max_image_bytes or data.len > max_model_image_bytes) return error.TooLarge;
+        total += data.len;
+    }
+    if (total > max_total) return error.TooLarge;
+}
+
+/// A tool result's images in the core's own form: base64, encoded once from
+/// the host's raw bytes (the core never sees them otherwise), named when the
+/// host keeps an image store.
+fn toolImages(images: []const Image, named: bool) ImageError![]core_types.ToolImage {
+    try checkImages(images, image_data.max_tool_images, image_data.max_result_frame_bytes / 4 * 3);
+    const list = try alloc_c.alloc(core_types.ToolImage, images.len);
+    var made: usize = 0;
+    errdefer {
+        for (list[0..made]) |image| {
+            alloc_c.free(image.data);
+            alloc_c.free(image.mime_type);
+        }
+        alloc_c.free(list);
+    }
+    const encoder = std.base64.standard.Encoder;
+    for (images) |image| {
+        const data = image.data.slice().?;
+        const encoded = try alloc_c.alloc(u8, encoder.calcSize(data.len));
+        errdefer alloc_c.free(encoded);
+        _ = encoder.encode(encoded, data);
+        const mime = try alloc_c.dupe(u8, image.mime.slice().?);
+        list[made] = .{ .data = encoded, .mime_type = mime, .name = if (named) session_codec.imageNameOf(data) else null };
+        made += 1;
+    }
+    return list;
 }
 
 // ---------------------------------------------------------------------------
@@ -3188,17 +4035,53 @@ fn writeError(w: *std.Io.Writer, rpc_id: i64, message: []const u8) !void {
 }
 
 export fn fx_hook_answer(handle: u64, question: u64, kind: i32, text: Str) callconv(.c) Status {
-    return hostCall(handle, .{ question, kind, text }, struct {
-        fn body(runtime: ?*Runtime, a: anytype) Status {
-            if (!runtime.?.running()) return FX_E_FAILED;
-            if (a[2].slice() == null) return FX_E_INVALID;
-            _ = a[0];
-            _ = a[1];
-            // No question is asked until P-STOP and P-PRETOOL land
-            // (milestone 2b), so every id is one never issued.
-            return FX_E_INVALID;
+    return hostCall(handle, .{ question, kind, text }, hookAnswerBody);
+}
+
+fn hookAnswerBody(runtime: ?*Runtime, a: anytype) Status {
+    const self = runtime.?;
+    const question: u64 = a[0];
+    const kind: i32 = a[1];
+    const text = a[2].slice() orelse return FX_E_INVALID;
+    const status = lockLive(self);
+    if (status != FX_OK) return status;
+    defer unlock(self);
+    const record = self.questions.get(question) orelse
+        return if (question == 0 or question >= self.next_question) FX_E_INVALID else FX_STALE;
+    if (record.answered) return FX_STALE;
+    // Each kind of question takes its own answers.
+    const max_text: usize = switch (record.kind) {
+        FX_HOOK_PRE_TOOL => switch (kind) {
+            FX_ANSWER_ALLOW => 0,
+            FX_ANSWER_BLOCK => max_hook_reason,
+            FX_ANSWER_REWRITE => max_hook_arguments,
+            else => return FX_E_INVALID,
+        },
+        FX_HOOK_STOP => switch (kind) {
+            FX_ANSWER_ALLOW => 0,
+            FX_ANSWER_CONTINUE => max_hook_context,
+            else => return FX_E_INVALID,
+        },
+        else => return FX_E_INVALID,
+    };
+    if (kind != FX_ANSWER_ALLOW) {
+        if (text.len == 0 or text.len > max_text or !isUtf8(text)) return FX_E_INVALID;
+        if (kind == FX_ANSWER_REWRITE) {
+            // The core runs rewritten input only if it is a JSON object.
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc_c, text, .{}) catch |err| return switch (err) {
+                error.OutOfMemory => FX_E_OOM,
+                else => FX_E_INVALID,
+            };
+            defer parsed.deinit();
+            if (parsed.value != .object) return FX_E_INVALID;
         }
-    }.body);
+    }
+    const copy: ?[]u8 = if (kind == FX_ANSWER_ALLOW) null else alloc_c.dupe(u8, text) catch return FX_E_OOM;
+    record.text = copy;
+    record.answer = kind;
+    record.answered = true;
+    self.calls_changed.broadcast(io_mod.getIo());
+    return FX_OK;
 }
 
 // ---------------------------------------------------------------------------
