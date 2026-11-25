@@ -428,11 +428,27 @@ impl Picker {
         self.page
             .map_or(0, |page| self.matches().len().saturating_sub(page))
     }
+    /// The one read-only line below the choices (an informational row
+    /// outside any section).
     pub fn note(&self) -> Option<&str> {
         self.choices
             .iter()
-            .find(|c| c.informational)
+            .find(|c| c.informational && c.category.is_empty())
             .map(|c| c.label.as_str())
+    }
+    /// Read-only rows listed in their own section, as a native menu's
+    /// disabled items: (place among the choices, section, text). They show
+    /// only while nothing is searched and are never lit or chosen.
+    pub fn section_notes(&self) -> Vec<(usize, &str, &str)> {
+        if !self.query.trim().is_empty() {
+            return Vec::new();
+        }
+        self.choices
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.informational && !c.category.is_empty())
+            .map(|(i, c)| (i, c.category.as_str(), c.label.as_str()))
+            .collect()
     }
     pub fn selected(&self) -> Option<usize> {
         self.rows().iter().position(
@@ -682,6 +698,33 @@ mod palette_layer_tests {
         assert_eq!(picker.note(), Some("Finding models"));
         assert!(picker.filtered().is_empty());
         assert_eq!(picker.navigate("enter"), None);
+    }
+
+    #[test]
+    fn a_sectioned_informational_row_stays_in_its_section_and_is_never_chosen() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("GPT Sol", "model:sol").within("OpenAI"),
+                Choice {
+                    informational: true,
+                    ..Choice::new("Aerolite · Coming later", "").within("Powermove")
+                },
+                Choice::new("High", "effort:high").within("Effort"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(picker.note(), None);
+        assert_eq!(
+            picker.section_notes(),
+            vec![(1, "Powermove", "Aerolite · Coming later")]
+        );
+        assert_eq!(picker.filtered(), vec![0, 2]);
+        picker.navigate("down");
+        picker.navigate("down");
+        assert_eq!(picker.navigate("enter").as_deref(), Some("effort:high"));
+        picker.search("Aero".into());
+        assert!(picker.section_notes().is_empty());
+        assert!(picker.filtered().is_empty());
     }
 }
 

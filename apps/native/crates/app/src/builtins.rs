@@ -223,6 +223,9 @@ pub struct Host {
     agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
+    /// The development switch's Powermove harness is on: the Agent panel's
+    /// way to an account is Settings › Providers.
+    pub providers: bool,
     /// The Settings window's AppKit chrome while this editor hosts it, and
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
@@ -446,6 +449,7 @@ impl Controller {
         {
             environment.aero = Some(crate::mcp::aero_launcher());
         }
+        self.builtins.providers = environment.aero.is_some();
         environment.compatible = Some(Arc::new(crate::providers::Chat {
             profile: self.mcp.profile.clone(),
         }));
@@ -2877,6 +2881,9 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.settings" => {
+                    if self.builtins.providers {
+                        self.builtins.settings_page = Some("providers".into());
+                    }
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }

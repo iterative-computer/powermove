@@ -8407,7 +8407,15 @@ impl Popup {
             kind.width().min(interior.w)
         }) as f64 + 2. * POPUP_SHADOW_PAD;
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
-            model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
+            // A searched model list keeps the field menu's height; one
+            // without a search (the harness menu) shows all of itself, up
+            // to the room above its chooser.
+            let most = if composer.is_some_and(|(_, search)| search) {
+                m.field_menu_height
+            } else {
+                interior.h
+            };
+            model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., most)).h
         } else if self.composer == Some(ComposerPicker::Add) {
             // "+" lists its attachment rows above Approvals' described rows:
             // all of it shows, up to the window's room, never scrolled past
@@ -9147,7 +9155,7 @@ struct PopupLayout<'a> {
     target: Option<&'a PopupTarget>,
     shortcuts: &'a HashMap<String, String>,
 }
-impl PopupLayout<'_> {
+impl<'a> PopupLayout<'a> {
     fn label(
         &mut self,
         text: &str,
@@ -9334,11 +9342,55 @@ impl PopupLayout<'_> {
         // Keep immutable model/shortcut references independent of the view pool.
         let model = self.model;
         let shortcuts = self.shortcuts;
+        // A section's read-only rows (disabled menu items) stand where they
+        // are listed, under their own heading.
+        let notes = if sections {
+            model.section_notes()
+        } else {
+            Vec::new()
+        };
+        let mut noted = 0;
+        let mut section_notes = |layout: &mut Self,
+                                 before: usize,
+                                 y: &mut f64,
+                                 category: &mut Option<&'a str>| {
+            while let Some(&(_, section, text)) = notes.get(noted).filter(|(at, ..)| *at < before) {
+                noted += 1;
+                if *category != Some(section) {
+                    *category = Some(section);
+                    let heading = layout.label(section, caption, t.colors.muted, None);
+                    heading.setFrame(NSRect::new(
+                        NSPoint::new(
+                            edge,
+                            *y + shape.heading as f64 - caption_h - t.space.xs as f64,
+                        ),
+                        NSSize::new(width - edge * 2., caption_h),
+                    ));
+                    *y += shape.heading as f64;
+                }
+                let note = popup_label(text, t.typography.body, t.colors.muted, mtm);
+                note.setAccessibilityElement(true);
+                centred(
+                    &note,
+                    lead,
+                    *y,
+                    row_h,
+                    (width - lead - edge).max(0.),
+                    body_h,
+                );
+                layout.list.addSubview(&note);
+                layout
+                    .parts
+                    .push(Retained::into_super(Retained::into_super(note)));
+                *y += row_h;
+            }
+        };
         for (place, &row) in chosen.iter().enumerate() {
             let (index, disclosure) = match row {
                 PickerRow::Choice(index) => (index, None),
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
+            section_notes(&mut self, index, &mut y, &mut category);
             let c = &model.choices[index];
             let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
             if disclosure.is_some() {
@@ -9366,7 +9418,32 @@ impl PopupLayout<'_> {
             }
             if sections && category != Some(c.category.as_str()) {
                 category = Some(c.category.as_str());
-                if c.category.is_empty() {
+                if c.category.is_empty()
+                    && place > 0
+                    && self.composer == Some(ComposerPicker::Model)
+                {
+                    // The model menu's closing row (Add a provider…) stands
+                    // under a separator, as a native menu's last item.
+                    let padding = f64::from(t.space.xs);
+                    let thickness = self
+                        .list
+                        .window()
+                        .map_or(1., |window| window.backingScaleFactor().recip());
+                    let line = NSBox::initWithFrame(
+                        NSBox::alloc(mtm),
+                        NSRect::new(
+                            NSPoint::new(edge, y + padding),
+                            NSSize::new((width - 2. * edge).max(0.), thickness),
+                        ),
+                    );
+                    line.setBoxType(NSBoxType::Custom);
+                    line.setBorderWidth(0.);
+                    line.setFillColor(&native_color(t.colors.separator));
+                    line.setAccessibilityElement(false);
+                    self.list.addSubview(&line);
+                    self.parts.push(Retained::into_super(line));
+                    y += 2. * padding + thickness;
+                } else if c.category.is_empty() {
                     y += if place > 0 { t.space.sm as f64 } else { 0. };
                 } else {
                     // A heading sits low in its band, nearer its own rows.
@@ -9617,6 +9694,7 @@ impl PopupLayout<'_> {
             });
             y += item_h;
         }
+        section_notes(&mut self, usize::MAX, &mut y, &mut category);
         if unlisted > 0 && !is_palette {
             let note = self.label(
                 &format!("{unlisted} more · type to narrow"),
@@ -9838,8 +9916,13 @@ pub fn capture_agent_picker(
     let mut rows = vec![];
     let height = PopupLayout {
         width: width as f64,
-        max_height: if providers {
-            model_picker_frame(owner, anchor, (width, t.metrics.field_menu_height)).h
+        max_height: if kind == Some(ComposerPicker::Model) {
+            let most = if searchable {
+                t.metrics.field_menu_height
+            } else {
+                available.h
+            };
+            model_picker_frame(owner, anchor, (width, most)).h
         } else {
             t.metrics.field_menu_height.min(available.h)
         },
@@ -9882,7 +9965,8 @@ pub fn capture_agent_picker(
         bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new())
     }?;
     let h = height as f32;
-    let frame = if providers {
+    // As the live menu: the model menu stands above its trigger.
+    let frame = if kind == Some(ComposerPicker::Model) {
         model_picker_frame(owner, anchor, (width, h))
     } else if kind.is_some() {
         composer_picker_frame(owner, anchor, (width, h), popup_checked_offset(&model, &rows, &scroll, height, shape.row))
