@@ -79,7 +79,9 @@ def claims(token):
 
 
 def post(path, form):
-    request = urllib.request.Request(ISSUER + path, data=urllib.parse.urlencode(form).encode(), method="POST")
+    # Codex 0.169 sends refreshes to CODEX_REFRESH_TOKEN_URL_OVERRIDE when it is set.
+    override = os.environ.get("CODEX_REFRESH_TOKEN_URL_OVERRIDE") if form.get("grant_type") == "refresh_token" else None
+    request = urllib.request.Request(override or ISSUER + path, data=urllib.parse.urlencode(form).encode(), method="POST")
     with urllib.request.urlopen(request, timeout=10) as answer:
         return json.loads(answer.read() or b"{}")
 
@@ -176,7 +178,8 @@ def main():
             elif method == "account/login/cancel":
                 result = {}
             elif method == "account/logout":
-                delete()
+                if not os.environ.get("PM_FAKE_CODEX_KEEP_ON_LOGOUT"):
+                    delete()
                 result = {}
             elif method == "model/list":
                 result = {"data": [{"id": "gpt-fake-sol", "model": "gpt-fake-sol", "displayName": "GPT Fake Sol", "isDefault": True,

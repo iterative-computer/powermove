@@ -190,7 +190,7 @@ impl AgentLink {
         let status = accounts.status(provider);
         // Claude Code also runs on the Anthropic key from Settings › Providers.
         if provider == Provider::Claude
-            && status.state != State::Connected
+            && pm_agents::account::claude_key_fallback(&Ok(status.clone()))
             && accounts.anthropic().masked.is_some()
         {
             return ("connected", String::new());
@@ -246,7 +246,10 @@ impl AgentLink {
         } else {
             self.accounts().map_or_else(Vec::new, |accounts| {
                 let models = accounts.models(provider);
-                if provider == Provider::Claude && models.is_empty() {
+                if provider == Provider::Claude
+                    && models.is_empty()
+                    && pm_agents::account::claude_key_fallback(&Ok(accounts.status(provider)))
+                {
                     accounts.anthropic().models
                 } else {
                     models

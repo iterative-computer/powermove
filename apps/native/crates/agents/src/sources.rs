@@ -207,7 +207,10 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
     Ok(match source {
         Source::ChatGpt => {
             let env = env.clone();
+            let identity = Arc::new(crate::codex_auth::Identity::new());
+            let scope = identity.clone();
             Live {
+                identity: Some(identity),
                 provider: "codex".into(),
                 configured: String::new(),
                 model: model.into(),
@@ -218,6 +221,8 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
                     let (access, account) = auth
                         .chatgpt
                         .ok_or("OpenAI is signed in with an API key, not ChatGPT.")?;
+                    // The account this turn started on, never another one (P1-4).
+                    scope.check(account.as_deref().unwrap_or("chatgpt"))?;
                     let mut headers =
                         vec![("authorization".to_owned(), format!("Bearer {access}"))];
                     if let Some(account) = account {
@@ -228,16 +233,26 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             }
         }
         Source::OpenAiKey => {
-            let key = crate::codex_auth::read(secrets.as_ref(), env)?
+            let removed = || "Add an OpenAI API key in Settings › Providers.".to_owned();
+            crate::codex_auth::read(secrets.as_ref(), env)?
                 .and_then(|a| a.api_key)
-                .ok_or("Add an OpenAI API key in Settings › Providers.")?;
+                .ok_or_else(removed)?;
+            let env = env.clone();
+            let identity = Arc::new(crate::codex_auth::Identity::new());
+            let scope = identity.clone();
             Live {
+                identity: Some(identity),
                 provider: "openai".into(),
                 configured: configured("openai", OPENAI_API, &effort_list(effort)),
                 model: model.into(),
                 catalog: None,
                 net,
+                // Read for every request: a removed or replaced key is never used.
                 credentials: Arc::new(move |_| {
+                    let key = crate::codex_auth::read(secrets.as_ref(), &env)?
+                        .and_then(|a| a.api_key)
+                        .ok_or_else(removed)?;
+                    scope.check(&key_id(&key))?;
                     Ok((
                         "https://api.openai.com".into(),
                         vec![("authorization".into(), format!("Bearer {key}"))],
@@ -246,15 +261,21 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             }
         }
         Source::AnthropicKey => {
-            let key = anthropic_key(secrets.as_ref(), env)
-                .ok_or("Add an Anthropic API key in Settings › Providers.")?;
+            let removed = || "Add an Anthropic API key in Settings › Providers.".to_owned();
+            let started = key_id(&anthropic_key(secrets.as_ref(), env).ok_or_else(removed)?);
+            let env = env.clone();
             Live {
+                identity: None,
                 provider: "anthropic".into(),
                 configured: configured("anthropic", ANTHROPIC_API, &[]),
                 model: model.into(),
                 catalog: None,
                 net,
                 credentials: Arc::new(move |_| {
+                    let key = anthropic_key(secrets.as_ref(), &env).ok_or_else(removed)?;
+                    if key_id(&key) != started {
+                        return Err("The Anthropic key changed during this turn. Send it again to use the new key.".into());
+                    }
                     Ok((
                         "https://api.anthropic.com".into(),
                         vec![
@@ -277,6 +298,7 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             let origin = pm_aero_core::origin_of(&saved.base_url)
                 .ok_or("The custom endpoint's address is invalid.")?;
             Live {
+                identity: None,
                 provider: "custom".into(),
                 configured: configured(
                     "custom",
@@ -297,6 +319,12 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             }
         }
     })
+}
+
+/// A key's identity for comparing, never the key itself.
+fn key_id(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("key:{:x}", Sha256::digest(key.as_bytes()))
 }
 
 /// What the core's Codex catalog asks for (the npm version lookup, then

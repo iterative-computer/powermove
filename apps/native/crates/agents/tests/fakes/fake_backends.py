@@ -7,7 +7,11 @@ backend (/chatgpt/backend-api/codex/responses), OpenAI (/openai/v1), Anthropic
 Usage: fake_backends.py PORT [ACCESS_TTL_SECONDS]. GET /stats answers what it
 saw. The model is a fake: asked with a Powermove project in its prompt, it
 renames the first layer through the `edit` tool, then says so.
-Refresh tokens rotate; a reused one answers `refresh_token_reused`."""
+Refresh tokens rotate; a reused one answers `refresh_token_reused`.
+POST /control merges test knobs: refresh_barrier (hold refreshes until that many
+arrived, 3 s at most), refresh_delay (seconds before a refresh answers),
+hold_seconds (before a Codex reply), account (the account a sign-in gets).
+Every request's headers and body are kept in /stats "raw" for leak checks."""
 import base64, hashlib, json, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,7 +21,10 @@ OPENAI_KEY_PREFIX, ANTHROPIC_KEY_PREFIX, CUSTOM_KEY = "sk-fake-openai-", "sk-ant
 ACCOUNT = "acct-fake-1"
 lock = threading.Lock()
 codes, refresh, used, access = {}, {}, set(), {}
-stats = {"refreshes": 0, "reused": 0, "logins": 0, "requests": []}
+stats = {"refreshes": 0, "reused": 0, "logins": 0, "requests": [], "raw": []}
+control = {"refresh_barrier": 0, "refresh_delay": 0, "hold_seconds": 0, "account": ACCOUNT}
+arrivals = threading.Condition()
+arrived = [0]
 counter = [0]
 
 
@@ -29,19 +36,20 @@ def jwt(claims):
     return f"{b64(b'{\"alg\":\"none\"}')}.{b64(json.dumps(claims).encode())}.fake"
 
 
-def new_tokens(with_id):
+def new_tokens(with_id, account=None):
     with lock:
         counter[0] += 1
         n = counter[0]
     now = int(time.time())
+    account = account or control["account"]
     at = jwt({"exp": now + TTL, "n": n, "scope": "openid profile email offline_access"})
     rt = f"rt_fake_{n}"
-    access[at] = now + TTL
-    refresh[rt] = True
+    access[at] = (now + TTL, account)
+    refresh[rt] = account
     out = {"access_token": at, "refresh_token": rt, "token_type": "Bearer", "expires_in": TTL}
     if with_id:
         out["id_token"] = jwt({"email": "owner@example.com", "exp": now + 3600,
-                               "https://api.openai.com/auth": {"chatgpt_account_id": ACCOUNT, "chatgpt_plan_type": "plus"}})
+                               "https://api.openai.com/auth": {"chatgpt_account_id": account, "chatgpt_plan_type": "plus"}})
     return out
 
 
@@ -125,7 +133,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def body(self):
-        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with lock:
+            stats["raw"].append(f"{self.command} {self.path}\n{self.headers}\n{body.decode('utf-8', 'replace')}")
+        return body
 
     def note(self):
         with lock:
@@ -138,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.note()
+        with lock:
+            stats["raw"].append(f"{self.command} {self.path}\n{self.headers}")
         url = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(url.query))
         if url.path == "/stats":
@@ -165,6 +178,9 @@ class Handler(BaseHTTPRequestHandler):
         self.note()
         path = urllib.parse.urlparse(self.path).path
         body = self.body()
+        if path == "/control":
+            control.update(json.loads(body or b"{}"))
+            return self.reply(200, control)
         if path == "/auth/oauth/token":
             form = dict(urllib.parse.parse_qsl(body.decode())) if body[:1] != b"{" else json.loads(body)
             if form.get("grant_type") == "authorization_code":
@@ -177,27 +193,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, new_tokens(True))
             if form.get("grant_type") == "refresh_token":
                 old = form.get("refresh_token")
+                if control["refresh_barrier"]:
+                    with arrivals:
+                        arrived[0] += 1
+                        arrivals.notify_all()
+                        arrivals.wait_for(lambda: arrived[0] >= control["refresh_barrier"], timeout=3)
                 with lock:
                     if old in used:
                         stats["reused"] += 1
                         return self.reply(401, {"error": "refresh_token_reused"})
-                    if not refresh.pop(old, None):
+                    account = refresh.pop(old, None)
+                    if not account:
                         return self.reply(401, {"error": "invalid_grant"})
                     used.add(old)
                     stats["refreshes"] += 1
-                return self.reply(200, new_tokens(False))
+                fresh = new_tokens(False, account)
+                time.sleep(control["refresh_delay"])
+                return self.reply(200, fresh)
             return self.reply(400, {"error": "unsupported_grant_type"})
         if path == "/auth/oauth/revoke":
             refresh.pop(dict(urllib.parse.parse_qsl(body.decode())).get("token"), None)
             return self.reply(200)
         if path == "/chatgpt/backend-api/codex/responses":
-            expires = access.get(self.bearer())
-            if not expires or expires < time.time() or self.headers.get("chatgpt-account-id") != ACCOUNT:
+            expires, account = access.get(self.bearer(), (0, None))
+            if expires < time.time() or self.headers.get("chatgpt-account-id") != account:
                 return self.reply(401, {"detail": "unauthorized"})
+            time.sleep(control["hold_seconds"])
             return self.reply(200, responses_sse(demo(body), body), "text/event-stream")
         keys = {"/openai/v1/chat/completions": lambda: self.bearer().startswith(OPENAI_KEY_PREFIX),
                 "/anthropic/v1/chat/completions": lambda: self.bearer().startswith(ANTHROPIC_KEY_PREFIX),
                 "/custom/v1/chat/completions": lambda: self.bearer() == CUSTOM_KEY}
+        if path == "/custom/v1/chat/completions" and self.bearer().startswith("custom-echo-"):
+            # A careless server that repeats the request's credential in its error.
+            return self.reply(400, {"error": {"message": f"bad request with {self.headers.get('Authorization')}",
+                                              "code": "invalid_request"}})
         if path in keys:
             if not keys[path]():
                 return self.reply(401, {"error": {"message": "bad key"}})

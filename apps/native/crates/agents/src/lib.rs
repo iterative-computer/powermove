@@ -21,6 +21,7 @@ pub mod stats;
 pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
+pub mod refresh_broker;
 pub mod runtime;
 pub mod sources;
 pub mod trace;

@@ -449,7 +449,13 @@ impl Controller {
         environment.compatible = Some(Arc::new(crate::providers::Chat {
             profile: self.mcp.profile.clone(),
         }));
-        let open = crate::provider_keys::attach(&mut environment);
+        // Settings › Providers' Keychain and network only with the switch on:
+        // with it off, nothing new is read or fetched (P1-5).
+        let open = if environment.aero.is_some() {
+            crate::provider_keys::attach(&mut environment)
+        } else {
+            Arc::new(pm_agents::account::open_in_browser)
+        };
         runtime.set_agent_environment(environment, open);
         let observation_kernel = self.kernel.clone();
         runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {

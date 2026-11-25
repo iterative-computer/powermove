@@ -15,6 +15,11 @@ pub trait Secrets: Send + Sync + std::fmt::Debug {
     fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String>;
     fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String>;
     fn delete(&self, service: &str, account: &str) -> Result<(), String>;
+    /// Codex's item, read the way Codex 0.169 reads it (its macOS keyring
+    /// backend opens the default User-domain keychain, not the search list).
+    fn read_codex(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        self.read(service, account)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +58,64 @@ impl Secrets for MemorySecrets {
 #[derive(Debug)]
 pub struct FakeKeychain(pub std::path::PathBuf);
 type Items = serde_json::Map<String, serde_json::Value>;
+/// Which Keychain a process may use. A development build launched against the
+/// local fakes (any of `PM_AGENT_FAKE_KEYCHAIN`, `PM_AGENT_FAKES`,
+/// `PM_CODEX_KEYRING_SERVICE`) uses only its fake store, and a missing or
+/// invalid store setting refuses every Keychain call: it never falls through
+/// to the real Keychain.
+#[derive(Debug)]
+pub enum KeychainMode {
+    Real,
+    Fake(FakeKeychain),
+    Refused(String),
+}
+pub fn keychain_mode(vars: &BTreeMap<String, String>) -> KeychainMode {
+    if !cfg!(debug_assertions) {
+        return KeychainMode::Real;
+    }
+    let lane = [
+        "PM_AGENT_FAKE_KEYCHAIN",
+        "PM_AGENT_FAKES",
+        "PM_CODEX_KEYRING_SERVICE",
+    ]
+    .iter()
+    .any(|name| vars.contains_key(*name));
+    if !lane {
+        return KeychainMode::Real;
+    }
+    let path = vars
+        .get("PM_AGENT_FAKE_KEYCHAIN")
+        .map(std::path::PathBuf::from);
+    match path {
+        Some(path)
+            if path.is_absolute()
+                && path.extension().is_some_and(|e| e == "json")
+                && path.parent().is_some_and(std::path::Path::is_dir) =>
+        {
+            KeychainMode::Fake(FakeKeychain(path))
+        }
+        _ => KeychainMode::Refused(
+            "This development build runs against local fakes without a valid fake Keychain \
+             (PM_AGENT_FAKE_KEYCHAIN, an absolute .json path in an existing folder); \
+             it will not touch the real Keychain."
+                .into(),
+        ),
+    }
+}
+/// A store that answers every call with why the Keychain is closed.
+#[derive(Debug)]
+pub struct RefusedKeychain(pub String);
+impl Secrets for RefusedKeychain {
+    fn read(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, String> {
+        Err(self.0.clone())
+    }
+    fn write(&self, _: &str, _: &str, _: &[u8]) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+    fn delete(&self, _: &str, _: &str) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+}
 impl FakeKeychain {
     /// The development switch's fake store, when the environment names one.
     pub fn from_env(vars: &BTreeMap<String, String>) -> Option<Self> {
@@ -188,7 +251,27 @@ impl Net for Loopback {
             .write_all(head.as_bytes())
             .and_then(|()| stream.write_all(request.body))
             .map_err(|e| e.to_string())?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&stream);
         let mut reader = BufReader::new(stream);
+        // A held answer must not outlast a stop (a sign-out, a cancelled turn).
+        let ready = |reader: &BufReader<TcpStream>| -> Result<(), String> {
+            while reader.buffer().is_empty() {
+                if stop.load(Ordering::Acquire) {
+                    return Err("Stopped.".into());
+                }
+                let mut poll = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one pollfd for a descriptor this function owns.
+                if unsafe { libc::poll(&mut poll, 1, 100) } != 0 {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        ready(&reader)?;
         let mut line = String::new();
         reader.read_line(&mut line).map_err(|e| e.to_string())?;
         let status = line
@@ -232,6 +315,7 @@ impl Net for Loopback {
             return Ok(());
         }
         while !stop.load(Ordering::Acquire) {
+            ready(&reader)?;
             let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
@@ -307,6 +391,56 @@ impl Net for Reroute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-3: a lane's fake-store setting that is missing or invalid closes
+    /// the Keychain instead of reaching the real one.
+    #[test]
+    fn an_invalid_lane_fake_store_setting_never_reaches_the_real_keychain() {
+        let dir = std::env::temp_dir();
+        let vars = |pairs: &[(&str, String)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        let refused = |vars: BTreeMap<String, String>| {
+            matches!(keychain_mode(&vars), KeychainMode::Refused(_))
+        };
+        // A typo, a missing suffix, a relative path, a missing folder.
+        for bad in [
+            dir.join("store").display().to_string(),
+            dir.join("store.jsn").display().to_string(),
+            "store.json".to_owned(),
+            dir.join("no-such-folder-pm/store.json")
+                .display()
+                .to_string(),
+            String::new(),
+        ] {
+            assert!(
+                refused(vars(&[("PM_AGENT_FAKE_KEYCHAIN", bad.clone())])),
+                "{bad}"
+            );
+        }
+        // The fakes named without any store at all.
+        assert!(refused(vars(&[(
+            "PM_AGENT_FAKES",
+            "https://chatgpt.com=http://127.0.0.1:9".into()
+        )])));
+        assert!(refused(vars(&[(
+            "PM_CODEX_KEYRING_SERVICE",
+            "lane Codex Auth".into()
+        )])));
+        let ok = dir.join("store.json").display().to_string();
+        assert!(matches!(
+            keychain_mode(&vars(&[("PM_AGENT_FAKE_KEYCHAIN", ok)])),
+            KeychainMode::Fake(_)
+        ));
+        assert!(matches!(
+            keychain_mode(&BTreeMap::new()),
+            KeychainMode::Real
+        ));
+        assert!(RefusedKeychain("closed".into()).read("s", "a").is_err());
+    }
 
     #[test]
     fn the_fake_keychain_keeps_items_across_handles_and_writes_whole() {

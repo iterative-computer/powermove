@@ -199,30 +199,42 @@ impl Accounts {
         self.refresh_anthropic();
         Ok(())
     }
+    /// Removes the key on a worker; the row follows when it is gone.
     pub fn remove_anthropic_key(self: &Arc<Self>) -> Result<(), String> {
         let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
-        secrets.delete(&crate::sources::anthropic_service(&self.environment), "api-key")?;
-        self.keys.lock().unwrap().anthropic = KeyState::default();
-        self.bump();
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let service = crate::sources::anthropic_service(&this.environment);
+            match secrets.delete(&service, "api-key") {
+                Ok(()) => this.keys.lock().unwrap().anthropic = KeyState::default(),
+                Err(error) => this.keys.lock().unwrap().anthropic.detail = Some(error),
+            }
+            this.bump();
+        });
         Ok(())
     }
     /// Reads the saved Anthropic key and lists its models, off this thread.
+    /// Switch off: nothing is read. The Keychain is read on a worker, never
+    /// on the calling thread.
     pub fn refresh_anthropic(self: &Arc<Self>) {
+        if !self.environment.providers() {
+            return;
+        }
         let (Some(secrets), Some(net)) = (self.environment.secrets.clone(), self.environment.net.clone()) else {
             return;
         };
-        let Some(key) = crate::sources::anthropic_key(secrets.as_ref(), &self.environment) else {
-            self.keys.lock().unwrap().anthropic = KeyState::default();
-            return self.bump();
-        };
-        {
-            let mut keys = self.keys.lock().unwrap();
-            keys.anthropic.masked = Some(crate::sources::mask(&key));
-            keys.anthropic.checking = true;
-        }
-        self.bump();
         let this = self.clone();
         std::thread::spawn(move || {
+            let Some(key) = crate::sources::anthropic_key(secrets.as_ref(), &this.environment) else {
+                this.keys.lock().unwrap().anthropic = KeyState::default();
+                return this.bump();
+            };
+            {
+                let mut keys = this.keys.lock().unwrap();
+                keys.anthropic.masked = Some(crate::sources::mask(&key));
+                keys.anthropic.checking = true;
+            }
+            this.bump();
             let listed = crate::sources::key_models(net.as_ref(), crate::sources::Source::AnthropicKey, &key);
             {
                 let mut keys = this.keys.lock().unwrap();
@@ -353,6 +365,18 @@ impl Accounts {
             Job::Refresh => {}
             Job::Disconnect => {
                 peer.request("account/logout", json!({}), REQUEST)?;
+                // Signed out only once the shared item is gone (P1-4): live
+                // runs on it stop when the identity generation moves.
+                if self.environment.providers()
+                    && let Some(secrets) = &self.environment.secrets
+                {
+                    if crate::codex_auth::read(secrets.as_ref(), &self.environment)?.is_some() {
+                        let mut status = chatgpt_status(&mut peer)?;
+                        status.detail = Some("Codex couldn’t remove the sign-in. Try Sign Out again.".into());
+                        return Ok(status);
+                    }
+                    crate::codex_auth::identity_changed();
+                }
                 self.set_models(Provider::Chatgpt, vec![]);
                 self.keys.lock().unwrap().openai.clear();
                 return Ok(Status::of(State::Disconnected, None));
@@ -404,6 +428,13 @@ impl Accounts {
             }
         }
         let mut status = chatgpt_status(&mut peer)?;
+        // A new sign-in or key is a new identity: turns on the old one end.
+        if matches!(job, Job::Connect | Job::ConnectKey)
+            && status.state == State::Connected
+            && self.environment.providers()
+        {
+            crate::codex_auth::identity_changed();
+        }
         self.read_openai_key(&mut status);
         if status.state == State::Connected {
             self.slots.lock().unwrap().get_mut(Provider::Chatgpt.name()).unwrap().finding_models = true;
@@ -424,6 +455,9 @@ impl Accounts {
     /// With Codex on an API key: the key masked, and its own model list for
     /// Powermove (read from the shared Keychain item, never from Codex).
     fn read_openai_key(&self, status: &mut Status) {
+        if !self.environment.providers() {
+            return;
+        }
         let key = match (&self.environment.secrets, status.state) {
             (Some(secrets), State::Connected) => crate::codex_auth::read(secrets.as_ref(), &self.environment)
                 .ok()
@@ -668,9 +702,16 @@ pub fn plan_name(id: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-/// Claude Code reports its own sign-in.
-pub(crate) fn claude_signed_in(binary: &PathBuf, vars: &BTreeMap<String, String>) -> bool {
-    claude_status(binary, vars, &AtomicBool::new(false)).is_ok_and(|s| s.state == State::Connected)
+/// Claude Code's own report of its sign-in.
+pub(crate) fn claude_status_of(binary: &PathBuf, vars: &BTreeMap<String, String>) -> Result<Status, String> {
+    claude_status(binary, vars, &AtomicBool::new(false))
+}
+/// Claude Code may run on Settings › Providers' Anthropic key only when its
+/// own status says plainly that it is signed out: a timeout, an error, an
+/// unreadable answer or "checking" never moves a signed-in person onto a
+/// metered key. The launch and the picker use this one condition.
+pub fn claude_key_fallback(status: &Result<Status, String>) -> bool {
+    matches!(status, Ok(status) if status.state == State::Disconnected)
 }
 fn claude_status(
     binary: &PathBuf,
@@ -875,9 +916,10 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
 /// A short-lived newline-JSON peer. Dropping it ends the process.
 pub(crate) struct Peer {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     next: u64,
+    released: bool,
 }
 impl Peer {
     pub(crate) fn start(
@@ -909,14 +951,16 @@ impl Peer {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             lines,
             next: 1,
+            released: false,
         })
     }
     fn write(&mut self, message: &Value) -> Result<(), String> {
-        writeln!(self.stdin, "{message}")
-            .and_then(|_| self.stdin.flush())
+        let stdin = self.stdin.as_mut().ok_or("The agent runtime stopped responding.")?;
+        writeln!(stdin, "{message}")
+            .and_then(|_| stdin.flush())
             .map_err(|_| "The agent runtime stopped responding.".to_owned())
     }
     pub(crate) fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
@@ -944,8 +988,25 @@ impl Peer {
         }
     }
 }
+impl Peer {
+    /// Closes its input and lets it exit by itself, reaped off this thread:
+    /// for a process that may be mid-way through a credential exchange.
+    pub(crate) fn release(mut self) {
+        self.released = true;
+    }
+}
 impl Drop for Peer {
     fn drop(&mut self) {
+        self.stdin.take();
+        if self.released {
+            let pid = self.child.id();
+            std::thread::spawn(move || {
+                let mut status = 0;
+                // SAFETY: waits for our own child, whose handle is dropped.
+                unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+            });
+            return;
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -996,6 +1057,17 @@ fn run(
 }
 #[cfg(test)]
 mod tests {
+    /// Item 6: Claude Code moves to the Anthropic key only on an explicit
+    /// signed-out status, never on a timeout, an error or "checking".
+    #[test]
+    fn claude_falls_back_to_the_key_only_on_an_explicit_signed_out_status() {
+        let of = |state| Ok(Status::of(state, None));
+        assert!(claude_key_fallback(&of(State::Disconnected)));
+        for state in [State::Connected, State::Unavailable, State::Checking, State::Connecting] {
+            assert!(!claude_key_fallback(&of(state)), "{state:?}");
+        }
+        assert!(!claude_key_fallback(&Err("Claude Code did not return an account status.".into())));
+    }
     use super::*;
     #[test]
     fn a_plan_reads_as_words() {

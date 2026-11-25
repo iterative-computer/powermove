@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub const SERVICE: &str = "Codex Auth";
@@ -115,24 +116,66 @@ pub fn codex_home(env: &Environment) -> PathBuf {
 
 /// The shared item as it is now.
 pub fn read(secrets: &dyn Secrets, env: &Environment) -> Result<Option<CodexAuth>, String> {
-    let bytes = secrets.read(&service(env), &store_key(&codex_home(env)))?;
+    let bytes = secrets.read_codex(&service(env), &store_key(&codex_home(env)))?;
     Ok(bytes.as_deref().and_then(CodexAuth::parse))
 }
 
-/// Moves a login an earlier build kept in `auth.json` (file store) into the
-/// keyring item, once, and removes the file. Never overwrites an item.
-pub fn migrate(secrets: &dyn Secrets, env: &Environment, home: &Path) -> Result<(), String> {
-    let file = home.join("auth.json");
-    let Ok(bytes) = std::fs::read(&file) else {
-        return Ok(());
-    };
-    let key = store_key(home);
-    if secrets.read(&service(env), &key)?.is_none() {
-        let value: Value =
-            serde_json::from_slice(&bytes).map_err(|_| "Codex's saved sign-in is unreadable.")?;
-        secrets.write(&service(env), &key, value.to_string().as_bytes())?;
+/// The OpenAI identity generation: a sign-in or sign-out through Settings ›
+/// Providers moves it on. A turn keeps the generation it started with
+/// (`Identity`), so a turn never carries on under another sign-in, and a
+/// live run's watcher stops it when the generation moves.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+/// A new sign-in or a sign-out: every turn on the old one ends, and the
+/// refresh broker forgets what it kept for it.
+pub fn identity_changed() {
+    let next = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    crate::refresh_broker::forget(next);
+}
+/// The OpenAI identity one turn runs under: the generation it started in
+/// and, once seen, the ChatGPT account or API key it used. A token rotation
+/// of that identity carries on; another identity ends the turn.
+#[derive(Debug)]
+pub struct Identity {
+    generation: u64,
+    seen: Mutex<Option<String>>,
+}
+impl Default for Identity {
+    fn default() -> Self {
+        Self::new()
     }
-    std::fs::remove_file(&file).map_err(|e| e.to_string())
+}
+impl Identity {
+    pub fn new() -> Self {
+        Self {
+            generation: generation(),
+            seen: Mutex::new(None),
+        }
+    }
+    pub fn current(&self) -> bool {
+        generation() == self.generation
+    }
+    /// `who` is the account id, or a hash of the key.
+    pub fn check(&self, who: &str) -> Result<(), String> {
+        if !self.current() {
+            return Err(changed());
+        }
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        match seen.as_deref() {
+            Some(before) if before != who => Err(changed()),
+            Some(_) => Ok(()),
+            None => {
+                *seen = Some(who.to_owned());
+                Ok(())
+            }
+        }
+    }
+}
+fn changed() -> String {
+    "The OpenAI sign-in changed during this turn. Send it again to run it on the current sign-in."
+        .into()
 }
 
 static REFRESH: Mutex<()> = Mutex::new(());
@@ -181,6 +224,10 @@ fn ask_codex_to_refresh(env: &Environment) -> Result<(), String> {
     )?;
     peer.notify("initialized", json!({}))?;
     peer.request("account/read", json!({"refreshToken": true}), wait)?;
+    // Let it end on its own once its input closes: never kill it while an
+    // exchange it started may still be running (the broker finishes the
+    // exchange either way).
+    peer.release();
     Ok(())
 }
 

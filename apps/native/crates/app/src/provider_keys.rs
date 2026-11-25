@@ -26,6 +26,9 @@ impl Secrets for Keychain {
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
         crate::cloud::keychain::Mac.delete(service, account)
     }
+    fn read_codex(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        crate::cloud::keychain::read_user_default(service, account)
+    }
 }
 
 /// The system HTTP stack, each request held to its own origin (a redirect

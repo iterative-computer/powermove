@@ -25,6 +25,9 @@ enum Transport {
 /// the edge adds for `origin` only. `credentials` gets the bearer a backend
 /// just refused, so it can refresh once.
 pub struct Live {
+    /// The OpenAI identity a turn started on: its requests stop when that
+    /// identity is signed out or replaced (P1-4).
+    pub identity: Option<Arc<crate::codex_auth::Identity>>,
     pub provider: String,
     pub configured: String,
     pub model: String,
@@ -263,27 +266,100 @@ fn deliver_live(
             headers: &all,
             body,
         };
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        live.net.stream(&request, &stop, &mut |chunk| match chunk {
+        // Stops the request when the core retires it, or when the identity
+        // this turn started on is signed out or replaced (P1-4).
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (stop, done, identity) = (stop.clone(), done.clone(), live.identity.clone());
+            thread::spawn(move || {
+                use std::sync::atomic::Ordering::{Acquire, Release};
+                while !done.load(Acquire) {
+                    let gone = identity.as_ref().is_some_and(|i| !i.current());
+                    if gone || remote.fetch_disposition(fetch) == Disposition::Retired {
+                        stop.store(true, Release);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            });
+        }
+        let mut code = 0;
+        let mut failure = Vec::new();
+        let streamed = live.net.stream(&request, &stop, &mut |chunk| match chunk {
             Chunk::Status(401) if attempt == 0 && bearer.is_some() => {
                 retry = true;
                 Ok(())
             }
-            Chunk::Status(code) => status(remote, fetch, code),
-            Chunk::Data(_) if retry => Ok(()),
-            Chunk::Data(bytes) => {
-                if remote.fetch_disposition(fetch) == Disposition::Retired {
-                    return Err("The core retired the request.".into());
+            Chunk::Status(got) => {
+                code = got;
+                // A failure's status goes with its safe body, below.
+                if (200..300).contains(&got) {
+                    status(remote, fetch, got)
+                } else {
+                    Ok(())
                 }
-                push(remote, fetch, bytes)
             }
-        })?;
-        if !retry {
-            return Ok(());
+            Chunk::Data(_) if retry => Ok(()),
+            Chunk::Data(bytes) if !(200..300).contains(&code) => {
+                if failure.len() < 64 * 1024 {
+                    failure.extend_from_slice(bytes);
+                }
+                Ok(())
+            }
+            Chunk::Data(bytes) => push(remote, fetch, bytes),
+        });
+        done.store(true, std::sync::atomic::Ordering::Release);
+        if live.identity.as_ref().is_some_and(|i| !i.current()) {
+            return Err("The OpenAI sign-in changed during this turn.".into());
         }
-        rejected = bearer.map(|b| b.trim_start_matches("Bearer ").to_owned());
+        streamed?;
+        if retry {
+            rejected = bearer.map(|b| b.trim_start_matches("Bearer ").to_owned());
+            continue;
+        }
+        if !(200..300).contains(&code) {
+            // Never the provider's own bytes: a careless server may repeat the
+            // credential it was sent (P1-6, ABI rule 13).
+            let shown: Vec<&str> = all.iter().map(|(_, v)| v.as_str()).collect();
+            let safe = safe_failure(code, &failure, &shown);
+            return status(remote, fetch, code).and_then(|_| push(remote, fetch, &safe));
+        }
+        return Ok(());
     }
     Err("The provider refused the refreshed credential.".into())
+}
+
+/// What the core hears of a failed provider response: the status and, when
+/// it is a plain identifier that repeats none of the request's header
+/// values, the provider's error code. Nothing else of its body.
+pub(crate) fn safe_failure(code: u16, body: &[u8], sent: &[&str]) -> Vec<u8> {
+    let value: Value = serde_json::from_slice(body).unwrap_or_default();
+    let kind = [
+        &value["error"]["code"],
+        &value["error"]["type"],
+        &value["error"],
+    ]
+    .into_iter()
+    .find_map(Value::as_str)
+    .filter(|kind| {
+        !kind.is_empty()
+            && kind.len() <= 48
+            && kind
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+            && !sent.iter().any(|value| {
+                let value = value.trim_start_matches("Bearer ");
+                !value.is_empty() && (value.contains(kind) || kind.contains(value))
+            })
+    });
+    let message = match kind {
+        Some(kind) => format!("The provider refused the request (HTTP {code}, {kind})."),
+        None => format!("The provider refused the request (HTTP {code})."),
+    };
+    json!({"error": {"message": message, "type": kind}})
+        .to_string()
+        .into_bytes()
 }
 
 fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
