@@ -1,6 +1,7 @@
 //! Settings › Providers as the Powermove harness (Aero) runs on them:
 //! OpenAI (Codex's ChatGPT sign-in, or an OpenAI API key Codex saved),
-//! Anthropic (an API key, through Anthropic's OpenAI-compatible endpoint),
+//! Anthropic (an API key, on Anthropic Messages with each model's thinking
+//! controls),
 //! Custom (the saved OpenAI-compatible connection). A Powermove model id
 //! names its source: `chatgpt/<slug>`, `openai/<id>`, `anthropic/<id>`,
 //! `custom/<id>`. Credentials stay here and in the Keychain; the core gets
@@ -56,6 +57,95 @@ impl Source {
         .find(|s| s.prefix() == prefix)?;
         (!model.is_empty()).then_some((source, model))
     }
+}
+
+/// How a Claude model takes the picker's level (the claude-api skill's model
+/// table, 2026-11-03).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Thinking {
+    /// `thinking: adaptive`, its summary shown, and `output_config.effort`.
+    Adaptive,
+    /// Opus 4.6 and Sonnet 4.6: the same, whose summary is already the default.
+    AdaptiveSummarized,
+    /// Opus 4.5: a thinking budget, and the effort it also takes.
+    BudgetAndEffort,
+    /// Sonnet 4.5 and Haiku 4.5: a thinking budget only.
+    Budget,
+}
+/// Model family → its control → the levels the picker offers, in order. The
+/// one place Claude levels are decided (lane NOTES has the same table).
+/// Families not listed (retired models) are offered no level.
+const CLAUDE: &[(&[&str], Thinking, &[&str])] = &[
+    (
+        &[
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-haiku-5",
+        ],
+        Thinking::Adaptive,
+        &["low", "medium", "high", "xhigh", "max"],
+    ),
+    (
+        &["claude-opus-4-6", "claude-sonnet-4-6"],
+        Thinking::AdaptiveSummarized,
+        &["low", "medium", "high", "max"],
+    ),
+    (
+        &["claude-opus-4-5"],
+        Thinking::BudgetAndEffort,
+        &["low", "medium", "high"],
+    ),
+    (
+        &["claude-sonnet-4-5", "claude-haiku-4-5"],
+        Thinking::Budget,
+        &["low", "medium", "high"],
+    ),
+];
+/// The output limit every listed Claude model is sent: room for thinking at
+/// the top levels, above each budget below, within each model's own limit
+/// (64K on the 4.5 models).
+pub const CLAUDE_MAX_TOKENS: u32 = 64_000;
+fn claude(model: &str) -> Option<(Thinking, &'static [&'static str])> {
+    CLAUDE.iter().find_map(|(families, thinking, levels)| {
+        families
+            .iter()
+            .any(|f| {
+                model
+                    .strip_prefix(f)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+            })
+            .then_some((*thinking, *levels))
+    })
+}
+/// The levels the picker offers for Claude `model`.
+pub fn claude_efforts(model: &str) -> Vec<String> {
+    claude(model).map_or_else(Vec::new, |(_, levels)| {
+        levels.iter().map(|l| (*l).to_owned()).collect()
+    })
+}
+/// The Anthropic Messages fields that choose `level` on `model`.
+pub fn claude_effort_fields(model: &str, level: &str) -> Option<Value> {
+    let (thinking, levels) = claude(model)?;
+    levels.contains(&level).then_some(())?;
+    let budget = match level {
+        "low" => 4_096,
+        "medium" => 16_384,
+        _ => 32_768,
+    };
+    Some(match thinking {
+        Thinking::Adaptive => json!({"thinking":{"type":"adaptive","display":"summarized"},
+            "output_config":{"effort":level}}),
+        Thinking::AdaptiveSummarized => {
+            json!({"thinking":{"type":"adaptive"},"output_config":{"effort":level}})
+        }
+        Thinking::BudgetAndEffort => json!({"thinking":{"type":"enabled","budget_tokens":budget},
+            "output_config":{"effort":level}}),
+        Thinking::Budget => json!({"thinking":{"type":"enabled","budget_tokens":budget}}),
+    })
 }
 
 /// `sk-…a1b2`: a key as Settings shows it.
@@ -140,11 +230,15 @@ pub fn key_models(net: &dyn Net, source: Source, key: &str) -> Result<Vec<Model>
                 efforts: if source == Source::OpenAiKey {
                     crate::compatible::efforts(id)
                 } else {
-                    vec![]
+                    claude_efforts(id)
                 },
                 default: false,
                 aliases: vec![],
-                default_effort: None,
+                // Claude's own default is lower on some models (medium on
+                // Opus 5.5); agent work runs at high.
+                default_effort: (source == Source::AnthropicKey
+                    && claude_efforts(id).iter().any(|l| l == "high"))
+                .then(|| "high".to_owned()),
             })
         })
         .collect::<Vec<_>>();
@@ -270,7 +364,7 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             Live {
                 identity: None,
                 provider: "anthropic".into(),
-                configured: configured("anthropic", ANTHROPIC_API, &[]),
+                configured: anthropic_configured(model, effort),
                 model: model.into(),
                 catalog: None,
                 net,
@@ -279,12 +373,11 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
                     if key_id(&key) != started {
                         return Err("The Anthropic key changed during this turn. Send it again to use the new key.".into());
                     }
+                    // The core adds `anthropic-version`; the key goes as
+                    // Anthropic reads it, never as a bearer.
                     Ok((
                         "https://api.anthropic.com".into(),
-                        vec![
-                            ("authorization".into(), format!("Bearer {key}")),
-                            ("x-api-key".into(), key.clone()),
-                        ],
+                        vec![("x-api-key".into(), key)],
                     ))
                 }),
             }
@@ -322,6 +415,36 @@ pub fn live(env: &Environment, id: &str, effort: &str) -> Result<Live, String> {
             }
         }
     })
+}
+
+/// The core's Anthropic Messages connection for Claude `model`: every level
+/// the model offers with its fields (`claude_effort_fields`), the output
+/// limit, and prompt caching (the automatic breakpoint moves to the newest
+/// block each turn, so the tools, system prompt and history read from the
+/// cache). A level the model doesn't offer is sent as the nearest one it does.
+/// Tool choice is left to the model: Claude's current models refuse a forced one.
+fn anthropic_configured(model: &str, effort: &str) -> String {
+    let levels = claude_efforts(model);
+    let mut efforts: serde_json::Map<String, Value> = levels
+        .iter()
+        .filter_map(|l| Some((l.clone(), claude_effort_fields(model, l)?)))
+        .collect();
+    if !effort.is_empty()
+        && !efforts.contains_key(effort)
+        && let Some(nearest) = crate::compatible::nearest(&levels, Some(effort))
+    {
+        let fields = efforts[&nearest].clone();
+        efforts.insert(effort.to_owned(), fields);
+    }
+    let mut entry = json!({"supports_tool_use": true, "supports_vision": true,
+        "request": {"cache_control": {"type": "ephemeral"}}});
+    if !efforts.is_empty() {
+        entry["max_output_tokens"] = CLAUDE_MAX_TOKENS.into();
+        entry["reasoning_efforts"] = efforts.into();
+    }
+    json!({"anthropic": {"protocol":"anthropic-messages","base_url":ANTHROPIC_API,
+        "auth":{"type":"none"},"tool_choice_mode":"omit","model_metadata":{model: entry}}})
+    .to_string()
 }
 
 /// A key's identity for comparing, never the key itself.
@@ -368,5 +491,60 @@ mod tests {
                 && !chat_model("gpt-4o-realtime")
                 && !chat_model("omni-moderation")
         );
+    }
+
+    /// One table decides Claude's levels: each family the levels its API
+    /// takes, the fields for each, and a budget under the output limit.
+    #[test]
+    fn each_claude_family_takes_the_levels_and_fields_its_api_documents() {
+        let five = ["low", "medium", "high", "xhigh", "max"];
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-fable-5-2",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            assert_eq!(claude_efforts(model), five, "{model}");
+        }
+        assert_eq!(
+            claude_efforts("claude-sonnet-4-6"),
+            ["low", "medium", "high", "max"]
+        );
+        assert_eq!(
+            claude_efforts("claude-haiku-4-5-20251001"),
+            ["low", "medium", "high"]
+        );
+        for retired in [
+            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-1-20250805",
+            "gpt-6-sol",
+        ] {
+            assert!(claude_efforts(retired).is_empty(), "{retired}");
+        }
+        assert_eq!(
+            claude_effort_fields("claude-opus-5-5", "xhigh"),
+            Some(
+                json!({"thinking":{"type":"adaptive","display":"summarized"},
+                "output_config":{"effort":"xhigh"}})
+            )
+        );
+        assert_eq!(
+            claude_effort_fields("claude-opus-4-6", "max"),
+            Some(json!({"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}))
+        );
+        assert_eq!(
+            claude_effort_fields("claude-opus-4-5-20251101", "medium"),
+            Some(json!({"thinking":{"type":"enabled","budget_tokens":16384},
+                "output_config":{"effort":"medium"}}))
+        );
+        assert_eq!(
+            claude_effort_fields("claude-haiku-4-5", "high"),
+            Some(json!({"thinking":{"type":"enabled","budget_tokens":32768}}))
+        );
+        assert_eq!(claude_effort_fields("claude-opus-4-6", "xhigh"), None);
+        assert!(32_768 < CLAUDE_MAX_TOKENS);
     }
 }
