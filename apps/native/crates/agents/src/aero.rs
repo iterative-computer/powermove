@@ -6,8 +6,8 @@ use crate::{
     transport::{self, Action, Handle},
 };
 use pm_aero_core::{
-    Config, HookAnswer, HookKind, HookKinds, HookLease, Host, JournalAppend, OpenArgs, Runtime,
-    StopReason, Tool, ToolLease,
+    Config, HookAnswer, HookAnswerError, HookKind, HookKinds, HookLease, Host, JournalAppend,
+    OpenArgs, Runtime, StopReason, Tool, ToolAnswerError, ToolLease,
     journal::{JournalWriter, SessionFolder, StoreError},
 };
 use serde_json::{Value, json};
@@ -257,11 +257,52 @@ impl Host for Mailbox {
     }
 }
 
-fn answer_hook(question: HookLease, answer: HookAnswer<'_>) -> Result<(), String> {
-    question
-        .answer(answer)
-        .map(|_| ())
-        .map_err(|(_, e)| e.to_string())
+/// A busy or out-of-memory core changed nothing: answer again shortly. Any
+/// other refusal drops the lease, and the wrapper's settler sends the
+/// fallback (a blocked call, an ended turn), so the core is never stranded.
+const ANSWER_TRIES: u32 = 200;
+
+fn retryable(error: pm_aero_core::Error) -> bool {
+    matches!(
+        error,
+        pm_aero_core::Error::Busy | pm_aero_core::Error::OutOfMemory
+    )
+}
+
+fn answer_hook(mut question: HookLease, answer: HookAnswer<'_>) -> Result<(), String> {
+    for _ in 0..ANSWER_TRIES {
+        match question.answer(answer) {
+            Ok(_) => return Ok(()),
+            Err(HookAnswerError::Open(lease, error)) if retryable(error) => {
+                question = lease;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(HookAnswerError::Open(..)) => return Ok(()),
+            Err(HookAnswerError::Spent(error)) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn answer_tool(
+    mut call: ToolLease,
+    text: &str,
+    images: &[pm_aero_core::Image<'_>],
+    failed: bool,
+) -> Result<(), String> {
+    for _ in 0..ANSWER_TRIES {
+        match call.answer_with(text, images, failed) {
+            // A malformed image was answered with an error the model reads.
+            Ok(_) | Err(ToolAnswerError::Spent(pm_aero_core::Error::Invalid)) => return Ok(()),
+            Err(ToolAnswerError::Open(lease, error)) if retryable(error) => {
+                call = lease;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(ToolAnswerError::Open(..)) => return Ok(()),
+            Err(ToolAnswerError::Spent(error)) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 struct Approval {
@@ -358,6 +399,12 @@ fn drive(
     let journal = journal::Journal::new(scope);
     let folder = SessionFolder::open(scope).map_err(|error| match error {
         StoreError::Fenced => "This Aero session is already running elsewhere.".to_owned(),
+        StoreError::TooLarge => {
+            "This Aero session's history is too large to reopen. Start a new thread.".to_owned()
+        }
+        StoreError::Corrupt(detail) => {
+            format!("This Aero session's saved history is damaged ({detail}). Start a new thread.")
+        }
         StoreError::Io(error) => format!("Aero's session storage failed: {error}"),
     })?;
     let writer = JournalWriter::start(folder).map_err(|e| e.to_string())?;
@@ -675,12 +722,7 @@ fn drive(
                 .collect();
             let id = format!("{}/{}", call.turn(), call.model_call_id());
             outputs.insert(id, crate::trace::truncate(&result.text, 1000));
-            // An image the core cannot use is answered as an error by the
-            // wrapper; the model reads why.
-            match call.answer_with(&result.text, &image_refs, failed) {
-                Ok(_) | Err(pm_aero_core::Error::Invalid) => {}
-                Err(error) => return Err(err(error)),
-            }
+            answer_tool(call, &result.text, &image_refs, failed)?;
         }
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {

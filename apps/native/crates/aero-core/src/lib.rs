@@ -483,34 +483,50 @@ impl ToolLease {
     }
 
     /// Answers the call (text copied once) and ends the lease.
-    pub fn answer(self, text: &str, is_error: bool) -> Result<Answered, Error> {
+    pub fn answer(self, text: &str, is_error: bool) -> Result<Answered, ToolAnswerError> {
         self.answer_with(text, &[], is_error)
     }
 
     /// Answers with images the model sees: raw encoded bytes (PNG, JPEG,
     /// GIF or WebP), never base64 on this side. A malformed image is
-    /// `Err(Invalid)`, which still ends the lease (the call is answered with
-    /// an error); images past the core's bounds are `TooLarge` (the model
-    /// reads that they were).
+    /// answered with an error the model reads, then
+    /// `Err(Spent(Invalid))`; images past the core's bounds are `TooLarge`
+    /// (the model reads that they were). A busy or out-of-memory core, or an
+    /// answer it does not take, hands the lease back
+    /// ([`ToolAnswerError::Open`], as [`HookLease::answer`] does): answer
+    /// again, or drop it for the fallback, so the core is never stranded.
     pub fn answer_with(
         mut self,
         text: &str,
         images: &[Image<'_>],
         is_error: bool,
-    ) -> Result<Answered, Error> {
-        self.answered = true;
+    ) -> Result<Answered, ToolAnswerError> {
         assert_off_main();
-        let mut result = self.send_unchecked(text, images, is_error);
-        if result == Err(Error::Invalid) && !images.is_empty() {
-            let _ = self.send_unchecked(
-                "The host tool returned an image the core cannot use.",
-                &[],
-                true,
-            );
-            result = Err(Error::Invalid);
+        let result = match self.send_unchecked(text, images, is_error) {
+            Err(Error::Invalid) if !images.is_empty() => self
+                .send_unchecked(
+                    "The host tool returned an image the core cannot use.",
+                    &[],
+                    true,
+                )
+                .and(Err(Error::Invalid)),
+            other => other,
+        };
+        match result {
+            // A malformed image was answered with an error above; any other
+            // refusal changed nothing and leaves the call open.
+            Err(error)
+                if matches!(error, Error::Busy | Error::OutOfMemory | Error::Unsupported)
+                    || (error == Error::Invalid && images.is_empty()) =>
+            {
+                Err(ToolAnswerError::Open(self, error))
+            }
+            result => {
+                self.answered = true;
+                self.shared.lease_closed();
+                result.map_err(ToolAnswerError::Spent)
+            }
         }
-        self.shared.lease_closed();
-        result
     }
 
     fn send(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
@@ -538,16 +554,48 @@ impl ToolLease {
             is_error,
         };
         // SAFETY: `out` and `text` are valid for the call; the core copies.
-        let status =
-            retry_busy(|| unsafe { sys::fx_tool_result(self.shared.handle(), self.call, &out) });
+        let status = retry_busy(|| {
+            TOOL_RESULT_FAULTS.take().unwrap_or_else(|| unsafe {
+                sys::fx_tool_result(self.shared.handle(), self.call, &out)
+            })
+        });
         match status {
             sys::FX_OK => Ok(Answered::Applied),
             sys::FX_E_TOO_LARGE => Ok(Answered::TooLarge),
             sys::FX_STALE => Ok(Answered::Stale),
+            sys::FX_BUSY => Err(Error::Busy),
             other => Err(check(other).err().unwrap_or(Error::Unknown(other))),
         }
     }
 }
+
+/// Why [`ToolLease::answer_with`] did not settle its call.
+#[derive(Debug)]
+pub enum ToolAnswerError {
+    /// The call is still open and the lease is handed back: answer again
+    /// (shortly, for `Busy` or `OutOfMemory`; differently, for `Invalid` or
+    /// `Unsupported`), or drop it for the fallback error answer.
+    Open(ToolLease, Error),
+    /// The lease is spent: answered with an error (a malformed image), or
+    /// the runtime takes no answer any more.
+    Spent(Error),
+}
+
+impl ToolAnswerError {
+    pub fn error(&self) -> Error {
+        match self {
+            ToolAnswerError::Open(_, error) | ToolAnswerError::Spent(error) => *error,
+        }
+    }
+}
+
+impl fmt::Display for ToolAnswerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error().fmt(f)
+    }
+}
+
+impl std::error::Error for ToolAnswerError {}
 
 impl Drop for ToolLease {
     fn drop(&mut self) {
@@ -692,41 +740,55 @@ fn settler() -> Option<&'static Mutex<std::sync::mpsc::Sender<Fallback>>> {
         .as_ref()
 }
 
-/// Test-only: the next `count` hook answers the wrapper sends (answers and
-/// fallbacks) fail with `status` without reaching the core, as FX_E_OOM or
-/// FX_BUSY from it would.
-static HOOK_ANSWER_FAULTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Statuses the next answers get instead of the core's, as the core
+/// returns them (FX_E_OOM, FX_BUSY): tests only. Count in the high half.
+struct Faults(std::sync::atomic::AtomicU64);
 
-#[doc(hidden)]
-pub fn fail_next_hook_answers(count: u32, status: sys::fx_status) {
-    HOOK_ANSWER_FAULTS.store(
-        (u64::from(count) << 32) | u64::from(status as u32),
-        std::sync::atomic::Ordering::Release,
-    );
-}
-
-fn hook_answer_fault() -> Option<sys::fx_status> {
-    use std::sync::atomic::Ordering;
-    let mut current = HOOK_ANSWER_FAULTS.load(Ordering::Acquire);
-    loop {
-        if current >> 32 == 0 {
-            return None;
-        }
-        let next = current - (1 << 32);
-        match HOOK_ANSWER_FAULTS.compare_exchange(
-            current,
-            next,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return Some(current as u32 as sys::fx_status),
-            Err(seen) => current = seen,
+impl Faults {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(0))
+    }
+    fn arm(&self, count: u32, status: sys::fx_status) {
+        self.0.store(
+            (u64::from(count) << 32) | u64::from(status as u32),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+    fn take(&self) -> Option<sys::fx_status> {
+        use std::sync::atomic::Ordering;
+        let mut current = self.0.load(Ordering::Acquire);
+        loop {
+            if current >> 32 == 0 {
+                return None;
+            }
+            match self.0.compare_exchange(
+                current,
+                current - (1 << 32),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(current as u32 as sys::fx_status),
+                Err(seen) => current = seen,
+            }
         }
     }
 }
 
+static HOOK_ANSWER_FAULTS: Faults = Faults::new();
+static TOOL_RESULT_FAULTS: Faults = Faults::new();
+
+#[doc(hidden)]
+pub fn fail_next_hook_answers(count: u32, status: sys::fx_status) {
+    HOOK_ANSWER_FAULTS.arm(count, status);
+}
+
+#[doc(hidden)]
+pub fn fail_next_tool_results(count: u32, status: sys::fx_status) {
+    TOOL_RESULT_FAULTS.arm(count, status);
+}
+
 fn hook_answer_status(handle: u64, question: u64, kind: i32, text: &str) -> sys::fx_status {
-    if let Some(status) = hook_answer_fault() {
+    if let Some(status) = HOOK_ANSWER_FAULTS.take() {
         return status;
     }
     // SAFETY: text is valid for the call; the core copies it.

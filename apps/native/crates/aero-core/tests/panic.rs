@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_aero_core::{
-    Error, Host, JournalAppend, Remote, Runtime, State, StopReason, Tool, ToolLease, sys,
+    Error, Host, JournalAppend, Remote, Runtime, State, StopReason, Tool, ToolAnswerError,
+    ToolLease, sys,
 };
 use support::{
     Driver, Model, Reply, Seen, config, on_worker, sse_text, sse_tool_calls, text_model,
@@ -236,7 +237,10 @@ fn a_panic_inside_a_tool_result_submission_never_parks_the_host() {
         // The panic happens on this thread, inside fx_tool_result, holding
         // the runtime lock: the call returns FX_E_FAILED instead of parking.
         let started = Instant::now();
-        assert_eq!(lease.answer("result", false), Err(Error::Failed));
+        assert!(matches!(
+            lease.answer("result", false),
+            Err(ToolAnswerError::Spent(Error::Failed))
+        ));
         assert!(started.elapsed() < Duration::from_secs(1));
         expect_panicked(&mut driver, "tool_result");
         // The runtime lock stays held by the unwound call; nothing waits on it.
@@ -518,7 +522,10 @@ fn wrapper_close_with_an_outstanding_lease_on_a_panicked_runtime() {
             .runtime
             .arm_fault(sys::FX_FAULT_TOOL_RESULT, 0)
             .unwrap();
-        assert_eq!(answered.answer("b", false), Err(Error::Failed));
+        assert!(matches!(
+            answered.answer("b", false),
+            Err(ToolAnswerError::Spent(Error::Failed))
+        ));
         expect_panicked(&mut driver, "tool_result");
         // Close on this thread, which still holds a lease: it does not wait
         // for it, since a panicked runtime's memory is never freed.
@@ -534,7 +541,10 @@ fn wrapper_close_with_an_outstanding_lease_on_a_panicked_runtime() {
         // and its late answer finds the handle closed.
         assert_eq!(held.input_json(), r#"{"q":"a"}"#);
         assert_eq!(held.name(), "lookup");
-        assert_eq!(held.answer("late", false), Err(Error::Closed));
+        assert!(matches!(
+            held.answer("late", false),
+            Err(ToolAnswerError::Spent(Error::Closed))
+        ));
         assert_eq!(remote.cancel(1), Err(Error::Closed));
         bystander_runs();
     });

@@ -9,7 +9,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pm_aero_core::{Error, Host, Image, Input, Outcome, Runtime, Steered, Tool, ToolLease};
+use pm_aero_core::{
+    Error, Host, Image, Input, Outcome, Runtime, Steered, Tool, ToolAnswerError, ToolLease,
+};
 use support::{
     Driver, Model, Reply, Seen, VISION_CATALOG, config, on_worker, sse_text, sse_tool_calls,
 };
@@ -231,7 +233,7 @@ fn bad_and_oversized_images_are_refused_and_change_nothing() {
         .expect("prompt");
         let call = lease(&mut driver, &leases);
         // A tool image that is not its type ends the lease with an error.
-        assert_eq!(
+        assert!(matches!(
             call.answer_with(
                 "frame",
                 &[Image {
@@ -240,8 +242,8 @@ fn bad_and_oversized_images_are_refused_and_change_nothing() {
                 }],
                 false
             ),
-            Err(Error::Invalid)
-        );
+            Err(ToolAnswerError::Spent(Error::Invalid))
+        ));
         assert!(matches!(end(&mut driver, turn), Seen::TurnEnd { .. }));
         assert!(
             driver

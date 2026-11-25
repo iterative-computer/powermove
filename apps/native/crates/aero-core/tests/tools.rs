@@ -144,7 +144,7 @@ fn the_input_is_pinned_through_the_callback_and_the_lease() {
         });
         let (input, answered) = executor.join().unwrap();
         assert_eq!(input, r#"{"q":"alpha"}"#);
-        assert_eq!(answered, Ok(Answered::Applied));
+        assert!(matches!(answered, Ok(Answered::Applied)), "{answered:?}");
         driver.until(
             20,
             |e| matches!(e, Seen::TurnEnd { turn: t, .. } if *t == turn),
@@ -340,7 +340,10 @@ fn a_cancelled_call_gets_tool_cancel_and_still_needs_its_answer() {
         }
         // The lease's input is still readable; its answer ends it.
         assert_eq!(lease.input_json(), r#"{"q":"slow"}"#);
-        assert_eq!(lease.answer("too late", false), Ok(Answered::Applied));
+        assert!(matches!(
+            lease.answer("too late", false),
+            Ok(Answered::Applied)
+        ));
         match driver.until(20, |e| matches!(e, Seen::TurnEnd { .. })) {
             Seen::TurnEnd { reason, .. } => assert_eq!(reason, StopReason::Cancelled),
             _ => unreachable!(),

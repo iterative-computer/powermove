@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use pm_aero_core::{
     Answered, Error, HookAnswer, HookAnswerError, HookKind, HookKinds, HookLease, Host, Runtime,
-    StopReason, Tool, ToolLease, fail_next_hook_answers, sys,
+    StopReason, Tool, ToolAnswerError, ToolLease, fail_next_hook_answers, fail_next_tool_results,
+    sys,
 };
 use support::{Driver, Reply, Seen, config, on_worker, sse_text, sse_tool_calls};
 
@@ -223,5 +224,49 @@ fn a_terminal_answer_error_hands_back_no_lease_and_close_never_waits_on_it() {
             closed.elapsed() < Duration::from_secs(5),
             "close never finished"
         );
+    });
+}
+
+/// PM-716: a tool answer the core could not take (out of memory, busy past
+/// every retry) hands the lease back, as a hook answer does, so a rare
+/// out-of-memory answer never strands the core.
+#[test]
+fn a_tool_answer_the_core_could_not_take_keeps_the_lease_answerable() {
+    let _serial = serial();
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        let (mut driver, _asked, called) = runtime(false, false);
+        let turn = driver
+            .runtime
+            .prompt("use the tool", "t-1")
+            .expect("prompt");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let lease = loop {
+            driver.pump(10);
+            if let Ok(lease) = called.try_recv() {
+                break lease;
+            }
+            assert!(Instant::now() < deadline, "no tool call");
+        };
+        fail_next_tool_results(1, sys::FX_E_OOM);
+        let Err(ToolAnswerError::Open(lease, error)) = lease.answer("found", false) else {
+            panic!("an answer the core did not take consumed the lease")
+        };
+        assert_eq!(error, Error::OutOfMemory);
+        assert_eq!(lease.input_json(), r#"{"q":"a"}"#);
+        fail_next_tool_results(64, sys::FX_BUSY);
+        let Err(ToolAnswerError::Open(lease, error)) = lease.answer("found", false) else {
+            panic!("a busy core consumed the lease")
+        };
+        fail_next_tool_results(0, 0);
+        assert_eq!(error, Error::Busy);
+        assert!(matches!(
+            lease.answer("found", false),
+            Ok(Answered::Applied)
+        ));
+        assert_eq!(turn_end(&mut driver, turn), StopReason::EndTurn);
+        driver.runtime.close();
     });
 }
