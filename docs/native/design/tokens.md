@@ -27,6 +27,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.channel_blue` | Blue channel ink on panels (curves, channel values) | `#3263C3` | `#70ADFB` | `#3263C3` | `#70ADFB` |
 | `colors.channel_green` | Green channel ink on panels (curves, channel values) | `#1D7D3E` | `#6FD087` | `#1D7D3E` | `#6FD087` |
 | `colors.channel_red` | Red channel ink on panels (curves, channel values) | `#BA3630` | `#F47B74` | `#BA3630` | `#F47B74` |
+| `colors.composer_send_idle` | Agent composer Send circle with nothing to send (derived) | `#FAFAFA` | `#2F2B2A` | `#F6F6F6` | `#332F2E` |
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#6A6867` | `#9FA0A3` | `#6A6867` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#282523` | `#F3F3F4` | `#282523` |
@@ -70,10 +71,8 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `metrics.agent_attachment` | Square draft attachment thumbnail edge | 56 | 56 | 56 | 56 |
 | `metrics.agent_attachment_sent` | Square sent attachment thumbnail edge | 40 | 40 | 40 | 40 |
-| `metrics.agent_effort_width` | Fixed composer effort pop-up width | 72 | 72 | 72 | 72 |
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
-| `metrics.agent_model_min` | Minimum composer model pop-up width | 96 | 96 | 96 | 96 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
 | `metrics.align_well` | Least width of an alignment well: three cells at the least hit target | 72 | 72 | 72 | 72 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
@@ -96,9 +95,12 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.comp_tab_height` | Composition tab height | 22 | 22 | 22 | 22 |
 | `metrics.comp_tab_leading` | Composition tab leading padding | 10 | 10 | 10 | 10 |
 | `metrics.comp_tab_trailing` | Composition tab trailing padding | 6 | 6 | 6 | 6 |
+| `metrics.composer_add_symbol` | Agent composer thin + glyph square | 16 | 16 | 16 | 16 |
+| `metrics.composer_control` | Agent composer control row height, its + button and Send circle | 22 | 22 | 22 | 22 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.composer_popover_radius` | Agent composer corner, concentric in the popover | 8 | 8 | 8 | 8 |
 | `metrics.composer_radius` | Agent composer corner, concentric in its panel | 6 | 6 | 6 | 6 |
+| `metrics.composer_symbol` | Agent composer Send arrow, Stop square and model chevron | 15 | 15 | 15 | 15 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
 | `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |
@@ -242,6 +244,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `radius.xl` | Popovers, sheets, the palette | 16 | 16 | 16 | 16 |
 | `radius.xs` | Checkbox, kind badge (base) | 4 | 4 | 4 | 4 |
 | `typography.body` | Dense UI text: values, list rows, menus in panels | 12 | 12 | 12 | 12 |
+| `typography.composer` | Agent composer draft and placeholder | 15 | 15 | 15 | 15 |
 | `typography.dense_leading` | Line height multiplier for dense UI | 1.3 | 1.3 | 1.3 | 1.3 |
 | `typography.display` | Empty-state and onboarding display | 24 | 24 | 24 | 24 |
 | `typography.display_optical_size` | Optical size for display | 24 | 24 | 24 | 24 |
