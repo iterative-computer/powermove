@@ -40,6 +40,8 @@ pub struct Status {
     pub email: Option<String>,
     pub plan: Option<String>,
     pub detail: Option<String>,
+    /// Signed in with an API key: the key masked (`sk-…a1b2`).
+    pub key: Option<String>,
 }
 impl Status {
     fn of(state: State, detail: Option<String>) -> Self {
@@ -48,6 +50,7 @@ impl Status {
             email: None,
             plan: None,
             detail: detail.map(|d| d.chars().take(DETAIL_LIMIT).collect()),
+            key: None,
         }
     }
 }
@@ -92,12 +95,32 @@ pub struct Accounts {
     slots: Mutex<BTreeMap<&'static str, Slot>>,
     revision: AtomicU64,
     closed: AtomicBool,
+    keys: Mutex<Keys>,
+}
+/// API keys from Settings › Providers as Powermove reads them.
+#[derive(Default)]
+struct Keys {
+    /// An OpenAI key Codex saved: the key's own model list, for Powermove.
+    openai: Vec<Model>,
+    anthropic: KeyState,
+    /// A key waiting for Codex to save it (`connect_openai_key`).
+    pending_openai: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyState {
+    /// The saved key, masked.
+    pub masked: Option<String>,
+    pub models: Vec<Model>,
+    pub detail: Option<String>,
+    pub checking: bool,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Job {
     Refresh,
     Connect,
     Disconnect,
+    /// Sign Codex in with the pending OpenAI API key.
+    ConnectKey,
 }
 impl Accounts {
     pub fn new(
@@ -120,6 +143,7 @@ impl Accounts {
             slots: Mutex::new(BTreeMap::from([("chatgpt", slot()), ("claude", slot())])),
             revision: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            keys: Mutex::default(),
         })
     }
     pub fn revision(&self) -> u64 {
@@ -151,6 +175,68 @@ impl Accounts {
     }
     pub fn connect(self: &Arc<Self>, provider: Provider) {
         self.start(provider, Job::Connect);
+    }
+    /// OpenAI's second way in: Codex saves `key` in the shared Keychain item.
+    pub fn connect_openai_key(self: &Arc<Self>, key: String) {
+        self.keys.lock().unwrap().pending_openai = Some(key);
+        self.start(Provider::Chatgpt, Job::ConnectKey);
+    }
+    /// The OpenAI key's models (Powermove runs them), while Codex holds a key.
+    pub fn openai_key_models(&self) -> Vec<Model> {
+        self.keys.lock().unwrap().openai.clone()
+    }
+    pub fn anthropic(&self) -> KeyState {
+        self.keys.lock().unwrap().anthropic.clone()
+    }
+    /// Saves the Anthropic API key in the Keychain and lists its models.
+    pub fn set_anthropic_key(self: &Arc<Self>, key: String) -> Result<(), String> {
+        let key = key.trim().to_owned();
+        if !crate::sources::valid_key(&key) {
+            return Err("That doesn’t look like an API key.".into());
+        }
+        let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
+        secrets.write(&crate::sources::anthropic_service(&self.environment), "api-key", key.as_bytes())?;
+        self.refresh_anthropic();
+        Ok(())
+    }
+    pub fn remove_anthropic_key(self: &Arc<Self>) -> Result<(), String> {
+        let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
+        secrets.delete(&crate::sources::anthropic_service(&self.environment), "api-key")?;
+        self.keys.lock().unwrap().anthropic = KeyState::default();
+        self.bump();
+        Ok(())
+    }
+    /// Reads the saved Anthropic key and lists its models, off this thread.
+    pub fn refresh_anthropic(self: &Arc<Self>) {
+        let (Some(secrets), Some(net)) = (self.environment.secrets.clone(), self.environment.net.clone()) else {
+            return;
+        };
+        let Some(key) = crate::sources::anthropic_key(secrets.as_ref(), &self.environment) else {
+            self.keys.lock().unwrap().anthropic = KeyState::default();
+            return self.bump();
+        };
+        {
+            let mut keys = self.keys.lock().unwrap();
+            keys.anthropic.masked = Some(crate::sources::mask(&key));
+            keys.anthropic.checking = true;
+        }
+        self.bump();
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let listed = crate::sources::key_models(net.as_ref(), crate::sources::Source::AnthropicKey, &key);
+            {
+                let mut keys = this.keys.lock().unwrap();
+                keys.anthropic.checking = false;
+                match listed {
+                    Ok(models) => {
+                        keys.anthropic.models = models;
+                        keys.anthropic.detail = None;
+                    }
+                    Err(detail) => keys.anthropic.detail = Some(detail),
+                }
+            }
+            this.bump();
+        });
     }
     /// Sign-out wins over a login still waiting on the browser.
     pub fn disconnect(self: &Arc<Self>, provider: Provider) {
@@ -187,7 +273,7 @@ impl Accounts {
             slot.cancel = Arc::default();
             slot.cancel.clone()
         };
-        if matches!(job, Job::Connect) {
+        if matches!(job, Job::Connect | Job::ConnectKey) {
             self.publish(provider, Status::of(State::Checking, None));
         }
         let this = self.clone();
@@ -268,7 +354,17 @@ impl Accounts {
             Job::Disconnect => {
                 peer.request("account/logout", json!({}), REQUEST)?;
                 self.set_models(Provider::Chatgpt, vec![]);
+                self.keys.lock().unwrap().openai.clear();
                 return Ok(Status::of(State::Disconnected, None));
+            }
+            Job::ConnectKey => {
+                let Some(key) = self.keys.lock().unwrap().pending_openai.take() else {
+                    return chatgpt_status(&mut peer);
+                };
+                if !crate::sources::valid_key(key.trim()) {
+                    return Ok(Status::of(State::Disconnected, Some("That doesn’t look like an API key.".into())));
+                }
+                peer.request("account/login/start", json!({"type":"apiKey","apiKey":key.trim()}), REQUEST)?;
             }
             Job::Connect => {
                 let status = chatgpt_status(&mut peer)?;
@@ -303,6 +399,7 @@ impl Accounts {
             }
         }
         let mut status = chatgpt_status(&mut peer)?;
+        self.read_openai_key(&mut status);
         if status.state == State::Connected {
             self.slots.lock().unwrap().get_mut(Provider::Chatgpt.name()).unwrap().finding_models = true;
             self.bump();
@@ -318,6 +415,27 @@ impl Accounts {
             }
         }
         Ok(status)
+    }
+    /// With Codex on an API key: the key masked, and its own model list for
+    /// Powermove (read from the shared Keychain item, never from Codex).
+    fn read_openai_key(&self, status: &mut Status) {
+        let key = match (&self.environment.secrets, status.state) {
+            (Some(secrets), State::Connected) => crate::codex_auth::read(secrets.as_ref(), &self.environment)
+                .ok()
+                .flatten()
+                .and_then(|auth| auth.api_key),
+            _ => None,
+        };
+        status.key = key.as_deref().map(crate::sources::mask);
+        let models = match (key, &self.environment.net) {
+            (Some(key), Some(net)) => crate::sources::key_models(net.as_ref(), crate::sources::Source::OpenAiKey, &key)
+                .unwrap_or_else(|detail| {
+                    status.detail = Some(detail);
+                    vec![]
+                }),
+            _ => vec![],
+        };
+        self.keys.lock().unwrap().openai = models;
     }
     fn claude(
         &self,
@@ -414,6 +532,10 @@ fn trusted_auth_url(raw: &str) -> Result<String, String> {
 fn chatgpt_status(peer: &mut Peer) -> Result<Status, String> {
     let read = peer.request("account/read", json!({"refreshToken":false}), REQUEST)?;
     let account = &read["account"];
+    if account["type"] == "apiKey" {
+        // Codex signed in with an OpenAI API key (the second way in under Settings › Providers).
+        return Ok(Status::of(State::Connected, None));
+    }
     if account["type"] != "chatgpt" {
         return Ok(Status::of(State::Disconnected, None));
     }
@@ -422,6 +544,7 @@ fn chatgpt_status(peer: &mut Peer) -> Result<Status, String> {
         email: text(&account["email"], 320),
         plan: text(&account["planType"], 80).map(|p| plan_name(&p)),
         detail: None,
+        key: None,
     })
 }
 fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
@@ -540,6 +663,10 @@ pub fn plan_name(id: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// Claude Code reports its own sign-in.
+pub(crate) fn claude_signed_in(binary: &PathBuf, vars: &BTreeMap<String, String>) -> bool {
+    claude_status(binary, vars, &AtomicBool::new(false)).is_ok_and(|s| s.state == State::Connected)
+}
 fn claude_status(
     binary: &PathBuf,
     vars: &BTreeMap<String, String>,
@@ -563,6 +690,7 @@ fn claude_status(
         // no plan and never shown.
         plan: text(&value["subscriptionType"], 80).map(|p| plan_name(&p)),
         detail: None,
+        key: None,
     })
 }
 /// Claude Code answers an initialize control request without a user prompt.
@@ -740,14 +868,14 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
     models
 }
 /// A short-lived newline-JSON peer. Dropping it ends the process.
-struct Peer {
+pub(crate) struct Peer {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
     next: u64,
 }
 impl Peer {
-    fn start(
+    pub(crate) fn start(
         binary: &PathBuf,
         args: &[&str],
         vars: BTreeMap<String, String>,
@@ -786,10 +914,10 @@ impl Peer {
             .and_then(|_| self.stdin.flush())
             .map_err(|_| "The agent runtime stopped responding.".to_owned())
     }
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+    pub(crate) fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
         self.write(&json!({"method":method,"params":params}))
     }
-    fn request(&mut self, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
+    pub(crate) fn request(&mut self, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
         let id = self.next;
         self.next += 1;
         self.write(&json!({"method":method,"id":id,"params":params}))?;

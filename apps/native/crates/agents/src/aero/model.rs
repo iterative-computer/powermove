@@ -17,6 +17,22 @@ type Fake = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
 enum Transport {
     Fake(Fake),
     Replay(Url),
+    Live(Arc<Live>),
+}
+
+/// A real provider through Providers (`crate::sources::live`): the
+/// core's provider and its description (no credential), and the credential
+/// the edge adds for `origin` only. `credentials` gets the bearer a backend
+/// just refused, so it can refresh once.
+pub struct Live {
+    pub provider: String,
+    pub configured: String,
+    pub model: String,
+    /// The Codex catalog's answer, for the ChatGPT route.
+    pub catalog: Option<Value>,
+    pub net: Arc<dyn crate::edge::Net>,
+    #[allow(clippy::type_complexity)]
+    pub credentials: Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
 }
 
 pub enum Reply {
@@ -55,10 +71,37 @@ impl Model {
         })
     }
 
+    pub fn live(live: Live) -> Self {
+        Self {
+            transport: Transport::Live(Arc::new(live)),
+        }
+    }
+
     pub fn endpoint(&self) -> &str {
         match &self.transport {
             Transport::Fake(_) => "http://127.0.0.1:1/aero-fake",
             Transport::Replay(url) => url.as_str(),
+            Transport::Live(_) => "",
+        }
+    }
+    /// The core's provider id ("" is the Gateway the fakes stand behind).
+    pub fn provider(&self) -> &str {
+        match &self.transport {
+            Transport::Live(live) => &live.provider,
+            _ => "",
+        }
+    }
+    pub fn configured(&self) -> &str {
+        match &self.transport {
+            Transport::Live(live) => &live.configured,
+            _ => "",
+        }
+    }
+    /// The model the core is given: a live source's own id, else `requested`.
+    pub fn name<'a>(&'a self, requested: &'a str) -> &'a str {
+        match &self.transport {
+            Transport::Live(live) => &live.model,
+            _ => requested,
         }
     }
 }
@@ -68,6 +111,25 @@ impl Model {
 /// reach it (the core refuses images to a model without vision), and the
 /// session's effort as its one reasoning option (the core refuses an effort
 /// the model does not list).
+/// A catalog GET: a live Codex route's own answer, else the fakes'.
+pub(super) fn catalog(edge: &Model, remote: Remote, fetch: u64, url: &str, model: &str, effort: &str) {
+    let Transport::Live(live) = &edge.transport else {
+        return answer_catalog(remote, fetch, model, effort);
+    };
+    let body = live.catalog.as_ref().map(|catalog| {
+        if url.starts_with("https://registry.npmjs.org/") {
+            json!({"version": catalog["version"]}).to_string()
+        } else {
+            json!({"models": catalog["models"]}).to_string()
+        }
+    });
+    let ok = match body {
+        Some(body) => status(remote, fetch, 200).and_then(|_| push(remote, fetch, body.as_bytes())),
+        None => status(remote, fetch, 404),
+    };
+    let _ = remote.fetch_finish(fetch, ok.is_ok());
+}
+
 pub(super) fn answer_catalog(remote: Remote, fetch: u64, model: &str, effort: &str) {
     let mut entry = json!({"id":model,"type":"language","tags":["tool-use","vision"],
         "context_window":200000,"max_tokens":8000});
@@ -81,8 +143,16 @@ pub(super) fn answer_catalog(remote: Remote, fetch: u64, model: &str, effort: &s
     let _ = remote.fetch_finish(fetch, ok.is_ok());
 }
 
-pub(super) fn deliver(model: &Model, remote: Remote, fetch: u64, url: &str, body: &[u8]) {
+pub(super) fn deliver(
+    model: &Model,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) {
     let result = match &model.transport {
+        Transport::Live(live) => deliver_live(live, remote, fetch, url, headers, body),
         Transport::Fake(fake) => {
             let content = response(fake(body), body);
             if let Some(content) = content {
@@ -135,6 +205,66 @@ fn deliver_replay(
         push(remote, fetch, &buffer[..len])?;
     }
     Ok(())
+}
+
+/// Sends the core's request with the source's credential when `url` is on
+/// the credential's origin (header rule 13), streaming the answer back. A
+/// 401 before any byte reached the core asks for a fresh credential once.
+fn deliver_live(
+    live: &Live,
+    remote: Remote,
+    fetch: u64,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(), String> {
+    use crate::edge::{Chunk, NetRequest};
+    let origin = pm_aero_core::origin_of(url);
+    let mut rejected: Option<String> = None;
+    for attempt in 0..2 {
+        let (trusted, credentials) = match (live.credentials)(rejected.as_deref()) {
+            Ok(found) => found,
+            Err(reason) => {
+                // The core reads why from the body of a refusal.
+                let body = json!({"error":{"message":reason,"code":"powermove_account"}}).to_string();
+                return status(remote, fetch, 401).and_then(|_| push(remote, fetch, body.as_bytes()));
+            }
+        };
+        let mut all: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(name, _)| !credentials.iter().any(|(c, _)| c.eq_ignore_ascii_case(name)))
+            .cloned()
+            .collect();
+        let bearer = credentials
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone());
+        if origin.as_deref() == Some(trusted.as_str()) {
+            all.extend(credentials);
+        }
+        let mut retry = false;
+        let request = NetRequest { method: "POST", url, headers: &all, body };
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        live.net.stream(&request, &stop, &mut |chunk| match chunk {
+            Chunk::Status(401) if attempt == 0 && bearer.is_some() => {
+                retry = true;
+                Ok(())
+            }
+            Chunk::Status(code) => status(remote, fetch, code),
+            Chunk::Data(_) if retry => Ok(()),
+            Chunk::Data(bytes) => {
+                if remote.fetch_disposition(fetch) == Disposition::Retired {
+                    return Err("The core retired the request.".into());
+                }
+                push(remote, fetch, bytes)
+            }
+        })?;
+        if !retry {
+            return Ok(());
+        }
+        rejected = bearer.map(|b| b.trim_start_matches("Bearer ").to_owned());
+    }
+    Err("The provider refused the refreshed credential.".into())
 }
 
 fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
@@ -283,14 +413,16 @@ pub fn evaluate(
     impl Host for NoTools {}
     let err = |e: pm_aero_core::Error| e.to_string();
     let dir = scope.to_str().ok_or("Invalid reviewer session path")?;
+    let name = model.name("fake/model");
     let mut runtime = Runtime::create(&Config {
-        model: "fake/model", endpoint_url: model.endpoint(), home: dir, workspace_root: dir,
+        provider: model.provider(), configured_providers_json: model.configured(),
+        model: name, endpoint_url: model.endpoint(), home: dir, workspace_root: dir,
         instructions: "You are an independent evaluator. Use only the provided result, captures and rubric. Score each criterion with specific evidence. Return the evaluation as JSON.",
         ..Config::default()
     }, Arc::new(NoTools)).map_err(err)?;
     let opening = runtime.open_session("").map_err(err)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    wait_open(&mut runtime, opening, ("fake/model", ""), deadline)?;
+    wait_open(&mut runtime, model, opening, (name, ""), deadline)?;
     runtime
         .prompt_input(
             &pm_aero_core::Input {
@@ -305,11 +437,12 @@ pub fn evaluate(
     while Instant::now() < deadline {
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {
-                answer_catalog(remote, fetch.fetch, "fake/model", "");
+                catalog(model, remote, fetch.fetch, fetch.url, name, "");
             } else {
                 let (id, url, body) = (fetch.fetch, fetch.url.to_owned(), fetch.body.to_vec());
+                let headers: Vec<_> = fetch.headers().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
                 let model = model.clone();
-                thread::spawn(move || deliver(&model, remote, id, &url, &body));
+                thread::spawn(move || deliver(&model, remote, id, &url, &headers, &body));
             }
         }
         for event in runtime.events.drain().map_err(err)? {

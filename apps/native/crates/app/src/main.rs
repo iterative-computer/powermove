@@ -111,6 +111,7 @@ mod playhead;
 mod pro_edit_tests;
 mod pro_media;
 mod project_library;
+mod provider_keys;
 mod providers;
 mod publish;
 mod quit_limit;

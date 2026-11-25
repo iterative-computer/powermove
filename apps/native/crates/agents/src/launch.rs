@@ -172,6 +172,13 @@ pub struct Environment {
     /// The API or local model connection (Settings › Accounts), when the app has one.
     pub compatible: Option<std::sync::Arc<dyn compatible::ChatHost>>,
     pub aero: Option<crate::aero::Launcher>,
+    /// The Keychain, for Providers' credentials (the app's).
+    pub secrets: Option<std::sync::Arc<dyn crate::edge::Secrets>>,
+    /// The system HTTP stack (the app's), for Powermove's model requests.
+    pub net: Option<std::sync::Arc<dyn crate::edge::Net>>,
+    /// Prefix of this app's own Keychain services (its bundle id), so each
+    /// build keeps its own items.
+    pub keychain_prefix: String,
 }
 impl Environment {
     /// Reads this process. Safe mode would drop the run's own MCP server.
@@ -194,6 +201,9 @@ impl Environment {
             composition_tools,
             compatible: None,
             aero: None,
+            secrets: None,
+            net: None,
+            keychain_prefix: "com.powermove.native.dev".into(),
         }
     }
     /// Explicit override, then an updated managed runtime, then the bundled one.
@@ -256,8 +266,11 @@ impl Environment {
         vars.insert("CLAUDE_CONFIG_DIR".into(), home.display().to_string());
         Ok(vars)
     }
-    /// File-only storage keeps account calls on Powermove's own `auth.json`. An
-    /// existing Codex login is copied once; after that its absence means sign-out.
+    /// Codex keeps its login in the Keychain (`cli_auth_credentials_store =
+    /// "keyring"`), the one OpenAI credential Codex and Powermove both read
+    /// (`codex_auth`). A login an earlier build kept in this home's
+    /// `auth.json` moves into the item once; an existing Codex login on this
+    /// Mac is brought over the same way, once, before Powermove owns the home.
     pub fn codex_vars(&self) -> Result<BTreeMap<String, String>, String> {
         let home = self.home("codex-runtime")?;
         private_store(&home.join("config.toml")).map_err(|e| e.to_string())?;
@@ -269,15 +282,18 @@ impl Environment {
             .map(PathBuf::from)
             .or_else(|| self.vars.get("HOME").map(|h| Path::new(h).join(".codex")))
             .map(|root| root.join("auth.json"));
-        if !owner.exists() {
-            if !auth.exists()
-                && let Some(source) = source.filter(|path| path.is_file())
-            {
-                fs::copy(source, &auth).map_err(|e| e.to_string())?;
-                fs::set_permissions(&auth, fs::Permissions::from_mode(0o600))
-                    .map_err(|e| e.to_string())?;
+        if let Some(secrets) = &self.secrets {
+            if !owner.exists() {
+                if !auth.exists()
+                    && let Some(source) = source.filter(|path| path.is_file())
+                {
+                    fs::copy(source, &auth).map_err(|e| e.to_string())?;
+                    fs::set_permissions(&auth, fs::Permissions::from_mode(0o600))
+                        .map_err(|e| e.to_string())?;
+                }
+                fs::write(&owner, "powermove\n").map_err(|e| e.to_string())?;
             }
-            fs::write(&owner, "powermove\n").map_err(|e| e.to_string())?;
+            crate::codex_auth::migrate(secrets.as_ref(), self, &home)?;
         }
         let mut vars = self.vars.clone();
         vars.insert("CODEX_HOME".into(), home.display().to_string());
@@ -293,7 +309,7 @@ fn private_store(config: &Path) -> std::io::Result<()> {
     let mut document: toml_edit::DocumentMut = current
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    document["cli_auth_credentials_store"] = toml_edit::value("file");
+    document["cli_auth_credentials_store"] = toml_edit::value("keyring");
     document["suppress_unstable_features_warning"] = toml_edit::value(true);
     let next = document.to_string();
     if next != current {
@@ -381,8 +397,19 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
         let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
         let scope = environment.profile.join("aero").join("sessions").join(&id);
         let authority = request.clone();
+        // A model from Providers runs on its provider; anything else
+        // (the development switch's demo) on the fake model.
+        let mut options = crate::aero::Options::development();
+        match request.model.as_deref() {
+            Some(model) if crate::sources::Source::of(model).is_some() => {
+                let effort = request.effort.as_deref().unwrap_or("");
+                options.model = crate::aero::Model::live(crate::sources::live(environment, model, effort)?);
+            }
+            Some(crate::sources::FAKE_MODEL) => {}
+            _ => return Err("Choose a model for Powermove, or add a provider in Settings › Providers.".into()),
+        }
         return Ok(crate::aero::start(
-            request, id, scope, crate::aero::Options::development(),
+            request, id, scope, options,
             move |path| open(&authority, path, &token),
         ).hold(grant));
     }
@@ -445,7 +472,14 @@ fn claude(
     let executable = env
         .binary(Runtime::Claude)
         .ok_or_else(|| missing("Claude"))?;
-    let vars = env.claude_vars()?;
+    let mut vars = env.claude_vars()?;
+    // Providers' Anthropic key runs Claude Code when Claude Code has no
+    // sign-in of its own (a signed-in Claude plan keeps running on the plan).
+    if let Some(key) = env.secrets.as_deref().and_then(|s| crate::sources::anthropic_key(s, env))
+        && !crate::account::claude_signed_in(&executable, &vars)
+    {
+        vars.insert("ANTHROPIC_API_KEY".into(), key);
+    }
     let (command, args) = env.mcp(token);
     let additional = request.additional();
     let prefix = |tools: &[String]| {
@@ -713,21 +747,21 @@ mod tests {
         let config = dir.join("config.toml");
         std::fs::write(
             &config,
-            "model = \"m\"\ncli_auth_credentials_store = \"keyring\"\n\n[profiles.work]\ncli_auth_credentials_store = \"keyring\"\n",
+            "model = \"m\"\ncli_auth_credentials_store = \"file\"\n\n[profiles.work]\ncli_auth_credentials_store = \"file\"\n",
         )
         .unwrap();
         super::private_store(&config).unwrap();
         let written: toml_edit::DocumentMut =
             std::fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(written["model"].as_str(), Some("m"));
-        assert_eq!(written["cli_auth_credentials_store"].as_str(), Some("file"));
+        assert_eq!(written["cli_auth_credentials_store"].as_str(), Some("keyring"));
         assert_eq!(
             written["suppress_unstable_features_warning"].as_bool(),
             Some(true)
         );
         assert_eq!(
             written["profiles"]["work"]["cli_auth_credentials_store"].as_str(),
-            Some("keyring")
+            Some("file")
         );
         std::fs::write(&config, "not = [toml").unwrap();
         assert!(super::private_store(&config).is_err());
@@ -769,6 +803,9 @@ mod exec_reply_tests {
             composition_tools: vec![],
             compatible: None,
             aero: None,
+            secrets: None,
+            net: None,
+            keychain_prefix: String::new(),
         };
         let request = Request {
             run: "same-run".into(),

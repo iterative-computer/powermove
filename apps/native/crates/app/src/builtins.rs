@@ -439,12 +439,12 @@ impl Controller {
         if cfg!(debug_assertions) && (environment.vars.get("PM_AERO_DEV").is_some_and(|value| value == "1")
             || self.mcp.profile.join("aero-dev").is_file()) {
             environment.aero = Some(crate::mcp::aero_launcher());
-        } else {
-            environment.compatible = Some(Arc::new(crate::providers::Chat {
-                profile: self.mcp.profile.clone(),
-            }));
         }
-        runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
+        environment.compatible = Some(Arc::new(crate::providers::Chat {
+            profile: self.mcp.profile.clone(),
+        }));
+        let open = crate::provider_keys::attach(&mut environment);
+        runtime.set_agent_environment(environment, open);
         let observation_kernel = self.kernel.clone();
         runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {
             let matches = || {
