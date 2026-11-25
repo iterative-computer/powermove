@@ -15,7 +15,8 @@
 #    leaving the markers for a person to resolve. Then run with --continue.
 # 4. Re-derives the closure at the new commit (tools/derive-closure.sh, which
 #    builds it), re-extracts src/libfx_core_runtime.zig from the new N-API
-#    entry, and refreshes the verbatim files (LICENSE, notices, fake server).
+#    entry, refreshes the verbatim files (LICENSE, notices, fake server) and
+#    sets build.zig's upstream_commit and upstream_version.
 # 5. Names the upstream build files that changed: ours are trimmed by hand.
 set -eu
 resume=0
@@ -85,6 +86,10 @@ python3 -I "$here/tools/extract-core-runtime.py" "$work/napi_core_main.zig" "$he
 git -C "$upstream" show "$new:LICENSE" > "$here/LICENSE"
 git -C "$upstream" show "$new:THIRD_PARTY_NOTICES.md" > "$here/THIRD_PARTY_NOTICES.md"
 git -C "$upstream" show "$new:benchmarks/libfx/fake-inference-server.zig" > "$here/test-support/fake-inference-server.zig"
+version=$(git -C "$upstream" show "$new:src/main.zig" | sed -n 's/^pub const version = "\(.*\)";$/\1/p')
+[ -n "$version" ] || { echo "sync: no version in upstream src/main.zig at $new" >&2; exit 1; }
+sed -i '' -e "s/^const upstream_commit = \".*\";$/const upstream_commit = \"$new\";/" \
+  -e "s/^const upstream_version = \".*\";$/const upstream_version = \"$version\";/" "$here/build.zig"
 
 changed=$(git -C "$upstream" diff --name-only "$old" "$new" -- build.zig build.zig.zon)
 [ -z "$changed" ] || echo "sync: upstream changed $(echo $changed): bring what the capi graph needs into ours by hand"
