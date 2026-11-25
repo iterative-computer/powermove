@@ -88,6 +88,14 @@ struct HandOff {
     picture: Option<(Arc<RenderImage>, Bounds<Pixels>)>,
     done: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
 }
+/// How a beat's scene shows the editor.
+enum EditorPicture {
+    Live,
+    /// Live, and pictured into the `Frozen` this frame.
+    Capture(Frozen),
+    /// The editor as it was, held while a change lands.
+    Held(Option<Arc<RenderImage>>),
+}
 /// A change on its way: frozen, applied, landing.
 struct Landing {
     change: Change,
@@ -288,6 +296,15 @@ impl Stage {
             home.size,
         )
     }
+    /// The editor's window on the stage: the app as it will open, standing
+    /// in the room rather than filling the display.
+    pub fn editor_rect(area: Size<Pixels>) -> Bounds<Pixels> {
+        let size = size(area.width * 0.9, area.height * 0.84);
+        Bounds::new(
+            point((area.width - size.width) / 2., area.height * 0.045),
+            size,
+        )
+    }
     fn room_picture(&mut self, t: f64, area: Size<Pixels>, scale: f32) -> AnyElement {
         // The grain moves at film's 24 frames a second.
         let room_t = (t.min(self.sheet.length() + 1.5) * 24.).floor() / 24.;
@@ -306,7 +323,7 @@ impl Stage {
         t: f64,
         area: Size<Pixels>,
         scale: f32,
-        capture: Option<Frozen>,
+        editor: EditorPicture,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -328,18 +345,32 @@ impl Stage {
                 };
                 root.child(furniture::mark(local, fold, &self.tokens, motion))
             }
-            Scene::Beat(_) => match self.demo.as_mut() {
-                Some(demo) => {
-                    let editor = demo.editor(window, cx);
-                    let frozen = capture.clone().unwrap_or_default();
-                    root.child(div().absolute().inset_0().child(freeze(
-                        editor,
-                        frozen,
-                        capture.is_some(),
-                    )))
-                }
-                None => root,
-            },
+            Scene::Beat(_) => {
+                let rect = Self::editor_rect(area);
+                let radius = px(self.tokens.radius.window);
+                let content = match (editor, self.demo.as_mut()) {
+                    (EditorPicture::Held(image), _) => still(image),
+                    (EditorPicture::Live, Some(demo)) => demo.editor(window, cx),
+                    (EditorPicture::Capture(frozen), Some(demo)) => {
+                        freeze(demo.editor(window, cx), frozen, true).into_any_element()
+                    }
+                    (_, None) => div().into_any_element(),
+                };
+                root.child(
+                    div()
+                        .absolute()
+                        .left(rect.origin.x)
+                        .top(rect.origin.y)
+                        .w(rect.size.width)
+                        .h(rect.size.height)
+                        .rounded(radius)
+                        .shadow_2xl()
+                        .border_1()
+                        .border_color(rgba((self.tokens.colors.text << 8) | 0x1a))
+                        .overflow_hidden()
+                        .child(content),
+                )
+            }
             Scene::Card => match &self.card {
                 Some(card) => root.child(
                     div()
@@ -366,7 +397,9 @@ impl Stage {
     ) -> Option<AnyElement> {
         let position = self.sheet.at(t);
         let demo = self.demo.as_mut()?;
-        let home = demo.composer_home(area);
+        let rect = Self::editor_rect(area);
+        let home = demo.composer_home(rect.size);
+        let home = Bounds::new(rect.origin + home.origin, home.size);
         let alone = Self::composer_alone(area, home);
         let (bounds, opacity, composer) = match position.scene {
             Scene::Mark => {
@@ -517,7 +550,16 @@ impl Stage {
     ) -> AnyElement {
         if local < beats::LANDS {
             self.landing = None;
-            return self.scene(index, local, t, area, scale, None, window, cx);
+            return self.scene(
+                index,
+                local,
+                t,
+                area,
+                scale,
+                EditorPicture::Live,
+                window,
+                cx,
+            );
         }
         if self.landing.as_ref().is_none_or(|l| l.change != change) {
             // This frame pictures the editor as it was; the change goes in
@@ -529,7 +571,16 @@ impl Stage {
                 applied: None,
                 landed: None,
             });
-            return self.scene(index, local, t, area, scale, Some(frozen), window, cx);
+            return self.scene(
+                index,
+                local,
+                t,
+                area,
+                scale,
+                EditorPicture::Capture(frozen),
+                window,
+                cx,
+            );
         }
         let landing = self.landing.as_mut().unwrap();
         if landing.applied.is_none() {
@@ -550,22 +601,60 @@ impl Stage {
         let held = landing.frozen.get();
         let Some(landed) = landing.landed else {
             // Not there yet: the editor as it was, held.
-            return still(held);
+            return self.scene(
+                index,
+                local,
+                t,
+                area,
+                scale,
+                EditorPicture::Held(held),
+                window,
+                cx,
+            );
         };
         let p = (t - landed) / self.sheet.wave_seconds;
         if p >= 1. || held.is_none() {
             self.release_wave(cx);
-            return self.scene(index, local, t, area, scale, None, window, cx);
+            return self.scene(
+                index,
+                local,
+                t,
+                area,
+                scale,
+                EditorPicture::Live,
+                window,
+                cx,
+            );
         }
         let source = self
             .demo
             .as_ref()
             .map_or(Bounds::new(point(px(0.), px(0.)), area), |d| {
-                d.site(change, area)
+                let rect = Self::editor_rect(area);
+                let site = d.site(change, rect.size);
+                Bounds::new(rect.origin + site.origin, site.size)
             });
         self.arm_wave(WaveKey::Change(change), cue::STEP_WAVE, source, window, cx);
-        let from = still(held);
-        let to = self.scene(index, local, t, area, scale, None, window, cx);
+        let from = self.scene(
+            index,
+            local,
+            t,
+            area,
+            scale,
+            EditorPicture::Held(held),
+            window,
+            cx,
+        );
+        let to = self.scene(
+            index,
+            local,
+            t,
+            area,
+            scale,
+            EditorPicture::Live,
+            window,
+            cx,
+        );
         self.waved(p, from, to, cx)
     }
     fn skip_button(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -722,7 +811,16 @@ impl Render for Stage {
                 if let Some(card) = &self.card {
                     card.update(cx, |c, cx| c.set_snapshot(true, cx));
                 }
-                let from = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
+                let from = self.scene(
+                    card_index,
+                    t - card_at,
+                    t,
+                    area,
+                    scale,
+                    EditorPicture::Live,
+                    window,
+                    cx,
+                );
                 let to = self.arrival(self.hand_off.as_ref().unwrap());
                 self.waved(p, from, to, cx)
             } else {
@@ -735,7 +833,8 @@ impl Render for Stage {
             let next = position.index + 1;
             let source = match self.sheet.cues[position.index].scene {
                 Scene::Composer => {
-                    let home = self.demo.as_ref().map(|d| d.composer_home(area));
+                    let rect = Self::editor_rect(area);
+                    let home = self.demo.as_ref().map(|d| d.composer_home(rect.size));
                     home.map_or(Bounds::new(point(px(0.), px(0.)), area), |h| {
                         Self::composer_alone(area, h)
                     })
@@ -749,8 +848,17 @@ impl Render for Stage {
                 card.update(cx, |c, cx| c.set_snapshot(true, cx));
             }
             let started = position.length - self.sheet.wave_seconds;
-            let from = self.scene(position.index, started, t, area, scale, None, window, cx);
-            let to = self.scene(next, 0., t, area, scale, None, window, cx);
+            let from = self.scene(
+                position.index,
+                started,
+                t,
+                area,
+                scale,
+                EditorPicture::Live,
+                window,
+                cx,
+            );
+            let to = self.scene(next, 0., t, area, scale, EditorPicture::Live, window, cx);
             self.waved(p, from, to, cx)
         } else if let Some((previous, began)) = self.leaving_card.clone() {
             // A step on the card: the wave from the card before.
@@ -761,7 +869,16 @@ impl Render for Stage {
                 if let Some(card) = &self.card {
                     card.update(cx, |c, cx| c.set_snapshot(false, cx));
                 }
-                self.scene(card_index, t - card_at, t, area, scale, None, window, cx)
+                self.scene(
+                    card_index,
+                    t - card_at,
+                    t,
+                    area,
+                    scale,
+                    EditorPicture::Live,
+                    window,
+                    cx,
+                )
             } else {
                 let key = WaveKey::Step(self.steps);
                 let card_bounds = Bounds::new(point(px(0.), px(0.)), area);
@@ -771,9 +888,27 @@ impl Render for Stage {
                     card.update(cx, |c, cx| c.set_snapshot(true, cx));
                 }
                 let current = self.card.replace(previous);
-                let from = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
+                let from = self.scene(
+                    card_index,
+                    t - card_at,
+                    t,
+                    area,
+                    scale,
+                    EditorPicture::Live,
+                    window,
+                    cx,
+                );
                 self.card = current;
-                let to = self.scene(card_index, t - card_at, t, area, scale, None, window, cx);
+                let to = self.scene(
+                    card_index,
+                    t - card_at,
+                    t,
+                    area,
+                    scale,
+                    EditorPicture::Live,
+                    window,
+                    cx,
+                );
                 self.waved(p, from, to, cx)
             }
         } else if let Scene::Beat(change) = position.scene {
@@ -806,7 +941,7 @@ impl Render for Stage {
                 t,
                 area,
                 scale,
-                None,
+                EditorPicture::Live,
                 window,
                 cx,
             );
