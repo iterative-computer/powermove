@@ -157,6 +157,44 @@ impl Session {
         }
         value.insert("compositions", Value::Array(compositions));
 
+        // Focused group chain inside the active composition (outermost to innermost).
+        let focused_group = model
+            .ui
+            .timeline
+            .get("nativeModel")
+            .and_then(|v| v.get("focusedGroup"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        if let Some(mut cur) = focused_group {
+            let layers = pm_kernel::model::list_layers(root, model.composition.as_deref());
+            let mut chain = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            while seen.insert(cur.to_owned()) {
+                let Some(layer) = layers.iter().find(|l| l.id == cur && l.kind == "group") else {
+                    break;
+                };
+                let mut item = Map::new();
+                item.insert("id", Value::from(layer.id.as_str()));
+                item.insert(
+                    "name",
+                    Value::from(if layer.name.is_empty() {
+                        "Group"
+                    } else {
+                        layer.name.as_str()
+                    }),
+                );
+                chain.push(Value::Object(item));
+                match layer.group.as_deref() {
+                    Some(parent) => cur = parent,
+                    None => break,
+                }
+            }
+            if !chain.is_empty() {
+                chain.reverse();
+                value.insert("focusedGroups", Value::Array(chain));
+            }
+        }
+
         value.insert("fit", Value::Bool(model.chrome.navigation.fit));
         value.insert("shownZoom", Value::Number(shown));
         value.insert("quality", Value::from(model.chrome.quality.id()));

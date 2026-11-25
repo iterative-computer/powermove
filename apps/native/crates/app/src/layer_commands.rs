@@ -1232,9 +1232,20 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
         track: None,
         time,
     };
+    let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
+    if let Some(group) = pm_panel_timeline::focused_group_for_published(published) {
+        commands.push(
+            pm_kernel::GroupCommand::MoveToGroup {
+                layer_ids: vec![id.clone()],
+                group: Some(group),
+                time,
+            }
+            .into(),
+        );
+    }
     Plan {
         select: Some(vec![id]),
-        ..plain(&label, vec![LayerCommand::Add(Box::new(add)).into()])
+        ..plain(&label, commands)
     }
 }
 /// `selectAdjacentLayer`: the stack's neighbour, or the far end with no selection.

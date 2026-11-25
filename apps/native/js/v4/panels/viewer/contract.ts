@@ -7,6 +7,7 @@ export interface ViewerModel {
   composition: string | null;
   name: string;
   compositions?: Array<{ id: string; name: string; parents: string[] }>;
+  focusedGroups?: Array<{ id: string; name: string }>;
   trail?: { ids: string[]; index: number };
   fit: boolean;
   shownZoom: number;

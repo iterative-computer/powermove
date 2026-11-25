@@ -21,6 +21,7 @@ cp "$binary" "$app/Contents/MacOS/powermove-native"
 cp "$here/little-victory-deep.wav" "$app/Contents/Resources/"
 # The About window's notices, and the licence text of the icons it names.
 cp "$here/Credits.rtf" "$app/Contents/Resources/"
+cp "$here/icon.icns" "$here/document.icns" "$app/Contents/Resources/"
 cp "$here/../crates/shell/icons/pierre/LICENSE" "$app/Contents/Resources/Pierre Icons License.txt"
 # The app starts these by path; without the shader compiler no effect draws.
 for helper in pm-glsl-compiler pm-store-helper; do
@@ -71,7 +72,7 @@ if otool -L "$binary" | grep -Fq libOpenImageDenoise; then
   : "${OIDN_DIR:?Set OIDN_DIR to a Metal-enabled OIDN install with CPU fallback}"
   python3 "$(dirname "$0")/bundle-oidn.py" "$app" --oidn-dir "$OIDN_DIR"
 fi
-xcrun actool "$here/Assets.xcassets" --compile "$app/Contents/Resources" \
+xcrun actool "$here/Assets.xcassets" "$here/Powermove.icon" --compile "$app/Contents/Resources" \
   --platform macosx --minimum-deployment-target 14.0 --accent-color AccentColor \
-  --output-partial-info-plist "$out/assets-info.plist" >/dev/null
+  --app-icon Powermove --output-partial-info-plist "$out/assets-info.plist" >/dev/null
 echo "$app"

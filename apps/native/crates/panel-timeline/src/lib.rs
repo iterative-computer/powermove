@@ -93,13 +93,37 @@ pub enum GraphDisplay {
 struct CachedTrackLayout {
     index: Arc<TimelineIndex>,
     held: HashMap<String, reveal::Held>,
+    focused_group: Option<String>,
     layout: Arc<tracks::Layout>,
+}
+
+/// The focused group id stored in the timeline's persisted UI state, if any.
+pub fn focused_group_from_ui(ui: &pm_kernel::state::UiState) -> Option<&str> {
+    ui.timeline
+        .get("nativeModel")
+        .and_then(|v| v.get("focusedGroup"))
+        .and_then(pm_model::Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Validates the focused group stored in `published.ui_state` against the active
+/// composition in `published.snapshot`.
+pub fn focused_group_for_published(published: &Published) -> Option<String> {
+    let id = focused_group_from_ui(&published.ui_state)?;
+    let root = published.snapshot.root()?;
+    let layers = pm_kernel::model::list_layers(root, None);
+    layers
+        .iter()
+        .any(|l| l.id == id && l.kind == "group")
+        .then(|| id.to_owned())
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TimelineModel {
     pub index: Arc<TimelineIndex>,
     pub selection: Selection,
+    /// Focused group layer id (double-clicked to edit like a composition).
+    pub focused_group: Option<String>,
     /// Transient value field; never persisted as a reveal request.
     pub editing_property: Option<(String, String)>,
     pub mode: TimelineMode,
@@ -148,20 +172,75 @@ impl TimelineModel {
     /// Lane packing depends on the immutable index and the held lane assignments.
     /// Model clones used by the canvas and outline share the packed result.
     pub fn track_layout(&self) -> Arc<tracks::Layout> {
+        let focus = self.active_focused_group().map(str::to_owned);
         let mut cached = self.track_layout.lock().unwrap();
         if let Some(entry) = &*cached
             && Arc::ptr_eq(&entry.index, &self.index)
             && entry.held == self.reveal.held
+            && entry.focused_group == focus
         {
             return entry.layout.clone();
         }
-        let layout = Arc::new(tracks::layout(&self.index, &self.reveal));
+        let layout = Arc::new(tracks::layout_focused(
+            &self.index,
+            &self.reveal,
+            focus.as_deref(),
+        ));
         *cached = Some(CachedTrackLayout {
             index: self.index.clone(),
             held: self.reveal.held.clone(),
+            focused_group: focus,
             layout: layout.clone(),
         });
         layout
+    }
+
+    /// The currently focused group layer id, if it still exists as a group in
+    /// the active composition.
+    pub fn active_focused_group(&self) -> Option<&str> {
+        let id = self.focused_group.as_deref()?;
+        self.index
+            .layer(id)
+            .is_some_and(|l| l.kind == "group")
+            .then_some(id)
+    }
+
+    /// Outermost-to-innermost chain of focused groups (empty when viewing the
+    /// whole composition).
+    pub fn focused_group_chain(&self) -> Vec<&Layer> {
+        let Some(mut cur) = self.active_focused_group() else {
+            return Vec::new();
+        };
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        while seen.insert(cur) {
+            let Some(layer) = self.index.layer(cur) else {
+                break;
+            };
+            if layer.kind != "group" {
+                break;
+            }
+            chain.push(layer);
+            match layer.group.as_deref() {
+                Some(parent) => cur = parent,
+                None => break,
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Focus a group layer like a composition (`None` returns to the active
+    /// composition root).
+    pub fn set_focused_group(&mut self, group: Option<String>) -> Result<(), ModelError> {
+        if let Some(id) = group.as_deref()
+            && !self.index.layer(id).is_some_and(|l| l.kind == "group")
+        {
+            return Err(ModelError::UnknownId(id.into()));
+        }
+        self.focused_group = group;
+        self.rebuild_rows();
+        Ok(())
     }
 
     pub fn follows_publication(&self, published: &Published) -> bool {
@@ -226,7 +305,13 @@ impl TimelineModel {
             } else {
                 self.reveal.held.clear();
             }
+            if !same_composition {
+                self.focused_group = None;
+            }
             self.index = TimelineIndex::shared(&published.snapshot, &self.index);
+            if self.focused_group.is_some() && self.active_focused_group().is_none() {
+                self.focused_group = None;
+            }
             self.rebuild_rows();
         }
         // A transition stays selected until a selection leaves out its layer,
@@ -427,13 +512,16 @@ impl TimelineModel {
         self.rows.clear();
         // Index parent links once; avoid an O(depth * layers) ancestor walk.
         let children = self.index.children();
-        let mut stack: Vec<(usize, usize)> = self
-            .index
-            .roots(&children)
-            .into_iter()
-            .rev()
-            .map(|i| (i, 0))
-            .collect();
+        let roots = if let Some(gid) = self.active_focused_group() {
+            children
+                .get(&Some(gid.to_owned()))
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            self.index.roots(&children)
+        };
+        let mut stack: Vec<(usize, usize)> =
+            roots.into_iter().rev().map(|i| (i, 0)).collect();
         let mut seen = HashSet::new();
         let query = self.search.trim().to_lowercase();
         while let Some((i, depth)) = stack.pop() {
@@ -787,6 +875,11 @@ impl TimelineModel {
             });
         let siblings = if group.is_some() {
             children.get(&group).cloned().unwrap_or_default()
+        } else if let Some(gid) = self.active_focused_group() {
+            children
+                .get(&Some(gid.to_owned()))
+                .cloned()
+                .unwrap_or_default()
         } else {
             self.index.roots(&children)
         };

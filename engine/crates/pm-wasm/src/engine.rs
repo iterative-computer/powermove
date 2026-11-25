@@ -1630,9 +1630,13 @@ impl Engine {
                         let local: Option<Vec<JsValue>> = get(request, "localView")
                             .filter(|v| !v.is_null())
                             .map(|v| js_values(Some(v)));
+                        let focus = get(request, "focusGroup")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty());
                         let options = PickOptions {
                             include_locked: arg(get(request, "includeLocked")).truthy(),
                             local_view: local.as_deref(),
+                            focus_group: focus,
                         };
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);

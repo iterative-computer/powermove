@@ -29,6 +29,15 @@ pub struct Scene {
 }
 /// The viewer's rendered-frame cache (RGBA16F surfaces).
 const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+fn focus_group_key(group: Option<&str>) -> u64 {
+    let Some(group) = group else {
+        return 0;
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    group.hash(&mut hash);
+    hash.finish().max(1)
+}
 /// The most output surfaces the engine keeps, of every size together. A
 /// frame finding all of them held by frames on screen or in flight takes one
 /// past it (the pool comes back as they land); twice it held is a leak.
@@ -601,6 +610,7 @@ pub struct Engine {
     pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
+    focus_group: Option<String>,
     #[cfg(feature = "kernel")]
     studio_resources: crate::studio::StudioResourceCache,
     /// Set by the device's lost callback or an internal GPU error: the
@@ -1117,6 +1127,7 @@ impl Engine {
         next.studio_preview = self.studio_preview;
         next.studio_progress = self.studio_progress.clone();
         next.studio_view = self.studio_view.clone();
+        next.focus_group = self.focus_group.clone();
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
@@ -1307,6 +1318,7 @@ impl Engine {
             studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
             studio_view: crate::studio::ViewCamera::Active,
+            focus_group: None,
             #[cfg(feature = "kernel")]
             studio_resources: crate::studio::StudioResourceCache::default(),
             lost,
@@ -1427,6 +1439,7 @@ impl Engine {
             resources: self.resources.generation,
             studio_preview: self.studio_preview,
             studio_view: self.studio_view.key(),
+            focus_group: focus_group_key(self.focus_group.as_deref()),
         }
     }
     /// Whether `scene` draws a 3D scene (path traced on this thread).
@@ -1662,6 +1675,9 @@ impl Engine {
     }
     pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
         self.studio_view = camera;
+    }
+    pub fn focus_group(&mut self, group: Option<String>) {
+        self.focus_group = group;
     }
     #[cfg(feature = "kernel")]
     pub(crate) fn start_export_calibration(
@@ -1993,7 +2009,10 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && shown.is_none() && !spec.exact;
+        let looked = hit.is_none()
+            && shown.is_none()
+            && !spec.exact
+            && self.focus_group.is_none();
         // A playing or paused frame waits a moment for its frame on disk
         // rather than drawing what was rendered because it can't be drawn
         // in time (a dragged one never waits).
@@ -2116,6 +2135,7 @@ impl Engine {
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
+                request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
                 // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
@@ -2645,6 +2665,7 @@ impl Engine {
         }
         let mut request = spec.request(scene)?;
         request.output_tone = self.output_tone;
+        request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
         let surface = self.cache_surface(size)?;
         let job = crate::settle::Job {
             key,

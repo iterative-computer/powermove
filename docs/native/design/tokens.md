@@ -172,7 +172,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.playhead` | Playhead line width | 1 | 1 | 1 | 1 |
 | `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
-| `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
+| `metrics.property_row` | Timeline property sub-row | 28 | 28 | 28 | 28 |
 | `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |
 | `metrics.row` | Inspector and list row height | 28 | 28 | 28 | 28 |
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |

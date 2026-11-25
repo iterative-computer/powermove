@@ -837,6 +837,7 @@ impl KernelAdapter {
                     time,
                     &pm_kernel::queries::PickOptions {
                         include_locked: args["includeLocked"] == true,
+                        focus_group: None,
                     },
                 );
                 Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))

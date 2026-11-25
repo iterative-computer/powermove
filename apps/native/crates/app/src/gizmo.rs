@@ -251,6 +251,8 @@ pub trait Host: 'static {
     }
     /// Open a composition (a double-clicked precomp).
     fn open_composition(&self, _: String, _: &mut App) {}
+    /// Focus a group layer like a composition (`None` returns to the composition).
+    fn focus_group(&self, _: Option<String>, _: &mut App) {}
     /// Imported-model geometry for picking a part (snapshot-approved
     /// originals); `None` when no media host can load it.
     fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
@@ -1927,6 +1929,15 @@ impl GizmoSurface {
                         s.pump(cx);
                     });
                 }
+                Some(DoubleClick::FocusGroup { group, select }) => {
+                    let _ = this.update(cx, |s, cx| {
+                        s.host.focus_group(group, cx);
+                        s.queue.push_back(Job::SelectLayers(
+                            select.into_iter().collect(),
+                        ));
+                        s.pump(cx);
+                    });
+                }
                 Some(DoubleClick::Text(id)) => {
                     let _ = handle.update(cx, |_, window, cx| {
                         let _ = this.update(cx, |s, cx| s.edit_text_all(id, window, cx));
@@ -1974,6 +1985,7 @@ impl GizmoSurface {
                     let p = kernel.published(&project)?;
                     let options = pm_kernel::PickOptions {
                         include_locked: true,
+                        focus_group: focused_group(&p),
                     };
                     let hit = crate::text_host::query(&p, |q| {
                         q.pick(None, press.at[0], press.at[1], press.time, &options)
@@ -3394,29 +3406,51 @@ enum DoubleClick {
     /// Descend one group level: the child of the deepest selected group
     /// holding the hit.
     Select(String),
+    /// Focus a group layer like a composition (or exit when `group` is `None`),
+    /// optionally selecting the clicked member inside it.
+    FocusGroup {
+        group: Option<String>,
+        select: Option<String>,
+    },
     /// Edit the text layer's text, all of it selected.
     Text(String),
     /// Open the precomp's composition.
     Open(String),
 }
+fn focused_group(p: &pm_kernel::Published) -> Option<String> {
+    pm_panel_timeline::focused_group_for_published(p)
+}
 fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
     let root = p.snapshot.root()?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
     let hit = crate::text_host::query(p, |q| {
-        q.pick(
-            None,
-            press.at[0],
-            press.at[1],
-            press.time,
-            &Default::default(),
-        )
+        q.pick(None, press.at[0], press.at[1], press.time, &pick_opts)
     })
     .ok()?
-    .layer_id?;
+    .layer_id;
+    let layers = pm_kernel::model::list_layers(root, None);
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.group.clone())
+    };
+    let Some(hit) = hit else {
+        // Double-clicking empty canvas while focused on a group steps up one level.
+        let gid = focus?;
+        return Some(DoubleClick::FocusGroup {
+            group: group_of(&gid),
+            select: None,
+        });
+    };
     // Studio 3D layers answer their own double-click.
     if is_studio(p, &hit) {
         return None;
     }
-    let layers = pm_kernel::model::list_layers(root, None);
     let info = layers.iter().find(|l| l.id == hit)?;
     let selected = p.selection.layers();
     let text = info.kind == "text" && !info.effectively_locked;
@@ -3424,17 +3458,24 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
     if text && selected.contains(&hit) {
         return Some(DoubleClick::Text(hit));
     }
-    let group_of = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l.id == id)
-            .and_then(|l| l.group.clone())
-    };
     let mut chain = vec![hit.clone()];
     while let Some(group) = group_of(chain.last().unwrap()) {
         chain.push(group);
     }
     chain.reverse();
+    let scope_start = focus
+        .as_ref()
+        .and_then(|gid| chain.iter().position(|id| id == gid).map(|i| i + 1))
+        .unwrap_or(0);
+    if scope_start + 1 < chain.len() {
+        let group = chain[scope_start].clone();
+        if layers.iter().any(|l| l.id == group && l.kind == "group") {
+            return Some(DoubleClick::FocusGroup {
+                group: Some(group),
+                select: Some(chain[scope_start + 1].clone()),
+            });
+        }
+    }
     if let Some(index) = chain.iter().rposition(|id| selected.contains(id))
         && index + 1 < chain.len()
     {
@@ -3455,14 +3496,13 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
 /// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
 fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
     let root = p.snapshot.root()?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
     let hit = crate::text_host::query(p, |q| {
-        q.pick(
-            None,
-            press.at[0],
-            press.at[1],
-            press.time,
-            &Default::default(),
-        )
+        q.pick(None, press.at[0], press.at[1], press.time, &pick_opts)
     })
     .ok()?;
     let Some(id) = hit.layer_id else {
@@ -3492,8 +3532,18 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
         }
         out
     };
-    let entered: Vec<String> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
-    let outermost = chain(&id).into_iter().rev().find(|g| !entered.contains(g));
+    let hit_chain = chain(&id);
+    if let Some(gid) = &focus
+        && !hit_chain.contains(gid)
+    {
+        return Some(None);
+    }
+    let mut entered: Vec<String> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
+    if let Some(gid) = &focus {
+        entered.push(gid.clone());
+        entered.extend(chain(gid));
+    }
+    let outermost = hit_chain.into_iter().rev().find(|g| !entered.contains(g));
     Some(Some(outermost.unwrap_or(id)))
 }
 /// Accent box, handles and anchor as engine lines. Sizes follow the display,

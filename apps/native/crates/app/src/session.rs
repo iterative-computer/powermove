@@ -165,6 +165,8 @@ pub struct Controller {
     pub media_mode: pm_engine_service::MediaMode,
     /// Preview Resolution (viewer bar) for this editor's viewers.
     pub quality: pm_engine_service::Quality,
+    /// Currently focused group layer id (isolated in viewer and timeline like a composition).
+    pub focus_group: Option<String>,
     /// What the open project delivers (Settings › Project › Output).
     pub project_output: pm_protocol::color::ProjectOutput,
     pub scopes: crate::colour::Scopes,
@@ -1360,6 +1362,7 @@ impl Controller {
             output_mode: crate::viewer2::OutputMode::from_env(),
             media_mode: Default::default(),
             quality: Default::default(),
+            focus_group: None,
             project_output: pm_protocol::color::ProjectOutput::Sdr,
             scopes: Default::default(),
             perf: Default::default(),
@@ -1877,14 +1880,23 @@ impl Controller {
         }
         self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
+        let mut viewer_changed = false;
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.view.adopt(&chrome.navigation);
             // Preview Resolution in the viewer bar: the engine renders at it.
             let quality = crate::viewer2::engine_quality(chrome.quality);
             if self.quality != quality {
                 self.quality = quality;
-                self.apply_viewer_options();
+                viewer_changed = true;
             }
+        }
+        let focus_group = pm_panel_timeline::focused_group_for_published(&p);
+        if self.focus_group != focus_group {
+            self.focus_group = focus_group;
+            viewer_changed = true;
+        }
+        if viewer_changed {
+            self.apply_viewer_options();
         }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),

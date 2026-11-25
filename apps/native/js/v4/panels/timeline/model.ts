@@ -147,7 +147,13 @@ export interface TimelineFrame {
   spokenTime: string;
   frameRate: string;
   timeEditor?: TextLease;
-  tabs: { id: string; name: string; active: boolean; showClose: boolean }[];
+  tabs: {
+    id: string;
+    name: string;
+    active: boolean;
+    showClose: boolean;
+    kind?: "composition" | "group";
+  }[];
   /** Already flattened/indexed by Rust. One viewport of overscan on each side. */
   window: {
     total: number;
@@ -178,6 +184,7 @@ export type Intent =
   | { type: "tabMenu"; id: string; action: string }
   | { type: "tabContext"; id: string }
   | { type: "selectRow"; id: string; modifiers: Modifiers }
+  | { type: "openLayer"; id: string }
   | { type: "disclosure"; id: string; open: boolean; all?: boolean }
   | { type: "rename"; id: string }
   /** A name or time field closed: its text, or empty when cancelled. */

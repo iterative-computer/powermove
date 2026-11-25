@@ -524,28 +524,43 @@ impl Backend {
         if self.native.tab_switch.is_none() && !self.native.composition_tabs.contains(&active) {
             self.native.composition_tabs.push(active.clone());
         }
-        let closable = self.native.composition_tabs.len() > 1;
-        frame["tabs"] = json!(
-            self.native
-                .composition_tabs
-                .iter()
-                .map(|id| {
-                    let comp = if id == "root" {
-                        Some(root)
-                    } else {
-                        root.get("comps").and_then(|c| c.get(id))
-                    };
-                    let name = comp
-                        .and_then(|c| c.get("name"))
-                        .and_then(|node| match node.kind() {
-                            pm_model::NodeKind::String(text) => text.as_str(),
-                            _ => None,
-                        })
-                        .unwrap_or("Composition");
-                    json!({"id":id,"name":name,"active":id == &active,"showClose":closable})
+        let group_chain = timeline.focused_group_chain();
+        let has_group_focus = !group_chain.is_empty();
+        let comp_closable = self.native.composition_tabs.len() > 1;
+        let mut tabs = Vec::with_capacity(self.native.composition_tabs.len() + group_chain.len());
+        for id in &self.native.composition_tabs {
+            let comp = if id == "root" {
+                Some(root)
+            } else {
+                root.get("comps").and_then(|c| c.get(id))
+            };
+            let name = comp
+                .and_then(|c| c.get("name"))
+                .and_then(|node| match node.kind() {
+                    pm_model::NodeKind::String(text) => text.as_str(),
+                    _ => None,
                 })
-                .collect::<Vec<_>>()
-        );
+                .unwrap_or("Composition");
+            tabs.push(json!({
+                "id": id,
+                "name": name,
+                "active": !has_group_focus && id == &active,
+                "showClose": comp_closable
+            }));
+            if id == &active {
+                for (index, group) in group_chain.iter().enumerate() {
+                    let gname = group.name.to_string_lossy();
+                    tabs.push(json!({
+                        "id": format!("group:{}", group.id),
+                        "name": if gname.is_empty() { "Group".to_owned() } else { gname },
+                        "active": index + 1 == group_chain.len(),
+                        "showClose": true,
+                        "kind": "group"
+                    }));
+                }
+            }
+        }
+        frame["tabs"] = json!(tabs);
         frame["renderSummary"] = json!("");
         frame["feedback"] = json!({});
         Ok(frame)
@@ -1143,6 +1158,7 @@ impl Backend {
                 // The editor's own timeline fits its view to the curves.
                 HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                HostEffect::FocusGroup(id) => json!({"kind":"focusGroup","id":id}),
                 // The empty composition's buttons: the app's own commands.
                 HostEffect::Run(name) => json!({"kind":"command","name":name}),
                 // Import… from the timeline: File › Import…, at the playhead.
@@ -1181,7 +1197,12 @@ impl Backend {
         use pm_panel_timeline::{RowId, v4};
         let done = |v: Value| Ok(NativeCommand::Value(v));
         match args["type"].as_str() {
-            Some("tab") if args["close"] == true => {
+            Some("tab")
+                if args["close"] == true
+                    && !args["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("group:")) =>
+            {
                 let id = args["id"].as_str().ok_or("composition id")?;
                 if self.native.composition_tabs.len() <= 1 {
                     return done(Value::Null);
@@ -1207,6 +1228,14 @@ impl Backend {
             }
             Some("tabMenu") => {
                 let id = args["id"].as_str().ok_or("composition id")?.to_owned();
+                if id.starts_with("group:") {
+                    return match args["action"].as_str() {
+                        Some("close") => {
+                            Ok(NativeCommand::Timeline(json!({"type":"tab","id":id,"close":true})))
+                        }
+                        _ => Err("Unknown group tab action".into()),
+                    };
+                }
                 if !self.native.composition_tabs.contains(&id) {
                     return Err("Unknown composition tab".into());
                 }
@@ -1306,6 +1335,12 @@ impl Backend {
     fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
         if args["type"] == "tabContext" {
             let id = args["id"].as_str().ok_or("composition id")?;
+            if id.starts_with("group:") {
+                let row = |action: &str, label: &str| {
+                    json!({"id":action,"label":label,"intent":{"type":"tabMenu","id":id,"action":action}})
+                };
+                return Ok(json!([row("close", "Close")]));
+            }
             if !self.native.composition_tabs.iter().any(|tab| tab == id) {
                 return Err("Unknown composition tab".into());
             }
@@ -2069,6 +2104,9 @@ impl Backend {
                             },
                             HostAction::OpenComposition(id) => {
                                 json!({"kind":"openComposition","id":id})
+                            }
+                            HostAction::FocusGroup(id) => {
+                                json!({"kind":"focusGroup","id":id})
                             }
                             HostAction::Command { id, args } => {
                                 json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})

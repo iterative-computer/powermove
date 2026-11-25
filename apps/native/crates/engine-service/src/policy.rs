@@ -101,6 +101,8 @@ pub struct CacheKey {
     pub studio_preview: crate::studio::Preview,
     /// `ViewCamera::key` of the pane's camera.
     pub studio_view: u64,
+    /// Interactive focused group hash (0 when none).
+    pub focus_group: u64,
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
@@ -124,6 +126,7 @@ impl CacheKey {
             && self.crop == other.crop
             && self.studio_preview == other.studio_preview
             && self.studio_view == other.studio_view
+            && self.focus_group == other.focus_group
     }
 }
 

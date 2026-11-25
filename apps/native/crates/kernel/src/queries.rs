@@ -108,6 +108,8 @@ pub struct Bounds {
 pub struct PickOptions {
     /// Hit locked layers too (the old selection tool skipped them).
     pub include_locked: bool,
+    /// Restrict picking to descendants of this focused group layer.
+    pub focus_group: Option<String>,
 }
 
 /// A frozen answer to "what is under the pointer".
@@ -533,6 +535,9 @@ impl QueryContext {
         m.insert("x", Value::Number(x));
         m.insert("y", Value::Number(y));
         m.insert("includeLocked", Value::Bool(options.include_locked));
+        if let Some(group) = &options.focus_group {
+            m.insert("focusGroup", Value::from(group.as_str()));
+        }
         let reply = self.query(&Value::Object(m))?;
         let revision = self.revision();
         let index = reply

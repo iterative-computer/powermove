@@ -884,6 +884,16 @@ impl<'d> Scope<'_, 'd> {
             if !self.active(layer, time)? || unpickable(layer) {
                 continue;
             }
+            if let Some(focus) = options.focus_group {
+                let focus_js = JsValue::String(focus.into());
+                let in_focus = self
+                    .group_ancestors(layer)?
+                    .iter()
+                    .any(|g| crate::js_sem::strict_eq(&node::get(g, b"id").to_js(), &focus_js));
+                if !in_focus {
+                    continue;
+                }
+            }
             if !options.include_locked
                 && (flag(layer, "lock")
                     || self.group_ancestors(layer)?.iter().any(|g| flag(g, "lock")))
@@ -937,6 +947,8 @@ pub struct PickOptions<'a> {
     /// The editor's Local View set: object layers outside it are skipped.
     /// `None` outside Local View.
     pub local_view: Option<&'a [JsValue]>,
+    /// Interactive group focus: only layers descending from this group are pickable.
+    pub focus_group: Option<&'a str>,
 }
 
 fn require_measure<'a>(

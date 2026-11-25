@@ -51,6 +51,8 @@ struct Recorder {
     files: RefCell<Vec<std::path::PathBuf>>,
     /// Where each outline was placed over the viewer.
     placements: RefCell<Vec<Option<crate::gizmo_layer::Placement>>>,
+    /// Focused group changes requested by double-clicking a group or empty canvas.
+    focused_groups: RefCell<Vec<Option<String>>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -193,6 +195,9 @@ impl Host for Recording {
     }
     fn open_composition(&self, comp: String, _: &mut App) {
         self.0.opened.borrow_mut().push(comp);
+    }
+    fn focus_group(&self, group: Option<String>, _: &mut App) {
+        self.0.focused_groups.borrow_mut().push(group);
     }
     fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         self.0.assets.borrow().clone()
@@ -4360,6 +4365,53 @@ fn three_d_group_with_3d_children_keeps_box_at_90_deg_and_drags_children_in_3d(
         (new_z - 100.0).abs() > 20.0,
         "dragging 3D child inside 90°-rotated 3D group should move along local Z, got z={new_z}"
     );
+}
+#[gpui::test]
+fn double_clicking_group_in_viewer_focuses_it_and_empty_canvas_exits(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &grouped());
+    select(&s, &[]);
+    // Double-click the group in the viewer -> focuses group "g" and selects child "l1".
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["g".to_string()]
+    });
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| {
+        *recorder.focused_groups.borrow() == [Some("g".to_string())]
+    });
+    assert_eq!(selected(&s), ["l1"]);
+
+    // Persist focusedGroup = "g" in ui_state as Controller::focus_builtin_group does.
+    let state = s.rig.kernel.state();
+    let mut ui = state.ui.get(PROJECT).cloned().unwrap_or_default();
+    let mut native = pm_model::Map::new();
+    native.insert("focusedGroup", pm_model::Value::from("g"));
+    let mut tl = pm_model::Map::new();
+    tl.insert("nativeModel", pm_model::Value::Object(native));
+    ui.timeline = pm_model::Value::Object(tl);
+    s.rig
+        .kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: Some(state.revision),
+            ops: vec![pm_kernel::state::StateOp::Ui {
+                project: PROJECT.into(),
+                next: ui,
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.vcx.run_until_parked();
+
+    // While focused on "g", clicking outside layer "l0" (at [210, 160]) hits nothing,
+    // and double-clicking empty canvas exits group focus back to None.
+    click(&mut s, cx, [210., 160.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| {
+        *recorder.focused_groups.borrow() == [Some("g".to_string()), None]
+    });
 }
 #[path = "drag_latency_viewer_tests.rs"]
 mod drag_latency_metrics;

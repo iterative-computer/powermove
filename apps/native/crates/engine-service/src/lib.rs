@@ -643,6 +643,7 @@ struct View {
     quality: Quality,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    focus_group: Option<String>,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -1231,6 +1232,19 @@ impl Viewer {
         self.edit(|v| {
             if v.quality != quality {
                 v.quality = quality;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    /// Interactive group focus: isolate rendering to this group and its
+    /// descendants in the viewer without mutating the document or exports.
+    pub fn focus_group(&self, group: Option<String>) -> Result<()> {
+        self.edit(|v| {
+            if v.focus_group != group {
+                v.focus_group = group;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
@@ -2025,6 +2039,7 @@ impl EngineService {
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 studio_view: studio::ViewCamera::Active,
+                focus_group: None,
                 adapt_drags: false,
                 editing: false,
                 edit_rested: false,
@@ -2240,6 +2255,7 @@ struct SettleAsk {
     spec: FrameSpec,
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
+    focus_group: Option<String>,
 }
 /// The longest lead of a playing frame, in refreshes (50 ms at 120 Hz):
 /// what an edit made while playing waits at most before it is drawn.
@@ -2267,6 +2283,7 @@ struct Work {
     spec: FrameSpec,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    focus_group: Option<String>,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -2346,7 +2363,9 @@ fn settle(
         spec,
         mastering,
         resources,
+        focus_group,
     } = ask;
+    engine.focus_group(focus_group);
     engine.mastering = mastering;
     engine.set_resources(resources);
     engine.use_compat_document(stamp.doc_id);
@@ -3633,6 +3652,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         spec,
                         mastering: v.mastering,
                         resources: v.resources.clone(),
+                        focus_group: v.focus_group.clone(),
                     });
                 }
             }
@@ -3792,6 +3812,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     v.studio_preview
                 },
                 studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
+                focus_group: if capture { None } else { v.focus_group.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -3920,6 +3941,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             spec,
             studio_preview,
             studio_view,
+            focus_group,
             layer,
             overlays,
             provider,
@@ -3947,6 +3969,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }));
             engine.studio_preview(studio_preview);
             engine.studio_camera(studio_view);
+            engine.focus_group(focus_group);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);

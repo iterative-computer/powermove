@@ -923,7 +923,7 @@ impl Tokens {
                 // v1's row height: the strip is 26 pt, tall enough for its
                 // material to read, with no density lost against v1.
                 track_row: 30.,
-                property_row: 22.,
+                property_row: 28.,
                 ruler: 24.,
                 viewer_ruler: 16.,
                 grade_wheel: 112.,

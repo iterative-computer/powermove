@@ -312,6 +312,7 @@ fn build_options(
         read_ahead: request.read_ahead && !request.export,
         keep_empty_groups: request.depth_id,
         compat_probe_only: false,
+        focus_group: (!request.export).then(|| request.focus_group.clone()).flatten(),
     }
 }
 

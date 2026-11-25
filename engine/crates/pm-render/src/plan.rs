@@ -349,6 +349,9 @@ pub struct Build<'r> {
     /// Layer draws kept from the last frame (`crate::reuse`): the
     /// interactive viewer's renders only.
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
+    /// Interactive viewer group focus: only this group and its descendants
+    /// draw at the top composition level (`precomp_depth == 0`).
+    focus_group: Option<String>,
 }
 
 use crate::pass_facts::PassFacts;
@@ -421,7 +424,7 @@ impl Build<'_> {
 }
 
 /// Options of a build beyond the frame's geometry.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BuildOptions {
     /// Local material capture; addresses are compared only while the borrowed
     /// document is alive. No pointer is dereferenced or retained by a frame.
@@ -457,6 +460,8 @@ pub struct BuildOptions {
     pub keep_empty_groups: bool,
     /// Collect outstanding raster overrides without building native content.
     pub compat_probe_only: bool,
+    /// Interactive viewer group focus (`RenderRequest::focus_group`).
+    pub focus_group: Option<String>,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -598,6 +603,7 @@ pub(crate) fn build_reusing<'r>(
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
                 final_output: options.final_output,
                 read_ahead: options.read_ahead,
+                focus_group: options.focus_group.clone(),
             },
         );
     }
@@ -636,6 +642,7 @@ pub(crate) fn build_reusing<'r>(
         preview: options.preview,
         offline_cards: options.offline_cards,
         reuse,
+        focus_group: options.focus_group,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     // One frame at one time: each layer's local matrix once per scope.
@@ -1087,6 +1094,31 @@ fn group_contains_solo<'d>(
     Ok(false)
 }
 
+/// Whether `group` is an ancestor of the layer with id `target_id`.
+fn group_contains_id<'d>(
+    scope: &mut Scope<'_, 'd>,
+    group: &'d Node,
+    target_id: &pm_eval::JsValue,
+    all: &[&'d Node],
+) -> JsResult<bool> {
+    if js::layer_type(group) != "group" {
+        return Ok(false);
+    }
+    let gid = node::get(group, b"id").to_js();
+    let Some(&target) = all
+        .iter()
+        .find(|&&l| pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), target_id))
+    else {
+        return Ok(false);
+    };
+    for a in scope.group_ancestors(target)? {
+        if pm_eval::js_sem::strict_eq(&node::get(a, b"id").to_js(), &gid) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The draws of one pass entry, or `None` when it draws nothing.
 #[allow(clippy::too_many_arguments)]
 fn draw_layer<'d>(
@@ -1110,6 +1142,28 @@ fn draw_layer<'d>(
         return drawn.map(|_| None);
     }
     let ty = js::layer_type(layer);
+    if b.precomp_depth == 0
+        && !b.forced_on.is_some_and(|p| std::ptr::eq(p, layer))
+        && let Some(focus) = b.focus_group.as_deref()
+    {
+        let focus_js = pm_eval::JsValue::String(focus.into());
+        let focus_exists = all.iter().any(|&l| {
+            js::layer_type(l) == "group"
+                && pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), &focus_js)
+        });
+        if focus_exists {
+            let is_focus = pm_eval::js_sem::strict_eq(&node::get(layer, b"id").to_js(), &focus_js);
+            if !is_focus {
+                let ancestors = scope.group_ancestors(layer)?;
+                let under_focus = ancestors
+                    .iter()
+                    .any(|g| pm_eval::js_sem::strict_eq(&node::get(g, b"id").to_js(), &focus_js));
+                if !under_focus && !group_contains_id(scope, layer, &focus_js, all)? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
     if solo && !js::flag(layer, "solo") {
         let ancestors = scope.group_ancestors(layer)?;
         if !ancestors.iter().any(|g| js::flag(g, "solo"))
@@ -4260,20 +4314,20 @@ mod tests {
             ] {
                 // A member that draws: the group draws.
                 assert_eq!(
-                    draws(&effects, &document(fx.clone(), 0., none), o),
+                    draws(&effects, &document(fx.clone(), 0., none), o.clone()),
                     1,
                     "{fx}"
                 );
                 // None does: left out.
                 assert_eq!(
-                    draws(&effects, &document(fx.clone(), 5., none), o),
+                    draws(&effects, &document(fx.clone(), 5., none), o.clone()),
                     0,
                     "{fx}"
                 );
                 // Kept for the depth and id surface.
                 let keep = BuildOptions {
                     keep_empty_groups: true,
-                    ..o
+                    ..o.clone()
                 };
                 assert_eq!(
                     draws(&effects, &document(fx.clone(), 5., half), keep),
@@ -4282,12 +4336,15 @@ mod tests {
                 );
                 // At half opacity (a boundary for that alone without
                 // effects): left out the same way.
-                assert_eq!(draws(&effects, &document(fx, 5., half), o), 0);
+                assert_eq!(draws(&effects, &document(fx, 5., half), o.clone()), 0);
             }
             // An effect switched off is not a stage.
             let mut off = gradient();
             off["on"] = json!(false);
-            assert_eq!(draws(&effects, &document(json!([off]), 5., half), o), 0);
+            assert_eq!(
+                draws(&effects, &document(json!([off]), 5., half), o.clone()),
+                0
+            );
         }
 
         #[test]
@@ -4297,7 +4354,7 @@ mod tests {
             let o = BuildOptions::default();
             // A generator draws from a transparent input.
             assert_eq!(
-                draws(&effects, &document(json!([gradient()]), 5., none), o),
+                draws(&effects, &document(json!([gradient()]), 5., none), o.clone()),
                 1
             );
             assert_eq!(

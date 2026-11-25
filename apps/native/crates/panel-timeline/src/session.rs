@@ -26,6 +26,7 @@ impl TimelineModel {
             .unwrap_or(false);
         self.track_snap_disabled = value.get("trackSnap").and_then(Value::as_bool) == Some(false);
         self.hide_shy = value.get("hideShy").and_then(Value::as_bool) == Some(true);
+        self.focused_group = crate::focused_group_from_ui(ui).map(str::to_owned);
         self.mode = if value.get("mode").and_then(Value::as_str) == Some("tracks") {
             TimelineMode::Tracks
         } else {
@@ -151,6 +152,12 @@ impl TimelineModel {
             layers.insert(id.as_str(), Value::Object(value));
         }
         native.insert("disclosure", Value::Object(layers));
+        native.insert(
+            "focusedGroup",
+            self.active_focused_group()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
         let mut comps = native
             .get("trackDisclosure")
             .and_then(Value::as_object)

@@ -222,6 +222,19 @@ function CompositionTab({
         fontSize: t("typography.reading"),
       }}
     >
+      {tab.kind === "group" && (
+        <div
+          role="presentation"
+          attr={{ symbol: "square.stack" }}
+          style={{
+            width: t("metrics.symbol_inline"),
+            height: t("metrics.symbol_inline"),
+            flexShrink: 0,
+            color: t(tab.active ? "colors.text" : "colors.secondary"),
+            symbolSize: t("metrics.symbol_inline"),
+          }}
+        />
+      )}
       <text
         style={{
           maxWidth: t("metrics.toolbar_title_width"),
@@ -310,7 +323,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             <CompositionTab
               key={tab.id}
               tab={tab}
-              closable={f.tabs.length > 1}
+              closable={
+                tab.kind === "group" ||
+                f.tabs.filter((item) => item.kind !== "group").length > 1
+              }
               send={send}
             />
           ))}
@@ -608,7 +624,9 @@ function Layer({
             // takes the gesture past its threshold; a click still selects).
             metadata={{
               timelineLayerDrag: { layer: row.layer },
-              opensField: "doubleClick",
+              ...(row.layerKind === "precomp" || row.layerKind === "group"
+                ? {}
+                : { opensField: "doubleClick" }),
             }}
             style={{
               ...text,
@@ -618,7 +636,12 @@ function Layer({
               overflow: "hidden",
               textOverflow: "ellipsis",
             }}
-            onDoubleClick={action(send, { type: "rename", id: row.id })}
+            onDoubleClick={action(
+              send,
+              row.layerKind === "precomp" || row.layerKind === "group"
+                ? { type: "openLayer", id: row.id }
+                : { type: "rename", id: row.id },
+            )}
           >
             {row.label}
           </text>
@@ -941,6 +964,12 @@ const TimelineRow = memo(
           send({ type: "selectRow", id: row.id, modifiers: clickModifiers });
           clickModifiers = {};
         }}
+        onDoubleClick={
+          row.kind === "layer" &&
+          (row.layerKind === "precomp" || row.layerKind === "group")
+            ? action(send, { type: "openLayer", id: row.id })
+            : undefined
+        }
         // Child controls stop click bubbling; the outline remains the sole row Tab stop.
         style={{
           ...split,

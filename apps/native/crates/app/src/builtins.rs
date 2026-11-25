@@ -2848,6 +2848,86 @@ impl Controller {
             cx,
         );
     }
+    pub fn focus_builtin_group(
+        &mut self,
+        group: Option<String>,
+        clear_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = &self.published else {
+            return;
+        };
+        let Some(root) = p.snapshot.root() else {
+            return;
+        };
+        if let Some(id) = group.as_deref() {
+            let layers = pm_kernel::model::list_layers(root, None);
+            if !layers.iter().any(|l| l.id == id && l.kind == "group") {
+                return;
+            }
+        }
+        let current = pm_panel_timeline::focused_group_for_published(p);
+        if current == group {
+            return;
+        }
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let kernel = self.kernel.clone();
+        let next_group = group.clone();
+        cx.spawn(async move |_, _| {
+            use pm_kernel::state::{STATE_CHANGED, StateOp, StateTransaction};
+            let mut state = kernel.state();
+            for attempt in 1..=8 {
+                let mut ui = state.ui.get(&project).cloned().unwrap_or_default();
+                let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+                let mut native = timeline
+                    .get("nativeModel")
+                    .and_then(pm_model::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                native.insert(
+                    "focusedGroup",
+                    next_group
+                        .as_deref()
+                        .map(pm_model::Value::from)
+                        .unwrap_or(pm_model::Value::Null),
+                );
+                timeline.insert("nativeModel", pm_model::Value::Object(native));
+                ui.timeline = pm_model::Value::Object(timeline);
+                match kernel
+                    .state_transaction(StateTransaction {
+                        expected_revision: Some(state.revision),
+                        ops: vec![StateOp::Ui {
+                            project: project.clone(),
+                            next: ui,
+                        }],
+                    })
+                    .await
+                {
+                    Some(Ok(_)) | None => break,
+                    Some(Err(pm_kernel::KernelFailure::Storage(m)))
+                        if m == STATE_CHANGED && attempt < 8 =>
+                    {
+                        state = kernel.state();
+                    }
+                    Some(Err(_)) => break,
+                }
+            }
+        })
+        .detach();
+        if clear_selection {
+            self.call(
+                pm_kernel::SelectionCall::Layers {
+                    ids: Vec::new(),
+                    add: false,
+                }
+                .user()
+                .into(),
+                cx,
+            );
+        }
+    }
     pub fn builtin_platform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
@@ -2903,6 +2983,13 @@ impl Controller {
                                 request.input["id"].as_str().unwrap_or(""),
                                 cx,
                             );
+                        }
+                        Some("focusGroup") => {
+                            let group = request.input["id"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                            self.focus_builtin_group(group, true, cx);
                         }
                         _ => {
                             self.message =
@@ -3947,6 +4034,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
+            E::FocusGroup(group) => v.focus_builtin_group(group, true, cx),
             E::CopyKeys(tracks) => {
                 crate::layer_commands::set_clipboard(crate::layer_commands::Clipboard::Keys(tracks));
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string("Powermove keyframes".into()));
@@ -4197,6 +4285,11 @@ impl crate::gizmo::Host for ControllerDelegate {
         let _ = self
             .0
             .update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
+    }
+    fn focus_group(&self, group: Option<String>, cx: &mut App) {
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.focus_builtin_group(group, false, cx));
     }
     fn scene3d_assets(&self, cx: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         let c = self.0.upgrade()?;

@@ -2895,12 +2895,15 @@ impl TimelineSurface {
                 .locking_layer(&layer)
                 .map(|owner| owner.id.clone());
             if event.click_count == 2 && lock.is_none() {
-                if let Some(id) = self.model.index.layer(&layer).and_then(|l| {
-                    (l.kind == "precomp")
-                        .then(|| l.definition.clone())
-                        .flatten()
-                }) {
-                    self.delegate.effect(HostEffect::OpenComposition(id), cx);
+                if let Some(l) = self.model.index.layer(&layer) {
+                    if l.kind == "precomp" {
+                        if let Some(id) = l.comp.clone() {
+                            self.delegate.effect(HostEffect::OpenComposition(id), cx);
+                        }
+                    } else if l.kind == "group" {
+                        self.delegate
+                            .effect(HostEffect::FocusGroup(Some(layer)), cx);
+                    }
                 }
                 return;
             }
@@ -2988,6 +2991,39 @@ impl TimelineSurface {
             });
             self.pump(cx);
             return;
+        }
+        if event.click_count == 2 && self.model.mode == TimelineMode::Layers {
+            let ruler = self.tokens.metrics.ruler as f64;
+            let row_at = self.view.scroll_y + (y - ruler);
+            if y >= ruler && row_at >= 0. {
+                let mut cursor = 0.;
+                for row in self.model.rows() {
+                    let h = if matches!(row.id, RowId::Property { .. } | RowId::Effect { .. } | RowId::Path { .. }) {
+                        self.tokens.metrics.property_row as f64
+                    } else {
+                        self.tokens.metrics.track_row as f64
+                    };
+                    if row_at < cursor + h {
+                        if let RowId::Layer(id) = &row.id
+                            && self.model.index.locking_layer(id).is_none()
+                            && let Some(l) = self.model.index.layer(id)
+                        {
+                            if l.kind == "precomp" {
+                                if let Some(comp) = l.comp.clone() {
+                                    self.delegate.effect(HostEffect::OpenComposition(comp), cx);
+                                    return;
+                                }
+                            } else if l.kind == "group" {
+                                self.delegate
+                                    .effect(HostEffect::FocusGroup(Some(id.clone())), cx);
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                    cursor += h;
+                }
+            }
         }
         self.gesture = Gesture::Marquee {
             session: MarqueeSession::begin(&self.model, additive, false),

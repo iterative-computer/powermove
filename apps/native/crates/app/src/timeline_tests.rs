@@ -5215,6 +5215,136 @@ fn three_d_switch_toggles_all_selected_layers_and_supports_vertical_drag_paint(
     }
 }
 
+#[gpui::test]
+fn double_clicking_precomp_and_group_in_timeline_focuses_like_a_composition(
+    cx: &mut TestAppContext,
+) {
+    let project = r##"{
+        "id": "p", "name": "Main", "compId": "main", "w": 640, "h": 360, "fps": 30, "dur": 10,
+        "layers": [
+            {"id":"pre","name":"Sub Comp","type":"precomp","from":0,"dur":6,"on":true,"d":{"comp":"sub","w":640,"h":360},"p":{}},
+            {"id":"g1","name":"Card Group","type":"group","from":0,"dur":6,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"c1","name":"Child","type":"solid","group":"g1","from":0,"dur":6,"on":true,"d":{"w":100,"h":100,"color":"#ff0000"},"p":{}},
+            {"id":"other","name":"Outside","type":"solid","from":0,"dur":6,"on":true,"d":{"w":100,"h":100,"color":"#00ff00"},"p":{}}
+        ],
+        "assets": {},
+        "comps": {
+            "sub": {"id":"sub","name":"Sub","w":640,"h":360,"fps":30,"dur":6,"layers":[]}
+        }
+    }"##;
+    let mut s = stage_project(cx, project.to_owned());
+
+    // 1. Double-clicking the precomp's track bar emits OpenComposition("sub").
+    let pre_clip = s.at(0, 2.0);
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: pre_clip,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: pre_clip,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .effects
+            .borrow()
+            .contains(&pm_panel_timeline::HostEffect::OpenComposition("sub".into())),
+        "double-clicking a precomp bar should open its composition"
+    );
+
+    // 2. Double-clicking the group layer in the timeline outline focuses g1:
+    //    rows scope to g1's children ("c1") and a focused group tab appears.
+    let g_name = bounds(&mut s.vcx, r#"timeline:name:["layer","g1"]"#).center();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: g_name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: g_name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().active_focused_group().map(str::to_owned)),
+        Some("g1".to_owned()),
+        "double-clicking a group in the timeline outline should focus it"
+    );
+    let visible_layers: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(visible_layers, vec!["c1".to_string()]);
+    // Focused group tab is published in timeline:tabs (header slot) as active.
+    let (group_tab_selected, root_tab_id) = s.view.read_with(&s.vcx, |v, _| {
+        let nodes = v.publication.surface.nodes();
+        let group_tab = nodes
+            .values()
+            .find(|n| n.props.get("id").and_then(|v| v.as_str()) == Some("timeline:tab:group:g1"))
+            .expect("focused group tab should be published in timeline:tabs");
+        let root_tab = nodes
+            .values()
+            .find(|n| n.props.get("id").and_then(|v| v.as_str()) == Some("timeline:tab:main"))
+            .expect("root composition tab should be published in timeline:tabs");
+        (
+            group_tab.props.get("aria-selected").and_then(|v| v.as_bool()),
+            root_tab.id,
+        )
+    });
+    assert_eq!(group_tab_selected, Some(true));
+
+    // 3. Clicking the parent composition tab exits group focus back to all root layers.
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.send(root_tab_id, "click", Default::default(), cx);
+    });
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().active_focused_group().map(str::to_owned)),
+        None,
+        "clicking parent composition tab should exit group focus"
+    );
+    let restored_layers: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(
+        restored_layers,
+        vec!["pre".to_string(), "g1".to_string(), "other".to_string()]
+    );
+}
+
 // Headless measurements through mounted app objects and their kernel workers.
 #[path = "drag_latency_timeline_tests.rs"]
 mod drag_latency_metrics;

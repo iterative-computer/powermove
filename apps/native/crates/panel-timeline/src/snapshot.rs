@@ -106,6 +106,8 @@ pub struct Layer {
     /// audio clip's fades (`d.fadeIn`, `d.fadeOut`) stand in for them.
     pub transitions: [Option<Transition>; 2],
     pub masks: Vec<String>,
+    /// The composition id referenced by a `precomp` layer (`d.comp`).
+    pub comp: Option<String>,
     pub definition: Option<String>,
     pub channels: Vec<Channel>,
     /// Revision at which the layer's tree node last changed: an unchanged
@@ -626,6 +628,7 @@ impl TimelineIndex {
             ),
             effects,
             masks,
+            comp: string(content.and_then(|d| d.get("comp"))),
             definition: string(content.and_then(|d| d.get("definition"))),
             preferred_track: number(layer.get("track")).unwrap_or(0.).max(0.).floor() as usize,
             channels,

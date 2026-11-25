@@ -77,6 +77,7 @@ pub enum HostEffect {
     FitCurves(f64, f64),
     FrameComposition,
     OpenComposition(String),
+    FocusGroup(Option<String>),
     ShowLayerMenu(String),
     EditKeyValues(Vec<String>),
     EditVelocity(Vec<String>),

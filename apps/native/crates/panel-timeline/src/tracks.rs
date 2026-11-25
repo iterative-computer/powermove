@@ -71,8 +71,19 @@ pub fn area(kind: &str) -> Area {
     }
 }
 pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
+    layout_focused(index, reveal, None)
+}
+pub fn layout_focused(
+    index: &TimelineIndex,
+    reveal: &RevealState,
+    focused_group: Option<&str>,
+) -> Layout {
     let children = index.children();
-    let roots = index.roots(&children);
+    let roots = if let Some(gid) = focused_group {
+        children.get(&Some(gid.to_owned())).cloned().unwrap_or_default()
+    } else {
+        index.roots(&children)
+    };
     let mut units = vec![Unit::default(); index.layers.len()];
     let mut visited = HashSet::new();
     let mut order = Vec::new();

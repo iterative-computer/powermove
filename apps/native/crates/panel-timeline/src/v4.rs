@@ -357,12 +357,110 @@ pub async fn dispatch(
                 context.time,
             )?
         }
-        "tab" if !boolean(intent, "close")? => Plan {
-            effects: vec![HostEffect::OpenComposition(
-                string(intent, "id")?.to_owned(),
-            )],
-            ..Plan::default()
-        },
+        "openLayer" => {
+            let id = layer_row(intent)?;
+            let layer = client
+                .model
+                .index
+                .layer(&id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            if layer.kind == "precomp" {
+                if let Some(comp) = layer.comp.clone() {
+                    Plan {
+                        effects: vec![HostEffect::OpenComposition(comp)],
+                        ..Plan::default()
+                    }
+                } else {
+                    Plan::default()
+                }
+            } else if layer.kind == "group" {
+                client.model.set_focused_group(Some(id))?;
+                persist = true;
+                Plan {
+                    calls: vec![
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    ],
+                    ..Plan::default()
+                }
+            } else {
+                Plan::default()
+            }
+        }
+        "tab" if !boolean(intent, "close")? => {
+            let id = string(intent, "id")?;
+            if let Some(group_id) = id.strip_prefix("group:") {
+                client.model.set_focused_group(Some(group_id.to_owned()))?;
+                persist = true;
+                Plan {
+                    calls: vec![
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    ],
+                    ..Plan::default()
+                }
+            } else {
+                let mut calls = Vec::new();
+                if client.model.active_focused_group().is_some() {
+                    client.model.set_focused_group(None)?;
+                    persist = true;
+                    calls.push(
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    );
+                }
+                let active = client
+                    .model
+                    .index
+                    .comp_id
+                    .as_deref()
+                    .unwrap_or("root");
+                let effects = if id != active {
+                    vec![HostEffect::OpenComposition(id.to_owned())]
+                } else {
+                    Vec::new()
+                };
+                Plan {
+                    calls,
+                    effects,
+                    ..Plan::default()
+                }
+            }
+        }
+        "tab" if boolean(intent, "close")? && string(intent, "id")?.starts_with("group:") => {
+            let id = string(intent, "id")?;
+            let group_id = id.strip_prefix("group:").unwrap();
+            let parent = client
+                .model
+                .index
+                .layer(group_id)
+                .and_then(|l| l.group.clone());
+            client.model.set_focused_group(parent)?;
+            persist = true;
+            Plan {
+                calls: vec![
+                    pm_kernel::SelectionCall::Layers {
+                        ids: Vec::new(),
+                        add: false,
+                    }
+                    .user()
+                    .into(),
+                ],
+                ..Plan::default()
+            }
+        }
         "propertyValue" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;
