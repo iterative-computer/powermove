@@ -403,8 +403,11 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|a| a == "--stage-capture") {
         let out = args
             .get(1)
-            .context("Usage: powermove-native --stage-capture <folder> [stills]")?;
-        return stage_capture::run(PathBuf::from(out), args.get(2).is_some_and(|a| a == "stills"));
+            .context("Usage: powermove-native --stage-capture <folder> [stills|pacing]")?;
+        return match args.get(2).and_then(|a| a.to_str()) {
+            Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
+            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills")),
+        };
     }
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
         return pro_media::cold_playback_bench();

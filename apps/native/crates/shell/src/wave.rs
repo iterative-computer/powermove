@@ -75,6 +75,9 @@ pub struct WaveState {
     on_finish: Option<Finish>,
     last_error: Option<String>,
     prepared_size: Option<Size<Pixels>>,
+    /// Preparation failed: the run cuts at its midpoint instead of
+    /// capturing again every frame (until `clear`/`reset`).
+    failed: bool,
 }
 impl WaveState {
     pub fn new(style: WaveStyle, source: impl Into<Source>) -> Result<Self, ValidationError> {
@@ -98,6 +101,7 @@ impl WaveState {
             on_finish: None,
             last_error: None,
             prepared_size: None,
+            failed: false,
         })
     }
     pub fn progress(&self) -> f64 {
@@ -191,6 +195,7 @@ impl WaveState {
     }
     /// `reset` from inside a render.
     pub fn clear(&mut self) {
+        self.failed = false;
         self.clock.reset();
         self.release();
         self.prepare = false;
@@ -380,6 +385,10 @@ impl Element for DistortionWave {
                 s.invalidate();
             }
             let p = s.progress();
+            if s.failed {
+                // No wave: a cut at the midpoint.
+                return (false, false, p >= 0.5);
+            }
             let active = p > 0. && p < 1.;
             let capture = (s.prepare || active)
                 && !s.renderer.as_ref().is_some_and(WaveRenderer::is_prepared);
@@ -440,10 +449,14 @@ impl Element for DistortionWave {
             self.state.update(cx, |s, _| {
                 let result = (|| -> Result<(), String> {
                     if s.renderer.is_none() {
+                        // The window's own device; a headless window (offscreen
+                        // captures) draws on the system's.
                         let device = window
                             .gpu_context()
                             .and_then(|c| c.downcast::<metal::Device>().ok())
-                            .ok_or("window has no native Metal context")?;
+                            .map(|d| *d)
+                            .or_else(metal::Device::system_default)
+                            .ok_or("no Metal device for the wave")?;
                         s.renderer = Some(WaveRenderer::new(&device)?);
                     }
                     let from = from.map_err(|e| e.to_string())?;
@@ -460,6 +473,10 @@ impl Element for DistortionWave {
                     s.prepare = false;
                     Ok(())
                 })();
+                if let Err(error) = &result {
+                    eprintln!("The wave could not prepare: {error}");
+                    s.failed = true;
+                }
                 s.last_error = result.err();
             });
         }
@@ -521,7 +538,8 @@ impl Element for DistortionWave {
                 ..ContentMask::default()
             };
             window.with_content_mask(Some(mask), |window| {
-                let revealed = self.state.read(cx).progress() >= 1.;
+                let state = self.state.read(cx);
+                let revealed = state.progress() >= if state.failed { 0.5 } else { 1. };
                 if revealed {
                     if let Some(to) = self.to.as_mut() {
                         to.paint(window, cx);

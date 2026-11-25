@@ -311,7 +311,8 @@ fn time_the_stage_pictures() {
 /// (layout, paint, the frame's own captures) is timed. Offscreen: no
 /// display presents, so this is the work per frame against the 8.33 ms
 /// interval, not a measure of presentation.
-fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
+pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(out)?;
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut cx = headless();
     let window = open(&mut cx, tokens, true);
