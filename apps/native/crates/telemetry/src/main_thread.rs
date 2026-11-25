@@ -85,10 +85,70 @@ unsafe extern "C" {
     fn thread_resume(thread: u32) -> i32;
     fn thread_get_state(thread: u32, flavor: i32, state: *mut u32, count: *mut u32) -> i32;
     fn _dyld_get_image_vmaddr_slide(index: u32) -> isize;
+    static mach_task_self_: u32;
+    fn mach_vm_read_overwrite(
+        task: u32,
+        address: u64,
+        size: u64,
+        data: u64,
+        out_size: *mut u64,
+    ) -> i32;
 }
 
-/// One stack of the suspended main thread into `out`, innermost first;
-/// returns its depth (0 before [`install`] or off arm64 macOS).
+/// Walks frame pointers from `fp` within the stack `[low, high)`, reading
+/// each frame record through `read` (which may fail), into `out`, innermost
+/// first after `pc` and `lr`. Never dereferences, never overflows, always
+/// ends: each next frame must be higher up the stack than the last.
+pub fn walk(
+    pc: u64,
+    lr: u64,
+    mut fp: u64,
+    low: u64,
+    high: u64,
+    mut read: impl FnMut(u64) -> Option<(u64, u64)>,
+    out: &mut [u64; DEPTH],
+) -> usize {
+    let strip = |a: u64| a & 0x0000_7FFF_FFFF_FFFF;
+    out[0] = strip(pc);
+    out[1] = strip(lr);
+    let mut n = 2;
+    while n < DEPTH
+        && fp >= low
+        && fp.is_multiple_of(8)
+        && fp.checked_add(16).is_some_and(|end| end <= high)
+    {
+        let Some((next, ret)) = read(fp) else { break };
+        let ret = strip(ret);
+        if ret == 0 {
+            break;
+        }
+        out[n] = ret;
+        n += 1;
+        if next <= fp {
+            break;
+        }
+        fp = next;
+    }
+    n
+}
+
+/// Resumes the thread however the sample ends.
+#[cfg(target_os = "macos")]
+struct Suspended(u32);
+#[cfg(target_os = "macos")]
+impl Drop for Suspended {
+    fn drop(&mut self) {
+        // SAFETY: the thread was suspended by this guard's owner.
+        unsafe {
+            thread_resume(self.0);
+        }
+    }
+}
+
+/// One stack of the main thread into `out`, innermost first; returns its
+/// depth (0 before [`install`] or off arm64 macOS). The thread is suspended
+/// only for the walk (no allocation, no lock), every read is a fallible Mach
+/// read, and it is resumed on every path.
 pub fn sample(out: &mut [u64; DEPTH]) -> usize {
     let thread = MAIN.load(Ordering::Relaxed);
     if thread == 0 {
@@ -103,42 +163,38 @@ pub fn sample(out: &mut [u64; DEPTH]) -> usize {
         );
         let mut state = ArmThreadState64::default();
         let mut count = (std::mem::size_of::<ArmThreadState64>() / 4) as u32;
-        // SAFETY: the thread stays suspended while its stack is read; every
-        // frame pointer is bounds-checked against its stack before a read.
+        // SAFETY: plain Mach calls; the guard resumes the thread.
         unsafe {
             if thread_suspend(thread) != 0 {
                 return 0;
             }
-            let mut n = 0;
+            let _resume = Suspended(thread);
             if thread_get_state(
                 thread,
                 ARM_THREAD_STATE64,
                 (&mut state as *mut ArmThreadState64).cast(),
                 &mut count,
-            ) == 0
+            ) != 0
             {
-                let strip = |a: u64| a & 0x0000_7FFF_FFFF_FFFF;
-                out[0] = strip(state.pc);
-                out[1] = strip(state.lr);
-                n = 2;
-                let mut fp = state.fp;
-                while n < DEPTH && fp >= low && fp + 16 <= high && fp % 8 == 0 {
-                    let frame = fp as *const u64;
-                    let next = *frame;
-                    let ret = strip(*frame.add(1));
-                    if ret == 0 {
-                        break;
-                    }
-                    out[n] = ret;
-                    n += 1;
-                    if next <= fp {
-                        break;
-                    }
-                    fp = next;
-                }
+                return 0;
             }
-            thread_resume(thread);
-            n
+            let task = mach_task_self_;
+            walk(
+                state.pc,
+                state.lr,
+                state.fp,
+                low,
+                high,
+                |fp| {
+                    let mut record = [0u64; 2];
+                    let mut got = 0u64;
+                    let ok =
+                        mach_vm_read_overwrite(task, fp, 16, record.as_mut_ptr() as u64, &mut got)
+                            == 0;
+                    (ok && got == 16).then_some((record[0], record[1]))
+                },
+                out,
+            )
         }
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -173,4 +229,58 @@ pub fn frame_name(address: u64) -> String {
     }
     #[cfg(not(target_os = "macos"))]
     format!("{address:#x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sol P1 (w99 review): a corrupt stack ends the walk, never a fault or
+    /// an overflow, and an unreadable frame stops it.
+    #[test]
+    fn a_corrupt_stack_ends_the_walk_safely() {
+        let mut out = [0u64; DEPTH];
+        // A frame pointer near the top of the address space can't wrap.
+        let n = walk(1, 2, u64::MAX - 8, 0, u64::MAX, |_| Some((0, 3)), &mut out);
+        assert_eq!(n, 2);
+        // A loop (next not higher) ends after one frame.
+        let n = walk(1, 2, 0x1000, 0x1000, 0x2000, |fp| Some((fp, 7)), &mut out);
+        assert_eq!(n, 3);
+        // An unreadable frame stops the walk.
+        let n = walk(1, 2, 0x1000, 0x1000, 0x2000, |_| None, &mut out);
+        assert_eq!(n, 2);
+        // A real chain is followed to the end of the stack.
+        let n = walk(
+            1,
+            2,
+            0x1000,
+            0x1000,
+            0x1040,
+            |fp| Some((fp + 16, fp)),
+            &mut out,
+        );
+        assert_eq!(&out[..n], &[1, 2, 0x1000, 0x1010, 0x1020, 0x1030]);
+    }
+
+    /// The sampler suspends and resumes: the main thread keeps running.
+    #[test]
+    fn sampling_a_running_thread_resumes_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            install();
+            tx.send(()).unwrap();
+            let mut spins = 0u64;
+            for _ in 0..200 {
+                spins = spins.wrapping_add(std::hint::black_box(1));
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            spins
+        });
+        rx.recv().unwrap();
+        let mut out = [0u64; DEPTH];
+        for _ in 0..20 {
+            let _ = sample(&mut out);
+        }
+        assert_eq!(worker.join().unwrap(), 200);
+    }
 }

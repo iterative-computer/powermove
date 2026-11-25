@@ -14,6 +14,7 @@
 //! turns it on in any feature build, every event marked `is_internal`.
 pub mod events;
 pub mod main_thread;
+#[cfg(feature = "telemetry")]
 mod prefs;
 
 #[cfg(feature = "telemetry")]
@@ -104,76 +105,101 @@ pub fn decide(feature: bool, env: &dyn Fn(&str) -> Option<String>, config: &Conf
 }
 
 /// Starts telemetry for this session (call once, on the main thread, before
-/// the first window). Reads the sharing choice; returns what was decided.
+/// the first window); returns what was decided. Nothing is sent or written
+/// until Settings' sharing value arrives ([`set_sharing`], from the kernel
+/// when the library attaches): until then events wait in memory only.
 pub fn init(config: Config) -> Mode {
-    let state = prefs::load(&config.profile);
     let mode = decide(
         cfg!(feature = "telemetry"),
         &|name| std::env::var(name).ok(),
         &config,
     );
-    SHARING.store(state.sharing, std::sync::atomic::Ordering::Relaxed);
-    let _ = PROFILE.set(config.profile.clone());
     #[cfg(feature = "telemetry")]
     if !matches!(mode, Mode::Off(_)) {
-        live::start(config, state, mode);
+        live::start(config, mode);
     }
     #[cfg(not(feature = "telemetry"))]
     let _ = (config.metal_bytes, config.displays);
     mode
 }
 
-static SHARING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-static PROFILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// Settings' value: unknown until the library attaches, then on or off.
+static SHARING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// The person's choice in Settings › Privacy.
+/// The person's choice in Settings › Privacy (false until Settings is read).
 pub fn sharing() -> bool {
-    SHARING.load(std::sync::atomic::Ordering::Relaxed)
+    SHARING.load(std::sync::atomic::Ordering::Relaxed) == 1
 }
 
-/// Turns sharing on or off. Off stops sending at once and deletes what is
-/// waiting to be sent; on resumes. The choice is saved off the main thread.
+/// Settings › Privacy's value: when the library attaches, and on every
+/// change. The kernel reports off at once and on only once Settings has
+/// saved it. Off stops sending at once, drops what is waiting (in memory and
+/// on disk) and anything captured before; on resumes.
 pub fn set_sharing(on: bool) {
-    if SHARING.swap(on, std::sync::atomic::Ordering::Relaxed) == on {
-        return;
-    }
+    let value = if on { 1 } else { 2 };
+    let changed = SHARING.swap(value, std::sync::atomic::Ordering::Relaxed) != value;
     #[cfg(feature = "telemetry")]
-    if live::set_sharing(on) {
-        return;
+    if changed {
+        live::set_sharing(on);
     }
-    // No telemetry thread this session: only the choice is saved.
-    if let Some(profile) = PROFILE.get().cloned() {
-        std::thread::spawn(move || {
-            let mut state = prefs::load(&profile);
-            state.sharing = on;
-            let _ = prefs::store(&profile, &state);
-        });
-    }
+    #[cfg(not(feature = "telemetry"))]
+    let _ = changed;
 }
 
-/// Whether events are being taken this session (sharing on and running):
+/// Whether events are being taken (running, and Settings hasn't said off):
 /// call sites that would do work to build an event check this first.
 #[inline]
 pub fn enabled() -> bool {
     #[cfg(feature = "telemetry")]
-    return live::on();
+    return live::taking();
     #[cfg(not(feature = "telemetry"))]
     false
 }
 
+/// Telemetry runs this session (whatever Settings says now: sharing can be
+/// turned on later).
+pub fn running() -> bool {
+    #[cfg(feature = "telemetry")]
+    return live::running();
+    #[cfg(not(feature = "telemetry"))]
+    false
+}
+
+/// Extensions this app installed from the Store catalogue (their public
+/// ids, kept in `telemetry.json`): only these are ever named in events;
+/// every other extension, a folder with a Store marker included, is "local".
 static STORE_EXTENSIONS: std::sync::RwLock<std::collections::BTreeSet<String>> =
     std::sync::RwLock::new(std::collections::BTreeSet::new());
 
-/// The extensions installed from the Store (public ids): only these are
-/// ever named in events; every other extension is "local".
-pub fn set_store_extensions(ids: impl IntoIterator<Item = String>) {
+pub fn is_store_extension(id: &str) -> bool {
+    STORE_EXTENSIONS.read().is_ok_and(|set| set.contains(id))
+}
+
+#[cfg(feature = "telemetry")]
+fn remember_store_extensions(ids: &[String]) {
     if let Ok(mut set) = STORE_EXTENSIONS.write() {
-        *set = ids.into_iter().collect();
+        *set = ids.iter().cloned().collect();
     }
 }
 
-pub fn is_store_extension(id: &str) -> bool {
-    STORE_EXTENSIONS.read().is_ok_and(|set| set.contains(id))
+/// The Store window installed `id`, the public id it picked from the
+/// catalogue: remembered as a Store install, and `store_extension_installed`.
+/// `fresh`: a new install (`store_extension_installed`); an update only
+/// records the provenance.
+pub fn store_installed(id: &str, fresh: bool) {
+    #[cfg(feature = "telemetry")]
+    live::store_installed(id, fresh);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = (id, fresh);
+}
+
+/// The Store window removed `id`: `store_extension_removed` only when this
+/// app had installed it from the Store.
+pub fn store_removed(id: &str) {
+    #[cfg(feature = "telemetry")]
+    live::store_removed(id);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = id;
 }
 
 /// Queues one event (never blocks; dropped and counted when the queue is
@@ -234,6 +260,15 @@ pub fn note_viewer_frame(playing: bool, scrubbing: bool, displayed_at: Option<f6
     let _ = (playing, scrubbing, displayed_at);
 }
 
+/// The frame rate playback aims for (the playing composition's rate).
+#[inline]
+pub fn note_playback_target(fps: f32) {
+    #[cfg(feature = "telemetry")]
+    live::perf::note_playback_target(fps);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = fps;
+}
+
 /// Whether the app is the active app (hangs count only then: a background
 /// app's timers can be held by App Nap).
 #[inline]
@@ -274,6 +309,28 @@ pub fn dev_failure() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sol P0 (w99 review): sharing is Settings' value, never a default:
+    /// nothing is on until Settings says so, and off can't be reversed by
+    /// telemetry's own files.
+    /// (With the feature, the live end-to-end test checks this on the
+    /// running worker.)
+    #[cfg(not(feature = "telemetry"))]
+    #[test]
+    fn sharing_waits_for_settings_and_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("telemetry.json"), br#"{"sharing":true}"#).unwrap();
+        let mut c = config("com.powermove.native.dev.w99");
+        c.profile = dir.path().into();
+        let _ = init(c);
+        assert!(!sharing());
+        set_sharing(false);
+        assert!(!sharing());
+        std::fs::remove_file(dir.path().join("telemetry.json")).unwrap();
+        assert!(!sharing());
+        set_sharing(true);
+        assert!(sharing());
+    }
 
     fn config(bundle: &str) -> Config {
         Config {

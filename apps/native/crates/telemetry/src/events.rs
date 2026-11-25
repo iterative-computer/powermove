@@ -321,17 +321,18 @@ pub enum Harness {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRunFinished {
     pub harness: Harness,
-    /// Cleaned by [`clean_id`]; "unknown" otherwise.
-    pub model: String,
-    /// e.g. "high"; cleaned by [`clean_id`].
-    pub effort: String,
+    /// A public model id from [`model_id`]'s list, else "custom".
+    pub model: &'static str,
+    /// From [`effort_id`]'s list, else "unknown".
+    pub effort: &'static str,
     pub result: Outcome,
-    /// Not counted by every harness yet.
+    /// Model turns, when the harness reports them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turns: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<u32>,
     pub duration_ms: u64,
+    /// Tokens, when the provider reports them (input includes cached input).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,9 +369,11 @@ pub struct PerfSummary {
     #[serde(flatten)]
     pub frames: Frames,
     /// Playback over the window: played frames that reached the display, a
-    /// second.
+    /// second, and the rate the playing composition asks for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playback_fps_achieved: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playback_fps_target: Option<f32>,
     pub peak_footprint_mb: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_metal_mb: Option<u64>,
@@ -449,9 +452,69 @@ pub struct Hang {
     /// "2-5s", "5-10s", "10-30s", "30s+", or "unrecovered" (the app was
     /// ended while it hung; sent at the next launch).
     pub duration: &'static str,
-    /// Frames of the main thread, innermost first: `binary+0xoffset`, with
-    /// the symbol when the binary carries one. No paths.
-    pub stack: Vec<String>,
+}
+
+/// Public model ids the app's harnesses offer. Anything else (a model a
+/// person configured for their own provider) is "custom", never its name.
+const MODELS: &[&str] = &[
+    "gpt-6.2-sol",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-6-astra",
+    "gpt-6.2-astra",
+    "gpt-6.1-terra",
+    "gpt-6",
+    "gpt-6-mini",
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.5-chat",
+    "gpt-5.4",
+    "gpt-5.4-pro",
+    "gpt-5.4-chat",
+    "gpt-5.4-chat-latest",
+    "gpt-oss",
+    "o1",
+    "o3",
+    "o3-mini",
+    "o4",
+    "claude-fable-5-2",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-5-5",
+    "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001",
+    "opus",
+    "sonnet",
+    "haiku",
+    "fable",
+];
+
+/// A run's model, by the list above.
+pub fn model_id(raw: Option<&str>) -> &'static str {
+    let Some(raw) = raw else { return "unknown" };
+    MODELS
+        .iter()
+        .find(|m| raw.eq_ignore_ascii_case(m))
+        .copied()
+        .unwrap_or("custom")
+}
+
+/// A run's reasoning effort, by the efforts the harnesses take.
+pub fn effort_id(raw: Option<&str>) -> &'static str {
+    const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    raw.and_then(|r| EFFORTS.iter().find(|e| r.eq_ignore_ascii_case(e)).copied())
+        .unwrap_or("unknown")
 }
 
 // Buckets: counts and sizes go out as ranges, never exact.
@@ -588,6 +651,24 @@ mod tests {
         }
         assert_eq!(Origin::extension("acme.not-from-the-store"), Origin::LOCAL);
         assert_eq!(Origin::builtin("My Panel"), Origin::LOCAL);
+    }
+
+    /// Sol P1 (w99 review): a configured model string never leaves.
+    #[test]
+    fn model_ids_outside_the_allowlist_read_custom() {
+        assert_eq!(model_id(Some("gpt-6.2-sol")), "gpt-6.2-sol");
+        assert_eq!(model_id(Some("Claude-Opus-5-5")), "claude-opus-5-5");
+        for private in [
+            "name@example.com",
+            "projects/private-model",
+            "jane-finetune",
+            "my-llama",
+        ] {
+            assert_eq!(model_id(Some(private)), "custom", "{private}");
+        }
+        assert_eq!(model_id(None), "unknown");
+        assert_eq!(effort_id(Some("high")), "high");
+        assert_eq!(effort_id(Some("whatever I typed")), "unknown");
     }
 
     #[test]

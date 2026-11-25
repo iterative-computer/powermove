@@ -751,9 +751,9 @@ impl StoreWindow {
             ) {
                 Ok(_) => {
                     pm_compat_runner::host::rescan_all();
-                    if !updating {
-                        crate::telemetry::store_extension(&pick.extension, true);
-                    }
+                    // Picked from the Store catalogue: its public id, and a
+                    // Store install telemetry may name from now on.
+                    pm_telemetry::store_installed(&pick.extension, !updating);
                     crate::cloud::remember_install(&profile, &pick.repo, Some(&pick.release));
                     Reply::Done(if updating {
                         format!("{} is updated.", pick.name)
@@ -812,8 +812,8 @@ impl StoreWindow {
                 Ok(()) => {
                     pm_compat_runner::host::rescan_all();
                     if let Some(repo) = &repo {
-                        // Only a Store extension is named (it has a repo).
-                        crate::telemetry::store_extension(&id, false);
+                        // Named only if this app installed it from the Store.
+                        pm_telemetry::store_removed(&id);
                         crate::cloud::remember_install(&profile, repo, None);
                     }
                     Reply::Done(format!("{name} is uninstalled."))

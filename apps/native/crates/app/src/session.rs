@@ -3701,6 +3701,7 @@ impl Controller {
         };
         self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
+        pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
@@ -5352,6 +5353,7 @@ impl Controller {
                         if self.running() {
                             TransportCommand::Pause
                         } else {
+                            pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
                             TransportCommand::Play {
                                 rate: PlaybackRate::NORMAL,
                             }

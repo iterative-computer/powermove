@@ -732,6 +732,15 @@ impl Client {
             e.events.push(Event::Notification(msg.clone()));
             return;
         }
+        // Telemetry counts: the running turn's usage (the last report counts).
+        if method_is(m, "thread/tokenUsage/updated") {
+            let last = &p["tokenUsage"]["last"];
+            if let (Some(input), Some(output)) =
+                (last["inputTokens"].as_u64(), last["outputTokens"].as_u64())
+            {
+                crate::stats::turn_usage(&id, input, output);
+            }
+        }
         if method_is(m, "error") {
             if p["willRetry"] == true {
                 if !t.reconnecting {
@@ -820,6 +829,7 @@ impl Client {
             return;
         }
         if method_is(m, "turn/completed") {
+            crate::stats::turn_completed(&id);
             let result = match p["turn"]["status"].as_str() {
                 Some("completed") => RunResult::success(
                     t.final_text.clone(),

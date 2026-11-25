@@ -1,6 +1,16 @@
-//! The running telemetry: a bounded channel the app's threads `try_send`
-//! into, one thread that batches and sends, the panic hook and the hang
-//! watchdog.
+//! The running telemetry. The app's threads `try_send` into a bounded
+//! channel; one thread (the worker) owns everything that leaves the process
+//! or touches disk: batching, sending, the outbox, crash import.
+//!
+//! Consent (Sol review, P0): Settings' sharing value is published in two
+//! atomics outside the event queue, `CONSENT` (unknown, on, off) and
+//! `GENERATION` (bumped on every change). Until Settings is known, events
+//! wait in memory only. The worker checks consent and generation before every
+//! request and every disk write; a revocation drops what is waiting in memory
+//! and on disk, and every message captured before it (by generation). The
+//! SDK never retries by itself: one attempt per request, retries are the
+//! worker's own, under the same checks. A request already on the wire when
+//! sharing is turned off cannot be recalled; nothing starts after.
 mod crash;
 pub mod exception;
 mod outbox;
@@ -12,13 +22,15 @@ use crate::{Config, Mode, prefs};
 use outbox::{Outbox, Record};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Events waiting for the telemetry thread before new ones are dropped.
 const QUEUE: usize = 2048;
+/// Events the thread keeps in memory (waiting for Settings, or between sends).
+const MAX_PENDING: usize = 1000;
 /// The thread wakes this often to fold commands and keep its schedule.
 const TICK: Duration = Duration::from_secs(1);
 const SEND_EVERY: Duration = Duration::from_secs(30);
@@ -29,43 +41,54 @@ const FOLD: Duration = Duration::from_secs(1);
 /// The longest a quit waits for the last events to leave.
 const QUIT_WAIT: Duration = Duration::from_millis(1500);
 const HANG_MS: u64 = 2000;
+/// Crash reports sent per launch (the rest wait for the next).
+const CRASHES_PER_LAUNCH: usize = 10;
+
+const UNKNOWN: u8 = 0;
+const ON: u8 = 1;
+const OFF: u8 = 2;
+static CONSENT: AtomicU8 = AtomicU8::new(UNKNOWN);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The generation of the last turn to off: everything captured before it is
+/// dropped, even if sharing is back on before the worker looks.
+static REVOKED: AtomicU64 = AtomicU64::new(0);
+static ACTIVE: AtomicBool = AtomicBool::new(true);
+static DROPPED: AtomicU64 = AtomicU64::new(0);
 
 enum Msg {
-    Event(Event, i64),
-    Launched {
-        first_window_ms: u64,
-        interactive_ms: u64,
-        at: i64,
-    },
-    Identify(String),
-    Sharing(bool),
-    Record(Box<Record>),
+    Event(Event, i64, u64),
+    Launched(u64, u64, i64, u64),
+    Identify(String, u64),
+    /// Raw return addresses and a scrubbed location, from the panic hook.
+    Panic(Vec<u64>, Option<(String, u32)>, i64, u64),
+    HangBegan(i64, u64),
+    HangEnded(&'static str, i64, u64),
+    StoreInstalled(String, bool, i64, u64),
+    StoreRemoved(String, i64, u64),
+    Wake,
+    #[cfg(test)]
     Flush(SyncSender<()>),
     Quit(bool, SyncSender<()>),
 }
 
-/// What the panic hook and the watchdog need without the thread.
 struct Shared {
     tx: SyncSender<Msg>,
-    distinct_id: String,
-    supers: Map<String, Value>,
-    outbox: Outbox,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
-/// Running and shared: the one check every capture makes.
-static ON: AtomicBool = AtomicBool::new(false);
-static ACTIVE: AtomicBool = AtomicBool::new(true);
-static DROPPED: AtomicU64 = AtomicU64::new(0);
 
-#[inline]
-pub fn on() -> bool {
-    ON.load(Relaxed)
+pub fn running() -> bool {
+    SHARED.get().is_some()
 }
 
-#[cfg(test)]
-pub fn force_on_for_tests() {
-    ON.store(true, Relaxed);
+/// Captures are taken (sharing on, or Settings not read yet: held in memory).
+#[inline]
+pub fn taking() -> bool {
+    CONSENT.load(Relaxed) != OFF && SHARED.get().is_some()
+}
+
+fn generation() -> u64 {
+    GENERATION.load(Relaxed)
 }
 
 fn now_ms() -> i64 {
@@ -74,80 +97,55 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-pub fn start(config: Config, state: prefs::State, mode: Mode) {
+fn send(msg: Msg) -> bool {
+    SHARED.get().is_some_and(|s| s.tx.try_send(msg).is_ok())
+}
+
+pub fn start(config: Config, mode: Mode) {
     let (tx, rx) = sync_channel(QUEUE);
-    let distinct_id = state
-        .install_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let (channel, internal) = match mode {
-        Mode::Production { channel } => (channel, false),
-        _ => ("dev", true),
-    };
-    let (language, region) = system::locale();
-    let supers = SuperProperties {
-        app_version: config.app_version.clone(),
-        build: config.build.clone(),
-        channel,
-        macos_version: system::macos_version(),
-        chip: system::chip(),
-        ram_bucket: ram_bucket(system::ram_bytes()),
-        display_count: config.displays.0,
-        display_max_scale: config.displays.1,
-        locale: language,
-        region,
-        is_internal: internal,
-        session_id: uuid::Uuid::now_v7().to_string(),
-    };
-    let supers = match serde_json::to_value(&supers) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
-    };
-    let shared = Shared {
-        tx,
-        distinct_id,
-        supers,
-        outbox: Outbox::new(&config.profile),
-    };
-    if SHARED.set(shared).is_err() {
+    if SHARED.set(Shared { tx }).is_err() {
         return;
     }
-    ON.store(state.sharing, Relaxed);
     install_panic_hook();
-    let bundle_id = config.bundle_id.clone().unwrap_or_default();
     let spawned = std::thread::Builder::new()
         .name("pm-telemetry".into())
-        .spawn(move || Worker::new(config, state, bundle_id).run(rx));
-    if spawned.is_err() {
-        ON.store(false, Relaxed);
-        return;
+        .spawn(move || Worker::new(config, mode).run(rx));
+    if spawned.is_ok() {
+        let _ = std::thread::Builder::new()
+            .name("pm-telemetry-hang".into())
+            .spawn(watch_hangs);
     }
-    let _ = std::thread::Builder::new()
-        .name("pm-telemetry-hang".into())
-        .spawn(watch_hangs);
+}
+
+/// Settings' value changed (or arrived): published at once, outside the
+/// event queue; the worker follows it before its next request or write.
+pub fn set_sharing(on: bool) {
+    let value = if on { ON } else { OFF };
+    if CONSENT.swap(value, Relaxed) != value {
+        let generation = GENERATION.fetch_add(1, Relaxed) + 1;
+        if !on {
+            REVOKED.store(generation, Relaxed);
+            perf::clear();
+        }
+        send(Msg::Wake);
+    }
 }
 
 #[inline]
 pub fn capture(event: Event) {
-    if !on() {
-        return;
-    }
-    if let Some(shared) = SHARED.get()
-        && shared.tx.try_send(Msg::Event(event, now_ms())).is_err()
-    {
+    if taking() && !send(Msg::Event(event, now_ms(), generation())) {
         DROPPED.fetch_add(1, Relaxed);
     }
 }
 
 pub fn launched(first_window_ms: u64, interactive_ms: u64) {
-    if let Some(shared) = SHARED.get()
-        && on()
-    {
-        let _ = shared.tx.try_send(Msg::Launched {
+    if taking() {
+        send(Msg::Launched(
             first_window_ms,
             interactive_ms,
-            at: now_ms(),
-        });
+            now_ms(),
+            generation(),
+        ));
     }
 }
 
@@ -158,10 +156,10 @@ pub fn since_process_start_ms() -> u64 {
 }
 
 pub fn identify(account_id: &str) {
-    if let (Some(shared), Some(id)) = (SHARED.get(), clean_id(&account_id.to_ascii_lowercase()))
-        && on()
+    if let Some(id) = clean_id(&account_id.to_ascii_lowercase())
+        && taking()
     {
-        let _ = shared.tx.try_send(Msg::Identify(id));
+        send(Msg::Identify(id, generation()));
     }
 }
 
@@ -169,73 +167,46 @@ pub fn set_active(active: bool) {
     ACTIVE.store(active, Relaxed);
 }
 
-/// Whether a telemetry thread took the change (it saves the choice).
-pub fn set_sharing(on: bool) -> bool {
-    let Some(shared) = SHARED.get() else {
-        return false;
-    };
-    // Captures stop (or resume) now; the thread clears what is waiting.
-    ON.store(on, Relaxed);
-    if let Err(std::sync::mpsc::TrySendError::Full(msg)) = shared.tx.try_send(Msg::Sharing(on)) {
-        let tx = shared.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(msg);
-        });
+pub fn store_installed(id: &str, fresh: bool) {
+    if let Some(id) = clean_id(id) {
+        send(Msg::StoreInstalled(id, fresh, now_ms(), generation()));
     }
-    true
+}
+
+pub fn store_removed(id: &str) {
+    if let Some(id) = clean_id(id) {
+        send(Msg::StoreRemoved(id, now_ms(), generation()));
+    }
 }
 
 pub fn quit(clean: bool) {
-    let Some(shared) = SHARED.get() else {
-        return;
-    };
     let (ack, done) = sync_channel(1);
-    if shared.tx.try_send(Msg::Quit(clean, ack)).is_ok() {
+    if send(Msg::Quit(clean, ack)) {
         let _ = done.recv_timeout(QUIT_WAIT);
     }
-}
-
-fn record(name: &str, mut properties: Map<String, Value>, timestamp_ms: i64) -> Option<Record> {
-    let shared = SHARED.get()?;
-    for (key, value) in &shared.supers {
-        properties
-            .entry(key.clone())
-            .or_insert_with(|| value.clone());
-    }
-    Some(Record {
-        uuid: uuid::Uuid::now_v7().to_string(),
-        event: name.to_owned(),
-        distinct_id: shared.distinct_id.clone(),
-        timestamp_ms,
-        properties,
-    })
-}
-
-fn event_record(event: &Event, timestamp_ms: i64) -> Option<Record> {
-    let properties = match serde_json::to_value(event)
-        .ok()?
-        .get_mut("properties")?
-        .take()
-    {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
-    record(event.name(), properties, timestamp_ms)
 }
 
 enum Delivery {
     Sent,
     /// Offline or PostHog busy: keep it for later.
     Retry,
-    /// Refused for good (a malformed batch): drop it.
-    Refused,
+    /// Refused for good, or sharing changed: drop it.
+    Dropped,
 }
 
 struct Worker {
     profile: PathBuf,
-    state: prefs::State,
+    mode: Mode,
+    build: String,
+    app_version: String,
+    displays: (u32, f32),
     bundle_id: String,
     metal: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    state: prefs::State,
+    outbox: Outbox,
+    distinct_id: String,
+    supers: Map<String, Value>,
+    main: Option<exception::Image>,
     client: Option<posthog::Client>,
     pending: Vec<Record>,
     /// A command waiting for repeats: the event, its first time, its last.
@@ -248,18 +219,32 @@ struct Worker {
     peaks: perf::Peaks,
     crash_last_session: bool,
     cold: bool,
-    /// The install id was made this launch.
     first_run: bool,
+    /// The consent generation this worker last acted on.
+    seen: u64,
+    /// The generation of the last revocation: older work is dropped.
+    revoked: u64,
+    was_off: bool,
+    crashes_read: bool,
+    hanging: bool,
 }
 
 impl Worker {
-    fn new(config: Config, state: prefs::State, bundle_id: String) -> Worker {
+    fn new(config: Config, mode: Mode) -> Worker {
         let now = Instant::now();
         Worker {
+            outbox: Outbox::new(&config.profile),
             profile: config.profile,
-            state,
-            bundle_id,
+            mode,
+            build: config.build,
+            app_version: config.app_version,
+            displays: config.displays,
+            bundle_id: config.bundle_id.unwrap_or_default(),
             metal: config.metal_bytes,
+            state: prefs::State::default(),
+            distinct_id: String::new(),
+            supers: Map::new(),
+            main: None,
             client: None,
             pending: vec![],
             folding: None,
@@ -272,74 +257,267 @@ impl Worker {
             crash_last_session: false,
             cold: false,
             first_run: false,
+            seen: 0,
+            revoked: 0,
+            was_off: false,
+            crashes_read: false,
+            hanging: false,
         }
     }
 
-    fn outbox(&self) -> &'static Outbox {
-        &SHARED.get().expect("started").outbox
+    fn internal(&self) -> bool {
+        self.mode == Mode::Internal
     }
 
     fn save(&self) {
         let _ = prefs::store(&self.profile, &self.state);
     }
 
-    fn run(mut self, rx: Receiver<Msg>) {
+    /// Off the main thread: the state, the Mac's facts, this session's record.
+    fn begin(&mut self) {
+        self.state = prefs::load(&self.profile);
+        crate::remember_store_extensions(&self.state.store_installs);
         self.crash_last_session = self.state.session_open;
         self.first_run = self.state.install_id.is_none();
+        self.distinct_id = self
+            .state
+            .install_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
         let boot = system::boot_time();
         self.cold = boot.is_some() && self.state.last_boot != boot;
         self.state.last_boot = boot;
         self.state.session_open = true;
-        self.state.install_id = Some(SHARED.get().expect("started").distinct_id.clone());
+        self.state.sessions.push(prefs::Session {
+            pid: std::process::id() as u64,
+            started: system::process_start().unwrap_or(now_ms() as f64 / 1000.),
+            internal: self.internal(),
+            ..Default::default()
+        });
+        prefs::cap(&mut self.state.sessions, prefs::MAX_SESSIONS);
         self.save();
-        if self.state.sharing {
-            self.client = client();
-            self.read_crash_reports();
+        self.main = exception::main_image();
+        let channel = match self.mode {
+            Mode::Production { channel } => channel,
+            _ => "dev",
+        };
+        let (language, region) = system::locale();
+        let supers = SuperProperties {
+            app_version: self.app_version.clone(),
+            build: self.build.clone(),
+            channel,
+            macos_version: system::macos_version(),
+            chip: system::chip(),
+            ram_bucket: ram_bucket(system::ram_bytes()),
+            display_count: self.displays.0,
+            display_max_scale: self.displays.1,
+            locale: language,
+            region,
+            is_internal: self.internal(),
+            session_id: uuid::Uuid::now_v7().to_string(),
+        };
+        if let Ok(Value::Object(map)) = serde_json::to_value(&supers) {
+            self.supers = map;
         }
+    }
+
+    fn session(&mut self) -> Option<&mut prefs::Session> {
+        let pid = std::process::id() as u64;
+        self.state.sessions.iter_mut().rev().find(|s| s.pid == pid)
+    }
+
+    fn run(mut self, rx: Receiver<Msg>) {
+        self.begin();
         loop {
+            self.follow_consent();
             match rx.recv_timeout(TICK) {
-                Ok(Msg::Event(event, at)) => self.add(event, at),
-                Ok(Msg::Launched {
-                    first_window_ms,
-                    interactive_ms,
-                    at,
-                }) => {
-                    let event = Event::AppLaunched(AppLaunched {
-                        kind: if self.cold {
-                            LaunchKind::Cold
-                        } else {
-                            LaunchKind::Warm
-                        },
-                        launch_to_first_window_ms: first_window_ms,
-                        launch_to_interactive_ms: interactive_ms,
-                        first_run: self.first_run,
-                        crash_last_session: self.crash_last_session,
-                    });
-                    self.add(event, at);
-                }
-                Ok(Msg::Identify(id)) => self.identify(id),
-                Ok(Msg::Sharing(on)) => self.sharing(on),
-                Ok(Msg::Record(record)) => {
-                    self.pending.push(*record);
-                    self.next_send = Instant::now();
-                }
-                Ok(Msg::Flush(ack)) => {
-                    self.send();
-                    let _ = ack.send(());
-                }
-                Ok(Msg::Quit(clean, ack)) => {
-                    self.quit(clean);
-                    let _ = ack.send(());
-                }
+                Ok(msg) => self.handle(msg),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            self.follow_consent();
             self.tick();
         }
     }
 
-    fn add(&mut self, event: Event, at: i64) {
-        if !on() {
+    /// Acts on a consent change: off purges everything waiting (memory and
+    /// disk); on starts the client and, once, reads crash reports.
+    fn follow_consent(&mut self) {
+        let generation = generation();
+        if generation == self.seen {
+            return;
+        }
+        self.seen = generation;
+        // A turn to off since the last look (even one already turned back
+        // on): everything waiting goes.
+        let revoked = REVOKED.load(Relaxed);
+        if revoked != self.revoked {
+            self.revoked = revoked;
+            self.purge();
+            self.was_off = true;
+            if let Some(session) = self.session() {
+                session.revoked = true;
+            }
+            self.save();
+        }
+        if CONSENT.load(Relaxed) == ON {
+            if self.client.is_none() {
+                self.client = client();
+            }
+            if std::mem::take(&mut self.was_off) {
+                let event = Event::SettingsChanged(SettingsChanged::Telemetry(true));
+                self.add(event, now_ms(), generation);
+            }
+            if let Some(session) = self.session() {
+                session.consented = true;
+            }
+            self.save();
+            if !self.crashes_read {
+                self.read_crash_reports();
+            }
+            self.next_send = Instant::now();
+        }
+    }
+
+    fn purge(&mut self) {
+        self.client = None;
+        self.pending.clear();
+        self.folding = None;
+        self.hanging = false;
+        perf::clear();
+        self.peaks = perf::Peaks::default();
+        DROPPED.store(0, Relaxed);
+        self.outbox.clear();
+    }
+
+    /// Sharing on, and no change since the worker last looked.
+    fn may_write(&self) -> bool {
+        CONSENT.load(Relaxed) == ON && generation() == self.seen
+    }
+
+    fn may_send(&self) -> bool {
+        self.may_write() && self.client.is_some()
+    }
+
+    /// Work captured before the last revocation, or while off, is dropped.
+    fn current(&self, captured: u64) -> bool {
+        captured >= REVOKED.load(Relaxed) && CONSENT.load(Relaxed) != OFF
+    }
+
+    fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Event(event, at, g) if self.current(g) => self.add(event, at, g),
+            Msg::Launched(first_window_ms, interactive_ms, at, g) if self.current(g) => {
+                let event = Event::AppLaunched(AppLaunched {
+                    kind: if self.cold {
+                        LaunchKind::Cold
+                    } else {
+                        LaunchKind::Warm
+                    },
+                    launch_to_first_window_ms: first_window_ms,
+                    launch_to_interactive_ms: interactive_ms,
+                    first_run: self.first_run,
+                    crash_last_session: self.crash_last_session,
+                });
+                self.add(event, at, g);
+            }
+            Msg::Identify(id, g) if self.current(g) => self.identify(id),
+            Msg::Panic(addrs, location, at, g) if self.current(g) => {
+                self.panic(addrs, location, at)
+            }
+            Msg::HangBegan(at, g) if self.current(g) => {
+                self.hanging = true;
+                // Kept in case the app is ended while it hangs.
+                if self.may_write()
+                    && let Some(record) = self.event_record(&hang_event("unrecovered"), at)
+                {
+                    let _ = self.outbox.write(outbox::HANG_PENDING, &[record]);
+                }
+            }
+            Msg::HangEnded(duration, at, g) => {
+                let _ = std::fs::remove_file(self.outbox.dir().join(outbox::HANG_PENDING));
+                if std::mem::take(&mut self.hanging) && self.current(g) {
+                    self.add(hang_event(duration), at, g);
+                }
+            }
+            Msg::StoreInstalled(id, fresh, at, g) => {
+                // Provenance is remembered whatever sharing says; the event
+                // follows consent.
+                if !self.state.store_installs.contains(&id) {
+                    self.state.store_installs.push(id.clone());
+                    prefs::cap(&mut self.state.store_installs, prefs::MAX_STORE_INSTALLS);
+                    crate::remember_store_extensions(&self.state.store_installs);
+                    self.save();
+                }
+                if fresh && self.current(g) {
+                    let event = Event::StoreExtensionInstalled(StoreExtension { extension_id: id });
+                    self.add(event, at, g);
+                }
+            }
+            Msg::StoreRemoved(id, at, g) => {
+                if self.state.store_installs.contains(&id) {
+                    self.state.store_installs.retain(|s| s != &id);
+                    crate::remember_store_extensions(&self.state.store_installs);
+                    self.save();
+                    if self.current(g) {
+                        let event =
+                            Event::StoreExtensionRemoved(StoreExtension { extension_id: id });
+                        self.add(event, at, g);
+                    }
+                }
+            }
+            #[cfg(test)]
+            Msg::Flush(ack) => {
+                self.send();
+                let _ = ack.send(());
+            }
+            Msg::Quit(clean, ack) => {
+                self.quit(clean);
+                let _ = ack.send(());
+            }
+            _ => {}
+        }
+    }
+
+    fn record(&self, name: &str, mut properties: Map<String, Value>, at: i64) -> Record {
+        for (key, value) in &self.supers {
+            properties
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        // A development check's events are always marked internal.
+        properties.insert("is_internal".into(), self.internal().into());
+        Record {
+            uuid: uuid::Uuid::now_v7().to_string(),
+            event: name.to_owned(),
+            distinct_id: self.distinct_id.clone(),
+            timestamp_ms: at,
+            properties,
+        }
+    }
+
+    fn event_record(&self, event: &Event, at: i64) -> Option<Record> {
+        let properties = match serde_json::to_value(event)
+            .ok()?
+            .get_mut("properties")?
+            .take()
+        {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        };
+        Some(self.record(event.name(), properties, at))
+    }
+
+    fn keep(&mut self, record: Record) {
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.remove(0);
+            DROPPED.fetch_add(1, Relaxed);
+        }
+        self.pending.push(record);
+    }
+
+    fn add(&mut self, event: Event, at: i64, captured: u64) {
+        if !self.current(captured) {
             return;
         }
         if let Event::CommandInvoked(command) = &event {
@@ -356,16 +534,16 @@ impl Worker {
             self.folding = Some((command.clone(), at, Instant::now()));
             return;
         }
-        if let Some(record) = event_record(&event, at) {
-            self.pending.push(record);
+        if let Some(record) = self.event_record(&event, at) {
+            self.keep(record);
         }
     }
 
     fn flush_fold(&mut self) {
         if let Some((command, at, _)) = self.folding.take()
-            && let Some(record) = event_record(&Event::CommandInvoked(command), at)
+            && let Some(record) = self.event_record(&Event::CommandInvoked(command), at)
         {
-            self.pending.push(record);
+            self.keep(record);
         }
     }
 
@@ -373,45 +551,50 @@ impl Worker {
         if self.state.identified.as_ref() == Some(&id) {
             return;
         }
-        let shared = SHARED.get().expect("started");
         let mut props = Map::new();
-        props.insert(
-            "$anon_distinct_id".into(),
-            shared.distinct_id.clone().into(),
-        );
-        if let Some(mut record) = record("$identify", props, now_ms()) {
-            record.distinct_id = id.clone();
-            self.pending.push(record);
-            self.next_send = Instant::now();
-        }
+        props.insert("$anon_distinct_id".into(), self.distinct_id.clone().into());
+        let mut record = self.record("$identify", props, now_ms());
+        record.distinct_id = id.clone();
+        self.keep(record);
         self.state.identified = Some(id);
         self.save();
     }
 
-    fn sharing(&mut self, on: bool) {
-        self.state.sharing = on;
-        if on {
-            self.client = self.client.take().or_else(client);
-            self.add(
-                Event::SettingsChanged(SettingsChanged::Telemetry(true)),
-                now_ms(),
-            );
-            self.next_send = Instant::now();
-        } else {
-            // Nothing that was waiting leaves; crashes from now on stay.
-            self.pending.clear();
-            self.folding = None;
-            let _ = perf::take();
-            self.peaks = perf::Peaks::default();
-            self.outbox().clear();
-            self.client = None;
-            self.state.last_crash_report = Some(now_ms() as f64 / 1000.);
+    fn panic(&mut self, addrs: Vec<u64>, location: Option<(String, u32)>, at: i64) {
+        let mut frames = exception::resolve(&addrs, self.main.as_ref());
+        // The hook's own frames sit inside the panic dispatcher.
+        let name = |f: &exception::Frame| f.function.clone().unwrap_or_default();
+        if let Some(dispatcher) = frames
+            .iter()
+            .take(64)
+            .position(|f| name(f).contains("panic_with_hook"))
+        {
+            frames.drain(..dispatcher);
         }
-        self.save();
+        let value = match &location {
+            Some((file, line)) => format!("panic at {file}:{line}"),
+            None => "panic".into(),
+        };
+        let mut props = exception::properties(
+            exception::Kind {
+                exception_type: "Panic",
+                value,
+                mechanism: "panic",
+            },
+            &frames,
+            self.main.as_ref(),
+        );
+        if let Some((file, line)) = location {
+            props.insert("$exception_panic_file".into(), file.into());
+            props.insert("$exception_panic_line".into(), line.into());
+        }
+        let record = self.record("$exception", props, at);
+        self.keep(record);
+        self.next_send = Instant::now();
     }
 
     fn tick(&mut self) {
-        if !on() {
+        if CONSENT.load(Relaxed) != ON {
             return;
         }
         if self
@@ -429,16 +612,8 @@ impl Worker {
             self.summary();
         }
         let due = Instant::now() >= self.next_send;
-        if (due && !self.pending.is_empty())
-            || (self.pending.len() >= SEND_AT && self.failures == 0)
-        {
+        if due || (self.pending.len() >= SEND_AT && self.failures == 0) {
             self.send();
-        } else if due {
-            // Nothing new: still try what an earlier session left.
-            self.next_send = Instant::now() + SEND_EVERY;
-            if self.failures == 0 {
-                self.drain_outbox();
-            }
         }
     }
 
@@ -454,43 +629,61 @@ impl Worker {
         let event = Event::PerfSummary(Box::new(PerfSummary {
             window_s,
             frames,
-            playback_fps_achieved: playback,
+            playback_fps_achieved: playback.map(|p| p.0),
+            playback_fps_target: playback.and_then(|p| p.1),
             peak_footprint_mb: peaks.footprint >> 20,
             peak_metal_mb: peaks.metal.map(|m| m >> 20),
             thermal_state_max: perf::thermal_name(peaks.thermal),
             on_battery: peaks.on_battery,
             telemetry_dropped: DROPPED.swap(0, Relaxed),
         }));
-        self.add(event, now_ms());
+        self.add(event, now_ms(), self.seen);
     }
 
-    fn deliver(&self, records: &[Record]) -> Delivery {
+    /// One attempt, under the consent check; a development check's batch
+    /// never carries an event that isn't marked internal.
+    fn deliver(&mut self, records: &[Record]) -> Delivery {
+        if !self.may_send() {
+            return Delivery::Dropped;
+        }
+        let internal = self.internal();
+        let events: Vec<posthog::Event> = records
+            .iter()
+            .filter(|r| admissible(internal, r))
+            .map(Record::to_posthog)
+            .collect();
+        if events.is_empty() {
+            return Delivery::Sent;
+        }
         let Some(client) = &self.client else {
-            return Delivery::Retry;
+            return Delivery::Dropped;
         };
-        let events = records.iter().map(Record::to_posthog).collect();
-        match client.capture_batch_immediate(events, false) {
+        let result = client.capture_batch_immediate(events, false);
+        // Sharing may have been turned off while the request ran.
+        self.follow_consent();
+        match result {
             Ok(_) => Delivery::Sent,
             Err(
                 posthog::Error::BadRequest(_)
                 | posthog::Error::Serialization(_)
                 | posthog::Error::InvalidArgument(_),
-            ) => Delivery::Refused,
-            Err(_) => Delivery::Retry,
+            ) => Delivery::Dropped,
+            Err(_) if self.may_write() => Delivery::Retry,
+            Err(_) => Delivery::Dropped,
         }
     }
 
     fn send(&mut self) {
         self.flush_fold();
-        if self.client.is_none() {
+        if !self.may_send() {
             return;
         }
         let batch = std::mem::take(&mut self.pending);
         let ok = batch.is_empty()
             || match self.deliver(&batch) {
-                Delivery::Sent | Delivery::Refused => true,
+                Delivery::Sent | Delivery::Dropped => true,
                 Delivery::Retry => {
-                    let _ = self.outbox().write(&Outbox::batch_name("batch"), &batch);
+                    let _ = self.outbox.write(&Outbox::batch_name("batch"), &batch);
                     false
                 }
             };
@@ -506,103 +699,145 @@ impl Worker {
     }
 
     /// Batches earlier sends or sessions left, oldest first, while PostHog
-    /// takes them.
+    /// takes them and sharing stays on.
     fn drain_outbox(&mut self) {
-        if self.client.is_none() {
-            return;
-        }
-        for file in self.outbox().pending(false).into_iter().take(10) {
+        for file in self.outbox.pending(false).into_iter().take(10) {
+            if !self.may_send() {
+                return;
+            }
             let records = Outbox::read(&file);
             match self.deliver(&records) {
-                Delivery::Sent | Delivery::Refused => {
-                    let _ = std::fs::remove_file(&file);
-                }
                 Delivery::Retry => {
                     self.failures += 1;
+                    self.next_send = Instant::now() + SEND_EVERY;
                     return;
                 }
+                _ if self.may_write() => {
+                    let _ = std::fs::remove_file(&file);
+                }
+                _ => return,
             }
         }
     }
 
+    /// Crash reports of recorded sessions that were sending, each once.
     fn read_crash_reports(&mut self) {
+        self.crashes_read = true;
         let Some(folder) = crash::reports_folder() else {
             return;
         };
-        // The first session looks back a day.
-        let since = self
-            .state
-            .last_crash_report
-            .unwrap_or(now_ms() as f64 / 1000. - 86_400.);
-        let mut newest = since;
-        for found in crash::new_reports(&folder, &self.bundle_id, since) {
-            if let Some(record) =
-                record("$exception", found.properties, (found.time * 1000.) as i64)
-            {
-                self.pending.push(record);
+        let now = now_ms() as f64 / 1000.;
+        let mut sent = 0;
+        for path in crash::candidates(&folder, now) {
+            if !self.may_write() || sent >= CRASHES_PER_LAUNCH {
+                break;
             }
-            newest = newest.max(found.time);
+            let Some(report) = crash::read(&path).and_then(|t| crash::parse(&t, &self.bundle_id))
+            else {
+                continue;
+            };
+            if self.state.crash_incidents.contains(&report.incident) {
+                continue;
+            }
+            let session = sending_session(&self.state.sessions, report.pid, report.launched);
+            if let Some(session) = session {
+                let mut record = self.record(
+                    "$exception",
+                    report.properties,
+                    (report.time * 1000.) as i64,
+                );
+                record.uuid = crash::event_uuid(&report.incident);
+                record
+                    .properties
+                    .insert("is_internal".into(), session.internal.into());
+                // Kept on disk before it counts as handled.
+                if self
+                    .outbox
+                    .write(&Outbox::batch_name("crash"), &[record])
+                    .is_err()
+                {
+                    break;
+                }
+                sent += 1;
+            }
+            self.state.crash_incidents.push(report.incident);
+            prefs::cap(&mut self.state.crash_incidents, prefs::MAX_INCIDENTS);
+            self.save();
         }
-        self.state.last_crash_report = Some(newest);
-        self.save();
-        // A hang the last session never recovered from is in the outbox.
-        if self.outbox().dir().join(outbox::HANG_PENDING).exists() {
-            let from = self.outbox().dir().join(outbox::HANG_PENDING);
-            let _ = std::fs::rename(&from, self.outbox().dir().join(Outbox::batch_name("hang")));
+        // A hang the last session never recovered from.
+        let pending = self.outbox.dir().join(outbox::HANG_PENDING);
+        if pending.exists() {
+            let _ = std::fs::rename(&pending, self.outbox.dir().join(Outbox::batch_name("hang")));
         }
-        self.next_send = Instant::now();
     }
 
     fn quit(&mut self, clean: bool) {
-        if on() {
-            self.summary();
-            let event = Event::AppQuit(AppQuit {
-                session_minutes: self.started.elapsed().as_secs() / 60,
-                clean,
-            });
-            self.add(event, now_ms());
-            self.flush_fold();
-            // Kept first, so nothing is lost if the process ends mid-send.
-            let batch = std::mem::take(&mut self.pending);
-            if !batch.is_empty()
-                && let Ok(file) = self.outbox().write(&Outbox::batch_name("quit"), &batch)
-            {
-                match self.deliver(&batch) {
-                    Delivery::Sent | Delivery::Refused => {
-                        let _ = std::fs::remove_file(file);
-                    }
-                    Delivery::Retry => {}
-                }
-            }
-        }
         self.state.session_open = !clean;
         self.save();
+        if !self.may_send() {
+            return;
+        }
+        self.summary();
+        let event = Event::AppQuit(AppQuit {
+            session_minutes: self.started.elapsed().as_secs() / 60,
+            clean,
+        });
+        self.add(event, now_ms(), self.seen);
+        self.flush_fold();
+        // Kept first, so nothing is lost if the process ends mid-send.
+        let batch = std::mem::take(&mut self.pending);
+        if !batch.is_empty()
+            && let Ok(file) = self.outbox.write(&Outbox::batch_name("quit"), &batch)
+            && matches!(self.deliver(&batch), Delivery::Sent | Delivery::Dropped)
+        {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }
 
-/// PostHog, or with `PM_TELEMETRY_DEV=1` the `PM_TELEMETRY_HOST` a check
-/// points it at (a closed port for the offline check, a local listener).
-fn host() -> String {
-    let dev = std::env::var("PM_TELEMETRY_DEV").as_deref() == Ok("1");
-    match std::env::var("PM_TELEMETRY_HOST") {
-        Ok(host) if dev && !host.is_empty() => host,
-        _ => crate::HOST.to_owned(),
-    }
+/// A development check (`PM_TELEMETRY_DEV`) sends only events marked
+/// internal: the last check before anything leaves.
+fn admissible(internal: bool, record: &Record) -> bool {
+    !internal || record.properties.get("is_internal") == Some(&Value::Bool(true))
 }
 
+/// The recorded session a crash belongs to (same process id, started within
+/// two seconds), if it was sending and never turned sharing off.
+fn sending_session(sessions: &[prefs::Session], pid: u64, launched: f64) -> Option<prefs::Session> {
+    sessions
+        .iter()
+        .find(|s| s.pid == pid && (s.started - launched).abs() < 2.)
+        .filter(|s| s.consented && !s.revoked)
+        .cloned()
+}
+
+fn hang_event(duration: &'static str) -> Event {
+    Event::Hang(Hang { duration })
+}
+
+#[cfg(test)]
+pub static TEST_HOST: OnceLock<String> = OnceLock::new();
+
+/// PostHog, with one attempt per request: retries are the worker's, under
+/// its consent checks.
 fn client() -> Option<posthog::Client> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
+    #[cfg(test)]
+    let host = TEST_HOST
+        .get()
+        .cloned()
+        .unwrap_or_else(|| crate::HOST.to_owned());
+    #[cfg(not(test))]
+    let host = crate::HOST.to_owned();
     let options = posthog::ClientOptionsBuilder::default()
         .api_key(crate::PROJECT_TOKEN.to_owned())
-        .host(host())
+        .host(host)
         .is_server(false)
         .disable_geoip(true)
         .request_timeout_seconds(10)
-        .max_capture_attempts(3)
-        .retry_initial_backoff_ms(250)
-        .retry_max_backoff_ms(2000)
+        .max_capture_attempts(1)
         .capture_compression(posthog::CaptureCompression::Gzip)
         .shutdown_timeout_ms(200)
         .build()
@@ -610,173 +845,77 @@ fn client() -> Option<posthog::Client> {
     Some(posthog::client(options))
 }
 
-/// Runs inside every panic before the previous hook: the exception is
-/// written to the outbox by the panicking thread itself (the app may end
-/// right after), then the telemetry thread is asked to send it.
+/// Runs inside every panic before the previous hook, and never blocks: up
+/// to 64 return addresses (no lock, no symbol lookup, no file) and the
+/// panic's location if it is a repository path, offered to the worker once
+/// without waiting. Never the panic's message.
 fn install_panic_hook() {
     static IN_PANIC: AtomicBool = AtomicBool::new(false);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if on() && !IN_PANIC.swap(true, Relaxed) {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report_panic(info)));
+        if taking() && !IN_PANIC.swap(true, Relaxed) {
+            let mut addrs = [0u64; 64];
+            let mut n = 0;
+            // SAFETY: the unwinder walks this thread's own stack; no other
+            // backtrace runs on it while it panics.
+            unsafe {
+                backtrace::trace_unsynchronized(|frame| {
+                    if let Some(slot) = addrs.get_mut(n) {
+                        *slot = frame.ip() as u64;
+                        n += 1;
+                    }
+                    n < addrs.len()
+                });
+            }
+            let location = info
+                .location()
+                .and_then(|l| exception::panic_file(l.file()).map(|f| (f, l.line())));
+            send(Msg::Panic(
+                addrs[..n].to_vec(),
+                location,
+                now_ms(),
+                generation(),
+            ));
             IN_PANIC.store(false, Relaxed);
         }
         previous(info);
     }));
 }
 
-#[allow(deprecated)]
-fn report_panic(info: &std::panic::PanicInfo<'_>) {
-    let Some(shared) = SHARED.get() else {
-        return;
-    };
-    let mut addrs = vec![];
-    backtrace::trace(|frame| {
-        addrs.push(frame.ip() as u64);
-        addrs.len() < 128
-    });
-    let mut frames = exception::resolve(&addrs);
-    // Our own hook plumbing sits inside the panic dispatcher: drop it (by
-    // the dispatcher's name, else our own frames by theirs).
-    let name = |f: &exception::Frame| f.function.clone().unwrap_or_default();
-    match frames
-        .iter()
-        .take(64)
-        .position(|f| name(f).contains("panic_with_hook"))
-    {
-        Some(dispatcher) => {
-            frames.drain(..dispatcher);
-        }
-        None => {
-            let ours = frames.iter().take(64).take_while(|f| {
-                let n = name(f);
-                n.starts_with("backtrace::") || n.contains("pm_telemetry::live")
-            });
-            let n = ours.count();
-            frames.drain(..n);
-        }
-    }
-    let message = info
-        .payload()
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| info.payload().downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "panic".into());
-    let mut props = exception::properties(
-        exception::Kind {
-            exception_type: "Panic",
-            message: &message,
-            mechanism: "panic",
-            level: "fatal",
-        },
-        &frames,
-        &exception::loaded_images(),
-    );
-    if let Some(location) = info.location() {
-        if let Some(file) = exception::scrub_source_path(location.file()) {
-            props.insert("$exception_panic_file".into(), file.into());
-        }
-        props.insert("$exception_panic_line".into(), location.line().into());
-    }
-    let thread = std::thread::current();
-    if let Some(name) = thread
-        .name()
-        .and_then(|n| clean_id(&n.to_ascii_lowercase()))
-    {
-        props.insert("thread".into(), name.into());
-    }
-    let Some(record) = record("$exception", props, now_ms()) else {
-        return;
-    };
-    if shared
-        .outbox
-        .write(&Outbox::batch_name("panic"), &[record])
-        .is_err()
-    {
-        return;
-    }
-    if thread.name() != Some("pm-telemetry") {
-        let (ack, done) = sync_channel(1);
-        if shared.tx.try_send(Msg::Flush(ack)).is_ok() {
-            let _ = done.recv_timeout(Duration::from_secs(2));
-        }
-    }
-}
-
 /// Watches the main thread's heartbeat: blocked for more than 2 s while the
-/// app is active, it samples the main thread's stack once and keeps a pending
-/// `hang` in the outbox (sent at the next launch if the app is ended while it
-/// hangs); when the main thread answers, the pending one is replaced by the
-/// event with its duration.
+/// app is active, it tells the worker (which keeps a pending `hang`, sent at
+/// the next launch if the app is ended while it hangs); when the main thread
+/// answers, the hang is sent with its duration. No stack is taken: the main
+/// thread is never suspended for telemetry.
 fn watch_hangs() {
-    let images = exception::loaded_images();
     let mut last = Instant::now();
-    let mut hang: Option<(u64, Record)> = None;
+    let mut began: Option<u64> = None;
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let held = last.elapsed() > Duration::from_millis(1500);
         last = Instant::now();
         let late = crate::main_thread::since_beat_ms();
-        match hang.take() {
+        match began {
             None => {
                 // A held process (App Nap, a debugger) is not a hang.
-                if held
-                    || late <= HANG_MS
-                    || !on()
-                    || !ACTIVE.load(Relaxed)
-                    || !crate::main_thread::installed()
+                if !held
+                    && late > HANG_MS
+                    && taking()
+                    && ACTIVE.load(Relaxed)
+                    && crate::main_thread::installed()
                 {
-                    continue;
-                }
-                let mut buf = [0u64; crate::main_thread::DEPTH];
-                let n = crate::main_thread::sample(&mut buf);
-                let stack = stack_lines(&buf[..n], &images);
-                let event = Event::Hang(Hang {
-                    duration: "unrecovered",
-                    stack,
-                });
-                if let Some(record) = event_record(&event, now_ms()) {
-                    if let Some(shared) = SHARED.get() {
-                        let _ = shared
-                            .outbox
-                            .write(outbox::HANG_PENDING, std::slice::from_ref(&record));
-                    }
-                    hang = Some((crate::main_thread::now_ms().saturating_sub(late), record));
+                    began = Some(crate::main_thread::now_ms().saturating_sub(late));
+                    send(Msg::HangBegan(now_ms(), generation()));
                 }
             }
-            Some((began, mut record)) if late < 1000 => {
-                let seconds = crate::main_thread::now_ms().saturating_sub(began) as f64 / 1000.;
-                record
-                    .properties
-                    .insert("duration".into(), hang_bucket(seconds).into());
-                if let Some(shared) = SHARED.get() {
-                    let _ = std::fs::remove_file(shared.outbox.dir().join(outbox::HANG_PENDING));
-                    let _ = shared.tx.try_send(Msg::Record(Box::new(record)));
-                }
+            Some(start) if late < 1000 => {
+                let seconds = crate::main_thread::now_ms().saturating_sub(start) as f64 / 1000.;
+                send(Msg::HangEnded(hang_bucket(seconds), now_ms(), generation()));
+                began = None;
             }
-            still => hang = still,
+            Some(_) => {}
         }
     }
-}
-
-/// `binary+0xoffset symbol`, innermost first.
-fn stack_lines(addrs: &[u64], images: &[exception::Image]) -> Vec<String> {
-    exception::resolve(addrs)
-        .into_iter()
-        .map(|frame| {
-            let image = images
-                .iter()
-                .find(|i| frame.addr >= i.base && frame.addr < i.base + i.size.max(1));
-            let place = match image {
-                Some(i) => format!("{}+{:#x}", i.name, frame.addr - i.base),
-                None => format!("{:#x}", frame.addr),
-            };
-            match frame.function {
-                Some(f) => format!("{place} {}", exception::normalize(&f)),
-                None => place,
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

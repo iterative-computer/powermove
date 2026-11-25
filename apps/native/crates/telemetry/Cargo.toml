@@ -21,7 +21,7 @@ posthog = { version = "1.4", default-features = false, features = ["tls-no-provi
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 backtrace = { version = "0.3.74", optional = true }
 findshlibs = { version = "0.10", optional = true }
-uuid = { version = "1", features = ["v4", "v7"], optional = true }
+uuid = { version = "1", features = ["v4", "v5", "v7"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

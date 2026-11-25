@@ -142,16 +142,13 @@ pub(crate) fn report_additions(commands: &[Command]) {
     for command in commands {
         match command {
             Command::Effect(effects::EffectCommand::Add(add)) => {
+                // A built-in by its catalogue id; an extension's effect is
+                // "local" (no proof here that it came from the Store).
                 let kind = &add.definition.effect_type;
                 let effect_id = if pm_fx_defs::builtins().effect(kind).is_some() {
                     pm_telemetry::Origin::builtin(kind)
                 } else {
-                    // An extension's effect: `owner.effect`, named only for
-                    // a Store extension.
-                    kind.rsplit_once('.')
-                        .map_or(pm_telemetry::Origin::LOCAL, |(owner, _)| {
-                            pm_telemetry::Origin::extension(owner)
-                        })
+                    pm_telemetry::Origin::LOCAL
                 };
                 pm_telemetry::capture(pm_telemetry::Event::EffectAdded(
                     pm_telemetry::EffectAdded { effect_id },

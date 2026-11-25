@@ -51,7 +51,7 @@ pub fn init(
 /// With the first window: the heartbeat, the app's activity, the launch
 /// report after the first frame, and the forced-failure checks.
 pub fn install(window: &mut gpui::Window, cx: &mut gpui::App) {
-    if !pm_telemetry::enabled() {
+    if !pm_telemetry::running() {
         return;
     }
     pm_telemetry::main_thread::install();
@@ -314,19 +314,6 @@ pub fn project_saved(ms: u64, file: Option<std::path::PathBuf>) {
                 pm_telemetry::ProjectSaved { ms, size },
             ));
         });
-}
-
-/// A Store extension installed (`true`) or removed, by its catalogue id.
-pub fn store_extension(id: &str, installed: bool) {
-    let Some(extension_id) = pm_telemetry::clean_id(id) else {
-        return;
-    };
-    let event = pm_telemetry::StoreExtension { extension_id };
-    pm_telemetry::capture(if installed {
-        pm_telemetry::Event::StoreExtensionInstalled(event)
-    } else {
-        pm_telemetry::Event::StoreExtensionRemoved(event)
-    });
 }
 
 /// Panels a window shows now: each newly shown one a person asked for is
