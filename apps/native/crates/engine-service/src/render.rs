@@ -713,9 +713,7 @@ pub struct Submission {
     #[cfg(test)]
     pub presented: Option<metal::Buffer>,
     #[cfg(test)]
-    pub before_completed: Option<Arc<dyn Fn() + Send + Sync>>,
-    #[cfg(test)]
-    pub fail_completion: bool,
+    pub before_completed: Option<crate::CompletionHook>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -2398,8 +2396,6 @@ impl Engine {
             presented,
             #[cfg(test)]
             before_completed: None,
-            #[cfg(test)]
-            fail_completion: false,
             width: output.width,
             height: output.height,
             failures,
@@ -2407,6 +2403,22 @@ impl Engine {
             compat_late,
         }))
     }
+    #[cfg(test)]
+    pub(crate) fn invalidate_submission(&self, submission: &mut Submission) {
+        assert!(submission.drawable.is_none());
+        // The queue records just one blit with an unretained reference.
+        // Releasing its buffer before commit gives a real Invalid Resource
+        // completion, without executing a faulting shader.
+        submission.command = objc2::rc::autoreleasepool(|_| {
+            let command = self.queue.new_command_buffer_with_unretained_references();
+            let buffer = self.metal.new_buffer(4096, metal::MTLResourceOptions::StorageModePrivate);
+            let blit = command.new_blit_command_encoder();
+            blit.fill_buffer(&buffer, metal::NSRange::new(0, 4096), 0);
+            blit.end_encoding();
+            command.to_owned()
+        });
+    }
+
     /// Native text grids spend only the allowance already granted to this
     /// renderer, and give way under pressure just like the other previews.
     pub(crate) fn text_grid_scale(&self, scene: &Scene, output: &Output) -> Option<f64> {
@@ -2884,14 +2896,12 @@ impl Submission {
         let lease = self.surface.clone();
         #[cfg(test)]
         let before_completed = self.before_completed.clone();
-        #[cfg(test)]
-        let fail_completion = self.fail_completion;
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
                 #[cfg(test)]
                 if let Some(hook) = &before_completed {
-                    hook();
+                    hook(b.status());
                 }
                 #[cfg(test)]
                 std::thread::sleep(std::time::Duration::from_millis(
@@ -2901,10 +2911,7 @@ impl Submission {
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);
                 t.completed = now();
-                let gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
-                #[cfg(test)]
-                let gpu_ok = gpu_ok && !fail_completion;
-                t.gpu_ok = gpu_ok;
+                t.gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
                 drop(t);
                 if let Some(wake) = &wake {
                     wake();

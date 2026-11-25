@@ -883,6 +883,9 @@ type ScopeTap = (
 fn watch_owner(state: &State, id: u64) -> String {
     format!("view {:p} {id}", state as *const State)
 }
+#[cfg(test)]
+type CompletionHook = Arc<dyn Fn(metal::MTLCommandBufferStatus) + Send + Sync>;
+
 struct Shared {
     state: Mutex<State>,
     memory: Mutex<memory::CacheUsage>,
@@ -906,9 +909,9 @@ struct Shared {
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
-    before_completed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    before_completed: Mutex<Option<CompletionHook>>,
     #[cfg(test)]
-    fail_next_completion: std::sync::atomic::AtomicBool,
+    invalidate_next_submission: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     paused_flight_peak: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -1769,7 +1772,7 @@ impl EngineService {
             #[cfg(test)]
             before_completed: Mutex::new(None),
             #[cfg(test)]
-            fail_next_completion: Default::default(),
+            invalidate_next_submission: Default::default(),
             #[cfg(test)]
             paused_flight_peak: Default::default(),
             #[cfg(test)]
@@ -4258,9 +4261,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         #[cfg(test)]
                         {
                             s.before_completed = shared.before_completed.lock().unwrap().take();
-                            s.fail_completion = shared
-                                .fail_next_completion
-                                .swap(false, std::sync::atomic::Ordering::Relaxed);
+                            if shared
+                                .invalidate_next_submission
+                                .swap(false, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                engine.invalidate_submission(&mut s);
+                            }
                         }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
@@ -6166,12 +6172,15 @@ mod worker_tests {
 
     fn hold_next_completion(
         service: &EngineService,
-    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    ) -> (
+        std::sync::mpsc::Receiver<metal::MTLCommandBufferStatus>,
+        std::sync::mpsc::Sender<()>,
+    ) {
         let (entered, hold) = std::sync::mpsc::channel();
         let (resume, release) = std::sync::mpsc::channel();
         let release = Mutex::new(release);
-        *service.shared.before_completed.lock().unwrap() = Some(Arc::new(move || {
-            let _ = entered.send(());
+        *service.shared.before_completed.lock().unwrap() = Some(Arc::new(move |status| {
+            let _ = entered.send(status);
             let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
         }));
         (hold, resume)
@@ -6221,20 +6230,29 @@ mod worker_tests {
     fn an_unsuccessful_completion_admits_the_queued_pose() {
         use std::sync::atomic::Ordering;
 
+        // Metal API validation diagnoses the expired reference before
+        // commit. Run this test with the driver's completion enabled.
+        if std::env::var_os("MTL_DEBUG_LAYER").is_some_and(|v| v != "0") {
+            return;
+        }
+
         let service = EngineService::start(pm_gpu::Gpu::new("failed-flight").unwrap()).unwrap();
         let v = shapes_viewer(&service, None);
         wait_for_pose(&v, seconds(0.));
         let (hold, resume) = hold_next_completion(&service);
         service
             .shared
-            .fail_next_completion
+            .invalidate_next_submission
             .store(true, Ordering::Relaxed);
         v.scrub(seconds(0.2)).unwrap();
-        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            hold.recv_timeout(Duration::from_secs(5)).unwrap(),
+            metal::MTLCommandBufferStatus::Error,
+        );
         v.scrub(seconds(0.4)).unwrap();
         resume.send(()).unwrap();
         wait_for_pose(&v, seconds(0.4));
-        assert!(!service.shared.fail_next_completion.load(Ordering::Relaxed));
+        assert!(!service.shared.invalidate_next_submission.load(Ordering::Relaxed));
         assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
         v.retire();
     }
