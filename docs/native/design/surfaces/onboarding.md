@@ -6,8 +6,10 @@ WorkspaceStep}.svelte`, `R/onboarding/{workspace-import.ts,SuitcaseTowers.svelte
 `apps/desktop/src/renderer/onboarding/welcome.html`.
 
 Order is fixed, as v1.2.0: Welcome → Timeline → Agent → Speech Model → Workspace.
-Only the last step begins. Native first launch (N001) runs before all of this; if the
-profile was migrated, onboarding records come across and these steps don't appear.
+Only the last step begins. Native first launch (N001) runs before the steps: a launch
+that copies the original app's library opens on the intro, whose wave draws the window
+the copy runs in, and the Welcome and the steps follow the copy, whatever the original
+app recorded (its onboarding marker comes across but doesn't skip them).
 
 No new tokens.
 

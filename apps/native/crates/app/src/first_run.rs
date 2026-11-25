@@ -79,8 +79,13 @@ impl Plan {
         // A development review may walk onboarding on an isolated profile.
         let review =
             cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ONBOARDING").is_some();
+        // A launch that copies the original app's library is a first run
+        // here too: the intro and the steps follow the copy, whatever the
+        // original app recorded (its onboarding marker comes across with
+        // the library, `onboarding_completed`).
+        let first_here = launch == Launch::Migrate || !onboarding_completed(&profile);
         Some(Self {
-            onboard: (!isolated || review) && !onboarding_completed(&profile),
+            onboard: (!isolated || review) && first_here,
             config,
             original,
             profile,
@@ -322,7 +327,9 @@ impl Flow {
             || matches!(self.entry, Entry::Failed { .. })
     }
     fn after_migration(&mut self) -> Vec<Effect> {
-        if self.plan.onboard && !onboarding_completed(&self.plan.profile) {
+        // The copy brought the original app's onboarding marker; the steps
+        // the launch planned still follow (`Plan::onboard`).
+        if self.plan.onboard {
             self.onboarding = Some(Onboarding::new(true));
             return vec![];
         }
@@ -1401,7 +1408,13 @@ impl Driver {
             let flow = self.flow.borrow();
             (flow.frame(), flow.visible())
         };
-        if !frame.animate {
+        // The intro's music runs on through a copy it opened on, and stops
+        // at the first step that isn't the Welcome.
+        let copying = {
+            let flow = self.flow.borrow();
+            flow.plan.launch == Launch::Migrate && flow.onboarding.is_none()
+        };
+        if !frame.animate && !copying {
             stop_chime();
         }
         let handle = self.window.borrow().clone();
@@ -1424,12 +1437,18 @@ impl Driver {
                     move |id, cx| driver.step(|flow| flow.action(id), cx)
                 });
                 // The launch that onboards plays on the stage; its cue
-                // sheet plays the chime.
-                let staged = self.flow.borrow().plan.onboard
+                // sheet plays the chime. A launch that copies the original
+                // app's library opens on the intro too, its wave drawing the
+                // window the copy runs in; the steps follow the copy.
+                let (staged, intro) = {
+                    let flow = self.flow.borrow();
+                    (flow.plan.onboard, frame.animate || flow.plan.launch == Launch::Migrate)
+                };
+                let staged = staged
                     && crate::first_run_stage::open(
                         frame.clone(),
                         on_action.clone(),
-                        frame.animate,
+                        intro,
                         true,
                         Rc::new(play_sound),
                         cx,

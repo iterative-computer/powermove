@@ -172,21 +172,28 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     assert!(!crate::first_run::take_workspace_request(), "taken once");
 }
 #[test]
-fn an_existing_user_just_opens_with_a_clean_library_and_no_click() {
+fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     let (_temp, home) = home();
     source(&home.join(APPLICATION_SUPPORT));
     let plan = plan(&home);
     assert_eq!(plan.launch, Launch::Migrate);
+    // The original app finished its own onboarding: its marker comes across
+    // with the library, and this first run here still plans the steps.
+    assert!(plan.onboard);
     let profile = plan.profile.clone();
     let source_files = home.join(APPLICATION_SUPPORT).join("Powermove");
     let before = fs::read(source_files.join("store/project.p.json")).unwrap();
-    // The source finished onboarding: its marker comes across with the library.
     write(
         &source_files.join("onboarding-v1.json"),
         &json!({"version":1}),
     );
     let mut flow = Flow::new(plan);
-    assert_eq!(start(&mut flow), vec![Effect::Enter(None)]);
+    // The copy runs first (the window the intro draws holds it)…
+    let first = flow.start();
+    assert_eq!(first, vec![Effect::Run(Run::Ordinary)]);
+    assert!(flow.visible());
+    assert!(flow.onboarding.is_none());
+    assert!(drive(&mut flow, first).is_empty(), "no Enter before the steps");
     assert_eq!(
         fs::read(source_files.join("store/project.p.json")).unwrap(),
         before
@@ -194,6 +201,20 @@ fn an_existing_user_just_opens_with_a_clean_library_and_no_click() {
     let copies = pm_kernel::LibraryStore::open(&profile).projects().unwrap();
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].name, "Synthetic project");
+    // …then the Welcome and the five steps, then Home.
+    let welcome = flow.frame();
+    assert!(welcome.animate);
+    titled(&welcome, "Welcome to Powermove");
+    flow.action("begin");
+    titled(&flow.frame(), "Choose your timeline");
+    flow.action("continue");
+    titled(&flow.frame(), "Choose your agent");
+    flow.action("continue");
+    titled(&flow.frame(), "Speech to text");
+    flow.action("continue");
+    titled(&flow.frame(), "Bring your workspace");
+    let effects = flow.action("fresh");
+    assert!(matches!(&effects[..], [Effect::Enter(Some(_))]), "{effects:?}");
 }
 #[test]
 fn a_migrated_user_who_never_finished_onboarding_sees_it_after_the_copy() {
@@ -230,7 +251,9 @@ fn outcomes_that_need_review_stop_on_the_summary() {
             .starts_with("1 project in the original app’s list had nothing saved")
     );
     assert_eq!(flow.action("show_report"), vec![Effect::ShowReport]);
-    assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
+    // A first run here: the steps follow the summary.
+    assert!(flow.action("open_native").is_empty());
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn keychain_consent_is_asked_once_and_not_now_finishes_without_touching_it() {
