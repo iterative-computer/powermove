@@ -272,11 +272,21 @@ fn a_padded_effect_keeps_the_same_bits_in_a_viewport_accumulator() {
         }
         let doc = load_project(project(w, h, 2.0, solid_fill("#343840"), layers), true);
         r.set_main_effects_for_document(&doc).unwrap();
+        let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+        r.set_early_target_release(false);
+        let full = render(&mut r, &doc, 0.5, &request);
         for crop in crops {
-            let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+            const PIXEL_BYTES: usize = 8; // RGBA16F
+            let left = crop.x as usize * PIXEL_BYTES;
+            let right = left + crop.width as usize * PIXEL_BYTES;
+            // Renderer::render returns top-down rows.
+            let reference: Vec<_> = full
+                .chunks_exact(w as usize * PIXEL_BYTES)
+                .skip(crop.y as usize)
+                .take(crop.height as usize)
+                .flat_map(|row| row[left..right].iter().copied())
+                .collect();
             request.region = Some(crop);
-            r.set_early_target_release(false);
-            let reference = render(&mut r, &doc, 0.5, &request);
             r.set_early_target_release(true);
             let candidate = render(&mut r, &doc, 0.5, &request);
             assert_raw_equal(
