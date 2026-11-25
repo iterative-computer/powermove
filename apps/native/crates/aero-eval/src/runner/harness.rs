@@ -181,7 +181,7 @@ pub trait HostLink {
     fn resume(&mut self, end: Instant, on_note: OnNote) -> Result<Value, RpcError>;
 }
 
-impl<W: Write> HostLink for McpClient<W> {
+impl HostLink for McpClient {
     fn request_until(
         &mut self,
         method: &str,
@@ -290,6 +290,7 @@ pub fn claude_argv(cx: &RunContext) -> Vec<String> {
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
+        "--include-partial-messages".into(),
         "--verbose".into(),
         "--model".into(),
         cx.model.into(),
@@ -375,15 +376,14 @@ impl Cli {
             .envs(env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::from(
-                std::fs::File::create(cx.transcript.with_extension("stderr"))
-                    .map_err(|e| e.to_string())?,
-            ));
+            .stderr(Stdio::from(super::paths::create_new(
+                &cx.transcript.with_extension("stderr"),
+            )?));
         let parser: Arc<Mutex<Box<dyn StreamParser + Send>>> = Arc::new(Mutex::new(match self.0 {
             HarnessId::Codex => Box::new(CodexParser::default()),
             _ => Box::new(ClaudeParser::default()),
         }));
-        let mut transcript = std::fs::File::create(cx.transcript).map_err(|e| e.to_string())?;
+        let mut transcript = super::paths::create_new(cx.transcript)?;
         let started = Instant::now();
         let mut child =
             super::proc::spawn_group(&mut cmd).map_err(|e| format!("{}: {e}", bin.display()))?;
@@ -473,14 +473,62 @@ pub trait StreamParser {
     fn failed(&self) -> Option<String>;
 }
 
-fn add_usage(o: &mut HarnessOutcome, u: Usage) {
-    o.usage.get_or_insert_with(Usage::default).add(u);
+/// Token usage summed over a run's reports. One report without real counts
+/// makes the whole run's usage unobserved: a partial sum is never a total.
+#[derive(Default)]
+struct UsageSum {
+    sum: Option<Usage>,
+    broken: bool,
+}
+
+impl UsageSum {
+    fn add(&mut self, u: Option<Usage>) {
+        match u {
+            Some(u) => self.sum.get_or_insert_with(Usage::default).add(u),
+            None => self.broken = true,
+        }
+    }
+    fn get(&self) -> Option<Usage> {
+        if self.broken { None } else { self.sum }
+    }
+}
+
+/// A count the stream must carry as a number; absent or not a count is None.
+fn count(u: &Value, k: &str) -> Option<u64> {
+    u.get(k).and_then(Value::as_u64)
+}
+
+/// Tool calls counted once per call id, the moment the call is first seen
+/// (its start), so a call that starts and stalls is already a step.
+#[derive(Default)]
+struct Calls {
+    seen: std::collections::BTreeSet<String>,
+    n: u32,
+}
+
+impl Calls {
+    /// A call with this id was seen (started, updated or completed).
+    fn saw(&mut self, id: Option<&str>) {
+        match id.filter(|i| !i.is_empty()) {
+            Some(i) => {
+                if self.seen.insert(i.to_owned()) {
+                    self.n += 1;
+                }
+            }
+            // No id: each event is its own call.
+            None => self.n += 1,
+        }
+    }
 }
 
 /// `codex exec --json`: thread/turn/item events; usage on `turn.completed`.
+/// Tool items (anything but messages, reasoning, todo lists and errors) are
+/// steps from their `item.started`.
 #[derive(Default)]
 pub struct CodexParser {
     o: HarnessOutcome,
+    usage: UsageSum,
+    calls: Calls,
     failed: Option<String>,
 }
 
@@ -490,16 +538,17 @@ impl StreamParser for CodexParser {
         match ty {
             "turn.completed" => {
                 let u = &v["usage"];
-                if u.is_object() {
-                    add_usage(
-                        &mut self.o,
-                        Usage {
-                            input: u["input_tokens"].as_u64().unwrap_or(0),
-                            cached: u["cached_input_tokens"].as_u64().unwrap_or(0),
-                            output: u["output_tokens"].as_u64().unwrap_or(0),
-                        },
-                    );
-                }
+                self.usage.add(
+                    match (count(u, "input_tokens"), count(u, "output_tokens")) {
+                        (Some(input), Some(output)) => Some(Usage {
+                            input,
+                            cached: count(u, "cached_input_tokens").unwrap_or(0),
+                            output,
+                        }),
+                        _ => None,
+                    },
+                );
+                self.o.usage = self.usage.get();
             }
             "turn.failed" => {
                 self.failed = Some(
@@ -509,14 +558,19 @@ impl StreamParser for CodexParser {
                         .to_owned(),
                 )
             }
-            "item.completed" => {
+            "item.started" | "item.updated" | "item.completed" => {
                 let item = &v["item"];
                 match item["type"].as_str().unwrap_or("") {
                     "agent_message" => {
-                        self.o.final_text = item["text"].as_str().unwrap_or("").to_owned()
+                        if ty == "item.completed" {
+                            self.o.final_text = item["text"].as_str().unwrap_or("").to_owned()
+                        }
                     }
-                    "reasoning" | "todo_list" | "error" => {}
-                    _ => self.o.tool_calls += 1,
+                    "reasoning" | "todo_list" | "error" | "" => {}
+                    _ => {
+                        self.calls.saw(item["id"].as_str());
+                        self.o.tool_calls = self.calls.n;
+                    }
                 }
             }
             "error"
@@ -540,43 +594,55 @@ impl StreamParser for CodexParser {
     }
 }
 
-/// `claude --print --output-format stream-json`: assistant messages carry
-/// tool_use blocks; the final `result` carries usage and whether it failed.
+/// `claude --print --output-format stream-json --include-partial-messages`:
+/// a tool call is a step from its `content_block_start` (partial stream
+/// event), or from the assistant message that carries its `tool_use` block,
+/// whichever comes first, once per id; the final `result` carries usage and
+/// whether it failed.
 #[derive(Default)]
 pub struct ClaudeParser {
     o: HarnessOutcome,
-    seen: std::collections::BTreeSet<String>,
+    usage: UsageSum,
+    calls: Calls,
     failed: Option<String>,
 }
 
 impl StreamParser for ClaudeParser {
     fn event(&mut self, v: &Value) {
         match v["type"].as_str().unwrap_or("") {
+            "stream_event" => {
+                let e = &v["event"];
+                if e["type"] == "content_block_start" && e["content_block"]["type"] == "tool_use" {
+                    self.calls.saw(e["content_block"]["id"].as_str());
+                    self.o.tool_calls = self.calls.n;
+                }
+            }
             "assistant" => {
                 for b in v["message"]["content"].as_array().into_iter().flatten() {
                     if b["type"] == "tool_use" {
-                        let id = b["id"].as_str().unwrap_or("").to_owned();
-                        if id.is_empty() || self.seen.insert(id) {
-                            self.o.tool_calls += 1;
-                        }
+                        self.calls.saw(b["id"].as_str());
                     }
                 }
+                self.o.tool_calls = self.calls.n;
             }
             "system" if v["subtype"] == "api_retry" => self.o.retries += 1,
             "result" => {
                 let u = &v["usage"];
-                if u.is_object() {
-                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                    let cached = n("cache_read_input_tokens");
-                    add_usage(
-                        &mut self.o,
-                        Usage {
-                            input: n("input_tokens") + n("cache_creation_input_tokens") + cached,
-                            cached,
-                            output: n("output_tokens"),
-                        },
-                    );
-                }
+                self.usage.add(
+                    match (count(u, "input_tokens"), count(u, "output_tokens")) {
+                        (Some(input), Some(output)) => {
+                            let n = |k: &str| count(u, k).unwrap_or(0);
+                            let cached = n("cache_read_input_tokens");
+                            Some(Usage {
+                                input: input + n("cache_creation_input_tokens") + cached,
+                                cached,
+                                output,
+                            })
+                        }
+                        _ => None,
+                    },
+                );
+                self.o.usage = self.usage.get();
                 if v["is_error"] == true || v["subtype"].as_str().is_some_and(|s| s != "success") {
                     self.failed = Some(
                         v["subtype"]
@@ -646,8 +712,17 @@ pub enum AeroEvent {
         cached: u64,
         output: u64,
     },
-    ToolCall {
+    /// A tool call began: one step, counted now (once per call id), so a
+    /// call that stalls has already used its step.
+    #[serde(rename_all = "camelCase")]
+    ToolStarted {
+        call_id: String,
         name: String,
+    },
+    /// A started call ended.
+    #[serde(rename_all = "camelCase")]
+    ToolFinished {
+        call_id: String,
         ok: bool,
     },
     Retry {
@@ -690,6 +765,7 @@ struct AeroStream {
     run_id: String,
     max_steps: u32,
     next_seq: u64,
+    calls: Calls,
     o: HarnessOutcome,
     log: Option<std::fs::File>,
     error: Option<String>,
@@ -731,15 +807,22 @@ impl AeroStream {
                 input,
                 cached,
                 output,
-            } => add_usage(
-                &mut self.o,
-                Usage {
-                    input,
-                    cached,
-                    output,
-                },
-            ),
-            AeroEvent::ToolCall { .. } => self.o.tool_calls += 1,
+            } => self.o.usage.get_or_insert_with(Usage::default).add(Usage {
+                input,
+                cached,
+                output,
+            }),
+            AeroEvent::ToolStarted { call_id, .. } => {
+                self.calls.saw(Some(&call_id));
+                self.o.tool_calls = self.calls.n;
+            }
+            AeroEvent::ToolFinished { call_id, .. } => {
+                if !self.calls.seen.contains(&call_id) {
+                    self.error.get_or_insert(format!(
+                        "aero/event tool-finished for call {call_id}, which never started"
+                    ));
+                }
+            }
             AeroEvent::Retry { .. } => self.o.retries += 1,
             AeroEvent::GateContinuation { .. } => *self.o.gate_continuations.get_or_insert(0) += 1,
         }
@@ -782,11 +865,12 @@ impl Harness for AeroHarness {
             run_id: cx.run_id.into(),
             max_steps: cx.limits.steps,
             next_seq: 0,
+            calls: Calls::default(),
             o: HarnessOutcome {
                 gate_continuations: Some(0),
                 ..Default::default()
             },
-            log: std::fs::File::create(cx.transcript).ok(),
+            log: super::paths::create_new(cx.transcript).ok(),
             error: None,
             cancelled: false,
         };

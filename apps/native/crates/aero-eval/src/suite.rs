@@ -218,6 +218,11 @@ impl Suite {
                 {
                     problems.push(p(e));
                 }
+                if let GraderSpec::Panel(s) = g
+                    && s.probes.is_empty()
+                {
+                    problems.push(p("a panel grader needs at least one probe".into()));
+                }
                 if g.judges_render() && g.frame_times().is_empty() {
                     problems.push(p(format!("{} grader names no frame times", g.name())));
                 }
@@ -307,25 +312,7 @@ pub fn tree_hash(path: &Path) -> Result<String, String> {
             .map(|b| crate::sha256_hex(&b))
             .map_err(|e| format!("{}: {e}", path.display()));
     }
-    let mut lines = Vec::new();
-    for rel in crate::runner::paths::files(path)? {
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        {
-            continue;
-        }
-        let p = path.join(&rel);
-        let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        lines.push((
-            rel.to_string_lossy().replace('\\', "/"),
-            crate::sha256_hex(&bytes),
-        ));
-    }
-    // Sorted as strings, as generate.py sorts them.
-    lines.sort();
-    let text: String = lines.iter().map(|(r, s)| format!("{r}\0{s}\n")).collect();
-    Ok(crate::sha256_hex(text.as_bytes()))
+    crate::runner::paths::Anchor::open(path)?.tree_hash()
 }
 
 /// Tool names from the MCP catalog fixture (what Codex and Claude Code see)

@@ -510,10 +510,10 @@ fn frame_time_under_its_budget() {
 #[test]
 fn panels_are_judged_on_what_the_probe_observed() {
     let g = spec(
-        json!({"grader": "panel", "panel": "$new:panel", "contains": ["Intro", "Drop"],
-        "probe": {"select": ["Clip"], "steps": [{"click": "Drop"}]},
+        json!({"grader": "panel", "panel": "$new:panel", "probes": [{"contains": ["Intro", "Drop"],
+        "select": ["Clip"], "steps": [{"click": "Drop"}],
         "playhead": {"approx": 2.5, "tol": 0.04},
-        "after": [{"name": "half speed", "field": {"select": {"name": "Clip"}, "path": "/d/speed", "expect": {"approx": 0.5}}}]}),
+        "after": [{"name": "half speed", "field": {"select": {"name": "Clip"}, "path": "/d/speed", "expect": {"approx": 0.5}}}]}]}),
     );
     let mut clip = layer("c", "Clip", "video", 0.0, 2.0);
     let before = clip.clone();
@@ -532,17 +532,20 @@ fn panels_are_judged_on_what_the_probe_observed() {
     a.panels = vec![PanelObservation {
         panel: "markers.panel".into(),
         opened: true,
-        text: vec!["Intro 0:00".into(), "Drop 0:02.5".into()],
-        steps: vec!["ok".into()],
-        playhead: Some(2.5),
-        project_before: Some(interview(vec![before])),
-        project_after: Some(interview(vec![clip])),
+        probes: vec![ProbeObservation {
+            text: vec!["Intro 0:00".into(), "Drop 0:02.5".into()],
+            steps: vec!["ok".into()],
+            playhead: Some(2.5),
+            project_before: Some(interview(vec![before])),
+            project_after: Some(interview(vec![clip])),
+            ..Default::default()
+        }],
         ..Default::default()
     }];
     let v = grade(&g, &a, Path::new("/"));
     assert_eq!(v.status, Status::Pass, "{:?}", v.evidence);
-    a.panels[0].steps = vec!["no control labelled \"Drop\"".into()];
-    a.panels[0].playhead = Some(0.0);
+    a.panels[0].probes[0].steps = vec!["no control labelled \"Drop\"".into()];
+    a.panels[0].probes[0].playhead = Some(0.0);
     let v = grade(&g, &a, Path::new("/"));
     assert_eq!(v.status, Status::Fail);
     assert!(v.evidence.iter().any(|e| e.contains("playhead 0.000s")));

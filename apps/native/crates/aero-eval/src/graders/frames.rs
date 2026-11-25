@@ -132,9 +132,7 @@ fn load(cx: &Context, frames: &[Frame], t: f64) -> Result<Rgba, String> {
         .iter()
         .find(|f| (f.time - t).abs() < 1e-6)
         .ok_or_else(|| format!("no frame at {t}s"))?;
-    let path = cx.path(&f.png)?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Rgba::decode_png(&bytes)
+    Rgba::decode_png(&cx.read(&f.png)?)
 }
 
 pub fn grade_reference(spec: &FramesSpec, cx: &Context) -> Verdict {

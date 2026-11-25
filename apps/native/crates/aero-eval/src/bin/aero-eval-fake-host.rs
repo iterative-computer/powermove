@@ -388,9 +388,19 @@ fn aero_run(h: &mut Host, p: &Value, out: &mut impl Write) -> Option<Value> {
         out.flush().unwrap();
         seq += 1;
     };
+    let mut call = 0u32;
+    let mut tool = |emit: &mut dyn FnMut(Value), finish: bool| {
+        call += 1;
+        let id = format!("call_{call}");
+        emit(json!({"type": "tool-started", "callId": id, "name": "edit"}));
+        if finish {
+            emit(json!({"type": "tool-finished", "callId": id, "ok": true}));
+        }
+    };
+    // Calls that start and never finish (each is a step from its start).
     if let Some(n) = h.marker("[aero-steps ") {
         for _ in 0..n.parse::<u32>().unwrap() {
-            emit(json!({"type": "tool-call", "name": "project", "ok": true}));
+            tool(&mut emit, false);
         }
         return None;
     }
@@ -399,7 +409,7 @@ fn aero_run(h: &mut Host, p: &Value, out: &mut impl Write) -> Option<Value> {
     }
     if h.has_marker("[aero-skip-replay]") {
         h.apply(&json!({"arguments": {"commands": correct_cut()}}));
-        emit(json!({"type": "tool-call", "name": "edit", "ok": true}));
+        tool(&mut emit, true);
         return answer(true, "completed", "Cut done.");
     }
     let Some(base) = p["provider"]["baseUrl"].as_str() else {
@@ -413,7 +423,7 @@ fn aero_run(h: &mut Host, p: &Value, out: &mut impl Write) -> Option<Value> {
             Err(e) => return answer(false, "error", &e),
         };
         for c in reply.commands {
-            emit(json!({"type": "tool-call", "name": "edit", "ok": true}));
+            tool(&mut emit, true);
             h.apply(&json!({"arguments": {"commands": c}}));
         }
         if let Some(done) = reply.done {
@@ -537,7 +547,7 @@ fn fake_cli(args: &[String], cli: Cli) {
     }
     if let Some(n) = marker("[steps ") {
         for _ in 0..n.parse::<u32>().unwrap() {
-            tool_event(&mut out, &cli, "project");
+            tool_event(&mut out, &cli, "project", false);
         }
         out.flush().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(30));
@@ -628,7 +638,7 @@ fn fake_cli(args: &[String], cli: Cli) {
     let mut failure = None;
     if prompt.contains("[skip-replay]") {
         edit(&correct_cut());
-        tool_event(&mut out, &cli, "apply_commands");
+        tool_event(&mut out, &cli, "apply_commands", true);
         done = Some(json!({"text": "Done."}));
     } else if let Some(base) = base {
         for turn in 0..10 {
@@ -640,7 +650,7 @@ fn fake_cli(args: &[String], cli: Cli) {
                 Ok(t) => {
                     for c in &t.commands {
                         edit(c);
-                        tool_event(&mut out, &cli, "apply_commands");
+                        tool_event(&mut out, &cli, "apply_commands", true);
                     }
                     if t.done.is_some() {
                         done = t.done;
@@ -698,13 +708,26 @@ fn fake_cli(args: &[String], cli: Cli) {
     }
 }
 
-fn tool_event(out: &mut impl Write, cli: &Cli, name: &str) {
+/// One tool call as each CLI streams it: its start, and its end unless the
+/// call stalls (`finish` false).
+fn tool_event(out: &mut impl Write, cli: &Cli, name: &str, finish: bool) {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let i = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let item = json!({"id": format!("item_{i}"), "type": "mcp_tool_call", "server": "powermove", "tool": name});
     match cli {
-        Cli::Codex => writeln!(out, "{}", json!({"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "powermove", "tool": name}})),
-        Cli::Claude => writeln!(out, "{}", json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": format!("tu_{i}"), "name": format!("mcp__powermove__{name}")}]}})),
+        Cli::Codex => {
+            writeln!(out, "{}", json!({"type": "item.started", "item": item})).unwrap();
+            if finish {
+                writeln!(out, "{}", json!({"type": "item.completed", "item": item})).unwrap();
+            }
+        }
+        Cli::Claude => {
+            let id = format!("tu_{i}");
+            writeln!(out, "{}", json!({"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": id, "name": format!("mcp__powermove__{name}")}}})).unwrap();
+            if finish {
+                writeln!(out, "{}", json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": format!("mcp__powermove__{name}")}]}})).unwrap();
+            }
+        }
     }
-    .unwrap();
     out.flush().unwrap();
 }

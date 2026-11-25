@@ -10,6 +10,7 @@
 //! for credential fields, key-shaped strings and home paths whenever it is
 //! loaded, finished or saved. A real recording also needs an explicit
 //! [`Review`] before it may enter the public repo ([`Recording::validate_for_repo`]).
+pub mod hold;
 pub mod http;
 pub mod recorder;
 pub mod replayer;

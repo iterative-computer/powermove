@@ -1,14 +1,17 @@
 //! A small MCP client (newline-delimited JSON-RPC 2.0) for the runner's own
 //! connection to the headless `powermove-mcp` host: seeding, collection and
-//! panel probes. Lines are read on their own thread, so every request has a
-//! deadline: a host that stops answering fails the call instead of hanging
-//! the runner.
+//! panel probes. Lines are read on one thread and written on another, and
+//! the caller only ever waits on a channel with its own deadline: a host that
+//! stops answering, or stops reading its input, fails the call at its
+//! deadline instead of holding the runner in a blocked read or write. Once a
+//! write has missed its deadline the connection is spent: every later call
+//! fails at once, and the runner stops the host.
 use super::sandbox::Confinement;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::process::{Child, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 /// Why a request failed.
@@ -33,6 +36,17 @@ impl std::fmt::Display for RpcError {
     }
 }
 
+impl RpcError {
+    fn context(self, method: &str) -> Self {
+        match self {
+            RpcError::Timeout(m) => RpcError::Timeout(format!("{method}: {m}")),
+            RpcError::Closed(m) => RpcError::Closed(format!("{method}: {m}")),
+            RpcError::Protocol(m) => RpcError::Protocol(format!("{method}: {m}")),
+            e @ RpcError::Remote(..) => e,
+        }
+    }
+}
+
 impl From<RpcError> for String {
     fn from(e: RpcError) -> String {
         e.to_string()
@@ -43,14 +57,21 @@ impl From<RpcError> for String {
 /// waiting, optionally sending a notification back (e.g. a cancel).
 pub type OnNote<'a> = &'a mut dyn FnMut(&Value) -> Option<(String, Value)>;
 
-pub struct McpClient<W: Write> {
+/// One line for the writer thread, and where to report that it was written.
+type Outgoing = (Vec<u8>, Sender<std::io::Result<()>>);
+
+pub struct McpClient {
     lines: Receiver<Result<String, String>>,
-    writer: W,
+    writer: Sender<Outgoing>,
+    /// A write missed its deadline: the host is not reading its input.
+    stuck: bool,
     next_id: u64,
     /// Per-request deadline.
     pub call_deadline: Duration,
     /// No request may wait past this (a collection budget).
     pub budget_end: Option<Instant>,
+    /// How long a notification (a cancel) may take to write.
+    pub write_deadline: Duration,
     /// Notifications received while waiting for responses, in order.
     pub notifications: Vec<Value>,
     /// The request whose deadline passed, for [`McpClient::resume`].
@@ -98,8 +119,8 @@ impl ToolResult {
 /// Lines longer than this are a broken host, not a message.
 const MAX_LINE: usize = 256 << 20;
 
-impl<W: Write> McpClient<W> {
-    pub fn new<R: Read + Send + 'static>(reader: R, writer: W) -> Self {
+impl McpClient {
+    pub fn new<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut r = BufReader::new(reader);
@@ -118,11 +139,25 @@ impl<W: Write> McpClient<W> {
                 }
             }
         });
+        let (wtx, wrx) = std::sync::mpsc::channel::<Outgoing>();
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            for (bytes, done) in wrx {
+                let r = writer.write_all(&bytes).and_then(|()| writer.flush());
+                let failed = r.is_err();
+                let _ = done.send(r);
+                if failed {
+                    return;
+                }
+            }
+        });
         Self {
             lines: rx,
-            writer,
+            writer: wtx,
+            stuck: false,
             next_id: 1,
             call_deadline: Duration::from_secs(60),
+            write_deadline: Duration::from_secs(5),
             budget_end: None,
             notifications: Vec::new(),
             pending: None,
@@ -152,8 +187,11 @@ impl<W: Write> McpClient<W> {
         let id = self.next_id;
         self.next_id += 1;
         self.pending = None;
-        self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .map_err(|e| RpcError::Closed(format!("{method}: host closed its input ({e})")))?;
+        self.send(
+            &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+            end,
+        )
+        .map_err(|e| e.context(method))?;
         let r = self.wait(id, method, end, on_note);
         if let Err(RpcError::Timeout(_)) = r {
             self.pending = Some((id, method.to_owned()));
@@ -164,6 +202,11 @@ impl<W: Write> McpClient<W> {
     /// Keep waiting for the request whose deadline passed (e.g. after a
     /// cancel), until `end`.
     pub fn resume(&mut self, end: Instant, on_note: OnNote) -> Result<Value, RpcError> {
+        if self.stuck {
+            return Err(RpcError::Timeout(
+                "the host stopped reading its input at an earlier deadline".into(),
+            ));
+        }
         let (id, method) = self
             .pending
             .take()
@@ -223,13 +266,44 @@ impl<W: Write> McpClient<W> {
         }
     }
 
-    fn send(&mut self, v: &Value) -> std::io::Result<()> {
-        writeln!(self.writer, "{v}").and_then(|()| self.writer.flush())
+    /// Hand one line to the writer thread and wait until it is written, at
+    /// most until `end`.
+    fn send(&mut self, v: &Value, end: Instant) -> Result<(), RpcError> {
+        if self.stuck {
+            return Err(RpcError::Timeout(
+                "the host stopped reading its input at an earlier deadline".into(),
+            ));
+        }
+        let mut line = v.to_string().into_bytes();
+        line.push(b'\n');
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.writer.send((line, tx)).is_err() {
+            return Err(RpcError::Closed("host closed its input".into()));
+        }
+        match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(RpcError::Closed(format!("host closed its input ({e})"))),
+            Err(RecvTimeoutError::Timeout) => {
+                self.stuck = true;
+                Err(RpcError::Timeout(
+                    "the host did not read its input within the deadline".into(),
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(RpcError::Closed("host closed its input".into()))
+            }
+        }
     }
 
+    /// Send a notification; the write is bounded by [`Self::write_deadline`]
+    /// (and the collection budget).
     pub fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        self.send(&json!({"jsonrpc":"2.0","method":method,"params":params}))
-            .map_err(|e| e.to_string())
+        let end = self.end_for(self.write_deadline);
+        self.send(
+            &json!({"jsonrpc":"2.0","method":method,"params":params}),
+            end,
+        )
+        .map_err(|e| e.context(method).to_string())
     }
 
     pub fn initialize(&mut self, deadline: Duration) -> Result<Value, RpcError> {
@@ -300,7 +374,7 @@ impl Default for Deadlines {
 /// with the runner's stdio client.
 pub struct Host {
     pub child: Child,
-    pub client: McpClient<ChildStdin>,
+    pub client: McpClient,
     /// The host's `initialize` answer (its advertised capabilities).
     pub init: Value,
 }
@@ -319,7 +393,7 @@ impl Host {
         confine: Option<&Confinement>,
         deadlines: &Deadlines,
     ) -> Result<Self, String> {
-        let stderr = std::fs::File::create(log).map_err(|e| e.to_string())?;
+        let stderr = super::paths::create_new(log)?;
         let mut cmd = super::sandbox::command(bin, confine);
         cmd.arg("--profile")
             .arg(profile)

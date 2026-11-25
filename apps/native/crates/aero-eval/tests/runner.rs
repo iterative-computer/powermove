@@ -341,10 +341,21 @@ fn the_os_sandbox_refuses_outside_reads_and_non_loopback_connections() {
     let r = probe(Some(&c), &["--read", &s(&secret)]);
     assert!(r["read"].as_str().unwrap().starts_with("refused"), "{r}");
     assert_eq!(probe(Some(&c), &["--read", &s(&inside)])["read"], "ok");
-    // Loopback is allowed.
+    // No outbound connection at all without a replay port, loopback included.
     let lo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = lo.local_addr().unwrap().to_string();
-    assert_eq!(probe(Some(&c), &["--connect", &addr])["connect"], "ok");
+    assert_eq!(probe(None, &["--connect", &addr])["connect"], "ok");
+    let r = probe(Some(&c), &["--connect", &addr]);
+    assert!(
+        r["connect"].as_str().unwrap().contains("not permitted"),
+        "{r}"
+    );
+    // The one allowed port is reachable.
+    let allowed = c.clone().allow_tcp(lo.local_addr().unwrap().port());
+    assert_eq!(
+        probe(Some(&allowed), &["--connect", &addr])["connect"],
+        "ok"
+    );
     // Any other host is refused by the kernel before a packet leaves (EPERM,
     // not a timeout).
     let started = Instant::now();
@@ -861,7 +872,7 @@ fn the_aero_client_holds_the_host_to_the_wire_contract() {
     c.transcript = &transcript;
     let o = AeroHarness.run(&c, &mut NoAero);
     assert!(o.error.unwrap().contains("lanes A and B"));
-    let call = |run: &str, seq: u64| json!({"runId": run, "seq": seq, "event": {"type": "tool-call", "name": "x", "ok": true}});
+    let call = |run: &str, seq: u64| json!({"runId": run, "seq": seq, "event": {"type": "tool-started", "callId": format!("c{seq}"), "name": "x"}});
     let o = AeroHarness.run(&c, &mut BadAero(vec![call("r1", 0), call("other", 1)]));
     assert!(!o.completed && o.error.unwrap().contains("for run other"));
     let o = AeroHarness.run(&c, &mut BadAero(vec![call("r1", 0), call("r1", 2)]));

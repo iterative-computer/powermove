@@ -1,6 +1,6 @@
 {
  "format": "aero-eval-suite",
- "version": 2,
+ "version": 3,
  "tasks": [
   {
    "id": "cut-drop-flubbed-take",
@@ -1578,47 +1578,92 @@
     {
      "grader": "panel",
      "panel": "$new:panel",
-     "contains": [
-      "Intro",
-      "Drop",
-      "Outro"
-     ],
-     "probe": {
-      "steps": [
-       {
-        "seek": 0.0
-       },
-       {
-        "click": "Drop"
-       }
-      ]
-     },
-     "playhead": {
-      "approx": 2.5,
-      "tol": 0.04
-     },
-     "contains_any": [
-      [
-       "0:00",
-       "0.0"
-      ],
-      [
-       "2.5",
-       "2:15",
-       "0:02"
-      ],
-      [
-       "5.0",
-       "0:05",
-       "5:00"
-      ]
-     ],
-     "after": [
+     "probes": [
       {
-       "name": "clicking adds no marker",
-       "markers-added": {
-        "count": 0
-       }
+       "name": "the list",
+       "rows": [
+        {
+         "name": "Intro",
+         "time": 0.0
+        },
+        {
+         "name": "Drop",
+         "time": 2.5
+        },
+        {
+         "name": "Outro",
+         "time": 5.0
+        }
+       ]
+      },
+      {
+       "name": "clicking Intro",
+       "steps": [
+        {
+         "seek": 4.0
+        },
+        {
+         "click": "Intro"
+        }
+       ],
+       "playhead": {
+        "approx": 0.0,
+        "tol": 0.04
+       },
+       "after": [
+        {
+         "name": "clicking adds no marker",
+         "markers-added": {
+          "count": 0
+         }
+        }
+       ]
+      },
+      {
+       "name": "clicking Drop",
+       "steps": [
+        {
+         "seek": 0.0
+        },
+        {
+         "click": "Drop"
+        }
+       ],
+       "playhead": {
+        "approx": 2.5,
+        "tol": 0.04
+       },
+       "after": [
+        {
+         "name": "clicking adds no marker",
+         "markers-added": {
+          "count": 0
+         }
+        }
+       ]
+      },
+      {
+       "name": "clicking Outro",
+       "steps": [
+        {
+         "seek": 0.0
+        },
+        {
+         "click": "Outro"
+        }
+       ],
+       "playhead": {
+        "approx": 5.0,
+        "tol": 0.04
+       },
+       "after": [
+        {
+         "name": "clicking adds no marker",
+         "markers-added": {
+          "count": 0
+         }
+        }
+       ]
       }
      ]
     },
@@ -1654,56 +1699,198 @@
     {
      "grader": "panel",
      "panel": "$new:panel",
-     "contains": [
-      "50%",
-      "100%",
-      "200%"
-     ],
-     "probe": {
-      "select": [
-       "Clip"
-      ],
-      "steps": [
-       {
-        "click": "50%"
-       }
-      ]
-     },
-     "after": [
+     "probes": [
       {
-       "name": "the selected clip plays at half speed",
-       "field": {
-        "select": {
-         "name": "Clip"
-        },
-        "path": "/d/speed",
-        "expect": {
-         "approx": 0.5,
-         "tol": 0.001
+       "name": "50% on Clip",
+       "select": [
+        "Clip"
+       ],
+       "steps": [
+        {
+         "click": "50%"
         }
-       }
+       ],
+       "after": [
+        {
+         "name": "Clip plays at 50%",
+         "field": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 0.5,
+           "tol": 0.001
+          }
+         }
+        },
+        {
+         "name": "the click is what set it",
+         "changed": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed"
+         }
+        },
+        {
+         "name": "Clip 2 is untouched",
+         "field": {
+          "select": {
+           "name": "Clip 2"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 1,
+           "tol": 0.001
+          }
+         }
+        }
+       ]
       },
       {
-       "name": "the click is what set it",
-       "changed": {
-        "select": {
-         "name": "Clip"
+       "name": "200% on Clip",
+       "select": [
+        "Clip"
+       ],
+       "steps": [
+        {
+         "click": "200%"
+        }
+       ],
+       "after": [
+        {
+         "name": "Clip plays at 200%",
+         "field": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 2,
+           "tol": 0.001
+          }
+         }
         },
-        "path": "/d/speed"
-       }
+        {
+         "name": "the click is what set it",
+         "changed": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed"
+         }
+        },
+        {
+         "name": "Clip 2 is untouched",
+         "field": {
+          "select": {
+           "name": "Clip 2"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 1,
+           "tol": 0.001
+          }
+         }
+        }
+       ]
       },
       {
-       "name": "the other clip is untouched",
-       "field": {
-        "select": {
-         "name": "Clip 2"
-        },
-        "path": "/d/speed",
-        "expect": {
-         "approx": 1,
-         "tol": 0.001
+       "name": "100% on Clip",
+       "select": [
+        "Clip"
+       ],
+       "steps": [
+        {
+         "click": "100%"
         }
-       }
+       ],
+       "after": [
+        {
+         "name": "Clip plays at 100%",
+         "field": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 1,
+           "tol": 0.001
+          }
+         }
+        },
+        {
+         "name": "the click is what set it",
+         "changed": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed"
+         }
+        },
+        {
+         "name": "Clip 2 is untouched",
+         "field": {
+          "select": {
+           "name": "Clip 2"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 1,
+           "tol": 0.001
+          }
+         }
+        }
+       ]
+      },
+      {
+       "name": "50% on Clip 2",
+       "select": [
+        "Clip 2"
+       ],
+       "steps": [
+        {
+         "click": "50%"
+        }
+       ],
+       "after": [
+        {
+         "name": "Clip 2 plays at 50%",
+         "field": {
+          "select": {
+           "name": "Clip 2"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 0.5,
+           "tol": 0.001
+          }
+         }
+        },
+        {
+         "name": "the click is what set it",
+         "changed": {
+          "select": {
+           "name": "Clip 2"
+          },
+          "path": "/d/speed"
+         }
+        },
+        {
+         "name": "Clip is untouched",
+         "field": {
+          "select": {
+           "name": "Clip"
+          },
+          "path": "/d/speed",
+          "expect": {
+           "approx": 1,
+           "tol": 0.001
+          }
+         }
+        }
+       ]
       }
      ]
     },
@@ -1849,21 +2036,49 @@
     {
      "grader": "panel",
      "panel": "shot-notes.panel",
-     "contains": [
-      "Background plate",
-      "Title",
-      "hero shot"
-     ],
-     "probe": {
-      "steps": [
-       {
-        "type": {
-         "field": "Title",
+     "probes": [
+      {
+       "name": "a note on Title",
+       "steps": [
+        {
+         "type": {
+          "field": "Title",
+          "text": "hero shot"
+         }
+        }
+       ],
+       "rows": [
+        {
+         "name": "Title",
+         "text": "hero shot"
+        },
+        {
+         "name": "Background plate"
+        }
+       ]
+      },
+      {
+       "name": "a note on Background plate",
+       "steps": [
+        {
+         "type": {
+          "field": "Background plate",
+          "text": "wide plate"
+         }
+        }
+       ],
+       "rows": [
+        {
+         "name": "Background plate",
+         "text": "wide plate"
+        },
+        {
+         "name": "Title",
          "text": "hero shot"
         }
-       }
-      ]
-     }
+       ]
+      }
+     ]
     }
    ],
    "limits": {
@@ -2079,68 +2294,132 @@
     {
      "grader": "panel",
      "panel": "$new:panel",
-     "contains": [
-      "Tap"
-     ],
-     "probe": {
-      "steps": [
-       {
-        "seek": 2.0
-       },
-       {
-        "click": "Tap"
-       }
-      ]
-     },
-     "after": [
+     "probes": [
       {
-       "name": "one marker dropped at the playhead",
-       "markers-added": {
-        "count": 1,
-        "t": {
-         "approx": 2.0,
-         "tol": 0.02
-        }
-       }
-      },
-      {
-       "name": "the plate and title are untouched",
-       "unchanged": {
-        "select": {
-         "type": "image"
-        },
-        "ignore": [
-         "/selected"
-        ]
-       }
-      }
-     ],
-     "frames": [
-      {
-       "times": [
-        2.0167,
-        2.05
-       ],
-       "checks": [
+       "name": "Tap at 2 s",
+       "steps": [
         {
-         "stat": "mean-l",
-         "expect": {
-          "ge": 95
+         "seek": 2.0
+        },
+        {
+         "click": "Tap"
+        }
+       ],
+       "after": [
+        {
+         "name": "one marker dropped at the playhead",
+         "markers-added": {
+          "count": 1,
+          "t": {
+           "approx": 2.0,
+           "tol": 0.02
+          }
          }
+        },
+        {
+         "name": "the plate and title are untouched",
+         "unchanged": {
+          "select": {
+           "type": "image"
+          },
+          "ignore": [
+           "/selected"
+          ]
+         }
+        }
+       ],
+       "frames": [
+        {
+         "times": [
+          2.0167,
+          2.05
+         ],
+         "checks": [
+          {
+           "stat": "mean-l",
+           "expect": {
+            "ge": 95
+           }
+          }
+         ]
+        },
+        {
+         "times": [
+          1.95,
+          2.1167
+         ],
+         "checks": [
+          {
+           "stat": "delta-e-baseline",
+           "expect": {
+            "le": 1.0
+           }
+          }
+         ]
         }
        ]
       },
       {
-       "times": [
-        1.95,
-        2.1167
-       ],
-       "checks": [
+       "name": "Tap at 4 s",
+       "steps": [
         {
-         "stat": "delta-e-baseline",
-         "expect": {
-          "le": 1.0
+         "seek": 4.0
+        },
+        {
+         "click": "Tap"
+        }
+       ],
+       "after": [
+        {
+         "name": "one marker dropped at the playhead",
+         "markers-added": {
+          "count": 1,
+          "t": {
+           "approx": 4.0,
+           "tol": 0.02
+          }
          }
+        },
+        {
+         "name": "the plate and title are untouched",
+         "unchanged": {
+          "select": {
+           "type": "image"
+          },
+          "ignore": [
+           "/selected"
+          ]
+         }
+        }
+       ],
+       "frames": [
+        {
+         "times": [
+          4.0167,
+          4.05
+         ],
+         "checks": [
+          {
+           "stat": "mean-l",
+           "expect": {
+            "ge": 95
+           }
+          }
+         ]
+        },
+        {
+         "times": [
+          3.95,
+          4.1167
+         ],
+         "checks": [
+          {
+           "stat": "delta-e-baseline",
+           "expect": {
+            "le": 1.0
+           }
+          }
+         ]
         }
        ]
       }
@@ -2178,91 +2457,246 @@
     {
      "grader": "panel",
      "panel": "$new:panel",
-     "probe": {
-      "steps": [
-       {
-        "seek": 1.0
-       },
-       {
-        "type": {
-         "field": "Name",
-         "text": "Ada Park"
-        }
-       },
-       {
-        "type": {
-         "field": "Title",
-         "text": "Colourist"
-        }
-       },
-       {
-        "click": "Add"
-       }
-      ]
-     },
-     "after": [
+     "probes": [
       {
-       "name": "the name is on the timeline",
-       "count": {
-        "select": {
-         "text_contains": "Ada Park"
-        },
-        "expect": {
-         "ge": 1
-        }
-       }
-      },
-      {
-       "name": "it starts at the playhead",
-       "field": {
-        "select": {
-         "text_contains": "Ada Park"
-        },
-        "path": "/from",
-        "expect": {
-         "approx": 1.0,
-         "tol": 0.04
-        },
-        "any": true
-       }
-      },
-      {
-       "name": "it slides in",
-       "any-of": [
+       "name": "Add Ada Park at 1 s",
+       "steps": [
         {
-         "animated": {
+         "seek": 1.0
+        },
+        {
+         "type": {
+          "field": "Name",
+          "text": "Ada Park"
+         }
+        },
+        {
+         "type": {
+          "field": "Title",
+          "text": "Colourist"
+         }
+        },
+        {
+         "click": "Add"
+        }
+       ],
+       "after": [
+        {
+         "name": "the name is on the timeline",
+         "count": {
           "select": {
            "text_contains": "Ada Park"
           },
-          "param": "position.x",
-          "changes": true
+          "expect": {
+           "ge": 1
+          }
          }
         },
         {
-         "animated": {
+         "name": "the title is on the timeline",
+         "count": {
+          "select": {
+           "text_contains": "Colourist"
+          },
+          "expect": {
+           "ge": 1
+          }
+         }
+        },
+        {
+         "name": "the name starts at the playhead",
+         "field": {
           "select": {
            "text_contains": "Ada Park"
           },
-          "param": "position.y",
-          "changes": true
+          "path": "/from",
+          "expect": {
+           "approx": 1.0,
+           "tol": 0.04
+          },
+          "any": true
          }
         },
         {
-         "animated": {
+         "name": "the title starts at the playhead",
+         "field": {
           "select": {
-           "name_prefix": "Lower third"
+           "text_contains": "Colourist"
           },
-          "param": "position.x",
-          "changes": true
+          "path": "/from",
+          "expect": {
+           "approx": 1.0,
+           "tol": 0.04
+          },
+          "any": true
          }
         },
         {
-         "animated": {
-          "select": {
-           "name_prefix": "Lower third"
+         "name": "it slides in",
+         "any-of": [
+          {
+           "animated": {
+            "select": {
+             "text_contains": "Ada Park"
+            },
+            "param": "position.x",
+            "changes": true
+           }
           },
-          "param": "position.y",
-          "changes": true
+          {
+           "animated": {
+            "select": {
+             "text_contains": "Ada Park"
+            },
+            "param": "position.y",
+            "changes": true
+           }
+          },
+          {
+           "animated": {
+            "select": {
+             "name_prefix": "Lower third"
+            },
+            "param": "position.x",
+            "changes": true
+           }
+          },
+          {
+           "animated": {
+            "select": {
+             "name_prefix": "Lower third"
+            },
+            "param": "position.y",
+            "changes": true
+           }
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "name": "Add Ben Ode at 3 s",
+       "steps": [
+        {
+         "seek": 3.0
+        },
+        {
+         "type": {
+          "field": "Name",
+          "text": "Ben Ode"
+         }
+        },
+        {
+         "type": {
+          "field": "Title",
+          "text": "Gaffer"
+         }
+        },
+        {
+         "click": "Add"
+        }
+       ],
+       "after": [
+        {
+         "name": "the name is on the timeline",
+         "count": {
+          "select": {
+           "text_contains": "Ben Ode"
+          },
+          "expect": {
+           "ge": 1
+          }
+         }
+        },
+        {
+         "name": "the title is on the timeline",
+         "count": {
+          "select": {
+           "text_contains": "Gaffer"
+          },
+          "expect": {
+           "ge": 1
+          }
+         }
+        },
+        {
+         "name": "the name starts at the playhead",
+         "field": {
+          "select": {
+           "text_contains": "Ben Ode"
+          },
+          "path": "/from",
+          "expect": {
+           "approx": 3.0,
+           "tol": 0.04
+          },
+          "any": true
+         }
+        },
+        {
+         "name": "the title starts at the playhead",
+         "field": {
+          "select": {
+           "text_contains": "Gaffer"
+          },
+          "path": "/from",
+          "expect": {
+           "approx": 3.0,
+           "tol": 0.04
+          },
+          "any": true
+         }
+        },
+        {
+         "name": "it slides in",
+         "any-of": [
+          {
+           "animated": {
+            "select": {
+             "text_contains": "Ben Ode"
+            },
+            "param": "position.x",
+            "changes": true
+           }
+          },
+          {
+           "animated": {
+            "select": {
+             "text_contains": "Ben Ode"
+            },
+            "param": "position.y",
+            "changes": true
+           }
+          },
+          {
+           "animated": {
+            "select": {
+             "name_prefix": "Lower third"
+            },
+            "param": "position.x",
+            "changes": true
+           }
+          },
+          {
+           "animated": {
+            "select": {
+             "name_prefix": "Lower third"
+            },
+            "param": "position.y",
+            "changes": true
+           }
+          }
+         ]
+        },
+        {
+         "name": "the first lower third stays",
+         "unchanged": {
+          "select": {
+           "text_contains": "Ada Park"
+          },
+          "ignore": [
+           "/selected"
+          ]
          }
         }
        ]

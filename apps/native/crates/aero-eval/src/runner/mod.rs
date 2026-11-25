@@ -298,14 +298,24 @@ fn execute(
         binaries.extend(cfg.harness_bin.as_deref());
     }
     binaries.extend(cfg.sandbox_read.iter().map(PathBuf::as_path));
+    // The replay holds its port on every interface before anything starts;
+    // the run's one outbound TCP port is that one.
+    let replay = match recording {
+        Some(r) => Some(crate::replay::replayer::ReplayServer::start(
+            crate::replay::replayer::Replayer::new(r, vec![dirs.root.display().to_string()]),
+        )?),
+        None => None,
+    };
     let confinement = if record.mode == "live" {
         None
     } else {
-        Some(sandbox::Confinement::for_run(
-            &dirs.root,
-            &binaries,
-            &cfg.sandbox_protect,
-        )?)
+        let c = sandbox::Confinement::for_run(&dirs.root, &binaries, &cfg.sandbox_protect)?;
+        let c = match &replay {
+            Some(r) => c.allow_tcp(r.port()),
+            None => c,
+        };
+        c.verify()?;
+        Some(c)
     };
     let project_id = collect::seed_profile(task, &cfg.data_root, &dirs)?;
     let host_env = harness::base_env(&dirs.profile, &dirs.tmp);
@@ -327,12 +337,6 @@ fn execute(
         let baseline =
             collect::baseline(task, &project_id, &dirs, &mut host.client, &mut artifacts)?;
         host.client.budget_end = None;
-        let replay = match recording {
-            Some(r) => Some(crate::replay::replayer::ReplayServer::start(
-                crate::replay::replayer::Replayer::new(r, vec![dirs.root.display().to_string()]),
-            )?),
-            None => None,
-        };
         let provider = match (&replay, harness_id) {
             (_, HarnessId::None) => Provider::None,
             (Some(r), _) => Provider::Replay {
@@ -435,7 +439,8 @@ fn execute(
 /// Grade a finished run again from its saved artifacts (e.g. after the owner
 /// adds `spot-check.json`), rewriting `run.json`.
 pub fn regrade(suite: &Suite, run_dir: &Path, data_root: &Path) -> Result<RunRecord, String> {
-    let bytes = std::fs::read(run_dir.join("run.json")).map_err(|e| e.to_string())?;
+    let dir = paths::Anchor::open(run_dir)?;
+    let bytes = dir.read(Path::new("run.json"))?;
     let mut record: RunRecord = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let task = suite
         .task(&record.task)
@@ -450,11 +455,10 @@ pub fn regrade(suite: &Suite, run_dir: &Path, data_root: &Path) -> Result<RunRec
     record.verdicts = grade(task, &artifacts, run_dir, data_root);
     record.needs_fix = artifacts.spot_check.as_ref().and_then(|s| s.needs_fix);
     record.conclude(&judges_render(task));
-    std::fs::write(
-        run_dir.join("run.json"),
-        serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    dir.replace(
+        Path::new("run.json"),
+        &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
+    )?;
     Ok(record)
 }
 

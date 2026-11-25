@@ -777,70 +777,121 @@ fn transition_iris() {
 
 // ---------------------------------------------------------------- panels
 
-fn panel_case(project: &str, panel: PanelObservation, new: bool) -> Case {
+fn panel_case(project: &str, panel: &str, probes: Vec<ProbeObservation>) -> Case {
     let mut c = Case::new(fixture(project));
-    if new {
-        c.ext("tool", "created", "panel", &panel.panel.clone(), 0);
-    }
+    c.ext("tool", "created", "panel", panel, 0);
     c.spot();
-    c.a.panels.push(panel);
+    c.a.panels.push(PanelObservation {
+        panel: panel.into(),
+        opened: true,
+        probes,
+        ..Default::default()
+    });
     c
+}
+
+fn ok_steps(n: usize) -> Vec<String> {
+    vec!["ok".into(); n]
+}
+
+/// The marker list as the panel shows it: one row per (name, time).
+fn marker_rows(rows: &[(&str, &str)]) -> ProbeObservation {
+    let mut all: Vec<String> = rows.iter().map(|(n, t)| format!("{n} {t}")).collect();
+    all.push(all.join(" "));
+    ProbeObservation {
+        text: rows
+            .iter()
+            .flat_map(|(n, t)| [n.to_string(), t.to_string()])
+            .collect(),
+        rows: all,
+        ..Default::default()
+    }
 }
 
 #[test]
 fn panel_marker_list() {
     let t = "panel-marker-list";
     let doc = fixture("markers.pmv");
-    let obs = |playhead: f64, text: &[&str]| PanelObservation {
-        panel: "tool.panel".into(),
-        opened: true,
-        text: text.iter().map(|s| s.to_string()).collect(),
-        steps: vec!["ok".into(), "ok".into()],
+    let click = |playhead: f64| ProbeObservation {
+        steps: ok_steps(2),
         playhead: Some(playhead),
         project_before: Some(doc.clone()),
         project_after: Some(doc.clone()),
         ..Default::default()
     };
-    let list = ["Intro", "0:00.0", "Drop", "0:02.5", "Outro", "0:05.0"];
-    passes(&panel_case("markers.pmv", obs(2.5, &list), true), t);
-    // Clicking does nothing (the probe first parks the playhead at 0).
-    fails(
-        &panel_case("markers.pmv", obs(0.0, &list), true),
-        t,
-        "a dead click",
-    );
+    let list = [("Intro", "0:00.0"), ("Drop", "0:02.5"), ("Outro", "0:05.0")];
+    let case = |rows: &[(&str, &str)], jumps: [f64; 3]| {
+        let mut p = vec![marker_rows(rows)];
+        p.extend(jumps.map(click));
+        panel_case("markers.pmv", "tool.panel", p)
+    };
+    passes(&case(&list, [0.0, 2.5, 5.0]), t);
+    // Clicking does nothing (each probe first parks the playhead elsewhere).
+    fails(&case(&list, [4.0, 0.0, 0.0]), t, "dead clicks");
+    // Only Drop jumps.
+    fails(&case(&list, [4.0, 2.5, 0.0]), t, "one working row");
     // Names without times.
     fails(
-        &panel_case("markers.pmv", obs(2.5, &["Intro", "Drop", "Outro"]), true),
+        &case(
+            &[("Intro", ""), ("Drop", ""), ("Outro", "")],
+            [0.0, 2.5, 5.0],
+        ),
         t,
         "no times",
+    );
+    // Review scenario: Intro and Outro show each other's times.
+    fails(
+        &case(
+            &[("Intro", "0:05.0"), ("Drop", "0:02.5"), ("Outro", "0:00.0")],
+            [0.0, 2.5, 5.0],
+        ),
+        t,
+        "swapped times",
     );
 }
 
 #[test]
 fn panel_speed_buttons() {
     let t = "panel-speed-buttons";
-    let with_speed = |s: f64| {
+    let doc = |clip: f64, clip2: f64| {
         let mut d = fixture("speed.pmv");
-        layer(&mut d, "Clip")["d"]["speed"] = json!(s);
+        layer(&mut d, "Clip")["d"]["speed"] = json!(clip);
+        layer(&mut d, "Clip 2")["d"]["speed"] = json!(clip2);
         d
     };
-    let obs = |before: f64, after: f64| PanelObservation {
-        panel: "tool.panel".into(),
-        opened: true,
-        text: vec!["50%".into(), "100%".into(), "200%".into()],
-        steps: vec!["ok".into()],
-        project_before: Some(with_speed(before)),
-        project_after: Some(with_speed(after)),
+    let press = |before: (f64, f64), after: (f64, f64)| ProbeObservation {
+        steps: ok_steps(1),
+        project_before: Some(doc(before.0, before.1)),
+        project_after: Some(doc(after.0, after.1)),
         ..Default::default()
     };
-    passes(&panel_case("speed.pmv", obs(1.0, 0.5), true), t);
-    // The run set the speed itself; the button does nothing.
-    fails(
-        &panel_case("speed.pmv", obs(0.5, 0.5), true),
-        t,
-        "a dead button",
-    );
+    // Each probe's result, given what the four presses actually set: 50% on
+    // Clip, 200% on Clip, 100% on Clip, 50% on Clip 2.
+    let case = |set: [Option<f64>; 4]| {
+        let mut s = (1.0, 1.0);
+        let mut probes = Vec::new();
+        for (i, v) in set.iter().enumerate() {
+            let before = s;
+            if let Some(v) = v {
+                if i == 3 {
+                    s.1 = *v;
+                } else {
+                    s.0 = *v;
+                }
+            }
+            probes.push(press(before, s));
+        }
+        panel_case("speed.pmv", "tool.panel", probes)
+    };
+    passes(&case([Some(0.5), Some(2.0), Some(1.0), Some(0.5)]), t);
+    // The run set the speed itself; the buttons do nothing.
+    fails(&case([None; 4]), t, "dead buttons");
+    // Review scenario: 50% works, 100% and 200% are inert.
+    fails(&case([Some(0.5), None, None, Some(0.5)]), t, "only 50%");
+    // The buttons always change Clip, whatever is selected.
+    let mut c = case([Some(0.5), Some(2.0), Some(1.0), None]);
+    c.a.panels[0].probes[3].project_after = Some(doc(0.5, 1.0));
+    fails(&c, t, "ignores the selection");
 }
 
 #[test]
@@ -853,44 +904,74 @@ fn tool_beat_flash() {
         d["proj"]["markers"] = m;
         d
     };
-    let case = |before: Value, after: Value, flash: bool| {
+    // Two taps (at 2 s and 4 s): the markers each one leaves and where the
+    // picture flashes.
+    let case = |taps: [(Value, Value, Option<f64>); 2]| {
         let mut c = Case::new(fixture("promo.pmv"));
         c.ext("beat", "created", "panel", "beat.panel", 0);
         c.spot();
-        let mut o = PanelObservation {
+        let mut probes = Vec::new();
+        for (at, (before, after, flash)) in [2.0, 4.0].into_iter().zip(taps) {
+            let mut o = ProbeObservation {
+                steps: ok_steps(2),
+                project_before: Some(before),
+                project_after: Some(after),
+                ..Default::default()
+            };
+            for d in [-0.05, 0.0167, 0.05, 0.1167] {
+                let time = ((at + d) * 10_000.0_f64).round() / 10_000.0;
+                let lit = flash.is_some_and(|f| (f..f + 0.0667).contains(&time));
+                let b = c.frame(time, &normal());
+                let a = c.frame(time, &if lit { white() } else { normal() });
+                o.baseline_frames.push(b);
+                o.frames.push(a);
+            }
+            probes.push(o);
+        }
+        c.a.panels.push(PanelObservation {
             panel: "beat.panel".into(),
             opened: true,
-            text: vec!["Tap".into()],
-            steps: vec!["ok".into(), "ok".into()],
-            project_before: Some(before),
-            project_after: Some(after),
+            probes,
             ..Default::default()
-        };
-        for t in [1.95, 2.0167, 2.05, 2.1167] {
-            let lit = flash && (2.0..2.0667).contains(&t);
-            let b = c.frame(t, &normal());
-            let a = c.frame(t, &if lit { white() } else { normal() });
-            o.baseline_frames.push(b);
-            o.frames.push(a);
-        }
-        c.a.panels.push(o);
+        });
         c
     };
-    let tapped = with_markers(json!([{"id": "m1", "t": 2.0, "name": "Beat"}]));
-    passes(&case(with_markers(json!([])), tapped, true), t);
-    // Review scenario: a no-op Tap, a marker already at 99 s, no flash and a
-    // positive spot-check.
+    let m = |ts: &[f64]| {
+        with_markers(json!(
+            ts.iter()
+                .enumerate()
+                .map(|(i, t)| json!({"id": format!("m{i}"), "t": t, "name": "Beat"}))
+                .collect::<Vec<_>>()
+        ))
+    };
+    passes(
+        &case([
+            (m(&[]), m(&[2.0]), Some(2.0)),
+            (m(&[2.0]), m(&[2.0, 4.0]), Some(4.0)),
+        ]),
+        t,
+    );
+    // Review scenario: a no-op Tap, a marker already at 99 s, no flash.
     let old = with_markers(json!([{"id": "m0", "t": 99.0}]));
-    fails(&case(old.clone(), old, false), t, "a no-op tap");
-    // A marker but no flash.
     fails(
-        &case(
-            with_markers(json!([])),
-            with_markers(json!([{"t": 2.0}])),
-            false,
-        ),
+        &case([(old.clone(), old.clone(), None), (old.clone(), old, None)]),
+        t,
+        "a no-op tap",
+    );
+    // Markers but no flash.
+    fails(
+        &case([(m(&[]), m(&[2.0]), None), (m(&[2.0]), m(&[2.0, 4.0]), None)]),
         t,
         "no flash",
+    );
+    // Tap always works at 2 s, wherever the playhead is.
+    fails(
+        &case([
+            (m(&[]), m(&[2.0]), Some(2.0)),
+            (m(&[2.0]), m(&[2.0, 2.0001]), Some(2.0)),
+        ]),
+        t,
+        "a fixed time",
     );
 }
 
@@ -898,39 +979,62 @@ fn tool_beat_flash() {
 fn tool_lower_third_kit() {
     let t = "tool-lower-third-kit";
     let doc = fixture("promo.pmv");
-    let with_third = |from: f64, keys: Value| {
+    let slide = json!([{"t": 0.0, "v": -400}, {"t": 0.5, "v": 0}]);
+    let still = json!([{"t": 0.0, "v": 0}, {"t": 0.5, "v": 0}]);
+    let third = |id: &str, from: f64, text: &str, keys: &Value| {
+        json!({"id": id, "type": "text", "name": "Lower third", "from": from, "dur": 4, "on": true,
+               "fx": [], "d": {"text": text}, "p": {"position.x": {"v": 0, "kf": keys}}})
+    };
+    let with = |layers: &[Value]| {
         let mut d = doc.clone();
-        d["proj"]["layers"].as_array_mut().unwrap().push(json!({
-            "id": "lt1", "type": "text", "name": "Lower third", "from": from, "dur": 4, "on": true,
-            "fx": [], "d": {"text": "Ada Park\nColourist"}, "p": {"position.x": {"v": 0, "kf": keys}}}));
+        d["proj"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .extend(layers.iter().cloned());
         d
     };
-    let obs = |after: Value| PanelObservation {
-        panel: "kit.panel".into(),
-        opened: true,
-        text: vec!["Name".into(), "Title".into(), "Add".into()],
-        steps: vec!["ok".into(); 4],
-        project_before: Some(doc.clone()),
-        project_after: Some(after),
-        ..Default::default()
+    let case = |first: Value, second: Value| {
+        let one = with(std::slice::from_ref(&first));
+        let two = with(&[first, second]);
+        panel_case(
+            "promo.pmv",
+            "kit.panel",
+            vec![
+                ProbeObservation {
+                    steps: ok_steps(4),
+                    project_before: Some(doc.clone()),
+                    project_after: Some(one.clone()),
+                    ..Default::default()
+                },
+                ProbeObservation {
+                    steps: ok_steps(4),
+                    project_before: Some(one),
+                    project_after: Some(two),
+                    ..Default::default()
+                },
+            ],
+        )
     };
-    let slide = json!([{"t": 0.0, "v": -400}, {"t": 0.5, "v": 0}]);
-    passes(
-        &panel_case("promo.pmv", obs(with_third(1.0, slide.clone())), true),
-        t,
-    );
+    let ada = |from: f64, keys: &Value| third("lt1", from, "Ada Park\nColourist", keys);
+    let ben = |from: f64, text: &str| third("lt2", from, text, &slide);
+    passes(&case(ada(1.0, &slide), ben(3.0, "Ben Ode\nGaffer")), t);
     // Dropped at the start instead of the playhead.
     fails(
-        &panel_case("promo.pmv", obs(with_third(0.0, slide)), true),
+        &case(ada(0.0, &slide), ben(0.0, "Ben Ode\nGaffer")),
         t,
         "at 0",
     );
     // Two identical keys: nothing slides.
-    let still = json!([{"t": 0.0, "v": 0}, {"t": 0.5, "v": 0}]);
     fails(
-        &panel_case("promo.pmv", obs(with_third(1.0, still)), true),
+        &case(ada(1.0, &still), ben(3.0, "Ben Ode\nGaffer")),
         t,
         "no slide",
+    );
+    // The typed title is ignored.
+    fails(
+        &case(third("lt1", 1.0, "Ada Park", &slide), ben(3.0, "Ben Ode")),
+        t,
+        "no title",
     );
 }
 
@@ -981,24 +1085,49 @@ fn fix_shot_notes_crash() {
     let case = |text: &[&str], step: &str| {
         let mut c = Case::new(fixture("promo.pmv"));
         c.ext("shot-notes", "updated", "panel", "shot-notes.panel", 0);
+        let probe = |rows: &[&str], step: &str| ProbeObservation {
+            rows: rows.iter().map(|s| s.to_string()).collect(),
+            text: rows.iter().map(|s| s.to_string()).collect(),
+            steps: vec![step.into()],
+            ..Default::default()
+        };
         c.a.panels.push(PanelObservation {
             panel: "shot-notes.panel".into(),
             opened: true,
-            text: text.iter().map(|s| s.to_string()).collect(),
-            steps: vec![step.into()],
+            probes: vec![probe(text, step), probe(&text[2..], step)],
             ..Default::default()
         });
         c
     };
-    passes(&case(&["Background plate", "Title", "hero shot"], "ok"), t);
+    let both = [
+        "Background plate",
+        "Title hero shot",
+        "Background plate wide plate",
+        "Title hero shot",
+    ];
+    passes(&case(&both, "ok"), t);
     // The crash caught and the list replaced with static text, no notes.
     fails(
         &case(
-            &["Background plate", "Title"],
+            &["Background plate", "Title", "Background plate", "Title"],
             "no control labelled \"Title\"",
         ),
         t,
         "static text",
+    );
+    // Every note lands on the first row.
+    fails(
+        &case(
+            &[
+                "Background plate hero shot",
+                "Title",
+                "Background plate hero shot wide plate",
+                "Title",
+            ],
+            "ok",
+        ),
+        t,
+        "notes on the wrong row",
     );
 }
 

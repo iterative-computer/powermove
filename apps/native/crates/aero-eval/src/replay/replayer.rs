@@ -35,7 +35,11 @@ pub struct ReplayReport {
     pub exchanges: usize,
     pub consumed: usize,
     pub divergence: Option<Divergence>,
-    /// Every recorded exchange was requested, in order, and matched.
+    /// Why the network boundary stopped holding during the replay, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
+    /// Every recorded exchange was requested, in order, and matched, and the
+    /// boundary held throughout.
     pub passed: bool,
 }
 
@@ -145,15 +149,19 @@ impl Replayer {
             exchanges: self.recording.exchanges.len(),
             consumed: self.cursor,
             divergence: self.divergence.clone(),
+            boundary: None,
             passed: self.divergence.is_none() && self.cursor == self.recording.exchanges.len(),
         }
     }
 }
 
-/// The replayer on a loopback port, for harnesses that call a model over HTTP
-/// (point their base URL at [`ReplayServer::origin`]).
+/// The replayer on a loopback port held on every interface
+/// ([`super::hold::PortHold`]), for harnesses that call a model over HTTP
+/// (point their base URL at [`ReplayServer::origin`]). Only loopback peers
+/// are served. Starting refuses when the port cannot be proved held.
 pub struct ReplayServer {
     addr: SocketAddr,
+    hold: super::hold::PortHold,
     deadline: Duration,
     stop: Arc<AtomicBool>,
     replayer: Arc<Mutex<Replayer>>,
@@ -168,7 +176,11 @@ impl ReplayServer {
     /// `deadline` bounds each connection's reads and writes, so a request
     /// that never finishes cannot hold the server (or its shutdown).
     pub fn start_with_deadline(replayer: Replayer, deadline: Duration) -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let mut hold = super::hold::PortHold::take()?;
+        hold.prove().map_err(|e| {
+            format!("refusing the replay: its port is not held on every interface: {e}")
+        })?;
+        let listener: TcpListener = hold.listener().ok_or("the hold has no listener")?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let replayer = Arc::new(Mutex::new(replayer));
@@ -179,6 +191,9 @@ impl ReplayServer {
                     break;
                 }
                 let Ok(mut stream) = conn else { continue };
+                if !stream.peer_addr().is_ok_and(|p| p.ip().is_loopback()) {
+                    continue;
+                }
                 if stream.set_read_timeout(Some(deadline)).is_err()
                     || stream.set_write_timeout(Some(deadline)).is_err()
                 {
@@ -193,6 +208,7 @@ impl ReplayServer {
         });
         Ok(Self {
             addr,
+            hold,
             deadline,
             stop,
             replayer,
@@ -204,10 +220,21 @@ impl ReplayServer {
         format!("http://{}", self.addr)
     }
 
-    /// Stop serving and return what happened.
+    /// The port confined runs may reach (and nothing else).
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// Stop serving and return what happened; a boundary that stopped
+    /// holding fails the replay.
     pub fn finish(mut self) -> ReplayReport {
         self.shutdown();
-        self.replayer.lock().unwrap().report()
+        let mut r = self.replayer.lock().unwrap().report();
+        if let Some(b) = self.hold.broken() {
+            r.boundary = Some(b);
+            r.passed = false;
+        }
+        r
     }
 
     fn shutdown(&mut self) {

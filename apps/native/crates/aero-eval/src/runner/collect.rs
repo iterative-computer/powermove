@@ -1,20 +1,21 @@
 //! Seeding a clean profile and collecting evidence over the host's MCP tools.
 //! Anything the host cannot report becomes a note (or a lacking capability),
 //! and the graders that needed it answer Unavailable: nothing is guessed into
-//! a pass. Files are only read inside the run folder, never through a
-//! symlink, and a path the host names is checked before it is read.
+//! a pass. Every file of the run is reached through the run folder opened
+//! once ([`paths::Anchor`]), one unfollowed component at a time, and a path
+//! the host names is read only when it lies in the run's exports or work
+//! folder.
 use super::mcp::McpClient;
 use super::paths;
 use crate::artifacts::{
     Artifacts, ChangedExtension, Evaluation, ExtensionHealth, Frame, FrameTiming, PanelObservation,
-    Registration, ThemeObservation,
+    ProbeObservation, Registration, ThemeObservation,
 };
 use crate::graders::panel::Step;
 use crate::graders::{Context, GraderSpec};
-use crate::suite::{Task, tree_hash};
+use crate::suite::Task;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The host has one window when headless.
@@ -23,6 +24,11 @@ const TIMING_SAMPLES: usize = 7;
 
 pub struct RunDirs {
     pub root: PathBuf,
+    /// The canonical spelling of `root` (`/var/…` is `/private/var/…`).
+    pub real_root: PathBuf,
+    /// The run folder, open: every read, walk and write below it goes
+    /// through this.
+    pub anchor: paths::Anchor,
     pub profile: PathBuf,
     pub exports: PathBuf,
     pub work: PathBuf,
@@ -36,7 +42,10 @@ impl RunDirs {
     /// The folders of a run inside its (already reserved, empty) root.
     pub fn create(root: &Path) -> Result<Self, String> {
         let root = std::path::absolute(root).map_err(|e| e.to_string())?;
+        let anchor = paths::Anchor::open(&root)?;
         let d = RunDirs {
+            real_root: std::fs::canonicalize(&root).map_err(|e| e.to_string())?,
+            anchor,
             profile: root.join("profile"),
             exports: root.join("exports"),
             work: root.join("work"),
@@ -53,15 +62,38 @@ impl RunDirs {
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    for rel in paths::files(from)? {
+/// Copy a suite folder into the run (relative to the run folder), creating
+/// folders below it unfollowed.
+fn copy_tree(from: &Path, d: &RunDirs, to: &Path) -> Result<(), String> {
+    let src = paths::Anchor::open(from)?;
+    for rel in src.files()? {
         let dest = to.join(&rel);
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            mkdirs(d, parent)?;
         }
-        std::fs::copy(from.join(&rel), &dest).map_err(|e| format!("{}: {e}", rel.display()))?;
+        d.anchor.write_new(&dest, &src.read(&rel)?)?;
     }
     Ok(())
+}
+
+/// Create the folders of `rel` below the run folder (existing ones must be
+/// real folders, not links).
+fn mkdirs(d: &RunDirs, rel: &Path) -> Result<(), String> {
+    let mut at = PathBuf::new();
+    for c in rel.components() {
+        let parent = d.anchor.dir(&at)?;
+        at.push(c);
+        match parent
+            .entries()?
+            .iter()
+            .find(|(n, _)| Path::new(n) == c.as_os_str())
+        {
+            Some((_, paths::Kind::Dir)) => {}
+            Some(_) => return Err(format!("{} is not a folder", d.root.join(&at).display())),
+            None => parent.mkdir(c.as_os_str())?,
+        }
+    }
+    d.anchor.dir(rel).map(|_| ())
 }
 
 /// Put the fixture into the clean profile: the project as a file entry of the
@@ -71,21 +103,22 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 pub fn seed_profile(task: &Task, data_root: &Path, d: &RunDirs) -> Result<String, String> {
     let fixtures = data_root.join("fixtures");
     let src = fixtures.join(&task.fixture.project);
-    let file = d
-        .work
-        .join(src.file_name().ok_or("fixture has no file name")?);
-    std::fs::copy(&src, &file).map_err(|e| format!("{}: {e}", src.display()))?;
-    let bytes = paths::read(&[&d.work], &file)?;
+    let name = src.file_name().ok_or("fixture has no file name")?;
+    let file = d.work.join(name);
+    let bytes = std::fs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+    d.anchor.write_new(&Path::new("work").join(name), &bytes)?;
     let doc = crate::pmv::read_document(&bytes)?;
     let project = crate::pmv::project_of(&doc);
     let id = project["id"]
         .as_str()
         .ok_or("fixture project has no id")?
         .to_owned();
-    let store = d.profile.join("store");
-    std::fs::create_dir_all(&store).map_err(|e| e.to_string())?;
+    mkdirs(d, Path::new("profile/store"))?;
     let write = |name: String, v: Value| {
-        std::fs::write(store.join(name), v.to_string()).map_err(|e| e.to_string())
+        d.anchor.write_new(
+            &Path::new("profile/store").join(name),
+            v.to_string().as_bytes(),
+        )
     };
     write(
         "projects.json".into(),
@@ -98,7 +131,7 @@ pub fn seed_profile(task: &Task, data_root: &Path, d: &RunDirs) -> Result<String
     for ext in &task.fixture.extensions {
         let from = fixtures.join(ext);
         let name = from.file_name().ok_or("extension has no folder name")?;
-        copy_tree(&from, &d.profile.join("extensions").join(name))?;
+        copy_tree(&from, d, &Path::new("profile/extensions").join(name))?;
     }
     Ok(id)
 }
@@ -112,19 +145,59 @@ pub struct Baseline {
     pub revision: Option<u64>,
 }
 
-fn extension_hashes(profile: &Path) -> BTreeMap<String, Result<String, String>> {
+/// Tree hashes of the profile's extension folders, reached from the run
+/// folder without following any link. An extension root that is a link (or
+/// not a folder) is refused, unread, and reported under its own name.
+fn extension_hashes(d: &RunDirs) -> BTreeMap<String, Result<String, String>> {
     let mut out = BTreeMap::new();
+    let profile = match d.anchor.dir(Path::new("profile")) {
+        Ok(p) => p,
+        Err(e) => {
+            out.insert("profile".into(), Err(e));
+            return out;
+        }
+    };
+    let entries = match profile.entries() {
+        Ok(e) => e,
+        Err(e) => {
+            out.insert("profile".into(), Err(e));
+            return out;
+        }
+    };
     for root in ["extensions", "extensions-shared"] {
-        let Ok(rd) = std::fs::read_dir(profile.join(root)) else {
+        let Some((_, kind)) = entries.iter().find(|(n, _)| n == root) else {
             continue;
         };
-        for e in rd.flatten() {
-            let Ok(t) = e.file_type() else { continue };
-            let name = e.file_name().to_string_lossy().into_owned();
-            if t.is_symlink() {
-                out.insert(name, Err("the extension folder is a symlink".into()));
-            } else if t.is_dir() {
-                out.insert(name, tree_hash(&e.path()));
+        if *kind != paths::Kind::Dir {
+            out.insert(
+                root.into(),
+                Err(format!(
+                    "the extension root {root} is a symlink or not a folder"
+                )),
+            );
+            continue;
+        }
+        let dir = match profile
+            .dir(Path::new(root))
+            .and_then(|a| Ok((a.entries()?, a)))
+        {
+            Ok(x) => x,
+            Err(e) => {
+                out.insert(root.into(), Err(e));
+                continue;
+            }
+        };
+        let (list, anchor) = dir;
+        for (name, kind) in list {
+            match kind {
+                paths::Kind::Symlink => {
+                    out.insert(name, Err("the extension folder is a symlink".into()));
+                }
+                paths::Kind::Dir => {
+                    let h = anchor.dir(Path::new(&name)).and_then(|a| a.tree_hash());
+                    out.insert(name, h);
+                }
+                _ => {}
             }
         }
     }
@@ -142,10 +215,10 @@ fn frame_times(task: &Task) -> Vec<f64> {
     t
 }
 
-fn render<W: Write>(
-    c: &mut McpClient<W>,
+fn render(
+    c: &mut McpClient,
     times: &[f64],
-    dir: &Path,
+    d: &RunDirs,
     prefix: &str,
 ) -> Result<Vec<Frame>, String> {
     let mut out = Vec::new();
@@ -165,23 +238,20 @@ fn render<W: Write>(
                     "render_frames returned {mime}; the frame graders read PNG only"
                 ));
             }
-            let name = format!("{prefix}-{t}.png");
-            std::fs::write(dir.join(&name), bytes).map_err(|e| e.to_string())?;
-            out.push(Frame {
-                time: t,
-                png: PathBuf::from("frames").join(name),
-            });
+            let rel = PathBuf::from("frames").join(format!("{prefix}-{t}.png"));
+            d.anchor.write_new(&rel, &bytes)?;
+            out.push(Frame { time: t, png: rel });
         }
     }
     Ok(out)
 }
 
 /// Open the seeded project, then capture the fixture's state and frames.
-pub fn baseline<W: Write>(
+pub fn baseline(
     task: &Task,
     project_id: &str,
     d: &RunDirs,
-    c: &mut McpClient<W>,
+    c: &mut McpClient,
     a: &mut Artifacts,
 ) -> Result<Baseline, String> {
     let listed = c.call("list_projects", json!({}))?;
@@ -192,21 +262,21 @@ pub fn baseline<W: Write>(
         ));
     }
     c.call("open_project", json!({"projectId": project_id}))?;
-    let file = std::fs::read_dir(&d.work)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "pmv"))
+    let work = d.anchor.dir(Path::new("work"))?;
+    let (file, _) = work
+        .entries()?
+        .into_iter()
+        .find(|(n, k)| *k == paths::Kind::File && n.ends_with(".pmv"))
         .ok_or("no working project file")?;
-    let before = crate::pmv::read_document(&paths::read(&[&d.work], &file)?)?;
+    let before = crate::pmv::read_document(&work.read(Path::new(&file))?)?;
     let b = Baseline {
-        extension_hashes: extension_hashes(&d.profile),
+        extension_hashes: extension_hashes(d),
         revision: crate::pmv::project_of(&before)["revision"].as_u64(),
     };
     a.project_before = Some(before);
     let times = frame_times(task);
     if !times.is_empty() && !lacks(a, super::capabilities::FRAMES) {
-        match render(c, &times, &d.frames, "baseline") {
+        match render(c, &times, d, "baseline") {
             Ok(f) => a.baseline_frames = f,
             Err(e) => a.notes.push(format!("baseline frames: {e}")),
         }
@@ -229,8 +299,9 @@ fn saved_path(r: &Value) -> Option<PathBuf> {
 }
 
 /// Save and read the project back. The path the host names is read only if
-/// it is a regular file in the run's exports or work folder.
-fn read_saved<W: Write>(c: &mut McpClient<W>, d: &RunDirs) -> Result<Value, String> {
+/// it is a regular file in the run's exports or work folder, reached from
+/// the open run folder with no link followed at any component.
+fn read_saved(c: &mut McpClient, d: &RunDirs) -> Result<Value, String> {
     let r = c.call("save_project", json!({}))?;
     let path = r
         .json()
@@ -238,15 +309,71 @@ fn read_saved<W: Write>(c: &mut McpClient<W>, d: &RunDirs) -> Result<Value, Stri
         .and_then(saved_path)
         .or_else(|| saved_path(&Value::String(r.text())))
         .ok_or_else(|| format!("save_project did not name a file: {}", r.text()))?;
-    crate::pmv::read_document(&paths::read(&[&d.exports, &d.work], &path)?)
+    let rel = d.anchor.relative(&path, &d.real_root).map_err(|_| {
+        format!(
+            "{} is not a file inside {} or {}",
+            path.display(),
+            d.exports.display(),
+            d.work.display()
+        )
+    })?;
+    if !rel.starts_with("exports") && !rel.starts_with("work") {
+        return Err(format!(
+            "{} is not a file inside {} or {}",
+            path.display(),
+            d.exports.display(),
+            d.work.display()
+        ));
+    }
+    crate::pmv::read_document(&d.anchor.read(&rel)?)
 }
 
-fn texts(v: &Value, out: &mut Vec<String>) {
+/// Keys of a panel state that name or classify an element instead of
+/// showing text (a control ref like `e5` must never read as a time).
+const NOT_SHOWN: [&str; 9] = [
+    "ref",
+    "id",
+    "role",
+    "type",
+    "kind",
+    "key",
+    "testId",
+    "className",
+    "style",
+];
+
+/// Every displayed string of a panel state, in order.
+pub fn texts(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::String(s) if !s.trim().is_empty() => out.push(s.clone()),
-        Value::Object(m) => m.values().for_each(|x| texts(x, out)),
+        Value::Object(m) => m
+            .iter()
+            .filter(|(k, _)| !NOT_SHOWN.contains(&k.as_str()))
+            .for_each(|(_, x)| texts(x, out)),
         Value::Array(a) => a.iter().for_each(|x| texts(x, out)),
         _ => {}
+    }
+}
+
+/// The displayed text of every element (object or list) of a panel state,
+/// innermost first, so a grader can tell which values share a row.
+pub fn rows(v: &Value, out: &mut Vec<String>) {
+    let children: Vec<&Value> = match v {
+        Value::Object(m) => m
+            .iter()
+            .filter(|(k, _)| !NOT_SHOWN.contains(&k.as_str()))
+            .map(|(_, x)| x)
+            .collect(),
+        Value::Array(a) => a.iter().collect(),
+        _ => return,
+    };
+    for c in children {
+        rows(c, out);
+    }
+    let mut t = Vec::new();
+    texts(v, &mut t);
+    if !t.is_empty() {
+        out.push(t.join(" "));
     }
 }
 
@@ -284,11 +411,11 @@ fn registrations(w: &Value) -> Vec<Registration> {
 /// After the harness: save and read the project back, render, and report
 /// extensions, frame times, panel probes, the active theme and the
 /// evaluator's scores. Stops early when the collection budget runs out.
-pub fn after<W: Write>(
+pub fn after(
     task: &Task,
     d: &RunDirs,
     b: &Baseline,
-    c: &mut McpClient<W>,
+    c: &mut McpClient,
     a: &mut Artifacts,
     data_root: &Path,
 ) {
@@ -298,13 +425,13 @@ pub fn after<W: Write>(
     }
     let times = frame_times(task);
     if !times.is_empty() && !lacks(a, super::capabilities::FRAMES) {
-        match render(c, &times, &d.frames, "after") {
+        match render(c, &times, d, "after") {
             Ok(f) => a.frames = f,
             Err(e) => a.notes.push(format!("frames after the run: {e}")),
         }
     }
     // Extensions: changed by tree hash; a symlinked one is refused, unread.
-    let now = extension_hashes(&d.profile);
+    let now = extension_hashes(d);
     let mut changed = Vec::new();
     for (id, h) in &now {
         let action = match (h, b.extension_hashes.get(id)) {
@@ -413,11 +540,7 @@ pub fn after<W: Write>(
 
 /// Paired timings of one target at active frames: the same revision rendered
 /// with the target enabled and disabled; each sample is their difference.
-fn measure<W: Write>(
-    c: &mut McpClient<W>,
-    target: &str,
-    times: &[f64],
-) -> Result<FrameTiming, String> {
+fn measure(c: &mut McpClient, target: &str, times: &[f64]) -> Result<FrameTiming, String> {
     let r = c
         .call(
             "measure_frame_time",
@@ -452,8 +575,8 @@ fn measure<W: Write>(
 
 /// A fresh evaluator session's scores for one rubric (never the generator's
 /// context): the rubric, the prompt and the run's frames and captures.
-fn evaluate<W: Write>(
-    c: &mut McpClient<W>,
+fn evaluate(
+    c: &mut McpClient,
     task: &Task,
     rubric: &Path,
     a: &Artifacts,
@@ -506,11 +629,11 @@ fn control_ref_by(state: &Value, label: &str, exact: bool) -> Option<String> {
     }
 }
 
-/// Run a panel's probe: open it, select, snapshot the project and frames,
-/// run the steps, then read the panel, the playhead, the project and the
-/// frames again.
-fn probe<W: Write>(
-    c: &mut McpClient<W>,
+/// Run a panel's probes in order: open it, then for each probe select,
+/// snapshot the project and frames, run the steps, and read the panel, its
+/// rows, the playhead, the project and the frames again.
+fn probe(
+    c: &mut McpClient,
     panel: &str,
     s: &crate::graders::panel::PanelSpec,
     project: Option<&Value>,
@@ -524,13 +647,37 @@ fn probe<W: Write>(
         return o;
     }
     o.opened = true;
-    if !s.probe.select.is_empty() {
+    let tag = panel.replace('/', "_");
+    for (i, p) in s.probes.iter().enumerate() {
+        o.probes
+            .push(run_probe(c, panel, p, project, d, &format!("{tag}-{i}")));
+    }
+    if let Ok(r) = c.call("capture_panel", json!({"panelId": panel}))
+        && let Some((_, bytes)) = r.images().into_iter().next()
+    {
+        let rel = PathBuf::from("frames").join(format!("panel-{tag}.png"));
+        if d.anchor.write_new(&rel, &bytes).is_ok() {
+            o.capture = Some(rel);
+        }
+    }
+    o
+}
+
+fn run_probe(
+    c: &mut McpClient,
+    panel: &str,
+    p: &crate::graders::panel::Probe,
+    project: Option<&Value>,
+    d: &RunDirs,
+    tag: &str,
+) -> ProbeObservation {
+    let mut o = ProbeObservation::default();
+    if !p.select.is_empty() {
         let layers = project
             .map(crate::pmv::project_of)
             .map(crate::graders::project::layers)
             .unwrap_or_default();
-        let ids: Vec<&str> = s
-            .probe
+        let ids: Vec<&str> = p
             .select
             .iter()
             .filter_map(|n| {
@@ -542,14 +689,13 @@ fn probe<W: Write>(
             .collect();
         let _ = c.call("select_layers", json!({"layerIds": ids}));
     }
-    let times = s.frame_times();
-    let tag = panel.replace('/', "_");
+    let times = p.frame_times();
     o.project_before = read_saved(c, d).ok();
     if !times.is_empty() {
         o.baseline_frames =
-            render(c, &times, &d.frames, &format!("panel-{tag}-before")).unwrap_or_default();
+            render(c, &times, d, &format!("panel-{tag}-before")).unwrap_or_default();
     }
-    for step in &s.probe.steps {
+    for step in &p.steps {
         let (label, args) = match step {
             Step::Seek(t) => {
                 o.steps
@@ -584,6 +730,7 @@ fn probe<W: Write>(
         .map(|r| r.json())
     {
         texts(&state, &mut o.text);
+        rows(&state, &mut o.rows);
     }
     o.playhead = c
         .call("get_timeline", json!({"limit": 1}))
@@ -593,15 +740,7 @@ fn probe<W: Write>(
         .and_then(playhead);
     o.project_after = read_saved(c, d).ok();
     if !times.is_empty() {
-        o.frames = render(c, &times, &d.frames, &format!("panel-{tag}-after")).unwrap_or_default();
-    }
-    if let Ok(r) = c.call("capture_panel", json!({"panelId": panel}))
-        && let Some((_, bytes)) = r.images().into_iter().next()
-    {
-        let p = d.frames.join(format!("panel-{tag}.png"));
-        if std::fs::write(&p, bytes).is_ok() {
-            o.capture = Some(PathBuf::from("frames").join(p.file_name().unwrap()));
-        }
+        o.frames = render(c, &times, d, &format!("panel-{tag}-after")).unwrap_or_default();
     }
     o
 }

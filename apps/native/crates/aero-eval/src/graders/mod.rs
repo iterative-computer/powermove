@@ -12,7 +12,7 @@ use crate::artifacts::Artifacts;
 use crate::verdict::Verdict;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// One grader of a task, as written in the suite file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,7 +94,7 @@ impl GraderSpec {
                 if s.seeks() {
                     n.push(cap::SEEK);
                 }
-                if !s.frames.is_empty() {
+                if s.renders() {
                     n.push(cap::FRAMES);
                 }
             }
@@ -138,16 +138,17 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
-    /// A file the artifacts name: always relative and inside the run folder
-    /// (no absolute paths, no `..`, no symlinks).
-    pub fn path(&self, p: &Path) -> Result<PathBuf, String> {
+    /// Read a file the artifacts name: always relative and inside the run
+    /// folder, reached from it with no link followed (no absolute paths, no
+    /// `..`).
+    pub fn read(&self, p: &Path) -> Result<Vec<u8>, String> {
         if p.is_absolute() {
             return Err(format!(
                 "{} is absolute; artifacts name run files",
                 p.display()
             ));
         }
-        crate::runner::paths::inside(self.run_dir, &self.run_dir.join(p))
+        crate::runner::paths::Anchor::open(self.run_dir)?.read(p)
     }
     /// Resolve an id that may be `$new:<kind>`: any contribution of that kind
     /// registered by an extension the run created or updated.

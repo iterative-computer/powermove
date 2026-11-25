@@ -1,9 +1,12 @@
 //! The OS boundary for runs that must fail closed (replays and the `none`
 //! harness): every component runs under a Seatbelt profile (macOS
 //! `sandbox-exec`, the mechanism `pm-runtime-v8`'s Store sandbox uses through
-//! `sandbox_init`) that allows network only to this machine (Seatbelt's one
-//! host filter, `localhost`, matches loopback and this Mac's own addresses;
-//! every other host is refused before a packet leaves), reads nothing under
+//! `sandbox_init`) whose only outbound network is TCP to the replay's port
+//! (none at all without a replay). Seatbelt's one host filter, `localhost`,
+//! matches loopback and this Mac's own addresses alike, so that port is held
+//! on every interface by the replay server ([`crate::replay::hold`]): the
+//! only listener the run can reach is the replay. Every other port and host
+//! is refused before a packet leaves. The profile reads nothing under
 //! the owner's home except the run folder and the binaries it was given,
 //! writes only inside the run folder, and cannot reach the Keychain daemons.
 //! The rules are enforced by the kernel, not by convention; the crate's
@@ -33,6 +36,9 @@ pub struct Confinement {
     /// Roots nothing may be read from, except `root` and `read`: the owner's
     /// home and every other user's.
     pub protected: Vec<PathBuf>,
+    /// The one TCP port the run may connect to (the replay's, held on every
+    /// interface); None allows no outbound connection at all.
+    pub tcp_port: Option<u16>,
 }
 
 /// Resolve a path the way the kernel matches it (`/tmp` is `/private/tmp`),
@@ -86,7 +92,33 @@ impl Confinement {
                 .filter(|p| p.exists())
                 .map(|p| real(p))
                 .collect::<Result<_, _>>()?,
+            tcp_port: None,
         })
+    }
+
+    /// Allow outbound TCP to this one port (the caller holds it on every
+    /// interface).
+    pub fn allow_tcp(mut self, port: u16) -> Self {
+        self.tcp_port = Some(port);
+        self
+    }
+
+    /// Prove the profile applies here: a trivial program must run under it.
+    /// A boundary that cannot be set up refuses the run.
+    pub fn verify(&self) -> Result<(), String> {
+        let out = self
+            .command(Path::new("/usr/bin/true"))
+            .env_clear()
+            .output()
+            .map_err(|e| format!("{SANDBOX_EXEC}: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "the sandbox profile could not be applied ({}): {}; refusing to run unconfined",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
     }
 
     /// The Seatbelt profile. Later rules win, so each deny is followed by the
@@ -137,10 +169,10 @@ impl Confinement {
         format!(
             "(version 1)\n\
              (allow default)\n\
-             ; network: this machine only (no DNS, no other host)\n\
+             ; network: outbound TCP to the replay's held port only (no DNS, no other port or host)\n\
              (deny network*)\n\
              (allow network-bind network-inbound (local ip \"localhost:*\"))\n\
-             (allow network-outbound (remote ip \"localhost:*\"))\n\
+             {outbound}\
              (allow network* (local unix-socket (subpath {root})) (remote unix-socket (subpath {root})))\n\
              ; reads: nothing under a protected root but the run folder and the binaries\n\
              {protected}\
@@ -155,6 +187,10 @@ impl Confinement {
             reads = reads.join(" "),
             ancestors = rule("allow file-read-metadata", &ancestors),
             services = services.join(" "),
+            outbound = match self.tcp_port {
+                Some(p) => format!("(allow network-outbound (remote tcp \"localhost:{p}\"))\n"),
+                None => String::new(),
+            },
         )
     }
 
