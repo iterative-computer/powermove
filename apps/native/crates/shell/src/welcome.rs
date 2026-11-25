@@ -66,14 +66,28 @@ impl Button {
         self
     }
 }
-/// One mutually exclusive option: a card in a row of cards or a grouped-form row.
-#[derive(Clone, Debug, PartialEq)]
+/// One mutually exclusive option: a card in a row of cards or a row in a
+/// grouped list.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Choice {
     pub id: String,
     pub label: String,
     pub detail: Option<String>,
-    /// Illustration rows on a card, drawn with timeline clip recipes.
+    /// Illustration rows on a card, drawn with timeline clip recipes (the
+    /// Welcome window without the stage).
     pub lines: Vec<String>,
+    /// A mark beside the label: an SF Symbol or vendored glyph name, or
+    /// `powermove` for the Powermove mark.
+    pub mark: Option<String>,
+    /// A short tag beside the label ("Recommended").
+    pub badge: Option<String>,
+    /// A quiet value at the row's end (a download's size).
+    pub meta: Option<String>,
+    /// A small button at the row's end (Connect, Download); pressing it
+    /// sends `pill:<id>`.
+    pub pill: Option<String>,
+    /// What the row says in place of its button ("Connected · …").
+    pub status: Option<String>,
 }
 /// The first run's steps, shown on the Welcome: their names and the one
 /// under way (`None`: none yet).
@@ -350,6 +364,7 @@ mod tests {
             label: id.into(),
             detail: None,
             lines: vec![],
+            ..Choice::default()
         };
         let frame = Frame {
             choices: vec![choice("layers"), choice("tracks")],

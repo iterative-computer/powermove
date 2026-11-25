@@ -25,6 +25,7 @@ fn frame() -> Frame {
                 label: id.into(),
                 detail: None,
                 lines: vec!["1  Title".into()],
+                ..Choice::default()
             })
             .into(),
         buttons: vec![

@@ -84,13 +84,14 @@ impl WelcomeView {
         cx.notify();
     }
     /// The stage card's AppKit button for `button`, made once per label.
-    fn native_button(
+    fn native_control(
         &mut self,
         button: &welcome::Button,
-        primary: bool,
+        size: Size,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<NativeControl> {
+        let primary = size == Size::Primary;
         let key = (button.id.clone(), button.label.clone());
         if let Some(control) = self.natives.get(&key) {
             let disabled = !button.enabled;
@@ -125,10 +126,11 @@ impl WelcomeView {
                 cx,
             );
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
-            if primary && self.stage {
-                control.prominent(PRIMARY_WIDTH);
-            } else if self.stage {
-                control.extra_large();
+            match size {
+                Size::Primary if self.stage => control.prominent(PRIMARY_WIDTH),
+                Size::Secondary if self.stage => control.extra_large(),
+                Size::Pill => control.small(),
+                _ => {}
             }
             control
         });
@@ -205,7 +207,16 @@ impl WelcomeView {
         let primary = self.frame.default.as_deref() == Some(&button.id);
         if self.stage && crate::text::available(window) {
             return self
-                .native_button(button, primary, window, cx)
+                .native_control(
+                    button,
+                    if primary {
+                        Size::Primary
+                    } else {
+                        Size::Secondary
+                    },
+                    window,
+                    cx,
+                )
                 .into_any_element();
         }
         let t = &self.tokens;
@@ -420,6 +431,167 @@ impl WelcomeView {
             .px(px(PANEL_INSET))
             .child(action);
         div().relative().size_full().child(left).child(right)
+    }
+    /// The step's choices on the stage: one grouped list, a squircle
+    /// whose rows are cut apart by the panel's own ground. A row has its
+    /// mark, its name and one quiet line; at its end a size, what it says
+    /// of itself, a small native button (Connect, Download), and the
+    /// accent's check on the chosen one.
+    fn choice_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.tokens.clone();
+        let c = &t.colors;
+        let choices = self.frame.choices.clone();
+        let count = choices.len();
+        let mut group = div()
+            .id("welcome-choices")
+            .role(Role::RadioGroup)
+            .flex()
+            .flex_col()
+            .gap(px(LIST_CUT));
+        for (index, choice) in choices.iter().enumerate() {
+            let selected = self.frame.chosen.as_ref() == Some(&choice.id);
+            let id = choice.id.clone();
+            let (first, last) = (index == 0, index + 1 == count);
+            let mark = choice.mark.clone().map(|name| {
+                let glyph = if name == "powermove" {
+                    mark_glyph(14., c.accent).into_any_element()
+                } else {
+                    crate::symbol::symbol(
+                        &name,
+                        15.,
+                        crate::symbol::Weight::Regular,
+                        c.text,
+                        window,
+                    )
+                    .into_any_element()
+                };
+                div()
+                    .flex_none()
+                    .size(px(30.))
+                    .rounded(px(t.radius.nested(LIST_RADIUS, LIST_INSET)))
+                    .bg(rgba((c.text << 8) | 0x0f))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(glyph)
+            });
+            let pill = choice
+                .pill
+                .clone()
+                .map(|label| self.pill(&format!("pill:{}", choice.id), &label, window, cx));
+            let quiet = |text: String| {
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c.secondary))
+                    .child(text)
+            };
+            let row = div()
+                .id(SharedString::from(format!("choice-{}", choice.id)))
+                .debug_selector(|| format!("choice-{id}", id = id.clone()))
+                .role(Role::RadioButton)
+                .aria_label(choice.label.clone())
+                .aria_selected(selected)
+                .tab_index(0)
+                .min_h(px(LIST_ROW))
+                .px(px(LIST_INSET))
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .bg(rgba((c.text << 8) | 0x0c))
+                .hover(|s| s.bg(rgba((c.text << 8) | 0x13)))
+                .when(first, |d| {
+                    d.rounded_tl(px(LIST_RADIUS)).rounded_tr(px(LIST_RADIUS))
+                })
+                .when(last, |d| {
+                    d.rounded_bl(px(LIST_RADIUS)).rounded_br(px(LIST_RADIUS))
+                })
+                .rounded_smoothing(t.radius.smoothing)
+                .children(mark)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(c.text))
+                                .child(choice.label.clone())
+                                .children(choice.badge.clone().map(|badge| {
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(rgb(c.secondary))
+                                        .child(badge)
+                                })),
+                        )
+                        .children(choice.detail.clone().map(|detail| {
+                            div()
+                                .text_size(px(13.))
+                                .line_height(relative(1.35))
+                                .text_color(rgb(c.secondary))
+                                .child(detail)
+                        })),
+                )
+                .children(choice.meta.clone().map(quiet))
+                .children(choice.status.clone().map(quiet))
+                .children(pill)
+                .when(selected, |d| {
+                    d.child(crate::symbol::symbol(
+                        "checkmark",
+                        13.,
+                        crate::symbol::Weight::Semibold,
+                        c.accent,
+                        window,
+                    ))
+                })
+                .on_click(cx.listener(move |v, _, _, cx| v.act(&format!("choose:{id}"), cx)));
+            group = group.child(row);
+        }
+        group.into_any_element()
+    }
+    /// A row's small native button: `id` is its action.
+    fn pill(
+        &mut self,
+        id: &str,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button = welcome::Button::new(id, label);
+        if crate::text::available(window) {
+            return self
+                .native_control(&button, Size::Pill, window, cx)
+                .into_any_element();
+        }
+        // Headless (no AppKit): the same small capsule, drawn.
+        let t = &self.tokens;
+        let id = id.to_owned();
+        div()
+            .id(SharedString::from(format!("welcome-{id}")))
+            .role(Role::Button)
+            .aria_label(label.to_owned())
+            .flex_none()
+            .h(px(24.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .rounded_full()
+            .bg(rgba((t.colors.text << 8) | 0x1c))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(t.colors.text))
+            .child(label.to_owned())
+            .on_click(cx.listener(move |v, _, _, cx| v.act(&id, cx)))
+            .into_any_element()
     }
     /// The steps as a list down the left column: a numeral in a ring for
     /// each step to come, the step under way in the accent, a check for one
@@ -847,20 +1019,20 @@ impl Render for WelcomeView {
             .when(frame.top && !two, |d| d.h_full().gap(px(0.)))
             .when(two, |d| d.gap(px(0.)))
             .when(frame.centred && !two, |d| d.items_center().text_center());
-        // On the stage: the step's action, in the right column's panel.
-        let mut action = div()
+        // On the stage: the step's action, one group in the right column's
+        // panel.
+        let mut group = div()
             .relative()
             .flex()
             .flex_col()
-            .gap(px(m.gap + 4.))
+            .gap(px(14.))
             .w_full()
-            .flex_1()
             .min_h(px(0.));
         macro_rules! act {
             ($e:expr $(,)?) => {{
                 let e = $e;
                 if two {
-                    action = action.child(e);
+                    group = group.child(e);
                 } else {
                     content = content.child(e);
                 }
@@ -961,7 +1133,11 @@ impl Render for WelcomeView {
             act!(spaced(div().flex_none()).child(self.steps(&kit, sliding.then(|| self.time()))));
         }
         if !frame.choices.is_empty() {
-            act!(self.choices(&kit, cx));
+            if two {
+                group = group.child(self.choice_list(window, cx));
+            } else {
+                content = content.child(self.choices(&kit, cx));
+            }
         }
         // The rows and the names scroll together in the room left between the
         // header and the buttons; a fade at the bottom says there's more.
@@ -1039,7 +1215,9 @@ impl Render for WelcomeView {
             act!(
                 div()
                     .when(frame.top, |d| d.mt(px(t.space.xl)))
-                    .text_size(px(t.typography.body))
+                    // Under the grouped list, at its rows' inset.
+                    .when(two, |d| d.px(px(LIST_INSET)).mt(px(-4.)))
+                    .text_size(px(if two { 13. } else { t.typography.body }))
                     .line_height(relative(1.45))
                     .text_color(rgb(c.secondary))
                     .child(note.clone()),
@@ -1076,10 +1254,6 @@ impl Render for WelcomeView {
                 );
             }
         }
-        if two {
-            // The action stands on the panel's bottom line.
-            action = action.child(div().flex_1());
-        }
         let mut footer = div()
             .flex()
             .flex_none()
@@ -1087,7 +1261,7 @@ impl Render for WelcomeView {
             .items_center()
             .gap(px(m.gap))
             .pt(px(if two {
-                20.
+                0.
             } else if frame.top {
                 t.space.xl
             } else {
@@ -1104,11 +1278,27 @@ impl Render for WelcomeView {
         for button in frame.buttons.iter().filter(|b| !b.leading) {
             footer = footer.child(self.button(button, window, cx));
         }
-        act!(footer);
         let body = if two {
+            // The group stands in the middle of the panel; the action on
+            // its bottom line.
+            let action = div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .child(group),
+                )
+                .child(footer);
             self.columns(content, action, window).into_any_element()
         } else {
-            content.into_any_element()
+            content.child(footer).into_any_element()
         };
         // The accessibility tree hangs off an identified, labelled root, as in
         // the editor; without it VoiceOver sees only the traffic lights.
@@ -1205,6 +1395,22 @@ pub const LEFT_COLUMN: f32 = 340.;
 const COLUMN_TOP: f32 = 84.;
 const COLUMN_INSET: f32 = 40.;
 const PANEL_INSET: f32 = 40.;
+/// A native button's size on the stage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Size {
+    /// The step's one primary action: extra large, glass.
+    Primary,
+    /// An action beside it: extra large.
+    Secondary,
+    /// A row's small button (Connect, Download).
+    Pill,
+}
+/// The stage's grouped list: its corner (continuous), the row's least
+/// height and side inset, and the cut between rows (the panel's ground).
+const LIST_RADIUS: f32 = 28.;
+const LIST_ROW: f32 = 56.;
+const LIST_INSET: f32 = 20.;
+const LIST_CUT: f32 = 2.;
 /// A step's supporting line on the stage.
 const LINE_SIZE: f32 = 14.;
 /// The stage's one primary action per step: the extra-large glass button's
@@ -1433,12 +1639,14 @@ fn capture_utility_welcome() {
                             label: "Start Fresh".into(),
                             detail: None,
                             lines: vec!["Create a new library".into()],
+                            ..Choice::default()
                         },
                         Choice {
                             id: "import".into(),
                             label: "Bring Your Work".into(),
                             detail: None,
                             lines: vec!["Copy an existing library".into()],
+                            ..Choice::default()
                         },
                     ],
                     names: Some(Names {

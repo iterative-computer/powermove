@@ -421,7 +421,16 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
                 if let Some(step) = step {
                     let tokens = tokens.clone();
                     let _ = cx.update(|cx| {
-                        let next = card(step_frame(step, "layers", "chatgpt", None), tokens, cx);
+                        let next = card(
+                            step_frame(
+                                step,
+                                &crate::first_run::Choices::default(),
+                                &Default::default(),
+                                None,
+                            ),
+                            tokens,
+                            cx,
+                        );
                         stage.update(cx, |s, cx| s.set_card(next.clone(), cx));
                         let _ = window
                             .update(cx, |_, w, cx| next.update(cx, |c, cx| c.hold_focus(w, cx)));

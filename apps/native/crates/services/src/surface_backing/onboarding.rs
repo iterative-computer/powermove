@@ -45,7 +45,7 @@ impl Choice {
             Some(v) => {
                 let agent: Agent = serde_json::from_value(v.clone())?;
                 let bytes = agent.model.as_bytes();
-                if !["chatgpt", "claude", "compatible"].contains(&agent.provider.as_str())
+                if !["aero", "chatgpt", "claude", "compatible"].contains(&agent.provider.as_str())
                     || bytes.is_empty()
                     || bytes.len() > 120
                     || !bytes[0].is_ascii_alphanumeric()

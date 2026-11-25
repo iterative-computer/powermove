@@ -115,23 +115,23 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     assert!(flow.visible());
     let welcome = flow.frame();
     assert!(welcome.animate);
-    titled(&welcome, "Welcome to Powermove.");
+    titled(&welcome, "Welcome to Powermove");
     // Begin is enabled from the first frame, and skips the animation.
     assert_eq!(welcome.default_action(), Some("begin"));
     flow.action("begin");
-    titled(&flow.frame(), "Pick Your Timeline.");
+    titled(&flow.frame(), "Choose your timeline");
     flow.action("choose:tracks");
     assert_eq!(flow.frame().chosen.as_deref(), Some("tracks"));
     flow.action("continue");
-    titled(&flow.frame(), "Pick Your Agent.");
+    titled(&flow.frame(), "Choose your agent");
     flow.action("back");
-    titled(&flow.frame(), "Pick Your Timeline.");
+    titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
     flow.action("choose:claude");
     flow.action("continue");
-    titled(&flow.frame(), "Pick Your Speech Model.");
+    titled(&flow.frame(), "Choose your speech model");
     flow.action("continue");
-    titled(&flow.frame(), "Grab Your Suitcase.");
+    titled(&flow.frame(), "Grab your suitcase");
     let effects = flow.action("fresh");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
@@ -152,7 +152,7 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     start(&mut flow);
     flow.action("begin");
     flow.action("back");
-    titled(&flow.frame(), "Welcome to Powermove.");
+    titled(&flow.frame(), "Welcome to Powermove");
     for action in ["begin", "continue", "continue", "continue"] {
         flow.action(action);
     }
@@ -201,7 +201,7 @@ fn a_migrated_user_who_never_finished_onboarding_sees_it_after_the_copy() {
     source(&home.join(APPLICATION_SUPPORT));
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
-    titled(&flow.frame(), "Welcome to Powermove.");
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn outcomes_that_need_review_stop_on_the_summary() {
@@ -221,7 +221,7 @@ fn outcomes_that_need_review_stop_on_the_summary() {
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "Your Library Is Ready");
+    titled(&frame, "Your library is ready");
     assert_eq!(frame.rows.len(), 1);
     assert_eq!(frame.rows[0].severity, Severity::Note);
     assert!(
@@ -258,7 +258,7 @@ fn keychain_consent_is_asked_once_and_not_now_finishes_without_touching_it() {
     assert_eq!(effects, vec![Effect::Run(Run::SkipConsent)]);
     assert!(drive(&mut flow, effects).is_empty());
     let summary = flow.frame();
-    titled(&summary, "Your Library Is Ready");
+    titled(&summary, "Your library is ready");
     // Sign-ins left behind go to the report, never as a count on the gate.
     assert!(summary.rows.is_empty());
     assert!(summary.buttons.iter().any(|b| b.id == "show_report"));
@@ -366,7 +366,7 @@ fn pausing_stops_at_a_durable_boundary_and_resume_picks_up() {
         Some("Picking up where it stopped…")
     );
     assert!(drive(&mut flow, effects).is_empty());
-    titled(&flow.frame(), "Welcome to Powermove.");
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn low_disk_and_refused_profiles_say_so_with_real_numbers() {
@@ -675,7 +675,7 @@ fn opening_from_the_summary_happens_once_however_often_it_is_asked() {
     let (_temp, home) = home();
     let mut flow = finished_onboarding(&home);
     review(&mut flow, Ok(Default::default()));
-    titled(&flow.frame(), "Your Library Is Ready");
+    titled(&flow.frame(), "Your library is ready");
     assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
     // A double click, or Return held down.
     assert!(flow.action("open_native").is_empty());
@@ -702,7 +702,7 @@ fn an_unread_report_stops_on_the_summary_and_says_so() {
         Err("unreadable".into()),
     )));
     let frame = flow.frame();
-    titled(&frame, "Your Library Is Ready");
+    titled(&frame, "Your library is ready");
     assert!(frame.rows[0].text.contains("couldn’t be read"));
     assert!(frame.buttons.iter().any(|b| b.id == "show_report"));
 }

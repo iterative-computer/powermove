@@ -1421,6 +1421,16 @@ impl NativeControl {
         self.height = v.fittingSize().height as f32;
         self.width = width;
     }
+    /// A push button at the small size: a row's own button.
+    pub fn small(&mut self) {
+        let Control::Button(v) = &self.control else {
+            return;
+        };
+        v.setControlSize(NSControlSize::Small);
+        let fit = v.fittingSize();
+        self.height = fit.height as f32;
+        self.width = fit.width as f32;
+    }
     /// A push button beside a `prominent` one: the same extra-large size,
     /// as wide as its title needs.
     pub fn extra_large(&mut self) {

@@ -132,6 +132,9 @@ pub enum Finished {
 #[derive(Debug)]
 pub enum Message {
     Event(Event),
+    /// A provider's sign-in changed: its line on the agent step, `None`
+    /// for not connected.
+    Account(pm_agents::Provider, Option<String>),
     Finished(Finished),
     /// The waiting original app has gone; the copy can start.
     ElectronClosed,
@@ -192,15 +195,42 @@ pub enum Effect {
     RunExtensions,
     /// Not Now: remember it, so later launches don't ask again.
     DeclineExtensions,
+    /// Sign in to an agent's provider, as Settings › Providers does (the
+    /// provider's own sign-in, in the browser).
+    Connect(pm_agents::Provider),
     /// Bring in the recent work the person asked for, before the library opens.
     BringIn,
     /// Open without it: the request is withdrawn.
     WithdrawRequest,
 }
+/// The onboarding steps' choices so far.
 #[derive(Debug)]
-struct Choices {
-    timeline: String,
-    agent: String,
+pub(crate) struct Choices {
+    pub timeline: String,
+    /// The agent's provider: `aero` is Powermove's own harness.
+    pub agent: String,
+    /// The speech model to download once the library is open, or `later`.
+    pub speech: String,
+    /// `import` (bring the After Effects workspace) or `fresh`.
+    pub workspace: String,
+}
+impl Default for Choices {
+    fn default() -> Self {
+        Self {
+            timeline: "layers".into(),
+            agent: "aero".into(),
+            // Nothing downloads unless the person asks.
+            speech: LATER.into(),
+            workspace: "import".into(),
+        }
+    }
+}
+/// The speech step's "not now".
+const LATER: &str = "later";
+/// The speech model the first run offers: the catalogue's first recommended
+/// one (Parakeet Unified EN).
+fn speech_model() -> Option<pm_transcribe::store::Model> {
+    pm_transcribe::store::catalog().into_iter().find(|m| m.recommended)
 }
 pub struct Flow {
     pub model: Model,
@@ -219,6 +249,9 @@ pub struct Flow {
     extensions: Option<Extensions>,
     /// Recent work the person asked to bring in, before the library opens.
     recent: Option<Recent>,
+    /// The agent step's sign-ins, by provider: what each row says in place
+    /// of its Connect button.
+    accounts: std::collections::BTreeMap<String, String>,
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -230,10 +263,8 @@ impl Flow {
         Self {
             model,
             onboarding: None,
-            choices: Choices {
-                timeline: "layers".into(),
-                agent: "chatgpt".into(),
-            },
+            choices: Choices::default(),
+            accounts: Default::default(),
             details: None,
             low_disk: None,
             report_unread: false,
@@ -317,6 +348,13 @@ impl Flow {
     }
     pub fn message(&mut self, message: Message) -> Vec<Effect> {
         match message {
+            Message::Account(provider, line) => {
+                match line {
+                    Some(line) => self.accounts.insert(provider.name().into(), line),
+                    None => self.accounts.remove(provider.name()),
+                };
+                vec![]
+            }
             Message::Event(event) => {
                 if let Some(Recent::Running { step, progress }) = &mut self.recent {
                     match event {
@@ -525,6 +563,31 @@ impl Flow {
             match onboarding.step {
                 Onboard::Timeline => self.choices.timeline = choice.into(),
                 Onboard::Agent => self.choices.agent = choice.into(),
+                // The model's row: a second press takes the download back.
+                Onboard::Transcription => {
+                    self.choices.speech = if self.choices.speech == choice {
+                        LATER.into()
+                    } else {
+                        choice.into()
+                    }
+                }
+                Onboard::Workspace => self.choices.workspace = choice.into(),
+                _ => {}
+            }
+            return vec![];
+        }
+        // A row's button: Connect on an agent, Download on the model.
+        if let Some(row) = id.strip_prefix("pill:") {
+            match onboarding.step {
+                Onboard::Agent => {
+                    let provider = match row {
+                        "claude" => pm_agents::Provider::Claude,
+                        // Powermove's agent runs on the ChatGPT account too.
+                        _ => pm_agents::Provider::Chatgpt,
+                    };
+                    return vec![Effect::Connect(provider)];
+                }
+                Onboard::Transcription => self.choices.speech = row.into(),
                 _ => {}
             }
             return vec![];
@@ -533,6 +596,11 @@ impl Flow {
             "begin" => {
                 onboarding.welcome();
                 let _ = onboarding.advance();
+            }
+            // The last step's Continue does what its chosen card says.
+            "continue" if onboarding.step == Onboard::Workspace => {
+                let chosen = self.choices.workspace.clone();
+                return self.onboarding_action(&chosen);
             }
             "continue" => {
                 let _ = onboarding.advance();
@@ -553,9 +621,13 @@ impl Flow {
                     "model": match self.choices.agent.as_str() {
                         "claude" => "claude-opus",
                         "compatible" => "compatible",
+                        "aero" => "auto",
                         _ => "gpt-5",
                     },
                 });
+                if self.choices.speech != LATER {
+                    raw["speechModel"] = self.choices.speech.clone().into();
+                }
                 if id == "import" {
                     raw["workspaceImport"] = "after-effects".into();
                 }
@@ -717,12 +789,7 @@ impl Flow {
         }
     }
     fn onboarding_frame(&self, onboarding: &Onboarding) -> Frame {
-        step_frame(
-            onboarding.step,
-            &self.choices.timeline,
-            &self.choices.agent,
-            self.error.clone(),
-        )
+        step_frame(onboarding.step, &self.choices, &self.accounts, self.error.clone())
     }
     pub fn frame(&self) -> Frame {
         match (&self.entry, &self.onboarding) {
@@ -732,7 +799,7 @@ impl Flow {
             }
             (Entry::Entering, None) => Frame {
                 surface: "N003".into(),
-                title: "Your Library Is Ready".into(),
+                title: "Your library is ready".into(),
                 status: Some("Opening Powermove…".into()),
                 spinner: true,
                 ..Frame::default()
@@ -747,12 +814,27 @@ impl Flow {
 }
 
 /// An onboarding step's frame, with the person's choices so far.
-pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Option<String>) -> Frame {
-    let choice = |id: &str, label: &str, detail: Option<&str>, lines: &[&str]| Choice {
+pub(crate) fn step_frame(
+    step: Onboard,
+    choices: &Choices,
+    accounts: &std::collections::BTreeMap<String, String>,
+    error: Option<String>,
+) -> Frame {
+    let row = |id: &str, label: &str, detail: &str| Choice {
         id: id.into(),
         label: label.into(),
-        detail: detail.map(str::to_owned),
-        lines: lines.iter().map(|s| (*s).to_owned()).collect(),
+        detail: Some(detail.into()),
+        ..Choice::default()
+    };
+    // An agent's row: Connect, or what its sign-in says.
+    let agent = |id: &str, label: &str, detail: &str, mark: &str, account: &str| {
+        let status = accounts.get(account).cloned();
+        Choice {
+            mark: Some(mark.into()),
+            pill: status.is_none().then(|| "Connect".into()),
+            status,
+            ..row(id, label, detail)
+        }
     };
     let continuing = |frame: Frame| Frame {
         buttons: vec![Button::new("continue", "Continue")],
@@ -764,84 +846,117 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
         Onboard::Timeline => continuing(Frame {
             surface: "S108".into(),
             back: Some("Back to Welcome".into()),
-            title: "Pick Your Timeline.".into(),
+            title: "Choose your timeline".into(),
             outline: Some(steps_outline(Some(0))),
             line: "Work the way you already do. You can switch anytime from the timeline panel."
                 .into(),
-            cards: true,
             choices: vec![
-                choice(
-                    "layers",
-                    "Layers",
-                    None,
-                    &["1  Title", "2  Lower third", "3  B-roll", "4  Interview", "5  Music"],
-                ),
-                choice(
-                    "tracks",
-                    "Tracks",
-                    None,
-                    &["V2  Title, Lower third", "V1  Interview, B-roll", "A1  Music"],
-                ),
+                row("layers", "Layers", "A layer for each element, as in After Effects."),
+                row("tracks", "Tracks", "Clips on tracks, as in Premiere Pro."),
             ],
-            chosen: Some(timeline.to_owned()),
+            chosen: Some(choices.timeline.clone()),
             ..Frame::default()
         }),
         Onboard::Agent => continuing(Frame {
             surface: "S109".into(),
             back: Some("Back to Timeline Choice".into()),
-            title: "Pick Your Agent.".into(),
+            title: "Choose your agent".into(),
             outline: Some(steps_outline(Some(1))),
             line: "It builds what you ask for, right in the editor. You can switch anytime from the agent’s composer."
                 .into(),
             choices: vec![
-                choice("chatgpt", "ChatGPT", Some("Uses your ChatGPT plan through Codex."), &[]),
-                choice("claude", "Claude", Some("Uses your Claude plan through Claude Code."), &[]),
-                choice(
-                    "compatible",
-                    "API or Local Model",
-                    Some("Any OpenAI-compatible API, Ollama or LM Studio. Connect it in Settings."),
-                    &[],
+                Choice {
+                    badge: Some("Recommended".into()),
+                    ..agent(
+                        "aero",
+                        "Powermove",
+                        "Built for Powermove, on ChatGPT or an API key.",
+                        "powermove",
+                        "chatgpt",
+                    )
+                },
+                agent("chatgpt", "Codex", "Uses your ChatGPT account.", "provider.chatgpt", "chatgpt"),
+                agent(
+                    "claude",
+                    "Claude Code",
+                    "Uses your Claude account or an Anthropic key.",
+                    "provider.claude",
+                    "claude",
                 ),
             ],
-            chosen: Some(agent.to_owned()),
+            chosen: Some(choices.agent.clone()),
+            note: Some("Accounts stay in Settings › Providers.".into()),
             ..Frame::default()
         }),
-        Onboard::Transcription => continuing(Frame {
-            surface: "S109".into(),
-            back: Some("Back to Agent Choice".into()),
-            title: "Pick Your Speech Model.".into(),
-            outline: Some(steps_outline(Some(2))),
-            line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
-                .into(),
-            // Models download from Settings › Transcription (S092) and the
-            // Generate Captions sheet (S091); S109's in-flow chooser isn't built.
-            status: Some("Speech models can be downloaded later from Settings.".into()),
-            ..Frame::default()
-        }),
-        Onboard::Workspace => Frame {
+        Onboard::Transcription => {
+            let mut rows = vec![];
+            if let Some(model) = speech_model() {
+                let queued = choices.speech == model.id;
+                let size = pm_transcribe::store::format_bytes(model.size());
+                rows.push(Choice {
+                    mark: Some("waveform".into()),
+                    pill: (!queued).then(|| "Download".into()),
+                    status: queued.then(|| format!("Downloads once you’re in · {size}")),
+                    meta: (!queued).then_some(size),
+                    ..row(
+                        &model.id,
+                        &model.name,
+                        &format!("{} Runs on this Mac.", model.description),
+                    )
+                });
+            }
+            continuing(Frame {
+                surface: "S109".into(),
+                back: Some("Back to Agent Choice".into()),
+                title: "Choose your speech model".into(),
+                outline: Some(steps_outline(Some(2))),
+                line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
+                    .into(),
+                choices: rows,
+                // The model row shows its download, not a selection.
+                chosen: None,
+                note: Some("More models in Settings › Transcription.".into()),
+                ..Frame::default()
+            })
+        }
+        Onboard::Workspace => continuing(Frame {
             surface: "S110".into(),
             back: Some("Back to Speech Model Choice".into()),
-            eyebrow: Some("After Effects".into()),
-            title: "Grab Your Suitcase.".into(),
+            title: "Grab your suitcase".into(),
             outline: Some(steps_outline(Some(3))),
             line: "Bring your panels and tools along. Your agent will unpack them in Powermove."
                 .into(),
-            error: error,
-            buttons: vec![
-                Button::new("fresh", "Start Fresh"),
-                Button::new("import", "Bring My Workspace"),
+            error,
+            choices: vec![
+                row("import", "Bring my workspace", "Your After Effects panels and tools, unpacked here."),
+                row("fresh", "Start fresh", "Powermove’s own layout. Bring things in later."),
             ],
-            default: Some("import".into()),
+            chosen: Some(choices.workspace.clone()),
             ..Frame::default()
-        },
+        }),
         Onboard::Starting | Onboard::Complete => Frame {
             surface: "S110".into(),
-            title: "Grab Your Suitcase.".into(),
+            title: "Grab your suitcase".into(),
             outline: Some(steps_outline(Some(4))),
             status: Some("Opening Powermove…".into()),
             spinner: true,
             ..Frame::default()
         },
+    }
+}
+
+/// What an agent's row says in place of its Connect button, as Settings ›
+/// Providers says it: `None` while it is not connected.
+fn account_line(status: &pm_agents::account::Status) -> Option<String> {
+    use pm_agents::account::State;
+    match status.state {
+        State::Connected => Some(match status.email.as_ref().or(status.plan.as_ref()) {
+            Some(who) => format!("Connected · {who}"),
+            None => "Connected".into(),
+        }),
+        State::Connecting => Some("Finish in your browser…".into()),
+        State::Checking => Some("Checking…".into()),
+        State::Disconnected | State::Unavailable => None,
     }
 }
 
@@ -870,8 +985,7 @@ pub(crate) fn welcome_frame() -> Frame {
     Frame {
         surface: "S107".into(),
         animate: true,
-        // Two lines, as v1.2.0 (read as one sentence).
-        title: "Welcome to\nPowermove.".into(),
+        title: "Welcome to Powermove".into(),
         line: "Four quick choices, then your editor.\nYou can change any of them later.".into(),
         outline: Some(steps_outline(None)),
         centred: true,
@@ -1163,6 +1277,7 @@ pub fn gate(
             flow: Rc::new(RefCell::new(Flow::new(plan))),
             window: Rc::default(),
             tx,
+            accounts: Rc::default(),
         };
         driver.begin(rx, cx);
     })
@@ -1197,6 +1312,9 @@ struct Driver {
     flow: Rc<RefCell<Flow>>,
     window: Rc<RefCell<Option<GateWindow>>>,
     tx: async_channel::Sender<Message>,
+    /// The agent step's sign-ins, made when a person first presses Connect
+    /// (nothing reads an account before that).
+    accounts: Rc<RefCell<Option<Arc<pm_agents::account::Accounts>>>>,
 }
 /// Where the first run shows: the stage on the launch that onboards (the
 /// film, then the steps on its card), else the Welcome window.
@@ -1223,6 +1341,35 @@ pub fn play_sound(id: &str, _: &mut gpui::App) {
     }
 }
 impl Driver {
+    /// Settings › Providers' sign-in for `provider`, from the agent step.
+    fn connect(&self, provider: pm_agents::Provider) {
+        let mut slot = self.accounts.borrow_mut();
+        let accounts = slot.get_or_insert_with(|| {
+            let environment = pm_agents::launch::Environment::current(
+                self.library.plan.profile.clone(),
+                pm_mcp::catalog::names(),
+                pm_mcp::catalog::composition_names(),
+            );
+            let tx = self.tx.clone();
+            let accounts = Arc::new(std::sync::OnceLock::<std::sync::Weak<pm_agents::account::Accounts>>::new());
+            let reader = accounts.clone();
+            let made = pm_agents::account::Accounts::new(
+                environment,
+                Arc::new(pm_agents::account::open_in_browser),
+                Arc::new(move || {
+                    let Some(accounts) = reader.get().and_then(std::sync::Weak::upgrade) else {
+                        return;
+                    };
+                    for provider in [pm_agents::Provider::Chatgpt, pm_agents::Provider::Claude] {
+                        let _ = tx.try_send(Message::Account(provider, account_line(&accounts.status(provider))));
+                    }
+                }),
+            );
+            let _ = accounts.set(Arc::downgrade(&made));
+            made
+        });
+        accounts.connect(provider);
+    }
     fn begin(self, rx: async_channel::Receiver<Message>, cx: &mut gpui::App) {
         let effects = self.flow.borrow_mut().start();
         self.show(cx);
@@ -1354,6 +1501,7 @@ impl Driver {
     fn apply(&self, effects: Vec<Effect>, cx: &mut gpui::App) {
         for effect in effects {
             match effect {
+                Effect::Connect(provider) => self.connect(provider),
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {
@@ -1566,6 +1714,15 @@ impl Library {
                     });
             }
             write_marker(&self.plan.profile, &choices)?;
+            // The speech model the person chose downloads while they work.
+            if let Some(id) = choices["speechModel"].as_str() {
+                crate::transcription::install(&self.plan.profile);
+                if let Some(store) = crate::transcription::store()
+                    && let Err(error) = store.download(id)
+                {
+                    eprintln!("The speech model couldn’t start downloading: {error}");
+                }
+            }
         }
         Ok(Opened {
             bring_workspace: choices_bring_workspace,
@@ -1647,3 +1804,59 @@ fn stop_chime() {
 #[cfg(test)]
 #[path = "first_run_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod step_frame_tests {
+    use super::*;
+
+    /// The agent rows offer Connect until a sign-in answers; Powermove's
+    /// row follows the ChatGPT account it runs on.
+    #[test]
+    fn agent_rows_connect_and_show_a_sign_in() {
+        let choices = Choices::default();
+        let none = Default::default();
+        let frame = step_frame(Onboard::Agent, &choices, &none, None);
+        let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["aero", "chatgpt", "claude"]);
+        assert_eq!(frame.chosen.as_deref(), Some("aero"));
+        assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
+        let signed = std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected · a@b.c".to_owned())]);
+        let frame = step_frame(Onboard::Agent, &choices, &signed, None);
+        for (choice, connected) in frame.choices.iter().zip([true, true, false]) {
+            assert_eq!(choice.pill.is_none(), connected, "{}", choice.id);
+            assert_eq!(choice.status.is_some(), connected, "{}", choice.id);
+        }
+    }
+
+    /// The speech model downloads only when asked: its row offers Download,
+    /// then says it will download once the person is in.
+    #[test]
+    fn the_speech_model_downloads_only_when_asked() {
+        let mut choices = Choices::default();
+        let none = Default::default();
+        let frame = step_frame(Onboard::Transcription, &choices, &none, None);
+        let row = &frame.choices[0];
+        assert_eq!(row.pill.as_deref(), Some("Download"));
+        assert!(row.status.is_none());
+        choices.speech = row.id.clone();
+        let frame = step_frame(Onboard::Transcription, &choices, &none, None);
+        assert!(frame.choices[0].pill.is_none());
+        assert!(frame.choices[0].status.as_deref().is_some_and(|s| s.starts_with("Downloads once")));
+    }
+
+    /// Every step's title is sentence case without a full stop.
+    #[test]
+    fn step_titles_are_sentence_case() {
+        let choices = Choices::default();
+        let none = Default::default();
+        for step in [Onboard::Welcome, Onboard::Timeline, Onboard::Agent, Onboard::Transcription, Onboard::Workspace] {
+            let title = step_frame(step, &choices, &none, None).title;
+            assert!(!title.ends_with('.'), "{title}");
+            let words: Vec<_> = title.split(' ').skip(1).collect();
+            assert!(
+                words.iter().all(|w| w.chars().next().is_some_and(char::is_lowercase) || *w == "Powermove"),
+                "{title}"
+            );
+        }
+    }
+}
