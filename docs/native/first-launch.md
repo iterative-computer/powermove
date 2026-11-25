@@ -59,7 +59,7 @@ in a folder macOS protects (Desktop, Documents, Downloads, iCloud Drive, cloud s
 other volumes; matched after resolving symlinked ancestors) goes through
 `pm_native_migrate::source_access`. Each folder has a persisted `Outcome` in
 `migration.json` (`folder_outcomes`): a folder without one is never opened. In the
-foreground it is named in `Allow Access to Your Media` (`Outcome::NeedsFolderAccess`, then
+foreground it is named in `Allow access to your media` (`Outcome::NeedsFolderAccess`, then
 `run_with_folder_access`), and Continue/Skip answer only the folders shown. An allowed
 open runs on a helper thread; an unanswered prompt shows `Waiting for macOS` with `Skip
 These Files` and is abandoned after two minutes (`Unanswered`, never retried silently).

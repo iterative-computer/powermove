@@ -22,16 +22,16 @@ quits the app. Quitting at any point is safe, and the next launch resumes.
 
 | `Event` / state | Title | Line | Status block | Buttons |
 |---|---|---|---|---|
-| `WaitingForElectron`, local | `Quit the Original App to Continue` | `Powermove copies your library while the original app is closed. Save your work there and quit it.` | spinner + `Waiting for the original app to quit…` | none; continues by itself |
-| Owner unknown or on another Mac | `The Original App Might Still Be Open` | `It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.` | | `Check Again` (default) |
-| Checkpoint | `Copying Your Library` | `Your original app stays unchanged, and this copy never replaces it.` | step status + step card | `Pause` |
-| `NeedsFolderAccess` | `Allow Access to Your Media` | `Some of your original media is in {folders}, which macOS protects. When you continue, macOS asks whether Powermove can open them. Choose Allow.` | card: folder, file count | `Skip These Files`, `Continue` (default) |
+| `WaitingForElectron`, local | `Quit the original app to continue` | `Powermove copies your library while the original app is closed. Save your work there and quit it.` | spinner + `Waiting for the original app to quit…` | none; continues by itself |
+| Owner unknown or on another Mac | `The original app might still be open` | `It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.` | | `Check Again` (default) |
+| Checkpoint | `Copying your library` | `Your original app stays unchanged, and this copy never replaces it.` | step status + step card | `Pause` |
+| `NeedsFolderAccess` | `Allow access to your media` | `Some of your original media is in {folders}, which macOS protects. When you continue, macOS asks whether Powermove can open them. Choose Allow.` | card: folder, file count | `Skip These Files`, `Continue` (default) |
 | Folder prompt unanswered | `Waiting for macOS` | `macOS is asking whether Powermove can open your files in {folder}. Choose Allow in its dialog. If you don’t see it, it may be behind this window.` | spinner + `Waiting for your answer…` | `Skip These Files` (no default) |
 | Interrupted, resumed | same | same | `Picking up where it stopped…` then the step | `Pause` |
-| Paused | `Copying Is Paused` | `It picks up where it stopped. You can quit and come back.` | step, frozen `ProgressRow` | `Resume` (default) |
-| Low disk | `Not Enough Space` | `Powermove needs {needed} free to copy your library, and this Mac has {available}. Nothing was deleted.` | | `Check Again` (default) |
-| Failed | `Copying Stopped` | `Your original app and library weren’t changed. {ServiceErrorCode informative}` | `Details` disclosure | `Try Again` (default) |
-| Profile refused | `Powermove Can’t Start` | `Its library folder isn’t usable. Your original app wasn’t changed.` | `Details` disclosure | `Quit Powermove` |
+| Paused | `Copying is paused` | `It picks up where it stopped. You can quit and come back.` | step, frozen `ProgressRow` | `Resume` (default) |
+| Low disk | `Not enough space` | `Powermove needs {needed} free to copy your library, and this Mac has {available}. Nothing was deleted.` | | `Check Again` (default) |
+| Failed | `Copying stopped` | `Your original app and library weren’t changed. {ServiceErrorCode informative}` | `Details` disclosure | `Try Again` (default) |
+| Profile refused | `Powermove can’t start` | `Its library folder isn’t usable. Your original app wasn’t changed.` | `Details` disclosure | `Quit Powermove` |
 
 **Steps**, from `Event::Started`/`Progress`, as a Settings-style card (title left, value
 right, inset hairlines, the running row's bar under it): `Library snapshot` (bytes),
@@ -44,13 +44,13 @@ bar. The status line says what's happening (`Taking a snapshot of your library�
 Names and paths never appear here: the event carries counts only.
 
 `Pause` shows `Pausing…` with Pause disabled until the copy reaches a safe stop, then
-`Copying Is Paused`.
+`Copying is paused`.
 
 `Details` shows selectable `MONO_FONT` text and goes to the Error Log. No secret or user
 path is included. There is no editor during the gate, so its copy points at Details, never
 at a menu.
 
-**The library won't open.** Title `Your Library Couldn’t Open`, line `Nothing was changed.
+**The library won't open.** Title `Your library couldn’t open`, line `Nothing was changed.
 If Powermove is open in another window or on another account, quit it, then try
 again.`, Details, `Quit Powermove` and `Try Again`. This also opens the window on a
 launch that had none. The editor never opens without its library.
@@ -76,10 +76,10 @@ person chooses to.
 
 | State | Title | Line | Buttons |
 |---|---|---|---|
-| `NeedsSecretConsent{interrupted: false}` | `Keep Your Sign-Ins` | `secrets::PROMPT` verbatim: `Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| `NeedsSecretConsent{interrupted: false}` | `Keep your sign-ins` | `secrets::PROMPT` verbatim: `Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
 | Waiting for the system | same | same; status `Waiting for macOS…` | disabled |
-| Denied or cancelled | `Keychain Access Wasn’t Allowed` | `Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.` | `Continue Without Them` (default), `Try Again` |
-| `interrupted: true` | `The Keychain Request Didn’t Finish` | `Powermove stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| Denied or cancelled | `Keychain access wasn’t allowed` | `Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.` | `Continue Without Them` (default), `Try Again` |
+| `interrupted: true` | `The Keychain request didn’t finish` | `Powermove stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
 | Partly imported | no extra screen; N003 lists the rest | | |
 
 `Continue` here is deliberately the default: it opens a system prompt, which is the

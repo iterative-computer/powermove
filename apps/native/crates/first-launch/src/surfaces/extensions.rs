@@ -161,7 +161,7 @@ impl Model {
         ) = match self.gate {
             Gate::Offer => (
                 "N004",
-                "Bring In Your Extensions".into(),
+                "Bring in your extensions".into(),
                 format!(
                     "The original app has {} that {} in Powermove yet. {UNTOUCHED}",
                     extensions(self.offered()),
@@ -186,7 +186,7 @@ impl Model {
             ),
             Gate::Running => (
                 "N005",
-                "Bringing In Your Extensions".into(),
+                "Bringing in your extensions".into(),
                 UNTOUCHED.into(),
                 vec![],
                 None,
@@ -220,7 +220,7 @@ impl Model {
             }
             Gate::Failed => (
                 "N006",
-                "Your Extensions Couldn’t Be Brought In".into(),
+                "Your extensions couldn’t be brought in".into(),
                 if startup {
                     "Nothing in your library changed. You can open it now and try again later from Settings › Storage.".into()
                 } else {

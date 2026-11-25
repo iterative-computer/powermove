@@ -59,7 +59,7 @@ fn n004_leads_with_the_count_shows_skips_in_full_and_lists_the_rest_by_name() {
     let model = Model::offer(scan(), Place::Startup).named(names());
     let view = model.view();
     assert_eq!(view.surface, "N004");
-    assert_eq!(view.title, "Bring In Your Extensions");
+    assert_eq!(view.title, "Bring in your extensions");
     assert!(
         view.line
             .starts_with("The original app has 45 extensions that aren’t in Powermove yet."),
@@ -219,7 +219,7 @@ fn n006_a_stopped_transfer_says_nothing_changed_and_still_opens_the_library() {
     ));
     let view = model.view();
     assert_eq!(model.gate, Gate::Failed);
-    assert_eq!(view.title, "Your Extensions Couldn’t Be Brought In");
+    assert_eq!(view.title, "Your extensions couldn’t be brought in");
     assert!(view.line.starts_with("Nothing in your library changed."));
     assert_eq!(ids(&model), ["try_again", "open_native"]);
     assert_eq!(view.default, Some("open_native"));

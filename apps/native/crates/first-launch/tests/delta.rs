@@ -629,7 +629,7 @@ fn the_app_and_the_coordinator_share_one_profile_layout() {
 }
 
 #[test]
-fn a_finished_onboarding_comes_across_from_the_original_app() {
+fn the_original_apps_onboarding_marker_comes_across_but_does_not_finish_ours() {
     let t = tempdir().unwrap();
     let config = profile(t.path());
     write(
@@ -637,7 +637,10 @@ fn a_finished_onboarding_comes_across_from_the_original_app() {
         &json!({"version":1,"timeline":"layers"}),
     );
     run(&config, |_| Ok(())).unwrap();
-    assert!(onboarding_completed(&config.native_profile));
+    // It comes across with the library, but this app's onboarding still
+    // runs: only its own marker stands for that.
+    assert!(config.native_profile.join("onboarding-v1.json").is_file());
+    assert!(!onboarding_completed(&config.native_profile));
 }
 
 #[test]

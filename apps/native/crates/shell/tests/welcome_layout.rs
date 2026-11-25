@@ -55,7 +55,7 @@ fn summary(overflow: bool) -> Frame {
     Frame {
         surface: "N006".into(),
         top: true,
-        eyebrow: Some("Extensions From the Original App".into()),
+        eyebrow: Some("Extensions from the original app".into()),
         title: "Your Extensions Are In".into(),
         line: "One couldn’t load. The reason is below. Your original app stays unchanged.".into(),
         stats: vec![stat("45", "Brought in"), stat("1", "Skipped")],
@@ -187,13 +187,13 @@ fn keychain_failure_and_retry_surfaces_render_headlessly() {
         for (name, title, line, retry) in [
             (
                 "keychain-missing",
-                "Keychain Access Wasn’t Allowed",
+                "Keychain access wasn’t allowed",
                 "The original app’s sign-in key wasn’t found in your Keychain. Open the original app and sign in, then try again. Your sign-ins and extension values stay in the original app. You can continue and sign in here.",
                 true,
             ),
             (
                 "keychain-consent",
-                "Keep Your Sign-Ins",
+                "Keep your sign-ins",
                 "Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.",
                 false,
             ),

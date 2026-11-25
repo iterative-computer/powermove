@@ -79,13 +79,11 @@ impl Plan {
         // A development review may walk onboarding on an isolated profile.
         let review =
             cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ONBOARDING").is_some();
-        // A launch that copies the original app's library is a first run
-        // here too: the intro and the steps follow the copy, whatever the
-        // original app recorded (its onboarding marker comes across with
-        // the library, `onboarding_completed`).
-        let first_here = launch == Launch::Migrate || !onboarding_completed(&profile);
+        // Until this app's own onboarding finishes (its marker, never the
+        // original app's, which comes across with a copied library): a
+        // copy, or a quit in the middle of the steps, still leads to them.
         Some(Self {
-            onboard: (!isolated || review) && first_here,
+            onboard: (!isolated || review) && !onboarding_completed(&profile),
             config,
             original,
             profile,
@@ -792,6 +790,8 @@ impl Flow {
                 })
                 .collect(),
             default: view.default.map(str::to_owned),
+            // On the stage, the library it fills: Home's recent projects.
+            preview: Some("home".into()),
             ..Frame::default()
         }
     }
@@ -809,6 +809,7 @@ impl Flow {
                 title: pm_first_launch::surfaces::migration::LIBRARY_READY.into(),
                 status: Some("Opening Powermove…".into()),
                 spinner: true,
+                preview: Some("home".into()),
                 ..Frame::default()
             },
             (_, Some(onboarding)) => self.onboarding_frame(onboarding),
@@ -1002,7 +1003,7 @@ pub(crate) fn welcome_frame() -> Frame {
 fn library_failed_frame(details: &str) -> Frame {
     Frame {
         surface: "N001".into(),
-        title: "Your Library Couldn’t Open".into(),
+        title: "Your library couldn’t open".into(),
         line: "Nothing was changed. If Powermove is open in another window or on another account, quit it, then try again.".into(),
         details: Some(details.to_owned()),
         buttons: vec![
@@ -1027,7 +1028,7 @@ fn recent_frame(recent: &Recent) -> Frame {
             };
             Frame {
                 surface: "N001".into(),
-                title: "Bringing In Recent Work".into(),
+                title: "Bringing in recent work".into(),
                 line: "Your original app stays unchanged.".into(),
                 status: Some(match progress {
                     Some((done, total)) => format!("{doing}… {done} of {total}"),
@@ -1040,7 +1041,7 @@ fn recent_frame(recent: &Recent) -> Frame {
         }
         Recent::Waiting => Frame {
             surface: "N001".into(),
-            title: "Quit the Original App".into(),
+            title: "Quit the original app".into(),
             line: "Powermove brings in your recent work once the original app is closed. The original app stays unchanged.".into(),
             status: Some("Waiting for the original app to quit…".into()),
             spinner: true,
@@ -1053,7 +1054,7 @@ fn recent_frame(recent: &Recent) -> Frame {
             details,
         } => Frame {
             surface: "N001".into(),
-            title: "Recent Work Couldn’t Come In".into(),
+            title: "Recent work couldn’t come in".into(),
             line: match low_disk {
                 Some((needed, available)) => format!(
                     "It needs {needed} free on this Mac, and there’s {available}. Nothing in the original app changed. You can try again from Settings › Storage."
@@ -1227,8 +1228,9 @@ pub fn write_marker(profile: &Path, choices: &serde_json::Value) -> std::io::Res
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let mut record = choices.clone();
     record["version"] = 1.into();
-    let target = profile.join("onboarding-v1.json");
-    let temporary = profile.join(format!("onboarding-v1.json.{}.tmp", std::process::id()));
+    let marker = pm_first_launch::ONBOARDING_MARKER;
+    let target = profile.join(marker);
+    let temporary = profile.join(format!("{marker}.{}.tmp", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1442,7 +1444,10 @@ impl Driver {
                 // window the copy runs in; the steps follow the copy.
                 let (staged, intro) = {
                     let flow = self.flow.borrow();
-                    (flow.plan.onboard, frame.animate || flow.plan.launch == Launch::Migrate)
+                    (
+                        flow.plan.onboard,
+                        frame.animate || flow.plan.launch == Launch::Migrate,
+                    )
                 };
                 let staged = staged
                     && crate::first_run_stage::open(

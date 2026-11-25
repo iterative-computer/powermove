@@ -1484,6 +1484,7 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
     }
     let bytes: &'static [u8] = match id {
         "welcome" => include_bytes!("../assets/onboarding/welcome.png"),
+        "home" => include_bytes!("../assets/onboarding/home.png"),
         "workspace" => include_bytes!("../assets/onboarding/workspace.png"),
         "timeline-layers" => include_bytes!("../assets/onboarding/timeline-layers.png"),
         "timeline-tracks" => include_bytes!("../assets/onboarding/timeline-tracks.png"),

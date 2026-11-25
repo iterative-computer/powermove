@@ -138,7 +138,7 @@ pub struct Frame {
     /// The Welcome's preview of the steps ahead.
     pub outline: Option<Outline>,
     /// On the stage: the product picture beside the step (`welcome_view::
-    /// preview`): `welcome`, `workspace`, `timeline-layers`, `timeline-tracks`, `agent`
+    /// preview`): `welcome`, `home`, `workspace`, `timeline-layers`, `timeline-tracks`, `agent`
     /// or `speech`.
     pub preview: Option<String>,
 }

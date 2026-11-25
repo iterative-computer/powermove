@@ -6,7 +6,7 @@ Rows N004 N005 N006. Grammar: [README](README.md) §1–5, and the gate in
 reasons). App: `crates/app/src/extension_transfer.rs`, `first_run.rs`, `storage.rs`.
 
 No new tokens. Reuses the Welcome window frame (S107) with an eyebrow,
-`Extensions From the Original App`.
+`Extensions from the original app`.
 
 ## When it shows
 
@@ -50,7 +50,7 @@ in full, and lists the rest by name only.
 
 | | |
 |---|---|
-| Title | `Bring In Your Extensions` |
+| Title | `Bring in your extensions` |
 | Line | `The original app has {n} extensions that aren’t in Powermove yet. Only extensions are copied. Your projects, settings and sign-ins stay as they are.` |
 | Counts | `New`, `Updated`, `Already in Powermove`, `Skipped` (non-zero only) |
 | Exceptions | `Not Brought In`: each skipped extension and why (`info.circle`) |
@@ -64,7 +64,7 @@ clears it, so something added to the original app later is offered at startup.
 
 ## N005 Bringing in
 
-Title `Bringing In Your Extensions`, the same line. One card row with the running bar:
+Title `Bringing in your extensions`, the same line. One card row with the running bar:
 `Copying` then `Checking that it loads`, with the extension's display name as the
 value. The engine copies every extension, then checks each one loads in a throwaway
 runtime (never the open project), with its declared dependencies installed first. No
@@ -77,7 +77,7 @@ buttons: it is quick, and quitting is safe.
 | Something brought in | `Your Extensions Are In` | `Each one was checked and loads.` / `One couldn’t load. The reason is below.` / `{n} couldn’t load. The reasons are below.` |
 | Nothing new | `Nothing New to Bring In` | `They were already in Powermove.` |
 | Only failures | `Your Extensions Couldn’t Load` | as above |
-| Stopped (folder unreadable, locked) | `Your Extensions Couldn’t Be Brought In` | `Nothing in your library changed.` |
+| Stopped (folder unreadable, locked) | `Your extensions couldn’t be brought in` | `Nothing in your library changed.` |
 
 Every line ends `Your original app stays unchanged.` Counts: `Brought in`, `Couldn’t
 load`, `Already in Powermove`, `Skipped`. Exceptions in order: couldn't load
