@@ -1,8 +1,8 @@
 //! The intro's picture at a time, from the cue sheet: where the mark is and
-//! how it is lit (`light::Light`), the credit, and the wordmark. Geometry is
-//! Dia's measured disc normalised to the mark: it starts 5.96 times its
-//! resting size with its top at the bottom edge, and comes to rest at the
-//! centre of the screen.
+//! how it is lit (`light::Light`), the credit, and the wordmark. Geometry
+//! follows Dia's measured disc on its curves, normalised to the mark: it
+//! starts 2.5 times its resting size (Dia's ×5.96) with its top at the
+//! bottom edge, and comes to rest at the centre of the screen.
 use super::cue::{CueSheet, smooth};
 use super::light::Light;
 use gpui::{prelude::*, *};
@@ -13,11 +13,14 @@ use pm_design::{TEXT_FONT, Tokens};
 pub const REST_HEIGHT: f64 = 0.235;
 /// Its resting centre (Dia's disc rests at 0.4997).
 pub const REST_Y: f64 = 0.5;
-/// At launch the mark is 1.5 times its resting size (Dia's disc is ×5.96:
+/// At launch the mark is 2.5 times its resting size (Dia's disc is ×5.96:
 /// at that size the mark's stem reads as a spike, not as light) with its apex
 /// at the bottom edge; before it, only its glow crests the edge, like a
 /// horizon, as it creeps up from below (Dia's creep curve).
-const LAUNCH_SCALE: f64 = 1.5;
+const LAUNCH_SCALE: f64 = 2.5;
+/// While white-hot the outline is this soft, in mark units, so the bloom
+/// carries the silhouette and the thin apex never shows as a white spike.
+const HOT_SOFTNESS: f64 = 15.;
 const LAUNCH_TOP: f64 = 1.0;
 const CREEP_TOP: f64 = 1.09;
 /// The outline's top (the tip's curve, above its anchors at −54.9) and
@@ -92,16 +95,18 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
     // The light leads the shape while it is white-hot: a soft outline that
     // resolves as the exposure comes down.
     let soft = if motion {
-        0.045 * h * (1. - settled)
+        HOT_SOFTNESS * m.unit * h * (1. - settled)
     } else {
         0.
     };
-    // The room's light: Dia's room light going down, then lower again as the
-    // mark lands.
+    // The room's light: Dia's room light going down, then down hard to
+    // near-black as the mark rises, so the mark is the only light (Dia's
+    // room drops to deep navy).
     let atmosphere = if motion {
-        (1. - 0.57 * s.dim.at(t)) * (1. - 0.55 * settled)
+        (1. - 0.57 * s.dim.at(t)) * (1. - 0.93 * smooth(1.6 * s.rise.at(t)))
     } else {
-        0.3
+        // Still: the room goes down as the mark fades in.
+        0.3 * (1. - 0.85 * smooth((t - s.credit.2.at) / 1.2))
     };
     Light {
         size: [size.0, size.1],
@@ -111,8 +116,10 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
         bloom: bloom as f32,
         edge: edge as f32,
         pool: pool as f32,
+        // The body comes up with its glow as the creep begins: before it,
+        // the swollen white-hot outline would show at the edge unlit.
         mark: if motion {
-            1.
+            smooth(creep / 0.12) as f32
         } else {
             smooth((t - s.credit.2.at) / 1.2) as f32
         },
