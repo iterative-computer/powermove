@@ -1088,7 +1088,7 @@ impl Exec<'_> {
     // resource still in use, including inputs to the rest of the frame.
     fn trim_vector_before_effect(&mut self, encoder: &mut wgpu::CommandEncoder, rect: Region) {
         const LARGE_EFFECT_PIXELS: u64 = 12 << 20;
-        const LARGE_VECTOR_BYTES: u64 = 384 << 20;
+        const LARGE_VECTOR_BYTES: u64 = 192 << 20;
         if !self.allow_vector_trim
             || self.final_frame
             || !self.recycle
