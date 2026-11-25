@@ -2545,6 +2545,15 @@ impl PlatformWindow for MacWindow {
         let view = this.native_view.as_ptr() as usize;
         // Whether the pending check saw this frame's moves beforehand.
         let pend = gpui_apple::feel::frames() && crate::composition::pending(view, this.painted);
+        if pend
+            && let Some(layer) = this.renderer.layer()
+        {
+            let layer: &objc2_quartz_core::CALayer = unsafe { &*(layer.as_ptr() as *const objc2_quartz_core::CALayer) };
+            gpui_apple::feel::write(&format!(
+                r#"{{"metal_layer":"{}"}}"#,
+                crate::slot_region::layer_path(layer)
+            ));
+        }
         let trace = |path: &str, moved: bool, acquire: f64| {
             // P-FEEL-FRAMES: every draw's decision, the frame it submitted (if
             // any) and where its slot regions' content then sits.

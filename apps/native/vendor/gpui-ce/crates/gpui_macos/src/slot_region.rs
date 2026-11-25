@@ -224,6 +224,7 @@ struct Container {
 #[derive(Default)]
 struct Host {
     targets: HashMap<usize, SlotRegionGeometry>,
+    delayed: HashMap<usize, SlotRegionGeometry>,
     containers: HashMap<usize, Container>,
     /// Containers placed by this present (a slot of theirs is shown).
     used: HashSet<usize>,
@@ -242,10 +243,23 @@ pub(crate) fn serial(gpui: &NSView, region: usize) -> Option<u64> {
 
 /// The regions GPUI's last draw made for the view keyed `view`.
 pub(crate) fn set(view: usize, regions: &[SlotRegionGeometry]) {
+    // PM-696 experiment (PM_SLOT_DELAY=1): each draw's regions take effect
+    // one draw later.
+    static DELAY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let delay = *DELAY.get_or_init(|| std::env::var_os("PM_SLOT_DELAY").is_some_and(|v| v == "1"));
     HOSTS.with_borrow_mut(|hosts| {
         let host = hosts.entry(view).or_default();
-        host.targets.clear();
-        host.targets.extend(regions.iter().map(|r| (r.id, *r)));
+        let fresh: HashMap<usize, SlotRegionGeometry> = regions.iter().map(|r| (r.id, *r)).collect();
+        if delay {
+            let previous = std::mem::replace(&mut host.delayed, fresh.clone());
+            host.targets = previous;
+            // A region new this draw is placed now (its slots need a home).
+            for (id, r) in fresh {
+                host.targets.entry(id).or_insert(r);
+            }
+        } else {
+            host.targets = fresh;
+        }
     });
 }
 
@@ -342,6 +356,14 @@ fn place(host: &mut Host, gpui: &NSView, id: usize) -> Option<Retained<NSView>> 
         container.fade.place(&container.clip, bounds, bounds, true);
         container.applied = Some(next);
         host.moved = true;
+        if gpui_apple::feel::frames()
+            && let Some(layer) = container.clip.layer()
+        {
+            gpui_apple::feel::write(&format!(
+                r#"{{"slot_layer":{id},"path":"{}"}}"#,
+                layer_path(&layer)
+            ));
+        }
     }
     if container.clip.isHidden() {
         container.clip.setHidden(false);
@@ -419,6 +441,27 @@ pub(crate) fn summary(view: usize) -> String {
             .collect::<Vec<_>>()
             .join(",")
     })
+}
+
+/// P-FEEL-FRAMES (PM-696 diagnosis): the render context a layer commits
+/// through and its superlayer chain, `ctx:<id> Class<Class<...`.
+pub(crate) fn layer_path(layer: &objc2_quartz_core::CALayer) -> String {
+    let mut out = String::new();
+    unsafe {
+        let ctx: *mut objc2::runtime::AnyObject = objc2::msg_send![layer, context];
+        let id: u32 = if ctx.is_null() { 0 } else { objc2::msg_send![ctx, contextId] };
+        out.push_str(&format!("ctx:{id}"));
+        let mut l: *const objc2_quartz_core::CALayer = layer;
+        for _ in 0..12 {
+            if l.is_null() {
+                break;
+            }
+            let cls = objc2::runtime::AnyObject::class(&*(l as *const objc2::runtime::AnyObject)).name();
+            out.push_str(&format!(" < {}", cls.to_string_lossy()));
+            l = objc2::msg_send![l, superlayer];
+        }
+    }
+    out
 }
 
 /// The window closes (its views go with it; nothing is touched here, as the
