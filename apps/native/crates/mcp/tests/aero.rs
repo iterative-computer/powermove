@@ -2174,10 +2174,12 @@ fn comp_layers(fixture: &Fixture, comp: &str) -> Vec<Value> {
     state["layers"].as_array().unwrap().clone()
 }
 
-/// PM-730 P1-1: an edit is checked in the composition it lands in. Deleting
-/// the only visual of a composition the editor doesn't show is refused.
+/// PM-730: an edit is checked in the composition it lands in, and an edit
+/// the kernel can't take back (one aimed at a composition by id, PM-734) is
+/// never refused: it is applied, the model is told what it broke, and one
+/// Undo takes it back. The project and the undo history agree.
 #[test]
-fn an_edit_in_a_closed_composition_is_checked_there() {
+fn an_edit_in_a_closed_composition_is_kept_and_warned_never_refused_half_applied() {
     let fixture = with_composition(
         Fixture::new(),
         "pre",
@@ -2196,16 +2198,33 @@ fn an_edit_in_a_closed_composition_is_checked_there() {
         _ => Reply::Text("Done.".into()),
     });
     let (turn, _) = fixture.start(model, |tools| Box::new(tools));
-    complete(&turn);
+    let result = complete(&turn);
+    assert!(
+        matches!(&result, RunResult::Failure { error, .. } if error.contains("1 blank range")),
+        "{result:?}"
+    );
     let bodies = bodies.lock().unwrap();
-    // Refused for the blank frames it makes in "pre" (the open composition
-    // is unchanged). Whether the refused write is taken back in a
-    // composition the editor doesn't show is the kernel's abort: PM-734.
-    assert!(bodies[1].contains("Project check failed"), "{}", bodies[1]);
+    assert!(!bodies[1].contains("Project check failed"), "{}", bodies[1]);
+    assert!(
+        bodies[1].contains("It is applied (one Undo takes it back)"),
+        "{}",
+        bodies[1]
+    );
     assert!(
         bodies[1].contains("newly blank span totaling 4s"),
         "{}",
         bodies[1]
+    );
+    assert!(
+        comp_layers(&fixture, "pre").is_empty(),
+        "the edit is applied"
+    );
+    undo_once(&fixture);
+    assert!(
+        comp_layers(&fixture, "pre")
+            .iter()
+            .any(|layer| layer["id"] == "inside"),
+        "one Undo takes it back"
     );
 }
 
@@ -2390,5 +2409,82 @@ fn a_fresh_prompt_forgets_what_the_last_turn_introduced() {
     assert_eq!(
         layer_value(&fixture, "flub", "p/opacity/v").as_f64(),
         Some(0.)
+    );
+}
+
+/// Media states for the offline-media test: "live" plays, anything else
+/// is offline.
+struct Library;
+impl pm_mcp::media::MediaRegistry for Library {
+    fn state(&self, _: &str, id: &str) -> pm_mcp::media::MediaState {
+        pm_mcp::media::MediaState {
+            available: id == "live",
+            duration: (id == "live").then_some(30.),
+            has_audio: id == "live",
+            ..Default::default()
+        }
+    }
+}
+
+/// PM-730: switching a layer to media that is offline is the edit's doing:
+/// it is caught, though media that goes offline on its own never is.
+#[test]
+fn switching_a_track_to_offline_media_is_caught() {
+    let fixture = Fixture::new();
+    {
+        let mut host = fixture.host.lock().unwrap();
+        let commands: Vec<pm_kernel::Command> = ["live", "gone"]
+            .into_iter()
+            .map(|id| {
+                pm_kernel::MediaCommand::AddAsset {
+                    asset_id: id.into(),
+                    asset: pm_model::json::parse(
+                        &json!({"id":id,"name":id,"kind":"audio","dur":30,"persisted":true})
+                            .to_string(),
+                    )
+                    .unwrap(),
+                }
+                .into()
+            })
+            .collect();
+        let revision = host.revision(&fixture.project).unwrap();
+        host.apply_commands(
+            &fixture.project,
+            commands,
+            "Synthetic media",
+            pm_kernel::Origin::Mcp,
+            revision,
+            1,
+        )
+        .unwrap();
+        host.media_registry = Some(Arc::new(Library));
+    }
+    person_edits(
+        &fixture,
+        json!([{"type":"add_layer","id":"track","name":"Track","layerType":"audio",
+            "from":0,"duration":4,"content":{"asset":"live"}}]),
+    );
+    let fixture = Fixture {
+        revision: revision_now(&fixture.host, &fixture.project),
+        ..fixture
+    };
+    let rev = fixture.revision;
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_content","target":"track","patch":{"asset":"gone"}}]}),
+        ),
+        _ => Reply::Text("Switched.".into()),
+    });
+    let (turn, _) = fixture.start(model, |tools| Box::new(tools));
+    complete(&turn);
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies[1].contains("media-offline"), "{}", bodies[1]);
+    assert_eq!(
+        layer_value(&fixture, "track", "d/asset"),
+        "live",
+        "the refused switch is taken back"
     );
 }

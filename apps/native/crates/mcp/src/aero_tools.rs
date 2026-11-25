@@ -15,6 +15,15 @@ use std::{
 const GONE: &str = "The project this Aero session works on was closed or replaced, so nothing more was changed. Ask the user to reopen it and start a new turn.";
 /// The person pressed Stop: nothing new starts.
 const HALTED: &str = "The turn was stopped before this tool changed anything.";
+/// Another writer changed the project while an edit ran: the edit is not
+/// kept, and nothing found meanwhile is the model's to repair.
+const CHANGED: &str =
+    "The project changed while this edit ran, so it wasn't kept. Read the project again and retry.";
+/// The project check couldn't run around an edit.
+const UNCHECKED: &str = "The project check couldn't run for this edit, so it wasn't kept. Read the project again and retry.";
+/// An edit the kernel can't take back (it lands in a composition by id: raw
+/// ops, PM-734) is never refused; what it introduced is the model's.
+const KEPT_WITH_PROBLEMS: &str = "This edit introduced the problems listed in problems. It is applied (one Undo takes it back): fix them, or undo the edit, before finishing.";
 
 #[path = "aero_tools/files.rs"]
 mod files;
@@ -336,8 +345,17 @@ impl Tools {
         // The composition the edit lands in, and its findings right before
         // the write: an edit is answerable only for what it changes there.
         let comp = self.target(&input.args)?;
+        // Dispatch writes an edit aimed at a composition by id as raw ops,
+        // which an abort doesn't take back yet (PM-734): such an edit is
+        // committed and warned about, never refused.
+        let scoped = input.args.get("compositionId").is_some()
+            || (self.session.agent_token.is_some() && self.active()?.default_comp.is_some());
         let before = if self.check_edits {
-            self.findings(&comp, self.own.get(&comp).and_then(|own| own.stride))?
+            match self.findings(&comp, self.own.get(&comp).and_then(|own| own.stride)) {
+                Ok(before) => before,
+                Err(error) if error.code == "revision_conflict" => return Err(error),
+                Err(_) => return Err(Error::invalid(UNCHECKED)),
+            }
         } else {
             Value::Null
         };
@@ -347,6 +365,10 @@ impl Tools {
         // this edit: one the turn fixed is dropped, so whoever brings it
         // back later is not the turn.
         let mut standing = Vec::new();
+        // The revision this edit's own write produced, and whether its
+        // findings were checked.
+        let mut written = None;
+        let mut checked = !self.check_edits;
         let previous_focus = self.active()?.focus.clone();
         let label = input.args["label"]
             .as_str()
@@ -381,11 +403,20 @@ impl Tools {
                     result["results"]
                 )));
             }
+            written = result["revision"].as_u64();
             let after = if self.check_edits {
-                self.findings(&comp, stride)?
+                match self.findings(&comp, stride) {
+                    Ok(after) => after,
+                    Err(_) if scoped => {
+                        result["note"] = json!("The project check couldn't run after this edit. It is applied (one Undo takes it back).");
+                        return Ok(result);
+                    }
+                    Err(_) => return Err(Error::invalid(UNCHECKED)),
+                }
             } else {
                 Value::Null
             };
+            checked = true;
             // The write is verified (no other writer between the two checks,
             // or it does not commit), so what is new is this edit's doing. It
             // is refused for an error; its warnings are what this turn's own
@@ -395,11 +426,15 @@ impl Tools {
                 .iter()
                 .filter(|issue| issue["severity"] == "error")
                 .collect();
-            if !errors.is_empty() {
+            if !errors.is_empty() && !scoped {
                 return Err(Error::invalid(format!(
                     "Project check failed. Fix these issues before retrying: {}",
                     json!(errors)
                 )));
+            }
+            if !errors.is_empty() {
+                result["problems"] = json!(errors);
+                result["note"] = json!(KEPT_WITH_PROBLEMS);
             }
             let mut own: Vec<_> = self
                 .own
@@ -423,13 +458,11 @@ impl Tools {
         // session has meanwhile let go of a closed or replaced project.
         let gone = self.session.active.is_none();
         let mut host = Automation::fenced(&self.session.host, document)?;
-        let checked_revision = result
-            .as_ref()
-            .ok()
-            .and_then(|value| value["revision"].as_u64())
-            .unwrap_or(expected);
+        let checked_revision = written.unwrap_or(expected);
         let current = host.revision(&self.project);
-        let commit = !gone && result.is_ok() && current.as_ref().ok() == Some(&checked_revision);
+        // Another writer between this edit's write and now.
+        let moved = written.is_some() && current.as_ref().ok() != Some(&checked_revision);
+        let commit = !gone && result.is_ok() && !moved;
         let settled = match lease {
             Some(lease) => host.finish_checked_edit(&self.project, writer, lease, commit),
             None => current.map(|revision| (revision, None)),
@@ -458,6 +491,15 @@ impl Tools {
         active.baseline = revision;
         // A confirmed clean abort leaves the project as this run left it.
         let clean_abort = !commit && kept.is_none() && revision == expected;
+        // An abort that left the revision moved without saying why (raw ops
+        // it can't take back, PM-734): say so rather than claim nothing kept.
+        let kept = kept.or_else(|| {
+            (!commit && written.is_some() && revision != expected).then(|| {
+                format!(
+                    " Part of this edit may still be applied; the project is at revision {revision}. Read it before continuing."
+                )
+            })
+        });
         self.undo_safe &= expected == self.own_revision && (commit || clean_abort);
         self.own_revision = revision;
         if !commit {
@@ -468,7 +510,7 @@ impl Tools {
                 active.committed |= revision != expected;
                 let own = self.own.entry(comp).or_default();
                 own.stride = own.stride.or(stride);
-                if self.check_edits {
+                if self.check_edits && checked {
                     own.issues = standing;
                 } else {
                     merge(&mut own.issues, added);
@@ -476,6 +518,12 @@ impl Tools {
                 result["revision"] = json!(revision);
                 Ok(result)
             }
+            // Whatever was found meanwhile may be the other writer's: only
+            // the fixed message goes back.
+            _ if moved => Err(Error::conflict(format!(
+                "{CHANGED}{}",
+                kept.unwrap_or_default()
+            ))),
             Ok(_) => Err(Error::conflict(format!(
                 "The project changed during verification. Read its current state before retrying.{}",
                 kept.unwrap_or_default()
@@ -521,7 +569,22 @@ impl Tools {
         }
         let snapshot = crate::automation::composition_snapshot(&view.snapshot, comp)?;
         let p = crate::automation::document_json(&snapshot)?;
-        crate::inspection::findings(&host, &self.project, p, stride)
+        // Each layer's media source, so a media finding can be told apart:
+        // the edit switched the source, or the file changed on its own.
+        let sources: serde_json::Map<String, Value> = p["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|layer| {
+                Some((
+                    layer["id"].as_str()?.to_owned(),
+                    layer["d"]["asset"].clone(),
+                ))
+            })
+            .collect();
+        let mut check = crate::inspection::findings(&host, &self.project, p, stride)?;
+        check["sources"] = Value::Object(sources);
+        Ok(check)
     }
 
     /// The findings this turn's own edits introduced that are still there.
@@ -950,7 +1013,8 @@ impl Tools {
 /// Blank-frame findings: they carry time ranges, not a layer.
 const BLANK: [&str; 2] = ["no-visuals", "empty-frames"];
 /// Findings a media file's own state raises (it went offline, it is still
-/// in the cloud): the edit didn't cause them, whenever they appear.
+/// in the cloud): the edit caused one only when it switched that layer's
+/// source; otherwise the file changed on its own.
 const MEDIA_STATE: [&str; 3] = ["media-failed", "media-offline", "media-in-cloud"];
 
 fn ranges(issue: &Value) -> Vec<(f64, f64)> {
@@ -1026,14 +1090,28 @@ fn introduced(before: &Value, now: &Value) -> Vec<Value> {
         .collect();
     let blank = blank_ranges(before);
     let slack = slack(before, now);
+    let switched = |layer: &str| before["sources"][layer] != now["sources"][layer];
+    // A media file's state that changed under a layer whose source the edit
+    // left alone: blank frames it leaves can't be told from the edit's.
+    let media_key = |issue: &Value| {
+        let code = code(issue);
+        let layer = issue["layerId"].as_str()?.to_owned();
+        (MEDIA_STATE.contains(&code.as_str()) && !switched(&layer)).then_some((code, layer))
+    };
+    let media_old: std::collections::HashSet<_> = old.iter().filter_map(media_key).collect();
+    let media_new: std::collections::HashSet<_> = new.iter().filter_map(media_key).collect();
+    let media_moved = media_old != media_new;
     let mut out: Vec<Value> = new
         .into_iter()
         .filter(|issue| {
             let code = code(issue);
-            if MEDIA_STATE.contains(&code.as_str()) || BLANK.contains(&code.as_str()) {
+            if BLANK.contains(&code.as_str()) {
                 return false;
             }
             match issue["layerId"].as_str() {
+                Some(layer) if MEDIA_STATE.contains(&code.as_str()) => {
+                    switched(layer) && !known.contains(&(code, layer.to_owned()))
+                }
                 Some(layer) => !known.contains(&(code, layer.to_owned())),
                 None => !old.contains(issue),
             }
@@ -1044,7 +1122,7 @@ fn introduced(before: &Value, now: &Value) -> Vec<Value> {
         .flat_map(|range| subtract(range, &blank))
         .filter(|(a, b)| b - a > slack)
         .collect();
-    if !pieces.is_empty() {
+    if !pieces.is_empty() && !media_moved {
         out.push(blank_issue(pieces));
     }
     out
@@ -1317,6 +1395,57 @@ mod tests {
             "the model was not told what stayed applied: {}",
             error.message
         );
+    }
+
+    /// PM-730: the person writes between an edit's write and its check.
+    /// The edit isn't kept, and the model gets a fixed message: none of what
+    /// the person did (here a broken layer) reaches it as a finding.
+    #[test]
+    fn a_write_between_the_checks_sends_the_model_no_findings() {
+        let fixture = fixture();
+        let mut tools = tools(&fixture);
+        tools.after_write = Some(Box::new(|host| {
+            let mut human = McpSession::new(host.clone());
+            human
+                .dispatch("start_session", &json!({"prompt":"The editor"}))
+                .unwrap();
+            human
+                .dispatch(
+                    "apply_commands",
+                    &json!({"commands":[
+                        {"type":"add_layer","id":"ghost","name":"Ghost","layerType":"video",
+                            "from":0,"duration":2,"content":{"asset":"ghost"}}
+                    ]}),
+                )
+                .unwrap();
+            human.finish(true).unwrap();
+        }));
+        let error = tools
+            .call("edit", &rename(fixture.revision, "Aero"), &mut |_| false)
+            .unwrap_err();
+        assert!(error.message.starts_with(CHANGED), "{}", error.message);
+        for finding in ["Ghost", "ghost", "missing-media", "[", "{"] {
+            assert!(!error.message.contains(finding), "{}", error.message);
+        }
+    }
+
+    /// PM-730: a file that goes offline between an edit's checks, under a
+    /// layer whose source the edit left alone, is not the edit's, and nor
+    /// are the blank frames it leaves. Switching the source to it is.
+    #[test]
+    fn media_going_offline_on_its_own_is_never_the_edits() {
+        let offline =
+            json!({"code":"media-offline","severity":"error","layerId":"clip","message":"offline"});
+        let blank = json!({"code":"empty-frames","severity":"error","ranges":[[0.0, 2.0]]});
+        let before = json!({"fps":10,"sampledEveryFrames":1,"issues":[],"sources":{"clip":"a"}});
+        let on_its_own = json!({"fps":10,"sampledEveryFrames":1,
+            "issues":[offline.clone(), blank.clone()],"sources":{"clip":"a"}});
+        assert_eq!(introduced(&before, &on_its_own), Vec::<Value>::new());
+        let switched = json!({"fps":10,"sampledEveryFrames":1,
+            "issues":[offline.clone(), blank],"sources":{"clip":"b"}});
+        let found = introduced(&before, &switched);
+        assert_eq!(found[0], offline, "{found:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
     }
 
     /// P1-5: the editor tries to close the project while an edit's lease
