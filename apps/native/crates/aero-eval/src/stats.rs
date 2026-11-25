@@ -2,9 +2,11 @@
 //! better": on the same model and effort, a higher success rate than every
 //! other harness with non-overlapping 90 % intervals, and median wall time
 //! and tokens no worse. The bar only compares like with like: live runs of
-//! the full harness (no ablation, no replay), the same tasks on both sides,
-//! at least [`MIN_RUNS_PER_TASK`] distinct runs per task per harness, and
-//! observed cost telemetry on every compared run.
+//! the full harness (no ablation, no replay), inside one cohort both
+//! harnesses ran in as one interleaved batch, on a balanced sample (the same
+//! tasks, at least [`MIN_RUNS_PER_TASK`] repeats per task run on both sides,
+//! the same number from every task), and observed cost telemetry on every
+//! compared run.
 use crate::record::RunRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -346,65 +348,203 @@ pub fn bar(runs: &[&RunRecord]) -> Vec<ModelVerdict> {
     out
 }
 
-fn by_task<'a>(runs: &[&'a RunRecord]) -> BTreeMap<&'a str, Vec<&'a RunRecord>> {
-    let mut m: BTreeMap<&str, Vec<&RunRecord>> = BTreeMap::new();
-    for r in runs {
-        m.entry(r.task.as_str()).or_default().push(r);
+/// The verdict of one comparison from its parts: any NotShown wins, then
+/// any Unavailable.
+fn worst(v: impl IntoIterator<Item = Bar>) -> Bar {
+    let v: Vec<Bar> = v.into_iter().collect();
+    if v.is_empty() {
+        Bar::Unavailable
+    } else if v.contains(&Bar::NotShown) {
+        Bar::NotShown
+    } else if v.contains(&Bar::Unavailable) {
+        Bar::Unavailable
+    } else {
+        Bar::Better
     }
-    m
 }
 
+/// Aero against one other harness. Runs are compared only inside a cohort
+/// both harnesses ran in (one interleaved batch, so drift in load or
+/// provider latency hits both alike), and only on a balanced sample: the
+/// same tasks, each with the same number of runs on both sides, paired by
+/// repeat. Every shared cohort must clear the bar on its own.
 fn compare(a: &[&RunRecord], o: &[&RunRecord], against: &str) -> Comparison {
+    let cohorts =
+        |v: &[&RunRecord]| -> BTreeSet<String> { v.iter().map(|r| r.cohort.clone()).collect() };
+    let (ca, co) = (cohorts(a), cohorts(o));
+    let shared: Vec<&String> = ca.intersection(&co).collect();
     let mut reasons = Vec::new();
-    let (ta, to) = (by_task(a), by_task(o));
-    fn only(
-        x: &BTreeMap<&str, Vec<&RunRecord>>,
-        y: &BTreeMap<&str, Vec<&RunRecord>>,
-    ) -> Vec<String> {
-        x.keys()
-            .filter(|k| !y.contains_key(*k))
-            .map(|k| k.to_string())
-            .collect()
-    }
-    let (oa, oo) = (only(&ta, &to), only(&to, &ta));
-    let mut unavailable = false;
-    if !oa.is_empty() || !oo.is_empty() {
-        unavailable = true;
+    if shared.is_empty() {
         reasons.push(format!(
-            "coverage differs: only aero ran {oa:?}, only {against} ran {oo:?}"
+            "no shared cohort: aero ran in {ca:?}, {against} in {co:?}; only runs of one interleaved batch compare"
         ));
-    }
-    for (side, m) in [("aero", &ta), (against, &to)] {
-        let short: Vec<String> = m
-            .iter()
-            .filter(|(_, v)| v.len() < MIN_RUNS_PER_TASK)
-            .map(|(t, v)| format!("{t} ({})", v.len()))
-            .collect();
-        if !short.is_empty() {
-            unavailable = true;
-            reasons.push(format!(
-                "{side} has fewer than {MIN_RUNS_PER_TASK} runs on {}",
-                short.join(", ")
-            ));
-        }
-    }
-    let unobserved = a
-        .iter()
-        .chain(o)
-        .filter(|r| r.wall_ms.is_none() || r.tokens.is_none())
-        .count();
-    if unobserved > 0 {
-        unavailable = true;
-        reasons.push(format!(
-            "{unobserved} runs have no observed wall time or token usage"
-        ));
-    }
-    if unavailable {
         return Comparison {
             against: against.into(),
             verdict: Bar::Unavailable,
             reasons,
         };
+    }
+    let outside = a
+        .iter()
+        .chain(o)
+        .filter(|r| !shared.contains(&&r.cohort))
+        .count();
+    if outside > 0 {
+        reasons.push(format!(
+            "{outside} runs outside the shared cohorts are left out"
+        ));
+    }
+    let mut verdicts = Vec::new();
+    for c in shared {
+        let pa: Vec<&RunRecord> = a.iter().copied().filter(|r| &r.cohort == c).collect();
+        let po: Vec<&RunRecord> = o.iter().copied().filter(|r| &r.cohort == c).collect();
+        let (bar, why) = compare_cohort(&pa, &po, against);
+        verdicts.push(bar);
+        reasons.extend(why.into_iter().map(|w| format!("cohort {c}: {w}")));
+    }
+    Comparison {
+        against: against.into(),
+        verdict: worst(verdicts),
+        reasons,
+    }
+}
+
+/// The runs of one cohort, sorted by batch position, are one interleaved
+/// batch: positions are distinct, start times follow them, repeat blocks
+/// never go back, and both harnesses ran in every repeat block.
+fn interleaved(a: &[&RunRecord], o: &[&RunRecord]) -> Result<(), String> {
+    let mut all: Vec<(&RunRecord, bool)> = a
+        .iter()
+        .map(|r| (*r, true))
+        .chain(o.iter().map(|r| (*r, false)))
+        .collect();
+    all.sort_by_key(|(r, _)| r.order);
+    if all.windows(2).any(|w| w[0].0.order == w[1].0.order) {
+        return Err(
+            "two runs share a batch position (the cohort was assembled from more than one batch)"
+                .into(),
+        );
+    }
+    if all
+        .windows(2)
+        .any(|w| w[1].0.started_unix_ms < w[0].0.started_unix_ms || w[1].0.rep < w[0].0.rep)
+    {
+        return Err(
+            "its runs do not follow one interleaved batch order (start times or repeats go back)"
+                .into(),
+        );
+    }
+    let mut blocks: BTreeMap<u32, (bool, bool)> = BTreeMap::new();
+    for (r, is_a) in &all {
+        let b = blocks.entry(r.rep).or_default();
+        if *is_a {
+            b.0 = true;
+        } else {
+            b.1 = true;
+        }
+    }
+    let lone: Vec<u32> = blocks
+        .iter()
+        .filter(|(_, (x, y))| !(*x && *y))
+        .map(|(k, _)| *k)
+        .collect();
+    if !lone.is_empty() {
+        return Err(format!(
+            "repeats {lone:?} ran only one of the two harnesses (not interleaved)"
+        ));
+    }
+    Ok(())
+}
+
+fn compare_cohort(a: &[&RunRecord], o: &[&RunRecord], against: &str) -> (Bar, Vec<String>) {
+    let mut reasons = Vec::new();
+    if let Err(e) = interleaved(a, o) {
+        reasons.push(e);
+        return (Bar::Unavailable, reasons);
+    }
+    let by = |v: &[&RunRecord]| -> Result<BTreeMap<String, BTreeMap<u32, usize>>, String> {
+        let mut m: BTreeMap<String, BTreeMap<u32, usize>> = BTreeMap::new();
+        for (i, r) in v.iter().enumerate() {
+            if m.entry(r.task.clone())
+                .or_default()
+                .insert(r.rep, i)
+                .is_some()
+            {
+                return Err(format!("{} repeat {} ran twice", r.task, r.rep));
+            }
+        }
+        Ok(m)
+    };
+    let (ta, to) = match (by(a), by(o)) {
+        (Ok(x), Ok(y)) => (x, y),
+        (Err(e), _) | (_, Err(e)) => {
+            reasons.push(e);
+            return (Bar::Unavailable, reasons);
+        }
+    };
+    let only = |x: &BTreeMap<String, BTreeMap<u32, usize>>,
+                y: &BTreeMap<String, BTreeMap<u32, usize>>| {
+        x.keys()
+            .filter(|k| !y.contains_key(*k))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let (oa, oo) = (only(&ta, &to), only(&to, &ta));
+    if !oa.is_empty() || !oo.is_empty() {
+        reasons.push(format!(
+            "coverage differs: only aero ran {oa:?}, only {against} ran {oo:?}"
+        ));
+        return (Bar::Unavailable, reasons);
+    }
+    // Repeats both harnesses ran, per task; the balanced sample takes the
+    // same number from every task (the first ones, by repeat).
+    let paired: BTreeMap<&String, Vec<u32>> = ta
+        .iter()
+        .map(|(t, reps)| {
+            let both: Vec<u32> = reps
+                .keys()
+                .filter(|r| to[t].contains_key(r))
+                .copied()
+                .collect();
+            (t, both)
+        })
+        .collect();
+    let n = paired.values().map(Vec::len).min().unwrap_or(0);
+    if n < MIN_RUNS_PER_TASK {
+        let short: Vec<String> = paired
+            .iter()
+            .filter(|(_, v)| v.len() < MIN_RUNS_PER_TASK)
+            .map(|(t, v)| format!("{t} ({})", v.len()))
+            .collect();
+        reasons.push(format!(
+            "fewer than {MIN_RUNS_PER_TASK} repeats ran on both harnesses for {}",
+            short.join(", ")
+        ));
+        return (Bar::Unavailable, reasons);
+    }
+    let mut sa = Vec::new();
+    let mut so = Vec::new();
+    for (t, reps) in &paired {
+        for r in reps.iter().take(n) {
+            sa.push(a[ta[*t][r]]);
+            so.push(o[to[*t][r]]);
+        }
+    }
+    let left = a.len() + o.len() - sa.len() - so.len();
+    reasons.push(format!(
+        "balanced sample: {n} paired repeats per task over {} tasks ({left} runs left out)",
+        paired.len()
+    ));
+    let unobserved = sa
+        .iter()
+        .chain(&so)
+        .filter(|r| r.wall_ms.is_none() || r.tokens.is_none())
+        .count();
+    if unobserved > 0 {
+        reasons.push(format!(
+            "{unobserved} runs have no observed wall time or token usage"
+        ));
+        return (Bar::Unavailable, reasons);
     }
     let rate = |v: &[&RunRecord]| {
         wilson(
@@ -413,38 +553,37 @@ fn compare(a: &[&RunRecord], o: &[&RunRecord], against: &str) -> Comparison {
             Z90,
         )
     };
-    let (sa, so) = (rate(a), rate(o));
-    let higher = sa.lo > so.hi;
+    let (ra, ro) = (rate(&sa), rate(&so));
+    let higher = ra.lo > ro.hi;
     reasons.push(format!(
-        "success {:.0}% [{:.0}, {:.0}] vs {:.0}% [{:.0}, {:.0}] over {} tasks: {}",
-        sa.estimate * 100.0,
-        sa.lo * 100.0,
-        sa.hi * 100.0,
-        so.estimate * 100.0,
-        so.lo * 100.0,
-        so.hi * 100.0,
-        ta.len(),
+        "success {:.0}% [{:.0}, {:.0}] vs {:.0}% [{:.0}, {:.0}]: {}",
+        ra.estimate * 100.0,
+        ra.lo * 100.0,
+        ra.hi * 100.0,
+        ro.estimate * 100.0,
+        ro.lo * 100.0,
+        ro.hi * 100.0,
         if higher {
             "higher, intervals apart"
         } else {
             "not separated"
         }
     ));
-    let median = |v: &[&RunRecord], f: &dyn Fn(&RunRecord) -> f64| {
-        median_interval(&v.iter().map(|r| f(r)).collect::<Vec<_>>(), 0.9)
+    let median = |v: &[&RunRecord], f: &dyn Fn(&RunRecord) -> Option<f64>| {
+        median_interval(&v.iter().filter_map(|r| f(r)).collect::<Vec<_>>(), 0.9)
             .map_or(f64::NAN, |m| m.estimate)
     };
     let mut cost_ok = true;
     for (name, f) in [
         (
             "wall ms",
-            &(|r: &RunRecord| r.wall_ms.unwrap_or(0) as f64) as &dyn Fn(&RunRecord) -> f64,
+            &(|r: &RunRecord| r.wall_ms.map(|w| w as f64)) as &dyn Fn(&RunRecord) -> Option<f64>,
         ),
         ("tokens", &|r: &RunRecord| {
-            r.tokens.map_or(0.0, |u| u.total() as f64)
+            r.tokens.map(|u| u.total() as f64)
         }),
     ] {
-        let (x, y) = (median(a, f), median(o, f));
+        let (x, y) = (median(&sa, f), median(&so, f));
         let ok = x <= y;
         cost_ok &= ok;
         reasons.push(format!(
@@ -452,15 +591,14 @@ fn compare(a: &[&RunRecord], o: &[&RunRecord], against: &str) -> Comparison {
             if ok { "no worse" } else { "worse" }
         ));
     }
-    Comparison {
-        against: against.into(),
-        verdict: if higher && cost_ok {
+    (
+        if higher && cost_ok {
             Bar::Better
         } else {
             Bar::NotShown
         },
         reasons,
-    }
+    )
 }
 
 fn show_median(m: &Option<MedianInterval>, f: impl Fn(f64) -> String) -> String {

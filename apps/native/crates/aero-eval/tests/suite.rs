@@ -143,6 +143,7 @@ struct Run {
     tokens: Option<u64>,
     mode: &'static str,
     ablation: Vec<String>,
+    rep: u32,
 }
 
 fn run(harness: &'static str, task: &'static str, success: bool, wall: u64, tokens: u64) -> Run {
@@ -154,12 +155,18 @@ fn run(harness: &'static str, task: &'static str, success: bool, wall: u64, toke
         tokens: Some(tokens),
         mode: "live",
         ablation: vec![],
+        rep: 0,
     }
 }
 
 static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Run {
+    fn rep(mut self, rep: u32) -> Self {
+        self.rep = rep;
+        self
+    }
+    /// A record in batch order: positions and start times follow creation.
     fn record(self) -> RunRecord {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         RunRecord {
@@ -174,9 +181,9 @@ impl Run {
             cohort: "c1".into(),
             ablation: self.ablation,
             run_id: format!("run-{n}"),
-            rep: 0,
+            rep: self.rep,
             order: n,
-            started_unix_ms: 0,
+            started_unix_ms: n as u64,
             wall_ms: self.wall,
             success: self.success,
             renders_correct: None,
@@ -204,15 +211,20 @@ impl Run {
     }
 }
 
-/// `n` runs per task per harness over `tasks`; counting each harness's runs
-/// across tasks, Aero succeeds at `a` of every 20 and Codex at `c`.
+/// One interleaved batch: `n` repeats of every task on Aero and Codex;
+/// counting each harness's runs, Aero succeeds at `a` of every 20 and Codex
+/// at `c`.
 fn batch(tasks: &[&'static str], n: u32, a: u32, c: u32) -> Vec<RunRecord> {
     let mut out = Vec::new();
     let mut k = 0;
-    for t in tasks {
-        for _ in 0..n {
-            out.push(run("aero", t, k % 20 < a, 60_000, 50_000).record());
-            out.push(run("codex", t, k % 20 < c, 90_000, 80_000).record());
+    for rep in 0..n {
+        for t in tasks {
+            out.push(run("aero", t, k % 20 < a, 60_000, 50_000).rep(rep).record());
+            out.push(
+                run("codex", t, k % 20 < c, 90_000, 80_000)
+                    .rep(rep)
+                    .record(),
+            );
             k += 1;
         }
     }
@@ -228,15 +240,13 @@ fn the_bar_needs_separated_intervals_and_no_worse_cost() {
     assert_eq!(s.bar.len(), 1);
     assert_eq!(s.bar[0].verdict, Bar::Better, "{:#?}", s.bar[0]);
     // Same success, or more tokens: not better.
-    let mut runs2: Vec<RunRecord> = runs
-        .iter()
-        .filter(|r| r.harness == "codex")
-        .cloned()
-        .collect();
-    for t in ["a", "b", "c", "d"] {
-        for i in 0..5 {
-            runs2.push(run("aero", t, i < 19, 60_000, 90_000).record());
-        }
+    let mut runs2 = runs.clone();
+    for r in runs2.iter_mut().filter(|r| r.harness == "aero") {
+        r.tokens = Some(Usage {
+            input: 90_000,
+            cached: 45_000,
+            output: 9_000,
+        });
     }
     let s = stats::summarize(&runs2, 1);
     assert_eq!(s.bar[0].verdict, Bar::NotShown);
@@ -256,20 +266,17 @@ fn the_bar_refuses_incomparable_samples() {
     // Review scenario: three Aero successes on one cut against three Codex
     // failures on another effect, replay mixed with live, gave BETTER.
     let mut runs = Vec::new();
-    for _ in 0..3 {
-        runs.push(run("aero", "cut", true, 1, 1).record());
-        runs.push(run("codex", "effect", false, 1, 1).record());
-        let mut r = run("aero", "cut", true, 1, 1);
+    for rep in 0..3 {
+        runs.push(run("aero", "cut", true, 1, 1).rep(rep).record());
+        runs.push(run("codex", "effect", false, 1, 1).rep(rep).record());
+        let mut r = run("aero", "cut", true, 1, 1).rep(rep);
         r.mode = "replay";
         runs.push(r.record());
     }
     let b = &stats::summarize(&runs, 1).bar[0];
     assert_eq!(b.verdict, Bar::Unavailable, "{b:#?}");
     let why = b.comparisons[0].reasons.join("\n");
-    assert!(
-        why.contains("coverage differs") && why.contains("fewer than 5"),
-        "{why}"
-    );
+    assert!(why.contains("coverage differs"), "{why}");
 
     // Matched tasks, but too few repeats on one side.
     let mut runs = batch(&["a", "b"], 5, 20, 0);
@@ -282,13 +289,16 @@ fn the_bar_refuses_incomparable_samples() {
             true
         }
     });
-    assert_eq!(stats::summarize(&runs, 1).bar[0].verdict, Bar::Unavailable);
+    let b = &stats::summarize(&runs, 1).bar[0];
+    assert_eq!(b.verdict, Bar::Unavailable);
+    assert!(
+        b.comparisons[0].reasons.join("\n").contains("fewer than 5"),
+        "{b:#?}"
+    );
 
     // A run without usage telemetry is unavailable, never zero cost.
     let mut runs = batch(&["a"], 20, 20, 0);
-    let mut r = run("aero", "a", true, 1, 1);
-    r.tokens = None;
-    runs.push(r.record());
+    runs[0].tokens = None;
     let b = &stats::summarize(&runs, 1).bar[0];
     assert_eq!(b.verdict, Bar::Unavailable);
     assert!(
@@ -302,7 +312,7 @@ fn the_bar_refuses_incomparable_samples() {
         .into_iter()
         .find(|g| g.harness == "aero" && g.task == "all")
         .unwrap();
-    assert_eq!((g.runs, g.tokens_unobserved), (21, 1));
+    assert_eq!((g.runs, g.tokens_unobserved), (20, 1));
 
     // Ablations, replays and `none` never enter the bar, and never pool.
     let mut runs = batch(&["a"], 20, 20, 0);
@@ -313,11 +323,12 @@ fn the_bar_refuses_incomparable_samples() {
             false,
             1,
             1,
-        );
+        )
+        .rep(19);
         r.mode = mode;
         runs.push(r.record());
     }
-    let mut r = run("aero", "a", false, 1, 1);
+    let mut r = run("aero", "a", false, 1, 1).rep(19);
     r.ablation = vec!["completion-gate".into()];
     runs.push(r.record());
     let s = stats::summarize(&runs, 1);
@@ -338,18 +349,25 @@ fn the_bar_refuses_incomparable_samples() {
 
 #[test]
 fn one_verdict_per_model_needs_every_comparison() {
-    let mut runs = batch(&["a"], 20, 20, 0);
-    // Claude Code on the same model beats Aero: the model verdict fails.
-    for i in 0..20 {
-        runs.push(run("claude-code", "a", i < 20, 10_000, 10_000).record());
+    // One batch of three harnesses; Claude Code on the same model beats
+    // Aero on cost: the model verdict fails.
+    let mut runs = Vec::new();
+    for rep in 0..20 {
+        runs.push(run("aero", "a", true, 60_000, 50_000).rep(rep).record());
+        runs.push(run("codex", "a", false, 90_000, 80_000).rep(rep).record());
+        runs.push(
+            run("claude-code", "a", true, 10_000, 10_000)
+                .rep(rep)
+                .record(),
+        );
     }
     let s = stats::summarize(&runs, 1);
     assert_eq!(s.bar.len(), 1);
-    assert_eq!(s.bar[0].verdict, Bar::NotShown);
+    assert_eq!(s.bar[0].verdict, Bar::NotShown, "{:#?}", s.bar[0]);
     assert_eq!(s.bar[0].comparisons.len(), 2);
     // Aero alone is not shown better than nothing.
     let alone: Vec<RunRecord> = (0..5)
-        .map(|_| run("aero", "a", true, 1, 1).record())
+        .map(|i| run("aero", "a", true, 1, 1).rep(i).record())
         .collect();
     assert_eq!(stats::summarize(&alone, 1).bar[0].verdict, Bar::Unavailable);
 }
