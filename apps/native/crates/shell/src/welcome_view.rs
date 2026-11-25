@@ -633,7 +633,7 @@ impl WelcomeView {
                     .text_size(px(TITLE_SIZE))
                     .font_weight(FontWeight::BOLD)
                     .line_height(relative(1.12))
-                    .letter_spacing(px(-TITLE_SIZE * 0.025))
+                    .letter_spacing(px(-TITLE_SIZE * 0.01))
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
             )
@@ -830,7 +830,9 @@ impl WelcomeView {
             .aria_label(spoken)
             .relative()
             .size_full()
-            .font_family(WELCOME_FONT)
+            // The system font: SF Pro, its Display cut at the title's size
+            // (automatic optical sizing).
+            .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .child(left)
@@ -1498,24 +1500,6 @@ pub fn stage_ground() -> Div {
                     linear_color_stop(rgb(FIELD_DEEP), 1.),
                 )),
         )
-}
-
-/// The Welcome's typeface: Geist, the website's (SIL OFL 1.1,
-/// `assets/fonts`).
-pub const WELCOME_FONT: &str = "Geist";
-/// Adds the Welcome's typeface to the app's text system, once.
-pub fn register_fonts(cx: &App) {
-    static ADDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if ADDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    let geist: &'static [u8] = include_bytes!("../assets/fonts/Geist-Variable.ttf");
-    if let Err(error) = cx
-        .text_system()
-        .add_fonts(vec![std::borrow::Cow::Borrowed(geist)])
-    {
-        eprintln!("The Welcome's typeface couldn’t load: {error}");
-    }
 }
 
 /// The product beside a step: a real picture of the app (its panels drawn

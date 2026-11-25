@@ -54,7 +54,6 @@ pub(crate) fn open(
     intro: bool,
     exact: bool,
 ) -> WindowHandle<Stage> {
-    cx.update(|cx| pm_shell::welcome_view::register_fonts(cx));
     cx.open_window(size(px(ROOM.0), px(ROOM.1)), move |_, cx| {
         let stage = cx.new(|cx| {
             let mut stage = Stage::new(tokens.clone(), CueSheet::default(), intro, cx);
