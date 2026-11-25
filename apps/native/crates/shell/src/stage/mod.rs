@@ -660,7 +660,10 @@ impl Render for Stage {
         } else {
             self.sheet.veil(opened, t) as f32
         };
-        let mut stage_alpha = 1.;
+        // What the stage shows comes up over its first moments (a launch
+        // straight to the window too): the first frame is always clear.
+        let mut stage_alpha =
+            smooth(opened / if self.motion() { 0.35 } else { 0.6 }) as f32;
         let picture: AnyElement = if let Some(hand_off) = self.hand_off.as_mut() {
             let since = t - hand_off.start;
             let out = smooth(since / WINDOW_OUT);
