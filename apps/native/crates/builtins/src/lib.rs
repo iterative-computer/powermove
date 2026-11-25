@@ -613,6 +613,7 @@ impl Builtins {
         let provider_of = |name: &str| match name {
             "chatgpt" => Provider::Chatgpt,
             "claude" => Provider::Claude,
+            "aero" => Provider::Aero,
             _ => Provider::Compatible,
         };
         let message = args["message"].as_str().unwrap_or_default();
@@ -634,6 +635,7 @@ impl Builtins {
                     Provider::Chatgpt => "ChatGPT",
                     Provider::Claude => "Claude",
                     Provider::Compatible => "your compatible provider",
+                    Provider::Aero => "Aero",
                 };
                 return Err(format!(
                     "Sign in to {name} in Settings › Agents before starting a run."

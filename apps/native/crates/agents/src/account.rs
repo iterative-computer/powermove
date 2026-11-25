@@ -220,7 +220,7 @@ impl Accounts {
         let result = match provider {
             Provider::Chatgpt => self.chatgpt(job, cancel),
             Provider::Claude => self.claude(job, cancel, MODELS),
-            Provider::Compatible => Ok(Status::of(State::Disconnected, None)),
+            Provider::Compatible | Provider::Aero => Ok(Status::of(State::Disconnected, None)),
         };
         result.unwrap_or_else(|detail| Status::of(State::Unavailable, Some(detail)))
     }

@@ -171,6 +171,7 @@ pub struct Environment {
     pub composition_tools: Vec<String>,
     /// The API or local model connection (Settings › Accounts), when the app has one.
     pub compatible: Option<std::sync::Arc<dyn compatible::ChatHost>>,
+    pub aero: Option<crate::aero::Launcher>,
 }
 impl Environment {
     /// Reads this process. Safe mode would drop the run's own MCP server.
@@ -192,6 +193,7 @@ impl Environment {
             tools,
             composition_tools,
             compatible: None,
+            aero: None,
         }
     }
     /// Explicit override, then an updated managed runtime, then the bundled one.
@@ -215,6 +217,7 @@ impl Environment {
     /// which a run reports in its conversation.
     pub fn available(&self, provider: Provider) -> bool {
         match provider {
+            Provider::Aero => self.aero.is_some(),
             Provider::Claude => self.binary(Runtime::Claude).is_some(),
             Provider::Chatgpt => self.binary(Runtime::Codex).is_some(),
             Provider::Compatible => self
@@ -370,6 +373,19 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     )
     .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
+    if request.provider == Provider::Aero {
+        use sha2::{Digest, Sha256};
+        let crate::aero::Launcher(open) = environment.aero.clone()
+            .ok_or("Aero's development switch is off.")?;
+        let project = request.project.as_deref().ok_or("Open a composition before running Aero.")?;
+        let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
+        let scope = environment.profile.join("aero").join("sessions").join(&id);
+        let authority = request.clone();
+        return Ok(crate::aero::start(
+            request, id, scope, crate::aero::Options::development(),
+            move |path| open(&authority, path, &token),
+        ).hold(grant));
+    }
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
     let warnings = loaded
         .warnings
@@ -384,6 +400,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
         }
         Provider::Chatgpt => codex_project(environment, request, authority, &token, &loaded),
         Provider::Compatible => compatible(environment, request, &token),
+        Provider::Aero => unreachable!("handled without a process"),
     }?;
     Ok(handle.prepend_events(warnings).hold(grant))
 }
@@ -751,6 +768,7 @@ mod exec_reply_tests {
             tools: vec![],
             composition_tools: vec![],
             compatible: None,
+            aero: None,
         };
         let request = Request {
             run: "same-run".into(),

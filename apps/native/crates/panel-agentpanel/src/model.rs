@@ -58,6 +58,7 @@ impl Settings {
             provider: match v["provider"].as_str() {
                 Some("claude") => Provider::Claude,
                 Some("compatible") => Provider::Compatible,
+                Some("aero") => Provider::Aero,
                 _ => Provider::Chatgpt,
             },
             model: v["model"].as_str().unwrap_or_default().into(),

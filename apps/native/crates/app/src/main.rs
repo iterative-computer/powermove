@@ -398,7 +398,7 @@ fn main() -> Result<()> {
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
-        || args.iter().any(|a| a == "--powermove-mcp")
+        || args.iter().any(|a| a == "--powermove-mcp" || a == "--listen")
         || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
     if !headless {
         platform::route_sigterm();
@@ -419,14 +419,19 @@ fn main() -> Result<()> {
         return smoke::run(PathBuf::from(manifest));
     }
     let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
+    let eval_host = args.iter().any(|a| a == "--listen");
+    let mut eval_exports = None;
     let mut launch = None;
     let mut agent_run = None;
     let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
     let mut lane_flags: Vec<&'static str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--powermove-mcp" {
+        if args[i] == "--powermove-mcp" || args[i] == "--listen" {
             // Same app executable and newline-delimited stdio contract.
+        } else if args[i] == "--exports" && eval_host {
+            i += 1;
+            eval_exports = Some(PathBuf::from(args.get(i).context("--exports needs a directory")?));
         } else if args[i] == "--agent-run" && mcp_mode {
             // The provider run this tool server belongs to (orchestration).
             i += 1;
@@ -454,6 +459,16 @@ fn main() -> Result<()> {
             launch = Some(PathBuf::from(&args[i]));
         }
         i += 1;
+    }
+    if eval_host {
+        anyhow::ensure!(!mcp_mode, "Choose one MCP host mode");
+        let profile = profile.context("Supply --profile with an isolated eval profile")?;
+        let exports = eval_exports.context("Supply --exports with an isolated eval output folder")?;
+        anyhow::ensure!(profile.is_absolute() && exports.is_absolute(), "Use absolute eval paths");
+        let checked = first_run::Plan::resolve(Some(profile.clone()), None, std::env::var_os("HOME"))
+            .context("Use an isolated native eval profile")?;
+        anyhow::ensure!(checked.launch != pm_first_launch::Launch::Migrate, "Eval never migrates a profile");
+        return mcp_services::headless(profile, exports, launch, true);
     }
     // The lane launcher's development flag (never the environment): sheets
     // wait while the app is inactive, and with `--open` stand for captures.
@@ -497,7 +512,7 @@ fn main() -> Result<()> {
             plan.launch != pm_first_launch::Launch::Migrate,
             "Open Powermove once to finish copying your library"
         );
-        return mcp_services::headless(profile, exports, launch);
+        return mcp_services::headless(profile, exports, launch, false);
     }
     std::fs::create_dir_all(&profile)?;
     transcription::install(&profile);

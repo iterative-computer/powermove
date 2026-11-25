@@ -33,6 +33,17 @@ pub trait EngineHook: Send + Sync {
         Ok(())
     }
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
+    fn extension_probe(
+        &self, _project: &str, _document: u64, _revision: u64, _ids: &[String],
+    ) -> Result<Value> {
+        Err(Error::unavailable("native extension probe renderer"))
+    }
+    fn eval_registrations(&self, _project: &str, _document: u64, _revision: u64) -> Result<Value> {
+        Err(Error::unavailable("native registration evidence"))
+    }
+    fn measure_frame_time(&self, _project: &str, _document: u64, _revision: u64, _args: &Value) -> Result<Value> {
+        Err(Error::unavailable("paired native frame timing"))
+    }
     fn render_effect_lab(
         &self,
         _: &crate::effect_lab::Request,
@@ -806,6 +817,40 @@ impl Automation {
         )?;
         Ok(())
     }
+    pub(crate) fn begin_checked_edit(
+        &mut self, project: &str, writer: u32, label: &str, revision: u64,
+    ) -> Result<u64> {
+        use pm_kernel::EditCall;
+        let ack = self.call(project, Request::new(
+            Caller::realm(writer, 1, Origin::Mcp),
+            EditCall::MutateBegin { label: label.to_owned() },
+        ).outside_revision(revision))?;
+        match ack.reply {
+            Reply::Mutation(lease) => Ok(lease),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
+    pub(crate) fn finish_checked_edit(
+        &mut self, project: &str, writer: u32, lease: u64, commit: bool,
+    ) -> Result<u64> {
+        use pm_kernel::EditCall;
+        let call = if commit {
+            EditCall::MutateFinish { lease, ops: Vec::new(), label: None }
+        } else {
+            EditCall::MutateAbort { lease }
+        };
+        let ack = self.call(
+            project, Request::new(Caller::realm(writer, 1, Origin::Mcp), call),
+        )?;
+        match &ack.reply {
+            Reply::Bool(true) => Ok(ack.revision),
+            Reply::Edit(value) if value.ok =>
+                Ok(ack.revision),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
     pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
         match self
             .call(

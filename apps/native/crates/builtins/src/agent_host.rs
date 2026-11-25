@@ -71,6 +71,11 @@ impl AgentLink {
 
     /// Reads who is signed in on workers; the panel updates when they answer.
     pub fn set_environment(self: &Arc<Self>, environment: Environment, open: Arc<Opener>) {
+        if environment.aero.is_some() {
+            // Development sessions use only the in-process fake model.
+            *self.environment.shared() = Some(environment);
+            return;
+        }
         let weak = Arc::downgrade(self);
         let accounts = Accounts::new(
             environment.clone(),
@@ -156,6 +161,13 @@ impl AgentLink {
     /// The panel's connection state and what to tell the user about it.
     pub fn connection(&self, provider: Provider) -> (&'static str, String) {
         let name = match provider {
+            Provider::Aero => {
+                return if self.environment().is_some_and(|env| env.aero.is_some()) {
+                    ("connected", String::new())
+                } else {
+                    ("unavailable", "Aero's development switch is off.".into())
+                }
+            }
             Provider::Chatgpt => "ChatGPT",
             Provider::Claude => "Claude",
             Provider::Compatible => {
@@ -226,6 +238,15 @@ impl AgentLink {
     pub fn model_choices(&self, provider: Provider) -> Vec<pm_agents::account::Model> {
         if provider == Provider::Compatible {
             self.compatible_models()
+        } else if provider == Provider::Aero && self.available(provider) {
+            vec![pm_agents::account::Model {
+                id: "fake/model".into(),
+                label: "Aero · Fake model".into(),
+                default: true,
+                efforts: vec![],
+                aliases: vec![],
+                default_effort: None,
+            }]
         } else {
             self.accounts()
                 .map_or_else(Vec::new, |accounts| accounts.models(provider))
@@ -235,6 +256,7 @@ impl AgentLink {
     pub fn catalog(&self, provider: Provider) -> Catalog {
         let environment = self.environment.shared();
         let mut providers = vec![];
+        let aero = environment.as_ref().is_some_and(|env| env.aero.is_some());
         for (candidate, label) in [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")] {
             let runtime = match candidate {
                 Provider::Claude => Runtime::Claude,
@@ -246,6 +268,9 @@ impl AgentLink {
             }
         }
         drop(environment);
+        if aero {
+            providers.push(("aero".into(), "Aero".into()));
+        }
         if let Some(saved) = self.compatible() {
             providers.push(("compatible".into(), saved.model));
         }
@@ -648,12 +673,14 @@ pub fn run_effect(
                         *text = expand_attached_request(text, attachments).into_owned();
                     }
                     state.runs.completion_gate();
-                    state.completion.begin(
-                        link,
-                        &effect.target.project,
-                        &effect.target.thread,
-                        &kept,
-                    );
+                    if kept.provider != Provider::Aero {
+                        state.completion.begin(
+                            link,
+                            &effect.target.project,
+                            &effect.target.thread,
+                            &kept,
+                        );
+                    }
                     let recovery = state
                         .panel
                         .recovery_launch(&effect.target.thread, &request.run)?
@@ -1008,12 +1035,16 @@ fn launch_request(
     };
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: prompt(
-            &state.panel,
-            thread,
-            &expand_attached_request(text, attached),
-            effect.message_id(),
-        )?,
+        prompt: if settings.provider == Provider::Aero {
+            expand_attached_request(text, attached).into_owned()
+        } else {
+            prompt(
+                &state.panel,
+                thread,
+                &expand_attached_request(text, attached),
+                effect.message_id(),
+            )?
+        },
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         // The effort the picker shows is the one that runs: with none saved,

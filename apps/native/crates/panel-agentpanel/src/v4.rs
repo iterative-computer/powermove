@@ -548,6 +548,7 @@ fn dispatch_composer(
                 "chatgpt" => Provider::Chatgpt,
                 "claude" => Provider::Claude,
                 "compatible" => Provider::Compatible,
+                "aero" => Provider::Aero,
                 _ => return Err(Error::Invalid("provider")),
             };
             panel.set_provider(

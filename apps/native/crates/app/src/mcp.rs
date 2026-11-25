@@ -42,6 +42,18 @@ pub fn still(project: &str, time: f64, width: u32) -> std::result::Result<Vec<u8
         .map_err(|e| e.to_string())
 }
 
+pub(crate) fn aero_launcher() -> pm_agents::aero::Launcher {
+    pm_agents::aero::Launcher(Arc::new(|request, scope, token| {
+        let host = STILLS.get().ok_or("Powermove's tool host is still starting.")?;
+        let project = request.project.as_deref().ok_or("Open a project to use Aero.")?;
+        pm_mcp::session::aero_tools::Tools::open(
+            host.clone(), project, None, scope, request.access, Some(token),
+        )
+        .map(|tools| Box::new(tools) as Box<dyn pm_agents::aero::Session>)
+        .map_err(|e| e.to_string())
+    }))
+}
+
 /// The tool host shared by every connection to this app.
 #[derive(Clone)]
 pub struct Tools {

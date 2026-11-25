@@ -831,6 +831,7 @@ impl Backend {
             pm_agents::Provider::Chatgpt,
             pm_agents::Provider::Claude,
             pm_agents::Provider::Compatible,
+            pm_agents::Provider::Aero,
         ]
         .into_iter()
         .map(|provider| {
@@ -2429,6 +2430,7 @@ impl Backend {
                                 "chatgpt" => pm_agents::Provider::Chatgpt,
                                 "claude" => pm_agents::Provider::Claude,
                                 "compatible" => pm_agents::Provider::Compatible,
+                                "aero" => pm_agents::Provider::Aero,
                                 _ => return Err("Unknown provider".into()),
                             };
                             let mut state = agent.shared();

@@ -1661,3 +1661,77 @@ fn agent_native_plan_preserves_a_concurrent_editors_history_group() {
         before
     );
 }
+
+#[test]
+fn aero_repairs_a_compile_error_and_loads_the_published_extension() {
+    use pm_agents::{
+        Access, Event, Provider, RunResult,
+        aero::{self, Model, Options, Reply},
+        launch::Request as Launch,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        session.dispatch("apply_commands", &json!({"commands":[
+            {"type":"add_layer","id":"plate","name":"Plate","layerType":"solid","from":0,"duration":2}
+        ]})).unwrap();
+        session.dispatch("finish_session", &json!({"commit":true})).unwrap();
+    }
+    let jobs = crate::mcp_services::connect_engine(&fixture.tools, Default::default(), Default::default()).unwrap();
+    let scope = fixture.host.profile.join("aero/sessions/extension");
+    let host = fixture.tools.automation.clone();
+    let source = include_str!("../../../js/compat/api-pack/samples/gradient-tint/index.ts");
+    let manifest = include_str!("../../../js/compat/api-pack/samples/gradient-tint/manifest.json");
+    let step = AtomicUsize::new(0);
+    let model = Model::fake(move |request| {
+        let tool = |name: &str, op: &str, args: Value| Reply::Tool {
+            name: name.into(), args: json!({"op":op,"args":args}),
+        };
+        match step.fetch_add(1, Ordering::Relaxed) {
+            0 => tool("files","write",json!({"path":"gradient-tint/manifest.json","text":manifest})),
+            1 => tool("files","write",json!({"path":"gradient-tint/index.ts","text":"const valid = 1;\nexport default function ( {"})),
+            2 => tool("extension","check",json!({"id":"gradient-tint"})),
+            3 => {
+                assert!(String::from_utf8_lossy(request).contains("index.ts:2:"));
+                tool("files","write",json!({"path":"gradient-tint/index.ts","text":source}))
+            }
+            4 => tool("extension","check",json!({"id":"gradient-tint"})),
+            5 => tool("extension","publish",json!({"extensions":[{"id":"gradient-tint","action":"created"}]})),
+            _ => Reply::Text("Published the repaired gradient tint.".into()),
+        }
+    });
+    let report: aero::Report = Arc::new(|_| {});
+    let handle = aero::start(Launch {
+        run: "extension".into(), prompt: "Make a gradient tint effect.".into(),
+        provider:Provider::Aero, model:None, effort:None, access:Access::Project,
+        approval:Default::default(), computer_consent:false, workspace:scope.clone(),
+        images:Vec::new(), role:None, files:Vec::new(), project:Some("test".into()),
+    }, "extension".into(), scope, Options {
+        model, wall:Duration::from_secs(45), report:Some(report),
+        ..Options::development()
+    }, move |scope| {
+        pm_mcp::session::aero_tools::Tools::open(host,"test",None,scope,Access::Project,None)
+            .map(|tools| Box::new(tools) as Box<dyn aero::Session>)
+            .map_err(|e| e.to_string())
+    });
+    let deadline = Instant::now() + Duration::from_secs(50);
+    let result = loop {
+        match handle.try_event() {
+            Ok(Event::Completed { result,.. }) => break result,
+            Ok(Event::Trace { value, .. }) if value["kind"] == "tool-end" => eprintln!("{value}"),
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline =>
+                std::thread::sleep(Duration::from_millis(5)),
+            event => panic!("Aero did not complete: {event:?}"),
+        }
+    };
+    assert_eq!(result,RunResult::success("Published the repaired gradient tint.".into(),Access::Project));
+    let published = fixture.host.kernel.published("test").unwrap();
+    let resources = jobs.resources(&published, true, &|| false).unwrap();
+    assert!(resources.definitions.iter().any(|d| d.id.as_str() == "gradient-tint.effect"));
+    drop(handle);
+    drop(jobs);
+}

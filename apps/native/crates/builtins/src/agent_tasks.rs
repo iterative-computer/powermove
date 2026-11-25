@@ -150,19 +150,17 @@ fn display(provider: Provider) -> &'static str {
         Provider::Chatgpt => "ChatGPT",
         Provider::Claude => "Claude",
         Provider::Compatible => "Connected model",
+        Provider::Aero => "Aero",
     }
 }
 /// Main's `orchestrationProviders`, from the composer's own catalog.
 fn providers(link: &AgentLink) -> Vec<Value> {
-    [Provider::Chatgpt, Provider::Claude, Provider::Compatible]
+    [Provider::Chatgpt, Provider::Claude, Provider::Compatible, Provider::Aero]
         .into_iter()
+        .filter(|&provider| provider != Provider::Aero || link.available(provider))
         .map(|p| {
             let connected = link.available(p);
-            let models: Vec<Value> = if p == Provider::Compatible {
-                link.compatible_models()
-            } else {
-                link.accounts().map_or_else(Vec::new, |a| a.models(p))
-            }
+            let models: Vec<Value> = link.model_choices(p)
                 .into_iter()
                 .map(|m| {
                     let options = m

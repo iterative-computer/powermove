@@ -42,6 +42,10 @@ pub trait ExtensionHost: Send + Sync {
     fn check(&self, dir: &Path, manifest: &Value) -> std::result::Result<(), String>;
     /// Published: every open window reloads these extensions now.
     fn reload(&self, ids: &[String]);
+    /// Activation records for installed extensions in each settled owner.
+    fn health(&self) -> Result<Vec<Value>> {
+        Err(Error::unavailable("per-window extension activation records"))
+    }
     /// The authoring pack written into each agent workspace (`api/`).
     fn api_pack(&self) -> Vec<(String, String)>;
 }
@@ -249,7 +253,7 @@ fn folders(roots: &[PathBuf]) -> BTreeMap<String, PathBuf> {
     }
     out
 }
-fn hashes(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+pub(crate) fn hashes(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     folders(roots)
         .into_iter()
         .map(|(id, dir)| Ok((id, tree_hash(&dir)?)))

@@ -30,15 +30,19 @@ fn run() -> pm_mcp::Result<()> {
     let exports = value("--exports").unwrap_or_else(|| profile.join("exports"));
     let host = Arc::new(Mutex::new(Automation::new(profile.clone(), exports)?));
     let server = if args.iter().any(|a| a == "--listen") {
-        Some(transport::LoopbackServer::start(&profile, host.clone())?)
+        Some(transport::LoopbackServer::start_unix(&profile, host.clone())?)
     } else {
         None
     };
-    let result = transport::serve_stdio(
-        std::io::stdin().lock(),
-        std::io::stdout().lock(),
-        McpSession::new(host.clone()),
-    );
+    let result = if server.is_some() {
+        pm_mcp::aero_rpc::serve(
+            std::io::BufReader::new(std::io::stdin()), std::io::stdout().lock(), host.clone(), profile,
+        )
+    } else {
+        transport::serve_stdio(
+            std::io::stdin().lock(), std::io::stdout().lock(), McpSession::new(host.clone()),
+        )
+    };
     drop(server);
     result.and_then(|()| host.lock().unwrap().close_headless())
 }

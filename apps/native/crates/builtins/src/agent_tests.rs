@@ -55,6 +55,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
         tools: vec!["get_project_state".into()],
         composition_tools: vec!["get_project_state".into()],
         compatible: None,
+        aero: None,
     }
 }
 struct Agent {
