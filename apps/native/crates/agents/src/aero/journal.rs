@@ -62,7 +62,7 @@ impl Journal {
 
     pub fn store_input(&self, id: &str, input: &str) -> Result<(), String> {
         if !crate::valid_id(id, 200) {
-            return Err("Invalid Powermove message id.".into());
+            return Err("Invalid Aero message id.".into());
         }
         store(&self.dir, &format!("{id}.input"), &input)
     }
@@ -115,5 +115,5 @@ fn store(dir: &Path, name: &str, value: &impl serde::Serialize) -> Result<(), St
 }
 
 fn show(error: impl std::fmt::Display) -> String {
-    format!("Powermove's session storage failed: {error}")
+    format!("Aero's session storage failed: {error}")
 }

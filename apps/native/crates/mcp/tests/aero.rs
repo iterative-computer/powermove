@@ -337,14 +337,25 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
 }
 
 /// A provider error inside a streamed (HTTP 200) reply, at once or after
-/// some text, reaches the person only in Powermove's words: never the
-/// provider's message, a key it echoes, or its JSON, in the panel's result,
+/// some text, reaches the person only in Aero's words: never the backend's
+/// message, a session token it echoes, or its JSON, in the panel's result,
 /// the trace, the run's reports or the session's files (PM-746, Sol P1-1).
 #[test]
 fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
-    use pm_agents::edge::{Chunk, MemorySecrets, Net, NetRequest, Secrets};
+    use pm_agents::edge::{Chunk, Net, NetRequest};
+    use pm_agents::inference::{PowermoveAccount, Session};
     use std::sync::atomic::AtomicBool;
-    const KEY: &str = "sk-ant-fake-leak-7f3a9c";
+    const TOKEN: &str = "pm-session-fake-leak-7f3a9c";
+    #[derive(Debug)]
+    struct Signed;
+    impl PowermoveAccount for Signed {
+        fn session(&self) -> Option<Session> {
+            Some(Session {
+                origin: "https://cloud.trypowermove.com".into(),
+                token: TOKEN.into(),
+            })
+        }
+    }
     #[derive(Debug, Clone, Copy)]
     struct Erroring {
         mid: bool,
@@ -352,35 +363,25 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
     impl Net for Erroring {
         fn stream(
             &self,
-            _: &NetRequest<'_>,
+            request: &NetRequest<'_>,
             _: &AtomicBool,
             on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
         ) -> Result<(), String> {
+            assert_eq!(
+                request.url,
+                "https://cloud.trypowermove.com/v1/aero/chat/completions"
+            );
             on(Chunk::Status(200))?;
             let mut sse = String::new();
-            let mut event = |name: &str, data: Value| {
-                sse.push_str(&format!("event: {name}\ndata: {data}\n\n"));
-            };
             if self.mid {
-                event(
-                    "message_start",
-                    json!({"type":"message_start","message":{"id":"msg_1",
-                    "type":"message","role":"assistant","content":[],"model":"claude-opus-5-5",
-                    "usage":{"input_tokens":1,"output_tokens":0}}}),
-                );
-                event(
-                    "content_block_start",
-                    json!({"type":"content_block_start","index":0,
-                    "content_block":{"type":"text","text":""}}),
-                );
-                event(
-                    "content_block_delta",
-                    json!({"type":"content_block_delta","index":0,
-                    "delta":{"type":"text_delta","text":"Starting"}}),
-                );
+                sse.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,
+                        "delta":{"role":"assistant","content":"Starting"},"finish_reason":null}]})
+                ));
             }
             let echoed = format!(
-                "bad header x-api-key: {KEY}; request {}",
+                "bad header authorization: Bearer {TOKEN}; request {}",
                 json!({"internal_trace":{"prompt":"secret prompt"}})
             );
             let kind = if self.mid {
@@ -388,10 +389,10 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
             } else {
                 "invalid_request_error"
             };
-            event(
-                "error",
-                json!({"type":"error","error":{"type":kind,"message":echoed}}),
-            );
+            sse.push_str(&format!(
+                "data: {}\n\n",
+                json!({"error":{"type":kind,"message":echoed}})
+            ));
             // In two pieces, so an event arrives split.
             let (a, b) = sse.as_bytes().split_at(sse.len() / 2);
             on(Chunk::Data(a))?;
@@ -402,32 +403,24 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
         (false, "The provider refused the request as invalid."),
         (
             true,
-            "The provider refused the credential. Check Settings › Providers.",
+            "Powermove refused the session. Sign in to Powermove again in Settings › Providers.",
         ),
     ] {
         let fixture = Fixture::new();
-        let secrets = Arc::new(MemorySecrets::default());
         let env = pm_agents::launch::Environment {
             profile: fixture.profile.path().join("app"),
-            keychain_prefix: "pm-leak-test".into(),
-            secrets: Some(secrets.clone()),
+            powermove: Some(Arc::new(Signed)),
             net: Some(Arc::new(Erroring { mid })),
             ..Default::default()
         };
-        secrets
-            .write(
-                &pm_agents::sources::anthropic_service(&env),
-                "api-key",
-                KEY.as_bytes(),
-            )
-            .unwrap();
-        let live = pm_agents::sources::live(&env, "anthropic/claude-opus-5-5", "high").unwrap();
+        let model = "anthropic/claude-opus-5-5";
+        let live = pm_agents::inference::live(&env, model, "high").unwrap();
         let scope = fixture.profile.path().join("aero/sessions/leak");
         let (turn, notes) = fixture.start_choice(
             "leak",
             scope.clone(),
             "Say hello.",
-            (Some("anthropic/claude-opus-5-5"), Some("high")),
+            (Some(model), Some("high")),
             Model::live(live),
             |tools| Box::new(tools),
         );
@@ -458,7 +451,7 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
         files(&scope, &mut seen);
         assert!(!seen.is_empty());
         for text in &seen {
-            for leak in [KEY, "internal_trace", "secret prompt", "x-api-key"] {
+            for leak in [TOKEN, "internal_trace", "secret prompt"] {
                 assert!(!text.contains(leak), "mid={mid}: {leak} reached {text}");
             }
         }
@@ -1397,7 +1390,7 @@ fn a_draft_survives_stop_after_a_compile_error_and_the_next_send() {
         RunResult::Success { text, .. } => assert_eq!(text, "The draft is still there."),
         RunResult::Failure { error, .. } => assert_eq!(
             error,
-            "Powermove stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
+            "Aero stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
         ),
     }
 }
@@ -1439,7 +1432,7 @@ fn a_draft_survives_an_exhausted_gate_and_the_next_send() {
     );
     let (result, _) = complete_with_progress(&first);
     assert!(
-        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Powermove stopped before its checks passed")),
+        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Aero stopped before its checks passed")),
         "{result:?}"
     );
     let mut reopened = fixture.tools_at(&scope, Access::Project);
@@ -2007,7 +2000,7 @@ fn an_exhausted_gate_ends_the_turn_in_plain_words() {
     );
     assert_eq!(
         error,
-        "Powermove stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
+        "Aero stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
     );
     assert!(
         !error.contains(['{', '[', '"']) && error.len() <= 400,
@@ -2094,7 +2087,7 @@ fn an_exhausted_gate_never_quotes_a_plan_or_the_project() {
     };
     assert_eq!(
         error,
-        "Powermove stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
+        "Aero stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
     );
     assert!(
         error.len() <= 200 && !error.contains(['{', '[', '"']),
@@ -2631,17 +2624,21 @@ fn switching_a_track_to_offline_media_is_caught() {
     );
 }
 
-/// The picker's level on every route the Powermove harness runs, as the
-/// request leaves Powermove (PM-746): emulate (`PM_EMULATE`, its executable)
-/// answers OpenAI Responses, Chat Completions and Anthropic Messages on a
-/// loopback port of its own. Fake credentials only, in memory.
+/// Aero's one route, as each request leaves Powermove (PM-746, PM-750):
+/// emulate (`PM_EMULATE`, its executable) answers Chat Completions on a
+/// loopback port of its own, standing in for Powermove inference. Fake
+/// credentials only, in memory.
 mod routes {
     use super::*;
     use pm_agents::edge::{Chunk, Loopback, MemorySecrets, Net, NetRequest};
+    use pm_agents::inference::{PowermoveAccount, Session};
     use pm_agents::launch::Environment;
-    use pm_agents::{codex_auth, compatible, sources};
+    use pm_agents::{codex_auth, compatible, keys};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::AtomicBool;
+
+    const ORIGIN: &str = "https://cloud.trypowermove.com";
+    const TOKEN: &str = "pm-session-fake-routes";
 
     struct Emulate {
         child: Child,
@@ -2668,6 +2665,8 @@ mod routes {
             .unwrap()
             .port();
         let models = [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
             "claude-opus-5-5",
             "claude-opus-4-6",
             "claude-haiku-4-5-20251001",
@@ -2712,7 +2711,6 @@ mod routes {
         url: String,
         headers: Vec<(String, String)>,
         body: Value,
-        reply: String,
     }
     impl Sent {
         fn header(&self, name: &str) -> Option<&str> {
@@ -2722,7 +2720,8 @@ mod routes {
                 .map(|(_, v)| v.as_str())
         }
     }
-    /// The app's network as the routes see it: provider origins go to emulate.
+    /// The app's network as the routes see it: every provider origin
+    /// (Powermove's and the ones Aero must never reach) goes to emulate.
     #[derive(Debug)]
     struct Wire {
         base: String,
@@ -2736,6 +2735,7 @@ mod routes {
             on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
         ) -> Result<(), String> {
             let url = [
+                ORIGIN,
                 "https://chatgpt.com",
                 "https://api.openai.com",
                 "https://api.anthropic.com",
@@ -2746,31 +2746,35 @@ mod routes {
                 || request.url.to_owned(),
                 |rest| format!("{}{rest}", self.base),
             );
-            let mut reply = Vec::new();
-            let streamed = Loopback.stream(
+            self.sent.lock().unwrap().push(Sent {
+                url: request.url.into(),
+                headers: request.headers.to_vec(),
+                body: serde_json::from_slice(request.body).unwrap_or_default(),
+            });
+            Loopback.stream(
                 &NetRequest {
                     url: &url,
                     ..*request
                 },
                 stop,
-                &mut |chunk| {
-                    if let Chunk::Data(bytes) = &chunk {
-                        reply.extend_from_slice(bytes);
-                    }
-                    on(chunk)
-                },
-            );
-            self.sent.lock().unwrap().push(Sent {
-                url: request.url.into(),
-                headers: request.headers.to_vec(),
-                body: serde_json::from_slice(request.body).unwrap_or_default(),
-                reply: String::from_utf8_lossy(&reply).into(),
-            });
-            streamed
+                on,
+            )
         }
     }
 
-    /// The saved custom endpoint (Settings › Providers › Custom).
+    /// The signed-in Powermove account.
+    #[derive(Debug)]
+    struct Signed;
+    impl PowermoveAccount for Signed {
+        fn session(&self) -> Option<Session> {
+            Some(Session {
+                origin: ORIGIN.into(),
+                token: TOKEN.into(),
+            })
+        }
+    }
+    /// A saved custom endpoint (the Compatible connection), which Aero
+    /// never reaches.
     #[derive(Debug)]
     struct Custom(String);
     impl compatible::ChatHost for Custom {
@@ -2801,7 +2805,7 @@ mod routes {
         fixture: Fixture,
         env: Environment,
         wire: Arc<Wire>,
-        _emulate: Emulate,
+        emulate: Emulate,
     }
     fn routes(rules: Value) -> Option<Routes> {
         let emulate = emulate(rules)?;
@@ -2815,6 +2819,7 @@ mod routes {
             keychain_prefix: "pm-effort-routes".into(),
             secrets: Some(Arc::new(MemorySecrets::default())),
             net: Some(wire.clone()),
+            powermove: Some(Arc::new(Signed)),
             compatible: Some(Arc::new(Custom(format!("{}/custom/v1", emulate.base)))),
             vars: [(
                 "PM_CODEX_KEYRING_SERVICE".to_owned(),
@@ -2829,7 +2834,7 @@ mod routes {
             fixture,
             env,
             wire,
-            _emulate: emulate,
+            emulate,
         })
     }
     impl Routes {
@@ -2841,25 +2846,17 @@ mod routes {
                 .write(service, account, value)
                 .unwrap();
         }
-        /// Codex's shared login item: an OpenAI API key, or a ChatGPT sign-in.
-        fn codex_login(&self, item: Value) {
-            let account = codex_auth::store_key(&codex_auth::codex_home(&self.env));
-            self.secret(
-                &codex_auth::service(&self.env),
-                &account,
-                item.to_string().as_bytes(),
-            );
-        }
-        /// One turn on the picker's `id` at `effort`; the model request it sent.
-        fn turn(&self, id: &str, effort: &str, prompt: &str) -> Vec<Sent> {
+        /// One turn on the picker's `id` at `effort` in `env`; the model
+        /// requests it sent.
+        fn turn_in(&self, env: &Environment, id: &str, effort: &str) -> Vec<Sent> {
             let before = self.wire.sent.lock().unwrap().len();
-            let live = sources::live(&self.env, id, effort).unwrap();
+            let live = pm_agents::inference::live(env, id, effort).unwrap();
             let run = format!("{}-{effort}", id.replace(['/', '.'], "-"));
             let scope = self.fixture.profile.path().join("aero/sessions").join(&run);
             let (turn, _notes) = self.fixture.start_choice(
                 &run,
                 scope,
-                prompt,
+                "Say hello.",
                 (Some(id), Some(effort)),
                 Model::live(live),
                 |tools| Box::new(tools),
@@ -2870,6 +2867,10 @@ mod routes {
                 matches!(result, RunResult::Success { .. }),
                 "{id} at {effort}: {result:?}; sent {sent:#?}"
             );
+            sent
+        }
+        fn turn(&self, id: &str, effort: &str) -> Vec<Sent> {
+            let sent = self.turn_in(&self.env, id, effort);
             assert!(!sent.is_empty(), "{id} at {effort} sent nothing");
             sent
         }
@@ -2880,123 +2881,106 @@ mod routes {
             {"type":"text","text":"Hello from emulate."}]}])
     }
 
+    /// Each picker level goes to Powermove inference as `reasoning_effort`,
+    /// on the Powermove session; no level sends none.
     #[test]
-    fn the_openai_key_route_sends_each_picker_level_as_reasoning_effort() {
+    fn the_aero_route_sends_each_picker_level_as_reasoning_effort_on_the_powermove_session() {
         let Some(r) = routes(hello()) else { return };
-        r.codex_login(json!({"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-1234"}));
-        for level in compatible::efforts("gpt-6-sol") {
-            let sent = r.turn("openai/gpt-6-sol", &level, "Say hello.");
-            for request in &sent {
-                assert_eq!(request.url, "https://api.openai.com/v1/chat/completions");
-                assert_eq!(request.body["reasoning_effort"], level.as_str(), "{level}");
+        for level in ["low", "medium", "high", "xhigh", "max", ""] {
+            for request in r.turn("openai/gpt-6-sol", level) {
+                assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"));
+                assert_eq!(request.body["model"], "openai/gpt-6-sol");
+                if level.is_empty() {
+                    assert!(request.body.get("reasoning_effort").is_none());
+                } else {
+                    assert_eq!(request.body["reasoning_effort"], level, "{level}");
+                }
                 assert_eq!(
                     request.header("authorization"),
-                    Some("Bearer sk-fake-openai-1234")
+                    Some(format!("Bearer {TOKEN}").as_str())
                 );
+                assert!(request.header("x-powermove-client").is_some());
             }
         }
     }
 
+    /// With an OpenAI key in Codex's item, an Anthropic key, a ChatGPT
+    /// sign-in's old model ids and a saved custom endpoint, every Aero
+    /// request still goes to Powermove inference on the Powermove session:
+    /// no key or other origin is ever reached.
     #[test]
-    fn the_chatgpt_sign_in_route_sends_each_picker_level_as_the_reasoning_effort() {
-        use base64::Engine as _;
-        let Some(r) = routes(hello()) else { return };
-        let claims =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
-        r.codex_login(json!({"auth_mode":"chatgpt","tokens":{"id_token":"x",
-            "access_token":format!("h.{claims}.s"),"refresh_token":"r","account_id":"acct-fake"}}));
-        for level in compatible::efforts("gpt-6-sol") {
-            let sent = r.turn("chatgpt/gpt-6-sol", &level, "Say hello.");
-            for request in &sent {
-                assert_eq!(
-                    request.url,
-                    "https://chatgpt.com/backend-api/codex/responses"
-                );
-                assert_eq!(
-                    request.body["reasoning"]["effort"],
-                    level.as_str(),
-                    "{level}"
-                );
-                assert_eq!(request.header("chatgpt-account-id"), Some("acct-fake"));
-            }
-        }
-    }
-
-    #[test]
-    fn the_custom_route_sends_each_picker_level_as_reasoning_effort() {
-        let Some(r) = routes(hello()) else { return };
-        let levels = compatible::efforts("gpt-5.5");
-        assert!(!levels.is_empty());
-        for level in levels {
-            let sent = r.turn("custom/gpt-5.5", &level, "Say hello.");
-            for request in &sent {
-                assert_eq!(
-                    request.url,
-                    format!("{}/custom/v1/chat/completions", r._emulate.base)
-                );
-                assert_eq!(request.body["reasoning_effort"], level.as_str(), "{level}");
-                assert_eq!(
-                    request.header("authorization"),
-                    Some("Bearer custom-fake-key")
-                );
-            }
-        }
-    }
-
-    const ANTHROPIC_KEY: &str = "sk-ant-fake-abcdef12";
-
-    /// Each Claude family's own control: adaptive thinking with the effort, or
-    /// a thinking budget below the output limit; the key as `x-api-key`
-    /// with the API version, never a bearer; prompt caching on.
-    #[test]
-    fn the_anthropic_key_route_sends_each_picker_level_as_that_models_thinking_fields() {
+    fn no_openai_key_anthropic_key_or_custom_connection_reaches_aero() {
         let Some(r) = routes(hello()) else { return };
         r.secret(
-            &sources::anthropic_service(&r.env),
+            &keys::anthropic_service(&r.env),
             "api-key",
-            ANTHROPIC_KEY.as_bytes(),
+            b"sk-ant-fake-abcdef12",
         );
-        for model in [
-            "claude-opus-5-5",
-            "claude-opus-4-6",
-            "claude-haiku-4-5-20251001",
+        let account = codex_auth::store_key(&codex_auth::codex_home(&r.env));
+        r.secret(
+            &codex_auth::service(&r.env),
+            &account,
+            json!({"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-1234"})
+                .to_string()
+                .as_bytes(),
+        );
+        for id in [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
+            "custom/gpt-5.5",
+            "chatgpt/gpt-6-sol",
         ] {
-            let levels = sources::claude_efforts(model);
-            assert!(!levels.is_empty(), "{model}");
-            for level in levels {
-                let fields = sources::claude_effort_fields(model, &level).unwrap();
-                let sent = r.turn(&format!("anthropic/{model}"), &level, "Say hello.");
-                for request in &sent {
-                    let body = &request.body;
-                    assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
-                    assert_eq!(body["thinking"], fields["thinking"], "{model} {level}");
-                    assert_eq!(
-                        body["output_config"], fields["output_config"],
-                        "{model} {level}"
-                    );
-                    assert_eq!(body["max_tokens"], sources::CLAUDE_MAX_TOKENS);
-                    let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
-                    assert!(budget < u64::from(sources::CLAUDE_MAX_TOKENS));
-                    assert_eq!(body["cache_control"], json!({"type":"ephemeral"}));
-                    assert!(body.get("tool_choice").is_none(), "{body}");
-                    assert_eq!(request.header("x-api-key"), Some(ANTHROPIC_KEY));
-                    assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
-                    assert_eq!(request.header("authorization"), None);
+            for request in r.turn(id, "high") {
+                assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"), "{id}");
+                assert_eq!(
+                    request.header("authorization"),
+                    Some(format!("Bearer {TOKEN}").as_str()),
+                    "{id}"
+                );
+                assert!(request.header("x-api-key").is_none(), "{id}");
+                assert!(request.header("chatgpt-account-id").is_none(), "{id}");
+                for (_, value) in &request.headers {
+                    assert!(!value.contains("sk-"), "{id}: a key reached Aero");
                 }
             }
         }
-        // A level the chosen model doesn't take runs as the nearest one below.
-        let sent = r.turn("anthropic/claude-opus-4-6", "xhigh", "Say hello.");
-        assert_eq!(sent[0].body["output_config"]["effort"], "high");
+        // Signed out of Powermove: Aero has no way in, whatever keys exist.
+        let signed_out = Environment {
+            powermove: None,
+            ..r.env.clone()
+        };
+        assert_eq!(
+            pm_agents::inference::live(&signed_out, "openai/gpt-6-sol", "high").err().as_deref(),
+            Some(pm_agents::inference::SIGN_IN)
+        );
     }
 
-    /// The picker offers each Claude model the levels it takes, from the
-    /// key's own model list, and none for a model this table doesn't know.
+    /// A development build with the switch on reaches the test endpoint
+    /// (emulate) directly, and nothing else.
     #[test]
-    fn the_anthropic_model_list_offers_each_models_own_levels() {
+    fn the_test_endpoint_reaches_emulate_with_the_development_switch_on() {
         let Some(r) = routes(hello()) else { return };
-        let models =
-            sources::key_models(&*r.wire, sources::Source::AnthropicKey, ANTHROPIC_KEY).unwrap();
+        let mut env = r.env.clone();
+        env.vars.insert(
+            pm_agents::inference::TEST_ENDPOINT.into(),
+            format!("{}/v1/aero", r.emulate.base),
+        );
+        // Switch off: the endpoint is not read.
+        assert!(!r.turn_in(&env, "openai/gpt-6-sol", "low").is_empty());
+        env.aero = Some(aero::Launcher(Arc::new(|_, _, _| Err("unused".into()))));
+        assert!(
+            r.turn_in(&env, "openai/gpt-6-sol", "low").is_empty(),
+            "the turn went to the test endpoint, not the network"
+        );
+    }
+
+    /// Claude Code on an Anthropic key: the key's model list offers each
+    /// Claude model the levels it takes, and none for one the table doesn't
+    /// know.
+    #[test]
+    fn the_anthropic_key_lists_claude_code_models_with_each_models_levels() {
+        let Some(r) = routes(hello()) else { return };
+        let models = keys::anthropic_models(&*r.wire, "sk-ant-fake-abcdef12").unwrap();
         let levels = |id: &str| {
             let model = models.iter().find(|m| m.id == id).unwrap();
             (model.efforts.join(" "), model.default_effort.clone())
@@ -3015,61 +2999,5 @@ mod routes {
             ("low medium high".into(), high)
         );
         assert_eq!(levels("claude-3-7-sonnet-20250219"), (String::new(), None));
-    }
-
-    /// After a tool call, the next request sends the thinking block back
-    /// first in that assistant turn, with the signature the model gave it,
-    /// and keeps the cached prefix byte for byte.
-    #[test]
-    fn the_anthropic_route_sends_a_thinking_signature_back_after_a_tool_call() {
-        let rules = json!([
-            {"id":"look","match":{"hasToolResult":false},"times":1,"reply":[
-                {"type":"reasoning","text":"Reading the layer before answering."},
-                {"type":"tool_call","name":"project","arguments":{"op":"layer","args":{"layerId":"keeper"}}}]},
-            {"id":"answer","match":{"hasToolResult":true},"reply":[
-                {"type":"reasoning","text":"The layer is there."},
-                {"type":"text","text":"The layer is called Keep."}]}
-        ]);
-        let Some(r) = routes(rules) else { return };
-        r.secret(
-            &sources::anthropic_service(&r.env),
-            "api-key",
-            ANTHROPIC_KEY.as_bytes(),
-        );
-        let sent = r.turn(
-            "anthropic/claude-opus-5-5",
-            "high",
-            "What is the first layer called?",
-        );
-        assert_eq!(sent.len(), 2, "{sent:#?}");
-        let (first, second) = (&sent[0], &sent[1]);
-        // The signature the first reply streamed.
-        let signature = first
-            .reply
-            .lines()
-            .filter_map(|line| line.strip_prefix("data: "))
-            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
-            .find_map(|event| event["delta"]["signature"].as_str().map(str::to_owned))
-            .expect("a signature in the first reply");
-        assert!(!signature.is_empty());
-        let messages = second.body["messages"].as_array().unwrap();
-        let assistant = messages
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("the tool turn's assistant message");
-        let content = assistant["content"].as_array().unwrap();
-        assert_eq!(
-            content[0],
-            json!({"type":"thinking","thinking":"Reading the layer before answering.","signature":signature})
-        );
-        assert!(content.iter().any(|block| block["type"] == "tool_use"));
-        // The cache's prefix: the same tools and system prompt, and the
-        // first request's messages unchanged at the start of the second.
-        assert_eq!(second.body["tools"], first.body["tools"]);
-        assert_eq!(second.body["system"], first.body["system"]);
-        let opened = first.body["messages"].as_array().unwrap();
-        assert_eq!(&messages[..opened.len()], &opened[..]);
-        assert_eq!(second.body["cache_control"], json!({"type":"ephemeral"}));
-        assert_eq!(second.body["output_config"]["effort"], "high");
     }
 }

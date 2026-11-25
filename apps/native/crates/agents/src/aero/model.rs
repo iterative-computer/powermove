@@ -23,19 +23,13 @@ enum Transport {
     Live(Arc<Live>),
 }
 
-/// A real provider through Providers (`crate::sources::live`): the
-/// core's provider and its description (no credential), and the credential
-/// the edge adds for `origin` only. `credentials` gets the bearer a backend
-/// just refused, so it can refresh once.
+/// Powermove inference (`crate::inference::live`): the core's provider and
+/// its description (no credential), and the credential the edge adds for
+/// `origin` only. `credentials` gets the bearer a backend just refused.
 pub struct Live {
-    /// The OpenAI identity a turn started on: its requests stop when that
-    /// identity is signed out or replaced (P1-4).
-    pub identity: Option<Arc<crate::codex_auth::Identity>>,
     pub provider: String,
     pub configured: String,
     pub model: String,
-    /// The Codex catalog's answer, for the ChatGPT route.
-    pub catalog: Option<Value>,
     pub net: Arc<dyn crate::edge::Net>,
     #[allow(clippy::type_complexity)]
     pub credentials:
@@ -77,7 +71,7 @@ impl Model {
             || url.fragment().is_some()
         {
             return Err(
-                "Powermove replay requires an explicit HTTP URL on a numeric loopback address.".into(),
+                "Aero replay requires an explicit HTTP URL on a numeric loopback address.".into(),
             );
         }
         Ok(Self {
@@ -137,29 +131,19 @@ impl Model {
 /// reach it (the core refuses images to a model without vision), and the
 /// session's effort as its one reasoning option (the core refuses an effort
 /// the model does not list).
-/// A catalog GET: a live Codex route's own answer, else the fakes'.
+/// A catalog GET: the fakes' answer; Aero's own connection lists none.
 pub(super) fn catalog(
     edge: &Model,
     remote: Remote,
     fetch: u64,
-    url: &str,
+    _url: &str,
     model: &str,
     effort: &str,
 ) {
-    let Transport::Live(live) = &edge.transport else {
+    if !matches!(edge.transport, Transport::Live(_)) {
         return answer_catalog(remote, fetch, model, effort);
-    };
-    let body = live.catalog.as_ref().map(|catalog| {
-        if url.starts_with("https://registry.npmjs.org/") {
-            json!({"version": catalog["version"]}).to_string()
-        } else {
-            json!({"models": catalog["models"]}).to_string()
-        }
-    });
-    let ok = match body {
-        Some(body) => status(remote, fetch, 200).and_then(|_| push(remote, fetch, body.as_bytes())),
-        None => status(remote, fetch, 404),
-    };
+    }
+    let ok = status(remote, fetch, 404);
     let _ = remote.fetch_finish(fetch, ok.is_ok());
 }
 
@@ -226,7 +210,7 @@ fn deliver_replay(
 ) -> Result<(), String> {
     let url = Url::parse(url).map_err(|e| e.to_string())?;
     if &url != base {
-        return Err("Powermove refused a model request outside the configured replay endpoint.".into());
+        return Err("Aero refused a model request outside the configured replay endpoint.".into());
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -303,17 +287,15 @@ fn deliver_live(
             headers: &all,
             body,
         };
-        // Stops the request when the core retires it, or when the identity
-        // this turn started on is signed out or replaced (P1-4).
+        // Stops the request when the core retires it.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let (stop, done, identity) = (stop.clone(), done.clone(), live.identity.clone());
+            let (stop, done) = (stop.clone(), done.clone());
             thread::spawn(move || {
                 use std::sync::atomic::Ordering::{Acquire, Release};
                 while !done.load(Acquire) {
-                    let gone = identity.as_ref().is_some_and(|i| !i.current());
-                    if gone || remote.fetch_disposition(fetch) == Disposition::Retired {
+                    if remote.fetch_disposition(fetch) == Disposition::Retired {
                         stop.store(true, Release);
                         return;
                     }
@@ -356,18 +338,13 @@ fn deliver_live(
             }
         });
         done.store(true, std::sync::atomic::Ordering::Release);
-        if live.identity.as_ref().is_some_and(|i| !i.current()) {
-            return Err("The OpenAI sign-in changed during this turn.".into());
-        }
         if let Err(error) = streamed {
             return Err(if error.starts_with("The model stopped responding") {
                 error
             } else if (200..300).contains(&code) {
                 "The connection to the model dropped before its reply finished. Try again.".into()
             } else {
-                format!(
-                    "Powermove couldn't reach the model ({error}). Check Settings › Providers and try again."
-                )
+                format!("Aero couldn't reach Powermove inference ({error}). Try again.")
             });
         }
         if retry {
@@ -379,6 +356,12 @@ fn deliver_live(
             // credential it was sent (P1-6, ABI rule 13).
             let shown: Vec<&str> = all.iter().map(|(_, v)| v.as_str()).collect();
             let safe = safe_failure(code, &failure, &shown);
+            // Aero's backend: the plan's credits are spent (the contract's 402).
+            if code == 402 {
+                *failed.lock().unwrap() = Some(
+                    "You’re out of Aero credits. They come back when your plan resets.".into(),
+                );
+            }
             return status(remote, fetch, code).and_then(|_| push(remote, fetch, &safe));
         }
         let rest = guard.finish();
@@ -444,7 +427,7 @@ fn error_words(kind: &str) -> (&'static str, &'static str) {
     {
         (
             "authentication_error",
-            "The provider refused the credential. Check Settings › Providers.",
+            "Powermove refused the session. Sign in to Powermove again in Settings › Providers.",
         )
     } else if kind.contains("invalid_request") {
         (
@@ -562,7 +545,7 @@ fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
         .map_err(|e| e.to_string())?
     {
         Outcome::Applied => Ok(()),
-        other => Err(format!("Powermove's fetch status was rejected: {other:?}")),
+        other => Err(format!("Aero's fetch status was rejected: {other:?}")),
     }
 }
 
@@ -573,7 +556,7 @@ fn push(remote: Remote, fetch: u64, bytes: &[u8]) -> Result<(), String> {
                 Outcome::Applied => break,
                 Outcome::Stale => return Ok(()),
                 Outcome::Backpressure | Outcome::Busy => thread::sleep(Duration::from_millis(2)),
-                other => return Err(format!("Powermove's fetch bytes were rejected: {other:?}")),
+                other => return Err(format!("Aero's fetch bytes were rejected: {other:?}")),
             }
         }
     }
@@ -623,8 +606,8 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
     if text.contains("Completion checks failed") {
         return Reply::Text("The synthetic run reached the completion checks.".into());
     }
-    if text.contains("Powermove demo edit") {
-        return Reply::Text("Renamed the first layer to Powermove demo edit.".into());
+    if text.contains("Aero demo edit") {
+        return Reply::Text("Renamed the first layer to Aero demo edit.".into());
     }
     let request: Value = serde_json::from_slice(bytes).unwrap_or_default();
     if let Some(header) = find_text(&request, "Project at session start\n")
@@ -637,11 +620,11 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
         return Reply::Tool {
             name: "edit".into(),
             args: json!({"op":"commands","revision":revision,
-            "args":{"label":"Powermove demo edit","commands":[{"type":"set_layer","target":id,
-            "patch":{"name":"Powermove demo edit"}}]}}),
+            "args":{"label":"Aero demo edit","commands":[{"type":"set_layer","target":id,
+            "patch":{"name":"Aero demo edit"}}]}}),
         };
     }
-    Reply::Text("Powermove is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
+    Reply::Text("Aero is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
 }
 
 fn find_text<'a>(value: &'a Value, marker: &str) -> Option<&'a str> {
