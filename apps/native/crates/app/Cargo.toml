@@ -12,7 +12,7 @@ path = "src/main.rs"
 telemetry = ["pm-telemetry/telemetry"]
 # The owner's Aero trial (Sandbox builds only; shipping builds never set it): turns on the
 # development switch (Settings › Providers and the Powermove harness) in a release build.
-aero-trial = []
+aero-trial = ["pm-agents/require-core"]
 
 [dependencies]
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }

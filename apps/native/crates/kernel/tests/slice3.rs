@@ -1068,8 +1068,11 @@ fn coedit_undo_turn_confirms_and_keeps_user_values() {
     assert_eq!(k.project("p").unwrap().store().revision(), revision);
 }
 
+/// ⌘Z during an agent run (PM-718): the run's steps so far are taken back
+/// as one step first, the person's own step stays on the stack as the next
+/// Undo, and Redo walks back up exactly; no Undo ever redoes.
 #[test]
-fn coedit_command_z_during_a_run_skips_agent_steps() {
+fn coedit_command_z_during_a_run_takes_back_the_runs_steps_first() {
     let root = common::TempDir::new("coedit-user-undo");
     let mut k = kernel(&root.0);
     new(&mut k);
@@ -1089,20 +1092,40 @@ fn coedit_command_z_during_a_run_skips_agent_steps() {
         },
     );
     edit(&mut k, agent, 70.);
-    let reply = call(&mut k, Caller::native(), HistoryCall::Undo).reply;
-    assert!(
-        matches!(reply, Reply::Applied { changed: true, .. }),
-        "{reply:?}"
-    );
-    let document = pm_model::canonical::realize_project(
-        k.project("p").unwrap().store().root().unwrap().to_value(),
-    );
-    let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
-    assert_eq!(layer.get("name"), Some(&Value::from("Layer")));
-    assert_eq!(
-        layer.get("p").unwrap().get("opacity").unwrap().get("v"),
-        Some(&Value::Number(70.))
-    );
+    edit(&mut k, agent, 60.);
+    let layer = |k: &Kernel| {
+        let document = pm_model::canonical::realize_project(
+            k.project("p").unwrap().store().root().unwrap().to_value(),
+        );
+        let layer = document.get("layers").unwrap().as_array().unwrap()[0].clone();
+        let name = layer.get("name").unwrap().as_str().unwrap().to_owned();
+        let opacity = layer
+            .get("p")
+            .unwrap()
+            .get("opacity")
+            .unwrap()
+            .get("v")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        (name, opacity)
+    };
+    let step = |k: &mut Kernel, history: HistoryCall| {
+        let reply = call(k, Caller::native(), history).reply;
+        assert!(matches!(reply, Reply::Bool(true)), "{reply:?}");
+    };
+    step(&mut k, HistoryCall::Undo);
+    assert_eq!(layer(&k), ("Mine".into(), 100.), "the run, whole");
+    step(&mut k, HistoryCall::Undo);
+    assert_eq!(layer(&k), ("Layer".into(), 100.), "then the person's step");
+    step(&mut k, HistoryCall::Redo);
+    assert_eq!(layer(&k), ("Mine".into(), 100.));
+    step(&mut k, HistoryCall::Redo);
+    assert_eq!(layer(&k), ("Mine".into(), 60.), "the run, whole");
+    // The turn's own Undo is still one tool call at a time.
+    let own = call(&mut k, agent, HistoryCall::Undo).reply;
+    assert!(matches!(own, Reply::Bool(true)), "{own:?}");
+    assert_eq!(layer(&k), ("Mine".into(), 70.));
 }
 
 #[test]

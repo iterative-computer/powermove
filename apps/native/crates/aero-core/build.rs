@@ -119,6 +119,15 @@ fn main() {
 }
 
 fn stub(reason: &str) {
+    // A build that must carry the core (the owner's trial Sandbox: pm-native-app's
+    // `aero-trial` feature turns on `require-core`) fails here instead of shipping
+    // the stub: a trial build once went out without the core.
+    if env::var_os("CARGO_FEATURE_REQUIRE_CORE").is_some() {
+        panic!(
+            "pm-aero-core: this build requires the libfx core, but it would be the stub ({reason}). \
+             Install the pinned Zig with apps/native/vendor/fx/install-zig.sh and set PM_ZIG_HOME."
+        );
+    }
     println!(
         "cargo::warning=pm-aero-core: built without the libfx core ({reason}); every call returns Unavailable"
     );

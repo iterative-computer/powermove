@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Passes pm-aero-core's require-core through (pm-native-app's aero-trial).
+require-core = ["pm-aero-core/require-core"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
