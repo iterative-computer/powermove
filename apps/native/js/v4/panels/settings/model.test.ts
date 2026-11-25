@@ -19,6 +19,7 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
       "storage",
       "agents",
       "extensions",
+      "privacy",
       "about",
     ]);
     expect(effects.filter((e) => e[0] === "present")).toHaveLength(2);
@@ -47,10 +48,12 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
     "extension-authored",
   );
   expect(requests.map((r) => r.operation.type)).toEqual(
-    Array(5).fill("settings.get"),
+    Array(6).fill("settings.get"),
   );
   expect(model.rows.find((r) => r.id === "cloud-media")?.value).toBe(false);
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
+  // Sharing usage data is on until it is turned off.
+  expect(model.rows.find((r) => r.id === "share-usage-data")?.value).toBe(true);
   // Projects open in tabs unless Separate Windows was chosen.
   expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
     "tabs",
