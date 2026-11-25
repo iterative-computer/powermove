@@ -464,3 +464,197 @@ fn a_region_the_frame_no_longer_draws_is_not_published(cx: &mut TestAppContext) 
     vcx.run_until_parked();
     assert_eq!(published(&mut vcx), 1, "back once");
 }
+
+/// A scroll layer that fades its content at the edges it can still scroll
+/// past (a dock panel's body).
+struct Fading {
+    handle: ScrollHandle,
+    staged: Rc<RefCell<Staged>>,
+}
+impl Render for Fading {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("fading")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .scroll_edge_fade_y(px(FADE))
+            .scroll_layer()
+            .children(rows(3))
+            .child(marked_row(self.staged.clone()))
+            .children(rows(20))
+    }
+}
+const FADE: f32 = 16.;
+
+/// The marker row's edge fades (top, bottom) in points, and the region's.
+fn fades(vcx: &mut VisualTestContext) -> ([f32; 2], [f32; 2]) {
+    vcx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quad = window
+            .painted_quads()
+            .into_iter()
+            .find(|q| (q.bounds.size.width.0 / scale - MARK).abs() < 0.01)
+            .expect("the marker row is drawn");
+        let regions = window.slot_region_geometry();
+        assert_eq!(regions.len(), 1, "one region");
+        (
+            [
+                quad.content_mask.fade_out.top.0 / scale,
+                quad.content_mask.fade_out.bottom.0 / scale,
+            ],
+            [f32::from(regions[0].fade[0]), f32::from(regions[0].fade[1])],
+        )
+    })
+}
+
+/// PM-710: a wheel step that leaves the top edge (or comes back to it)
+/// changes where the body fades. It replays the layer with the fades moved,
+/// as a full draw places them, instead of drawing the view again (which
+/// redrew a dock panel's whole body on the first step of every scroll down
+/// from the top and on the step that reached it again).
+#[gpui::test]
+fn a_scroll_layer_moves_its_edge_fades_without_drawing_again(cx: &mut TestAppContext) {
+    let staged = Rc::new(RefCell::new(Staged::default()));
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| Fading {
+            handle: handle.clone(),
+            staged: staged.clone(),
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    // A second frame records the layer (the first may draw it plainly).
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    vcx.run_until_parked();
+    let at_top = fades(&mut vcx);
+    assert_eq!(
+        at_top,
+        ([0., FADE], [0., FADE]),
+        "at the top only the bottom fades"
+    );
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    let paints = staged.borrow().paints;
+    wheel(&mut vcx, -12.);
+    assert_eq!(
+        staged.borrow().paints,
+        paints,
+        "leaving the top: replayed, not painted again"
+    );
+    let scrolled = fades(&mut vcx);
+    assert_eq!(
+        scrolled,
+        ([FADE, FADE], [FADE, FADE]),
+        "both edges fade once scrolled"
+    );
+    wheel(&mut vcx, 12.);
+    assert_eq!(staged.borrow().paints, paints, "back at the top: replayed");
+    assert_eq!(fades(&mut vcx), at_top, "the top fade goes again");
+    // Scrolled and settled, a full draw shows the same fades as the replay.
+    wheel(&mut vcx, -12.);
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    assert!(staged.borrow().paints > paints, "settled: drawn in full");
+    assert_eq!(
+        fades(&mut vcx),
+        scrolled,
+        "the full draw fades as the replay did"
+    );
+}
+
+/// A panel's own scroller inside a body that fits its slot: the body is a
+/// scroll layer with nothing to scroll (a dock panel's body around the
+/// Project panel).
+struct FitsBody {
+    body: ScrollHandle,
+    list: ScrollHandle,
+    staged: Rc<RefCell<Staged>>,
+}
+impl Render for FitsBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("body")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.body)
+            .scroll_layer()
+            .child(
+                div()
+                    .id("list")
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .w_full()
+                    .h(px(160.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.list)
+                    .scroll_layer()
+                    .children(rows(2))
+                    .child(marked_row(self.staged.clone()))
+                    .children(rows(12)),
+            )
+    }
+}
+
+/// PM-710: the inner scroller of a body with nothing to scroll replays its
+/// steps; it was a nested layer (recorded inside the body's recording),
+/// whose every step drew the panel again (the Project panel's first wheel
+/// step of each scroll).
+#[gpui::test]
+fn a_scroll_layer_inside_a_body_that_fits_replays_its_steps(cx: &mut TestAppContext) {
+    let staged = Rc::new(RefCell::new(Staged::default()));
+    let (body, list) = (ScrollHandle::new(), ScrollHandle::new());
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| FitsBody {
+            body: body.clone(),
+            list: list.clone(),
+            staged: staged.clone(),
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    vcx.run_until_parked();
+    for dy in [-15., -20., 9.] {
+        let (before, paints) = (drawn_now(&mut vcx), staged.borrow().paints);
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(60.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            drawn_now(&mut vcx).y - before.y,
+            px(dy),
+            "the row moved by the step"
+        );
+        assert_eq!(
+            staged.borrow().paints,
+            paints,
+            "{dy}: replayed, not painted again"
+        );
+    }
+}

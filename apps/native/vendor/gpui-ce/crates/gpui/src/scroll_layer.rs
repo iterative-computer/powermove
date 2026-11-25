@@ -46,6 +46,29 @@ pub(crate) const REACH: f32 = 1.0;
 /// (hover, accessibility and text input positions follow the content then).
 pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// A layer whose div fades its content at the scroll edges it can still
+/// scroll past: the masks its clip is made from, so a step that reaches or
+/// leaves an edge moves the fades instead of drawing the view again.
+#[derive(Clone)]
+pub(crate) struct EdgeFades {
+    /// The layer it is for.
+    pub key: ScrollLayerKey,
+    /// The clip the div is drawn in (its ancestors').
+    pub parent: ContentMask<Pixels>,
+    /// The div's own overflow clip, without the edge fades.
+    pub own: ContentMask<Pixels>,
+    /// How far the fade at an edge reaches.
+    pub fade: Pixels,
+}
+
+/// Whether content lies past the top and the bottom edge at `offset`.
+pub(crate) fn vertical_edges(offset: Pixels, maximum: Pixels) -> (bool, bool) {
+    (
+        maximum > crate::px(1.) && -offset > crate::px(1.),
+        maximum > crate::px(1.) && maximum + offset > crate::px(1.),
+    )
+}
+
 pub(crate) struct ScrollLayer {
     /// The view whose cached frame holds the layer.
     pub view: EntityId,
@@ -58,6 +81,8 @@ pub(crate) struct ScrollLayer {
     pub max: Point<Pixels>,
     /// The div's own clip, where the content shows.
     pub clip: ContentMask<Pixels>,
+    /// How `clip` follows the edges, for a div that fades at them.
+    pub edges: Option<EdgeFades>,
     /// The content as drawn, clipped only to the recording's reach.
     pub ops: Vec<PaintOperation>,
     pub hitboxes: Vec<Hitbox>,
@@ -82,6 +107,25 @@ impl ScrollLayer {
     /// The offset now, clamped to the layer's extent.
     pub fn current(&self) -> Point<Pixels> {
         *self.offset.borrow()
+    }
+
+    /// The clip at the current offset: the edge fades where content lies
+    /// past an edge, as the div draws them. False when the edges changed
+    /// and the layer cannot follow them.
+    pub fn fit_edges(&mut self, changed: bool) -> bool {
+        let Some(edges) = &self.edges else {
+            return !changed;
+        };
+        let (top, bottom) = vertical_edges(self.current().y, self.max.y);
+        let mut own = edges.own.clone();
+        if top {
+            own.fade_out.top = edges.fade;
+        }
+        if bottom {
+            own.fade_out.bottom = edges.fade;
+        }
+        self.clip = own.intersect(&edges.parent);
+        true
     }
 
     /// Whether `offset` keeps the visible content inside the recording.
