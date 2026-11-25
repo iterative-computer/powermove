@@ -219,7 +219,7 @@ pub fn check(host: &Automation, id: &str) -> Result<Value> {
     let mut out = findings(host, id, host.read_document(id)?, None)?;
     let issues = out["issues"].as_array_mut().unwrap();
     for issue in issues.iter_mut() {
-        if let Some(ranges) = issue["ranges"].as_array_mut() {
+        if let Some(ranges) = issue.get_mut("ranges").and_then(Value::as_array_mut) {
             ranges.truncate(40);
         }
     }
