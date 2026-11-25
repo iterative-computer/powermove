@@ -583,15 +583,18 @@ typedef struct fx_session_open_args {
  * Terminal event for *request: FX_EVENT_SESSION_OPENED,
  * FX_EVENT_IMAGES_NEEDED, or FX_EVENT_REQUEST_DONE with an error. FX_E_STATE
  * if a session is open or opening; FX_E_TOO_LARGE if the journal and
- * checkpoint can never fit; FX_BACKPRESSURE. BUILD: a journal or checkpoint
- * returns FX_E_UNSUPPORTED until milestone 2b (resume). */
+ * checkpoint can never fit (each at most 4 MiB, the core's snapshot bound);
+ * FX_BACKPRESSURE. FX_E_INVALID for a journal, checkpoint or flag on a
+ * session that is not journaled. After FX_EVENT_IMAGES_NEEDED or a refused
+ * journal, the core still holds the session: open again (same arguments). */
 fx_status fx_session_open(fx_runtime rt, const fx_session_open_args *args, uint64_t *request);
 
 /* WORKER. Stages one batch of named images (at most FX_MAX_STAGE_BATCH and
  * FX_MAX_STAGE_BATCH_BYTES; copied) for the next fx_session_open. Terminal
  * event: FX_EVENT_REQUEST_DONE (FX_OK staged, or an error such as a name
- * that does not match its bytes). FX_E_STATE once a session is open.
- * BUILD: FX_E_UNSUPPORTED until milestone 2b (P-IMAGES). */
+ * that does not match its bytes). FX_E_STATE unless the last open ended with
+ * FX_EVENT_IMAGES_NEEDED; FX_E_INVALID for an empty batch or a malformed
+ * name. */
 fx_status fx_session_stage_images(fx_runtime rt, const fx_named_bytes *images, size_t count,
                                   uint64_t *request);
 
@@ -618,12 +621,14 @@ typedef struct fx_input {
  * and FX_E_OOM included). FX_E_STATE before the session is open, while a
  * turn runs (steer it instead) or after a journal failure; FX_E_TOO_LARGE;
  * FX_BACKPRESSURE.
- * BUILD: images return FX_E_UNSUPPORTED until milestone 2b (P-IMAGES). */
+ * Images (raw bytes, copied once, base64-encoded only into the model
+ * request by the core): FX_E_INVALID when the bytes are not the type `mime`
+ * names, FX_E_TOO_LARGE past the core's model bounds (3.75 MiB per image,
+ * 6 MiB per prompt) as past FX_MAX_*. */
 fx_status fx_turn_prompt(fx_runtime rt, const fx_input *input, fx_str message_id, uint64_t *turn);
 
 /* WORKER. Continues the turn a crash left open (FX_RECOVERY_OPEN_TURN), with
- * no new input. FX_E_STATE when there is none. BUILD: FX_E_UNSUPPORTED until
- * milestone 2b (resume). */
+ * no new input. FX_E_STATE when there is none. */
 fx_status fx_turn_resume(fx_runtime rt, uint64_t *turn);
 
 /* WORKER. Steers running turn `turn` with input (copied), libfx's way: it
@@ -638,8 +643,8 @@ fx_status fx_turn_resume(fx_runtime rt, uint64_t *turn);
  * or comes back ("Rich input"). Text is at most FX_MAX_STEER_TEXT. A steer
  * with images
  * cannot join a turn: the turn ends at its next safe point and the steer
- * comes back as FX_EVENT_STEER_RETURNED (the handoff). BUILD: images return
- * FX_E_UNSUPPORTED until milestone 2b (P-IMAGES). */
+ * comes back as FX_EVENT_STEER_RETURNED (the handoff); its images never
+ * reach the core. */
 fx_status fx_turn_steer(fx_runtime rt, uint64_t turn, const fx_input *input, fx_str message_id,
                         uint64_t *request);
 
@@ -665,8 +670,9 @@ fx_status fx_turn_cancel(fx_runtime rt, uint64_t turn);
 
 /* WORKER. Asks for a checkpoint of the journaled session. Terminal event for
  * *request: FX_EVENT_CHECKPOINT, or FX_EVENT_REQUEST_DONE with an error.
- * FX_E_STATE when the session is not open or not journaled. BUILD:
- * FX_E_UNSUPPORTED until milestone 2b (resume). */
+ * FX_E_STATE when the session is not open or not journaled. A session that
+ * is not quiet (a turn open, a follow-up waiting) gets FX_EVENT_REQUEST_DONE
+ * with FX_E_STATE: ask again after the turn. */
 fx_status fx_checkpoint(fx_runtime rt, uint64_t *request);
 
 /* ------------------------------------------------------------------------ */
@@ -787,8 +793,10 @@ typedef struct fx_tool_output {
  * FX_E_OOM: retry. These leave the call unconsumed. A runtime that is not
  * running answers FX_E_FAILED and consumes nothing (rule 9 says when the
  * lease ends then).
- * BUILD: images return FX_E_UNSUPPORTED (the call stays unanswered) until
- * milestone 2b (P-IMAGES). */
+ * Images: FX_E_INVALID (unconsumed) when one is not the type it names;
+ * past the core's bounds (8 images, 3.75 MiB each, 6 MiB together) the
+ * answer is FX_E_TOO_LARGE, and the model reads that the images exceeded
+ * the limit. */
 fx_status fx_tool_result(fx_runtime rt, uint64_t call, const fx_tool_output *out);
 
 /* ------------------------------------------------------------------------ */
@@ -896,9 +904,8 @@ typedef int32_t fx_hook_answer_kind;
  * As fx_tool_result, FX_OK consumes the lease (rule 9), for a question whose
  * turn was cancelled too (the answer is dropped); FX_STALE (consumed
  * already), FX_E_INVALID (an id never issued, or a kind the question does
- * not take), FX_BUSY and FX_E_OOM leave the question open. BUILD: no
- * question is asked until milestone 2b
- * (P-STOP, P-PRETOOL), so every id is FX_E_INVALID. */
+ * not take, an empty or oversized text, rewritten input that is not a JSON
+ * object), FX_BUSY and FX_E_OOM leave the question open. */
 fx_status fx_hook_answer(fx_runtime rt, uint64_t question, fx_hook_answer_kind kind, fx_str text);
 
 /* ------------------------------------------------------------------------ */
