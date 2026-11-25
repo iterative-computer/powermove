@@ -395,6 +395,11 @@ impl SurfaceView {
             return;
         }
         let step = self.cull.wheeling.map_or(0, |n| n + 1);
+        if self.cull.wheeling.is_none() {
+            // The scroll moves the rows under the pointer: washes stop where
+            // they head (PM-732: one fading out drew the panel every frame).
+            self.motion.hovers.finish();
+        }
         // A panel that left no row out has every row built already: wider
         // margins would build nothing more (PM-710).
         if self.cull.wheeling.replace(step).is_none() && self.culls() {
