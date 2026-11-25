@@ -2120,6 +2120,10 @@ struct Runtime {
     /// preview's, taken when it was handed over. Any newer picture (a seek,
     /// an edit, play) is a preview again.
     full_for: Option<Stamp>,
+    /// A wide preview for this stamp fell back to the live renderer.
+    preview_fallback: Option<Stamp>,
+    /// First time a wide preview of this stamp needed override answers.
+    preview_pending: Option<(Stamp, f64)>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -2299,6 +2303,7 @@ fn has_render_slot(
 struct Settling {
     id: u64,
     stamp: Stamp,
+    preview: bool,
     /// Set when its viewer takes a command: it gives way at once.
     cancel: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -2401,24 +2406,17 @@ const SETTLE_NEXT_SECONDS: f64 = 0.02;
 /// Asks the engine for `ask`'s settled picture: drawn off this thread, in
 /// slices that give way to this viewer's next command and leave every
 /// viewer's pictures the GPU first. The job, when one started.
-fn settle(
+fn request_settle(
     engine: &mut render::Engine,
     shared: &Arc<Shared>,
-    runtime: &mut BTreeMap<u64, Runtime>,
-    ask: SettleAsk,
+    ask: &SettleAsk,
     recorder: Option<&trace::Recorder>,
-) -> Option<Settling> {
+) -> (Settling, Result<render::Asked>) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let SettleAsk {
-        id,
-        stamp,
-        scene,
-        spec,
-        mastering,
-        resources,
-    } = ask;
-    engine.mastering = mastering;
-    engine.set_resources(resources);
+    let (id, stamp) = (ask.id, ask.stamp);
+    let spec = ask.spec;
+    engine.mastering = ask.mastering;
+    engine.set_resources(ask.resources.clone());
     engine.use_compat_document(stamp.doc_id);
     let cancel = Arc::new(AtomicBool::new(false));
     // Its viewer asked for something newer (a command not even taken yet
@@ -2459,7 +2457,7 @@ fn settle(
             gate(expected)
         })
     };
-    let asked = engine.settle(&scene, spec, gate);
+    let asked = engine.settle(&ask.scene, spec, gate);
     let now = trace::now();
     if let Some(recorder) = recorder {
         recorder.record(serde_json::json!({
@@ -2469,9 +2467,22 @@ fn settle(
                 Ok(render::Asked::Busy) => "busy",
                 Err(_) => "error",
             },
-            "viewer_id": id, "time": spec.time.get(), "at": now,
+            "viewer_id": id, "viewport_preview": !spec.settled, "time": spec.time.get(), "at": now,
         }));
     }
+    (Settling { id, stamp, preview: !spec.settled, cancel }, asked)
+}
+
+fn settle(
+    engine: &mut render::Engine,
+    shared: &Arc<Shared>,
+    runtime: &mut BTreeMap<u64, Runtime>,
+    ask: SettleAsk,
+    recorder: Option<&trace::Recorder>,
+) -> Option<Settling> {
+    let (job, asked) = request_settle(engine, shared, &ask, recorder);
+    let (id, stamp) = (ask.id, ask.stamp);
+    let now = trace::now();
     let mut state = shared.state.lock().unwrap();
     let current = state
         .views
@@ -2482,11 +2493,7 @@ fn settle(
         runtime.get_mut(&id),
     ) else {
         // Not its picture any more: one that started gives way by itself.
-        return matches!(asked, Ok(render::Asked::Started)).then_some(Settling {
-            id,
-            stamp,
-            cancel,
-        });
+        return matches!(asked, Ok(render::Asked::Started)).then_some(job);
     };
     match asked {
         Ok(render::Asked::Started) => {
@@ -2495,8 +2502,8 @@ fn settle(
                 .settling
                 .lock()
                 .unwrap()
-                .push((id, stamp, spec.time, spec.scale));
-            Some(Settling { id, stamp, cancel })
+                .push((id, stamp, ask.spec.time, ask.spec.scale));
+            Some(job)
         }
         Ok(render::Asked::Ready) => {
             // Kept from an earlier visit to this time: shown at once.
@@ -3176,6 +3183,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let view = state.views.get_mut(&job.id).filter(|_| current);
             let r = runtime.get_mut(&job.id).filter(|_| current);
             let outcome = match (end, view, r) {
+                (render::Settled::Kept, Some(v), Some(r)) if job.preview => {
+                    v.dirty = true;
+                    r.preview_pending = None;
+                    "shown"
+                }
                 (render::Settled::Kept, Some(v), Some(r)) => {
                     v.stamp.sequence += 1;
                     bump_site(line!(), "");
@@ -3188,7 +3200,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     engine.shelve_settled();
                     "superseded"
                 }
-                (end, _, r) => {
+                (end, view, r) => {
+                    if job.preview
+                        && let Some(v) = view
+                    {
+                        // The live renderer can show its usual stand-ins or
+                        // errors if the background picture wasn't usable.
+                        v.dirty = true;
+                    }
                     let (outcome, again) = match end {
                         render::Settled::GaveWay => ("gave way", true),
                         render::Settled::Unkept => ("unkept", true),
@@ -3217,8 +3236,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     };
                     // Still this viewer's picture: asked for again once it
                     // has rested.
-                    if let (Some(r), true) = (r, again) {
-                        r.settle_at = Some((job.stamp, now + policy::SETTLE_IDLE_SECONDS));
+                    if let Some(r) = r {
+                        if job.preview {
+                            let wait_for_answer = outcome == "pending" && {
+                                let (stamp, since) = r.preview_pending.get_or_insert((job.stamp, now));
+                                if *stamp != job.stamp {
+                                    (*stamp, *since) = (job.stamp, now);
+                                }
+                                now - *since < WAITING_SHOWN_SECONDS
+                            };
+                            if !wait_for_answer && outcome != "gave way" {
+                                r.preview_fallback = Some(job.stamp);
+                            }
+                            r.not_before = now + SETTLE_NEXT_SECONDS;
+                        } else if again {
+                            r.settle_at = Some((job.stamp, now + policy::SETTLE_IDLE_SECONDS));
+                        }
                     }
                     outcome
                 }
@@ -3229,7 +3262,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 let held = engine.settler_held().unwrap_or_default();
                 let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
                 recorder.record(serde_json::json!({
-                    "settled": outcome, "viewer_id": job.id, "taken": now,
+                    "settled": outcome, "viewer_id": job.id, "viewport_preview": job.preview, "taken": now,
                     "sent": timing.sent, "began": timing.began, "planned": timing.planned,
                     "first_submission": timing.first_submission, "ended": timing.ended,
                     "slices": timing.slices, "worst_slice_ms": timing.worst_slice_ms,
@@ -3437,6 +3470,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     full_owed: None,
                     settle_at: None,
                     full_for: None,
+                    preview_fallback: None,
+                    preview_pending: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -3599,6 +3634,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 None
             };
             let playing = r.transport.clock.is_playing();
+            if settling.as_ref().is_some_and(|job| {
+                job.preview && job.id == id && job.stamp == v.stamp
+            }) {
+                continue;
+            }
             if !has_render_slot(
                 flights.iter().map(Flight::slot),
                 id,
@@ -4038,7 +4078,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             engine.studio_preview(studio_preview);
             engine.studio_camera(studio_view);
             engine.mastering = mastering;
-            engine.set_resources(resources);
+            engine.set_resources(resources.clone());
             engine.use_compat_document(stamp.doc_id);
             let overrides = engine
                 .compat()
@@ -4080,6 +4120,50 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
             }
             pass.mark("observe");
+            if spec.wide_viewport(&scene)
+                && !engine.definitions_pending()
+                && !engine.draws_studio(&scene)
+                && runtime.get(&id).is_none_or(|r| r.preview_fallback != Some(stamp))
+            {
+                let ask = SettleAsk {
+                    id,
+                    stamp,
+                    scene: scene.clone(),
+                    spec,
+                    mastering,
+                    resources,
+                };
+                let asked = if settling.is_some() {
+                    Ok(render::Asked::Busy)
+                } else {
+                    let (job, asked) = request_settle(&mut engine, &shared, &ask, recorder.as_ref());
+                    if matches!(asked, Ok(render::Asked::Started)) {
+                        settling = Some(job);
+                    }
+                    asked
+                };
+                match asked {
+                    Ok(render::Asked::Ready) => {}
+                    Ok(asked) => {
+                        let mut state = shared.state.lock().unwrap();
+                        if let Some(v) = state.views.get_mut(&id).filter(|v| v.stamp == stamp) {
+                            v.input = v.input.or(input);
+                            if matches!(asked, render::Asked::Busy) {
+                                v.dirty = true;
+                                if let Some(r) = runtime.get_mut(&id) {
+                                    r.not_before = trace::now() + SETTLE_NEXT_SECONDS;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.preview_fallback = Some(stamp);
+                        }
+                    }
+                }
+            }
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -6677,6 +6761,40 @@ mod worker_tests {
             .expect("stopping the service waited for a settled picture");
         release.send(()).unwrap();
         stop.join().unwrap();
+    }
+
+    #[test]
+    fn a_wide_paused_viewport_keeps_the_worker_available() {
+        let service = EngineService::start(pm_gpu::Gpu::new("wide-paused-preview").unwrap()).unwrap();
+        let mut config = shapes_config(None);
+        let snapshot = &mut config.snapshot;
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] = serde_json::json!([
+            {"id":"wide-blur","type":"blur","version":1,"on":true,"p":{}}
+        ]);
+        let value = pm_model::json::parse(&project.to_string()).unwrap();
+        snapshot.document = Arc::new(pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(value)),
+            1,
+        ));
+        config.output.crop = Some(policy::Crop {
+            x: 333, y: 275, canvas_width: 6400, canvas_height: 3600,
+        });
+        let (entered, began) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        *service.shared.settle_hold.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let wide = service.viewer(config).unwrap();
+        began.recv_timeout(Duration::from_secs(10)).unwrap();
+        let other = shapes_viewer(&service, None);
+        wait_for_pose(&other, seconds(0.));
+        assert!(wide.status().frame.is_none());
+        resume.send(()).unwrap();
+        wait_for_pose(&wide, seconds(0.));
+        assert_eq!(service.shared.settle_ends.lock().unwrap()[0], "shown");
     }
 
     /// A paused viewer settles while another plays, in bounded time: its

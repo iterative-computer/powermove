@@ -192,6 +192,30 @@ impl FrameSpec {
     pub(crate) fn preview_video(&self) -> bool {
         !self.exact && self.moment != Moment::Paused
     }
+    /// A large paused viewport can have an effect that needs the original
+    /// canvas. Record that picture behind the viewer on the sliced renderer.
+    pub(crate) fn wide_viewport(&self, scene: &Scene) -> bool {
+        use pm_eval::node::{array, member, truthy};
+
+        let Some(crop) = self.output.crop.filter(|_| {
+            self.moment == Moment::Paused && !self.exact && self.output.is_zoomed()
+        }) else {
+            return false;
+        };
+        if f64::from(crop.canvas_width) * f64::from(crop.canvas_height)
+            * self.scale * self.scale < (12 << 20) as f64
+        {
+            return false;
+        }
+        pm_eval::Comp::resolve(&scene.doc, &scene.comp).is_ok_and(|comp| {
+            comp.layers().iter().any(|layer| {
+                array(member(Some(layer), "fx")).is_some_and(|fx| {
+                    fx.iter().any(|effect| member(Some(effect), "on").is_none_or(|on| truthy(Some(on))))
+                })
+            })
+        })
+    }
+
     pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))

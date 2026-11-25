@@ -1100,18 +1100,17 @@ impl Exec<'_> {
     // before allocating the effect's pass targets. The queue retains every
     // resource still in use, including inputs to the rest of the frame.
     fn trim_vector_before_effect(&mut self, encoder: &mut wgpu::CommandEncoder, rect: Region) {
-        const LARGE_EFFECT_PIXELS: u64 = 12 << 20;
-        const LARGE_VECTOR_BYTES: u64 = 192 << 20;
-        if !self.allow_vector_trim
-            || self.final_frame
+        let Some((plan, (effect_pixels, vector_bytes))) = self.vector_trim else {
+            return;
+        };
+        if self.final_frame
             || !self.recycle
-            || self.effects.slices.is_some()
-            || u64::from(rect.width) * u64::from(rect.height) < LARGE_EFFECT_PIXELS
-            || self.vector.bytes() < LARGE_VECTOR_BYTES
+            || u64::from(rect.width) * u64::from(rect.height) < effect_pixels
+            || self.vector.bytes() < vector_bytes
         {
             return;
         }
-        self.allow_vector_trim = false;
+        self.vector_trim = None;
         let completed = std::mem::replace(
             encoder,
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1119,15 +1118,24 @@ impl Exec<'_> {
             }),
         );
         self.effects.uniforms.flush(self.queue);
+        if let Some(slices) = &mut self.effects.slices {
+            slices.admit();
+        }
         let submission = self.queue.submit([completed.finish()]);
-        self.vector.trim(0);
-        self.binds.clear();
-        // Let completed draws give back their GPU references. A slow
-        // submission still goes through the frame's usual hang handling.
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(std::time::Duration::from_millis(250)),
-        });
+        let repeated = crate::renderer::media_prepare::repeated_vectors(plan);
+        self.binds.drop_textures(&self.vector.trim_submitted_prefix(&repeated));
+        // A sliced renderer already waits on its own thread, allowing these
+        // allocation waves to stay apart. The viewer worker never waits.
+        if let Some(slices) = &mut self.effects.slices {
+            let watchdog = &mut self.effects.watchdog;
+            slices.submitted(self.device, submission, || {
+                if watchdog.frames_in_flight() > 0 {
+                    watchdog.collect(self.device, self.queue, false);
+                }
+            });
+        } else {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
     }
 
     /// `content`: where `input` can be non-zero ([`effect_input_bounds`]).

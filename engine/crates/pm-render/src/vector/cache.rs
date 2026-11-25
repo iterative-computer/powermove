@@ -847,6 +847,28 @@ impl VectorCache {
         );
     }
 
+    /// Release consumed rasters and scratch after a frame prefix has been
+    /// submitted. Later siblings still own the rasters prepared for them.
+    /// Warm entries from an earlier frame have not been visited yet.
+    pub(crate) fn trim_submitted_prefix(
+        &mut self,
+        repeated: &HashSet<[u8; 32]>,
+    ) -> Vec<wgpu::TextureView> {
+        let mut retired = Vec::new();
+        self.entries.retain(|(key, _), entry| {
+            let keep = entry.frame != self.frame || entry.prepared || repeated.contains(key);
+            if !keep {
+                self.bytes -= entry.bytes;
+                retired.push(entry.view.clone());
+            }
+            keep
+        });
+        let outlines = std::mem::take(&mut self.scene_outlines);
+        self.clear_scene_scratch();
+        self.scene_outlines = outlines;
+        retired
+    }
+
     /// Raster hits avoid all coverage and paint work. Reclaim reusable
     /// scratch before evicting completed rasters from the preceding frame.
     fn fit_scene_scratch(&mut self, budget: u64) {

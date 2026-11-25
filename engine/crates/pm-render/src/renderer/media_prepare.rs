@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::composite;
-use crate::plan::{Content, Draw, Source};
+use crate::plan::{Content, Source};
 
 /// Result of preparing media for a planned frame. A source that cannot be
 /// prepared is reported here and will still get its usual render failure.
@@ -17,37 +17,82 @@ pub struct MediaPreparation {
     pub videos: Vec<(String, u64)>,
 }
 
-fn visit_content(content: &Content, layer: &str, visit: &mut impl FnMut(&str, &Source)) {
+fn visit_content<'a>(
+    content: &'a Content,
+    layer: &str,
+    visit: &mut impl FnMut(&str, &'a Source),
+    effects: &mut impl FnMut(&'a composite::effects::PreparedEffects),
+) {
     match content {
         Content::Texture { source, .. } => {
             visit(layer, source);
             if let Source::Comp(plan) | Source::Accumulate(plan) = source {
-                visit_plan(plan, visit);
+                visit_plan(plan, visit, effects);
             }
         }
-        Content::Placed(placed) => visit_content(&placed.content, layer, visit),
+        Content::Placed(placed) => visit_content(&placed.content, layer, visit, effects),
         Content::Composite(node) => {
             if let composite::Node::Layer(layer_node) = &**node {
                 for draw in &layer_node.content {
-                    visit_draw(draw, visit);
+                    visit_content(&draw.content, &draw.layer, visit, effects);
                 }
                 if let Some(matte) = &layer_node.matte {
-                    visit_plan(&matte.source, visit);
+                    visit_plan(&matte.source, visit, effects);
                 }
+                if let Some(layer_effects) = &layer_node.effects {
+                    effects(layer_effects);
+                }
+            } else if let composite::Node::Adjustment(adjustment) = &**node {
+                effects(&adjustment.effects);
             }
         }
         Content::Solid(_) => {}
     }
 }
 
-fn visit_draw(draw: &Draw, visit: &mut impl FnMut(&str, &Source)) {
-    visit_content(&draw.content, &draw.layer, visit);
+fn visit_plan<'a>(
+    plan: &'a CompPlan,
+    visit: &mut impl FnMut(&str, &'a Source),
+    effects: &mut impl FnMut(&'a composite::effects::PreparedEffects),
+) {
+    for draw in &plan.draws {
+        visit_content(&draw.content, &draw.layer, visit, effects);
+    }
 }
 
-fn visit_plan(plan: &CompPlan, visit: &mut impl FnMut(&str, &Source)) {
-    for draw in &plan.draws {
-        visit_draw(draw, visit);
+/// Vectors the plan can resolve more than once. A cutoff must keep these
+/// even if one of their draws already ran. Include nested effect inputs.
+pub(crate) fn repeated_vectors(plan: &CompPlan) -> std::collections::HashSet<[u8; 32]> {
+    use std::collections::HashSet;
+
+    fn collect(plan: &CompPlan, seen: &mut HashSet<[u8; 32]>, repeated: &mut HashSet<[u8; 32]>) {
+        let mut chains = Vec::new();
+        visit_plan(
+            plan,
+            &mut |_, source| {
+                if let Source::Vector(vector) = source {
+                    let key = vector.key();
+                    if !seen.insert(key) {
+                        repeated.insert(key);
+                    }
+                }
+            },
+            &mut |effects| chains.push(effects),
+        );
+        for chain in chains {
+            for input in chain.passes.input_plans() {
+                collect(&input.plan, seen, repeated);
+            }
+            // An effect asset can reuse an earlier draw's raster.
+            repeated.extend(chain.passes.vector_assets().iter().filter_map(|asset| {
+                asset.vector.as_ref().map(crate::vector::VectorSource::key)
+            }));
+        }
     }
+
+    let mut repeated = HashSet::new();
+    collect(plan, &mut HashSet::new(), &mut repeated);
+    repeated
 }
 
 /// The still draws of a plan, nested compositions included: each file, its
@@ -109,25 +154,29 @@ pub(super) fn any_still(plan: &CompPlan, held: &mut impl FnMut(&std::path::Path)
 
 pub(super) fn planned_videos(plan: &CompPlan) -> Vec<crate::media::PlannedVideoDraw> {
     let mut out = Vec::new();
-    visit_plan(plan, &mut |layer, source| {
-        if let Source::Video {
-            path,
-            time,
-            interpret,
-            composition_rate,
-            ..
-        } = source
-        {
-            out.push(crate::media::PlannedVideoDraw {
-                layer: layer.to_owned(),
-                path: path.clone(),
-                instance: crate::exec::instance_of(layer),
-                seconds: *time,
-                interpret: interpret.clone(),
-                composition: *composition_rate,
-            });
-        }
-    });
+    visit_plan(
+        plan,
+        &mut |layer, source| {
+            if let Source::Video {
+                path,
+                time,
+                interpret,
+                composition_rate,
+                ..
+            } = source
+            {
+                out.push(crate::media::PlannedVideoDraw {
+                    layer: layer.to_owned(),
+                    path: path.clone(),
+                    instance: crate::exec::instance_of(layer),
+                    seconds: *time,
+                    interpret: interpret.clone(),
+                    composition: *composition_rate,
+                });
+            }
+        },
+        &mut |_| {},
+    );
     out
 }
 

@@ -84,6 +84,15 @@ impl BindCache {
         self.compat.clear();
     }
 
+    pub(crate) fn drop_textures(&mut self, views: &[wgpu::TextureView]) {
+        for view in views {
+            self.textures.remove(view);
+        }
+        self.resamples
+            .retain(|(image, intermediate), _| !views.contains(image) && !views.contains(intermediate));
+        self.retained = None;
+    }
+
     fn clear_bindings(&mut self) {
         self.textures.clear();
         self.quads.clear();

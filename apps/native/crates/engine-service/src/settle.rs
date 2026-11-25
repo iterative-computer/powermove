@@ -558,6 +558,11 @@ fn draw(
             Arc::new(crate::compat::ExactAnswers(store))
                 as Arc<dyn pm_render::compat::CompatRasters>
         }));
+        let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
+        renderer.set_preview_media(
+            preview && job.spec.preview_stills(scene),
+            preview && job.spec.preview_video(),
+        );
         let slices = renderer
             .slices_mut()
             .expect("set when the renderer was made");
