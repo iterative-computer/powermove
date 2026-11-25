@@ -2235,7 +2235,7 @@ struct Flight {
 struct FlightSlot {
     viewer: u64,
     done: bool,
-    small_drag: bool,
+    drag_bytes: Option<u64>,
 }
 
 impl Flight {
@@ -2243,36 +2243,38 @@ impl Flight {
         FlightSlot {
             viewer: self.id,
             done: self.gpu_done,
-            small_drag: self.spec.moment == Moment::Scrub
-                && !self.spec.exact
-                && small_drag_output(self.spec.output),
+            drag_bytes: (self.spec.moment == Moment::Scrub && !self.spec.exact)
+                .then(|| self.spec.render_size())
+                .and_then(|size| drag_working_bytes(self.spec.output, size.width, size.height)),
         }
     }
 }
 
-fn small_drag_output(output: Output) -> bool {
-    // A small uncropped output bounds the screen-sized working attachments.
-    // An effect in a zoomed crop can still allocate at the logical canvas's
-    // density. Keep that path serial, including a transition back from zoom.
-    !output.is_zoomed() && u64::from(output.width) * u64::from(output.height) <= 1920 * 1080
+/// Keep the two overlapping working sets within this allowance. Charge
+/// four RGBA16F working targets and one output per device pixel. Cropped
+/// work can allocate on the larger logical canvas, so it still flies solo.
+const DRAG_WORKING_BUDGET: u64 = 640 << 20;
+
+fn drag_working_bytes(output: Output, width: u32, height: u32) -> Option<u64> {
+    (!output.is_zoomed()).then(|| u64::from(width) * u64::from(height) * (5 * 8))
 }
 
-fn pipeline_layer_drag(view: &View, runtime: &Runtime, now: f64) -> bool {
-    view.editing
+fn layer_drag_bytes(view: &View, runtime: &Runtime, now: f64) -> Option<u64> {
+    (view.editing
         && !view.edit_rested
         && !view.capture
-        && runtime.refine_at.is_none_or(|at| at > now)
-        && small_drag_output(view.config.output)
+        && runtime.refine_at.is_none_or(|at| at > now))
+    .then_some(view.config.output)
+    .and_then(|out| drag_working_bytes(out, out.width, out.height))
 }
 
-/// A small layer drag can start recording its next frame while the prior
-/// one renders. Leave only one such frame ahead, and wait out any remaining
-/// large or playing frame of this viewer before admitting it.
+/// An uncropped layer drag can start its next frame while the prior one
+/// renders. Leave only one frame ahead and wait for playing or zoomed work.
 fn has_render_slot(
     flights: impl ExactSizeIterator<Item = FlightSlot>,
     view: u64,
     playing: bool,
-    pipeline_drag: bool,
+    next_drag_bytes: Option<u64>,
 ) -> bool {
     if flights.len() >= 3 {
         return false;
@@ -2281,9 +2283,13 @@ fn has_render_slot(
         return true;
     }
     let mut unfinished = flights.filter(|f| f.viewer == view && !f.done);
-    unfinished
-        .next()
-        .is_none_or(|first| pipeline_drag && first.small_drag && unfinished.next().is_none())
+    unfinished.next().is_none_or(|first| {
+        first
+            .drag_bytes
+            .zip(next_drag_bytes)
+            .is_some_and(|(first, next)| first.saturating_add(next) <= DRAG_WORKING_BUDGET)
+            && unfinished.next().is_none()
+    })
 }
 
 /// A settled picture asked of the engine and not handed over yet.
@@ -3594,7 +3600,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 flights.iter().map(Flight::slot),
                 id,
                 playing,
-                pipeline_layer_drag(v, r, now),
+                layer_drag_bytes(v, r, now),
             ) {
                 continue;
             }
@@ -3762,7 +3768,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.status.held_frames += 1;
                 continue;
             }
-            v.dirty = false;
             let moment = if playing {
                 Moment::Playing
             } else if r.scrub || (v.editing && !v.edit_rested) {
@@ -3832,6 +3837,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 (quality, false)
             };
+            if let Some(drag_bytes) = layer_drag_bytes(v, r, now)
+                && scale > 1.
+                && !has_render_slot(
+                    flights.iter().map(Flight::slot),
+                    id,
+                    playing,
+                    Some((drag_bytes as f64 * scale * scale).ceil() as u64),
+                )
+            {
+                continue;
+            }
+            v.dirty = false;
             work = Some(Work {
                 transient: v.transient_snapshot.is_some(),
                 id,
@@ -4484,7 +4501,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         state
                             .views
                             .get(id)
-                            .is_some_and(|v| pipeline_layer_drag(v, r, now)),
+                            .and_then(|v| layer_drag_bytes(v, r, now)),
                     )
                 })
                 .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
@@ -4814,30 +4831,63 @@ mod worker_tests {
         let slot = |viewer, done| FlightSlot {
             viewer,
             done,
-            small_drag: false,
+            drag_bytes: None,
         };
         let first = slot(1, false);
-        assert!(!has_render_slot([first].into_iter(), 1, false, false));
-        assert!(!has_render_slot([first].into_iter(), 1, false, true));
-        let small = FlightSlot {
-            small_drag: true,
-            ..first
-        };
-        assert!(has_render_slot([small].into_iter(), 1, false, true));
-        assert!(!has_render_slot([small, small].into_iter(), 1, false, true));
-        assert!(has_render_slot(
-            [slot(1, true)].into_iter(),
-            1,
-            false,
-            false
-        ));
-        assert!(has_render_slot([first].into_iter(), 2, false, false));
-        assert!(has_render_slot([first, first].into_iter(), 1, true, false));
+        assert!(!has_render_slot([first].into_iter(), 1, false, None));
+        assert!(!has_render_slot([first].into_iter(), 1, false, Some(1)));
+        for (width, height, fits) in [
+            (2000, 1120, true), // 1000 × 560 pt at 2×
+            (3840, 2160, true),
+            (5120, 2880, false),
+        ] {
+            let output = Output {
+                width,
+                height,
+                headroom: 1.,
+                display: 1,
+                crop: None,
+            };
+            let drag_bytes = drag_working_bytes(output, width, height);
+            let drag = FlightSlot {
+                drag_bytes,
+                ..first
+            };
+            assert_eq!(
+                has_render_slot([drag].into_iter(), 1, false, drag_bytes),
+                fits
+            );
+            assert!(!has_render_slot(
+                [drag, drag].into_iter(),
+                1,
+                false,
+                drag_bytes
+            ));
+            assert!(
+                drag_working_bytes(
+                    Output {
+                        crop: Some(policy::Crop {
+                            x: 1,
+                            y: 0,
+                            canvas_width: width + 1,
+                            canvas_height: height,
+                        }),
+                        ..output
+                    },
+                    width,
+                    height,
+                )
+                .is_none()
+            );
+        }
+        assert!(has_render_slot([slot(1, true)].into_iter(), 1, false, None));
+        assert!(has_render_slot([first].into_iter(), 2, false, None));
+        assert!(has_render_slot([first, first].into_iter(), 1, true, None));
         assert!(!has_render_slot(
             [first, slot(1, true), slot(2, false)].into_iter(),
             1,
             true,
-            false,
+            None,
         ));
     }
 
@@ -6138,12 +6188,14 @@ mod worker_tests {
     }
 
     #[test]
-    fn a_small_layer_drag_can_pipeline_one_more_frame() {
+    fn a_retina_layer_drag_can_pipeline_one_more_frame() {
         use std::sync::atomic::Ordering;
 
         let service =
             EngineService::start(pm_gpu::Gpu::new("layer-drag-pipeline").unwrap()).unwrap();
-        let v = shapes_viewer(&service, None);
+        let mut config = shapes_config(None);
+        config.output = config.output.resized(2000, 1120);
+        let v = service.viewer(config).unwrap();
         wait_for_pose(&v, seconds(0.));
         v.editing(true).unwrap();
         wait_for(&v, "drag preview", |s| {
