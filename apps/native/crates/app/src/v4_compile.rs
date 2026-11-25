@@ -254,6 +254,9 @@ pub struct NodeView {
     /// The timeline's layer name: a press there can lift into a reorder.
     pub timeline_layer_drag: Option<SharedString>,
     pub timeline_parent_pick: Option<SharedString>,
+    /// A layer row switch (`threeD`, `visibility`, `lock`, `solo`, `shy`) that
+    /// supports multi-select toggling and After Effects–style vertical drag painting.
+    pub timeline_switch: Option<(pm_panel_timeline::LayerSwitch, SharedString)>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -1032,6 +1035,23 @@ fn compile(
             .and_then(|t| t.get("layer"))
             .and_then(Value::as_str)
             .map(|layer| SharedString::from(layer.to_owned())),
+        timeline_switch: header_id.and_then(|semantic| {
+            let (switch, rest) = [
+                ("timeline:threeD:", pm_panel_timeline::LayerSwitch::ThreeD),
+                ("timeline:visibility:", pm_panel_timeline::LayerSwitch::Visible),
+                ("timeline:lock:", pm_panel_timeline::LayerSwitch::Locked),
+                ("timeline:solo:", pm_panel_timeline::LayerSwitch::Solo),
+                ("timeline:shy:", pm_panel_timeline::LayerSwitch::Shy),
+            ]
+            .into_iter()
+            .find_map(|(prefix, sw)| semantic.strip_prefix(prefix).map(|rest| (sw, rest)))?;
+            let pm_panel_timeline::RowId::Layer(layer) =
+                pm_panel_timeline::v4::parse_row(rest).ok()?
+            else {
+                return None;
+            };
+            Some((switch, SharedString::from(layer)))
+        }),
         timeline_layer_drag: meta.and_then(|m| {
             // nativeRow already carries the collision-free layer identity.
             // Reuse it instead of adding another drag object to every row's

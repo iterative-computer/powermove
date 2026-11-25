@@ -5157,6 +5157,64 @@ fn overlap_timeline_time_follows_the_transport(cx: &mut TestAppContext) {
     }));
 }
 
+#[gpui::test]
+fn three_d_switch_toggles_all_selected_layers_and_supports_vertical_drag_paint(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 3);
+    // 1. Multi-select l0, l1, l2 and click 3D on l0 -> all three become 3D.
+    let mut shift = Modifiers::none();
+    shift.shift = true;
+    let r0 = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
+    let r2 = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+    let p0 = point(r0.origin.x + px(12.), r0.center().y);
+    let p2 = point(r2.origin.x + px(12.), r2.center().y);
+    s.drag(cx, p0, p0 + point(px(2.), px(0.)), Modifiers::none());
+    s.drag(cx, p2, p2 + point(px(2.), px(0.)), shift);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        vec!["l0", "l1", "l2"]
+    );
+    let btn0 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l0"]"#).center();
+    s.vcx.simulate_mouse_down(btn0, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_up(btn0, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should be 3D after clicking 3D on multi-selection"
+        );
+    }
+    // 2. Select only l0, then press 3D on l0 and drag down across l1 and l2 ->
+    // all three turn off in one undoable drag-paint gesture.
+    s.drag(cx, p0, p0 + point(px(2.), px(0.)), Modifiers::none());
+    let b0 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l0"]"#).center();
+    let b1 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l1"]"#).center();
+    let b2 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l2"]"#).center();
+    s.vcx.simulate_mouse_down(b0, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(b1, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(b2, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_up(b2, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            !s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should be 2D after dragging down across 3D switches"
+        );
+    }
+    // Single undo restores all three back to 3D.
+    s.undo(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should return to 3D on a single undo of drag-paint"
+        );
+    }
+}
+
 // Headless measurements through mounted app objects and their kernel workers.
 #[path = "drag_latency_timeline_tests.rs"]
 mod drag_latency_metrics;

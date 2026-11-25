@@ -2256,3 +2256,63 @@ fn duplicate_group_and_explicit_child_preserves_caller_ids_without_double_copy()
         .count();
     assert_eq!(children_of_copy, 2);
 }
+
+#[test]
+fn group_3d_layers_auto_enables_3d_and_centers_depth_pivot() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"a","type":"shape","name":"Front","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":400,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":100,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"b","type":"shape","name":"Back","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":600,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":300,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        GroupCommand::Group {
+            layer_ids: vec!["a".into(), "b".into()],
+            group_id: "g3d".into(),
+            name: Some("Stack3D".into()),
+            time: 0.0,
+        },
+    );
+    let g = layer(&s, "g3d");
+    assert_eq!(get(&g, &["threeD"]).as_bool(), Some(true));
+    assert!((num(&g, &["p", "anchor.z", "v"]) - 200.0).abs() < 1e-4);
+    assert!((num(&g, &["p", "position.z", "v"]) - 200.0).abs() < 1e-4);
+}
+
+#[test]
+fn enabling_3d_on_group_with_3d_children_centers_z_pivot() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"g","type":"group","name":"Card","threeD":false,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"anchor.x":{"v":500,"kf":[]},"anchor.y":{"v":300,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},
+                    {"id":"c1","type":"shape","name":"Front","group":"g","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":120,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"c2","type":"shape","name":"Back","group":"g","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":320,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        LayerCommand::Set {
+            layer_id: "g".into(),
+            patch: LayerPatch {
+                three_d: Some(true),
+                ..Default::default()
+            },
+        },
+    );
+    let g = layer(&s, "g");
+    assert_eq!(get(&g, &["threeD"]).as_bool(), Some(true));
+    assert!((num(&g, &["p", "anchor.z", "v"]) - 220.0).abs() < 1e-4);
+    assert!((num(&g, &["p", "position.z", "v"]) - 220.0).abs() < 1e-4);
+}

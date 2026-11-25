@@ -1093,6 +1093,78 @@ fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), Comm
             }
         }
         cx.set(at("threeD"), Value::Bool(three_d))?;
+        // When enabling 3D on a group whose Z pivot is still untouched at 0,
+        // center anchor.z and position.z on its 3D children's depth midpoint
+        // (an exact identity transform when rotation.x/y == 0 and scale.z == 100)
+        // so 3D rotation orbits cleanly around the group's children.
+        if three_d && layer_type == "group" {
+            let static_eq = |l: &Value, key: &str, expected: f64| -> bool {
+                let Some(prop) = l.get("p").and_then(|p| p.get(key)) else {
+                    return true;
+                };
+                if prop.get("expr").is_some_and(Value::is_truthy) {
+                    return false;
+                }
+                if prop
+                    .get("kf")
+                    .and_then(Value::as_array)
+                    .is_some_and(|k| !k.is_empty())
+                {
+                    return false;
+                }
+                prop.get("v")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|v| (v - expected).abs() < 1e-6)
+            };
+            let untouched_z = static_eq(&layer, "anchor.z", 0.0)
+                && static_eq(&layer, "position.z", 0.0)
+                && static_eq(&layer, "rotation.x", 0.0)
+                && static_eq(&layer, "rotation.y", 0.0)
+                && static_eq(&layer, "orientation.x", 0.0)
+                && static_eq(&layer, "orientation.y", 0.0)
+                && static_eq(&layer, "scale.z", 100.0);
+            if untouched_z {
+                let now = cx.layer_stack(comp.as_deref());
+                let members: HashSet<&str> = [layer_id].into_iter().collect();
+                let has_text = expand_groups(&now, &members).iter().any(|id| {
+                    now.iter()
+                        .find(|l| values::text(l, "id") == Some(id.as_str()))
+                        .is_some_and(|l| values::text(l, "type") == Some("text"))
+                });
+                if (!has_text || cx.text.is_some())
+                    && let Ok((loc_now, _)) = cx.layer(layer_id)
+                {
+                    let index = loc_now.index;
+                    let mut measure = cx.measure(false)?;
+                    let z_center = cx.kernel(comp.as_deref(), |edit| {
+                        edit.read(|s| {
+                            let Some(g) = s.layers().get(index) else {
+                                return Ok(None);
+                            };
+                            let b = s.group_bounds(
+                                g,
+                                0.0,
+                                &mut *measure,
+                                &mut pm_eval::bounds::NoHost,
+                            )?;
+                            Ok(b.and_then(|b| b.z).map(|(z0, z1)| (z0 + z1) / 2.0))
+                        })
+                    })?;
+                    cx.check_fonts()?;
+                    if let Some(cz) = z_center
+                        && cz.is_finite()
+                        && cz.abs() > 1e-6
+                    {
+                        for k in ["anchor.z", "position.z"] {
+                            let mut p_path = at("p");
+                            p_path.push(k.into());
+                            p_path.push("v".into());
+                            cx.set(p_path, Value::Number(cz))?;
+                        }
+                    }
+                }
+            }
+        }
     }
     if let Some(c) = p.continuous_raster {
         if layer_type != "precomp" {

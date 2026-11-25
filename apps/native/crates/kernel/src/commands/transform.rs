@@ -228,23 +228,36 @@ fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(),
                 let (next_x, next_y) = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
                 let dx = next_x - s.channel(l, "anchor.x", time)?.to_number();
                 let dy = next_y - s.channel(l, "anchor.y", time)?.to_number();
-                let m = s.local_matrix(l, time)?;
                 let x = s.channel(l, "position.x", time)?.to_number();
                 let y = s.channel(l, "position.y", time)?.to_number();
-                Ok(Some([
-                    next_x,
-                    next_y,
-                    x + m[0] * dx + m[2] * dy,
-                    y + m[1] * dx + m[3] * dy,
-                ]))
+                if pm_eval::node::truthy(pm_eval::node::member(Some(l), "threeD")) {
+                    let cur_az = s.value3d(l, "anchor.z", time, 0.0)?;
+                    let next_z = b.z.map_or(cur_az, |(z0, z1)| (z0 + z1) / 2.0);
+                    let dz = next_z - cur_az;
+                    let m = s.local3d(l, time)?;
+                    let z = s.value3d(l, "position.z", time, 0.0)?;
+                    Ok(Some(vec![
+                        ("anchor.x", next_x),
+                        ("anchor.y", next_y),
+                        ("anchor.z", next_z),
+                        ("position.x", x + m[0] * dx + m[4] * dy + m[8] * dz),
+                        ("position.y", y + m[1] * dx + m[5] * dy + m[9] * dz),
+                        ("position.z", z + m[2] * dx + m[6] * dy + m[10] * dz),
+                    ]))
+                } else {
+                    let m = s.local_matrix(l, time)?;
+                    Ok(Some(vec![
+                        ("anchor.x", next_x),
+                        ("anchor.y", next_y),
+                        ("position.x", x + m[0] * dx + m[2] * dy),
+                        ("position.y", y + m[1] * dx + m[3] * dy),
+                    ]))
+                }
             })
         })?;
         cx.check_fonts()?;
         let Some(values) = centered else { continue };
-        for (channel, value) in ["anchor.x", "anchor.y", "position.x", "position.y"]
-            .into_iter()
-            .zip(values)
-        {
+        for (channel, value) in values {
             let mut c = SetProperty::new(id.clone(), channel, value, time);
             c.preserve_hand_edits = false;
             c.mark_intent = true;

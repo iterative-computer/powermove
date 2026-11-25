@@ -159,6 +159,27 @@ pub(super) fn group(
         &Map::new(),
         &Map::new(),
     )?;
+    // If every selected non-audio layer is already 3D, start the new group in 3D
+    // so its pivot centers in X, Y, and Z over its 3D children.
+    let mut has_transformable = false;
+    let mut all_three_d = true;
+    for r in &roots {
+        if let Ok(loc) = cx.find(r)
+            && let Ok(node) = cx.layer_node(&loc)
+            && node.get("type").and_then(crate::model::str_of) != Some("audio")
+        {
+            has_transformable = true;
+            let is_3d = matches!(
+                node.get("threeD").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true))
+            );
+            if !is_3d {
+                all_three_d = false;
+                break;
+            }
+        }
+    }
+    let group_three_d = has_transformable && all_three_d;
     {
         let m = values::obj(&mut g);
         m.insert(
@@ -168,6 +189,9 @@ pub(super) fn group(
         m.insert("collapsed", Value::Bool(false));
         m.insert("from", Value::Number(0.0));
         m.insert("dur", Value::Number(cx.duration(comp.as_deref())));
+        if group_three_d {
+            m.insert("threeD", Value::Bool(true));
+        }
     }
     let at = index_of(&layers, &roots[0]).unwrap_or(0);
     let mut next = layers.clone();

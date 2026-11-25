@@ -723,12 +723,9 @@ impl<'d> Scope<'_, 'd> {
         if self.is_model_group(group)? {
             return self.model_group_bounds3d(group, time, host);
         }
-        let m = self.world_matrix(group, time)?;
-        let Some(inv) = invert(&m) else {
-            return Ok(None);
-        };
         let gid = node::get(group, b"id").to_js();
-        let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut children: Vec<&'d Node> = Vec::new();
+        let mut any_3d = self.is_3d_layer(group)?;
         for child in self.layers() {
             if is_type(child, "group") {
                 continue;
@@ -740,6 +737,71 @@ impl<'d> Scope<'_, 'd> {
             if !inside || !self.active(child, time)? {
                 continue;
             }
+            any_3d |= flag(child, "threeD");
+            children.push(child);
+        }
+        if children.is_empty() {
+            return Ok(None);
+        }
+        if any_3d {
+            let m = self.world3d(group, time, false)?;
+            let Some(inv) = crate::space3d::inverse3d(&m) else {
+                return Ok(None);
+            };
+            let mut points: Vec<[f64; 3]> = Vec::new();
+            for child in children {
+                let bounds = self.bounds_with_measure(child, time, measure, host)?;
+                let world = self.world3d(child, time, false)?;
+                let local = crate::space3d::multiply(&inv, &world);
+                let apply3 = |x: f64, y: f64, z: f64| -> [f64; 3] {
+                    [
+                        local[0] * x + local[4] * y + local[8] * z + local[12],
+                        local[1] * x + local[5] * y + local[9] * z + local[13],
+                        local[2] * x + local[6] * y + local[10] * z + local[14],
+                    ]
+                };
+                if let Some(b) = bounds {
+                    let (z0, z1) = b.z.unwrap_or((0.0, 0.0));
+                    let zs: &[f64] = if (z1 - z0).abs() > 1e-9 {
+                        &[z0, z1]
+                    } else {
+                        &[z0]
+                    };
+                    for &z in zs {
+                        for x in [b.x0, b.x1] {
+                            for y in [b.y0, b.y1] {
+                                points.push(apply3(x, y, z));
+                            }
+                        }
+                    }
+                } else if !is_type(child, "audio") {
+                    points.push([local[12], local[13], local[14]]);
+                }
+            }
+            if points.is_empty() {
+                return Ok(None);
+            }
+            let fold = |f: fn(f64, f64) -> f64, start: f64, idx: usize| {
+                points.iter().map(|p| p[idx]).fold(start, f)
+            };
+            let x0 = fold(js_min, f64::INFINITY, 0);
+            let x1 = fold(js_max, f64::NEG_INFINITY, 0);
+            let y0 = fold(js_min, f64::INFINITY, 1);
+            let y1 = fold(js_max, f64::NEG_INFINITY, 1);
+            let z0 = fold(js_min, f64::INFINITY, 2);
+            let z1 = fold(js_max, f64::NEG_INFINITY, 2);
+            let mut b = Bounds::sized(x0, y0, x1, y1, 0.0, 0.0);
+            if z0.abs() > 1e-9 || z1.abs() > 1e-9 {
+                b.z = Some((z0, z1));
+            }
+            return Ok(Some(b));
+        }
+        let m = self.world_matrix(group, time)?;
+        let Some(inv) = invert(&m) else {
+            return Ok(None);
+        };
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for child in children {
             let bounds = self.bounds_with_measure(child, time, measure, host)?;
             let world = self.world_matrix(child, time)?;
             let local = mul(&inv, &world);

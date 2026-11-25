@@ -4277,5 +4277,89 @@ fn selection_box_projects_through_plane_matrix_for_3d_layers_and_3d_groups(
         );
     }
 }
+
+#[gpui::test]
+fn three_d_group_with_3d_children_keeps_box_at_90_deg_and_drags_children_in_3d(
+    cx: &mut TestAppContext,
+) {
+    let project = r#"{
+        "id":"c","name":"Main","w":1000,"h":600,"fps":30,"dur":4,
+        "layers":[
+            {
+                "id":"g3d","type":"group","name":"Cube","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":500,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":200,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":0,"kf":[]},
+                    "rotation.y":{"v":90,"kf":[]},
+                    "anchor.x":{"v":500,"kf":[]},
+                    "anchor.y":{"v":300,"kf":[]},
+                    "anchor.z":{"v":200,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{},
+                "fx":[]
+            },
+            {
+                "id":"c1","type":"shape","name":"Side","group":"g3d","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":500,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":100,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":0,"kf":[]},
+                    "rotation.y":{"v":-90,"kf":[]},
+                    "anchor.x":{"v":0,"kf":[]},
+                    "anchor.y":{"v":0,"kf":[]},
+                    "anchor.z":{"v":0,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{"kind":"rect","w":140,"h":140,"stroke":0},
+                "fx":[]
+            }
+        ]
+    }"#;
+    let mut s = unposed(cx, project);
+    // 1. Even when the 3D group is rotated 90° edge-on, its 3D child facing the
+    // camera still gives the group a valid, finite selection box enclosing it.
+    select_ids(&mut s, cx, &["g3d"]);
+    let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    assert_eq!(poses.len(), 1, "edge-on 3D group with 3D child must keep its selection box");
+    let w = (poses[0].corners[1][0] - poses[0].corners[0][0]).abs();
+    let h = (poses[0].corners[3][1] - poses[0].corners[0][1]).abs();
+    assert!(w > 50.0 && h > 50.0, "box should enclose 3D child: {w}x{h}");
+
+    // 2. Selecting the 3D child inside the 90°-rotated group and dragging horizontally
+    // on screen moves the child cleanly along its group's Z axis (not stuck/exploding).
+    select_ids(&mut s, cx, &["c1"]);
+    let child_poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    assert_eq!(child_poses.len(), 1);
+    let drag_from = s.point_of(child_poses[0].anchor);
+    s.drag(cx, drag_from, point(px(60.), px(0.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let new_z = mirror
+        .queries()
+        .evaluate(None, "c1", "position.z", 0.5)
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!(
+        (new_z - 100.0).abs() > 20.0,
+        "dragging 3D child inside 90°-rotated 3D group should move along local Z, got z={new_z}"
+    );
+}
 #[path = "drag_latency_viewer_tests.rs"]
 mod drag_latency_metrics;

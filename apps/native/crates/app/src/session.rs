@@ -181,6 +181,10 @@ pub struct Controller {
         std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds:
         std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    /// Isolated per-panel GPU aurora views so build animations never force
+    /// full-window Controller re-renders.
+    pub(crate) panel_build_views:
+        std::collections::HashMap<String, Entity<crate::generated_panel::BuildAuroraView>>,
     /// The workspace `panel_builds` last followed, as JSON (`refresh`).
     pub(crate) workspace_json: crate::generated_panel::WorkspaceJson,
     /// Generated panels' Off/On toggles: the system's segmented control per
@@ -1366,6 +1370,7 @@ impl Controller {
             agent_panel_sweep: false,
             agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
+            panel_build_views: Default::default(),
             workspace_json: Default::default(),
             generated_switches: Default::default(),
             shell: None,

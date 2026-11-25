@@ -158,6 +158,26 @@ impl Outline {
             surface.update(cx, |s, cx| s.press_parent(layer.into(), at, cx));
         }
     }
+    fn has_surface(&self) -> bool {
+        self.surface
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .is_some()
+    }
+    fn press_switch(
+        &self,
+        switch: pm_panel_timeline::LayerSwitch,
+        layer: &str,
+        at: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(WeakEntity::upgrade) {
+            surface.update(cx, |s, cx| s.press_switch(switch, layer.into(), at, cx));
+            return true;
+        }
+        false
+    }
     fn toggle_disclosure(&self, row: &str, cx: &mut App) -> bool {
         let Ok(pm_panel_timeline::RowId::Layer(layer)) = pm_panel_timeline::v4::parse_row(row)
         else {
@@ -3097,6 +3117,15 @@ impl SurfaceView {
         {
             return;
         }
+        if self.publication.panel == "timeline"
+            && self.natives.outline.has_surface()
+            && self
+                .prepared
+                .node(id)
+                .is_some_and(|node| node.timeline_switch.is_some())
+        {
+            return;
+        }
         if self.publication.panel == "agent"
             && self.prepared.semantics.get("agent-send") == Some(&id)
             && let Some(editor) = self.prepared.semantics.get("agent-composer-text")
@@ -5689,11 +5718,29 @@ impl SurfaceView {
             }
             in_layer
         };
-        if row_control && !events.pointer() && node.timeline_parent_pick.is_none() {
+        if row_control
+            && !events.pointer()
+            && node.timeline_parent_pick.is_none()
+            && node.timeline_switch.is_none()
+        {
             element = element.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, _: &MouseDownEvent, window, cx| {
                     v.focus_pressed(id, window, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        }
+        if let Some((switch, layer)) = node.timeline_switch.clone() {
+            let outline = self.natives.outline.clone();
+            let disabled = node.disabled;
+            element = element.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    v.focus_pressed(id, window, cx);
+                    if !disabled {
+                        let _ = outline.press_switch(switch, &layer, event.position, cx);
+                    }
                     cx.stop_propagation();
                 }),
             );

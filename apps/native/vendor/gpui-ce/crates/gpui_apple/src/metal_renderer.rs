@@ -23,6 +23,23 @@ use gpui_render::{
 };
 use image::RgbaImage;
 
+#[derive(Clone, Copy)]
+enum DotPass {
+    Matrix {
+        detail: f32,
+        resolve: f32,
+        accent: u32,
+        scale: f32,
+    },
+    Aurora {
+        age: f32,
+        opening: f32,
+        fade: f32,
+        accent: u32,
+        scale: f32,
+    },
+}
+
 use core_foundation::base::TCFType;
 use core_video::{
     metal_texture::CVMetalTextureGetTexture, metal_texture_cache::CVMetalTextureCache,
@@ -1561,7 +1578,25 @@ impl MetalRenderer {
                                 resolve,
                                 accent,
                                 scale,
-                            } => Some((*detail, *resolve, *accent, *scale)),
+                            } => Some(DotPass::Matrix {
+                                detail: *detail,
+                                resolve: *resolve,
+                                accent: *accent,
+                                scale: *scale,
+                            }),
+                            gpui::ScaledFilter::DotAurora {
+                                age,
+                                opening,
+                                fade,
+                                accent,
+                                scale,
+                            } => Some(DotPass::Aurora {
+                                age: *age,
+                                opening: *opening,
+                                fade: *fade,
+                                accent: *accent,
+                                scale: *scale,
+                            }),
                             _ => None,
                         }),
                     );
@@ -1719,7 +1754,7 @@ impl MetalRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
-        dots: Option<(f32, f32, u32, f32)>,
+        dots: Option<DotPass>,
     ) {
         if clip_rounded && blur_radius <= 0.0 {
             return;
@@ -1741,7 +1776,7 @@ impl MetalRenderer {
         if scissor.is_empty() {
             return;
         }
-        let clip = if clip_rounded {
+        let clip = if clip_rounded || matches!(dots, Some(DotPass::Aurora { .. })) {
             gpui_render::blur::FilterCompositeClip::RoundedBounds
         } else {
             gpui_render::blur::FilterCompositeClip::ContentShape
@@ -1808,14 +1843,38 @@ impl MetalRenderer {
             source_size,
             full_size,
         );
-        if let Some((detail, resolve, accent, scale)) = dots {
-            composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
-            composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
-                ((accent >> 16) & 255) as f32 / 255.0,
-                ((accent >> 8) & 255) as f32 / 255.0,
-                (accent & 255) as f32 / 255.0,
-                1.0,
-            );
+        if let Some(dots) = dots {
+            match dots {
+                DotPass::Matrix {
+                    detail,
+                    resolve,
+                    accent,
+                    scale,
+                } => {
+                    composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
+                    composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
+                        ((accent >> 16) & 255) as f32 / 255.0,
+                        ((accent >> 8) & 255) as f32 / 255.0,
+                        (accent & 255) as f32 / 255.0,
+                        1.0,
+                    );
+                }
+                DotPass::Aurora {
+                    age,
+                    opening,
+                    fade,
+                    accent,
+                    scale,
+                } => {
+                    composite_uniforms.dots = wgsl_rs::std::vec4f(-1.0, age, opening, scale);
+                    composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
+                        ((accent >> 16) & 255) as f32 / 255.0,
+                        ((accent >> 8) & 255) as f32 / 255.0,
+                        (accent & 255) as f32 / 255.0,
+                        fade,
+                    );
+                }
+            }
         }
         let encoder = new_command_encoder_for_texture(
             command_buffer,

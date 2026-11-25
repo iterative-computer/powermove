@@ -271,6 +271,17 @@ pub trait Host: 'static {
         None
     }
 }
+/// 3D drag frame for moving a 3D child cleanly inside a 3D-rotated parent/group.
+#[derive(Clone, Copy, Debug)]
+struct Drag3d {
+    /// Inverse of the layer's `parent3d` matrix (maps world XYZ deltas into parent-local XYZ).
+    parent_inv: [f64; 16],
+    /// Perspective scale `(1.0 + world_z / focal)` at the layer's anchor.
+    depth_scale: f64,
+    /// True when the parent space has non-zero 3D tilt (X/Y rotation or Z coupling).
+    parent_tilted: bool,
+}
+
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
 pub struct Pose {
@@ -286,6 +297,18 @@ pub struct Pose {
     /// Positioning homography (`planeMatrix(..., true)`) mapping parent-plane XY
     /// at the layer's Z depth to composition pixels for 1:1 3D drag moves.
     plane_pos: Option<[f64; 9]>,
+    /// True when `corners` is a screen-space enclosing box for a 3D group with
+    /// non-coplanar 3D children (handles interpolate `corners` directly so the
+    /// box never detaches or disappears when rotated edge-on).
+    screen_box: bool,
+    /// Whether this layer itself has `threeD: true`.
+    own_3d: bool,
+    /// Evaluated `position.z` (0 for 2D layers).
+    position_z: f64,
+    /// Evaluated `scale.z` for 3D layers (keeps uniform 3D group scale shear-free).
+    scale_z: Option<f64>,
+    /// 3D parent-space drag transform when dragging inside a 3D hierarchy.
+    drag_3d: Option<Drag3d>,
     /// Rotation, skew and scale of the layer alone.
     linear: [f64; 4],
     /// Maps composition deltas into the layer's parent space.
@@ -535,6 +558,105 @@ pub(crate) fn project_plane(m: &[f64; 9], p: [f64; 2]) -> Option<[f64; 2]> {
     let y = (m[1] * p[0] + m[4] * p[1] + m[7]) / w;
     (x.is_finite() && y.is_finite()).then_some([x, y])
 }
+fn project_3d_point(
+    world3d: &[f64; 16],
+    p: [f64; 3],
+    cx: f64,
+    cy: f64,
+    focal: f64,
+) -> Option<[f64; 2]> {
+    let wx = world3d[0] * p[0] + world3d[4] * p[1] + world3d[8] * p[2] + world3d[12];
+    let wy = world3d[1] * p[0] + world3d[5] * p[1] + world3d[9] * p[2] + world3d[13];
+    let wz = world3d[2] * p[0] + world3d[6] * p[1] + world3d[10] * p[2] + world3d[14];
+    let w = 1.0 + wz / focal;
+    if !w.is_finite() || w <= 1e-4 {
+        return None;
+    }
+    let x = cx + (wx - cx) / w;
+    let y = cy + (wy - cy) / w;
+    (x.is_finite() && y.is_finite()).then_some([x, y])
+}
+
+/// Composition center and focal length (`max(1, w) * perspective / 36`) matching
+/// `pm_eval::space3d::plane_matrix` (outermost 3D group owns perspective).
+fn comp_perspective(
+    root: &pm_model::Node,
+    list: &[pm_kernel::model::LayerInfo],
+    id: &str,
+    mirror: &mut QueryMirror,
+    time: f64,
+) -> (f64, f64, f64) {
+    let comp = pm_kernel::model::comp_node(root, None).unwrap_or(root);
+    let w = comp
+        .get("w")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1920.0);
+    let h = comp
+        .get("h")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1080.0);
+    let mut owner = id.to_owned();
+    let mut cur = list
+        .iter()
+        .find(|l| l.id == id)
+        .and_then(|l| l.group.as_deref());
+    let mut guard = 0usize;
+    while let Some(g) = cur {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let is_g3d = pm_kernel::model::find_layer(root, g)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|n| n.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        if is_g3d {
+            owner = g.to_owned();
+        }
+        cur = list
+            .iter()
+            .find(|l| l.id == g)
+            .and_then(|l| l.group.as_deref());
+    }
+    let perspective = mirror
+        .queries()
+        .evaluate(None, &owner, "perspective", time)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(50.0)
+        .max(0.001);
+    (w / 2.0, h / 2.0, w.max(1.0) * perspective / 36.0)
+}
+
+/// Active non-group descendants of `group_id` in `list`.
+fn group_descendants(list: &[pm_kernel::model::LayerInfo], group_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for info in list {
+        if info.kind == "group" {
+            continue;
+        }
+        let mut cur = info.group.as_deref();
+        let mut guard = 0usize;
+        while let Some(g) = cur {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            if g == group_id {
+                out.push(info.id.clone());
+                break;
+            }
+            cur = list
+                .iter()
+                .find(|l| l.id == g)
+                .and_then(|l| l.group.as_deref());
+        }
+    }
+    out
+}
+
 /// Project a 2D box `[x0, y0, x1, y1]` through `plane_matrix` for 2.5D 3D
 /// layers or 2D `world_matrix` for flat layers.
 pub(crate) fn project_box(
@@ -637,7 +759,8 @@ impl Pose {
     }
     fn handle(&self, index: usize) -> [f64; 2] {
         let (u, v) = HANDLES[index];
-        if let Some(plane) = &self.plane
+        if !self.screen_box
+            && let Some(plane) = &self.plane
             && let Some(projected) = project_plane(plane, self.local(u, v))
         {
             return projected;
@@ -757,68 +880,171 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         };
         let has_skew = number("skew").is_some();
         let rotation = number("rotation").unwrap_or(0.);
+        let own_3d = pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|l| l.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        let position_z = if own_3d {
+            number("position.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let local_anchor_z = if own_3d {
+            number("anchor.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let scale_z = if own_3d {
+            Some(number("scale.z").unwrap_or(100.))
+        } else {
+            None
+        };
         let is_3d = mirror.queries().is_3d_layer(None, id, time).unwrap_or(false);
+        let effective_bounds = bounds;
+        let mut screen_box = false;
+        let mut drag_3d = None;
         let (plane, plane_pos, corners, anchor) = if is_3d {
             let Ok(plane) = mirror.queries().plane_matrix(None, id, time, false) else {
                 continue;
             };
             let plane_pos = mirror.queries().plane_matrix(None, id, time, true).ok();
-            // For a 3D group whose children have independent Z depth or 3D tilt,
-            // expand the group's plane bounds so its perspective box encloses all
-            // active descendants as rendered.
-            let mut b = bounds;
-            if kind == "group"
-                && let Some(inv_group) = pm_eval::space3d::inverse_plane(&plane)
+            let (cx, cy, focal) = comp_perspective(root, &list, id, &mut mirror, time);
+            let world3d = mirror.queries().world_3d(None, id, time, false).ok();
+            if own_3d
+                && let Ok(world_pos) = mirror.queries().world_3d(None, id, time, true)
             {
-                let mut descendants: Vec<String> = Vec::new();
-                for info in &list {
-                    if info.kind == "group" {
-                        continue;
-                    }
-                    let mut cur = info.group.as_deref();
-                    while let Some(g) = cur {
-                        if g == id {
-                            descendants.push(info.id.clone());
-                            break;
-                        }
-                        cur = list
-                            .iter()
-                            .find(|l| l.id == g)
-                            .and_then(|l| l.group.as_deref());
-                    }
+                let parent3d = pm_eval::space3d::multiply(
+                    &world_pos,
+                    &pm_eval::space3d::translation(0.0, 0.0, -position_z),
+                );
+                if let Some(parent_inv) = pm_eval::space3d::inverse3d(&parent3d) {
+                    let parent_tilted = parent3d[2].abs() > 1e-4
+                        || parent3d[6].abs() > 1e-4
+                        || parent3d[8].abs() > 1e-4
+                        || parent3d[9].abs() > 1e-4;
+                    let wz = if let Some(w3) = &world3d {
+                        w3[2] * local_anchor[0]
+                            + w3[6] * local_anchor[1]
+                            + w3[10] * local_anchor_z
+                            + w3[14]
+                    } else {
+                        world_pos[14]
+                    };
+                    let depth_scale = (1.0 + wz / focal).max(0.05);
+                    drag_3d = Some(Drag3d {
+                        parent_inv,
+                        depth_scale,
+                        parent_tilted,
+                    });
                 }
-                for child_id in descendants {
-                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
+            }
+            let anchor_3d = world3d
+                .as_ref()
+                .and_then(|w3| {
+                    project_3d_point(w3, [local_anchor[0], local_anchor[1], local_anchor_z], cx, cy, focal)
+                })
+                .or_else(|| project_plane(&plane, local_anchor));
+            // For a 3D group: if any active descendant has independent 3D depth/tilt
+            // (or the group plane itself is edge-on so corners can't project on Z=0),
+            // enclose the descendants' projected 3D corners directly in screen space
+            // so the box and handles never distort, detach, or disappear.
+            if kind == "group" {
+                let descendants = group_descendants(&list, id);
+                let mut child_has_depth = false;
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                let mut any_projected = false;
+                for child_id in &descendants {
+                    if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
                         continue;
+                    }
+                    let child_own_3d = pm_kernel::model::find_layer(root, child_id)
+                        .and_then(|at| pm_kernel::model::layer_at(root, &at))
+                        .and_then(|l| l.get("threeD"))
+                        .and_then(|v| v.to_value().as_bool())
+                        == Some(true);
+                    if child_own_3d {
+                        let ch = |m: &mut QueryMirror, k: &str| {
+                            m.queries()
+                                .evaluate(None, child_id, k, time)
+                                .ok()
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0)
+                        };
+                        if ch(&mut mirror, "position.z").abs() > 1e-4
+                            || ch(&mut mirror, "rotation.x").abs() > 1e-4
+                            || ch(&mut mirror, "rotation.y").abs() > 1e-4
+                            || ch(&mut mirror, "orientation.x").abs() > 1e-4
+                            || ch(&mut mirror, "orientation.y").abs() > 1e-4
+                        {
+                            child_has_depth = true;
+                        }
                     }
                     let Ok(Some(cb)) =
-                        crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
+                        crate::text_host::query(p, |q| q.bounds(None, child_id, time))
                     else {
                         continue;
                     };
-                    if let Some((cc, _)) = project_box(mirror.queries(), &child_id, time, cb) {
-                        for corner in cc {
-                            if let Some(in_group) = project_plane(&inv_group, corner) {
-                                b.x0 = b.x0.min(in_group[0]);
-                                b.y0 = b.y0.min(in_group[1]);
-                                b.x1 = b.x1.max(in_group[0]);
-                                b.y1 = b.y1.max(in_group[1]);
+                    if let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false) {
+                        for local_pt in [
+                            [cb.x0, cb.y0],
+                            [cb.x1, cb.y0],
+                            [cb.x1, cb.y1],
+                            [cb.x0, cb.y1],
+                        ] {
+                            if let Some(pt) = project_plane(&cp, local_pt) {
+                                lo[0] = lo[0].min(pt[0]);
+                                lo[1] = lo[1].min(pt[1]);
+                                hi[0] = hi[0].max(pt[0]);
+                                hi[1] = hi[1].max(pt[1]);
+                                any_projected = true;
                             }
                         }
                     }
                 }
+                let planar_corners = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                );
+                if (child_has_depth || planar_corners.0.is_none() || planar_corners.1.is_none() || planar_corners.2.is_none() || planar_corners.3.is_none())
+                    && any_projected
+                    && lo[0].is_finite()
+                    && hi[0].is_finite()
+                {
+                    screen_box = true;
+                    let corners = [
+                        [lo[0], lo[1]],
+                        [hi[0], lo[1]],
+                        [hi[0], hi[1]],
+                        [lo[0], hi[1]],
+                    ];
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5]);
+                    (Some(plane), plane_pos, corners, anchor)
+                } else {
+                    let (Some(c0), Some(c1), Some(c2), Some(c3)) = planar_corners else {
+                        continue;
+                    };
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                    (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
+                }
+            } else {
+                let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                ) else {
+                    continue;
+                };
+                let anchor = anchor_3d
+                    .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
             }
-            let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
-                project_plane(&plane, [b.x0, b.y0]),
-                project_plane(&plane, [b.x1, b.y0]),
-                project_plane(&plane, [b.x1, b.y1]),
-                project_plane(&plane, [b.x0, b.y1]),
-            ) else {
-                continue;
-            };
-            let anchor = project_plane(&plane, local_anchor)
-                .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
-            (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
         } else {
             let mut corners = [
                 transform(&world, [bounds.x0, bounds.y0]),
@@ -832,33 +1058,17 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 let mut any_3d_child = false;
                 let mut lo = [f64::INFINITY; 2];
                 let mut hi = [f64::NEG_INFINITY; 2];
-                for info in &list {
-                    if info.kind == "group" {
-                        continue;
-                    }
-                    let mut in_group = false;
-                    let mut cur = info.group.as_deref();
-                    while let Some(g) = cur {
-                        if g == id {
-                            in_group = true;
-                            break;
-                        }
-                        cur = list
-                            .iter()
-                            .find(|l| l.id == g)
-                            .and_then(|l| l.group.as_deref());
-                    }
-                    if !in_group || !mirror.queries().active(None, &info.id, time).unwrap_or(false)
-                    {
+                for child_id in group_descendants(&list, id) {
+                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
                         continue;
                     }
                     let Ok(Some(cb)) =
-                        crate::text_host::query(p, |q| q.bounds(None, &info.id, time))
+                        crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
                     else {
                         continue;
                     };
                     if let Some((cc, child_plane)) =
-                        project_box(mirror.queries(), &info.id, time, cb)
+                        project_box(mirror.queries(), &child_id, time, cb)
                     {
                         any_3d_child |= child_plane.is_some();
                         for pt in cc {
@@ -870,6 +1080,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                     }
                 }
                 if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+                    screen_box = true;
                     corners = [
                         [lo[0], lo[1]],
                         [hi[0], lo[1]],
@@ -888,9 +1099,19 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             world,
             plane,
             plane_pos,
+            screen_box,
+            own_3d,
+            position_z,
+            scale_z,
+            drag_3d,
             linear: [local[0], local[1], local[2], local[3]],
             to_parent,
-            bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
+            bounds: [
+                effective_bounds.x0,
+                effective_bounds.y0,
+                effective_bounds.x1,
+                effective_bounds.y1,
+            ],
             shape,
             text_size,
             has_skew,
@@ -2528,6 +2749,11 @@ fn group_pose(poses: &[Pose]) -> Option<Pose> {
         world: [1., 0., 0., 1., 0., 0.],
         plane: None,
         plane_pos: None,
+        screen_box: false,
+        own_3d: false,
+        position_z: 0.,
+        scale_z: None,
+        drag_3d: None,
         linear: [1., 0., 0., 1.],
         to_parent: [1., 0., 0., 1.],
         bounds: [x0, y0, x1, y1],
@@ -2853,18 +3079,34 @@ fn commands(
         let id = &pose.id;
         match drag.hit {
             Hit::Body => {
-                let d = pose
-                    .plane_pos
-                    .as_ref()
-                    .and_then(pm_eval::space3d::inverse_plane)
-                    .and_then(|inv| {
-                        let a = project_plane(&inv, origin)?;
-                        let b = project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
-                        Some([b[0] - a[0], b[1] - a[1]])
-                    })
-                    .unwrap_or_else(|| apply(pose.to_parent, delta));
-                out.push(set(id, "position.x", pose.position[0] + d[0], t));
-                out.push(set(id, "position.y", pose.position[1] + d[1], t));
+                if pose.own_3d
+                    && let Some(d3) = pose.drag_3d
+                    && d3.parent_tilted
+                {
+                    let wx = delta[0] * d3.depth_scale;
+                    let wy = delta[1] * d3.depth_scale;
+                    let inv = &d3.parent_inv;
+                    let dx = inv[0] * wx + inv[4] * wy;
+                    let dy = inv[1] * wx + inv[5] * wy;
+                    let dz = inv[2] * wx + inv[6] * wy;
+                    out.push(set(id, "position.x", pose.position[0] + dx, t));
+                    out.push(set(id, "position.y", pose.position[1] + dy, t));
+                    out.push(set(id, "position.z", pose.position_z + dz, t));
+                } else {
+                    let d = pose
+                        .plane_pos
+                        .as_ref()
+                        .and_then(pm_eval::space3d::inverse_plane)
+                        .and_then(|inv| {
+                            let a = project_plane(&inv, origin)?;
+                            let b =
+                                project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
+                            Some([b[0] - a[0], b[1] - a[1]])
+                        })
+                        .unwrap_or_else(|| apply(pose.to_parent, delta));
+                    out.push(set(id, "position.x", pose.position[0] + d[0], t));
+                    out.push(set(id, "position.y", pose.position[1] + d[1], t));
+                }
             }
             Hit::Rotate => {
                 out.push(set(id, "rotation", turned_to(pose, origin, at, mods), t));
@@ -2936,11 +3178,52 @@ fn resize(
     mods: Mods,
     t: f64,
 ) -> Vec<Command> {
+    let (u, v) = HANDLES[index];
+    let (active_x, active_y) = (u != 0.5, v != 0.5);
+    // A 3D group whose children have independent 3D depth/tilt scales uniformly
+    // in screen space across X, Y, and Z so rotating or scaling never causes
+    // edge-on singularities or depth shear.
+    if pose.screen_box {
+        let handle = pose.handle(index);
+        let pivot = if mods.alt {
+            pose.anchor
+        } else {
+            let opp_u = if active_x { 1. - u } else { 0.5 };
+            let opp_v = if active_y { 1. - v } else { 0.5 };
+            let top = lerp(pose.corners[0], pose.corners[1], opp_u);
+            let bottom = lerp(pose.corners[3], pose.corners[2], opp_u);
+            lerp(top, bottom, opp_v)
+        };
+        let grabbed = [
+            at[0] - (origin[0] - handle[0]),
+            at[1] - (origin[1] - handle[1]),
+        ];
+        let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+        let factor = if active_x && active_y {
+            ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                / (dx * dx + dy * dy).max(1e-9)
+        } else if active_x && dx.abs() > 1e-9 {
+            (grabbed[0] - pivot[0]) / dx
+        } else if active_y && dy.abs() > 1e-9 {
+            (grabbed[1] - pivot[1]) / dy
+        } else {
+            1.
+        };
+        let scale_x = (pose.scale[0] * factor).max(MIN_SCALE);
+        let kept = scale_x / pose.scale[0].max(1e-9);
+        let scale_y = (pose.scale[1] * kept).max(MIN_SCALE);
+        let mut cmds = vec![
+            set(&pose.id, "scale.x", round(scale_x, 3), t),
+            set(&pose.id, "scale.y", round(scale_y, 3), t),
+        ];
+        if let Some(sz) = pose.scale_z {
+            cmds.push(set(&pose.id, "scale.z", round((sz * kept).max(MIN_SCALE), 3), t));
+        }
+        return cmds;
+    }
     let (Some(start), Some(now)) = (pose.to_local(origin), pose.to_local(at)) else {
         return vec![];
     };
-    let (u, v) = HANDLES[index];
-    let (active_x, active_y) = (u != 0.5, v != 0.5);
     let handle = pose.local(u, v);
     let pivot = if mods.alt {
         pose.local(0.5, 0.5)
@@ -2964,7 +3247,8 @@ fn resize(
     };
     let mut fx = factor(active_x, dx, grabbed[0], pivot[0]);
     let mut fy = factor(active_y, dy, grabbed[1], pivot[1]);
-    if mods.shift || pose.keeps_aspect {
+    let uniform_scale = mods.shift || pose.keeps_aspect;
+    if uniform_scale {
         let uniform = if active_x && active_y {
             // Project onto the corner's diagonal: continuous through shrink and growth.
             ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
@@ -2991,7 +3275,7 @@ fn resize(
         pose.linear,
         [fixed[0] * (1. - kept_x), fixed[1] * (1. - kept_y)],
     );
-    vec![
+    let mut cmds = vec![
         set(&pose.id, "scale.x", round(scale_x, 3), t),
         set(&pose.id, "scale.y", round(scale_y, 3), t),
         set(
@@ -3006,7 +3290,13 @@ fn resize(
             round(pose.position[1] + correction[1], 3),
             t,
         ),
-    ]
+    ];
+    if uniform_scale
+        && let Some(sz) = pose.scale_z
+    {
+        cmds.push(set(&pose.id, "scale.z", round((sz * kept_x).max(MIN_SCALE), 3), t));
+    }
+    cmds
 }
 /// Selection bounds carry half the stroke on each side, and a shape's box grows
 /// about its own centre, so the fixed point follows its place inside that box.
@@ -3045,8 +3335,54 @@ fn resize_shape(
     ]
 }
 /// A layer's box in the composition at `time`: its transformed bounds
-/// (perspective-projected through `planeMatrix` for 2.5D 3D layers).
+/// (perspective-projected through `planeMatrix` for 2.5D 3D layers, or
+/// screen-space union of projected descendants for 3D groups with 3D depth).
 fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
+    let root = p.snapshot.root()?;
+    let list = pm_kernel::model::list_layers(root, None);
+    let is_group = list.iter().any(|l| l.id == id && l.kind == "group");
+    if is_group {
+        let mut mirror = QueryMirror::new(p);
+        let descendants = group_descendants(&list, id);
+        let mut any_3d_child = false;
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for child_id in &descendants {
+            if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
+                continue;
+            }
+            let Ok(Some(cb)) = crate::text_host::query(p, |q| q.bounds(None, child_id, time))
+            else {
+                continue;
+            };
+            if let Ok(true) = mirror.queries().is_3d_layer(None, child_id, time)
+                && let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false)
+            {
+                any_3d_child = true;
+                for local_pt in [
+                    [cb.x0, cb.y0],
+                    [cb.x1, cb.y0],
+                    [cb.x1, cb.y1],
+                    [cb.x0, cb.y1],
+                ] {
+                    if let Some(pt) = project_plane(&cp, local_pt) {
+                        lo[0] = lo[0].min(pt[0]);
+                        lo[1] = lo[1].min(pt[1]);
+                        hi[0] = hi[0].max(pt[0]);
+                        hi[1] = hi[1].max(pt[1]);
+                    }
+                }
+            }
+        }
+        if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+            return Some([
+                [lo[0], lo[1]],
+                [hi[0], lo[1]],
+                [hi[0], hi[1]],
+                [lo[0], hi[1]],
+            ]);
+        }
+    }
     let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
     let mut mirror = QueryMirror::new(p);
     project_box(mirror.queries(), id, time, b).map(|(corners, _)| corners)

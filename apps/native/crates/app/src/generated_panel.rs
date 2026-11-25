@@ -92,14 +92,16 @@ mod build_repaint_tests {
     use super::build_repaint;
 
     #[test]
-    fn building_panels_follow_the_display_unless_playing() {
-        // Paused: the next display frame (CADisplayLink, 120 Hz on
-        // ProMotion), not a 16 ms timer.
-        assert_eq!(build_repaint(false), None);
-        // Playing: unchanged, a 33 ms wait.
+    fn building_panels_use_low_energy_cadence() {
+        // Paused: 30 fps isolated aurora tick (never 120 Hz full-window redraws).
+        assert_eq!(
+            build_repaint(false),
+            Some(std::time::Duration::from_millis(33))
+        );
+        // Playing: 20 fps so playback stays uninterrupted.
         assert_eq!(
             build_repaint(true),
-            Some(std::time::Duration::from_millis(33))
+            Some(std::time::Duration::from_millis(50))
         );
     }
 }
@@ -206,44 +208,146 @@ pub(crate) fn publication(
     }
 }
 
+/// Lightweight isolated view for the panel generation dot-matrix aurora.
+/// Owns its own single timer and GPU-only `Filter::DotAurora` quad so idle
+/// waiting never triggers full-window `Controller` re-renders or CPU loops.
+pub(crate) struct BuildAuroraView {
+    state: panel_build::State,
+    rect: pm_shell::layout::Rect,
+    tokens: pm_design::Tokens,
+    playing: bool,
+    parent: gpui::WeakEntity<Controller>,
+    timer_armed: bool,
+}
+
+impl BuildAuroraView {
+    fn new(
+        state: panel_build::State,
+        rect: pm_shell::layout::Rect,
+        tokens: pm_design::Tokens,
+        playing: bool,
+        parent: gpui::WeakEntity<Controller>,
+    ) -> Self {
+        Self {
+            state,
+            rect,
+            tokens,
+            playing,
+            parent,
+            timer_armed: false,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        state: panel_build::State,
+        rect: pm_shell::layout::Rect,
+        tokens: &pm_design::Tokens,
+        playing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.state = state;
+        self.rect = rect;
+        self.tokens = tokens.clone();
+        self.playing = playing;
+        self.ensure_timer(cx);
+    }
+
+    fn needs_controller_notify(state: &panel_build::State) -> bool {
+        if matches!(
+            state.stage,
+            panel_build::Stage::Ink | panel_build::Stage::Ready | panel_build::Stage::Erase
+        ) {
+            return true;
+        }
+        let mut probe = state.clone();
+        probe.tick();
+        probe.stage != state.stage || probe.row != state.row
+    }
+
+    fn ensure_timer(&mut self, cx: &mut Context<Self>) {
+        if self.timer_armed
+            || !self
+                .state
+                .animating(std::time::Instant::now(), self.tokens.accessibility.reduce_motion)
+        {
+            return;
+        }
+        let Some(wait) = build_repaint(self.playing) else {
+            return;
+        };
+        self.timer_armed = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |view, cx| {
+                view.timer_armed = false;
+                if Self::needs_controller_notify(&view.state) {
+                    let _ = view.parent.update(cx, |_, cx| cx.notify());
+                } else {
+                    cx.notify();
+                }
+                view.ensure_timer(cx);
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for BuildAuroraView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let age = self.state.started.elapsed().as_secs_f32();
+        let elapsed = self.state.changed.elapsed().as_secs_f32();
+        build_frame(
+            self.state.clone(),
+            self.rect,
+            &self.tokens,
+            self.playing,
+            age,
+            elapsed,
+            0.5,
+            false,
+        )
+    }
+}
+
 /// The canvas owns no hit targets or focus handles. Every primitive is clipped
 /// to the reserved body, so the viewer and neighbouring panels stay untouched.
 fn build_surface(
+    v: &mut Controller,
+    id: &str,
     state: panel_build::State,
     rect: pm_shell::layout::Rect,
     t: &pm_design::Tokens,
     playing: bool,
     fraction: f32,
-    window: &Window,
+    _window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
-    let entity = cx.entity().downgrade();
-    if state.animating(std::time::Instant::now(), t.accessibility.reduce_motion) {
-        match build_repaint(playing) {
-            // The display link paces it (120 Hz on ProMotion). Renders in
-            // one frame share one next frame, where a timer per render kept
-            // a chain of wake-ups going for each extra render.
-            None => window.on_next_frame(move |_, cx| {
-                let _ = entity.update(cx, |_, cx| cx.notify());
-            }),
-            Some(wait) => cx
-                .spawn(async move |_, cx| {
-                    cx.background_executor().timer(wait).await;
-                    let _ = entity.update(cx, |_, cx| cx.notify());
-                })
-                .detach(),
-        }
-    }
-    let age = state.started.elapsed().as_secs_f32();
-    let elapsed = state.changed.elapsed().as_secs_f32();
-    build_frame(state, rect, t, playing, age, elapsed, fraction, false)
+    let _ = fraction;
+    let parent = cx.entity().downgrade();
+    let view = if let Some(existing) = v.panel_build_views.get(id).cloned() {
+        existing.update(cx, |view, cx| view.sync(state, rect, t, playing, cx));
+        existing
+    } else {
+        let created = cx.new(|cx| {
+            let mut view = BuildAuroraView::new(state, rect, t.clone(), playing, parent);
+            view.ensure_timer(cx);
+            view
+        });
+        v.panel_build_views.insert(id.to_owned(), created.clone());
+        created
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .child(view)
+        .into_any_element()
 }
 
-/// When a building panel's animation draws again: at the display's next
-/// frame (`None`), or while playing after a fixed wait, at most 30 times a
-/// second, so the window does not draw at the display rate beside playback.
+/// Paced low-energy cadence for panel generation animation: 30 fps while paused,
+/// 20 fps during video playback, rendered on the GPU inside an isolated entity.
 fn build_repaint(playing: bool) -> Option<std::time::Duration> {
-    playing.then_some(std::time::Duration::from_millis(33))
+    Some(std::time::Duration::from_millis(if playing { 50 } else { 33 }))
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
@@ -264,64 +368,29 @@ fn build_frame(
         panel_build::Stage::Erase => 1. - panel_build::fade(elapsed, 0.24),
         _ => panel_build::fade(age, 0.24),
     };
-    let (accent, text, muted) = (t.colors.accent, t.colors.text, t.colors.muted);
-    let radius = t.radius.lg;
     let dim = panel_build::playback(playing).0;
+    let alpha = (fade * dim).clamp(0., 1.);
     let _ = fraction;
+    if ink_only || reduced || alpha <= 0. {
+        return div()
+            .absolute()
+            .inset_0()
+            .h(px(height))
+            .into_any_element();
+    }
+    let opening = panel_build::fade(age, 0.48);
     div()
         .absolute()
         .inset_0()
         .h(px(height))
         .overflow_hidden()
         .rounded(px(t.radius.lg))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    if ink_only || reduced || fade <= 0. {
-                        return;
-                    }
-                    let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-                    let opening = panel_build::fade(age, 0.48);
-                    window.with_content_mask(
-                        Some(ContentMask {
-                            bounds,
-                            ..Default::default()
-                        }),
-                        |window| {
-                            for dot in pm_design::dots::aurora(size, age, accent, text, muted) {
-                                if !inside_ground(dot.center, size, radius) {
-                                    continue;
-                                }
-                                // The thin initial row expands into a sparse-to-dense slot field.
-                                if dot.center[1] > 3. + (size[1] - 3.) * opening {
-                                    continue;
-                                }
-                                if pm_design::dots::hash(dot.center) > opening {
-                                    continue;
-                                }
-                                let p = bounds.origin
-                                    + point(
-                                        px(dot.center[0] - dot.radius),
-                                        px(dot.center[1] - dot.radius),
-                                    );
-                                window.paint_quad(
-                                    PaintQuad::new(Bounds::new(
-                                        p,
-                                        gpui::size(px(dot.radius * 2.), px(dot.radius * 2.)),
-                                    ))
-                                    .corner_radii(px(dot.radius))
-                                    .background(
-                                        pm_shell::kit::ink(dot.color, dot.alpha * fade * dim),
-                                    ),
-                                );
-                            }
-                        },
-                    );
-                },
-            )
-            .size_full(),
-        )
+        .filter(vec![Filter::DotAurora {
+            age,
+            opening,
+            fade: alpha,
+            accent: t.colors.accent,
+        }])
         .into_any_element()
 }
 
@@ -334,67 +403,12 @@ fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u3
     t.colors.panel
 }
 
-fn inside_ground(point: [f32; 2], size: [f32; 2], radius: f32) -> bool {
-    let r = radius.min(size[0].min(size[1]) * 0.5);
-    let dx = point[0] - point[0].clamp(r, size[0] - r);
-    let dy = point[1] - point[1].clamp(r, size[1] - r);
-    dx * dx + dy * dy <= r * r
-}
-
-fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
-    let resolve = build.map_or(1., |b| b.resolve(b.now()));
-    if resolve >= 1. || t.accessibility.reduce_motion {
-        return div()
-            .absolute()
-            .inset_0()
-            .rounded(px(t.radius.lg))
-            .bg(rgb(t.colors.panel));
-    }
-    let color = t.colors.panel;
-    let radius = t.radius.lg;
-    div().absolute().inset_0().child(
-        canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                window.with_content_mask(
-                    Some(ContentMask {
-                        bounds,
-                        ..Default::default()
-                    }),
-                    |window| {
-                        if resolve > 0. {
-                            window.paint_quad(
-                                PaintQuad::new(bounds)
-                                    .corner_radii(px(radius))
-                                    .background(pm_shell::kit::ink(color, resolve)),
-                            );
-                        }
-                        let dimensions =
-                            [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-                        for dot in pm_design::dots::matrix(dimensions, 4., |_| [1.; 4]) {
-                            if !inside_ground(dot.center, dimensions, radius) {
-                                continue;
-                            }
-                            let p = bounds.origin
-                                + point(
-                                    px(dot.center[0] - dot.radius),
-                                    px(dot.center[1] - dot.radius),
-                                );
-                            window.paint_quad(
-                                PaintQuad::new(Bounds::new(
-                                    p,
-                                    size(px(dot.radius * 2.), px(dot.radius * 2.)),
-                                ))
-                                .corner_radii(px(dot.radius))
-                                .background(pm_shell::kit::ink(color, 1. - resolve)),
-                            );
-                        }
-                    },
-                );
-            },
-        )
-        .size_full(),
-    )
+fn ground(t: &pm_design::Tokens, _build: Option<&panel_build::State>) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(t.radius.lg))
+        .bg(rgb(t.colors.panel))
 }
 
 fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
@@ -1130,13 +1144,14 @@ fn render(
             let control = &def["controls"][b.row];
             let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
             let fraction = control_fraction(control, &current);
+            let running = v.running();
             (
-                build_surface(b.clone(), rect, &t, v.running(), fraction, window, cx),
+                build_surface(v, id, b.clone(), rect, &t, running, fraction, window, cx),
                 build_frame(
                     b.clone(),
                     rect,
                     &t,
-                    v.running(),
+                    running,
                     b.started.elapsed().as_secs_f32(),
                     b.changed.elapsed().as_secs_f32(),
                     fraction,
@@ -2126,15 +2141,19 @@ pub(crate) fn agent_slot(
                     }
                     content = None;
                     if !done && web_capture.is_none() {
+                        let tokens = v.host.borrow().tokens.clone();
+                        let running = v.running();
                         return Some(
                             div()
                                 .relative()
                                 .size_full()
                                 .child(build_surface(
+                                    v,
+                                    id,
                                     state,
                                     rect,
-                                    &v.host.borrow().tokens.clone(),
-                                    v.running(),
+                                    &tokens,
+                                    running,
                                     0.5,
                                     window,
                                     cx,
@@ -2175,7 +2194,8 @@ pub(crate) fn agent_slot(
         return content;
     }
     let tokens = v.host.borrow().tokens.clone();
-    let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
+    let running = v.running();
+    let overlay = build_surface(v, id, state.clone(), rect, &tokens, running, 0.5, window, cx);
     let root_alpha = if state.stage == panel_build::Stage::Erase {
         1. - panel_build::fade(state.changed.elapsed().as_secs_f32(), 0.36)
     } else {
@@ -2250,7 +2270,8 @@ pub(crate) fn extension_build(
     if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 {
         return content;
     }
-    let field = build_surface(state.clone(), rect, &t, v.running(), 0.5, window, cx);
+    let running = v.running();
+    let field = build_surface(v, id, state.clone(), rect, &t, running, 0.5, window, cx);
     div()
         .relative()
         .size_full()
@@ -2284,9 +2305,11 @@ impl Controller {
                     page.borrow_mut().finish_panel_build(&target);
                 }
                 self.panel_builds.remove(&target);
+                self.panel_build_views.remove(&target);
             }
         }
         self.panel_builds.remove(id);
+        self.panel_build_views.remove(id);
     }
 }
 pub(crate) fn sweep_agent_builds(v: &mut Controller, cx: &mut Context<Controller>) -> bool {

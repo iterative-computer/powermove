@@ -939,43 +939,103 @@ impl TimelineModel {
             .ok_or_else(|| ModelError::UnknownId(channel.into()))?;
         Ok(())
     }
-    pub fn switch(&self, layer: &str, switch: LayerSwitch) -> Result<Plan, ModelError> {
-        let l = self
-            .index
-            .layer(layer)
-            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
-        let patch = match switch {
+    /// Current boolean value of `switch` on `layer`.
+    pub fn switch_value(&self, layer: &str, switch: LayerSwitch) -> Option<bool> {
+        let l = self.index.layer(layer)?;
+        Some(match switch {
+            LayerSwitch::Visible => l.visible,
+            LayerSwitch::Locked => l.locked,
+            LayerSwitch::Solo => l.solo,
+            LayerSwitch::ThreeD => l.three_d,
+            LayerSwitch::Shy => l.shy,
+        })
+    }
+
+    /// Build a patch setting `switch` to `value`.
+    pub fn switch_patch(switch: LayerSwitch, value: bool) -> LayerPatch {
+        match switch {
             LayerSwitch::Visible => LayerPatch {
-                visible: Some(!l.visible),
+                visible: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Locked => LayerPatch {
-                locked: Some(!l.locked),
+                locked: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Solo => LayerPatch {
-                solo: Some(!l.solo),
+                solo: Some(value),
                 ..Default::default()
             },
             LayerSwitch::ThreeD => LayerPatch {
-                three_d: Some(!l.three_d),
+                three_d: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Shy => LayerPatch {
-                shy: Some(!l.shy),
+                shy: Some(value),
                 ..Default::default()
             },
+        }
+    }
+
+    /// Whether `layer` can accept `switch` in a bulk / multi-selection edit.
+    pub fn switch_eligible(&self, layer: &str, switch: LayerSwitch) -> bool {
+        let Some(l) = self.index.layer(layer) else {
+            return false;
         };
-        Ok(Plan::edit(
-            vec![
+        match switch {
+            LayerSwitch::Locked => true,
+            LayerSwitch::ThreeD => !l.effectively_locked && l.can_be_3d(),
+            LayerSwitch::Visible | LayerSwitch::Solo | LayerSwitch::Shy => !l.effectively_locked,
+        }
+    }
+
+    /// Set `switch` to `value` on every eligible layer in `layers` as one undoable edit.
+    pub fn set_switch(
+        &self,
+        layers: &[String],
+        switch: LayerSwitch,
+        value: bool,
+    ) -> Result<Plan, ModelError> {
+        let multi = layers.len() > 1;
+        let patch = Self::switch_patch(switch, value);
+        let mut commands = Vec::new();
+        for id in layers {
+            let l = self
+                .index
+                .layer(id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            if multi && !self.switch_eligible(id, switch) {
+                continue;
+            }
+            if multi && self.switch_value(id, switch) == Some(value) {
+                continue;
+            }
+            commands.push(
                 LayerCommand::Set {
-                    layer_id: layer.into(),
-                    patch,
+                    layer_id: l.id.clone(),
+                    patch: patch.clone(),
                 }
                 .into(),
-            ],
-            self.index.revision,
-        ))
+            );
+        }
+        if commands.is_empty() {
+            return Ok(Plan::default());
+        }
+        Ok(Plan::edit(commands, self.index.revision))
+    }
+
+    pub fn switch(&self, layer: &str, switch: LayerSwitch) -> Result<Plan, ModelError> {
+        let current = self
+            .switch_value(layer, switch)
+            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
+        let target = !current;
+        let selected = self.selection.layers();
+        let ids: Vec<String> = if selected.len() > 1 && selected.iter().any(|id| id == layer) {
+            selected.to_vec()
+        } else {
+            vec![layer.to_owned()]
+        };
+        self.set_switch(&ids, switch, target)
     }
     pub fn parent(&self, ids: &[String], parent: Option<String>, time: f64) -> Plan {
         Plan::edit(
@@ -998,7 +1058,7 @@ impl TimelineModel {
         )
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerSwitch {
     Visible,
     Locked,

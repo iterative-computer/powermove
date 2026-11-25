@@ -5395,3 +5395,38 @@ fn group_strips_track_live_edits_even_when_a_child_stays_put() {
         }
     }
 }
+
+#[test]
+fn three_d_switch_applies_to_all_selected_eligible_layers() {
+    let (_a, mut c) = client();
+    // Select all three layers (a, b, c) and toggle 3D on "a".
+    select(&mut c, &["a", "b", "c"]);
+    let p = c.model.switch("a", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    for id in ["a", "b", "c"] {
+        assert!(
+            c.model.index.layer(id).unwrap().three_d,
+            "{id} should become 3D when toggled while selected"
+        );
+    }
+    // Toggling off on "b" turns 3D off for all selected layers in one undoable step.
+    let p = c.model.switch("b", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    for id in ["a", "b", "c"] {
+        assert!(!c.model.index.layer(id).unwrap().three_d, "{id} should turn 2D");
+    }
+    undo(&mut c);
+    for id in ["a", "b", "c"] {
+        assert!(
+            c.model.index.layer(id).unwrap().three_d,
+            "one undo restores all 3 layers"
+        );
+    }
+    // Clicking 3D on an unselected layer only toggles that layer.
+    select(&mut c, &["a", "b"]);
+    let p = c.model.switch("c", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    assert!(c.model.index.layer("a").unwrap().three_d);
+    assert!(c.model.index.layer("b").unwrap().three_d);
+    assert!(!c.model.index.layer("c").unwrap().three_d);
+}

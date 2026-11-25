@@ -538,8 +538,22 @@ pub enum Filter {
     Blur(Pixels),
     /// Fixed-size, additive dot generations sampled from isolated content.
     DotMatrix {
+        /// Dot grid detail level (`0.0..=4.0`).
         detail: f32,
+        /// Crossfade from dotted (`0.0`) to crisp (`1.0`).
         resolve: f32,
+        /// Accent color packed as `0xRRGGBB`.
+        accent: u32,
+    },
+    /// GPU-rendered drifting dot-matrix aurora field (zero CPU quad overhead).
+    DotAurora {
+        /// Animation clock in seconds.
+        age: f32,
+        /// Vertical reveal progress (`0.0..=1.0`).
+        opening: f32,
+        /// Overall opacity multiplier (`0.0..=1.0`).
+        fade: f32,
+        /// Accent color packed as `0xRRGGBB`.
         accent: u32,
     },
 }
@@ -555,6 +569,7 @@ impl Filter {
         match self {
             Filter::Blur(radius) => *radius <= Pixels::ZERO,
             Filter::DotMatrix { resolve, .. } => *resolve >= 1.0,
+            Filter::DotAurora { fade, .. } => *fade <= 0.0,
         }
     }
 
@@ -570,6 +585,18 @@ impl Filter {
             } => ScaledFilter::DotMatrix {
                 detail: *detail,
                 resolve: *resolve,
+                accent: *accent,
+                scale: factor,
+            },
+            Filter::DotAurora {
+                age,
+                opening,
+                fade,
+                accent,
+            } => ScaledFilter::DotAurora {
+                age: *age,
+                opening: *opening,
+                fade: *fade,
                 accent: *accent,
                 scale: factor,
             },
@@ -590,9 +617,26 @@ pub enum ScaledFilter {
     Blur(ScaledPixels),
     /// Device scale keeps the grid fixed in logical pixels.
     DotMatrix {
+        /// Dot grid detail level (`0.0..=4.0`).
         detail: f32,
+        /// Crossfade from dotted (`0.0`) to crisp (`1.0`).
         resolve: f32,
+        /// Accent color packed as `0xRRGGBB`.
         accent: u32,
+        /// Window display scale factor.
+        scale: f32,
+    },
+    /// GPU-rendered drifting dot-matrix aurora field in logical pixels.
+    DotAurora {
+        /// Animation clock in seconds.
+        age: f32,
+        /// Vertical reveal progress (`0.0..=1.0`).
+        opening: f32,
+        /// Overall opacity multiplier (`0.0..=1.0`).
+        fade: f32,
+        /// Accent color packed as `0xRRGGBB`.
+        accent: u32,
+        /// Window display scale factor.
         scale: f32,
     },
 }

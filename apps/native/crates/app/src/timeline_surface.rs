@@ -294,6 +294,12 @@ enum Job {
     Begin(Spec, f64),
     Sample(DragSample),
     Finish(bool),
+    SwitchBegin {
+        label: String,
+        commands: Vec<pm_kernel::Command>,
+    },
+    SwitchStep(Vec<pm_kernel::Command>),
+    SwitchFinish(bool),
     Apply(Plan),
     CommitGain(Plan, u64),
     Command {
@@ -388,6 +394,13 @@ enum Gesture {
         at: Point<Pixels>,
         target: Option<String>,
         moved: bool,
+    },
+    /// Press-and-drag bulk toggle across a timeline switch column (After Effects style).
+    SwitchPaint {
+        switch: pm_panel_timeline::LayerSwitch,
+        target: bool,
+        applied: BTreeSet<String>,
+        last_row: Option<usize>,
     },
     Idle,
     Pressed(Press),
@@ -1097,6 +1110,10 @@ impl TimelineSurface {
             }
             Gesture::Marquee { session, .. } => {
                 self.queue.push_back(Job::Apply(session.cancel()));
+            }
+            Gesture::SwitchPaint { .. } => {
+                self.queue.retain(|job| !matches!(job, Job::SwitchStep(_)));
+                self.queue.push_back(Job::SwitchFinish(false));
             }
             Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             _ => {}
@@ -2526,6 +2543,7 @@ impl TimelineSurface {
                 self.gesture,
                 Gesture::LayerPress { .. }
                     | Gesture::ParentPick { .. }
+                    | Gesture::SwitchPaint { .. }
                     | Gesture::Pressed(Press {
                         spec: Some(Spec::Property { .. }),
                         ..
@@ -3091,6 +3109,93 @@ impl TimelineSurface {
             self.changed(false, cx);
         }
     }
+    pub fn press_switch(
+        &mut self,
+        switch: pm_panel_timeline::LayerSwitch,
+        layer: String,
+        _origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::LayerSwitch;
+        self.start_pointer_gesture(cx);
+        if let Some(p) = self.kernel.published(&self.project) {
+            Arc::make_mut(&mut self.model).sync(&p);
+        }
+        let pressed = if switch == LayerSwitch::Locked
+            && self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked && !l.locked)
+        {
+            self.model
+                .index
+                .locking_layer(&layer)
+                .map(|owner| owner.id.clone())
+                .unwrap_or_else(|| layer.clone())
+        } else {
+            layer.clone()
+        };
+        let Some(current) = self.model.switch_value(&pressed, switch) else {
+            return;
+        };
+        let target = !current;
+        let selected = self.model.selection.layers();
+        let initial_ids: Vec<String> =
+            if selected.len() > 1 && selected.iter().any(|id| id == &pressed) {
+                selected.to_vec()
+            } else {
+                vec![pressed.clone()]
+            };
+        let multi = initial_ids.len() > 1;
+        let patch = TimelineModel::switch_patch(switch, target);
+        let mut applied = BTreeSet::new();
+        applied.insert(layer.clone());
+        applied.insert(pressed.clone());
+        let mut commands = Vec::new();
+        for id in initial_ids {
+            if multi && !self.model.switch_eligible(&id, switch) {
+                continue;
+            }
+            if !multi && !self.model.switch_eligible(&id, switch) {
+                continue;
+            }
+            if multi && self.model.switch_value(&id, switch) == Some(target) {
+                applied.insert(id);
+                continue;
+            }
+            applied.insert(id.clone());
+            commands.push(
+                pm_kernel::LayerCommand::Set {
+                    layer_id: id,
+                    patch: patch.clone(),
+                }
+                .into(),
+            );
+        }
+        let last_row = self
+            .model
+            .rows()
+            .iter()
+            .position(|row| matches!(&row.id, RowId::Layer(id) if id.as_str() == layer.as_str()));
+        let label = match switch {
+            LayerSwitch::ThreeD => if target { "Enable 3D" } else { "Disable 3D" },
+            LayerSwitch::Visible => if target { "Show Layers" } else { "Hide Layers" },
+            LayerSwitch::Locked => if target { "Lock Layers" } else { "Unlock Layers" },
+            LayerSwitch::Solo => if target { "Solo Layers" } else { "Unsolo Layers" },
+            LayerSwitch::Shy => if target { "Shy Layers" } else { "Unshy Layers" },
+        }
+        .to_owned();
+        self.gesture = Gesture::SwitchPaint {
+            switch,
+            target,
+            applied,
+            last_row,
+        };
+        self.queue.push_back(Job::SwitchBegin { label, commands });
+        self.pump(cx);
+    }
+
     pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>, cx: &mut Context<Self>) {
         self.start_pointer_gesture(cx);
         let selected = self.model.selection.layers();
@@ -3522,6 +3627,75 @@ impl TimelineSurface {
                 }
             }
             cx.notify();
+            return true;
+        }
+        if let Gesture::SwitchPaint {
+            switch,
+            target,
+            last_row,
+            ..
+        } = self.gesture
+        {
+            self.autoscroll_rows(event.position, cx);
+            let (_, y) = self.local(event.position);
+            let hit = self
+                .scene
+                .as_ref()
+                .zip(self.viewport())
+                .and_then(|(scene, vp)| scene.layer_row_at(vp, &self.tokens, y))
+                .and_then(|row| match pm_panel_timeline::v4::parse_row(&row.id).ok()? {
+                    RowId::Layer(id) => Some(id),
+                    _ => None,
+                });
+            if let Some(hit_id) = hit
+                && let Some(cur_idx) = self
+                    .model
+                    .rows()
+                    .iter()
+                    .position(|row| matches!(&row.id, RowId::Layer(id) if id.as_str() == hit_id.as_str()))
+            {
+                let start = last_row.unwrap_or(cur_idx);
+                let (lo, hi) = if start <= cur_idx {
+                    (start, cur_idx)
+                } else {
+                    (cur_idx, start)
+                };
+                let mut swept = Vec::new();
+                if let Gesture::SwitchPaint {
+                    applied,
+                    last_row: prev,
+                    ..
+                } = &mut self.gesture
+                {
+                    *prev = Some(cur_idx);
+                    for row in &self.model.rows()[lo..=hi] {
+                        if let RowId::Layer(id) = &row.id
+                            && applied.insert(id.clone())
+                        {
+                            swept.push(id.clone());
+                        }
+                    }
+                }
+                let patch = TimelineModel::switch_patch(switch, target);
+                let mut commands = Vec::new();
+                for id in swept {
+                    if self.model.switch_eligible(&id, switch)
+                        && self.model.switch_value(&id, switch) != Some(target)
+                    {
+                        commands.push(
+                            pm_kernel::LayerCommand::Set {
+                                layer_id: id,
+                                patch: patch.clone(),
+                            }
+                            .into(),
+                        );
+                    }
+                }
+                if !commands.is_empty() {
+                    self.queue.push_back(Job::SwitchStep(commands));
+                    self.pump(cx);
+                }
+            }
             return true;
         }
         if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
@@ -4038,6 +4212,9 @@ impl TimelineSurface {
                     );
                 }
                 self.queue.push_back(Job::Sync);
+            }
+            Gesture::SwitchPaint { .. } => {
+                self.queue.push_back(Job::SwitchFinish(true));
             }
             Gesture::ParentPick {
                 ids, target, moved, ..
@@ -5152,6 +5329,21 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 }
                 client.finish_drag(commit).await.map_err(text)?;
             }
+            Ok(vec![])
+        }
+        Job::SwitchBegin { label, commands } => {
+            client
+                .begin_switch_paint(label, commands)
+                .await
+                .map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SwitchStep(commands) => {
+            client.step_switch_paint(commands).await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SwitchFinish(commit) => {
+            client.finish_switch_paint(commit).await.map_err(text)?;
             Ok(vec![])
         }
         Job::Apply(plan) | Job::CommitGain(plan, _) => client.dispatch(plan).await.map_err(text),

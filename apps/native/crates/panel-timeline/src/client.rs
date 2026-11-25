@@ -65,6 +65,7 @@ pub struct TimelineClient {
     pub model: TimelineModel,
     active: Option<(u64, Drag)>,
     active_revision: Option<u64>,
+    switch_gesture: Option<u64>,
     preview: Option<LayerPreview>,
     adopted: Option<pm_model::Value>,
 }
@@ -81,6 +82,7 @@ impl TimelineClient {
             model: TimelineModel::default(),
             active: None,
             active_revision: None,
+            switch_gesture: None,
             preview: None,
             adopted: None,
         };
@@ -581,6 +583,74 @@ impl TimelineClient {
         self.active = None;
         self.active_revision = None;
         Ok(ack)
+    }
+
+    /// Begin a press-and-drag switch paint gesture (one undo step across all swept rows).
+    pub async fn begin_switch_paint(
+        &mut self,
+        label: String,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        if let Some(old) = self.switch_gesture.take() {
+            let _ = self.call(GestureCall::Commit { gesture: old }.into()).await;
+        }
+        self.sync()?;
+        let ack = self
+            .call(GestureCall::Begin { label }.into())
+            .await?;
+        let Reply::Gesture(id) = ack.reply else {
+            return Err(ClientError::Rejected("gesture acknowledgement".into()));
+        };
+        self.switch_gesture = Some(id);
+        if !commands.is_empty() {
+            self.call(
+                GestureCall::Step {
+                    gesture: id,
+                    body: WriteBody::Commands(commands),
+                    replace: false,
+                }
+                .into(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Append newly swept layer switch edits to the active switch-paint gesture.
+    pub async fn step_switch_paint(
+        &mut self,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture else {
+            return Ok(());
+        };
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.call(
+            GestureCall::Step {
+                gesture: id,
+                body: WriteBody::Commands(commands),
+                replace: false,
+            }
+            .into(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Commit or cancel the active switch-paint gesture.
+    pub async fn finish_switch_paint(&mut self, commit: bool) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture.take() else {
+            return Ok(());
+        };
+        let call = if commit {
+            GestureCall::Commit { gesture: id }
+        } else {
+            GestureCall::Cancel { gesture: id }
+        };
+        self.call(call.into()).await?;
+        Ok(())
     }
     /// Adopt view facts another client of this project persisted. Rows depend
     /// on them, so a native surface and the panel worker must agree.
