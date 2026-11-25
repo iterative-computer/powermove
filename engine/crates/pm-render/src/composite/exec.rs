@@ -696,6 +696,12 @@ impl Exec<'_> {
                     // reads no backdrop (`draws_over_the_stack`), and the
                     // stack beneath it is not drawn yet.
                     let backdrop = (!deferred).then_some(&acc);
+                    if !deferred && n.effects.is_some() {
+                        // The stack's draws have recorded all their reads.
+                        // Give back their rasters before taking the layer's
+                        // own large input, as well as the later pass targets.
+                        self.trim_vector_before_effect(encoder, covered);
+                    }
                     let Some((res, depth, res_owned, output_bounds)) =
                         self.layer_node(encoder, plan, n, covered, backdrop)
                     else {
