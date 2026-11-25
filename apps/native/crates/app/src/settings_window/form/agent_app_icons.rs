@@ -20,8 +20,8 @@ const OPENAI: Mark = Mark {
     // The official SVG already contains clear space around the mark.
     scale: 1.,
 };
-const CLAUDE_CODE: Mark = Mark {
-    svg: include_bytes!("../../../assets/settings-agent-icons/claude-code.svg"),
+const CLAUDE: Mark = Mark {
+    svg: include_bytes!("../../../assets/settings-agent-icons/claude-ai-icon.svg"),
     scale: 2. / 3.,
 };
 const OPENCODE: Mark = Mark {
@@ -37,9 +37,9 @@ fn resolve<T>(
 ) -> Option<T> {
     // See the asset attribution for the product marks that require prior approval.
     let (apps, mark, fallback): (&[&str], Option<&Mark>, _) = match id {
-        // Claude Code is a command-line tool: its own mark, not the Claude app's icon.
-        "claude-code" => (&[], Some(&CLAUDE_CODE), "terminal"),
-        "claude-desktop" => (&["Claude"], None, "terminal"),
+        // Claude Code is a command-line tool: the Claude logo, not the app's icon.
+        "claude-code" => (&[], Some(&CLAUDE), "terminal"),
+        "claude-desktop" => (&["Claude"], Some(&CLAUDE), "terminal"),
         "codex" => (&["Codex", "ChatGPT"], Some(&OPENAI), "terminal"),
         "gemini-cli" => (&["Gemini"], None, "terminal"),
         "opencode" => (&["OpenCode"], Some(&OPENCODE), "terminal"),
@@ -240,7 +240,8 @@ mod tests {
         for (id, apps, expected) in [
             ("codex", &["Codex", "ChatGPT"][..], OPENAI.svg),
             ("opencode", &["OpenCode"][..], OPENCODE.svg),
-            ("claude-code", &[][..], CLAUDE_CODE.svg),
+            ("claude-code", &[][..], CLAUDE.svg),
+            ("claude-desktop", &["Claude"][..], CLAUDE.svg),
         ] {
             let mut lookups = Vec::new();
             let image = resolve(
@@ -259,10 +260,7 @@ mod tests {
 
     #[test]
     fn clients_without_a_bundled_mark_use_a_neutral_symbol() {
-        for (id, bundle) in [
-            ("claude-desktop", "Claude"),
-            ("gemini-cli", "Gemini"),
-        ] {
+        for (id, bundle) in [("gemini-cli", "Gemini")] {
             let image = resolve(
                 id,
                 |name| {

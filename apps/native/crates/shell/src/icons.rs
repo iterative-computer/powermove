@@ -86,10 +86,10 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         // The model chooser's one small chevron.
         "composer.chevron" => g(pierre!("ChevronSm")),
         // Provider marks beside the model's name. OpenAI's blossom
-        // identifies ChatGPT, monochrome (as in Settings, see its
-        // ATTRIBUTION); Claude Code is its own mark in its own colour (the
-        // unchanged SVGL file, same ATTRIBUTION); Anthropic API and local
-        // models show Pierre's neutral sparkle.
+        // identifies ChatGPT and OpenAI, monochrome (as in Settings, see its
+        // ATTRIBUTION); the Claude logo identifies Claude, Claude Code and
+        // Anthropic keys, in its own colour (SVGL's file, unchanged, same
+        // ATTRIBUTION); custom endpoints show Pierre's neutral sparkle.
         "provider.chatgpt" => Some(Glyph {
             svg: include_str!("../../app/assets/settings-agent-icons/openai-blossom.svg"),
             turns: 0,
@@ -99,14 +99,14 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             size: 2.,
             color: None,
         }),
-        "provider.claude" => Some(Glyph {
-            svg: include_str!("../../app/assets/settings-agent-icons/claude-code.svg"),
+        "provider.claude" | "provider.anthropic" => Some(Glyph {
+            svg: include_str!("../../app/assets/settings-agent-icons/claude-ai-icon.svg"),
             turns: 0,
             mirror: false,
             size: 1.,
             color: Some(0xD97757),
         }),
-        "provider.anthropic" | "provider.compatible" => g(pierre!("Sparkle")),
+        "provider.compatible" => g(pierre!("Sparkle")),
         // The Powermove harness: the app's own mark (assets/brand), filled
         // in one ink, a touch smaller than its box as the sparkle is.
         "provider.powermove" => Some(Glyph {

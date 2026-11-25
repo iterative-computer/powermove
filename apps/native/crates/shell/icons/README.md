@@ -48,8 +48,8 @@ bars, knockouts by mask, no thinner strokes or outlines.
   (`assets/brand`) filled in one ink, on its own 141 × 116 box.
 
 Product marks for the Agent chooser come from `apps/native/crates/app/assets/settings-agent-icons`
-(see its `ATTRIBUTION.md`): OpenAI's blossom, drawn in the surface's ink, and the Claude Code mark
-(the unchanged SVGL file), drawn in its own colour.
+(see its `ATTRIBUTION.md`): OpenAI's blossom, drawn in the surface's ink, and SVGL's Claude logo
+(unchanged), drawn in its own colour.
 
 The composer's Send arrow is Pierre's `IconArrow` turned a quarter, its chevron
 `IconChevronSm`, and the provider mark beside a model's name Pierre's `IconSparkle`
