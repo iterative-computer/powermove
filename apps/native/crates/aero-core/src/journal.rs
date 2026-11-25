@@ -121,12 +121,14 @@ impl SessionFolder {
     /// reads what the folder holds ([`SessionFolder::take_stored`]) and cuts
     /// a torn last line before any append.
     pub fn open(dir: &Path) -> Result<SessionFolder, StoreError> {
-        std::fs::create_dir_all(dir.join("images"))?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dir.join("writer.lock"))?;
+        // The folder holds the conversation: owner-only, also when an older
+        // build made it with the default modes.
+        private_dir(dir)?;
+        private_dir(&dir.join("images"))?;
+        let lock = private_file(
+            OpenOptions::new().truncate(false).write(true),
+            &dir.join("writer.lock"),
+        )?;
         // SAFETY: a valid descriptor; flock has no other preconditions.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(StoreError::Fenced);
@@ -135,11 +137,10 @@ impl SessionFolder {
             io::ErrorKind::InvalidData => StoreError::Corrupt(error.to_string()),
             _ => StoreError::Io(error),
         })?;
-        let events = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(dir.join("events"))?;
+        let events = private_file(
+            OpenOptions::new().read(true).append(true),
+            &dir.join("events"),
+        )?;
         if scan.torn {
             events.set_len(scan.valid_len)?;
             events.sync_all()?;
@@ -247,7 +248,7 @@ impl SessionFolder {
             return Ok(false);
         }
         let temp = self.dir.join("checkpoint.new");
-        let mut file = File::create(&temp)?;
+        let mut file = private_file(OpenOptions::new().write(true).truncate(true), &temp)?;
         file.write_all(&at_seq.to_le_bytes())?;
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -274,7 +275,7 @@ impl SessionFolder {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             let written = (|| {
-                let mut file = File::create(&temp)?;
+                let mut file = private_file(OpenOptions::new().write(true).truncate(true), &temp)?;
                 file.write_all(bytes)?;
                 file.sync_all()?;
                 std::fs::rename(&temp, &path)
@@ -527,4 +528,22 @@ impl JournalWriter {
     pub fn stop(&self) {
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
+}
+
+/// Makes `dir` (and its parents) and leaves it readable by its owner only.
+fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Opens or creates `path` readable by its owner only.
+fn private_file(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = options.create(true).mode(0o600).open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }

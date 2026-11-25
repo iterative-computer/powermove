@@ -282,3 +282,35 @@ fn concurrent_and_interrupted_writers_never_publish_a_torn_image() {
     drop(folder);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The folder holds the conversation: the folder is owner-only and every
+/// file it writes is too, including a folder an older build left open.
+#[test]
+fn the_session_folder_and_its_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let dir = scratch("modes");
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.join("events"), b"").unwrap();
+    std::fs::set_permissions(dir.join("events"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let folder = SessionFolder::open(&dir).expect("open");
+    folder
+        .append(1, 2, &events(1, 2, "private"))
+        .expect("append");
+    folder.mark_acked(2);
+    assert!(folder.save_checkpoint(2, b"snapshot").expect("checkpoint"));
+    let image = folder.put_image(b"\x89PNG not really").expect("image");
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&dir.join("images")), 0o700);
+    for file in [
+        dir.join("events"),
+        dir.join("writer.lock"),
+        dir.join("checkpoint"),
+        dir.join("images").join(image),
+    ] {
+        assert_eq!(mode(&file), 0o600, "{}", file.display());
+    }
+    drop(folder);
+    let _ = std::fs::remove_dir_all(&dir);
+}
