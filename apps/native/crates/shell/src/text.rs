@@ -70,7 +70,7 @@ impl TextField {
         let view: Retained<NSView> =
             unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
         let slot = Rc::new(NativeTextSlot::new(&view, kind, label, value));
-        slot.set_font_size(tokens.typography.body as f64);
+        slot.set_font_size(type_size(kind, &tokens) as f64);
         let (tx, rx) = async_channel::unbounded();
         slot.on_event(Rc::new(move || {
             let _ = tx.try_send(());
@@ -128,8 +128,8 @@ impl TextField {
     /// counts from one). Past the most, the editor scrolls.
     fn lines(&self, window: &mut Window, least: usize) -> f32 {
         let text = self.slot.value();
-        let size = px(self.tokens.typography.body);
-        let room = self.width.get() - 2. * MULTILINE_TEXT_ORIGIN.0;
+        let size = px(type_size(self.kind, &self.tokens));
+        let room = self.width.get() - 2. * self.text_origin().0;
         let mut lines = 0usize;
         for line in text.split('\n') {
             lines += 1;
@@ -406,6 +406,14 @@ impl TextField {
         self.await_keyboard();
         cx.notify();
     }
+    /// Where the first line's text starts in the field.
+    fn text_origin(&self) -> (f32, f32) {
+        if self.kind == TextKind::Composer {
+            COMPOSER_TEXT_ORIGIN
+        } else {
+            MULTILINE_TEXT_ORIGIN
+        }
+    }
     /// Select a UTF-16 prefix, leaving a filename extension intact.
     pub fn begin_editing_selecting_to(&mut self, end: usize, cx: &mut Context<Self>) {
         self.slot.begin_editing();
@@ -419,7 +427,9 @@ impl TextField {
             // A source field keeps its face at the new size.
             Some(family) if resized => self.set_code(&family),
             Some(_) => {}
-            None => self.slot.set_font_size(self.tokens.typography.body as f64),
+            None => self
+                .slot
+                .set_font_size(type_size(self.kind, &self.tokens) as f64),
         }
     }
     /// The panel marks a value its host set (`metadata.hostValue`, rising
@@ -537,6 +547,19 @@ impl TextField {
 /// Where a multi-line native editor draws its first glyph, from its own
 /// corner: the text container inset plus the line fragment padding.
 const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
+/// Where a composer's first line box starts: its draft is written straight
+/// on the composer, level with the controls under it
+/// (`gpui_macos::native_text::COMPOSER_INSET` and the line fragment padding).
+const COMPOSER_TEXT_ORIGIN: (f32, f32) = (7., 7.);
+/// The point size a field of `kind` sets its text in: the Agent composer's
+/// draft is larger than the panels' body text.
+fn type_size(kind: TextKind, tokens: &pm_design::Tokens) -> f32 {
+    if kind == TextKind::Composer {
+        tokens.typography.composer
+    } else {
+        tokens.typography.body
+    }
+}
 /// How far under a dense well's top its one-line editor starts, so the
 /// text being edited stands on the baseline of the value drawn at rest.
 const DENSE_EDIT_DROP: f32 = 3.;
@@ -603,9 +626,9 @@ impl Render for TextField {
                         .min(self.tokens.metrics.composer_max_lines);
                     // Each line as the editor spaces it (v1's 1.5), and
                     // its inset above and below.
-                    let line = self.tokens.typography.body
+                    let line = self.tokens.typography.composer
                         * gpui_macos::native_text::COMPOSER_LEADING as f32;
-                    (lines * line + 6.).max(self.tokens.metrics.hit)
+                    (lines * line + 2. * COMPOSER_TEXT_ORIGIN.1).max(self.tokens.metrics.hit)
                 } else if self.inline_name {
                     f32::from(window.line_height())
                 } else if bare {
@@ -646,7 +669,7 @@ impl Render for TextField {
                 .when(editing, |d| d.shadow(vec![ring]))
             })
             .text_color(rgb(self.ink.unwrap_or(self.tokens.colors.text)))
-            .text_size(px(self.tokens.typography.body))
+            .text_size(px(type_size(self.kind, &self.tokens)))
             .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
@@ -683,12 +706,24 @@ impl Render for TextField {
                     && !self.placeholder.is_empty()
                     && self.slot.value().is_empty(),
                 |d| {
+                    let (left, top) = self.text_origin();
+                    let composer = self.kind == TextKind::Composer;
                     d.child(
                         div()
                             .absolute()
-                            .left(px(MULTILINE_TEXT_ORIGIN.0))
-                            .top(px(MULTILINE_TEXT_ORIGIN.1))
-                            .text_color(rgb(self.tokens.colors.muted))
+                            .left(px(left))
+                            .top(px(top))
+                            // A composer's placeholder is the third text step,
+                            // in the line box its draft is set in.
+                            .when(composer, |d| {
+                                d.line_height(px(self.tokens.typography.composer
+                                    * gpui_macos::native_text::COMPOSER_LEADING as f32))
+                            })
+                            .text_color(rgb(if composer {
+                                self.tokens.colors.faint
+                            } else {
+                                self.tokens.colors.muted
+                            }))
                             .child(self.placeholder.clone()),
                     )
                 },

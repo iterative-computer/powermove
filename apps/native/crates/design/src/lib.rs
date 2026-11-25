@@ -68,6 +68,10 @@ pub struct Colors {
     /// Opaque hairline for control and card edges (`text` ink at
     /// `translucency.edge` over `panel`; `separator` under Increase Contrast).
     pub hairline: u32,
+    /// The Agent composer's Send circle while there is nothing to send: a
+    /// dim neutral disc (`text` ink at half `translucency.hover` over
+    /// `floating`).
+    pub composer_send_idle: u32,
     /// Metadata on a selected row (`selected_fill`): ≥ 4.5:1 where `muted` is not.
     pub selected_secondary: u32,
     /// `danger` words on a selected row (`Missing`): ≥ 4.5:1 on `selected_fill`.
@@ -147,6 +151,8 @@ pub struct TypeScale {
     pub reading: f32,
     /// Sheet, Settings pane and empty-state headings.
     pub heading: f32,
+    /// The Agent composer's draft and placeholder.
+    pub composer: f32,
     /// Transport and timeline timecode (SF Pro, tabular figures, medium).
     pub timecode: f32,
     pub regular_weight: f32,
@@ -384,8 +390,6 @@ pub struct Metrics {
     /// Agent attachment and pop-up geometry, shared by light and dark themes.
     pub agent_attachment: f32,
     pub agent_attachment_sent: f32,
-    pub agent_model_min: f32,
-    pub agent_effort_width: f32,
     /// The Agent popover's height when the window has room (the original
     /// app's 680 pt conversation).
     pub agent_height: f32,
@@ -422,6 +426,14 @@ pub struct Metrics {
     pub composer_radius: f32,
     /// The same in the Agent popover (`radius.nested(popover_radius, text_padding)`).
     pub composer_popover_radius: f32,
+    /// The composer's control row: its height, the "+" button and the Send
+    /// circle's diameter.
+    pub composer_control: f32,
+    /// The composer's "+" glyph square (a thin plus).
+    pub composer_add_symbol: f32,
+    /// The composer's small glyphs: Send's arrow, Stop's square, the model
+    /// chooser's chevron.
+    pub composer_symbol: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -709,6 +721,7 @@ impl Colors {
             fill: 0,
             fill_strong: 0,
             hairline: 0,
+            composer_send_idle: 0,
             selected_secondary: secondary,
             selected_danger: if dark { 0xff8a80 } else { 0xa82319 },
             focus: mix(panel, ink, if dark { 0.58 } else { 0.5 }),
@@ -827,10 +840,14 @@ impl Tokens {
     }
     /// Header, the idle composer (one line of draft over its row of
     /// controls, inside its edge and padding) and the bottom inset.
+    /// The Agent panel's header and its idle composer: the edge, one line
+    /// of draft (v1's 1.5 leading, 7 pt inset above and below: the shell's
+    /// composer text origin), `space.xl`, the control row and `space.md`
+    /// under it, the composer `text_padding` off the panel's bottom.
     pub fn agent_panel_minimum_height(&self) -> f32 {
         let m = &self.metrics;
-        let text = (self.typography.body * 1.5 + 6.).max(m.hit);
-        m.header + m.text_padding + 2. * m.border + 3. * m.gap + m.control + text
+        let draft = (self.typography.composer * 1.5 + 2. * 7.).max(m.hit);
+        m.header + m.text_padding + 2. * m.border + draft + self.space.xl + m.hit + self.space.md
     }
 
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
@@ -958,8 +975,6 @@ impl Tokens {
                 agent_width: 440.,
                 agent_attachment: 56.,
                 agent_attachment_sent: 40.,
-                agent_model_min: 96.,
-                agent_effort_width: 72.,
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
@@ -978,6 +993,9 @@ impl Tokens {
                 // Derived with the panel corners (`derive_composer_radii`).
                 composer_radius: 0.,
                 composer_popover_radius: 0.,
+                composer_control: 22.,
+                composer_add_symbol: 16.,
+                composer_symbol: 15.,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
@@ -1029,6 +1047,7 @@ impl Tokens {
                 display: 24.,
                 reading: 13.,
                 heading: 15.,
+                composer: 15.,
                 timecode: 13.,
                 regular_weight: 400.,
                 medium_weight: 500.,
@@ -1130,6 +1149,7 @@ impl Tokens {
             Scheme::Light => c.floating,
         };
         c.faint = mix(ground, ink, t.faint);
+        c.composer_send_idle = mix(c.floating, ink, t.hover / 2.);
         c.hairline = if self.accessibility.increase_contrast {
             c.separator
         } else {
@@ -1177,7 +1197,6 @@ impl Tokens {
         metrics.tab: size, metrics.pill_radius: size, metrics.pill_inset: size,
         metrics.segment_radius: size,
         metrics.agent_attachment: size, metrics.agent_attachment_sent: size,
-        metrics.agent_model_min: size, metrics.agent_effort_width: size,
         metrics.row: size, metrics.control: size, metrics.field: size,
         metrics.value_column: size, metrics.border: size, metrics.track_row: size,
         typography.minimum: size, typography.body: size, typography.label: size,

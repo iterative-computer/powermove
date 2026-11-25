@@ -71,6 +71,27 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         // Pierre's plus spans 10 of 16 px in a 1.5 px line: beside the
         // search glass it reads small and thin, so it is drawn full size.
         "plus" => g(drawn!("plus")),
+        // The Agent composer's "+": the same plus in Pierre's 1.5 px line,
+        // drawn large and light beside the draft.
+        "composer.add" => g(drawn!("plus-thin")),
+        // The composer's Send and Stop, inside their circle.
+        "composer.send" => turned(pierre!("Arrow"), 1),
+        "composer.stop" => g(drawn!("stop")),
+        // The model chooser's one small chevron.
+        "composer.chevron" => g(pierre!("ChevronSm")),
+        // Provider marks beside the model's name, monochrome. OpenAI's
+        // blossom identifies ChatGPT (as in Settings, see its ATTRIBUTION);
+        // Anthropic asks permission before its artwork is bundled, so Claude
+        // and API or local models show Pierre's neutral sparkle.
+        "provider.chatgpt" => Some(Glyph {
+            svg: include_str!("../../app/assets/settings-agent-icons/openai-blossom.svg"),
+            turns: 0,
+            mirror: false,
+            // The official file keeps clear space round the mark (about half
+            // its square): drawn at the sparkle's size.
+            size: 2.,
+        }),
+        "provider.claude" | "provider.compatible" => g(pierre!("Sparkle")),
         "minus" => g(pierre!("Minus")),
         "xmark" => g(pierre!("X")),
         "ellipsis" => g(pierre!("Ellipsis")),
@@ -210,6 +231,13 @@ mod tests {
         "distribute.horizontal.center",
         "distribute.vertical.center",
         "plus",
+        "composer.add",
+        "composer.send",
+        "composer.stop",
+        "composer.chevron",
+        "provider.chatgpt",
+        "provider.claude",
+        "provider.compatible",
         "minus",
         "xmark",
         "ellipsis",

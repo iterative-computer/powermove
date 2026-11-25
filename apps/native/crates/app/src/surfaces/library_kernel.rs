@@ -152,6 +152,7 @@ impl KernelLibrary {
                 }
             }
             Command::Create(values) => {
+                crate::telemetry::project_created();
                 let id = pm_kernel::new_id("P");
                 let project = project_value(&id, &values)?;
                 let reply = self.shell(ShellCall::Open {

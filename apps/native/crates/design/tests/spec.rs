@@ -20,14 +20,6 @@ const ROLES: &[(&str, &str)] = &[
         "Square sent attachment thumbnail edge",
     ),
     (
-        "metrics.agent_model_min",
-        "Minimum composer model pop-up width",
-    ),
-    (
-        "metrics.agent_effort_width",
-        "Fixed composer effort pop-up width",
-    ),
-    (
         "colors.timeline_selected",
         "Accent tint for selected timeline layer rows",
     ),
@@ -408,6 +400,18 @@ const ROLES: &[(&str, &str)] = &[
         "metrics.composer_popover_radius",
         "Agent composer corner, concentric in the popover",
     ),
+    (
+        "metrics.composer_control",
+        "Agent composer control row height, its + button and Send circle",
+    ),
+    (
+        "metrics.composer_add_symbol",
+        "Agent composer thin + glyph square",
+    ),
+    (
+        "metrics.composer_symbol",
+        "Agent composer Send arrow, Stop square and model chevron",
+    ),
     ("metrics.group_radius", "Settings grouped-form card corner"),
     ("metrics.form_row", "Minimum Settings row height"),
     (
@@ -521,6 +525,10 @@ const ROLES: &[(&str, &str)] = &[
     (
         "typography.heading",
         "Sheet and Settings pane headings (semibold)",
+    ),
+    (
+        "typography.composer",
+        "Agent composer draft and placeholder",
     ),
     (
         "typography.timecode",
@@ -710,6 +718,10 @@ const ROLES: &[(&str, &str)] = &[
         "Segment and tab corner inside a pill (concentric)",
     ),
     ("colors.hairline", "Opaque control and card edge (derived)"),
+    (
+        "colors.composer_send_idle",
+        "Agent composer Send circle with nothing to send (derived)",
+    ),
     (
         "metrics.pill_radius",
         "Segmented track and tab-strip corner",

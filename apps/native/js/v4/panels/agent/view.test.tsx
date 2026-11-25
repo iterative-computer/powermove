@@ -152,11 +152,9 @@ test("focus order follows the thread bar, conversation and the composer's one ro
     "quote-source-history:message-0",
     "quote-source-live:text-1",
     "agent-composer-text",
-    "agent-attach",
-    "agent-pick-region",
+    "agent-add",
     "agent-model",
     "agent-effort",
-    "agent-access",
     "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -164,7 +162,7 @@ test("focus order follows the thread bar, conversation and the composer's one ro
   );
   root.dispose();
 });
-test("the model and approvals give up space in the docked composer's one row; effort keeps its width", async () => {
+test("the model's name gives way in the docked composer's one row; effort keeps its width", async () => {
   const { root } = mount();
   const p = states.selected();
   p.native.presentation = "docked";
@@ -174,19 +172,20 @@ test("the model and approvals give up space in the docked composer's one row; ef
   const nodes = root.inspect().nodes;
   const label = (picker: ReturnType<typeof byId>) =>
     nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
-  for (const id of ["agent-model", "agent-access"]) {
-    const picker = byId(root, id);
-    expect(picker.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
-    expect(label(picker)?.props.style).toMatchObject({ flexShrink: 1, textOverflow: "ellipsis" });
-  }
+  const model = byId(root, "agent-model");
+  expect(model.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
+  expect(label(model)?.props.style).toMatchObject({ flexShrink: 1, textOverflow: "ellipsis" });
   const effort = byId(root, "agent-effort");
   expect(effort.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.metadata).toBeUndefined();
-  // Every control sits in the composer's one row, on its one surface.
+  // Every control sits in the composer's one row, on its one surface: "+",
+  // then the model chooser (the model and its effort, one control).
   const options = byId(root, "agent-options");
-  for (const id of ["agent-attach", "agent-pick-region", "agent-model", "agent-effort", "agent-access"])
+  for (const id of ["agent-add", "agent-chooser"])
     expect(options.children).toContain(byId(root, id).id);
+  for (const id of ["agent-model", "agent-effort"])
+    expect(byId(root, "agent-chooser").children).toContain(byId(root, id).id);
   expect(byId(root, "agent-composer").children).toContain(options.id);
   expect(byId(root, "agent-threads")).toBeDefined();
   expect(byId(root, "agent-new")).toBeDefined();
@@ -215,7 +214,7 @@ test("the composer is one surface: the draft sits on it with no inset field, its
     expect(composer.children).toContain(text.id);
     expect(text.props.style.background).toEqual(composer.props.style.background);
     // Pickers are quiet on the surface until their menu is open.
-    for (const id of ["agent-model", "agent-effort", "agent-access"])
+    for (const id of ["agent-model", "agent-effort", "agent-add"])
       expect(byId(root, id).props.style).not.toHaveProperty("background");
   }
   root.dispose();
@@ -344,7 +343,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   assertWire(commits);
   root.dispose();
 });
-test("provider and model share one menu; effort and access have their own; picks reach the model", async () => {
+test("provider and model share one menu; effort has its own; approvals are in +; picks reach the model", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -376,7 +375,7 @@ test("provider and model share one menu; effort and access have their own; picks
     "agent-model",
     "agent-model",
     "agent-effort",
-    "agent-access",
+    "agent-add",
   ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
@@ -389,6 +388,15 @@ test("provider and model share one menu; effort and access have their own; picks
   expect(asked[2]!.map((o) => [o.label, o.checked])).toEqual([
     ["Low", false],
     ["High", true],
+  ]);
+  // "+": the attachments, then Approvals as a section of their own.
+  expect(asked[3]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
+    ["", "Add Files…", false],
+    ["", "Select Part of the Screen", false],
+    ["Approvals", "Composition only", true],
+    ["Approvals", "Supervised", false],
+    ["Approvals", "Auto", false],
+    ["Approvals", "Full access", false],
   ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },
@@ -628,7 +636,7 @@ test("composer pickers use the pressed anchor and enable search only for a long 
   };
   const render = () => root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   await render();
-  for (const id of ["agent-model", "agent-effort", "agent-access"]) {
+  for (const id of ["agent-model", "agent-effort", "agent-add"]) {
     const button = byId(root, id);
     await root.drive(button.id, "click");
     expect(requests.at(-1)).toMatchObject({ anchor: button.id, search: false });
@@ -1249,9 +1257,10 @@ test("composer sends direction with a draft during a run", async () => {
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
   expect(byId(root, "agent-composer-text").props.disabled).not.toBe(true);
   expect(byId(root, "agent-send").props.disabled).toBe(false);
-  // Stop and Send stand apart in the row, which has no gap of its own.
-  expect(byId(root, "agent-stop")).toBeDefined();
-  expect(byId(root, "agent-send").props.style.marginLeft).toEqual({ token: "metrics.gap" });
+  // Stop steps back beside Send: a dim disc, and Send is the lit one.
+  const disc = (id: string) => root.inspect().nodes.find((n) => byId(root, id).children.includes(n.id))!;
+  expect(disc("agent-stop").props.style).toMatchObject({ background: { token: "colors.composer_send_idle" } });
+  expect(disc("agent-send").props.style).toMatchObject({ background: { token: "colors.text" } });
   await root.drive(byId(root, "agent-send").id, "click");
   expect(actions).toEqual([{ type: "submit" }]);
 });
@@ -1302,8 +1311,14 @@ test("each attachment kind has its tile, and file drops route to native attachme
   await root.render(
     <AgentView publication={p} send={(a) => actions.push(a)} />,
   );
-  expect(byId(root, "agent-attach").props.disabled).toBe(true);
-  expect(byId(root, "agent-pick-region").props.title).toContain("six");
+  // At six, "+" says so in place of its attachment rows.
+  let asked: MenuOption[] = [];
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} menu={async (r) => { asked = r.options; return null; }} />,
+  );
+  await root.drive(byId(root, "agent-add").id, "click");
+  expect(asked[0]).toMatchObject({ informational: true, label: "A message can carry six attachments" });
+  expect(asked.some((o) => o.value === "attach" || o.value === "pickRegion")).toBe(false);
   root.dispose();
 });
 
@@ -1480,8 +1495,13 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   expect(byId(root, "agent-model").props.open).toBe(false);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
-  for (const id of ["agent-model", "agent-effort", "agent-access"])
+  for (const id of ["agent-model", "agent-effort"])
     expect(byId(root, id).props.disabled).toBe(true);
+  // During a run "+" still adds files; Approvals wait for the run to end.
+  expect(byId(root, "agent-add").props.disabled).toBe(false);
+  await root.drive(byId(root, "agent-add").id, "click");
+  expect(requests.at(-1)!.options.some((o) => o.category === "Approvals")).toBe(false);
+  close(null);
   root.dispose();
 });
 
@@ -1499,7 +1519,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     return new Promise((resolve) => { settle = resolve; });
   };
   await root.render(<AgentView publication={fixture()} menu={menu} send={() => {}} />);
-  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-access", "Enter"]]) {
+  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-add", "Enter"]]) {
     const trigger = byId(root, id);
     await root.drive(trigger.id, "keydown", { key });
     expect(byId(root, id).props["aria-expanded"]).toBe(true);
@@ -1508,7 +1528,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     expect(byId(root, id).props["aria-expanded"]).toBe(false);
   }
   expect(requests.map(({ picker }) => picker)).toEqual([
-    "model", "model", "effort", "effort", "access", "access",
+    "model", "model", "effort", "effort", "add", "add",
   ]);
   root.dispose();
 });

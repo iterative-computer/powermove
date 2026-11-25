@@ -14,6 +14,7 @@ pub mod delivery;
 pub mod history;
 pub mod launch;
 pub mod monitor;
+pub mod stats;
 pub mod orchestration;
 pub mod persistence;
 pub mod protocol;

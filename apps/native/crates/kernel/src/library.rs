@@ -79,7 +79,8 @@ pub const STATIC_KEYS: [&str; 42] = [
 /// Keys only the native app writes (v1.2.0 leaves them alone): the person's
 /// keymap (Settings › Shortcuts) and how projects open (Settings › General ›
 /// Open Projects In).
-pub const NATIVE_KEYS: [&str; 2] = ["keymap", "openProjectsIn"];
+/// Native-only settings (no v1 key). `shareUsageData`: Settings › Privacy.
+pub const NATIVE_KEYS: [&str; 3] = ["keymap", "openProjectsIn", "shareUsageData"];
 
 /// `DYNAMIC_PREFIXES` at v1.2.0.
 pub const DYNAMIC_PREFIXES: [&str; 10] = [

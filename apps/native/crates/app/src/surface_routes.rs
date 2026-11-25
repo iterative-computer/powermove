@@ -172,6 +172,9 @@ impl Controller {
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
             "panelLibrary" => self.open_panel_library(cx),
+            "openTelemetryDocs" => {
+                crate::platform::open_url(pm_telemetry::DOCS_URL);
+            }
             // Settings › General › Agent Notifications, when macOS says no.
             "openNotificationSettings" => {
                 let id = crate::platform::bundle_id().unwrap_or_default();

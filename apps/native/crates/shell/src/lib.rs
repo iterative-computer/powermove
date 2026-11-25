@@ -50,6 +50,7 @@ pub mod settings_window;
 #[cfg(target_os = "macos")]
 pub mod icons;
 pub mod symbol;
+pub mod telemetry;
 #[cfg(target_os = "macos")]
 pub mod text;
 pub mod theme;

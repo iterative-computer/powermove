@@ -202,6 +202,15 @@ impl Client {
         {
             e.trace(&self.run, t);
         }
+        if ty == "turn.completed" {
+            let usage = &v["usage"];
+            crate::stats::turn(&self.run);
+            crate::stats::tokens(
+                &self.run,
+                usage["input_tokens"].as_u64(),
+                usage["output_tokens"].as_u64(),
+            );
+        }
         if ty == "turn.failed" {
             let msg = v["error"]["message"]
                 .as_str()

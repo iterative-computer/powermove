@@ -997,12 +997,18 @@ impl Kernel {
             .iter()
             .filter_map(|change| match change {
                 crate::state::StateChange::Setting { key, value } => {
+                    // Settings › Privacy turned off: sharing stops before the
+                    // write, whatever becomes of it.
+                    if key == SHARE_USAGE && !share_usage(value.as_ref()) {
+                        pm_telemetry::set_sharing(false);
+                    }
                     Some((key.clone(), value.clone()))
                 }
                 _ => None,
             })
             .collect();
         writes.extend(next.durable_extensions_since(&self.state));
+        let reports = writes.clone();
         if let Some(writer) = &self.library {
             writer
                 .write_settings(writes)
@@ -1010,6 +1016,10 @@ impl Kernel {
         } else {
             crate::persistence::validate_values(&writes)
                 .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        }
+        // Saved: sharing turns on only now, and changes are reported.
+        for (key, value) in &reports {
+            report_setting(key, value.as_ref());
         }
         self.state = next;
         Ok(crate::state::StateAck {
@@ -1106,3 +1116,52 @@ pub fn base_hash_of(project: &Value) -> String {
 
 #[allow(dead_code)]
 fn _paths(_: &Path) {}
+
+/// `settings_changed` for the allowlisted settings, with their new value.
+/// Settings › Privacy › Share Anonymous Usage and Crash Reports.
+pub(crate) const SHARE_USAGE: &str = "shareUsageData";
+
+/// Whether Settings' value shares: never set (absent from a store that
+/// loaded) is Settings' default, on; anything but a boolean is off.
+pub(crate) fn share_usage(value: Option<&Value>) -> bool {
+    match value {
+        None => true,
+        Some(value) => value.as_bool() == Some(true),
+    }
+}
+
+fn report_setting(key: &str, value: Option<&Value>) {
+    use pm_telemetry::SettingsChanged;
+    if key == SHARE_USAGE {
+        pm_telemetry::set_sharing(share_usage(value));
+        return;
+    }
+    if !pm_telemetry::enabled() {
+        return;
+    }
+    let change = match (key, value.and_then(Value::as_str)) {
+        ("themeMode", Some("system")) => SettingsChanged::Theme("system"),
+        ("themeMode", Some("light")) => SettingsChanged::Theme("light"),
+        ("themeMode", Some("dark")) => SettingsChanged::Theme("dark"),
+        ("openProjectsIn", Some("tabs")) => SettingsChanged::ProjectWindows("tabs"),
+        ("openProjectsIn", Some("windows")) => SettingsChanged::ProjectWindows("windows"),
+        _ => return,
+    };
+    pm_telemetry::capture(pm_telemetry::Event::SettingsChanged(change));
+}
+
+#[cfg(test)]
+mod share_usage_tests {
+    use pm_model::json::Value;
+
+    /// Sol P0 (w99 review): the sharing choice is Settings' own value; only a
+    /// key never set reads as Settings' default.
+    #[test]
+    fn share_usage_setting_decides_consent() {
+        assert!(super::share_usage(None));
+        assert!(super::share_usage(Some(&Value::Bool(true))));
+        assert!(!super::share_usage(Some(&Value::Bool(false))));
+        assert!(!super::share_usage(Some(&pm_model::json::parse("\"yes\"").unwrap())));
+        assert!(!super::share_usage(Some(&pm_model::json::parse("1").unwrap())));
+    }
+}
