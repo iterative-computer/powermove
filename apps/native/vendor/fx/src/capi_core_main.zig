@@ -1564,39 +1564,16 @@ const Runtime = struct {
                     alloc_c.free(steer.message_id);
                 }
                 var reason: StopReason = .@"error";
+                var usage: Usage = .{};
                 if (err != null) {
                     self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
-                    self.queueEvent(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.@"error") }, .{}, .control);
                 } else {
                     // The step limit arrives typed, as max_model_turns
                     // (patch P-STEPS), never read from the reply's text.
                     reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
-                    self.queueEvent(.{
-                        .kind = .turn_end,
-                        .turn = turn,
-                        .code = @intFromEnum(reason),
-                        .usage = promptUsage(result),
-                    }, .{}, .control);
+                    usage = promptUsage(result);
                 }
-                // Only now may a later turn start (its TURN_START comes after).
-                self.lock.lockUncancelable(io);
-                if (self.turn == turn) {
-                    self.turn = 0;
-                    // A turn that ended, however, is the one a retry of its
-                    // message id names ("Deduplication"); a failed or yielded
-                    // one is not.
-                    const ended = self.turn_message_id;
-                    self.turn_message_id = null;
-                    if (reason != .@"error" and reason != .yielded) {
-                        if (self.last_turn_id) |old| alloc_c.free(old);
-                        self.last_turn_id = ended;
-                    } else if (ended) |id| alloc_c.free(id);
-                    // A crash's open turn is resumed or interrupted by now.
-                    self.resumable = false;
-                    if (self.open_turn_id) |id| alloc_c.free(id);
-                    self.open_turn_id = null;
-                }
-                self.lock.unlock(io);
+                self.endTurn(turn, reason, usage);
             },
             .steer => {
                 var status: Status = FX_OK;
@@ -1648,6 +1625,44 @@ const Runtime = struct {
                 self.queueEvent(.{ .kind = .checkpoint, .request = pending.request, .id = at_seq }, .{ .bytes = bytes }, .control);
             },
         }
+    }
+
+    /// Queues `turn`'s TURN_END and ends the turn in one critical section
+    /// with `lock` and the event lock, so a host that has drained TURN_END
+    /// can start the next turn at once. A control event: it never waits for
+    /// room; one that cannot be queued fails the runtime.
+    fn endTurn(self: *Runtime, turn: u64, reason: StopReason, usage: Usage) void {
+        self.parkIfPanicked();
+        const io = io_mod.getIo();
+        const queue = &self.events;
+        self.lock.lockUncancelable(io);
+        queue.mutex.lockUncancelable(io);
+        var appended = true;
+        var was_empty = false;
+        if (!queue.closed) {
+            if (queue.appendLocked(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(reason), .usage = usage }, .{})) |empty| {
+                was_empty = empty;
+            } else |_| appended = false;
+        }
+        if (self.turn == turn) {
+            self.turn = 0;
+            // A turn that ended, however, is the one a retry of its message
+            // id names ("Deduplication"); a failed or yielded one is not.
+            const ended = self.turn_message_id;
+            self.turn_message_id = null;
+            if (reason != .@"error" and reason != .yielded) {
+                if (self.last_turn_id) |old| alloc_c.free(old);
+                self.last_turn_id = ended;
+            } else if (ended) |id| alloc_c.free(id);
+            // A crash's open turn is resumed or interrupted by now.
+            self.resumable = false;
+            if (self.open_turn_id) |id| alloc_c.free(id);
+            self.open_turn_id = null;
+        }
+        queue.mutex.unlock(io);
+        self.lock.unlock(io);
+        if (!appended) return self.failTransport("the core could not queue an event (out of memory)");
+        if (was_empty) self.ready.notify();
     }
 
     /// libfx/journal_open's answer. The caller holds `lock`; this releases it.
@@ -2900,6 +2915,7 @@ fn shutdown(runtime: *Runtime) void {
     var events_closed = false;
     var input_closed = false;
     var fetch_closed = false;
+    var rounds: usize = 0;
     while (!runtime.thread_done.load(.acquire)) {
         if (runtime.panicked()) return;
         // Wake every core thread that waits on the host; retried until each
@@ -2929,8 +2945,15 @@ fn shutdown(runtime: *Runtime) void {
             runtime.lock.unlock(io);
         }
         if (runtime.thread_done.load(.acquire)) return;
-        const ts: std.c.timespec = .{ .sec = 0, .nsec = 1_000_000 };
-        _ = std.c.nanosleep(&ts, null);
+        // The core thread ends within microseconds of its input closing:
+        // yield first, then sleep in short steps (close's budget is 0.1 ms).
+        rounds += 1;
+        if (rounds < 64) {
+            std.Thread.yield() catch {};
+        } else {
+            const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+            _ = std.c.nanosleep(&ts, null);
+        }
     }
 }
 

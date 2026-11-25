@@ -189,17 +189,20 @@ impl SessionFolder {
     }
 }
 
+/// An append copied for the writer thread: id, first and last seq, events.
+type Queued = (u64, u64, u64, String);
+
 /// Stores a runtime's appends on a thread of its own and acknowledges each
 /// once durable (or fails it): [`crate::Host::journal_append`] only enqueues.
 pub struct JournalWriter {
-    queue: Mutex<Option<Sender<(u64, u64, u64, String)>>>,
+    queue: Mutex<Option<Sender<Queued>>>,
     remote: Arc<OnceLock<Remote>>,
     folder: Arc<SessionFolder>,
 }
 
 impl JournalWriter {
     pub fn start(folder: SessionFolder) -> io::Result<Arc<JournalWriter>> {
-        let (send, receive) = channel::<(u64, u64, u64, String)>();
+        let (send, receive) = channel::<Queued>();
         let remote: Arc<OnceLock<Remote>> = Arc::new(OnceLock::new());
         let folder = Arc::new(folder);
         let (bound, store) = (remote.clone(), folder.clone());

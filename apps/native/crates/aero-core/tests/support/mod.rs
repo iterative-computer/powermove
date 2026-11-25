@@ -734,14 +734,15 @@ fn serve(
 ) {
     let endpoint = endpoint.to_string();
     std::thread::spawn(move || {
-        if let (Purpose::Catalog, Some(listing)) = (seen.purpose, &catalog) {
-            if seen.provider == "gateway" && seen.url.ends_with("/models") {
-                if remote.fetch_status(seen.fetch, 200, None) == Ok(Outcome::Applied) {
-                    push_all(remote, seen.fetch, listing.as_bytes());
-                }
-                let _ = remote.fetch_finish(seen.fetch, true);
-                return;
+        if let (Purpose::Catalog, Some(listing)) = (seen.purpose, &catalog)
+            && seen.provider == "gateway"
+            && seen.url.ends_with("/models")
+        {
+            if remote.fetch_status(seen.fetch, 200, None) == Ok(Outcome::Applied) {
+                push_all(remote, seen.fetch, listing.as_bytes());
             }
+            let _ = remote.fetch_finish(seen.fetch, true);
+            return;
         }
         // The model catalog (a GET to the provider's canonical URL) and
         // anything but the model route: answered here, Not Found. Tests
