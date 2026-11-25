@@ -98,14 +98,9 @@ impl Net for SystemNet {
 /// answered by local fakes in a development build that names them), this
 /// build's Keychain prefix, and the browser hop.
 pub fn attach(environment: &mut pm_agents::launch::Environment) -> Arc<pm_agents::account::Opener> {
-    // A development build against the local fakes keeps everything in the
-    // lane's own test keychain file; every other build, the login Keychain.
-    environment.secrets = Some(
-        match pm_agents::edge::KeychainFile::from_env(&environment.vars) {
-            Some(file) => Arc::new(file) as Arc<dyn Secrets>,
-            None => Arc::new(Keychain),
-        },
-    );
+    // The app's one Keychain door: a development build named to the local
+    // fakes answers from their fake store instead (`cloud::keychain`).
+    environment.secrets = Some(Arc::new(Keychain));
     environment.net = Some(pm_agents::edge::Reroute::from_env(
         &environment.vars,
         Arc::new(SystemNet),

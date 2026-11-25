@@ -3,12 +3,11 @@
 //! refreshes, concurrent asks never spend a refresh token twice; Powermove's
 //! core runs on ChatGPT, an OpenAI key, an Anthropic key and a custom
 //! endpoint with credentials added at its fetch edge; signing out takes the
-//! credential from both harnesses. Every Keychain item lives in a keychain
-//! file made for the run (never the login keychain), deleted at the end, and
-//! every `security` call gives up after five seconds instead of waiting on a
-//! prompt. Nothing here reaches the network.
+//! credential from both harnesses. Every Keychain item lives in the run's
+//! fake Keychain file (no real keychain, no `security`, no dialog), deleted
+//! at the end. Nothing here reaches the network.
 use pm_agents::account::{Accounts, State};
-use pm_agents::edge::{KeychainFile, Loopback, NetRequest, Reroute, fetch};
+use pm_agents::edge::{FakeKeychain, Loopback, NetRequest, Reroute, fetch};
 use pm_agents::launch::Environment;
 use pm_agents::{Provider, aero, codex_auth, sources};
 use serde_json::Value;
@@ -54,59 +53,18 @@ impl Drop for Fakes {
     fn drop(&mut self) {
         let _ = self.server.kill();
         let _ = self.server.wait();
-        let _ = keychain_tool(&["delete-keychain"], &self.keychain);
         let _ = std::fs::remove_file(&self.keychain);
+        let _ = std::fs::remove_file(self.keychain.with_extension("json.lock"));
         let _ = std::fs::remove_dir_all(&self.env.profile);
     }
 }
-/// `security <args> <keychain file>` that never waits on a prompt: five
-/// seconds, then the call (and the test) fails.
-fn keychain_tool(args: &[&str], keychain: &std::path::Path) -> Result<(), String> {
-    let mut child = Command::new("/usr/bin/security")
-        .args(args)
-        .arg(keychain)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return status
-                .success()
-                .then_some(())
-                .ok_or_else(|| format!("security {args:?} failed"));
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            return Err(format!("security {args:?} did not answer in time"));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-/// A fresh keychain file for this run (PM_TEST_KEYCHAIN_DIR, else the temp
-/// folder), unlocked and set never to lock: the only keychain the test, the
-/// fake Codex and the code under test touch.
+/// This run's fake Keychain (PM_TEST_KEYCHAIN_DIR, else the temp folder): a
+/// JSON file the fake Codex and the code under test share, never a real
+/// keychain, so nothing here can show a dialog.
 fn test_keychain(port: u16) -> PathBuf {
     let dir =
         std::env::var_os("PM_TEST_KEYCHAIN_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let path = dir.join(format!(
-        "pm-providers-{}-{port}.keychain-db",
-        std::process::id()
-    ));
-    let password = format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            ^ u128::from(port)
-    );
-    keychain_tool(&["create-keychain", "-p", &password], &path).unwrap();
-    keychain_tool(&["unlock-keychain", "-p", &password], &path).unwrap();
-    keychain_tool(&["set-keychain-settings"], &path).unwrap();
-    path
+    dir.join(format!("pm-providers-{}-{port}.json", std::process::id()))
 }
 fn fakes(ttl: u64) -> Fakes {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fakes");
@@ -142,7 +100,7 @@ fn fakes(ttl: u64) -> Fakes {
         ),
         ("PM_AGENT_FAKE_BROWSER".to_owned(), "1".to_owned()),
         (
-            "PM_AGENT_KEYCHAIN".to_owned(),
+            "PM_AGENT_FAKE_KEYCHAIN".to_owned(),
             keychain.display().to_string(),
         ),
         (
@@ -157,7 +115,7 @@ fn fakes(ttl: u64) -> Fakes {
         app_version: "test".into(),
         executable: "/bin/false".into(),
         keychain_prefix: format!("pm-aero-picker-test-{}", std::process::id()),
-        secrets: Some(Arc::new(KeychainFile(keychain.clone()))),
+        secrets: Some(Arc::new(FakeKeychain(keychain.clone()))),
         compatible: Some(Arc::new(Custom(format!("{base}/custom/v1")))),
         // The development switch: Providers, and Codex's login in the Keychain.
         aero: Some(aero::Launcher(Arc::new(|_, _, _| Err("unused".into())))),

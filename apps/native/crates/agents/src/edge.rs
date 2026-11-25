@@ -44,66 +44,75 @@ impl Secrets for MemorySecrets {
     }
 }
 
-/// Generic passwords in one keychain file, never the login keychain or the
-/// search list: development builds and tests against the local fakes
-/// (`PM_AGENT_KEYCHAIN`, a lane's unlocked test keychain). Each call is
-/// `security` with the file named explicitly and a five-second limit, so a
-/// call that would wait on a prompt fails instead.
+/// A stand-in for the Keychain in one JSON file, for development builds and
+/// tests against the local fakes (`PM_AGENT_FAKE_KEYCHAIN`): Codex's fake and
+/// Powermove share it across processes, as they share one Keychain item for
+/// real. It never touches a real keychain and never shows a dialog. Writers
+/// hold an exclusive lock on `<file>.lock`, taken within two seconds or the
+/// call fails; the file is replaced whole, so a reader never sees half a write.
 #[derive(Debug)]
-pub struct KeychainFile(pub std::path::PathBuf);
-impl KeychainFile {
-    /// The development switch's test keychain, when the environment names one.
+pub struct FakeKeychain(pub std::path::PathBuf);
+type Items = serde_json::Map<String, serde_json::Value>;
+impl FakeKeychain {
+    /// The development switch's fake store, when the environment names one.
     pub fn from_env(vars: &BTreeMap<String, String>) -> Option<Self> {
-        vars.get("PM_AGENT_KEYCHAIN")
-            .filter(|p| cfg!(debug_assertions) && p.ends_with(".keychain-db"))
+        vars.get("PM_AGENT_FAKE_KEYCHAIN")
+            .filter(|p| cfg!(debug_assertions) && p.ends_with(".json"))
             .map(|p| Self(p.into()))
     }
-    fn run(&self, args: &[&str]) -> Result<(bool, Vec<u8>), String> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("/usr/bin/security")
-            .args(args)
-            .arg(&self.0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+    fn key(service: &str, account: &str) -> String {
+        format!("{service}\t{account}")
+    }
+    fn with<T>(&self, change: impl FnOnce(&mut Items) -> (T, bool)) -> Result<T, String> {
+        use std::os::fd::AsRawFd as _;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.0.with_extension("json.lock"))
             .map_err(|e| e.to_string())?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                let mut out = Vec::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    stdout.read_to_end(&mut out).map_err(|e| e.to_string())?;
-                }
-                return Ok((status.success(), out));
-            }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // SAFETY: flock on a descriptor this function owns.
+        while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("The test keychain did not answer in time.".into());
+                return Err("The fake keychain is busy.".into());
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        let mut items: Items = match std::fs::read(&self.0) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Items::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        let (out, changed) = change(&mut items);
+        if changed {
+            let tmp = self.0.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_vec(&items).expect("items"))
+                .and_then(|()| std::fs::rename(&tmp, &self.0))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(out)
     }
 }
-impl Secrets for KeychainFile {
+impl Secrets for FakeKeychain {
     fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-        let (found, out) =
-            self.run(&["find-generic-password", "-s", service, "-a", account, "-w"])?;
-        Ok(found.then(|| out.trim_ascii_end().to_vec()))
+        self.with(|items| {
+            let found = items
+                .get(&Self::key(service, account))
+                .and_then(|v| v.as_str());
+            (found.map(|v| v.as_bytes().to_vec()), false)
+        })
     }
     fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
-        let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
-        // Never update in place (`-U` can ask for access): delete, then add.
-        self.delete(service, account)?;
-        let (ok, _) =
-            self.run(&["add-generic-password", "-A", "-s", service, "-a", account, "-w", text])?;
-        ok.then_some(())
-            .ok_or_else(|| "The test keychain refused the item.".into())
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| e.to_string())?
+            .to_owned();
+        self.with(|items| {
+            items.insert(Self::key(service, account), text.into());
+            ((), true)
+        })
     }
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
-        self.run(&["delete-generic-password", "-s", service, "-a", account])
-            .map(|_| ())
+        self.with(|items| ((), items.remove(&Self::key(service, account)).is_some()))
     }
 }
 
@@ -298,6 +307,37 @@ impl Net for Reroute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fake_keychain_keeps_items_across_handles_and_writes_whole() {
+        let dir = std::env::temp_dir().join(format!("pm-fake-keychain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("items.json");
+        let (a, b) = (FakeKeychain(path.clone()), FakeKeychain(path.clone()));
+        assert_eq!(a.read("S", "a").unwrap(), None);
+        a.write("S", "a", b"one").unwrap();
+        assert_eq!(b.read("S", "a").unwrap().as_deref(), Some(&b"one"[..]));
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    FakeKeychain(path)
+                        .write("S", &format!("k{i}"), b"v")
+                        .unwrap()
+                })
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        assert!((0..8).all(|i| a.read("S", &format!("k{i}")).unwrap().is_some()));
+        b.delete("S", "a").unwrap();
+        assert_eq!(a.read("S", "a").unwrap(), None);
+        let vars = BTreeMap::from([(
+            "PM_AGENT_FAKE_KEYCHAIN".to_owned(),
+            path.display().to_string(),
+        )]);
+        assert!(FakeKeychain::from_env(&vars).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn reroute_maps_only_listed_loopback_targets() {

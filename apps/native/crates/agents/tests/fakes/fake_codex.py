@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """A fake `codex` for Settings › Providers tests and on-screen passes: the
 App Server account methods Powermove calls, with Codex 0.169's keyring store
-(one generic password, in the lane's test keychain file PM_AGENT_KEYCHAIN,
-service PM_CODEX_KEYRING_SERVICE, account
+(one item, in the lane's fake keychain file PM_AGENT_FAKE_KEYCHAIN, service
+PM_CODEX_KEYRING_SERVICE, account
 `cli|<first 16 hex of sha256(realpath(CODEX_HOME))>`, Codex's auth.json
 document). Sign-in follows the Codex ChatGPT route against the fake issuer
 PM_FAKE_AUTH (authorize, loopback /auth/callback, code exchange with PKCE);
 `account/read` with `refreshToken` refreshes when the access token is within
-five minutes of expiring, the only refresher, as Codex is. Items are made
-with `security -A`, only in that file and under the lane's service."""
-import base64, hashlib, json, os, secrets, subprocess, sys, threading, time, urllib.parse, urllib.request
+five minutes of expiring, the only refresher, as Codex is. It never runs
+`security` and never touches a real keychain."""
+import base64, fcntl, hashlib, json, os, secrets, sys, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 if os.environ.get("PM_FAKE_CODEX_LOG"):
@@ -21,17 +21,37 @@ if not SERVICE or SERVICE == "Codex Auth":
 HOME = os.path.realpath(os.environ["CODEX_HOME"])
 KEY = "cli|" + hashlib.sha256(HOME.encode()).hexdigest()[:16]
 out_lock = threading.Lock()
-# Only the lane's own test keychain file, named on every call: never the
-# login keychain or the search list, and a call that would wait on a prompt
-# times out instead.
-KEYCHAIN = os.environ.get("PM_AGENT_KEYCHAIN", "")
-if not KEYCHAIN.endswith(".keychain-db") or not os.path.isfile(KEYCHAIN):
-    sys.exit("fake codex: set PM_AGENT_KEYCHAIN to the lane's test keychain file")
+# The Keychain is the lane's fake store (PM_AGENT_FAKE_KEYCHAIN, a JSON file
+# Powermove reads too; pm_agents::edge::FakeKeychain): never a real keychain.
+STORE = os.environ.get("PM_AGENT_FAKE_KEYCHAIN", "")
+if not STORE.endswith(".json"):
+    sys.exit("fake codex: set PM_AGENT_FAKE_KEYCHAIN to the lane's fake keychain file")
+ITEM = f"{SERVICE}\t{KEY}"
 
 
-def security(*args, check=False):
-    return subprocess.run(["/usr/bin/security", *args, KEYCHAIN], capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, timeout=5, check=check)
+def store(change=None):
+    """Reads the store under its lock (two seconds at most); `change` edits it."""
+    with open(STORE[:-len(".json")] + ".json.lock", "a") as lock:
+        deadline = time.time() + 2
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise RuntimeError("the fake keychain is busy")
+                time.sleep(0.005)
+        try:
+            with open(STORE) as f:
+                items = json.load(f)
+        except FileNotFoundError:
+            items = {}
+        if change:
+            change(items)
+            with open(STORE + ".tmp", "w") as f:
+                json.dump(items, f)
+            os.replace(STORE + ".tmp", STORE)
+        return items
 
 
 def send(value):
@@ -41,18 +61,16 @@ def send(value):
 
 
 def item():
-    found = security("find-generic-password", "-s", SERVICE, "-a", KEY, "-w")
-    return json.loads(found.stdout) if found.returncode == 0 and found.stdout.strip() else None
+    found = store().get(ITEM)
+    return json.loads(found) if found else None
 
 
 def save(document):
-    # Never update in place (`-U` can ask for access): delete, then add.
-    security("delete-generic-password", "-s", SERVICE, "-a", KEY)
-    security("add-generic-password", "-A", "-s", SERVICE, "-a", KEY, "-w", json.dumps(document, separators=(",", ":")), check=True)
+    store(lambda items: items.__setitem__(ITEM, json.dumps(document, separators=(",", ":"))))
 
 
 def delete():
-    security("delete-generic-password", "-s", SERVICE, "-a", KEY)
+    store(lambda items: items.pop(ITEM, None))
 
 
 def claims(token):

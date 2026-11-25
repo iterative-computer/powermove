@@ -201,10 +201,27 @@ pub(crate) mod keychain {
         unsafe { SecKeychainItemFreeContent(ptr::null_mut(), data) };
         Ok(Some((bytes, item)))
     }
+    /// A development build launched against the local fakes
+    /// (`PM_AGENT_FAKE_KEYCHAIN`) keeps every item in their fake store and
+    /// never calls the Security framework, so a lane app never reaches the
+    /// login Keychain or shows a Keychain dialog.
+    fn fake() -> Option<pm_agents::edge::FakeKeychain> {
+        let path = std::env::var("PM_AGENT_FAKE_KEYCHAIN").ok()?;
+        let vars = std::collections::BTreeMap::from([("PM_AGENT_FAKE_KEYCHAIN".to_owned(), path)]);
+        pm_agents::edge::FakeKeychain::from_env(&vars)
+    }
     pub fn read(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.read(service, account);
+        }
         Ok(find(service, account, false)?.map(|(bytes, _)| bytes))
     }
     pub fn delete(service: &str, account: &str) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.delete(service, account);
+        }
         if let Some((_, item)) = find(service, account, true)? {
             let status = unsafe { SecKeychainItemDelete(item) };
             unsafe { CFRelease(item) };
@@ -215,6 +232,10 @@ pub(crate) mod keychain {
         Ok(())
     }
     pub fn write(service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.write(service, account, bytes);
+        }
         delete(service, account)?;
         let status = unsafe {
             SecKeychainAddGenericPassword(
