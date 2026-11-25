@@ -2271,8 +2271,8 @@ fn opening_another_composition_mid_turn_surfaces_nothing_from_it() {
     }
 }
 
-/// A composition with 50 one-second layers two seconds apart: 50 blank
-/// ranges, more than the public check lists.
+/// The open composition: 50 one-second layers two seconds apart, so 50
+/// blank ranges, more than the public check lists.
 fn strip() -> Fixture {
     let layers: Vec<_> = (0..50)
         .map(|k| {
@@ -2300,7 +2300,29 @@ fn strip() -> Fixture {
         blank["message"].as_str().unwrap().contains("in 50 spans"),
         "{blank}"
     );
-    fixture
+    {
+        let mut host = fixture.host.lock().unwrap();
+        let revision = host.revision(&fixture.project).unwrap();
+        host.apply_commands(
+            &fixture.project,
+            vec![
+                pm_kernel::CompCommand::Open {
+                    comp_id: "strip".into(),
+                }
+                .into(),
+            ],
+            "Open",
+            pm_kernel::Origin::Mcp,
+            revision,
+            1,
+        )
+        .unwrap();
+    }
+    let revision = revision_now(&fixture.host, &fixture.project);
+    Fixture {
+        revision,
+        ..fixture
+    }
 }
 
 fn strip_edit(command: Value) -> (Fixture, String) {
@@ -2311,7 +2333,7 @@ fn strip_edit(command: Value) -> (Fixture, String) {
             "edit",
             "commands",
             Some(rev),
-            json!({"compositionId":"strip","commands":[command]}),
+            json!({ "commands": [command] }),
         ),
         _ => Reply::Text("Done.".into()),
     });
