@@ -1249,6 +1249,9 @@ test("composer sends direction with a draft during a run", async () => {
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
   expect(byId(root, "agent-composer-text").props.disabled).not.toBe(true);
   expect(byId(root, "agent-send").props.disabled).toBe(false);
+  // Stop and Send stand apart in the row, which has no gap of its own.
+  expect(byId(root, "agent-stop")).toBeDefined();
+  expect(byId(root, "agent-send").props.style.marginLeft).toEqual({ token: "metrics.gap" });
   await root.drive(byId(root, "agent-send").id, "click");
   expect(actions).toEqual([{ type: "submit" }]);
 });

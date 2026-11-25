@@ -3182,6 +3182,8 @@ function Composer({
               flexShrink: 0,
               width: t("metrics.control"),
               height: t("metrics.control"),
+              // Apart from Stop beside it during a run (the row has no gap).
+              ...(working ? { marginLeft: t("metrics.gap") } : {}),
               borderRadius: t("metrics.inner_radius"),
               symbolSize: t("metrics.symbol_panel"),
               // A quiet square until there is something to send (v1's).
