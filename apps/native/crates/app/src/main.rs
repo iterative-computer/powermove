@@ -402,9 +402,13 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|a| a == "--stage-capture") {
         let out = args
             .get(1)
-            .context("Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing]")?;
+            .context("Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing|window]")?;
         return match args.get(2).and_then(|a| a.to_str()) {
             Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
+            Some("window") => stage_capture::native_stills(
+                PathBuf::from(out),
+                metal::Device::system_default().context("no Metal device")?,
+            ),
             Some("reduced") => stage_capture::run(PathBuf::from(out), true, true),
             mode => stage_capture::run(PathBuf::from(out), mode == Some("stills"), false),
         };

@@ -80,6 +80,8 @@ pub struct Choice {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Outline {
     pub steps: Vec<String>,
+    /// A line on each step, under its name.
+    pub notes: Vec<String>,
     pub current: Option<usize>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]

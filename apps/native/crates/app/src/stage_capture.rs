@@ -120,14 +120,20 @@ pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow:
     ];
     let step_at = sheet.length() + 1.;
     let hand_off_at = step_at + 1.4;
-    let end = if stills_only { sheet.length() + 0.4 } else { hand_off_at + 1.2 };
+    let end = if stills_only {
+        sheet.length() + 0.4
+    } else {
+        hand_off_at + 1.2
+    };
     let fps = 60.;
     let first = frame_at(&mut cx, window, 0.);
     let (w, h) = (first.width(), first.height());
     let mut ffmpeg = (!stills_only).then(|| {
         std::fs::create_dir_all(out.join("quarter")).ok();
         std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
+            .args([
+                "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
+            ])
             .arg(format!("{w}x{h}"))
             .args([
                 "-r", "60", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14",
@@ -148,7 +154,10 @@ pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow:
         }
         // Stills only: jump between the stills (the springs and the wave
         // are functions of the clock).
-        if stills_only && next_still < stills.len() && t + 0.5 / fps < stills[next_still].1 - 1. / fps {
+        if stills_only
+            && next_still < stills.len()
+            && t + 0.5 / fps < stills[next_still].1 - 1. / fps
+        {
             n = (stills[next_still].1 * fps).round() as u32;
             continue;
         }
@@ -329,4 +338,196 @@ fn thread_cpu() -> f64 {
     // SAFETY: `ts` is a valid out-pointer for the call.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
+/// The Welcome in its real window (`--stage-capture <folder> window`): the
+/// window the first run shows once the wave has drawn it, with its AppKit
+/// title bar and controls, at the Welcome and at two steps. The window
+/// stands off every display and the app never activates, so nothing reaches
+/// the screen; each still is the window as the window server composites it.
+/// AppKit draws the window of an app that is not active in its inactive
+/// look (grey window buttons).
+pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> anyhow::Result<()> {
+    use crate::first_run::{step_frame, welcome_frame};
+    use pm_services::surface_backing::onboarding::Step;
+    use pm_shell::stage::native_window;
+    std::fs::create_dir_all(&out)?;
+    gpui_macos::allow_offscreen_windows();
+    // SAFETY: set before any thread reads the environment.
+    unsafe {
+        std::env::set_var("PM_NATIVE_DRAW_OCCLUDED", "1");
+        // The display link that runs without a screen (on the main display).
+        std::env::set_var("PM_GPUI_CV_DISPLAY_LINK", "1");
+    }
+    pm_shell::capture_app(device, move |cx| {
+        let tokens = Tokens::new(Scheme::Dark, pm_shell::tokens().accessibility);
+        let stage = cx.new(|cx| {
+            let mut stage = Stage::new(tokens.clone(), CueSheet::default(), false, cx);
+            stage.wait = true;
+            stage
+        });
+        let m = &tokens.metrics;
+        let bounds = Bounds::new(
+            point(px(-9000.), px(-9000.)),
+            size(px(m.welcome_width), px(m.welcome_height)),
+        );
+        fn card(frame: Frame, tokens: Tokens, cx: &mut App) -> Entity<WelcomeView> {
+            cx.new(|cx| {
+                let mut card = WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx);
+                card.stage = true;
+                card
+            })
+        }
+        let first = tokens.clone();
+        let window = native_window::open(
+            stage.clone(),
+            None,
+            bounds,
+            move |_, cx| card(welcome_frame(), first, cx),
+            Rc::new(|_, _| true),
+            cx,
+        )
+        .expect("the Welcome window opens");
+        // Ordered in only where no display shows it.
+        if !native_window::off_every_display(window.into(), cx) {
+            eprintln!("The capture window would show on a display: nothing captured.");
+            cx.quit();
+            return;
+        }
+        native_window::show(window.into(), cx);
+        let _ = window.update(cx, |_, w, _| {
+            if let Some(ns) = native_window::ns_window(w) {
+                use objc2_app_kit::NSWindowButton;
+                let enabled = |b| ns.standardWindowButton(b).is_some_and(|b| b.isEnabled());
+                println!(
+                    "window buttons: close {}, minimize {}, zoom {}; resizable {}",
+                    enabled(NSWindowButton::CloseButton),
+                    enabled(NSWindowButton::MiniaturizeButton),
+                    enabled(NSWindowButton::ZoomButton),
+                    ns.styleMask()
+                        .contains(objc2_app_kit::NSWindowStyleMask::Resizable),
+                );
+            }
+        });
+        let shots = [
+            ("1-welcome", None),
+            ("2-timeline", Some(Step::Timeline)),
+            ("3-agent", Some(Step::Agent)),
+        ];
+        cx.spawn(async move |cx| {
+            for (name, step) in shots {
+                if let Some(step) = step {
+                    let tokens = tokens.clone();
+                    let _ = cx.update(|cx| {
+                        let next = card(step_frame(step, "layers", "chatgpt", None), tokens, cx);
+                        stage.update(cx, |s, cx| s.set_card(next.clone(), cx));
+                        let _ = window
+                            .update(cx, |_, w, cx| next.update(cx, |c, cx| c.hold_focus(w, cx)));
+                    });
+                }
+                // The step's change and its controls settle.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = window.update(cx, |_, w, _| {
+                        match native_window::ns_window(w)
+                            .and_then(|ns| capture_window(ns.windowNumber() as u32))
+                        {
+                            Some(image) => {
+                                let path = out.join(format!("{name}.png"));
+                                image.save(&path).expect("writes the still");
+                                println!("{}", path.display());
+                            }
+                            None => eprintln!("{name}: the window could not be captured"),
+                        }
+                    });
+                });
+            }
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+    Ok(())
+}
+
+/// The window `number` as the window server composites it (this app's own
+/// window: no screen-recording grant), straight RGBA.
+fn capture_window(number: u32) -> Option<image::RgbaImage> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGImageGetWidth(image: *const c_void) -> usize;
+        fn CGImageGetHeight(image: *const c_void) -> usize;
+        fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
+        fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
+        fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+        fn CFDataGetLength(data: *const c_void) -> isize;
+        fn CFRelease(object: *const c_void);
+    }
+    // CGWindowListCreateImage: still in CoreGraphics, no longer in the SDK's
+    // headers, so looked up by name.
+    type Create = unsafe extern "C" fn(Rect, u32, u32, u32) -> *const c_void;
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr()) };
+    if symbol.is_null() {
+        return None;
+    }
+    let create: Create = unsafe { std::mem::transmute(symbol) };
+    // The null rectangle: the window's own bounds. Including this window
+    // only; its bounds without the shadow, at the display's resolution.
+    let null = Rect {
+        x: f64::INFINITY,
+        y: f64::INFINITY,
+        w: 0.,
+        h: 0.,
+    };
+    let image = unsafe { create(null, 1 << 3, number, 1 << 0 | 1 << 3) };
+    if image.is_null() {
+        return None;
+    }
+    let result = unsafe {
+        let (w, h, row) = (
+            CGImageGetWidth(image),
+            CGImageGetHeight(image),
+            CGImageGetBytesPerRow(image),
+        );
+        let data = CGDataProviderCopyData(CGImageGetDataProvider(image));
+        let bytes =
+            std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize);
+        // 32-bit little-endian, alpha first and premultiplied: B, G, R, A.
+        let mut out = image::RgbaImage::new(w as u32, h as u32);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &bytes[y * row + x * 4..y * row + x * 4 + 4];
+                let a = p[3];
+                let un = |v: u8| {
+                    if a == 0 {
+                        0
+                    } else {
+                        ((v as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                    }
+                };
+                out.put_pixel(
+                    x as u32,
+                    y as u32,
+                    image::Rgba([un(p[2]), un(p[1]), un(p[0]), a]),
+                );
+            }
+        }
+        CFRelease(data);
+        out
+    };
+    unsafe { CFRelease(image) };
+    Some(result)
 }

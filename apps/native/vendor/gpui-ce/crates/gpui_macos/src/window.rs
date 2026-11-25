@@ -1104,7 +1104,14 @@ impl MacWindowState {
                 return;
             }
         }
-        let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
+        // A capture's window off every display has no screen: it keeps the
+        // main display's frames (P-OFFSCREEN-CAPTURE).
+        let display_id = display_id_for_screen(unsafe { self.native_window.screen() }).or_else(|| {
+            OFFSCREEN_CAPTURE
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| unsafe { CGMainDisplayID() })
+        });
+        let Some(display_id) = display_id else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
             self.stop_display_link();
             return;
@@ -3164,12 +3171,28 @@ unsafe extern "C" fn pin_sheet_top(this: &Objc2Object, _: Sel, height: f64) {
 /// sheet, one centred in its parent. A pinned sheet answers with the same
 /// frame hung from the top edge it was pinned at, so it grows and shrinks
 /// downwards and follows its parent when that moves or is resized.
+/// Powermove P-OFFSCREEN-CAPTURE: a capture of a real window (its AppKit
+/// chrome and controls) places it off every display, where AppKit would
+/// otherwise move it back on screen. Set only by a capture process that shows
+/// nothing; never in the app.
+static OFFSCREEN_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> CGDirectDisplayID;
+}
+pub fn allow_offscreen_windows() {
+    OFFSCREEN_CAPTURE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 unsafe extern "C" fn constrain_window_frame(
     this: &Objc2Object,
     _: Sel,
     rect: Objc2NSRect,
     screen: ObjcId,
 ) -> Objc2NSRect {
+    if OFFSCREEN_CAPTURE.load(std::sync::atomic::Ordering::Relaxed) {
+        return rect;
+    }
     // SAFETY: registered on GPUIWindow, whose superclass is NSWindow.
     unsafe {
         let rect: Objc2NSRect = msg_send![

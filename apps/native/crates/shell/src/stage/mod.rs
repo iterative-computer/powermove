@@ -9,6 +9,7 @@
 pub mod cue;
 pub mod intro;
 pub mod light;
+pub mod native_window;
 
 use crate::kit::Recipes;
 use crate::native_control::{BuildSnapshot, ControlSpec, Kind, NativeControl};
@@ -41,8 +42,8 @@ const SLIDE_OUT: f32 = 6.;
 /// quiet-md's quick fade (critically damped) and its vanish.
 /// The mark in the Welcome window: its height (points) and centre (a
 /// fraction of the window's height).
-pub const WINDOW_MARK: f32 = 84.;
-pub const WINDOW_MARK_Y: f32 = 0.235;
+pub const WINDOW_MARK: f32 = 80.;
+pub const WINDOW_MARK_Y: f32 = 0.2;
 const ARRIVE: Spring = Spring::new(520., 46.);
 const LEAVE: Spring = Spring::new(900., 60.);
 
@@ -81,7 +82,24 @@ pub struct Stage {
     focus: FocusHandle,
     skip: Option<Entity<NativeControl>>,
     hand_off: Option<HandOff>,
+    /// `StageEvent::WindowLive` was sent.
+    live_sent: bool,
+    /// A real window (`native_window`) holds the Welcome now: the stage
+    /// draws only the room, once that window has drawn its first frame.
+    native: Option<AnyWindowHandle>,
+    native_drawn: bool,
+    /// The step made for the real window, drawn only there until it shows
+    /// (its AppKit controls belong to that window).
+    pending: Option<Entity<WelcomeView>>,
 }
+
+/// What the stage tells its owner.
+pub enum StageEvent {
+    /// The wave has drawn the window and it is live: the owner puts the
+    /// Welcome in a real window on the same rectangle (`native_window`).
+    WindowLive,
+}
+impl EventEmitter<StageEvent> for Stage {}
 
 impl Stage {
     /// `intro` false: the window at once (a launch with nothing to welcome).
@@ -124,6 +142,10 @@ impl Stage {
             focus: cx.focus_handle(),
             skip: None,
             hand_off: None,
+            live_sent: false,
+            native: None,
+            native_drawn: false,
+            pending: None,
         }
     }
     pub fn on_sound(&mut self, sound: OnSound) {
@@ -147,6 +169,13 @@ impl Stage {
     /// cross-fades in over the one before (interruptible: a step arriving
     /// mid-change takes over from wherever the last one was).
     pub fn set_card(&mut self, card: Entity<WelcomeView>, cx: &mut Context<Self>) {
+        // A step arriving before the real window shows takes the place of
+        // the one made for it, there.
+        if self.pending.is_some() {
+            self.pending = Some(card);
+            cx.notify();
+            return;
+        }
         let live = self.now() >= self.sheet.length();
         if let Some(previous) = self.card.replace(card.clone())
             && live
@@ -163,6 +192,79 @@ impl Stage {
             self.presence.to(1., ARRIVE);
         }
         cx.notify();
+    }
+    /// The Welcome moves into a real window (`window`), with `card` (made
+    /// for that window, so its AppKit controls live there) in place of the
+    /// current one, at once.
+    pub fn host_natively(
+        &mut self,
+        window: AnyWindowHandle,
+        card: Entity<WelcomeView>,
+        cx: &mut Context<Self>,
+    ) {
+        self.native = Some(window);
+        self.native_drawn = false;
+        self.pending = Some(card);
+        cx.notify();
+    }
+    /// The real window is up: the stage stops drawing its own copy.
+    pub fn native_shown(&mut self, cx: &mut Context<Self>) {
+        self.native_drawn = true;
+        if let Some(card) = self.pending.take() {
+            self.card = Some(card);
+            self.leaving = None;
+            self.presence = Animated::unit(1.);
+        }
+        cx.notify();
+    }
+    /// The real window holding the Welcome, if one does.
+    pub fn native_window(&self) -> Option<AnyWindowHandle> {
+        self.native
+    }
+    /// The Welcome window's rectangle on a stage of `area`.
+    pub fn welcome_rect(&self, area: Size<Pixels>) -> Bounds<Pixels> {
+        self.window_rect(area)
+    }
+    /// The window's content for the real window: its lit ground and the
+    /// step (or a step change), filling `window`. Returns whether the
+    /// ground has drawn (the window is shown from then on).
+    pub fn window_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, bool) {
+        let t = self.now();
+        let size = window.bounds().size;
+        let scale = window.scale_factor();
+        self.light.warm(window);
+        if self.step_springs(t, cx) {
+            window.request_animation_frame();
+        }
+        let lit = self.window_light(Bounds::new(Point::default(), size), scale, cx);
+        let drawn = lit.is_some();
+        if !drawn {
+            window.request_animation_frame();
+        }
+        let mut ground = div()
+            .id("stage-window")
+            .debug_selector(|| "stage-window".into())
+            .relative()
+            .size_full()
+            .bg(rgb(self.tokens.colors.window))
+            .overflow_hidden()
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if let Some(lit) = lit {
+                            window.paint_texture(bounds, lit);
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        ground = match &self.pending {
+            Some(card) => ground.child(div().absolute().inset_0().child(card.clone())),
+            None => self.contents(ground),
+        };
+        (ground.into_any_element(), drawn)
     }
     /// Esc or Skip: straight to the window, with a short fade.
     pub fn skip(&mut self, cx: &mut Context<Self>) {
@@ -225,13 +327,17 @@ impl Stage {
             (f32::from(area.width) * scale).round(),
             (f32::from(area.height) * scale).round(),
         );
-        let mut light = intro::light_at(t, &self.sheet, self.motion(), size, scale);
+        // Once the wave has the window, the room holds the light it had at the
+        // hold (the wave draws over that very picture): nothing in the room
+        // changes as the window arrives. The mark itself is under the window.
+        let at = if t >= self.sheet.length() {
+            self.sheet.hold
+        } else {
+            t
+        };
+        let mut light = intro::light_at(at, &self.sheet, self.motion(), size, scale);
         if t >= self.sheet.length() {
-            // The mark went into the window: the room keeps its own light.
             light.mark = 0.;
-            light.bloom = 0.;
-            light.pool = 0.;
-            light.time = self.sheet.hold as f32;
         }
         let texture = self.light.picture(light, self.wait);
         canvas(
@@ -256,7 +362,7 @@ impl Stage {
             .overflow_hidden()
             .bg(rgb(0x000000))
             .child(self.room(t, area, scale))
-            .child(intro::credit(t, &self.sheet, area))
+            .child(intro::credit(t, &self.sheet, area, scale))
             .child(intro::words(t, &self.sheet, area, &self.tokens, motion))
             .into_any_element()
     }
@@ -272,9 +378,10 @@ impl Stage {
             size,
         )
     }
+    /// The real Welcome window's corner (a titled window without a toolbar,
+    /// measured on macOS 26 and 27): the wave reveals the window it becomes.
     fn window_radius(&self) -> f32 {
-        let m = &self.tokens.metrics;
-        m.group_radius + m.sheet_inset
+        16.
     }
     /// The window: its ground and the current step's content, with a
     /// leaving step's content fading over it.
@@ -294,11 +401,21 @@ impl Stage {
         // How much of the Welcome step is showing: its light follows it
         // through a step's cross-fade.
         let welcome = |card: &Entity<WelcomeView>| card.read(cx).frame.animate;
-        let mut w = self
-            .card
-            .as_ref()
-            .filter(|c| welcome(c))
-            .map_or(0., |_| self.presence.get().clamp(0., 1.));
+        let mut w = match &self.pending {
+            // The step made for the real window, shown whole there.
+            Some(card) => {
+                if welcome(card) {
+                    1.
+                } else {
+                    0.
+                }
+            }
+            None => self
+                .card
+                .as_ref()
+                .filter(|c| welcome(c))
+                .map_or(0., |_| self.presence.get().clamp(0., 1.)),
+        };
         if let Some(leaving) = self.leaving.as_ref().filter(|l| welcome(&l.card)) {
             w = w.max(leaving.presence.get().clamp(0., 1.));
         }
@@ -367,6 +484,10 @@ impl Stage {
             // The shadow arrives with the window, not with its picture.
             ground = faded_shadow(ground.elevated(t, Elevation::Raised), shadow);
         }
+        self.contents(ground)
+    }
+    /// The step on the window's ground, with a leaving step fading over it.
+    fn contents(&self, mut ground: Stateful<Div>) -> Stateful<Div> {
         let content = |card: &Entity<WelcomeView>, presence: f32, slide: f32| {
             div()
                 .absolute()
@@ -394,6 +515,15 @@ impl Stage {
         out: f64,
         cx: &App,
     ) -> AnyElement {
+        let room = div()
+            .relative()
+            .size_full()
+            .bg(rgb(0x000000))
+            .child(self.room(t, area, scale));
+        if self.native.is_some() && self.native_drawn {
+            // The real window holds the Welcome (and eases itself out).
+            return room.into_any_element();
+        }
         let rect = self.window_rect(area);
         let lit = self.window_light(rect, scale, cx);
         // Out: the window eases away, settling a few points as it goes.
@@ -401,12 +531,7 @@ impl Stage {
             .window(rect, 1., lit)
             .top(px(8. * out as f32))
             .opacity(1. - out as f32);
-        div()
-            .relative()
-            .size_full()
-            .bg(rgb(0x000000))
-            .child(self.room(t, area, scale))
-            .child(
+        room.child(
                 div()
                     .absolute()
                     .inset_0()
@@ -638,6 +763,12 @@ impl Render for Stage {
                 self.window_scene(t, area, scale, out, cx)
             }
         } else if phase == Phase::Window {
+            // Live: the owner moves the Welcome into a real window (an app
+            // with AppKit; captures and tests keep the drawn one).
+            if !self.live_sent && self.clock.is_none() && crate::text::available(window) {
+                self.live_sent = true;
+                cx.emit(StageEvent::WindowLive);
+            }
             if self.prepared {
                 self.prepared = false;
                 self.wave.update(cx, |w, _| w.clear());
@@ -746,7 +877,22 @@ pub fn open_stage(
         |window, cx| {
             raise(window);
             let stage = cx.new(|cx| build(window, cx));
-            stage.update(cx, |stage, cx| window.focus(&stage.focus, cx));
+            stage.update(cx, |stage, cx| {
+                window.focus(&stage.focus, cx);
+                // A click on the room while the Welcome is in its own
+                // window gives the keys back to that window.
+                cx.observe_window_activation(window, |stage: &mut Stage, window, cx| {
+                    if window.is_window_active()
+                        && stage.native_drawn
+                        && let Some(native) = stage.native
+                    {
+                        cx.defer(move |cx| {
+                            let _ = native.update(cx, |_, window, _| window.activate());
+                        });
+                    }
+                })
+                .detach();
+            });
             window.on_window_should_close(cx, |_, cx| {
                 cx.quit();
                 true

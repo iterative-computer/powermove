@@ -717,96 +717,12 @@ impl Flow {
         }
     }
     fn onboarding_frame(&self, onboarding: &Onboarding) -> Frame {
-        let choice = |id: &str, label: &str, detail: Option<&str>, lines: &[&str]| Choice {
-            id: id.into(),
-            label: label.into(),
-            detail: detail.map(str::to_owned),
-            lines: lines.iter().map(|s| (*s).to_owned()).collect(),
-        };
-        let continuing = |frame: Frame| Frame {
-            buttons: vec![Button::new("continue", "Continue")],
-            default: Some("continue".into()),
-            ..frame
-        };
-        match onboarding.step {
-            Onboard::Animation | Onboard::Welcome => welcome_frame(),
-            Onboard::Timeline => continuing(Frame {
-                surface: "S108".into(),
-                back: Some("Back to Welcome".into()),
-                title: "Pick Your Timeline.".into(),
-                line: "Work the way you already do. You can switch anytime from the timeline panel."
-                    .into(),
-                cards: true,
-                choices: vec![
-                    choice(
-                        "layers",
-                        "Layers",
-                        None,
-                        &["1  Title", "2  Lower third", "3  B-roll", "4  Interview", "5  Music"],
-                    ),
-                    choice(
-                        "tracks",
-                        "Tracks",
-                        None,
-                        &["V2  Title, Lower third", "V1  Interview, B-roll", "A1  Music"],
-                    ),
-                ],
-                chosen: Some(self.choices.timeline.clone()),
-                ..Frame::default()
-            }),
-            Onboard::Agent => continuing(Frame {
-                surface: "S109".into(),
-                back: Some("Back to Timeline Choice".into()),
-                title: "Pick Your Agent.".into(),
-                line: "It builds what you ask for, right in the editor. You can switch anytime from the agent’s composer."
-                    .into(),
-                choices: vec![
-                    choice("chatgpt", "ChatGPT", Some("Uses your ChatGPT plan through Codex."), &[]),
-                    choice("claude", "Claude", Some("Uses your Claude plan through Claude Code."), &[]),
-                    choice(
-                        "compatible",
-                        "API or Local Model",
-                        Some("Any OpenAI-compatible API, Ollama or LM Studio. Connect it in Settings."),
-                        &[],
-                    ),
-                ],
-                chosen: Some(self.choices.agent.clone()),
-                ..Frame::default()
-            }),
-            Onboard::Transcription => continuing(Frame {
-                surface: "S109".into(),
-                back: Some("Back to Agent Choice".into()),
-                title: "Pick Your Speech Model.".into(),
-                line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
-                    .into(),
-                // Models download from Settings › Transcription (S092) and the
-                // Generate Captions sheet (S091); S109's in-flow chooser isn't built.
-                status: Some("Speech models can be downloaded later from Settings.".into()),
-                ..Frame::default()
-            }),
-            Onboard::Workspace => Frame {
-                surface: "S110".into(),
-                back: Some("Back to Speech Model Choice".into()),
-                eyebrow: Some("After Effects".into()),
-                title: "Grab Your Suitcase.".into(),
-                line: "Bring your panels and tools along. Your agent will unpack them in Powermove."
-                    .into(),
-                error: self.error.clone(),
-                buttons: vec![
-                    Button::new("fresh", "Start Fresh"),
-                    Button::new("import", "Bring My Workspace"),
-                ],
-                default: Some("import".into()),
-                ..Frame::default()
-            },
-            Onboard::Starting | Onboard::Complete => Frame {
-                surface: "S110".into(),
-                title: "Grab Your Suitcase.".into(),
-                status: Some("Opening Powermove…".into()),
-                spinner: true,
-                ..Frame::default()
-            },
-        }
+        step_frame(
+            onboarding.step,
+            &self.choices.timeline,
+            &self.choices.agent,
+            self.error.clone(),
+        )
     }
     pub fn frame(&self) -> Frame {
         match (&self.entry, &self.onboarding) {
@@ -830,6 +746,100 @@ impl Flow {
     }
 }
 
+/// An onboarding step's frame, with the person's choices so far.
+pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Option<String>) -> Frame {
+    let choice = |id: &str, label: &str, detail: Option<&str>, lines: &[&str]| Choice {
+        id: id.into(),
+        label: label.into(),
+        detail: detail.map(str::to_owned),
+        lines: lines.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    let continuing = |frame: Frame| Frame {
+        buttons: vec![Button::new("continue", "Continue")],
+        default: Some("continue".into()),
+        ..frame
+    };
+    match step {
+        Onboard::Animation | Onboard::Welcome => welcome_frame(),
+        Onboard::Timeline => continuing(Frame {
+            surface: "S108".into(),
+            back: Some("Back to Welcome".into()),
+            title: "Pick Your Timeline.".into(),
+            line: "Work the way you already do. You can switch anytime from the timeline panel."
+                .into(),
+            cards: true,
+            choices: vec![
+                choice(
+                    "layers",
+                    "Layers",
+                    None,
+                    &["1  Title", "2  Lower third", "3  B-roll", "4  Interview", "5  Music"],
+                ),
+                choice(
+                    "tracks",
+                    "Tracks",
+                    None,
+                    &["V2  Title, Lower third", "V1  Interview, B-roll", "A1  Music"],
+                ),
+            ],
+            chosen: Some(timeline.to_owned()),
+            ..Frame::default()
+        }),
+        Onboard::Agent => continuing(Frame {
+            surface: "S109".into(),
+            back: Some("Back to Timeline Choice".into()),
+            title: "Pick Your Agent.".into(),
+            line: "It builds what you ask for, right in the editor. You can switch anytime from the agent’s composer."
+                .into(),
+            choices: vec![
+                choice("chatgpt", "ChatGPT", Some("Uses your ChatGPT plan through Codex."), &[]),
+                choice("claude", "Claude", Some("Uses your Claude plan through Claude Code."), &[]),
+                choice(
+                    "compatible",
+                    "API or Local Model",
+                    Some("Any OpenAI-compatible API, Ollama or LM Studio. Connect it in Settings."),
+                    &[],
+                ),
+            ],
+            chosen: Some(agent.to_owned()),
+            ..Frame::default()
+        }),
+        Onboard::Transcription => continuing(Frame {
+            surface: "S109".into(),
+            back: Some("Back to Agent Choice".into()),
+            title: "Pick Your Speech Model.".into(),
+            line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
+                .into(),
+            // Models download from Settings › Transcription (S092) and the
+            // Generate Captions sheet (S091); S109's in-flow chooser isn't built.
+            status: Some("Speech models can be downloaded later from Settings.".into()),
+            ..Frame::default()
+        }),
+        Onboard::Workspace => Frame {
+            surface: "S110".into(),
+            back: Some("Back to Speech Model Choice".into()),
+            eyebrow: Some("After Effects".into()),
+            title: "Grab Your Suitcase.".into(),
+            line: "Bring your panels and tools along. Your agent will unpack them in Powermove."
+                .into(),
+            error: error,
+            buttons: vec![
+                Button::new("fresh", "Start Fresh"),
+                Button::new("import", "Bring My Workspace"),
+            ],
+            default: Some("import".into()),
+            ..Frame::default()
+        },
+        Onboard::Starting | Onboard::Complete => Frame {
+            surface: "S110".into(),
+            title: "Grab Your Suitcase.".into(),
+            status: Some("Opening Powermove…".into()),
+            spinner: true,
+            ..Frame::default()
+        },
+    }
+}
+
 /// The first run's Welcome: the title card, a line on what comes next and the
 /// steps ahead.
 pub(crate) fn welcome_frame() -> Frame {
@@ -838,11 +848,20 @@ pub(crate) fn welcome_frame() -> Frame {
         animate: true,
         // Two lines, as v1.2.0 (read as one sentence).
         title: "Welcome to\nPowermove.".into(),
-        line: "Four quick choices, then your editor. You can change any of them later.".into(),
+        line: "Four quick choices, then your editor.\nYou can change any of them later.".into(),
         outline: Some(pm_shell::welcome::Outline {
             steps: ["Timeline", "Agent", "Speech Model", "Workspace"]
                 .map(str::to_owned)
                 .to_vec(),
+            // Each step's own line, shortened.
+            notes: [
+                "Work the way you already do.",
+                "It builds what you ask for, in the editor.",
+                "Captions and transcripts, on this Mac.",
+                "Bring your panels and tools along.",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
             current: None,
         }),
         centred: true,
@@ -1180,7 +1199,10 @@ impl GateWindow {
     fn activate(&self, cx: &mut gpui::App) {
         let _ = match self {
             Self::Welcome(h) => h.update(cx, |_, window, _| window.activate()),
-            Self::Stage(s) => s.window.update(cx, |_, window, _| window.activate()),
+            Self::Stage(s) => {
+                s.activate(cx);
+                Ok(())
+            }
         };
     }
 }
@@ -1255,6 +1277,7 @@ impl Driver {
                         frame.clone(),
                         on_action.clone(),
                         frame.animate,
+                        true,
                         Rc::new(play_sound),
                         cx,
                     )

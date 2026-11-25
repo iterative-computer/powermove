@@ -1411,6 +1411,16 @@ impl NativeControl {
     pub fn is_search(&self) -> bool {
         matches!(self.control, Control::Search(_))
     }
+    /// A window's one primary action, as macOS welcome and setup windows
+    /// set it: a push button at the extra-large size and a fixed `width`.
+    pub fn prominent(&mut self, width: f32) {
+        let Control::Button(v) = &self.control else {
+            return;
+        };
+        v.setControlSize(NSControlSize::ExtraLarge);
+        self.height = v.fittingSize().height as f32;
+        self.width = width;
+    }
     /// Whether the control takes the whole width of its row.
     pub fn stretches(&self) -> bool {
         self.stretch

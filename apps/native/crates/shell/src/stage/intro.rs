@@ -146,10 +146,11 @@ fn ink(alpha: f64) -> Rgba {
     c
 }
 
-/// The credit: "ITERATIVE COMPUTER" in spaced capitals, "presents" under
-/// it in a light italic, a step quieter; where Dia sets its own. (System
-/// families only: a family GPUI cannot resolve stops the app.)
-pub fn credit(t: f64, s: &CueSheet, area: Size<Pixels>) -> AnyElement {
+/// The credit: Iterative Computer's own wordmark, "presents" under it in
+/// Fraunces Italic (the wordmark's family), a step quieter; where Dia sets
+/// its own. Both are drawn from their outlines (`assets/credit`) at the
+/// stage's device resolution.
+pub fn credit(t: f64, s: &CueSheet, area: Size<Pixels>, scale: f32) -> AnyElement {
     let out = 1. - s.credit.2.at(t);
     let first = s.credit.0.at(t) * out;
     let then = s.credit.1.at(t) * out;
@@ -157,46 +158,95 @@ pub fn credit(t: f64, s: &CueSheet, area: Size<Pixels>) -> AnyElement {
         return div().into_any_element();
     }
     let h = f32::from(area.height);
-    // Cap heights: Dia's line 0.0175 of the height; ours a touch smaller
-    // and tracked wide. SF's capitals are 0.705 of the size.
-    let size = h * 0.0165 / 0.705;
-    let line = |top: f32, child: Div| {
+    // Points per unit of the outlines (both 2000 to the em): the wordmark's
+    // capitals (1400 units) stand 0.0185 of the height, centred where Dia's
+    // first line is (0.466); "presents" at 0.62 of its size, its baseline
+    // 1.7 cap heights under the wordmark's.
+    let cap = h * 0.0185;
+    let unit = cap / 1400.;
+    let baseline = h * 0.466 + cap / 2.;
+    let piece = |svg: Credit, top: f32, unit: f32, alpha: f64| {
+        let (vw, vh, above) = svg.frame();
+        let (w, ht) = (vw * unit, vh * unit);
+        let image = credit_image(svg, (ht * scale).round() as u32, (w * scale).round() as u32);
         div()
             .absolute()
             .left_0()
             .right_0()
-            .top(px(top))
+            .top(px(top - above * unit))
             .flex()
             .justify_center()
-            .child(child)
+            .opacity(alpha.clamp(0., 1.) as f32)
+            .children(image.map(|image| img(ImageSource::Render(image)).w(px(w)).h(px(ht))))
     };
+    let small = unit * 0.62;
     div()
         .id("stage-credit")
         .debug_selector(|| "stage-credit".into())
         .absolute()
         .inset_0()
-        .child(line(
-            h * 0.466 - size * 0.62,
-            div()
-                .font_family(TEXT_FONT)
-                .font_weight(FontWeight(430.))
-                .text_size(px(size))
-                .letter_spacing(px(size * 0.26))
-                .text_color(ink(0.9 * first))
-                .child("ITERATIVE COMPUTER"),
-        ))
-        .child(line(
-            h * 0.507 - size * 0.6,
-            div()
-                .font_family(TEXT_FONT)
-                .italic()
-                .font_weight(FontWeight::LIGHT)
-                .text_size(px(size * 1.08))
-                .letter_spacing(px(size * 0.04))
-                .text_color(ink(0.6 * then))
-                .child("presents"),
+        .child(piece(Credit::Wordmark, baseline, unit, 0.9 * first))
+        .child(piece(
+            Credit::Presents,
+            baseline + 1.7 * cap,
+            small,
+            0.58 * then,
         ))
         .into_any_element()
+}
+
+/// The credit's two outlines.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Credit {
+    Wordmark,
+    Presents,
+}
+impl Credit {
+    fn svg(self) -> &'static str {
+        match self {
+            Self::Wordmark => include_str!("../../assets/credit/iterative-computer.svg"),
+            Self::Presents => include_str!("../../assets/credit/presents.svg"),
+        }
+    }
+    /// Its view box's width and height and the baseline's depth from its
+    /// top, in outline units.
+    fn frame(self) -> (f32, f32, f32) {
+        match self {
+            Self::Wordmark => (14559.5, 1967.5, 1459.),
+            Self::Presents => (7681., 1910., 1400.),
+        }
+    }
+}
+
+/// `svg` drawn `w` × `h` device pixels in the stage's ink, cached.
+fn credit_image(svg: Credit, h: u32, w: u32) -> Option<std::sync::Arc<RenderImage>> {
+    use resvg::{tiny_skia, usvg};
+    use std::{cell::RefCell, collections::HashMap, sync::Arc};
+    thread_local! {
+        static CACHE: RefCell<HashMap<(Credit, u32), Option<Arc<RenderImage>>>> = RefCell::default();
+    }
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&(svg, h)).cloned()) {
+        return hit;
+    }
+    let draw = || {
+        let tree = usvg::Tree::from_str(svg.svg(), &usvg::Options::default()).ok()?;
+        let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
+        let size = tree.size();
+        let transform =
+            tiny_skia::Transform::from_scale(w as f32 / size.width(), h as f32 / size.height());
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        let (r, g, b) = ((INK >> 16) as u8, (INK >> 8) as u8, INK as u8);
+        let pixels = pixmap
+            .pixels()
+            .iter()
+            .flat_map(|p| [b, g, r, p.alpha()])
+            .collect();
+        let buffer = image::RgbaImage::from_raw(w.max(1), h.max(1), pixels)?;
+        Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+    };
+    let image = draw();
+    CACHE.with(|c| c.borrow_mut().insert((svg, h), image.clone()));
+    image
 }
 
 /// The wordmark under the mark: uncovered as the mark passes it, then

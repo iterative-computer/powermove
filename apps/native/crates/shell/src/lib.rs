@@ -75,6 +75,8 @@ pub use macos::{
     Finish, Gate, OpenUrls, left_button_held, open_editor, run, run_gated, run_integrated,
     run_with_device, smoke, tokens,
 };
+#[cfg(debug_assertions)]
+pub use macos::capture_app;
 #[cfg(target_os = "macos")]
 pub use native::{
     AgentStatus, viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,

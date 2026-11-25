@@ -94,7 +94,9 @@ impl WelcomeView {
         let key = (button.id.clone(), button.label.clone());
         if let Some(control) = self.natives.get(&key) {
             let disabled = !button.enabled;
-            control.update(cx, |c, cx| c.update(&serde_json::Value::Null, &[], disabled, cx));
+            control.update(cx, |c, cx| {
+                c.update(&serde_json::Value::Null, &[], disabled, cx)
+            });
             return control.clone();
         }
         let tokens = self.tokens.clone();
@@ -123,13 +125,28 @@ impl WelcomeView {
                 cx,
             );
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
+            if primary && self.stage {
+                control.prominent(self.primary_width());
+            }
             control
         });
         let id = button.id.clone();
-        cx.subscribe(&control, move |v: &mut Self, _, _: &serde_json::Value, cx| v.act(&id, cx))
-            .detach();
+        cx.subscribe(
+            &control,
+            move |v: &mut Self, _, _: &serde_json::Value, cx| v.act(&id, cx),
+        )
+        .detach();
         self.natives.insert(key, control.clone());
         control
+    }
+    /// The stage's one primary action: wide on the Welcome, where it is the
+    /// only action; a step's Continue is narrower, at the column's end.
+    fn primary_width(&self) -> f32 {
+        if self.frame.outline.is_some() || self.frame.centred {
+            PRIMARY_WIDTH
+        } else {
+            STEP_PRIMARY_WIDTH
+        }
     }
     /// Gives the view the keys, and takes them back when the control that had
     /// them leaves with its step (Begin, Back): GPUI then leaves the window
@@ -214,7 +231,15 @@ impl WelcomeView {
             .justify_center()
             .child(button.label.clone());
         // Headless (no AppKit): the stage's large glass button, drawn.
-        element = if self.stage {
+        element = if self.stage && primary {
+            // The extra-large glass button (`NativeControl::prominent`).
+            element
+                .w(px(self.primary_width()))
+                .h(px(PRIMARY_HEIGHT))
+                .rounded_full()
+                .text_size(px(t.typography.heading))
+                .font_weight(FontWeight::MEDIUM)
+        } else if self.stage {
             element
                 .min_w(px(m.row * 4.))
                 .px(px(m.inset * 1.5))
@@ -363,49 +388,164 @@ impl WelcomeView {
         }
         card
     }
-    /// The steps ahead, in one quiet row: a dot and a name each, joined by
-    /// hairlines; the one under way (or next) in the accent, the rest in the
-    /// secondary ink.
-    fn outline(&self, outline: &welcome::Outline) -> impl IntoElement + use<> {
+    /// The Welcome, as macOS welcome windows set theirs: under the mark (on
+    /// the stage, the one it lights at `stage::WINDOW_MARK_Y`) the title on one line, its line,
+    /// the four steps ahead in a row, and the one primary action, extra
+    /// large, low in the window. Fixed to the window's size, so it lines up
+    /// with the mark the stage lights in it.
+    fn welcome(
+        &mut self,
+        outline: Option<&welcome::Outline>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.tokens.clone();
+        let (c, m) = (&t.colors, &t.metrics);
+        let frame = self.frame.clone();
+        let h = m.welcome_height;
+        let title = frame.title.replace('\n', " ");
+        let spoken = title.clone();
+        let size = 34.;
+        let mut root = div()
+            .id("welcome")
+            .role(Role::Group)
+            .accessibility_id("shell.welcome")
+            .aria_label(spoken.clone())
+            .relative()
+            .size_full()
+            .font_family(pm_design::TEXT_FONT)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key));
+        if !self.stage {
+            // A Welcome window without the stage (the stage could not open):
+            // its own ground, and the mark drawn in it.
+            root = root.bg(rgb(c.window));
+            if frame.animate {
+                let time = if t.accessibility.reduce_motion {
+                    welcome::ANIMATION_SECONDS
+                } else {
+                    self.time()
+                };
+                if time < welcome::ANIMATION_SECONDS && self.clock.is_none() {
+                    window.request_animation_frame();
+                }
+                root = root.child(mark_canvas(time, &t));
+            }
+        }
+        let centred = |top: f32| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(top))
+                .flex()
+                .flex_col()
+                .items_center()
+                .text_center()
+        };
+        let title_top = h * 0.345;
+        root = root
+            .child(
+                centred(title_top).child(
+                    div()
+                        .id("welcome-title")
+                        .debug_selector(|| "welcome-title".into())
+                        .role(Role::Heading)
+                        .aria_label(spoken)
+                        .text_size(px(size))
+                        .font_weight(FontWeight::BOLD)
+                        .line_height(relative(1.15))
+                        .letter_spacing(px(-size * 0.014))
+                        .text_color(rgb(c.text))
+                        .child(title),
+                ),
+            )
+            .child(
+                centred(title_top + size * 1.15 + 10.).child(
+                    div()
+                        .id("welcome-line")
+                        .role(Role::Label)
+                        .aria_label(frame.line.replace('\n', " "))
+                        .text_size(px(15.))
+                        .line_height(relative(1.4))
+                        .text_color(rgb(c.secondary))
+                        .child(frame.line.clone()),
+                ),
+            )
+            .children(outline.map(|o| centred(h * 0.565).child(self.steps_ahead(o))));
+        let mut footer = centred(0.).top_auto().bottom(px(PRIMARY_BOTTOM));
+        for button in frame.buttons.iter() {
+            footer = footer.child(self.button(button, window, cx));
+        }
+        root.child(footer)
+    }
+    /// The steps ahead in one grouped panel: four equal columns, each a
+    /// numeral in a ring and the step's name, its line under them in the
+    /// secondary ink; hairlines between.
+    fn steps_ahead(&self, outline: &welcome::Outline) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let c = &t.colors;
-        let next = outline.current.unwrap_or(0);
+        let hairline = rgba((c.text << 8) | 0x14);
         let mut row = div()
             .id("welcome-outline")
             .debug_selector(|| "welcome-outline".into())
             .role(Role::List)
             .aria_label(format!("Steps: {}", outline.steps.join(", ")))
+            .w(px(STEPS_WIDTH))
             .flex()
-            .items_center()
-            .gap(px(t.space.md))
-            .text_size(px(t.typography.body))
-            .text_color(rgb(c.secondary));
+            .items_stretch()
+            .rounded(px(STEPS_RADIUS))
+            .bg(rgba((c.text << 8) | 0x0a))
+            .border_1()
+            .border_color(hairline);
         for (index, step) in outline.steps.iter().enumerate() {
+            let note = outline.notes.get(index).cloned().unwrap_or_default();
             if index > 0 {
-                row = row.child(
-                    div()
-                        .w(px(t.space.xl))
-                        .h(px(1.))
-                        .bg(rgba((c.secondary << 8) | 0x40)),
-                );
+                row = row.child(div().flex_none().w(px(1.)).my(px(16.)).bg(hairline));
             }
-            let dot = if index == next {
-                rgb(c.accent)
-            } else if index < next {
-                rgb(c.text)
-            } else {
-                rgba((c.secondary << 8) | 0x70)
-            };
+            let ring = div()
+                .flex_none()
+                .size(px(18.))
+                .rounded_full()
+                .border_1()
+                .border_color(rgba((c.secondary << 8) | 0x80))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(c.secondary))
+                .child(format!("{}", index + 1));
             row = row.child(
                 div()
                     .id(SharedString::from(format!("welcome-outline-{index}")))
                     .role(Role::ListItem)
-                    .aria_label(step.clone())
+                    .aria_label(format!("{step}: {note}"))
+                    .flex_1()
+                    .min_w(px(0.))
                     .flex()
-                    .items_center()
-                    .gap(px(t.space.sm))
-                    .child(div().size(px(6.)).rounded_full().bg(dot))
-                    .child(step.clone()),
+                    .flex_col()
+                    .gap(px(7.))
+                    .px(px(18.))
+                    .py(px(16.))
+                    .text_left()
+                    .child(
+                        div().flex().items_center().gap(px(8.)).child(ring).child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c.text))
+                                .child(step.clone()),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_size(px(12.5))
+                            .line_height(relative(1.4))
+                            .text_color(rgb(c.secondary))
+                            .child(note),
+                    ),
             );
         }
         row
@@ -683,14 +823,18 @@ impl WelcomeView {
 }
 impl Render for WelcomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.frame.outline.is_some() || (self.stage && self.frame.centred) {
+            let outline = self.frame.outline.clone();
+            return self.welcome(outline.as_ref(), window, cx);
+        }
         self.motion.frame(window);
         let kit = Kit::new(&self.tokens, &self.motion, Self::motion, window, cx);
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let frame = self.frame.clone();
         // On the stage the film is the animation.
-        let time = (frame.animate && !self.stage && !t.accessibility.reduce_motion)
-            .then(|| self.time());
+        let time =
+            (frame.animate && !self.stage && !t.accessibility.reduce_motion).then(|| self.time());
         let spin = frame.spinner && !t.accessibility.reduce_motion;
         let sliding = !t.accessibility.reduce_motion
             && frame
@@ -712,18 +856,28 @@ impl Render for WelcomeView {
             .flex_col()
             .gap(px(m.gap))
             .w_full()
-            .max_w(px(m.sheet_width_wide))
+            .max_w(px(if self.stage {
+                STEPS_WIDTH
+            } else {
+                m.sheet_width_wide
+            }))
             .max_h(relative(1.))
             .min_h(px(0.))
             .when(frame.top, |d| d.h_full().gap(px(0.)))
+            .when(self.stage && !frame.top && !frame.centred, |d| {
+                // A step on the stage: its title and line, then air, then
+                // its choices.
+                d.h_full().gap(px(28.))
+            })
             .when(frame.centred, |d| d.items_center().text_center());
         let mut header = div()
             .flex()
             .flex_col()
             .gap(px(if frame.top {
                 m.gap + 2.
-            } else if self.stage && frame.centred {
-                t.space.md
+            } else if self.stage {
+                // The Welcome's title-to-line step.
+                10.
             } else {
                 m.gap
             }))
@@ -755,10 +909,16 @@ impl Render for WelcomeView {
                             // Welcome window: its type steps up with it.
                             let size = match (self.stage, frame.centred) {
                                 (true, true) => t.typography.display * 1.75,
-                                (true, false) => t.typography.display * 1.3,
+                                // A step's title: the Welcome's, a step down.
+                                (true, false) => STEP_TITLE,
                                 _ => t.typography.display,
                             };
                             d.text_size(px(size))
+                                .when(self.stage && !frame.centred, |d| {
+                                    d.font_weight(FontWeight::BOLD)
+                                        .line_height(relative(1.15))
+                                        .letter_spacing(px(-size * 0.012))
+                                })
                                 .when(self.stage && frame.centred, |d| {
                                     d.font_weight(FontWeight(t.typography.display_weight))
                                         .line_height(relative(1.06))
@@ -784,9 +944,6 @@ impl Render for WelcomeView {
                     .child(frame.line.clone()),
             );
         content = content.child(header);
-        if let Some(outline) = &frame.outline {
-            content = content.child(div().pt(px(t.space.xl)).child(self.outline(outline)));
-        }
         let spaced = |d: Div| if frame.top { d.mt(air) } else { d };
         if let Some(status) = &frame.status {
             let mut row = div()
@@ -928,6 +1085,11 @@ impl Render for WelcomeView {
                 );
             }
         }
+        if self.stage && !frame.top && !frame.centred {
+            // The step's action stands on the window's bottom line, where
+            // the Welcome's Begin is.
+            content = content.child(div().flex_1());
+        }
         let mut footer = div()
             .flex()
             .flex_none()
@@ -972,19 +1134,28 @@ impl Render for WelcomeView {
             .flex()
             .flex_col()
             .items_center()
-            .p(px(if self.stage { m.sheet_inset * 2. } else { m.sheet_inset }))
+            .p(px(if self.stage {
+                m.sheet_inset * 2.
+            } else {
+                m.sheet_inset
+            }))
             .map(|d| {
                 if frame.top {
                     // Clear of the title bar, with the sheet's own air below.
                     d.justify_start()
-                        .pt(px(if self.stage { m.sheet_inset + m.inset } else { m.toolbar }))
+                        .pt(px(if self.stage {
+                            m.sheet_inset + m.inset
+                        } else {
+                            m.toolbar
+                        }))
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
-                    d.justify_center().when(self.stage && frame.animate, |d| {
-                        // Under the stage's lit mark (`stage::WINDOW_MARK_Y`):
-                        // the mark, then the title, its line, the steps, the
-                        // button, on one column from the top.
-                        d.justify_start().pt(px(m.welcome_height * 0.385))
+                    d.justify_center().when(self.stage, |d| {
+                        // A step: its title at one height, its action on
+                        // the window's bottom line (`welcome`'s Begin).
+                        d.justify_start()
+                            .pt(px(m.welcome_height * 0.2))
+                            .pb(px(PRIMARY_BOTTOM))
                     })
                 }
             })
@@ -1003,8 +1174,20 @@ impl Render for WelcomeView {
                     .aria_label(frame.back.clone().unwrap_or_default())
                     .tab_index(0)
                     .absolute()
-                    .top(px(if self.stage { m.sheet_inset } else { m.toolbar }))
-                    .left(px(m.sheet_inset))
+                    // On the stage the window is a real titled window: Back
+                    // stands in its title bar, after the window buttons,
+                    // centred on them.
+                    .top(px(if self.stage {
+                        TITLEBAR_MIDDLE - 9.
+                    } else {
+                        m.toolbar
+                    }))
+                    .left(px(if self.stage {
+                        TITLEBAR_LEADING
+                    } else {
+                        m.sheet_inset
+                    }))
+                    .h(px(18.))
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.text))
                     .flex()
@@ -1026,6 +1209,23 @@ impl Render for WelcomeView {
 }
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
 /// under Reduce Motion. Also the kit's indeterminate progress row.
+/// The Welcome window's title bar: the middle of its window buttons and
+/// the first point after them (macOS 26 and 27, measured).
+const TITLEBAR_MIDDLE: f32 = 16.;
+const TITLEBAR_LEADING: f32 = 84.;
+/// The Welcome's primary action: the extra-large glass button's width and
+/// (drawn, headless) height.
+const PRIMARY_WIDTH: f32 = 220.;
+const STEP_PRIMARY_WIDTH: f32 = 160.;
+const PRIMARY_HEIGHT: f32 = 44.;
+/// The primary action's distance from the window's bottom edge.
+const PRIMARY_BOTTOM: f32 = 48.;
+/// A step's title (the Welcome's is 34).
+const STEP_TITLE: f32 = 28.;
+/// The Welcome's panel of steps ahead: its width and corner radius.
+const STEPS_WIDTH: f32 = 720.;
+const STEPS_RADIUS: f32 = 14.;
+
 pub fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let colour = tokens.colors.secondary;
     let size = tokens.typography.reading;
