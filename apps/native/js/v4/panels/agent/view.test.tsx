@@ -2023,3 +2023,83 @@ test("queued directions are marked on the user bubble", async () => {
   expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
   await root.dispose();
 });
+test("with the Powermove harness: a segmented harness control, then models grouped by provider, Aerolite disabled and Add a provider…", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = {
+    models: [
+      ["chatgpt/gpt-6-sol", "GPT-6 Sol"],
+      ["custom/llama-4", "llama-4"],
+      ["anthropic/claude-opus-5-5", "Claude Opus 5.5"],
+    ],
+    providers: [
+      ["aero", "Powermove"],
+      ["chatgpt", "Codex"],
+      ["claude", "Claude Code"],
+    ],
+    efforts: ["low", "high"],
+  };
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "chatgpt/gpt-6-sol";
+  const asked: MenuOption[][] = [];
+  const picks = ["model:anthropic/claude-opus-5-5", "providers:"];
+  const menu: Menu = async (r) => {
+    asked.push(r.options);
+    return picks.shift();
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
+  const harness = byId(root, "agent-harness-choice");
+  expect(harness.props.label).toBe("Harness");
+  for (const _ of [0, 1]) {
+    await root.drive(byId(root, "agent-model").id, "click");
+    await Promise.resolve();
+  }
+  const rows = asked[0]!;
+  expect(rows.map((o) => [o.category, o.label, o.informational ?? false])).toEqual([
+    ["OpenAI", "GPT-6 Sol", false],
+    ["Anthropic", "Claude Opus 5.5", false],
+    ["Powermove", "Aerolite", true],
+    ["Custom", "llama-4", false],
+    [" ", "Add a provider…", false],
+  ]);
+  expect(rows.find((o) => o.label === "Aerolite")!.detail).toBe("Coming later");
+  expect(actions).toEqual([
+    { type: "setModel", model: "anthropic/claude-opus-5-5", effort: p.snapshot.settings.effort },
+    { type: "openSettings" },
+  ]);
+  root.dispose();
+});
+test("with the Powermove harness, Codex lists only OpenAI models and Claude Code only Anthropic's; no Aerolite row", async () => {
+  for (const [harness, model, group] of [
+    ["chatgpt", "gpt-6-sol", "OpenAI"],
+    ["claude", "claude-opus-5-5", "Anthropic"],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = {
+      models: [[model, model]],
+      providers: [
+        ["aero", "Powermove"],
+        ["chatgpt", "Codex"],
+        ["claude", "Claude Code"],
+      ],
+      efforts: [],
+    };
+    p.snapshot.settings.provider = harness;
+    p.snapshot.settings.model = model;
+    const asked: MenuOption[][] = [];
+    const menu: Menu = async (r) => {
+      asked.push(r.options);
+      return null;
+    };
+    await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+    await root.drive(byId(root, "agent-model").id, "click");
+    await Promise.resolve();
+    expect(asked[0]!.map((o) => [o.category, o.label])).toEqual([
+      [group, model],
+      [" ", "Add a provider…"],
+    ]);
+    root.dispose();
+  }
+});

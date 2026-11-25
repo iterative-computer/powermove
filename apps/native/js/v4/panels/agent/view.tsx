@@ -822,6 +822,21 @@ function ProseBlock({
 
 // ── Menus and the thread bar ────────────────────────────────────────────
 
+/** The Powermove harness is offered: the picker is harness, then model. */
+export function harnessMode(s: Snapshot): boolean {
+  return s.catalog.providers.some(([id]) => id === "aero");
+}
+/** The provider (Settings › Providers) a harness's model runs on. */
+export function providerGroup(harness: string, model: string): string {
+  if (harness === "chatgpt") return "OpenAI";
+  if (harness === "claude") return "Anthropic";
+  const source = model.split("/")[0];
+  return (
+    ({ chatgpt: "OpenAI", openai: "OpenAI", anthropic: "Anthropic", custom: "Custom" } as Record<string, string>)[
+      source
+    ] ?? "Development"
+  );
+}
 /** One row of the window's field menu (the kit's searchable menu). */
 export interface MenuOption {
   label: string;
@@ -2811,8 +2826,37 @@ function Composer({
     provider: string;
     epoch: number;
   } | null>(null);
+  // With the Powermove harness (the development switch), the harness is
+  // its own segmented control and the menu lists only what the chosen one
+  // can run, grouped by provider (Settings › Providers), then the way there.
+  const harnessRows = (s: Snapshot): MenuOption[] => {
+    const harness = s.settings.provider;
+    const rows: MenuOption[] = pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
+      label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+      detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
+      value: `model:${v}`,
+      checked: v === s.settings.model,
+      category: providerGroup(harness, v),
+      provider: harness,
+    }));
+    if (harness === "aero")
+      rows.push({
+        label: "Aerolite",
+        detail: "Coming later",
+        value: "",
+        category: "Powermove",
+        informational: true,
+      });
+    if (native.current.findingModels && !rows.some((r) => r.value.startsWith("model:")))
+      rows.push({ label: "Finding models…", value: "", informational: true });
+    const order = ["OpenAI", "Anthropic", "Powermove", "Custom", "Development"];
+    const rank = (r: MenuOption) => order.indexOf(r.category ?? "") >>> 0;
+    rows.sort((a, b) => rank(a) - rank(b));
+    rows.push({ label: "Add a provider…", value: "providers:", category: " " });
+    return rows;
+  };
   const modelRows = (s: Snapshot): MenuOption[] =>
-    s.catalog.providers.flatMap(([provider, providerName]) => {
+    harnessMode(s) ? harnessRows(s) : s.catalog.providers.flatMap(([provider, providerName]) => {
       const active = provider === s.settings.provider;
       const group = native.current.modelGroups?.[provider];
       const category = provider === "compatible"
@@ -2859,7 +2903,10 @@ function Composer({
       const at = choice.indexOf(":");
       const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
       const now = latest.current;
-      if (kind === "provider") {
+      if (kind === "providers") {
+        setOpenPicker(null);
+        send({ type: "openSettings" });
+      } else if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
         awaiting.current = { anchor, provider: value, epoch };
         send({ type: "setProvider", provider: value });
@@ -3171,6 +3218,20 @@ function Composer({
           minWidth: t("metrics.hit"),
         }}
       />
+      {harnessMode(s) && (
+        <div id="agent-harness" style={{ ...row, height: t("metrics.control") }}>
+          <UI.SegmentedControl
+            id="agent-harness-choice"
+            label="Harness"
+            disabled={choicesLocked}
+            value={s.settings.provider}
+            options={s.catalog.providers.map(([id, label]) => ({ id, label }))}
+            onChange={(id) => {
+              if (id !== s.settings.provider) send({ type: "setProvider", provider: id });
+            }}
+          />
+        </div>
+      )}
       <div
         id="agent-options"
         // The row stands `space.xl` under the field (about 24 pt under the

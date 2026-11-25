@@ -266,14 +266,17 @@ impl Environment {
         vars.insert("CLAUDE_CONFIG_DIR".into(), home.display().to_string());
         Ok(vars)
     }
-    /// Codex keeps its login in the Keychain (`cli_auth_credentials_store =
+    /// Where Codex keeps its login. Today's builds: file-only storage in
+    /// Powermove's own `auth.json`; an existing Codex login is copied once,
+    /// and after that its absence means sign-out. With the development switch
+    /// (Settings › Providers): the Keychain (`cli_auth_credentials_store =
     /// "keyring"`), the one OpenAI credential Codex and Powermove both read
-    /// (`codex_auth`). A login an earlier build kept in this home's
-    /// `auth.json` moves into the item once; an existing Codex login on this
-    /// Mac is brought over the same way, once, before Powermove owns the home.
+    /// (`codex_auth`); a login kept in this home's `auth.json` moves into the
+    /// item once and the file goes.
     pub fn codex_vars(&self) -> Result<BTreeMap<String, String>, String> {
         let home = self.home("codex-runtime")?;
-        private_store(&home.join("config.toml")).map_err(|e| e.to_string())?;
+        let keyring = self.providers() && self.secrets.is_some();
+        private_store(&home.join("config.toml"), keyring).map_err(|e| e.to_string())?;
         let owner = home.join(".powermove-auth-owned");
         let auth = home.join("auth.json");
         let source = self
@@ -282,25 +285,29 @@ impl Environment {
             .map(PathBuf::from)
             .or_else(|| self.vars.get("HOME").map(|h| Path::new(h).join(".codex")))
             .map(|root| root.join("auth.json"));
-        if let Some(secrets) = &self.secrets {
-            if !owner.exists() {
-                if !auth.exists()
-                    && let Some(source) = source.filter(|path| path.is_file())
-                {
-                    fs::copy(source, &auth).map_err(|e| e.to_string())?;
-                    fs::set_permissions(&auth, fs::Permissions::from_mode(0o600))
-                        .map_err(|e| e.to_string())?;
-                }
-                fs::write(&owner, "powermove\n").map_err(|e| e.to_string())?;
+        if !owner.exists() {
+            if !auth.exists()
+                && let Some(source) = source.filter(|path| path.is_file())
+            {
+                fs::copy(source, &auth).map_err(|e| e.to_string())?;
+                fs::set_permissions(&auth, fs::Permissions::from_mode(0o600))
+                    .map_err(|e| e.to_string())?;
             }
+            fs::write(&owner, "powermove\n").map_err(|e| e.to_string())?;
+        }
+        if keyring && let Some(secrets) = &self.secrets {
             crate::codex_auth::migrate(secrets.as_ref(), self, &home)?;
         }
         let mut vars = self.vars.clone();
         vars.insert("CODEX_HOME".into(), home.display().to_string());
         Ok(vars)
     }
+    /// The development switch's Settings › Providers (and the Powermove harness).
+    pub fn providers(&self) -> bool {
+        self.aero.is_some()
+    }
 }
-fn private_store(config: &Path) -> std::io::Result<()> {
+fn private_store(config: &Path, keyring: bool) -> std::io::Result<()> {
     let current = match fs::read_to_string(config) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -309,7 +316,8 @@ fn private_store(config: &Path) -> std::io::Result<()> {
     let mut document: toml_edit::DocumentMut = current
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    document["cli_auth_credentials_store"] = toml_edit::value("keyring");
+    document["cli_auth_credentials_store"] =
+        toml_edit::value(if keyring { "keyring" } else { "file" });
     document["suppress_unstable_features_warning"] = toml_edit::value(true);
     let next = document.to_string();
     if next != current {
@@ -750,7 +758,12 @@ mod tests {
             "model = \"m\"\ncli_auth_credentials_store = \"file\"\n\n[profiles.work]\ncli_auth_credentials_store = \"file\"\n",
         )
         .unwrap();
-        super::private_store(&config).unwrap();
+        super::private_store(&config, false).unwrap();
+        let written: toml_edit::DocumentMut =
+            std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(written["cli_auth_credentials_store"].as_str(), Some("file"));
+        // The development switch's Providers keep Codex's login in the Keychain.
+        super::private_store(&config, true).unwrap();
         let written: toml_edit::DocumentMut =
             std::fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(written["model"].as_str(), Some("m"));
@@ -764,7 +777,7 @@ mod tests {
             Some("file")
         );
         std::fs::write(&config, "not = [toml").unwrap();
-        assert!(super::private_store(&config).is_err());
+        assert!(super::private_store(&config, false).is_err());
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "not = [toml");
         std::fs::remove_dir_all(&dir).unwrap();
     }

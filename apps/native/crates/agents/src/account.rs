@@ -384,7 +384,12 @@ impl Accounts {
                         Some("Codex did not return a ChatGPT sign-in URL.".into()),
                     ));
                 };
-                let url = trusted_auth_url(url)?;
+                // A development build against the local fakes signs in on a
+                // loopback issuer; everything else only on OpenAI's own.
+                let fake = cfg!(debug_assertions)
+                    && self.environment.vars.get("PM_AGENT_FAKE_BROWSER").is_some_and(|v| v == "1")
+                    && url.starts_with("http://127.0.0.1:");
+                let url = if fake { url.to_owned() } else { trusted_auth_url(url)? };
                 (self.open)(&url)?;
                 self.publish(
                     Provider::Chatgpt,
