@@ -261,7 +261,7 @@ impl Net for Idle {
         });
         if quiet.load(Ordering::Acquire) {
             let seconds = self.after.as_secs();
-            let span = if seconds >= 60 && seconds % 60 == 0 {
+            let span = if seconds >= 60 && seconds.is_multiple_of(60) {
                 format!("{} minutes", seconds / 60)
             } else {
                 format!("{:.1} seconds", self.after.as_secs_f64())
