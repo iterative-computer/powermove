@@ -49,7 +49,7 @@ mod figma_paste;
 mod file_coordination;
 mod first_run;
 mod first_run_stage;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 mod stage_capture;
 mod demo_editor;
 mod film_script;
