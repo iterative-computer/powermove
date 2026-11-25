@@ -2000,6 +2000,7 @@ fn report_run(
         pm_agents::Provider::Chatgpt => Harness::Codex,
         pm_agents::Provider::Claude => Harness::ClaudeCode,
         pm_agents::Provider::Compatible => Harness::Powermove,
+        pm_agents::Provider::Aero => Harness::Powermove,
     };
     let result = match result {
         RunResult::Success { .. } => Outcome::Ok,
