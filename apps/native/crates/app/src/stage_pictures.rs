@@ -311,10 +311,6 @@ impl EnginePictures {
             failed: None,
         }
     }
-    /// Why the engine could not draw the room, if it could not.
-    pub fn failure(&self) -> Option<&str> {
-        self.failed.as_deref()
-    }
     fn receive(&mut self, reply: Reply) {
         match reply {
             Reply::Ready(device) => {

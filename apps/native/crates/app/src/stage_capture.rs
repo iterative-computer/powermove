@@ -8,7 +8,7 @@ use crate::stage_pictures::EnginePictures;
 use gpui::{prelude::*, *};
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
-    stage::{CueSheet, Phase, Stage},
+    stage::{CueSheet, Stage},
     welcome::{Button, Frame},
     welcome_view::WelcomeView,
 };
@@ -266,24 +266,62 @@ fn time_the_room() {
 /// interval, not a measure of presentation.
 pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(out)?;
-    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut cx = headless();
-    let window = open(&mut cx, tokens, true, false);
+    let window = open(
+        &mut cx,
+        Tokens::new(Scheme::Dark, Accessibility::default()),
+        true,
+        false,
+    );
     let sheet = CueSheet::default();
     // Warm: the room's engine starts and the window draws once.
     for t in [0., 0.1] {
         frame_at(&mut cx, window, t);
     }
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let end = sheet.length() + 1.;
+    // The intro, a step in the window (its wave), and the hand-off's wave.
+    let step_at = sheet.length() + 0.6;
+    let hand_off_at = step_at + sheet.wave_seconds + 0.4;
+    let end = hand_off_at + sheet.wave_seconds + 0.6;
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut rows = Vec::new();
     let mut n = 0u32;
+    let (mut stepped, mut handed) = (false, false);
     loop {
         let t = f64::from(n) / 120.;
         if t > end {
             break;
         }
         let started = Instant::now();
+        let cpu = thread_cpu();
+        if t >= step_at && !stepped {
+            stepped = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                let card = cx.new(|cx| {
+                    let mut card =
+                        WelcomeView::new(tokens.clone(), timeline_frame(), Rc::new(|_, _| {}), cx);
+                    card.stage = true;
+                    card
+                });
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.set_card(card, cx);
+                });
+            })
+            .unwrap();
+        }
+        if t >= hand_off_at && !handed {
+            handed = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.hand_off(None, |_, _| {}, cx);
+                });
+            })
+            .unwrap();
+        }
         cx.update_window(window.into(), |view, w, cx| {
             let stage = view.downcast::<Stage>().unwrap();
             stage.update(cx, |s, _| s.clock = Some(t));
@@ -293,43 +331,68 @@ pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
         .unwrap();
         cx.run_until_parked();
         let ms = started.elapsed().as_secs_f64() * 1e3;
-        rows.push((t, sheet.phase(t), ms));
+        let cpu = (thread_cpu() - cpu) * 1e3;
+        let phase = if t >= hand_off_at {
+            "HandOff".to_owned()
+        } else if t >= step_at {
+            "Step".to_owned()
+        } else {
+            format!("{:?}", sheet.phase(t))
+        };
+        rows.push((t, phase, ms, cpu));
         n += 1;
         let spare = (1. / 120.) - started.elapsed().as_secs_f64();
         if spare > 0. {
             std::thread::sleep(std::time::Duration::from_secs_f64(spare));
         }
     }
-    let mut report = String::from("t,phase,ms\n");
-    for (t, phase, ms) in &rows {
-        report.push_str(&format!("{t:.4},{phase:?},{ms:.3}\n"));
+    let mut report = String::from("t,phase,ms,cpu_ms\n");
+    for (t, phase, ms, cpu) in &rows {
+        report.push_str(&format!("{t:.4},{phase},{ms:.3},{cpu:.3}\n"));
     }
     std::fs::write(out.join("pacing.csv"), report)?;
-    let mut by: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
-    for (_, phase, ms) in &rows {
-        by.entry(format!("{phase:?}")).or_default().push(*ms);
-    }
-    by.insert("all".into(), rows.iter().map(|r| r.2).collect());
-    let worst = rows.iter().fold(
-        (0., 0.),
-        |w: (f64, f64), r| if r.2 > w.1 { (r.0, r.2) } else { w },
-    );
-    for (phase, mut v) in by {
-        v.sort_by(f64::total_cmp);
-        let over = v.iter().filter(|ms| **ms > 1000. / 120.).count();
+    // Wall time includes the shared machine's preemption; the main
+    // thread's own CPU time is the work itself.
+    for (label, pick) in [("wall", 2usize), ("cpu", 3)] {
+        let value = |r: &(f64, String, f64, f64)| if pick == 2 { r.2 } else { r.3 };
+        let mut by: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        for r in &rows {
+            by.entry(r.1.clone()).or_default().push(value(r));
+        }
+        by.insert("all".into(), rows.iter().map(value).collect());
+        let worst = rows.iter().fold(
+            (0., 0.),
+            |w: (f64, f64), r| {
+                if value(r) > w.1 { (r.0, value(r)) } else { w }
+            },
+        );
+        for (phase, mut v) in by {
+            v.sort_by(f64::total_cmp);
+            let over = v.iter().filter(|ms| **ms > 1000. / 120.).count();
+            eprintln!(
+                "pacing {label:<4} {phase:<8} frames {:>5}  p50 {:>6.2} ms  p95 {:>6.2}  p99 {:>6.2}  max {:>7.2}  over 8.33 ms: {over}",
+                v.len(),
+                v[v.len() / 2],
+                v[v.len() * 95 / 100],
+                v[v.len() * 99 / 100],
+                v[v.len() - 1]
+            );
+        }
         eprintln!(
-            "pacing {phase:<8} frames {:>5}  p50 {:>6.2} ms  p95 {:>6.2}  p99 {:>6.2}  max {:>7.2}  over 8.33 ms: {over}",
-            v.len(),
-            v[v.len() / 2],
-            v[v.len() * 95 / 100],
-            v[v.len() * 99 / 100],
-            v[v.len() - 1]
+            "pacing {label:<4} worst frame at t={:.3} s: {:.2} ms",
+            worst.0, worst.1
         );
     }
-    eprintln!(
-        "pacing worst frame at t={:.3} s: {:.2} ms",
-        worst.0, worst.1
-    );
-    let _ = Phase::Window;
     Ok(())
+}
+
+/// The calling thread's CPU time, in seconds.
+fn thread_cpu() -> f64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }

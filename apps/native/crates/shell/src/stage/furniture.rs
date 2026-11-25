@@ -5,8 +5,19 @@ use crate::welcome;
 use gpui::{prelude::*, *};
 use pm_design::{TEXT_FONT, Tokens};
 
+/// Tessellated outlines, keyed by the geometry they were made for.
+type Outlines = (Vec<u32>, Vec<Option<Path<Pixels>>>);
+thread_local! {
+    /// The mark's outlines for the last geometry (`mark`).
+    static OUTLINES: std::cell::RefCell<Outlines> = std::cell::RefCell::default();
+}
+
 /// The light on the stage: a warm white, never pure.
-const LIGHT: u32 = 0xf2_ee_e6;
+pub(super) const LIGHT: u32 = 0xf2_ee_e6;
+/// The mark's light: the accent warmed toward the stage's white.
+pub(super) fn glow(tokens: &Tokens) -> u32 {
+    pm_design::mix(tokens.colors.accent, LIGHT, 0.55)
+}
 
 fn ink(alpha: f64) -> Rgba {
     let mut c = Rgba::from(rgb(LIGHT));
@@ -71,7 +82,7 @@ pub fn mark_at(t: f64, sheet: &CueSheet, motion: bool) -> (f64, f64, f64) {
 
 /// The mark in its light, and the wordmark under it.
 pub fn mark(t: f64, sheet: &CueSheet, tokens: &Tokens, motion: bool) -> AnyElement {
-    let accent = tokens.colors.accent;
+    let tint = Rgba::from(rgb(glow(tokens)));
     let (cx, cy, size) = mark_at(t, sheet, motion);
     let shown = if motion {
         span(t, sheet.rise.0 - 0.1, sheet.rise.0 + 0.2)
@@ -117,22 +128,42 @@ pub fn mark(t: f64, sheet: &CueSheet, tokens: &Tokens, motion: bool) -> AnyEleme
             };
             // The light: the mark's own shape, larger and fainter outward.
             const STEPS: usize = 16;
-            if bloom > 0.01 {
-                let tint = Rgba::from(rgb(pm_design::mix(accent, LIGHT, 0.55)));
-                for step in (1..=STEPS).rev() {
-                    let r = step as f64 / STEPS as f64;
-                    if let Ok(path) = outline(1. + reach * r) {
-                        let mut c = tint;
-                        c.alpha = (bloom * 0.1 * smooth(1. - r)) as f32;
-                        window.paint_path(path, c);
+            // The outlines are tessellated once per geometry: while the
+            // mark holds still (and the wave pictures it) they are reused.
+            let key = [
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width,
+                bounds.size.height,
+            ]
+            .map(|v| f32::from(v).to_bits())
+            .into_iter()
+            .chain([cx, cy, size, reach].map(|v| (v as f32).to_bits()))
+            .collect::<Vec<_>>();
+            OUTLINES.with_borrow_mut(|cache| {
+                if cache.0 != key {
+                    let paths = (0..=STEPS)
+                        .map(|step| outline(1. + reach * step as f64 / STEPS as f64).ok())
+                        .collect();
+                    *cache = (key, paths);
+                }
+                let paths = &cache.1;
+                if bloom > 0.01 {
+                    for step in (1..=STEPS).rev() {
+                        let r = step as f64 / STEPS as f64;
+                        if let Some(path) = paths[step].clone() {
+                            let mut c = tint;
+                            c.alpha = (bloom * 0.1 * smooth(1. - r)) as f32;
+                            window.paint_path(path, c);
+                        }
                     }
                 }
-            }
-            if body > 0.
-                && let Ok(path) = outline(1.)
-            {
-                window.paint_path(path, ink(body));
-            }
+                if body > 0.
+                    && let Some(path) = paths[0].clone()
+                {
+                    window.paint_path(path, ink(body));
+                }
+            });
         },
     )
     .absolute()

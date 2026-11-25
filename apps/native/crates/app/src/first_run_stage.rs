@@ -57,11 +57,64 @@ impl StageWindow {
     }
     /// The last step: the wave carries the card away and the room's lights
     /// come up on the app's first window, opened behind the stage.
+    ///
+    /// The app's first window opens behind the stage; once it has drawn,
+    /// its picture (taken on the GPU from its own frame) is where the wave
+    /// arrives. Without one (it has not drawn yet) the wave arrives in the
+    /// room and the lights come up on the window all the same.
     pub fn hand_off(&self, cx: &mut gpui::App) {
-        let _ = self.window.update(cx, |stage, _, cx| {
-            stage.hand_off(None, |window, _| window.remove_window(), cx);
-        });
+        let stage = self.window;
+        cx.spawn(async move |cx| {
+            // A few frames for the window to draw behind the stage.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(120))
+                .await;
+            cx.update(|cx| {
+                let arrival = arrival(stage, cx);
+                let _ = stage.update(cx, |stage, _, cx| {
+                    stage.hand_off(arrival, |window, _| window.remove_window(), cx);
+                });
+            });
+        })
+        .detach();
     }
+}
+
+/// The app's newest window as it last drew, placed where it sits on the
+/// stage, on its own ground (its AppKit toolbar is not in GPUI's picture).
+fn arrival(stage: WindowHandle<Stage>, cx: &mut gpui::App) -> Option<pm_shell::stage::Arrival> {
+    let stage_any: gpui::AnyWindowHandle = stage.into();
+    let origin = stage
+        .update(cx, |_, window, _| window.bounds().origin)
+        .ok()?;
+    let editor = cx.windows().into_iter().rev().find(|w| *w != stage_any)?;
+    let tokens = pm_shell::tokens();
+    editor
+        .update(cx, |_, window, _| {
+            let snapshot = window.rendered_frame_gpu().ok()?;
+            let picture = gpui::NativeTexture::new(
+                snapshot.texture,
+                snapshot.event,
+                snapshot.value,
+                std::sync::Arc::new(NoLease),
+            )
+            .ok()?;
+            let at = window.bounds();
+            Some(pm_shell::stage::Arrival {
+                picture,
+                at: gpui::Bounds::new(at.origin - origin, at.size),
+                ground: tokens.colors.window,
+                radius: tokens.radius.window,
+            })
+        })
+        .ok()
+        .flatten()
+}
+/// The window's picture is its own texture: nothing to give back.
+#[derive(Debug)]
+struct NoLease;
+impl gpui::TextureLease for NoLease {
+    fn gpu_completed(&self, _: bool) {}
 }
 
 /// Opens the stage over the display with `frame` in its window; `intro`

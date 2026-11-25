@@ -418,12 +418,18 @@ impl Stage {
 
 /// The wave the stage uses: Powermove's accent on the rim, square corners
 /// (the picture is the whole display).
+/// The stage's wave is the mark's light, quiet: a soft warm rim and
+/// hairline, no sparks.
 fn wave_style(kind: pm_wave::WaveType, tokens: &Tokens) -> WaveStyle {
-    let a = tokens.colors.accent;
+    let a = furniture::glow(tokens);
+    let base = WaveStyle::new(kind);
     WaveStyle {
         palette: Palette::Single([(a >> 16) as u8, (a >> 8) as u8, a as u8]),
         corner_radius: 0.,
-        ..WaveStyle::new(kind)
+        rim_strength: base.rim_strength * 0.5,
+        hairline_opacity: base.hairline_opacity * 0.4,
+        particle_count: 0.,
+        ..base
     }
 }
 
@@ -445,6 +451,8 @@ impl Render for Stage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.now();
         self.sounds(t, cx);
+        // The wave's shaders compile on a worker from the first frame on.
+        self.wave.update(cx, |w, _| w.warm(window));
         let area = window.bounds().size;
         let scale = window.scale_factor();
         let phase = self.sheet.phase(t);
