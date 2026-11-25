@@ -1297,7 +1297,7 @@ fn a_draft_survives_an_exhausted_gate_and_the_next_send() {
     );
     let (result, _) = complete_with_progress(&first);
     assert!(
-        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Not done")),
+        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Powermove stopped before its checks passed")),
         "{result:?}"
     );
     let mut reopened = fixture.tools_at(&scope, Access::Project);
@@ -1668,5 +1668,205 @@ fn a_steer_answered_not_ok_comes_back_and_reaches_the_model() {
     assert!(
         lost.is_empty(),
         "accepted steers never reached the model: {lost:?}"
+    );
+}
+
+/// A copy of the fixture with layers hidden on purpose (opacity 0, as a
+/// real project's loading veils are): the project check reports each one
+/// as never visible before any turn starts.
+fn with_hidden_layers(fixture: Fixture) -> Fixture {
+    {
+        let mut seed = McpSession::new(fixture.host.clone());
+        seed.dispatch("start_session", &json!({"prompt":"Seed hidden layers"}))
+            .unwrap();
+        let commands: Vec<_> = (0..3)
+            .flat_map(|n| {
+                let id = format!("veil{n}");
+                [
+                    json!({"type":"add_layer","id":id,"name":format!("Loading veil {n}"),
+                        "layerType":"solid","from":0,"duration":4}),
+                    json!({"type":"set_property","target":id,"path":"opacity","value":0}),
+                ]
+            })
+            .collect();
+        seed.dispatch("apply_commands", &json!({"commands":commands}))
+            .unwrap();
+        let check = seed.dispatch("check_project", &json!({})).unwrap();
+        assert_eq!(
+            check["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|issue| issue["code"] == "never-visible")
+                .count(),
+            3,
+            "{check}"
+        );
+        seed.finish(true).unwrap();
+    }
+    let revision = fixture
+        .host
+        .lock()
+        .unwrap()
+        .revision(&fixture.project)
+        .unwrap();
+    Fixture {
+        revision,
+        ..fixture
+    }
+}
+
+/// Every request body the fake model received, in order.
+fn recorded(
+    f: impl Fn(usize, &str) -> Reply + Send + Sync + 'static,
+) -> (Model, Arc<Mutex<Vec<String>>>) {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    let model = scripted(move |step, input| {
+        let body = String::from_utf8_lossy(input).into_owned();
+        seen.lock().unwrap().push(body.clone());
+        f(step, &body)
+    });
+    (model, bodies)
+}
+
+/// PM-730: on a real project the gate sent the project's own hidden layers
+/// to the model as problems to fix, three rounds, then failed the turn.
+#[test]
+fn a_rename_on_a_project_with_hidden_layers_passes_the_gate_in_one_round() {
+    let fixture = with_hidden_layers(Fixture::new());
+    let rev = fixture.revision;
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Harness Title"}}]}),
+        ),
+        _ => Reply::Text("Renamed Keep to Harness Title.".into()),
+    });
+    let (turn, notes) = fixture.start(model, |tools| Box::new(tools));
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Renamed Keep to Harness Title.".into(), Access::Project)
+    );
+    assert_eq!(
+        notes
+            .try_iter()
+            .filter(|v| v["type"] == "gate-continuation")
+            .count(),
+        0
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one edit, one answer, no repair round");
+    // Their names reach the model only in its own reads of the project,
+    // never as findings to fix.
+    for body in bodies.iter() {
+        assert!(!body.contains("never shows"), "{body}");
+        assert!(!body.contains("Completion checks failed"), "{body}");
+    }
+    let project = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap();
+    let layers = project["layers"].as_array().unwrap();
+    assert!(layers.iter().any(|l| l["name"] == "Harness Title"));
+    assert_eq!(
+        layers
+            .iter()
+            .filter(|l| l["name"].as_str().unwrap().starts_with("Loading veil"))
+            .count(),
+        3
+    );
+}
+
+/// PM-730: a problem the turn adds still fails the gate, and the repair
+/// prompt names that one problem, not the project's older findings.
+#[test]
+fn a_problem_the_turn_adds_is_the_only_one_the_gate_names() {
+    let fixture = with_hidden_layers(Fixture::new());
+    let rev = fixture.revision;
+    let (model, bodies) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_property","target":"flub","path":"opacity","value":0}]}),
+        ),
+        1 => Reply::Text("Hid the flubbed take.".into()),
+        2 => call(
+            "edit",
+            "commands",
+            Some(rev + 1),
+            json!({"commands":[{"type":"set_property","target":"flub","path":"opacity","value":100}]}),
+        ),
+        _ => Reply::Text("Showed the take again.".into()),
+    });
+    let (turn, notes) = fixture.start(model, |tools| Box::new(tools));
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Showed the take again.".into(), Access::Project)
+    );
+    let continued: Vec<_> = notes
+        .try_iter()
+        .filter(|v| v["type"] == "gate-continuation")
+        .collect();
+    assert_eq!(continued.len(), 1, "{continued:?}");
+    assert_eq!(
+        continued[0]["failures"],
+        json!([
+            "“Remove” is fully transparent wherever it plays in 0s–4s (its opacity or its group's opacity is 0), so it never shows."
+        ])
+    );
+    let bodies = bodies.lock().unwrap();
+    // The edit's own result warns about the new problem only.
+    assert!(
+        bodies[1].contains("“Remove” is fully transparent"),
+        "{}",
+        bodies[1]
+    );
+    let repair = &bodies[2];
+    assert!(repair.contains("Completion checks failed"), "{repair}");
+    for body in bodies.iter() {
+        assert!(!body.contains("“Loading veil"), "{body}");
+    }
+}
+
+/// PM-730: a gate still failing after its last round ends the turn in one
+/// plain sentence (the panel showed "couldn't finish" and Details the raw
+/// JSON list).
+#[test]
+fn an_exhausted_gate_ends_the_turn_in_plain_words() {
+    let fixture = with_hidden_layers(Fixture::new());
+    let rev = fixture.revision;
+    let (model, _) = recorded(move |step, _| match step {
+        0 => call(
+            "edit",
+            "commands",
+            Some(rev),
+            json!({"commands":[{"type":"set_property","target":"flub","path":"opacity","value":0}]}),
+        ),
+        _ => Reply::Text("Done.".into()),
+    });
+    let (turn, notes) = fixture.start(model, |tools| Box::new(tools));
+    let RunResult::Failure { error, .. } = complete(&turn) else {
+        panic!("an unrepaired problem fails the turn");
+    };
+    assert_eq!(
+        notes
+            .try_iter()
+            .filter(|v| v["type"] == "gate-continuation")
+            .count(),
+        3
+    );
+    assert_eq!(
+        error,
+        "Powermove stopped before its checks passed. Still wrong: “Remove” is fully transparent wherever it plays in 0s–4s (its opacity or its group's opacity is 0), so it never shows. Review the result before you continue."
+    );
+    assert!(
+        !error.contains(['{', '[', '"']) && error.len() <= 400,
+        "{error}"
     );
 }

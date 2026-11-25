@@ -33,6 +33,9 @@ pub struct Tools {
     project: String,
     access: pm_agents::Access,
     origin: pm_kernel::Snapshot,
+    /// The project check's findings when the turn began: the gate and the
+    /// edit checks name only what the turn added (None: that check failed).
+    found_at_start: Option<Value>,
     own_revision: u64,
     undo_safe: bool,
     changed_extensions: BTreeMap<String, String>,
@@ -96,6 +99,7 @@ impl Tools {
         assert_project(active, &guard, project)?;
         let origin = guard.original_view(project)?.snapshot;
         let revision = origin.revision;
+        let found_at_start = crate::inspection::findings(&guard, project).ok();
         if expected.is_some_and(|expected| expected != revision) {
             return Err(Error::conflict(format!(
                 "The request names revision {}, but the project is at {revision}. Read the current revision and retry.",
@@ -137,6 +141,7 @@ impl Tools {
             project: project.into(),
             access,
             origin,
+            found_at_start,
             own_revision: revision,
             undo_safe: true,
             changed_extensions: BTreeMap::new(),
@@ -320,7 +325,7 @@ impl Tools {
             }
         }
         let before = if self.check_edits {
-            self.project_check(input.args.get("compositionId"))?
+            self.findings()?
         } else {
             Value::Null
         };
@@ -359,28 +364,25 @@ impl Tools {
                 )));
             }
             let after = if self.check_edits {
-                self.project_check(input.args.get("compositionId"))?
+                self.findings()?
             } else {
                 Value::Null
             };
-            let issues = after["issues"].as_array().into_iter().flatten();
-            let introduced: Vec<_> = issues
-                .clone()
-                .filter(|issue| {
-                    issue["severity"] == "error"
-                        && !before["issues"]
-                            .as_array()
-                            .is_some_and(|old| old.contains(issue))
-                })
+            // This edit is refused for an error it added; its warnings are
+            // the ones this turn added and has not fixed yet.
+            let errors: Vec<_> = introduced(&before, &after)
+                .into_iter()
+                .filter(|issue| issue["severity"] == "error")
                 .collect();
-            if !introduced.is_empty() {
+            if !errors.is_empty() {
                 return Err(Error::invalid(format!(
                     "Project check failed. Fix these issues before retrying: {}",
-                    json!(introduced)
+                    json!(errors)
                 )));
             }
             result["warnings"] = json!(
-                issues
+                self.since_start(&after)
+                    .into_iter()
                     .filter(|issue| issue["severity"] != "error")
                     .collect::<Vec<_>>()
             );
@@ -451,11 +453,26 @@ impl Tools {
         }
     }
 
-    fn project_check(&mut self, composition: Option<&Value>) -> Result<Value> {
-        self.session.dispatch(
-            "check_project",
-            &composition.map_or_else(|| json!({}), |id| json!({"compositionId":id})),
-        )
+    /// Every finding of the project check, untruncated.
+    fn findings(&self) -> Result<Value> {
+        let document = self.active()?.document;
+        let host = Automation::fenced(&self.session.host, document)?;
+        crate::inspection::findings(&host, &self.project)
+    }
+
+    /// The findings this turn added. Without a check from the turn's start,
+    /// only errors count: a warning is never blamed on the turn unproven.
+    fn since_start(&self, now: &Value) -> Vec<Value> {
+        match &self.found_at_start {
+            Some(start) => introduced(start, now),
+            None => now["issues"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|issue| issue["severity"] == "error")
+                .cloned()
+                .collect(),
+        }
     }
 
     fn look(&mut self, op: &str, args: &Value) -> Result<Value> {
@@ -672,7 +689,10 @@ impl Tools {
 
     fn check(&mut self, check: &Check) -> Result<bool> {
         match check {
-            Check::Project => Ok(self.project_check(None)?["ok"] == true),
+            Check::Project => {
+                let now = self.findings()?;
+                Ok(self.since_start(&now).is_empty())
+            }
             Check::State { pointer, equals } => {
                 let document = self.active()?.document;
                 let host = Automation::fenced(&self.session.host, document)?;
@@ -753,13 +773,16 @@ impl Tools {
 
     pub fn failures(&mut self) -> Vec<String> {
         let mut failures = Vec::new();
-        match self.project_check(None) {
-            Ok(check) if check["ok"] == true => {}
-            Ok(check) => failures.push(format!(
-                "Project check: {}. Fix the reported issues and check again.",
-                check["issues"]
-            )),
-            Err(error) => failures.push(format!("Project check failed: {error}")),
+        // Only what this turn added: the project's own older findings (a
+        // layer hidden on purpose) are the person's, never the model's job.
+        match self.findings() {
+            Ok(now) => failures.extend(self.since_start(&now).iter().map(|issue| {
+                issue["message"]
+                    .as_str()
+                    .unwrap_or("The project check found a new problem.")
+                    .to_owned()
+            })),
+            Err(error) => failures.push(format!("The project check couldn't run: {error}")),
         }
         let plan = std::mem::take(&mut self.plan);
         for item in plan.iter().filter(|item| item.done) {
@@ -816,6 +839,55 @@ impl Tools {
         self.session.finish(true)?;
         Ok(())
     }
+}
+
+/// The findings in `now` that `before` did not have. A layer's finding is
+/// known by its code and layer, not its words (a rename rewords it). Blank
+/// frames count only where frames that showed something before are now
+/// blank, beyond what a coarser sampling stride can move a gap's edge.
+fn introduced(before: &Value, now: &Value) -> Vec<Value> {
+    const BLANK: [&str; 2] = ["no-visuals", "empty-frames"];
+    let list = |check: &Value| check["issues"].as_array().cloned().unwrap_or_default();
+    let (old, new) = (list(before), list(now));
+    let code = |issue: &Value| issue["code"].as_str().unwrap_or("").to_owned();
+    let known: std::collections::HashSet<_> = old
+        .iter()
+        .filter_map(|issue| Some((code(issue), issue["layerId"].as_str()?.to_owned())))
+        .collect();
+    let ranges = |issue: &Value| -> Vec<(f64, f64)> {
+        issue["ranges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r[0].as_f64()?, r[1].as_f64()?)))
+            .collect()
+    };
+    let blank: Vec<_> = old
+        .iter()
+        .filter(|issue| BLANK.contains(&code(issue).as_str()))
+        .flat_map(ranges)
+        .collect();
+    let stride = |check: &Value| check["sampledEveryFrames"].as_f64().unwrap_or(1.);
+    let fps = now["fps"].as_f64().unwrap_or(30.).max(1.);
+    let coarse = stride(before).max(stride(now));
+    let slack = if coarse > 1. { coarse / fps } else { 0. } + 1e-3;
+    new.into_iter()
+        .filter(|issue| {
+            if let Some(layer) = issue["layerId"].as_str() {
+                return !known.contains(&(code(issue), layer.to_owned()));
+            }
+            if !BLANK.contains(&code(issue).as_str()) {
+                return !old.contains(issue);
+            }
+            ranges(issue).iter().any(|&(from, to)| {
+                let blank_before: f64 = blank
+                    .iter()
+                    .map(|&(a, b)| (to.min(b) - from.max(a)).max(0.))
+                    .sum();
+                to - from - blank_before > slack
+            })
+        })
+        .collect()
 }
 
 /// Keeps the stage's baseline beside it, owner-only, replaced atomically.

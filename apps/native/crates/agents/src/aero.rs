@@ -261,6 +261,39 @@ fn plain(message: &str) -> String {
     }
 }
 
+/// The end of a turn whose completion checks still fail after the last
+/// repair round: one short sentence for the panel and Details, naming
+/// what is still wrong in the checks' own words, never their raw data.
+fn unfinished(failures: &[String]) -> String {
+    const ROOM: usize = 280;
+    let mut named: Vec<String> = Vec::new();
+    let mut used = 0;
+    for failure in failures {
+        let words = failure.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words = words.trim_end_matches('.');
+        if !named.is_empty() && used + words.len() > ROOM {
+            break;
+        }
+        let words = if words.len() > ROOM {
+            let cut = words.floor_char_boundary(ROOM);
+            format!("{}…", words[..cut].trim_end())
+        } else {
+            words.to_owned()
+        };
+        used += words.len();
+        named.push(words);
+    }
+    match failures.len() - named.len() {
+        0 => {}
+        1 => named.push("and one more problem".into()),
+        n => named.push(format!("and {n} more problems")),
+    }
+    format!(
+        "Powermove stopped before its checks passed. Still wrong: {}. Review the result before you continue.",
+        named.join("; ")
+    )
+}
+
 enum Callback {
     Tool(ToolLease),
     Hook(HookLease),
@@ -981,11 +1014,10 @@ fn drive(
         if let Ok(failures) = checks.try_recv() {
             let prompt = || {
                 format!(
-                    "Completion checks failed. Repair the following issues before finishing:\n{}",
-                    failures.join("\n")
+                    "Completion checks failed. Repair only these problems, which this turn introduced, before finishing:\n- {}",
+                    failures.join("\n- ")
                 )
             };
-            let not_done = || format!("Not done: {}", failures.join(" "));
             if let Some(question) = stop_hook.take() {
                 if failures.is_empty() || stopped.is_some() {
                     answer_hook(question, HookAnswer::Allow)?;
@@ -1000,7 +1032,7 @@ fn drive(
                 } else {
                     // The core asks once more after the last continuation;
                     // that ask can only end the turn.
-                    gate_exhausted = Some(not_done());
+                    gate_exhausted = Some(unfinished(&failures));
                     answer_hook(question, HookAnswer::Allow)?;
                 }
             }
