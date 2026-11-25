@@ -42,7 +42,7 @@ const SLIDE_OUT: f32 = 6.;
 /// The mark in the Welcome window: its height (points) and centre (a
 /// fraction of the window's height).
 pub const WINDOW_MARK: f32 = 84.;
-pub const WINDOW_MARK_Y: f32 = 0.31;
+pub const WINDOW_MARK_Y: f32 = 0.235;
 const ARRIVE: Spring = Spring::new(520., 46.);
 const LEAVE: Spring = Spring::new(900., 60.);
 
@@ -194,14 +194,11 @@ impl Stage {
     fn motion(&self) -> bool {
         !self.tokens.accessibility.reduce_motion
     }
-    /// How far the house lights are down (0–1), from when the stage opens:
-    /// Dia's room light going down.
+    /// How far the stage has come up over the desktop (0–1).
     fn dimmed(&self, opened: f64) -> f64 {
-        if self.motion() {
-            self.sheet.dim.at(opened)
-        } else {
-            smooth(opened / 0.6)
-        }
+        // The room's field is alive from the first frames; its own light then
+        // goes down on Dia's curve (`intro::light_at`).
+        smooth(opened / if self.motion() { 0.35 } else { 0.6 })
     }
     fn sounds(&mut self, t: f64, cx: &mut Context<Self>) {
         if t > self.last_t {
@@ -328,7 +325,9 @@ impl Stage {
             density: scale,
             reach: 0.45 * height + (mark * 1.2 - 0.45 * height) * w,
             atmosphere: 0.,
-            pad: [0.; 3],
+            soft: 0.,
+            iris: 1.,
+            field: 0.,
             ground: [linear(16), linear(8), linear(0)],
             domain: [0.; 4],
         };

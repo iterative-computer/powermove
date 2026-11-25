@@ -16,15 +16,7 @@ use std::{rc::Rc, sync::Arc, time::Instant};
 pub(crate) const ROOM: (f32, f32) = (1512., 982.);
 
 pub(crate) fn welcome_frame() -> Frame {
-    Frame {
-        surface: "S107".into(),
-        animate: true,
-        title: "Welcome to\nPowermove.".into(),
-        centred: true,
-        buttons: vec![Button::new("begin", "Begin")],
-        default: Some("begin".into()),
-        ..Frame::default()
-    }
+    crate::first_run::welcome_frame()
 }
 pub(crate) fn timeline_frame() -> Frame {
     Frame {

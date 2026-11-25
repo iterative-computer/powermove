@@ -33,7 +33,12 @@ pub struct Light {
     /// A window's flat ground (linear RGB), lit from its top; zero for the
     /// room.
     pub ground: [f32; 3],
-    pub pad: [f32; 3],
+    /// The outline's softness, device pixels (the light leading the shape).
+    pub soft: f32,
+    /// The body's slow colour drift (0–1).
+    pub iris: f32,
+    /// The room's field of light (0–1; a window has none).
+    pub field: f32,
     pub domain: [f32; 4],
 }
 

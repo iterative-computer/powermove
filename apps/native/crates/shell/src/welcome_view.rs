@@ -363,6 +363,53 @@ impl WelcomeView {
         }
         card
     }
+    /// The steps ahead, in one quiet row: a dot and a name each, joined by
+    /// hairlines; the one under way (or next) in the accent, the rest in the
+    /// secondary ink.
+    fn outline(&self, outline: &welcome::Outline) -> impl IntoElement + use<> {
+        let t = &self.tokens;
+        let c = &t.colors;
+        let next = outline.current.unwrap_or(0);
+        let mut row = div()
+            .id("welcome-outline")
+            .debug_selector(|| "welcome-outline".into())
+            .role(Role::List)
+            .aria_label(format!("Steps: {}", outline.steps.join(", ")))
+            .flex()
+            .items_center()
+            .gap(px(t.space.md))
+            .text_size(px(t.typography.body))
+            .text_color(rgb(c.secondary));
+        for (index, step) in outline.steps.iter().enumerate() {
+            if index > 0 {
+                row = row.child(
+                    div()
+                        .w(px(t.space.xl))
+                        .h(px(1.))
+                        .bg(rgba((c.secondary << 8) | 0x40)),
+                );
+            }
+            let dot = if index == next {
+                rgb(c.accent)
+            } else if index < next {
+                rgb(c.text)
+            } else {
+                rgba((c.secondary << 8) | 0x70)
+            };
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("welcome-outline-{index}")))
+                    .role(Role::ListItem)
+                    .aria_label(step.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.sm))
+                    .child(div().size(px(6.)).rounded_full().bg(dot))
+                    .child(step.clone()),
+            );
+        }
+        row
+    }
     /// A group's heading, as Settings heads its groups.
     fn section_title(&self, title: &str) -> impl IntoElement + use<> {
         let t = &self.tokens;
@@ -673,7 +720,13 @@ impl Render for WelcomeView {
         let mut header = div()
             .flex()
             .flex_col()
-            .gap(px(if frame.top { m.gap + 2. } else { m.gap }))
+            .gap(px(if frame.top {
+                m.gap + 2.
+            } else if self.stage && frame.centred {
+                t.space.md
+            } else {
+                m.gap
+            }))
             .when(frame.centred, |d| d.items_center());
         if let Some(label) = &frame.eyebrow {
             header = header.child(
@@ -731,6 +784,9 @@ impl Render for WelcomeView {
                     .child(frame.line.clone()),
             );
         content = content.child(header);
+        if let Some(outline) = &frame.outline {
+            content = content.child(div().pt(px(t.space.xl)).child(self.outline(outline)));
+        }
         let spaced = |d: Div| if frame.top { d.mt(air) } else { d };
         if let Some(status) = &frame.status {
             let mut row = div()
@@ -925,8 +981,10 @@ impl Render for WelcomeView {
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
                     d.justify_center().when(self.stage && frame.animate, |d| {
-                        // Under the stage's lit mark (`stage::WINDOW_MARK_Y`).
-                        d.pt(px(m.welcome_height * 0.30))
+                        // Under the stage's lit mark (`stage::WINDOW_MARK_Y`):
+                        // the mark, then the title, its line, the steps, the
+                        // button, on one column from the top.
+                        d.justify_start().pt(px(m.welcome_height * 0.385))
                     })
                 }
             })

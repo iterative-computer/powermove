@@ -729,16 +729,7 @@ impl Flow {
             ..frame
         };
         match onboarding.step {
-            Onboard::Animation | Onboard::Welcome => Frame {
-                surface: "S107".into(),
-                animate: true,
-                // Two lines, as v1.2.0 (read as one sentence).
-                title: "Welcome to\nPowermove.".into(),
-                centred: true,
-                buttons: vec![Button::new("begin", "Begin")],
-                default: Some("begin".into()),
-                ..Frame::default()
-            },
+            Onboard::Animation | Onboard::Welcome => welcome_frame(),
             Onboard::Timeline => continuing(Frame {
                 surface: "S108".into(),
                 back: Some("Back to Welcome".into()),
@@ -838,6 +829,29 @@ impl Flow {
         }
     }
 }
+
+/// The first run's Welcome: the title card, a line on what comes next and the
+/// steps ahead.
+pub(crate) fn welcome_frame() -> Frame {
+    Frame {
+        surface: "S107".into(),
+        animate: true,
+        // Two lines, as v1.2.0 (read as one sentence).
+        title: "Welcome to\nPowermove.".into(),
+        line: "Four quick choices, then your editor. You can change any of them later.".into(),
+        outline: Some(pm_shell::welcome::Outline {
+            steps: ["Timeline", "Agent", "Speech Model", "Workspace"]
+                .map(str::to_owned)
+                .to_vec(),
+            current: None,
+        }),
+        centred: true,
+        buttons: vec![Button::new("begin", "Begin")],
+        default: Some("begin".into()),
+        ..Frame::default()
+    }
+}
+
 
 fn library_failed_frame(details: &str) -> Frame {
     Frame {
