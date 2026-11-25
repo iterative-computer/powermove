@@ -2012,73 +2012,149 @@ fn aero_tools(fixture: &Fixture, name: &str) -> pm_mcp::session::aero_tools::Too
 /// P1-3: the editor writes while Aero reads the project (the editor's
 /// writes reach the kernel actor directly, between Powermove's reads). Every
 /// answer's data belongs to the revision it is stamped with.
+///
+/// The editor writes once per read, racing it, and records its edit only
+/// after its ack, so a read can be stamped with a revision the log does not
+/// hold yet; the check waits for that record instead of guessing (PM-737).
+/// No sleeps: the edits are paced by the reads.
 #[test]
 fn a_human_edit_between_reads_never_mislabels_project_state() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::sync::{Condvar, Mutex};
+    #[derive(Default)]
+    struct Shared {
+        /// Reads started; the editor writes once for each.
+        reads: u32,
+        done: bool,
+        edits: Vec<(u64, String)>,
+    }
+    const READS: u32 = 300;
     let fixture = Fixture::new();
     let mut tools = aero_tools(&fixture, "race");
     let kernel = fixture.host.kernel.clone();
-    let stop = Arc::new(AtomicBool::new(false));
-    let edits = Arc::new(std::sync::Mutex::new(Vec::<(u64, String)>::new()));
+    let base = kernel.published("test").unwrap().revision();
+    let shared = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
     let human = {
-        let (stop, edits) = (stop.clone(), edits.clone());
+        let shared = shared.clone();
         std::thread::spawn(move || {
-            let mut i = 0;
-            while !stop.load(Ordering::Acquire) {
-                i += 1;
+            let (lock, changed) = &*shared;
+            for i in 1..=READS {
+                drop(
+                    changed
+                        .wait_while(lock.lock().unwrap(), |s| s.reads < i && !s.done)
+                        .unwrap(),
+                );
+                if lock.lock().unwrap().done {
+                    return;
+                }
                 let name = format!("Human take {i:04}");
-                let ack = kernel
-                    .call_blocking(
-                        "test",
-                        Request::new(
-                            Caller::native(),
-                            Call::Transact {
-                                label: Some("UI edit".into()),
-                                body: WriteBody::Commands(vec![
-                                    CompCommand::Set {
-                                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
-                                            name: Some(name.clone()),
-                                            ..Default::default()
-                                        }),
-                                    }
-                                    .into(),
-                                ]),
-                                expected_revision: None,
-                            },
-                        ),
-                    )
-                    .unwrap();
-                edits.lock().unwrap().push((ack.revision, name));
-                std::thread::sleep(Duration::from_millis(2));
+                let revision = human_rename(&kernel, &name);
+                lock.lock().unwrap().edits.push((revision, name));
+                changed.notify_all();
             }
         })
     };
+    let (lock, changed) = &*shared;
     let mut checked = 0;
-    for _ in 0..300 {
-        let Ok(state) = tools.call("project", r#"{"op":"summary"}"#, &mut |_| false) else {
-            continue;
-        };
-        let revision = state["revision"].as_u64().unwrap();
-        let text = state.to_string();
-        let expected = edits
-            .lock()
+    for _ in 0..READS {
+        // The previous read's edit is in, so at most one write lands during
+        // this read: one retry, never "kept changing".
+        changed
+            .wait_while(lock.lock().unwrap(), |s| (s.edits.len() as u32) < s.reads)
             .unwrap()
-            .iter()
-            .filter(|(at, _)| *at <= revision)
-            .max_by_key(|(at, _)| *at)
-            .map(|(_, name)| name.clone());
-        if let Some(expected) = expected {
-            assert!(
-                text.contains(&expected),
-                "data from another revision was stamped {revision}: expected {expected}"
-            );
-            checked += 1;
+            .reads += 1;
+        changed.notify_all();
+        let state = tools
+            .call("project", r#"{"op":"summary"}"#, &mut |_| false)
+            .unwrap();
+        let revision = state["revision"].as_u64().unwrap();
+        if revision <= base {
+            continue;
         }
+        // Only the editor writes after `base`: its record of this revision
+        // comes once its ack does.
+        let shared = changed
+            .wait_while(lock.lock().unwrap(), |s| {
+                s.edits.last().is_none_or(|(at, _)| *at < revision)
+            })
+            .unwrap();
+        let (at, expected) = shared
+            .edits
+            .iter()
+            .rfind(|(at, _)| *at <= revision)
+            .unwrap();
+        assert_eq!(*at, revision, "revision {revision} was not the editor's");
+        let text = state.to_string();
+        assert!(
+            text.contains(expected.as_str()),
+            "data from another revision was stamped {revision}: expected {expected}"
+        );
+        checked += 1;
     }
-    stop.store(true, Ordering::Release);
+    lock.lock().unwrap().done = true;
+    changed.notify_all();
     human.join().unwrap();
-    assert!(checked > 50, "only {checked} reads were checked");
+    // Only the first read can be answered before the editor's first edit.
+    assert!(checked >= READS - 1, "only {checked} reads were checked");
+}
+
+/// The editor's edit: a composition rename written straight to the kernel
+/// actor, as a panel's write is. Returns the revision it committed.
+fn human_rename(kernel: &KernelHandle, name: &str) -> u64 {
+    kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("UI edit".into()),
+                    body: WriteBody::Commands(vec![
+                        CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some(name.into()),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .unwrap()
+        .revision
+}
+
+/// PM-737: the editor's commit is visible to Powermove's reads before the
+/// editor's own thread hears its ack. A read in that window is stamped with
+/// the new revision and carries the new name; the old race test compared it
+/// with an edit log that did not have the commit yet and failed.
+#[test]
+fn a_read_before_the_editor_hears_its_ack_is_stamped_with_that_edit() {
+    let fixture = Fixture::new();
+    let mut tools = aero_tools(&fixture, "ack-window");
+    let kernel = fixture.host.kernel.clone();
+    let mut log: Vec<(u64, String)> = Vec::new();
+    for i in 1..=20 {
+        let name = format!("Human take {i:04}");
+        // Committed; the person's log does not have it yet.
+        let revision = human_rename(&kernel, &name);
+        let state = tools
+            .call("project", r#"{"op":"summary"}"#, &mut |_| false)
+            .unwrap();
+        let text = state.to_string();
+        assert_eq!(state["revision"].as_u64(), Some(revision), "{text}");
+        assert!(
+            text.contains(&name),
+            "revision {revision} lacks {name}: {text}"
+        );
+        if let Some((_, older)) = log.last() {
+            assert!(
+                !text.contains(older),
+                "revision {revision} still has {older}"
+            );
+        }
+        log.push((revision, name));
+    }
 }
 
 /// P1-5: the project is reopened (a new document under the same id) while
