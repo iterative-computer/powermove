@@ -123,6 +123,22 @@ def chat_sse(reply, body):
     return chunk({"role": "assistant", "tool_calls": [call]}) + chunk({}, "tool_calls") + "data: [DONE]\n\n"
 
 
+def messages_sse(reply, body):
+    """Anthropic Messages events; a tool reply is answered as text here."""
+    rid = hashlib.sha256(body).hexdigest()[:12]
+    text = reply[1] if reply[0] == "text" else "Hello from the fake provider."
+    out = []
+    ev = lambda v: out.append(f"event: {v['type']}\ndata: {json.dumps(v)}\n\n")
+    ev({"type": "message_start", "message": {"id": f"msg_{rid}", "type": "message", "role": "assistant", "content": [],
+        "model": json.loads(body or b"{}").get("model", ""), "usage": {"input_tokens": 1, "output_tokens": 0}}})
+    ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    ev({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}})
+    ev({"type": "content_block_stop", "index": 0})
+    ev({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}})
+    ev({"type": "message_stop"})
+    return "".join(out)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -232,8 +248,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"detail": "unauthorized"})
             time.sleep(control["hold_seconds"])
             return self.reply(200, responses_sse(demo(body), body), "text/event-stream")
+        if path == "/anthropic/v1/messages":
+            # Anthropic reads the key as x-api-key, with the API version.
+            if (self.headers.get("Authorization") or not (self.headers.get("x-api-key") or "").startswith(ANTHROPIC_KEY_PREFIX)
+                    or not self.headers.get("anthropic-version")):
+                return self.reply(401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}})
+            return self.reply(200, messages_sse(demo(body), body), "text/event-stream")
         keys = {"/openai/v1/chat/completions": lambda: self.bearer().startswith(OPENAI_KEY_PREFIX),
-                "/anthropic/v1/chat/completions": lambda: self.bearer().startswith(ANTHROPIC_KEY_PREFIX),
                 "/custom/v1/chat/completions": lambda: self.bearer() == CUSTOM_KEY}
         if path == "/custom/v1/chat/completions" and self.bearer().startswith("custom-echo-"):
             # A careless server that repeats the request's credential in its error.
@@ -242,9 +263,6 @@ class Handler(BaseHTTPRequestHandler):
         if path in keys:
             if not keys[path]():
                 return self.reply(401, {"error": {"message": "bad key"}})
-            request = json.loads(body or b"{}")
-            if "max_tokens" in request and path.startswith("/anthropic") and request["max_tokens"] <= 0:
-                return self.reply(400, {"error": {"message": "max_tokens"}})
             return self.reply(200, chat_sse(demo(body), body), "text/event-stream")
         self.reply(404, {"error": "not found"})
 

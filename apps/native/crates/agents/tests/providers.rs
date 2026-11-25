@@ -437,7 +437,7 @@ fn an_openai_key_an_anthropic_key_and_a_custom_endpoint_each_run_powermove() {
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
     assert!(accounts.openai_key_models().is_empty());
 
-    // Anthropic API key: the Keychain, its model list, Powermove through the compatibility endpoint.
+    // Anthropic API key: the Keychain, its model list, Powermove on Anthropic Messages.
     assert!(accounts.set_anthropic_key("not a key".into()).is_err());
     accounts
         .set_anthropic_key("sk-ant-fake-abcdef12".into())
@@ -452,10 +452,15 @@ fn an_openai_key_an_anthropic_key_and_a_custom_endpoint_each_run_powermove() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|r| r["path"] == "/anthropic/v1/chat/completions")
+        .filter(|r| r["path"] == "/anthropic/v1/messages")
         .cloned()
         .collect();
-    assert!(!anthropic_calls.is_empty() && anthropic_calls.iter().all(|r| r["x-api-key"] == true));
+    assert!(
+        !anthropic_calls.is_empty()
+            && anthropic_calls
+                .iter()
+                .all(|r| r["x-api-key"] == true && r["authorization"] == "")
+    );
     accounts.remove_anthropic_key().unwrap();
     until("the key's removal", || {
         accounts.anthropic().masked.is_none()
