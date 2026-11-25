@@ -703,7 +703,8 @@ pub fn identity(cx: &App) -> Option<String> {
 }
 /// Calls `f` with who is signed in whenever the account changes.
 pub fn on_change(cx: &mut App, f: impl Fn(Option<String>, &mut App) + 'static) {
-    cx.observe_global::<Cloud>(move |cx| f(identity(cx), cx)).detach();
+    cx.observe_global::<Cloud>(move |cx| f(identity(cx), cx))
+        .detach();
 }
 pub(crate) fn sign_in_available(cx: &App) -> bool {
     cx.has_global::<Cloud>()

@@ -1428,8 +1428,6 @@ const FIELD_LIGHT: u32 = 0xff7a2e;
 const FIELD_DEEP: u32 = 0xa3301a;
 const COLUMN: f32 = 330.;
 const TITLE_SIZE: f32 = 26.;
-const PREVIEW_LEFT: f32 = 24.;
-const PREVIEW_TOP: f32 = 140.;
 /// The stage's grouped list: its corner (continuous), the row's least
 /// height and side inset (where the hairlines start), the icons' tile.
 const LIST_RADIUS: f32 = 12.;
@@ -1493,30 +1491,71 @@ pub fn stage_ground() -> Div {
                 .w(px(HALF))
                 .bg(rgb(LEFT_GROUND)),
         )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .left(px(HALF))
-                .bg(linear_gradient(
-                    150.,
-                    linear_color_stop(rgb(FIELD_LIGHT), 0.),
-                    linear_color_stop(rgb(FIELD_DEEP), 1.),
-                )),
-        )
+        .child(field())
+}
+/// The right half's field: our orange with depth. A warm gradient from a lit
+/// top to an ember base, the base deepened further, a soft light from the
+/// upper left, and a fine grain so it reads as a surface, not a fill.
+fn field() -> Div {
+    let light = div()
+        .absolute()
+        .left(px(-140.))
+        .top(px(-200.))
+        .size(px(420.))
+        .rounded_full()
+        .shadow(vec![BoxShadow {
+            color: hsla(36. / 360., 1., 0.82, 0.42).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(220.),
+            spread_radius: px(40.),
+            inset: false,
+        }]);
+    let mut grain = div().absolute().inset_0().opacity(0.07).overflow_hidden();
+    if let Some((image, (w, h))) = picture("grain") {
+        let (w, h) = (w as f32 / 2., h as f32 / 2.);
+        let (columns, rows) = ((HALF / w).ceil() as usize, (900. / h).ceil() as usize);
+        for row in 0..rows {
+            for column in 0..columns {
+                grain = grain.child(
+                    img(ImageSource::Render(image.clone()))
+                        .absolute()
+                        .left(px(column as f32 * w))
+                        .top(px(row as f32 * h))
+                        .w(px(w))
+                        .h(px(h)),
+                );
+            }
+        }
+    }
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .left(px(HALF))
+        .overflow_hidden()
+        .bg(linear_gradient(
+            160.,
+            linear_color_stop(rgb(FIELD_LIGHT), 0.),
+            linear_color_stop(rgb(FIELD_DEEP), 1.),
+        ))
+        .child(div().absolute().inset_0().bg(linear_gradient(
+            180.,
+            linear_color_stop(hsla(14. / 360., 0.9, 0.12, 0.), 0.45),
+            linear_color_stop(hsla(14. / 360., 0.9, 0.12, 0.38), 1.),
+        )))
+        .child(light)
+        .child(grain)
 }
 
-/// The product beside a step: a real picture of the app on a demo project
-/// (`assets/onboarding`), which the field's right and bottom edges crop, as
-/// Arc shows its browser.
-fn preview(id: &str, window: &Window) -> Option<AnyElement> {
+/// A picture from `assets/onboarding`, decoded once (BGRA, for GPUI).
+fn picture(name: &str) -> Option<(std::sync::Arc<RenderImage>, (u32, u32))> {
     use std::{cell::RefCell, collections::HashMap};
     thread_local! {
         static IMAGES: RefCell<HashMap<String, Option<(std::sync::Arc<RenderImage>, (u32, u32))>>> = RefCell::default();
     }
-    let bytes: &'static [u8] = match id {
+    let bytes: &'static [u8] = match name {
+        "grain" => include_bytes!("../assets/onboarding/grain.png"),
         "welcome" => include_bytes!("../assets/onboarding/welcome.png"),
         "home" => include_bytes!("../assets/onboarding/home.png"),
         "effects" => include_bytes!("../assets/onboarding/effects.png"),
@@ -1525,6 +1564,16 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
         "timeline-tracks" => include_bytes!("../assets/onboarding/timeline-tracks.png"),
         "agent" => include_bytes!("../assets/onboarding/agent.png"),
         "speech" => include_bytes!("../assets/onboarding/speech.png"),
+        "v1-welcome" => include_bytes!("../assets/onboarding/v1-welcome.png"),
+        "v1-timeline-layers" => include_bytes!("../assets/onboarding/v1-timeline-layers.png"),
+        "v1-timeline-tracks" => include_bytes!("../assets/onboarding/v1-timeline-tracks.png"),
+        "v1-agent" => include_bytes!("../assets/onboarding/v1-agent.png"),
+        "v1-speech" => include_bytes!("../assets/onboarding/v1-speech.png"),
+        "v2-welcome" => include_bytes!("../assets/onboarding/v2-welcome.png"),
+        "v2-timeline-layers" => include_bytes!("../assets/onboarding/v2-timeline-layers.png"),
+        "v2-timeline-tracks" => include_bytes!("../assets/onboarding/v2-timeline-tracks.png"),
+        "v2-agent" => include_bytes!("../assets/onboarding/v2-agent.png"),
+        "v2-speech" => include_bytes!("../assets/onboarding/v2-speech.png"),
         _ => return None,
     };
     let decode = || {
@@ -1541,38 +1590,100 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
             size,
         ))
     };
-    let (image, (w, h)) = IMAGES.with(|c| {
+    IMAGES.with(|c| {
         c.borrow_mut()
-            .entry(id.to_owned())
+            .entry(name.to_owned())
             .or_insert_with(decode)
             .clone()
-    })?;
-    // The pictures are drawn at two pixels a point and shown at that size,
-    // the product at its own scale, running off the field's right and
-    // bottom edges as Arc's browser does.
-    let (w, h) = (w as f32 / 2., h as f32 / 2.);
-    let _ = window;
+    })
+}
+/// How the right half shows the product (three designs under review).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Right {
+    /// One element of the real UI, large (about 2×), cropped hard.
+    Zoom,
+    /// A real Powermove window, a little smaller, floating on the field.
+    Window,
+    /// That window set back, with the step's element large in front of it.
+    Stack,
+}
+fn right() -> Right {
+    // Development builds pick a design for review (`PM_NATIVE_WELCOME_RIGHT`).
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("PM_NATIVE_WELCOME_RIGHT") {
+        match v.as_str() {
+            "v2" => return Right::Window,
+            "v3" => return Right::Stack,
+            _ => {}
+        }
+    }
+    Right::Zoom
+}
+/// `name` shown at `density` picture pixels a point, its corner at
+/// (`left`, `top`) on the field, with a soft shadow and a hairline rim.
+fn piece(name: &str, density: f32, left: f32, top: f32, radius: f32, shadow: f32) -> Option<Div> {
+    let (image, (w, h)) = picture(name)?;
+    let (w, h) = (w as f32 / density, h as f32 / density);
     Some(
         div()
             .absolute()
-            // One place for every step's picture: nothing moves sideways
-            // on Continue.
-            .left(px(PREVIEW_LEFT))
-            .top(px(PREVIEW_TOP))
+            .left(px(left))
+            .top(px(top))
             .w(px(w))
             .h(px(h))
-            .rounded_tl(px(10.))
-            .overflow_hidden()
-            .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.4).into(),
-                offset: point(px(0.), px(12.)),
-                blur_radius: px(40.),
-                spread_radius: px(0.),
-                inset: false,
-            }])
-            .child(img(ImageSource::Render(image)).size_full())
-            .into_any_element(),
+            .rounded(px(radius))
+            .shadow(vec![
+                BoxShadow {
+                    color: hsla(14. / 360., 0.8, 0.08, 0.55 * shadow).into(),
+                    offset: point(px(0.), px(28.)),
+                    blur_radius: px(64.),
+                    spread_radius: px(-8.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.25 * shadow).into(),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(6.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+            ])
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(radius))
+                    .overflow_hidden()
+                    .border(px(0.5))
+                    .border_color(hsla(0., 0., 1., 0.22))
+                    .child(img(ImageSource::Render(image)).size_full()),
+            ),
     )
+}
+/// The product beside a step: real pictures of the app on a demo project
+/// (`assets/onboarding`), large and legible, running off the field's right
+/// and bottom edges, with depth.
+fn preview(id: &str, window: &Window) -> Option<AnyElement> {
+    let _ = window;
+    let designed = matches!(
+        id,
+        "welcome" | "timeline-layers" | "timeline-tracks" | "agent" | "speech"
+    );
+    let shown = match (designed, right()) {
+        // The step's element at about twice the product's size.
+        (true, Right::Zoom) => piece(&format!("v1-{id}"), 2., 36., 56., 14., 1.)?,
+        // A real window at three quarters of its size, its own corners and
+        // rim, running off the bottom and the right.
+        (true, Right::Window) => piece(&format!("v2-{id}"), 2. / 0.75, 44., 112., 12., 1.)?,
+        // The window set back and quiet, the step's element large in front.
+        (true, Right::Stack) => div()
+            .absolute()
+            .inset_0()
+            .child(piece(&format!("v2-{id}"), 2. / 0.55, 28., 44., 9., 0.6)?.opacity(0.5))
+            .child(piece(&format!("v1-{id}"), 2. / 0.8, 88., 214., 14., 1.3)?),
+        // The other frames: their picture at the product's own size.
+        (false, _) => piece(id, 2., 36., 56., 12., 1.)?,
+    };
+    Some(shown.into_any_element())
 }
 
 /// The Powermove mark, `size` points high, filled with `color`.

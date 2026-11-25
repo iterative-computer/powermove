@@ -10,6 +10,11 @@ use pm_design::{Accessibility, Scheme, Tokens};
 use std::sync::Arc;
 
 /// `PM_PANEL_CAPTURE_SIZE=w,h` draws every panel at that size instead.
+/// `PM_PANEL_CAPTURE_SCALE`: the backing scale to draw at (4: a panel shown
+/// at twice its size, still sharp).
+fn capture_scale() -> Option<f32> {
+    std::env::var("PM_PANEL_CAPTURE_SCALE").ok()?.parse().ok()
+}
 fn capture_size(w: f32, h: f32) -> (f32, f32) {
     std::env::var("PM_PANEL_CAPTURE_SIZE")
         .ok()
@@ -324,6 +329,9 @@ fn capture_builtin_panels() {
                         })
                     })
                     .unwrap();
+                if let Some(scale) = capture_scale() {
+                    cx.simulate_scale_change(window.into(), scale);
+                }
                 for _ in 0..40 {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -737,6 +745,9 @@ fn capture_agent_states() {
                 );
                 let fill = if panel == "settings" {
                     tokens.colors.panel_secondary
+                } else if std::env::var_os("PM_PANEL_CAPTURE_DOCKED").is_some() {
+                    // A docked panel, on the editor's panel ground.
+                    tokens.colors.panel
                 } else {
                     tokens.colors.floating
                 };
@@ -759,6 +770,9 @@ fn capture_agent_states() {
                         cx.new(|_| Frame { view, fill, timecode: None })
                     })
                     .unwrap();
+                if let Some(scale) = capture_scale() {
+                    cx.simulate_scale_change(window.into(), scale);
+                }
                 for _ in 0..30 {
                     window.update(&mut cx, |_, window, _| window.refresh()).unwrap();
                     cx.run_until_parked();
