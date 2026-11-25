@@ -332,6 +332,8 @@ fn film_panel_build(editor: &Entity<Editor>, args: &Value, cx: &mut App) -> pm_m
     Ok(serde_json::json!({"build_id": id, "event": event, "accepted": true}))
 }
 
+/// A v4 surface mounting on a worker: (id, hash, title) and its result.
+type MountingSurface = (String, String, String, mpsc::Receiver<Result<(), String>>);
 /// The film's model connection: saved, so the agent panel is ready, but
 /// it refuses every request (the film types; it never sends).
 #[derive(Debug)]
@@ -402,7 +404,6 @@ pub struct DemoEditor {
     _actor: KernelActor,
     /// Everything the film writes (library, extensions, runs) lives here
     /// and goes with it.
-    pub profile: std::path::PathBuf,
     _profile: tempfile::TempDir,
     mounting: Vec<(String, pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>)>,
     pub(crate) dock: Option<Rc<Dock>>,
@@ -418,7 +419,7 @@ pub struct DemoEditor {
     /// Mounted extension surfaces: id and the graph hash they run.
     surfaces: HashMap<String, String>,
     /// Surfaces mounting on a worker: (id, hash, title) and the result.
-    mounting_surfaces: Vec<(String, String, String, mpsc::Receiver<Result<(), String>>)>,
+    mounting_surfaces: Vec<MountingSurface>,
     /// The host publication last read, and the timeline chrome last applied.
     seen_revision: Option<u64>,
     chrome: Option<String>,
@@ -456,7 +457,7 @@ impl DemoEditor {
         // change at a time, in order.
         let (script, jobs) =
             std::sync::mpsc::channel::<(Change, std::sync::mpsc::Sender<Result<(), String>>)>();
-        let script_profile = path.clone();
+        let script_profile = path;
         std::thread::Builder::new()
             .name("film-script".into())
             .spawn(move || {
@@ -475,7 +476,6 @@ impl DemoEditor {
             script,
             _automation: automation,
             _actor: actor,
-            profile: path,
             _profile: profile,
             mounting,
             dock: None,
@@ -790,7 +790,7 @@ impl DemoEditor {
                 cx.spawn(async move |cx| {
                     while let Ok(call) = calls.recv().await {
                         let target = target.clone();
-                        let _ = cx.update(|cx| film_surface(call, target, cx));
+                        cx.update(|cx| film_surface(call, target, cx));
                     }
                 })
                 .detach();
@@ -963,13 +963,6 @@ impl FilmDemo {
             asked: HashMap::new(),
             applied: HashMap::new(),
         }
-    }
-    /// Why a change could not be made, if one could not.
-    pub fn failures(&self) -> Vec<(Change, String)> {
-        self.applied
-            .iter()
-            .filter_map(|(c, r)| r.as_ref().err().map(|e| (*c, e.clone())))
-            .collect()
     }
     fn started(&mut self, wait: bool) -> Option<&mut DemoEditor> {
         if let Some(rx) = &self.starting {

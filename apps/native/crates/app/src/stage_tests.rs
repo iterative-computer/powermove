@@ -22,3 +22,11 @@ fn the_engine_draws_every_scene_on_the_stage() {
     let card = frame_at(&mut cx, window, sheet.length() + 1.);
     assert!(mean(&card) > 0.01, "the card's room is lit");
 }
+
+fn mean(image: &image::RgbaImage) -> f32 {
+    let mut sum = 0.;
+    for p in image.pixels() {
+        sum += f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2]);
+    }
+    sum / (image.width() * image.height() * 3) as f32 / 255.
+}

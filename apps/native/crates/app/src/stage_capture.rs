@@ -69,7 +69,7 @@ pub(crate) fn timeline_frame() -> Frame {
     }
 }
 pub(crate) fn headless() -> HeadlessAppContext {
-    let mut cx = HeadlessAppContext::with_platform(
+    let cx = HeadlessAppContext::with_platform(
         Arc::new(
             gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
                 .with_automatic_optical_sizing(),
@@ -135,21 +135,6 @@ pub(crate) fn frame_at(
     cx.run_until_parked();
     cx.capture_screenshot(window.into()).unwrap()
 }
-pub(crate) fn luma(image: &image::RgbaImage, x: f32, y: f32) -> f32 {
-    let p = image.get_pixel(
-        ((x * image.width() as f32) as u32).min(image.width() - 1),
-        ((y * image.height() as f32) as u32).min(image.height() - 1),
-    );
-    (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 255.
-}
-pub(crate) fn mean(image: &image::RgbaImage) -> f32 {
-    let mut sum = 0.;
-    for p in image.pixels() {
-        sum += f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2]);
-    }
-    sum / (image.width() * image.height() * 3) as f32 / 255.
-}
-
 /// Stills of every scene and wave, one recording of the whole run (raw
 /// frames encoded by ffmpeg), and the pictures' costs, into `out`.
 /// `stills_only` leaves out the recording and the timing.

@@ -66,6 +66,10 @@ pub trait Demo {
     /// The film's clock, each frame (the editor's own playhead follows it).
     fn at(&mut self, _t: f64) {}
 }
+/// What runs once the hand-off's lights are up (the stage closes).
+type AfterHandOff = Box<dyn FnOnce(&mut Window, &mut App)>;
+/// The person skipped the film.
+pub type OnSkip = Rc<dyn Fn(&mut App)>;
 /// A sound cue (`cue::Sound::id`) reached.
 pub type OnSound = Rc<dyn Fn(&str, &mut App)>;
 
@@ -91,7 +95,7 @@ struct HandOff {
     start: f64,
     /// The app's first window as drawn, where it sits on the display.
     picture: Option<(Arc<RenderImage>, Bounds<Pixels>)>,
-    done: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
+    done: Option<AfterHandOff>,
 }
 /// How a beat's scene shows the editor.
 enum EditorPicture {
@@ -135,7 +139,7 @@ pub struct Stage {
     on_sound: Option<OnSound>,
     focus: FocusHandle,
     skip: Option<Entity<NativeControl>>,
-    on_skip: Option<Rc<dyn Fn(&mut App)>>,
+    on_skip: Option<OnSkip>,
     hand_off: Option<HandOff>,
 }
 
@@ -190,7 +194,7 @@ impl Stage {
         self.on_sound = Some(sound);
     }
     /// Called when the person skips the film (the card then shows at once).
-    pub fn on_skip(&mut self, skip: Rc<dyn Fn(&mut App)>) {
+    pub fn on_skip(&mut self, skip: OnSkip) {
         self.on_skip = Some(skip);
     }
     /// The film's time: seconds since the stage opened, moved on by Skip.
@@ -345,6 +349,7 @@ impl Stage {
     }
     /// One scene as a picture at `local` seconds into it (the composer is
     /// drawn over it separately: it stays live through every wave).
+    #[allow(clippy::too_many_arguments)]
     fn scene(
         &mut self,
         index: usize,
@@ -575,6 +580,7 @@ impl Stage {
     }
     /// A beat's change: hold the editor as it was, apply the change, and
     /// once it has landed wave from the held picture into the live editor.
+    #[allow(clippy::too_many_arguments)]
     fn beat(
         &mut self,
         change: Change,

@@ -25,17 +25,6 @@ const ROOM_SECONDS: f64 = 26.;
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
 }
-/// Keys sampled from `f` every `step` seconds over `(from, to)`, linear.
-fn sampled(from: f64, to: f64, step: f64, f: impl Fn(f64) -> f64) -> Value {
-    let n = ((to - from) / step).ceil() as usize;
-    let kf: Vec<Value> = (0..=n)
-        .map(|i| {
-            let t = (from + i as f64 * step).min(to);
-            json!({ "t": t, "v": f(t), "i": format!("k{i}"), "inInterp": "linear", "outInterp": "linear" })
-        })
-        .collect();
-    json!({ "v": f(from), "kf": kf, "expr": null })
-}
 fn keys(points: &[(f64, f64)]) -> Value {
     let kf: Vec<Value> = points
         .iter()
@@ -319,10 +308,7 @@ enum Job {
     Draw(Request),
     /// The film's viewer draws this scene with these definitions from now
     /// on (the agent changed the project, or an extension it wrote arrived).
-    Viewer(
-        Scene,
-        Arc<pm_engine_service::resources::ResourceSnapshot>,
-    ),
+    Viewer(Scene, Arc<pm_engine_service::resources::ResourceSnapshot>),
 }
 struct Request {
     what: Picture,
@@ -632,27 +618,27 @@ impl Pictures for EnginePictures {
             .latest
             .as_ref()
             .is_some_and(|(at, _)| (*at - t).abs() < 1e-6);
-        if !current && stream.drawing.is_none() {
-            if let Some(slot) = stream
+        if !current
+            && stream.drawing.is_none()
+            && let Some(slot) = stream
                 .slots
                 .iter()
                 .position(|s| s.free.load(Ordering::Acquire))
-            {
-                stream.slots[slot].free.store(false, Ordering::Release);
-                self.value += 1;
-                stream.drawing = Some((t, slot, self.value));
-                let sent = tx.send(Job::Draw(Request {
-                    what,
-                    t,
-                    target: stream.slots[slot].texture.clone(),
-                    event: event.clone(),
-                    value: self.value,
-                    measure: self.measure,
-                }));
-                if sent.is_err() {
-                    stream.drawing = None;
-                    stream.slots[slot].free.store(true, Ordering::Release);
-                }
+        {
+            stream.slots[slot].free.store(false, Ordering::Release);
+            self.value += 1;
+            stream.drawing = Some((t, slot, self.value));
+            let sent = tx.send(Job::Draw(Request {
+                what,
+                t,
+                target: stream.slots[slot].texture.clone(),
+                event: event.clone(),
+                value: self.value,
+                measure: self.measure,
+            }));
+            if sent.is_err() {
+                stream.drawing = None;
+                stream.slots[slot].free.store(true, Ordering::Release);
             }
         }
         if self.exact.is_some() {
