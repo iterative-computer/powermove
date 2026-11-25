@@ -74,7 +74,7 @@ fn send(
     })
 }
 /// One leaked string per origin ever reached (a handful per person).
-fn origin_static(origin: String) -> &'static str {
+pub(crate) fn origin_static(origin: String) -> &'static str {
     static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut seen = SEEN.lock().unwrap();
     if let Some(found) = seen.iter().find(|o| **o == origin) {

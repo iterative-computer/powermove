@@ -71,11 +71,6 @@ impl AgentLink {
 
     /// Reads who is signed in on workers; the panel updates when they answer.
     pub fn set_environment(self: &Arc<Self>, environment: Environment, open: Arc<Opener>) {
-        if environment.aero.is_some() {
-            // Development sessions use only the in-process fake model.
-            *self.environment.shared() = Some(environment);
-            return;
-        }
         let weak = Arc::downgrade(self);
         let accounts = Accounts::new(
             environment.clone(),
@@ -91,6 +86,7 @@ impl AgentLink {
         *self.accounts.shared() = Some(accounts.clone());
         accounts.refresh(Provider::Chatgpt);
         accounts.refresh(Provider::Claude);
+        accounts.refresh_anthropic();
     }
     pub fn set_notices(&self, sink: Arc<NoticeSink>) {
         *self.notices.shared() = Some(sink);
@@ -192,6 +188,13 @@ impl AgentLink {
             return ("unavailable", reason);
         };
         let status = accounts.status(provider);
+        // Claude Code also runs on the Anthropic key from Settings › Providers.
+        if provider == Provider::Claude
+            && pm_agents::account::claude_key_fallback(&Ok(status.clone()))
+            && accounts.anthropic().masked.is_some()
+        {
+            return ("connected", String::new());
+        }
         let signed_out = || format!("Sign in to {name} in Settings.");
         match status.state {
             State::Checking => ("checking", String::new()),
@@ -239,18 +242,66 @@ impl AgentLink {
         if provider == Provider::Compatible {
             self.compatible_models()
         } else if provider == Provider::Aero && self.available(provider) {
-            vec![pm_agents::account::Model {
-                id: "fake/model".into(),
-                label: "Aero · Fake model".into(),
-                default: true,
+            self.powermove_models()
+        } else {
+            self.accounts().map_or_else(Vec::new, |accounts| {
+                let models = accounts.models(provider);
+                if provider == Provider::Claude
+                    && models.is_empty()
+                    && pm_agents::account::claude_key_fallback(&Ok(accounts.status(provider)))
+                {
+                    accounts.anthropic().models
+                } else {
+                    models
+                }
+            })
+        }
+    }
+    /// What the Powermove harness can run with the signed-in providers
+    /// (Settings › Providers), each id naming its source (`sources::Source`):
+    /// OpenAI by ChatGPT sign-in (Codex's list) or by key (the key's list),
+    /// Anthropic by key, Custom. A Claude plan never runs here.
+    pub fn powermove_models(&self) -> Vec<pm_agents::account::Model> {
+        use pm_agents::sources::Source;
+        let mut out = vec![];
+        let mut add = |source: Source, models: Vec<pm_agents::account::Model>| {
+            out.extend(models.into_iter().map(|mut m| {
+                m.id = format!("{}/{}", source.prefix(), m.id);
+                m.aliases.clear();
+                m.default = false;
+                m.default_effort = m.default_effort.filter(|e| m.efforts.contains(e));
+                m
+            }));
+        };
+        if let Some(accounts) = self.accounts() {
+            let openai = accounts.status(Provider::Chatgpt);
+            if openai.state == State::Connected {
+                if openai.key.is_some() {
+                    add(Source::OpenAiKey, accounts.openai_key_models());
+                } else {
+                    add(Source::ChatGpt, accounts.models(Provider::Chatgpt));
+                }
+            }
+            add(Source::AnthropicKey, accounts.anthropic().models);
+        }
+        add(Source::Custom, self.compatible_models());
+        let fake = self
+            .environment()
+            .is_some_and(|env| env.vars.get("PM_AERO_FAKE_MODEL").is_some_and(|v| v == "1"));
+        if fake {
+            out.push(pm_agents::account::Model {
+                id: pm_agents::sources::FAKE_MODEL.into(),
+                label: "Fake model".into(),
+                default: false,
                 efforts: vec![],
                 aliases: vec![],
                 default_effort: None,
-            }]
-        } else {
-            self.accounts()
-                .map_or_else(Vec::new, |accounts| accounts.models(provider))
+            });
         }
+        if let Some(first) = out.first_mut() {
+            first.default = true;
+        }
+        out
     }
     /// Providers this install can run, and the choices of the given one.
     pub fn catalog(&self, provider: Provider) -> Catalog {
@@ -269,9 +320,14 @@ impl AgentLink {
         }
         drop(environment);
         if aero {
-            providers.push(("aero".into(), "Aero".into()));
-        }
-        if let Some(saved) = self.compatible() {
+            // The harnesses (Powermove | Codex | Claude Code); Custom models run
+            // under Powermove, so the compatible connection is no harness here.
+            providers = vec![
+                ("aero".into(), "Powermove".into()),
+                ("chatgpt".into(), "Codex".into()),
+                ("claude".into(), "Claude Code".into()),
+            ];
+        } else if let Some(saved) = self.compatible() {
             providers.push(("compatible".into(), saved.model));
         }
         let listed = self.model_choices(provider);
@@ -1046,7 +1102,17 @@ fn launch_request(
             )?
         },
         provider: settings.provider,
-        model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
+        // Codex and Claude Code run their own default when none is chosen;
+        // Powermove runs the model its picker shows as the default.
+        model: Some(if settings.provider == Provider::Aero {
+            state.panel.session(thread).map_or_else(
+                |_| settings.model.clone(),
+                |s| s.catalog.resolve(&settings.model).to_owned(),
+            )
+        } else {
+            settings.model.clone()
+        })
+        .filter(|m| !m.is_empty()),
         // The effort the picker shows is the one that runs: with none saved,
         // the model's default, sent by name (Claude Code names none of its own).
         effort: Some(

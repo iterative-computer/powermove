@@ -8,6 +8,10 @@ description = "Aero's agent core: the vendored libfx core (apps/native/vendor/fx
 links = "fx_core"
 build = "build.rs"
 
+[features]
+# Fail the build instead of compiling the stub when the core can't be built (trial builds).
+require-core = []
+
 [dependencies]
 libc = "0.2"
 sha2 = "0.10"

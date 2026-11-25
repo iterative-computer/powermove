@@ -1668,6 +1668,10 @@ impl Builtins {
     ) {
         self.broker.agent.set_environment(environment, open);
     }
+    /// Settings › Providers' accounts (the app's key sheet saves through them).
+    pub fn agent_accounts(&self) -> Option<std::sync::Arc<pm_agents::account::Accounts>> {
+        self.broker.agent.accounts()
+    }
     pub fn set_agent_capture(&self, capture: std::sync::Arc<agent_context::FrameCapture>) {
         self.broker.agent.set_capture(capture);
     }

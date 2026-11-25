@@ -606,11 +606,12 @@ fn an_agent_edit_that_never_ends_is_aborted_whole_at_the_wait_limit() {
 
 /// An in-app agent run: the turn is fenced (`AgentTurn`), each tool call is
 /// its own lease, and the run's steps become one "Agent" step at its end.
-/// During the turn the person's Undo takes back the person's own newest step
-/// (the coedit rule); arriving while a lease applies, it waits for it, and
-/// the agent's steps stay whole.
+/// During the turn the person's Undo takes back the run's steps so far as
+/// one step (PM-718), never one tool call of it; arriving while a lease
+/// applies, it waits for it. The person's own step stays below, and Redo
+/// walks back up exactly.
 #[test]
-fn a_multi_step_agent_turn_keeps_each_edit_whole_around_the_persons_undo() {
+fn a_multi_step_agent_turn_is_one_step_for_the_persons_undo() {
     let mut p = project();
     persons_step(&mut p);
     let mark = match call(&mut p, agent(), HistoryCall::Mark).reply {
@@ -629,13 +630,23 @@ fn a_multi_step_agent_turn_keeps_each_edit_whole_around_the_persons_undo() {
     agent_writes(&mut p, opacity("layer1", 60.0));
     let finished = agent_finishes(&mut p, second);
     assert!(finished_ok(&finished));
-    assert!(matches!(resolved(&finished, ticket), Reply::Applied { .. }));
-    assert_eq!(opacity_of(&p, "layer0"), 100.0, "the person's own step");
+    assert!(matches!(resolved(&finished, ticket), Reply::Bool(true)));
+    assert!(
+        agent_edit_absent(&p),
+        "both tool calls of the run, as one step"
+    );
+    assert_eq!(opacity_of(&p, "layer0"), 40.0, "the person's step stays");
+    assert!(matches!(undo(&mut p), Reply::Bool(true)));
+    assert_eq!(opacity_of(&p, "layer0"), 100.0, "then the person's step");
+    assert!(matches!(redo(&mut p), Reply::Bool(true)));
+    assert_eq!(opacity_of(&p, "layer0"), 40.0);
+    assert!(agent_edit_absent(&p));
+    assert!(matches!(redo(&mut p), Reply::Bool(true)));
     assert_eq!(name_of(&p, "layer0"), "Agent");
-    assert_eq!(opacity_of(&p, "layer1"), 60.0);
+    assert_eq!(opacity_of(&p, "layer1"), 60.0, "the run, whole");
+    assert!(matches!(redo(&mut p), Reply::Bool(false)));
 
-    // The run ends: its steps are squashed before the turn is unfenced, so
-    // no plain Undo can land on one tool call of the run.
+    // The run ends: its steps are squashed before the turn is unfenced.
     let revision = p.store().revision();
     let squashed = call(
         &mut p,
@@ -648,12 +659,48 @@ fn a_multi_step_agent_turn_keeps_each_edit_whole_around_the_persons_undo() {
     );
     assert!(matches!(squashed.reply, Reply::Entry(Some(_))));
     call(&mut p, agent(), HistoryCall::AgentTurn { active: false });
-
-    // The person's "Undo Opacity" is the newest step; then the whole run.
-    assert!(matches!(undo(&mut p), Reply::Bool(true)));
-    assert_eq!(opacity_of(&p, "layer0"), 40.0);
-    assert_eq!(name_of(&p, "layer0"), "Agent");
     assert!(matches!(undo(&mut p), Reply::Bool(true)));
     assert!(agent_edit_absent(&p));
     assert_eq!(opacity_of(&p, "layer0"), 40.0);
+    assert!(matches!(undo(&mut p), Reply::Bool(true)));
+    assert_eq!(opacity_of(&p, "layer0"), 100.0);
+}
+
+/// A run the person took back before it ended is not squashed (its steps
+/// are above the cursor), yet stays one step for Undo and Redo after the
+/// turn, as the acceptance pass saw it: no Undo that redoes.
+#[test]
+fn a_run_undone_before_its_turn_ends_stays_one_step_after_it() {
+    let mut p = project();
+    persons_step(&mut p);
+    let mark = match call(&mut p, agent(), HistoryCall::Mark).reply {
+        Reply::Mark(mark) => mark,
+        other => panic!("{other:?}"),
+    };
+    call(&mut p, agent(), HistoryCall::AgentTurn { active: true });
+    agent_writes(&mut p, rename("layer0", "Agent"));
+    agent_writes(&mut p, opacity("layer1", 50.0));
+    assert!(matches!(undo(&mut p), Reply::Bool(true)));
+    assert!(agent_edit_absent(&p));
+    let revision = p.store().revision();
+    let squashed = call(
+        &mut p,
+        agent(),
+        HistoryCall::SquashSegments {
+            mark,
+            label: "Agent · Edit project".into(),
+            expected_revision: revision,
+        },
+    );
+    assert!(matches!(squashed.reply, Reply::Entry(None)));
+    call(&mut p, agent(), HistoryCall::AgentTurn { active: false });
+    assert!(matches!(undo(&mut p), Reply::Bool(true)));
+    assert_eq!(opacity_of(&p, "layer0"), 100.0, "the person's step, once");
+    assert!(agent_edit_absent(&p));
+    assert!(matches!(undo(&mut p), Reply::Bool(false)));
+    assert!(matches!(redo(&mut p), Reply::Bool(true)));
+    assert_eq!(opacity_of(&p, "layer0"), 40.0);
+    assert!(agent_edit_absent(&p));
+    assert!(matches!(redo(&mut p), Reply::Bool(true)));
+    assert!(agent_edit_applied(&p), "the run, whole");
 }
