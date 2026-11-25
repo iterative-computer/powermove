@@ -314,6 +314,16 @@ fn scenes(room_size: (f64, f64), film: &Value) -> anyhow::Result<HashMap<Picture
 
 // ---------- The worker ----------
 
+/// What the worker is asked: a frame, or the film's project as it is now.
+enum Job {
+    Draw(Request),
+    /// The film's viewer draws this scene with these definitions from now
+    /// on (the agent changed the project, or an extension it wrote arrived).
+    Viewer(
+        Scene,
+        Arc<pm_engine_service::resources::ResourceSnapshot>,
+    ),
+}
 struct Request {
     what: Picture,
     t: f64,
@@ -366,7 +376,7 @@ struct Stream {
 
 /// The engine's pictures for the stage.
 pub struct EnginePictures {
-    tx: Option<mpsc::Sender<Request>>,
+    tx: Option<mpsc::Sender<Job>>,
     rx: mpsc::Receiver<Reply>,
     device: Option<metal::Device>,
     event: Option<metal::Event>,
@@ -390,14 +400,14 @@ impl EnginePictures {
         room: (f64, f64),
         film: Value,
     ) -> Self {
-        let (tx, requests) = mpsc::channel::<Request>();
+        let (tx, requests) = mpsc::channel::<Job>();
         let (replies, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("stage-pictures".into())
             .spawn(move || {
                 let setup = Headless::for_surfaces(fonts, shader_cache)
                     .and_then(|engine| Ok((engine, scenes(room, &film)?)));
-                let (mut engine, scenes) = match setup {
+                let (mut engine, mut scenes) = match setup {
                     Ok(v) => v,
                     Err(error) => {
                         let _ = replies.send(Reply::Failed(format!("{error:#}")));
@@ -405,7 +415,15 @@ impl EnginePictures {
                     }
                 };
                 let _ = replies.send(Reply::Ready(engine.metal_device()));
-                while let Ok(request) = requests.recv() {
+                while let Ok(job) = requests.recv() {
+                    let request = match job {
+                        Job::Draw(request) => request,
+                        Job::Viewer(scene, resources) => {
+                            engine.set_resources(resources);
+                            scenes.insert(Picture::Viewer, scene);
+                            continue;
+                        }
+                    };
                     let started = std::time::Instant::now();
                     let drawn = draw(&mut engine, &scenes, &request);
                     let ms = match (&drawn, request.measure) {
@@ -436,6 +454,31 @@ impl EnginePictures {
             measure: false,
             measured: Vec::new(),
             failed: None,
+        }
+    }
+    /// The film's viewer pictures `project` (a kernel snapshot of the film's
+    /// project) with `resources` (what its extensions contribute) from the
+    /// next frame on.
+    pub fn set_viewer(
+        &mut self,
+        project: &pm_kernel::Published,
+        resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
+    ) {
+        let Some(comp) = project.snapshot.open_comp() else {
+            return;
+        };
+        let scene = Scene {
+            doc: project.snapshot.document.clone(),
+            comp,
+            media: Default::default(),
+            content: project.snapshot.doc_id,
+        };
+        if let Some(tx) = &self.tx
+            && tx.send(Job::Viewer(scene, resources)).is_ok()
+            && let Some(stream) = self.streams.get_mut(&Picture::Viewer)
+        {
+            // The frame held is the old project's: the next ask draws again.
+            stream.latest = stream.latest.take().map(|(_, texture)| (f64::NAN, texture));
         }
     }
     /// Why the engine could not draw the stage, if it could not.
@@ -598,14 +641,14 @@ impl Pictures for EnginePictures {
                 stream.slots[slot].free.store(false, Ordering::Release);
                 self.value += 1;
                 stream.drawing = Some((t, slot, self.value));
-                let sent = tx.send(Request {
+                let sent = tx.send(Job::Draw(Request {
                     what,
                     t,
                     target: stream.slots[slot].texture.clone(),
                     event: event.clone(),
                     value: self.value,
                     measure: self.measure,
-                });
+                }));
                 if sent.is_err() {
                     stream.drawing = None;
                     stream.slots[slot].free.store(true, Ordering::Release);

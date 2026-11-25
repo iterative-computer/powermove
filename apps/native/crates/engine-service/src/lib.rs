@@ -4607,6 +4607,11 @@ impl Headless {
     pub fn metal_device(&self) -> metal::Device {
         self.engine.metal().to_owned()
     }
+    /// The extension definitions (effects, transitions, layers) the next
+    /// frames draw with, as a viewer's are pinned.
+    pub fn set_resources(&mut self, resources: Arc<resources::ResourceSnapshot>) {
+        self.engine.set_resources(resources);
+    }
     /// One frame drawn for a GPUI surface: the picture, converted on the
     /// engine's queue to display-encoded sRGB in `target` (BGRA8, the
     /// output's size, on [`Self::metal_device`]), then `event` signalled at
