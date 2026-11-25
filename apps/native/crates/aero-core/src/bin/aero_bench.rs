@@ -10,7 +10,15 @@
 //!
 //! Run it release-built, off the main thread's way (it runs on a worker
 //! thread of its own): `cargo run --release -p pm-aero-core --bin aero_bench
-//! -- [--samples N] [--out report.json]`.
+//! -- [--samples N] [--out report.json] [--resume-journal journal.json]`.
+//!
+//! Resume is measured on one fixed journal, the one fx's restore is measured
+//! on too (`tools/fx-resume-bench.mjs`): with `--resume-journal` the file is
+//! read if it exists and written (200 text turns and a tool turn) if not.
+//! The report names its sha256, which the checker matches against the
+//! baseline's and fx's. The close row's instruction count includes the
+//! core's shutdown spin and swings with scheduling (0.65-0.74 M on loaded
+//! reruns against 0.40 M quiet): record a baseline on a quiet machine only.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -394,7 +402,7 @@ impl Session {
 // The rows
 // ---------------------------------------------------------------------------
 
-fn run(samples: usize) -> String {
+fn run(samples: usize, resume_journal: Option<std::path::PathBuf>) -> String {
     let warm = (samples / 10).max(5);
     let tools = tools();
 
@@ -428,7 +436,7 @@ fn run(samples: usize) -> String {
     };
     let mut close_row = Row {
         id: "close",
-        what: "Runtime::close (teardown, thread joined, fd closed)",
+        what: "Runtime::close (teardown, thread joined, fd closed). Note: its instruction count includes the core's shutdown spin and swings with scheduling (0.65-0.74 M on Sol's loaded reruns, 0.40 M quiet), so record the baseline on a quiet machine only",
         samples: Samples::default(),
         p50_ms: 0.1,
         p90_ms: None,
@@ -581,47 +589,23 @@ fn run(samples: usize) -> String {
     warm_session.runtime.close();
 
     // Resume from a 200-turn journal (fx's bench-durable --history 200: 200
-    // text turns, then one tool turn), opened without a checkpoint.
-    let mut source = session(&tools, true);
-    source.open();
-    for index in 0..200 {
-        source.text_turn(&format!("h-{index}"));
-    }
-    source
-        .runtime
-        .prompt("use a tool", "h-tool")
-        .expect("prompt");
-    let fetch = source.model_fetch();
-    source.reply(fetch, SSE_TOOL);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let lease = loop {
-        if let Ok((lease, _, _)) = source.leases.try_recv() {
-            break lease;
+    // text turns, then one tool turn), opened without a checkpoint: the
+    // fixed journal file when there is one, so fx is measured on the same.
+    let fixed = resume_journal
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let journal = match fixed {
+        Some(journal) => journal,
+        None => {
+            let journal = resume_source(&tools);
+            if let Some(path) = &resume_journal {
+                std::fs::write(path, &journal).expect("write the resume journal");
+            }
+            journal
         }
-        source.pump(1);
-        assert!(Instant::now() < deadline, "no tool call");
     };
-    lease.answer("found", false).expect("answer");
-    let fetch = source.model_fetch();
-    source.reply(fetch, &format!("{SSE_DELTA}{SSE_FINISH}"));
-    source.until(|f| f.turn_end);
-    for _ in 0..10 {
-        source.pump(10);
-    }
-    let parts: Vec<&str> = source
-        .stored
-        .iter()
-        .filter_map(|events| {
-            events
-                .trim()
-                .strip_prefix('[')
-                .and_then(|rest| rest.strip_suffix(']'))
-        })
-        .filter(|inner| !inner.trim().is_empty())
-        .collect();
-    let journal = format!("[{}]", parts.join(","));
+    let journal_sha256 = pm_aero_core::image_name(journal.as_bytes());
     let journal_bytes = journal.len();
-    source.runtime.close();
     let mut resume_row = Row {
         id: "resume_200",
         what: "fx_runtime_create + fx_session_open from a 200-turn journal to SESSION_OPENED",
@@ -629,7 +613,7 @@ fn run(samples: usize) -> String {
         p50_ms: 0.0,
         p90_ms: None,
         p99_ms: None,
-        fx: "measured: bench-durable --history 200 journal_restore_create_ms",
+        fx: "tools/fx-resume-bench.mjs on the same journal (resume_journal_sha256): journal_restore_create_ms",
     };
     for index in 0..(samples / 4).max(10) + 3 {
         let started = Instant::now();
@@ -672,11 +656,56 @@ fn run(samples: usize) -> String {
     ];
     let body: Vec<String> = rows.iter().map(Row::json).collect();
     format!(
-        "{{\"schema\":1,\"samples\":{samples},\"rows\":{{{}}},\"copies\":{{\"rust_allocations_per_text_delta\":{:.3},\"rust_allocations_per_tool_answer\":{:.3},\"tool_input\":\"borrowed from the core (ToolLease::input_ptr; tests/tools.rs)\",\"tool_result\":\"one copy, into the core (fx_tool_result)\"}},\"memory\":{{\"resident_per_session_idle_bytes\":{idle},\"resident_per_session_after_prompt_bytes\":{prompted},\"budget_idle_bytes\":358400,\"budget_after_prompt_bytes\":819200}},\"threads\":{{\"before\":{threads_before},\"after_close\":{threads_after}}},\"resume_journal_bytes\":{journal_bytes}}}",
+        "{{\"schema\":1,\"samples\":{samples},\"rows\":{{{}}},\"copies\":{{\"rust_allocations_per_text_delta\":{:.3},\"rust_allocations_per_tool_answer\":{:.3},\"tool_input\":\"borrowed from the core (ToolLease::input_ptr; tests/tools.rs)\",\"tool_result\":\"one copy, into the core (fx_tool_result)\"}},\"memory\":{{\"resident_per_session_idle_bytes\":{idle},\"resident_per_session_after_prompt_bytes\":{prompted},\"budget_idle_bytes\":358400,\"budget_after_prompt_bytes\":819200}},\"threads\":{{\"before\":{threads_before},\"after_close\":{threads_after}}},\"resume_journal_bytes\":{journal_bytes},\"resume_journal_sha256\":\"{journal_sha256}\"}}",
         body.join(","),
         delta_allocations as f64 / deltas.max(1) as f64,
         answer_allocations as f64 / samples.max(1) as f64,
     )
+}
+
+/// A 200-turn journal (200 text turns, then one tool turn), as fx's
+/// bench-durable --history 200 builds one.
+fn resume_source(tools: &[Tool<'static>]) -> String {
+    let mut source = session(tools, true);
+    source.open();
+    for index in 0..200 {
+        source.text_turn(&format!("h-{index}"));
+    }
+    source
+        .runtime
+        .prompt("use a tool", "h-tool")
+        .expect("prompt");
+    let fetch = source.model_fetch();
+    source.reply(fetch, SSE_TOOL);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let lease = loop {
+        if let Ok((lease, _, _)) = source.leases.try_recv() {
+            break lease;
+        }
+        source.pump(1);
+        assert!(Instant::now() < deadline, "no tool call");
+    };
+    lease.answer("found", false).expect("answer");
+    let fetch = source.model_fetch();
+    source.reply(fetch, &format!("{SSE_DELTA}{SSE_FINISH}"));
+    source.until(|f| f.turn_end);
+    for _ in 0..10 {
+        source.pump(10);
+    }
+    let parts: Vec<&str> = source
+        .stored
+        .iter()
+        .filter_map(|events| {
+            events
+                .trim()
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+        })
+        .filter(|inner| !inner.trim().is_empty())
+        .collect();
+    let journal = format!("[{}]", parts.join(","));
+    source.runtime.close();
+    journal
 }
 
 fn main() {
@@ -686,6 +715,7 @@ fn main() {
     }
     let mut samples = 200usize;
     let mut out: Option<String> = None;
+    let mut resume_journal: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -696,11 +726,16 @@ fn main() {
                     .expect("--samples N")
             }
             "--out" => out = args.next(),
+            "--resume-journal" => {
+                resume_journal = Some(std::path::PathBuf::from(
+                    args.next().expect("--resume-journal PATH"),
+                ))
+            }
             other => panic!("unknown argument {other}"),
         }
     }
     // The core is never called on the main thread.
-    let report = std::thread::spawn(move || run(samples))
+    let report = std::thread::spawn(move || run(samples, resume_journal))
         .join()
         .expect("bench thread");
     match out {
