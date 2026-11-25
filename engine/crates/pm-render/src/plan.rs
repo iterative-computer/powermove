@@ -968,6 +968,7 @@ pub(crate) fn comp_pass<'d>(
         b.assets,
         b.options3d.view.as_ref(),
         b.precomp_depth == 0,
+        b.material.is_none(),
     ) {
         Ok((ordered, ctx)) => {
             b.pass3d.push(ctx);
@@ -1029,6 +1030,11 @@ pub(crate) fn comp_pass<'d>(
         && b.matte_depth == 0;
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
+        // Outside its span a regular layer cannot draw. Avoid collecting
+        // its render dependencies just to let draw_layer reject it.
+        if b.material.is_none() && pm_eval::evaluator::outside_layer_span(layer, time) {
+            continue;
+        }
         let id = node::get(layer, b"id").to_js();
         if facts.matte_sources.contains(&id) {
             continue;

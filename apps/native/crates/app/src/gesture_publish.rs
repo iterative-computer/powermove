@@ -111,6 +111,104 @@ mod tests {
     use serde_json::Value;
     use std::time::{Duration, Instant};
 
+    mod drag_fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn layer_drag_profile_panel_workers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = drag_fixture::open(temp.path().join("journals"));
+        let mut panels = Builtins::new(kernel.clone(), drag_fixture::PROJECT, || {}).unwrap();
+        for id in ["inspector", "layer-effects"] {
+            finish(panels.mount(id).unwrap());
+        }
+        panels.update_facts(serde_json::json!({"time": drag_fixture::TIME}));
+
+        // Anchor Point runs on the separate compatibility worker. A local
+        // profile copies its code and adds a completion marker to its panel
+        // listener. The marker is stored only in the temporary kernel.
+        let anchor = std::env::var_os("PM_PROFILE_ANCHOR_POINT").map(|installed| {
+            use pm_compat_runner::host::{ExtensionHost, HostConfig, settle_document};
+            let installed = std::path::PathBuf::from(installed);
+            let roots = temp.path().join("extensions");
+            let copied = roots.join("anchor-point");
+            std::fs::create_dir_all(&copied).unwrap();
+            std::fs::copy(installed.join("manifest.json"), copied.join("manifest.json")).unwrap();
+            let source = std::fs::read_to_string(installed.join("index.ts")).unwrap();
+            let instrumented = source
+                .replacen("const listeners=[", "let dragProbe = 0; api.storage.set('dragProbe', dragProbe); const listeners=[", 1)
+                .replacen("api.on('project:changed',update)",
+                    "api.on('project:changed',()=>{update(); api.storage.set('dragProbe', ++dragProbe)})", 1);
+            assert_ne!(source, instrumented, "Anchor Point source changed");
+            std::fs::write(copied.join("index.ts"), instrumented).unwrap();
+            let host = ExtensionHost::start(HostConfig {
+                kernel: kernel.clone(),
+                project: drag_fixture::PROJECT.into(),
+                roots: vec![roots],
+                cache: temp.path().join("extension-cache"),
+                owner: None,
+                text: None,
+                frames: None,
+                rasters: None,
+                vars: None,
+                clipboard: None,
+                wake: std::sync::Arc::new(|| {}),
+            });
+            let initial = kernel.published(drag_fixture::PROJECT).unwrap();
+            settle_document(initial.snapshot.doc_id, Duration::from_secs(20), &|| false)
+                .unwrap().expect("Anchor Point host");
+            host.set_window_shown(true);
+            host.set_viewport(1280., 720., 1.);
+            host.set_panel("anchor-point", true);
+            host.place_panel("anchor-point", Some([0., 0., 220., 300.]));
+            wait_for_anchor_turn(&kernel, &host, 0);
+            host
+        });
+
+        let mut builtins = Vec::new();
+        let mut legacy = Vec::new();
+        drag_fixture::drag(&kernel, |_| {
+            let start = Instant::now();
+            let (tickets, _) = panels.publish_live(|id| matches!(id, "inspector" | "layer-effects"));
+            let dispatched = start.elapsed().as_secs_f64() * 1000.;
+            let after_dispatch = Instant::now();
+            if let Some(anchor) = &anchor {
+                wait_for_anchor_turn(&kernel, anchor, legacy.len() as u64 + 1);
+                legacy.push([start.elapsed().as_secs_f64() * 1000.]);
+            }
+            for (_, ticket) in tickets {
+                finish(ticket.unwrap());
+            }
+            builtins.push([dispatched, after_dispatch.elapsed().as_secs_f64() * 1000.]);
+        });
+        drag_fixture::report(["V8 dispatch", "V8 panel worker round trip"], &builtins);
+        if anchor.is_some() {
+            drag_fixture::report(["Anchor Point compatibility worker, concurrent with V8"], &legacy);
+        }
+        drag_fixture::assert_budget(&builtins, [0]);
+        panels.close();
+    }
+
+    fn wait_for_anchor_turn(
+        kernel: &KernelHandle,
+        host: &pm_compat_runner::host::ExtensionHost,
+        turn: u64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let storage = pm_compat_runner::adapter::storage_of(kernel);
+            if storage.as_object().unwrap().iter().any(|(key, value)| {
+                key.ends_with(".dragProbe") && value.as_u64().is_some_and(|value| value >= turn)
+                    || value["dragProbe"].as_u64().is_some_and(|value| value >= turn)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Anchor Point missed turn {turn}: {:?}", host.records());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     const PROJECT: &str = "n2";
     /// Mounted for these tests: a relevant panel shown, a relevant panel
     /// hidden, an unrelated panel shown and an unrelated panel hidden.

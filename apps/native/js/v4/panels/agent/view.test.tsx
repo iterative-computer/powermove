@@ -326,7 +326,7 @@ test("provider and model share one menu; effort and access have their own; picks
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
+  const picks = ["model:gpt-6-mini", null, "low", "auto"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -356,7 +356,6 @@ test("provider and model share one menu; effort and access have their own; picks
     ["High", true],
   ]);
   expect(actions).toEqual([
-    { type: "setProvider", provider: "claude" },
     { type: "setModel", model: "gpt-6-mini", effort: "high" },
     { type: "setModel", model: "gpt-6", effort: "low" },
     { type: "setAccess", access: "auto" },
@@ -426,7 +425,7 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6.1-Sol");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  const models = asked[0]!.filter((o) => o.category === "ChatGPT");
+  const models = asked[0]!.filter((o) => o.category === "ChatGPT" && !o.stays);
   expect(models.map((o) => [o.label, o.checked])).toEqual([
     ["GPT-6.1-Sol", true],
     ["GPT-6-Astra", false],
@@ -439,64 +438,30 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, ChatGPT");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  expect(asked[1]!.filter((o) => o.category === "ChatGPT")).toEqual([]);
+  expect(asked[1]!).toEqual([
+    { label: "ChatGPT", category: "ChatGPT", provider: "chatgpt", value: "", stays: true, checked: true, detail: "No models available" },
+  ]);
   expect(asked.flat().some((o) => /^Default/.test(o.label))).toBe(false);
   root.dispose();
 });
-test("a provider pick keeps the model menu open and lists that provider's models in it", async () => {
+test("an empty inactive provider offers switching inside its section", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
-  p.snapshot.catalog = {
-    models: [["gpt-6", "GPT-6"]],
-    providers: [
-      ["chatgpt", "ChatGPT"],
-      ["claude", "Claude"],
-    ],
-    efforts: [],
-  };
-  p.snapshot.settings.model = "gpt-6";
+  p.snapshot.catalog.providers.push(["claude", "Claude"]);
   const requests: Parameters<Menu>[0][] = [];
-  const answers = ["provider:claude", "model:sonnet"];
-  const menu: Menu = async (r) => {
-    requests.push(r);
-    return answers.shift() ?? null;
+  const menu: Menu = async (request) => {
+    requests.push(request);
+    return "provider:claude";
   };
-  const send = (a: Action) => actions.push(a);
-  await root.render(<AgentView publication={p} menu={menu} send={send} />);
+  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
   await root.drive(byId(root, "agent-model").id, "click");
-  await Promise.resolve();
-  // Provider rows keep the menu up; model rows close it.
-  const first = requests[0]!.options;
-  expect(first.find((o) => o.value === "provider:claude")?.stays).toBe(true);
-  expect(first.find((o) => o.value === "model:gpt-6")?.stays).toBeUndefined();
-  expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
-  // The switch publishes Claude's models: they go to the same open menu,
-  // its default ticked, and a model pick there runs.
-  const q = structuredClone(p);
-  q.snapshot.settings.provider = "claude";
-  q.snapshot.settings.model = "opus";
-  q.snapshot.catalog.models = [
-    ["opus", "Opus 5.5"],
-    ["sonnet", "Sonnet 5.5"],
-  ];
-  await root.render(<AgentView publication={q} menu={menu} send={send} />);
-  for (let i = 0; i < 4; i++) await Promise.resolve();
-  expect(requests.length).toBe(2);
-  expect(requests[1]!.update).toBe(true);
-  expect(
-    requests[1]!.options
-      .filter((o) => o.category === "Claude")
-      .map((o) => [o.label, o.checked]),
-  ).toEqual([
-    ["Opus 5.5", true],
-    ["Sonnet 5.5", false],
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.options.filter((option) => option.provider === "claude")).toEqual([
+    { label: "Claude", category: "Claude", provider: "claude", value: "", stays: true, checked: false, detail: "No models available" },
+    { label: "Switch to Claude", category: "Claude", provider: "claude", value: "provider:claude" },
   ]);
-  expect(actions.at(-1)).toEqual({
-    type: "setModel",
-    model: "sonnet",
-    effort: q.snapshot.settings.effort,
-  });
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
   root.dispose();
 });
 test("Claude discovery updates the already-open picker without reopening it", async () => {
@@ -505,7 +470,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
   p.snapshot.catalog.providers = [
     ["chatgpt", "ChatGPT"],
     ["claude", "Claude"],
-    ["compatible", "Connected model"],
+    ["compatible", "OpenAI-compatible"],
   ];
   p.snapshot.settings.provider = "claude";
   p.snapshot.settings.model = "opus";
@@ -525,25 +490,23 @@ test("Claude discovery updates the already-open picker without reopening it", as
   const send = (action: Action) => actions.push(action);
   await root.render(<AgentView publication={p} menu={menu} send={send} />);
   await root.drive(byId(root, "agent-model").id, "click");
-  expect(
-    requests[0]!.options
-      .filter((o) => o.category === "Claude")
-      .map((o) => [o.label, o.informational]),
-  ).toEqual([
-    ["Opus 5.5", undefined],
-    ["Finding models…", true],
-  ]);
+  const headings = (request: Parameters<Menu>[0]) => request.options
+    .filter((row) => row.stays)
+    .map(({ provider, category, checked }) => ({ provider, category, checked }));
+  const claudeHeading = (request: Parameters<Menu>[0]) =>
+    request.options.find((row) => row.provider === "claude" && row.stays);
+  expect(claudeHeading(requests[0]!)?.detail).toBe("Finding models…");
 
-  // A failed discovery does not change the catalog, but removes its notice.
+  // A failed discovery leaves the single-model section in place.
   const failed = structuredClone(p);
   failed.native.findingModels = false;
   await root.render(<AgentView publication={failed} menu={menu} send={send} />);
   expect(requests).toHaveLength(2);
   expect(requests[1]!.refresh).toBe(true);
-  expect(requests[1]!.options.some((o) => o.informational)).toBe(false);
+  expect(claudeHeading(requests[1]!)?.detail).toBeUndefined();
   await root.render(<AgentView publication={p} menu={menu} send={send} />);
   expect(requests).toHaveLength(3);
-  expect(requests[2]!.options.some((o) => o.informational)).toBe(true);
+  expect(claudeHeading(requests[2]!)?.detail).toBe("Finding models…");
 
   const discovered = structuredClone(p);
   discovered.snapshot.catalog.models.push(
@@ -555,11 +518,16 @@ test("Claude discovery updates the already-open picker without reopening it", as
     <AgentView publication={discovered} menu={menu} send={send} />,
   );
   expect(requests).toHaveLength(4);
-  expect(requests[3]!.update).toBe(true);
   expect(requests[3]!.refresh).toBe(true);
+  for (const request of requests.slice(1)) {
+    expect(request.anchor).toBe(requests[0]!.anchor);
+    expect(headings(request)).toEqual(headings(requests[0]!));
+  }
+  expect(claudeHeading(requests[3]!)?.detail).toBeUndefined();
+  expect(actions).toEqual([]);
   expect(
     requests[3]!.options
-      .filter((o) => o.category === "Claude")
+      .filter((o) => o.provider === "claude" && !o.stays)
       .map((o) => [o.label, o.checked]),
   ).toEqual([
     ["Opus 5.5", true],
@@ -608,39 +576,49 @@ test("composer pickers use the pressed anchor and enable search only for a long 
   }
   root.dispose();
 });
-test("model menu groups discovered choices by provider and switches directly to a model", async () => {
+test("model menu keeps empty, single-model and long catalogs under provider disclosures", async () => {
   const { root } = mount();
   const p = fixture();
   p.snapshot.settings.model = "gpt-6.2-sol";
   p.snapshot.catalog.models = [["gpt-6.2-sol", "GPT-6.2 Sol"]];
   p.snapshot.catalog.providers = [
-    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "gpt-6-astra"],
+    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "OpenRouter"],
   ];
+  // The native snapshot can still include the configured model's name.
+  Object.assign(p.native, { connectedModelName: "GPT-6 Astra" });
   p.native.modelGroups = {
     chatgpt: [["gpt-6.2-sol", "GPT-6.2 Sol", true]],
-    claude: [["opus", "Opus 5.5", true], ["sonnet", "Sonnet 5.5", false]],
-    compatible: [["gpt-6-astra", "gpt-6-astra", true]],
+    claude: [],
+    compatible: Array.from({ length: 22 }, (_, i) => [
+      i === 0 ? "gpt-6-astra" : `model-${i}`,
+      i === 0 ? "GPT-6 Astra" : `Model ${i}`,
+      i === 0,
+    ]),
   };
-  p.native.connectedModelName = "GPT-6 Astra";
   const actions: Action[] = [];
   const requests: Parameters<Menu>[0][] = [];
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} menu={async (request) => {
     requests.push(request);
-    return "other:claude:sonnet";
+    return "other:compatible:gpt-6-astra";
   }} />);
   const model = byId(root, "agent-model");
   await root.drive(model.id, "keydown", { key: "Enter" });
-  expect(requests[0]!.options.map(({ label, category, checked, default: isDefault }) =>
-    [category, label, checked, isDefault ?? false],
-  )).toEqual([
-    ["ChatGPT", "GPT-6.2 Sol", true, true],
-    ["Claude", "Opus 5.5", false, true],
-    ["Claude", "Sonnet 5.5", false, false],
-    ["GPT-6 Astra", "gpt-6-astra", false, true],
+  const request = requests[0]!;
+  expect(request.options.some((row) => row.label === "Use Claude")).toBe(false);
+  expect(request.options.filter((row) => row.stays)).toEqual([
+    { category: "ChatGPT", label: "ChatGPT", provider: "chatgpt", value: "", stays: true, checked: true },
+    { category: "Claude", label: "Claude", provider: "claude", value: "", stays: true, checked: false, detail: "No models available" },
+    { category: "OpenRouter", label: "OpenRouter", provider: "compatible", value: "", stays: true, checked: false },
   ]);
-  expect(actions).toEqual([{ type: "setProvider", provider: "claude", model: "sonnet" }]);
+  expect(request.options.find((row) => row.label === "GPT-6 Astra")).toMatchObject({
+    category: "OpenRouter", provider: "compatible", value: "other:compatible:gpt-6-astra", default: true,
+  });
+  expect(request.options.filter((row) => row.value.startsWith("other:compatible:"))).toHaveLength(22);
+  expect(request.search).toBe(true);
+  expect(actions).toEqual([{ type: "setProvider", provider: "compatible", model: "gpt-6-astra" }]);
   await root.drive(model.id, "keydown", { key: " " });
   expect(requests).toHaveLength(2);
+  expect(requests[1]!.options).toEqual(request.options);
   root.dispose();
 });
 test("suggestions read as buttons: a raised fill with a hairline edge, the label in body text", async () => {

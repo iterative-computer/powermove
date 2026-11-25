@@ -3944,3 +3944,36 @@ fn trim_row(path: &str) -> Option<(String, &'static str, &'static str)> {
     };
     Some((format!("trim.{pid}.{param}"), label, unit))
 }
+
+#[cfg(test)]
+mod layer_drag_profile {
+    use super::*;
+    use std::time::Instant;
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn profile_639_layer_properties_snapshot() {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let mut props = Properties::default();
+        let mut model = Inspector::new(
+            kernel.published(fixture::PROJECT).unwrap(),
+            Default::default(),
+        );
+        let _ = props.snapshot(&mut model, fixture::TIME, false).unwrap();
+        let mut samples = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            model.sync(p);
+            let sync = start.elapsed();
+            let start = Instant::now();
+            std::hint::black_box(props.snapshot(&mut model, fixture::TIME, false).unwrap());
+            samples.push([sync, start.elapsed()].map(|d| d.as_secs_f64() * 1000.));
+        });
+        fixture::report(["Inspector sync", "Properties snapshot"], &samples);
+        fixture::assert_budget(&samples, [0, 1]);
+    }
+}

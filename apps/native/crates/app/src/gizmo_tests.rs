@@ -21,6 +21,7 @@ use std::{
 #[derive(Default)]
 struct Recorder {
     canvas_focuses: Cell<usize>,
+    studio_view: Cell<Option<pm_engine_service::studio::FreeView>>,
     lines: RefCell<Vec<OverlayLine>>,
     /// The marks sent with them (handles, knob, anchor rings, keyline).
     marks: RefCell<Vec<crate::gizmo_layer::Mark>>,
@@ -205,7 +206,8 @@ impl Host for Recording {
     fn focus_part(&self, layer: &str, slot: Option<u64>, _: &mut App) {
         self.0.parts.borrow_mut().push((layer.into(), slot));
     }
-    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        self.0.studio_view.set(view);
         if let Some(owner) = self.0.lease.borrow().as_ref() {
             owner.read(cx);
         }
@@ -3340,6 +3342,105 @@ fn studio_view_commands_run_after_the_controller_update(cx: &mut TestAppContext)
     assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
     assert!(!capture.get());
     assert_eq!(s.recorder.canvas_focuses.get(), 1);
+}
+
+#[gpui::test]
+fn fly_from_2d_in_a_grouped_composition_without_a_camera(cx: &mut TestAppContext) {
+    let project = r#"{
+        "id":"c","name":"Do anything","w":640,"h":360,"fps":30,"dur":5,
+        "layers":[
+            {"id":"card","type":"group","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"child","group":"card","type":"shape","from":0,"dur":2,"on":true,"p":{},"d":{"w":120,"h":80},"fx":[]},
+            {"id":"caption","group":"card","type":"text","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"light-control","type":"null","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"wash","type":"adjustment","from":0,"dur":5,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"l0","type":"solid","from":0,"dur":5,"on":true,"p":{},"d":{"w":640,"h":360},"fx":[]}
+        ]
+    }"#;
+    let mut s = stage_on(cx, project);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let root = published.snapshot.root().unwrap();
+    let rows = pm_kernel::model::list_layers(root, published.snapshot.open_comp().as_deref());
+    assert!(
+        !crate::session::project_disabled_commands(Some(&published), &rows).contains("studio.view"),
+        "Fly Navigation must be available in the menu and command palette"
+    );
+    let active_scene = pm_panel_studio3d::viewport::scene(&published, 0.5).unwrap();
+    assert!(!active_scene.has_camera);
+    assert!(active_scene.items.iter().any(|item| item.id == "light-control"));
+    let empty_scene = pm_panel_studio3d::viewport::scene(&published, 3.).unwrap();
+    assert!(!empty_scene.has_camera);
+    assert!(empty_scene.items.is_empty());
+
+    let binding = pm_shell::keyboard::shipped()
+        .into_iter()
+        .find(|binding| binding.id == "native.fly")
+        .unwrap();
+    assert_eq!(binding.chord, "shift+`");
+    assert_eq!(binding.command, "studio.view");
+    let group = binding.args[0].as_str().unwrap();
+    let value = binding.args[1].as_str().unwrap();
+
+    let capture = Rc::new(Cell::new(false));
+    let input = gpui::VisualContext::new_window_entity(&mut s.vcx, |_, _| ());
+    let start_fly = |s: &mut Stage| {
+        input.update_in(&mut s.vcx, |_, window, cx| {
+            assert!(s.surface.read(cx).studio_takes_key(group, false, window));
+            crate::session::defer_studio_view(
+                s.surface.clone(),
+                group.into(),
+                value.into(),
+                capture.clone(),
+                || {},
+                window,
+                cx,
+            );
+        });
+        assert!(capture.get());
+        assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    };
+    let ui_is = |flying: &str, look: &str, s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let viewer = &p.ui_state.viewer;
+        viewer.get("studioFly").and_then(pm_model::Value::as_str) == Some(flying)
+            && viewer.get("studioLook").and_then(pm_model::Value::as_str) == Some(look)
+    };
+
+    for time in [3., 0.5] {
+        s.recorder.time.set(Some(time));
+        s.refresh(cx);
+        assert!(s.recorder.studio_view.get().is_none());
+        assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+        start_fly(&mut s);
+        settle(cx, |_| ui_is("on", "free", &s));
+
+        let initial = s.recorder.studio_view.get().unwrap();
+        let end = s.surface.update(&mut s.vcx, |g, cx| {
+            g.studio_fly_pointer(point(px(100.), px(100.)), cx);
+            g.studio_fly_pointer(point(px(110.), px(100.)), cx);
+            assert_ne!(s.recorder.studio_view.get().unwrap().target, initial.target);
+            g.studio_fly_advance(2., 0.5, cx);
+            g.studio_free_pose().unwrap()
+        });
+        let pushed = s.recorder.studio_view.get().unwrap();
+        assert_ne!(end.position, initial.eye);
+        assert_eq!(pushed.eye, end.position);
+        assert_eq!(pushed.target, end.target);
+
+        let keep = time == 0.5;
+        s.vcx.simulate_keystrokes(if keep { "enter" } else { "escape" });
+        assert!(!capture.get());
+        settle(cx, |_| ui_is("off", if keep { "free" } else { "camera" }, &s));
+        if keep {
+            assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose()), Some(end));
+            assert_eq!(s.recorder.studio_view.get(), Some(pushed));
+        } else {
+            assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+            assert!(s.recorder.studio_view.get().is_none());
+        }
+    }
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().revision(), published.revision());
+    assert!(s.recorder.reports.borrow().is_empty());
 }
 
 #[gpui::test]

@@ -641,6 +641,40 @@ impl<'d> Scope<'_, 'd> {
         layers: &[&'d Node],
         time: f64,
     ) -> JsResult<Vec<&'d Node>> {
+        self.depth_ordered_layers_inner(layers, time, false)
+    }
+
+    /// Renderer-only ordering. When no plane can draw, the matrices and
+    /// order of those planes do not affect the picture. Retain their slots
+    /// and use full ordering for a pass containing any potentially active plane.
+    pub fn depth_ordered_draw_layers(
+        &mut self,
+        layers: &[&'d Node],
+        time: f64,
+    ) -> JsResult<Vec<&'d Node>> {
+        self.depth_ordered_layers_inner(layers, time, true)
+    }
+
+    fn depth_ordered_layers_inner(
+        &mut self,
+        layers: &[&'d Node],
+        time: f64,
+        skip_inactive: bool,
+    ) -> JsResult<Vec<&'d Node>> {
+        if skip_inactive {
+            // Most planes on a large timeline may be out of time. Check
+            // the span before walking their group ancestry, too.
+            let mut active_plane = false;
+            for &layer in layers {
+                if !crate::evaluator::outside_layer_span(layer, time) && self.is_3d_layer(layer)? {
+                    active_plane = true;
+                    break;
+                }
+            }
+            if !active_plane {
+                return Ok(layers.to_vec());
+            }
+        }
         let mut flags = Vec::with_capacity(layers.len());
         for l in layers {
             flags.push(self.is_3d_layer(l)?);
@@ -1007,6 +1041,26 @@ mod tests {
         scope.view_camera = Some(camera);
         let behind = scope.plane_matrix(a, 0., false).unwrap();
         assert!(behind[8] < 0.);
+    }
+
+    #[test]
+    fn the_renderer_keeps_depth_sorting_for_a_pass_with_an_active_plane() {
+        let root = root(serde_json::json!([
+            {"id":"a","type":"shape","threeD":true,"from":0,"dur":1,"p":{}},
+            {"id":"b","type":"shape","threeD":true,"from":0,"dur":3,
+                "p":{"position.z":{"v":-100}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let [a, b] = [&comp.layers()[0], &comp.layers()[1]];
+        let pass = [a, b];
+        // At two seconds one plane still draws and needs the original order.
+        let normal = scope.depth_ordered_layers(&pass, 2.).unwrap();
+        assert!(same(normal[0], b));
+        assert!(same(scope.depth_ordered_draw_layers(&pass, 2.).unwrap()[0], b));
+        // At four seconds neither plane can draw. Keep their stored order.
+        assert!(same(scope.depth_ordered_draw_layers(&pass, 4.).unwrap()[0], a));
     }
 
     #[test]

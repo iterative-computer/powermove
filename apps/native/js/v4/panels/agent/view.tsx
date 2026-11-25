@@ -831,9 +831,9 @@ export interface MenuOption {
   default?: boolean;
   /** The section it is listed under. */
   category?: string;
-  /** Stable provider ID for model rows. */
+  /** Stable provider ID shared by the heading and its model rows. */
   provider?: string;
-  /** Choosing it keeps the menu open (a provider: its models follow). */
+  /** A model provider heading toggles locally and keeps the menu open. */
   stays?: boolean;
   /** Quiet status text, not a choice. */
   informational?: boolean;
@@ -847,8 +847,6 @@ export type Menu = (request: {
   /** Composer pop-ups track their button rather than the legacy field menu. */
   picker?: "model" | "effort" | "access";
   search?: boolean;
-  /** New rows for the menu still open after a row that stays was chosen. */
-  update?: boolean;
   /** Change the open model menu's rows without replacing its pending choice. */
   refresh?: boolean;
 }) => Promise<unknown>;
@@ -2651,6 +2649,52 @@ function pairs(entries: [string, string][], current: string) {
     ? options
     : [...options, { v: current, label: current }];
 }
+function modelPickerOptions(s: Snapshot, n: NativeFacts) {
+  const options: MenuOption[] = [];
+  let modelCount = 0;
+  for (const [provider, category] of s.catalog.providers) {
+    const active = provider === s.settings.provider;
+    const group = n.modelGroups?.[provider];
+    const models = active
+      ? pairs(s.catalog.models, s.settings.model)
+      : (group ?? []).map(([v, label]) => ({ v, label }));
+    const finding =
+      active && n.findingModels && !s.catalog.models.some(([id]) => id !== s.settings.model);
+    options.push({
+      label: category,
+      category,
+      provider,
+      value: "",
+      stays: true,
+      checked: active,
+      detail: finding ? "Finding models…" : models.length === 0 ? "No models available" : undefined,
+    });
+
+    const defaults = new Set(group?.filter(([, , on]) => on).map(([id]) => id));
+    for (const { v, label } of models) {
+      options.push({
+        label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
+        value: active ? `model:${v}` : `other:${provider}:${v}`,
+        checked: active && v === s.settings.model,
+        default: defaults.has(v) || undefined,
+        category,
+        provider,
+      });
+    }
+    modelCount += models.length;
+    if (!active && models.length === 0) {
+      options.push({
+        label: `Switch to ${category}`,
+        category,
+        provider,
+        value: `provider:${provider}`,
+      });
+    }
+  }
+  return { options, search: modelCount > 12 };
+}
+
 function Composer({
   s,
   n,
@@ -2687,18 +2731,6 @@ function Composer({
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
   const openModelMenu = useRef<{ anchor: number; rows: string } | null>(null);
-  const requestModelMenu: Menu = async (request) => {
-    const open = {
-      anchor: request.anchor,
-      rows: JSON.stringify(request.options),
-    };
-    openModelMenu.current = open;
-    try {
-      return await menu?.(request);
-    } finally {
-      if (openModelMenu.current === open) openModelMenu.current = null;
-    }
-  };
   const modelName = named(
     s.catalog.models,
     s.settings.model,
@@ -2711,124 +2743,62 @@ function Composer({
   const choicesLocked = working || s.composerDisabled;
   const [openPicker, setOpenPicker] = useState<string | null>(null);
   const menuEpoch = useRef(0);
-  // Provider and model share one menu. A provider row keeps it open: the
-  // Model section follows that provider, its default ticked, in the same
-  // menu; it closes on a model, Escape or a click outside.
   const latest = useRef(s);
   latest.current = s;
-  const native = useRef(n);
-  native.current = n;
-  const awaiting = useRef<{
-    anchor: number;
-    provider: string;
-    epoch: number;
-  } | null>(null);
-  const modelRows = (s: Snapshot): MenuOption[] =>
-    s.catalog.providers.flatMap(([provider, providerName]) => {
-      const active = provider === s.settings.provider;
-      const group = native.current.modelGroups?.[provider];
-      const category = provider === "compatible"
-        ? (native.current.connectedModelName ?? providerName)
-        : providerName;
-      const models = active
-        ? pairs(s.catalog.models, s.settings.model)
-        : (group ?? []).map(([v, label]) => ({ v, label }));
-      const defaults = new Set(group?.filter(([, , on]) => on).map(([id]) => id));
-      const rows: MenuOption[] = models.map(({ v, label }) => ({
-        label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
-        detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
-        value: active ? `model:${v}` : `other:${provider}:${v}`,
-        checked: active && v === s.settings.model,
-        default: defaults.has(v) || undefined,
-        category,
-        provider,
-      }));
-      if (!rows.length && !active)
-        rows.push({ label: `Use ${category}`, category, value: `provider:${provider}`, stays: true });
-      if (active && native.current.findingModels && !s.catalog.models.some(([id]) => id !== s.settings.model))
-        rows.push({ label: "Finding models…", category, value: "", informational: true });
-      return rows;
-    });
-  const modelSearch = (s: Snapshot) => s.catalog.models.length > 12;
-  const modelMenu = (
-    anchor: number,
-    update: boolean,
-    epoch = menuEpoch.current,
-  ) =>
-    void requestModelMenu({
+  const openModels = (anchor: number) => {
+    if (!menu) return;
+    const { options, search } = modelPickerOptions(s, n);
+    const open = { anchor, rows: JSON.stringify(options) };
+    openModelMenu.current = open;
+    menuEpoch.current++;
+    setOpenPicker("model");
+    void menu({
       anchor,
       picker: "model",
-      search: modelSearch(latest.current),
+      search,
       placeholder: "Search models",
-      options: modelRows(latest.current),
-      ...(update ? { update } : {}),
+      options,
     }).then((choice) => {
-      if (menuEpoch.current !== epoch) return;
-      if (typeof choice !== "string") {
-        setOpenPicker(null);
-        return;
-      }
+      if (openModelMenu.current !== open) return;
+      openModelMenu.current = null;
+      setOpenPicker((picker) => picker === "model" ? null : picker);
+      if (typeof choice !== "string") return;
       const at = choice.indexOf(":");
       const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
-      const now = latest.current;
       if (kind === "provider") {
-        if (value === now.settings.provider) return modelMenu(anchor, true);
-        awaiting.current = { anchor, provider: value, epoch };
         send({ type: "setProvider", provider: value });
-        // A switch the model refused: the open menu keeps working.
-        setTimeout(() => {
-          const pending = awaiting.current;
-          if (
-            pending?.provider !== value ||
-            pending.epoch !== epoch ||
-            menuEpoch.current !== epoch
-          )
-            return;
-          awaiting.current = null;
-          modelMenu(pending.anchor, true);
-        }, 1000);
-      }
-      // The effort shown goes along: the new model keeps it when it
-      // takes it, else runs at its own default.
-      else if (kind === "model") {
-        setOpenPicker(null);
+      } else if (kind === "model") {
+        // Carry the shown effort forward when the new model supports it.
         send({
           type: "setModel",
           model: value,
-          effort: now.settings.effort,
+          effort: latest.current.settings.effort,
         });
       } else if (kind === "other") {
         const colon = value.indexOf(":");
-        setOpenPicker(null);
-        send({ type: "setProvider", provider: value.slice(0, colon), model: value.slice(colon + 1) });
+        send({
+          type: "setProvider",
+          provider: value.slice(0, colon),
+          model: value.slice(colon + 1),
+        });
       }
     });
-  const openModels = (anchor: number) => {
-    menuEpoch.current++;
-    awaiting.current = null;
-    setOpenPicker("model");
-    modelMenu(anchor, false);
   };
   useLayoutEffect(() => {
-    const pending = awaiting.current;
-    if (!pending || s.settings.provider !== pending.provider) return;
-    awaiting.current = null;
-    modelMenu(pending.anchor, true);
-  }, [s.settings.provider, s.catalog.models]);
-  useLayoutEffect(() => {
+    // Native disclosure state stays open while account publications replace the
+    // rows behind the same pending menu choice.
     const open = openModelMenu.current;
     if (!open) return;
-    const options = modelRows(s);
+    const { options, search } = modelPickerOptions(s, n);
     const rows = JSON.stringify(options);
     if (rows === open.rows) return;
     open.rows = rows;
     void menu?.({
       anchor: open.anchor,
       picker: "model",
-      search: modelSearch(s),
+      search,
       placeholder: "Search models",
       options,
-      update: true,
       refresh: true,
     });
   }, [
@@ -2838,7 +2808,6 @@ function Composer({
     s.catalog.models,
     n.findingModels,
     n.modelGroups,
-    n.connectedModelName,
   ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
@@ -3141,7 +3110,7 @@ function Composer({
             disabled={!menu || choicesLocked}
             opened={openPicker === "effort"}
             open={(anchor) => {
-              awaiting.current = null;
+              openModelMenu.current = null;
               const epoch = ++menuEpoch.current;
               setOpenPicker("effort");
               void menu?.({
@@ -3176,7 +3145,7 @@ function Composer({
           disabled={!menu || working || s.composerDisabled}
           opened={openPicker === "access"}
           open={(anchor) => {
-            awaiting.current = null;
+            openModelMenu.current = null;
             const epoch = ++menuEpoch.current;
             setOpenPicker("access");
             void menu?.({

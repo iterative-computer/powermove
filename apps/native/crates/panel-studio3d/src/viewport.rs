@@ -312,6 +312,14 @@ fn translation(m: &[f64; 16]) -> Vec3 {
     )
     .map_or([0.; 3], |b| b.min)
 }
+/// Whether the open composition supports 3D navigation at any playhead time.
+pub fn supports_navigation(p: &Published) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .is_some_and(has_roles)
+    })
+}
+
 /// Whether the composition supports 3D navigation, read from its layer nodes.
 fn has_roles(comp: &pm_model::Node) -> bool {
     let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
@@ -865,6 +873,8 @@ pub fn scene_with_bounds(
             Role::Camera => {}
         }
     }
+    // Empty scenes still have an editor camera. Layer timing and visibility
+    // only affect the items available for selection and framing.
     Ok(Scene {
         shot,
         has_camera: r.camera_id.is_some(),
@@ -936,6 +946,37 @@ mod tests {
             assert!(layers.as_array().unwrap().iter().any(|l| schema::role(l).is_some()));
         }
     }
+    #[test]
+    fn grouped_25d_scene_keeps_its_editor_camera_outside_the_layers_span() {
+        let p = serde_json::json!({
+            "id": "p", "compId": "c", "w": 640, "h": 360, "fps": 30, "dur": 5,
+            "layers": [
+                {"id":"card","type":"group","threeD":true,"on":true,"from":0,"dur":2,"p":{}},
+                {"id":"child","type":"shape","group":"card","on":true,"from":0,"dur":2,
+                 "p":{},"d":{"w":120,"h":80}},
+                {"id":"control","type":"null","threeD":true,"on":true,"from":0,"dur":2,"p":{}}
+            ]
+        });
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        kernel
+            .open("p", pm_kernel::OpenSource::Untitled(pm_scene3d::to_model(&p)))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let published = kernel.published("p").unwrap();
+        assert!(supports_navigation(&published));
+
+        let active = scene(&published, 0.5).unwrap();
+        assert!(!active.has_camera);
+        assert!(active.items.iter().any(|item| item.id == "control"));
+        let empty = scene(&published, 3.).unwrap();
+        assert!(!empty.has_camera);
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.shot, active.shot);
+        assert_eq!(empty.shot.position, default_camera_25d(640., 360.).position);
+    }
+
     #[test]
     fn flat_3d_layers_enable_navigation_with_the_legacy_eye() {
         let value = serde_json::json!({"w":800,"h":500,"layers":[{"id":"flat","type":"solid","threeD":true}]});

@@ -1181,10 +1181,17 @@ impl GizmoSurface {
         cx.defer(move |cx| {
             this.update(cx, |s, cx| {
                 s.refreshing = false;
-                s.reread(cx);
+                let live_outline = s.draws_live_outline();
+                if !live_outline {
+                    s.reread(cx);
+                }
                 s.text_reread(cx);
                 s.pen_reread(cx);
-                s.effects_reread(cx);
+                // Keep visible effect handles attached during a transform.
+                // With none shown, there is nothing to recompute here.
+                if !live_outline || !s.effect_controls.is_empty() {
+                    s.effects_reread(cx);
+                }
             });
         });
     }
@@ -1196,6 +1203,14 @@ impl GizmoSurface {
             cx.notify();
         }));
     }
+    fn draws_live_outline(&self) -> bool {
+        !self.studio.free_look
+            && self
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.active && drag.draws_own_outline())
+    }
+
     /// Reread the pose off the main thread. While playing the engine owns the
     /// frame and gizmos stay down.
     fn reread(&mut self, cx: &mut Context<Self>) {
@@ -1311,7 +1326,7 @@ impl GizmoSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
-                if s.latest == ticket {
+                if s.latest == ticket && !s.draws_live_outline() {
                     let (
                         poses,
                         scene,
@@ -2619,7 +2634,6 @@ impl GizmoSurface {
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         let (started, kind) = (std::time::Instant::now(), job.kind());
-        let cancelled = matches!(job, Job::Finish(false));
         crate::interaction_work::submit!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2721,9 +2735,11 @@ impl GizmoSurface {
                     s.gesture = None;
                 }
                 s.pump(cx);
-                // A cancelled gesture reads back its restored state. Clicks
-                // the Pen holds act once its own work has landed.
-                if cancelled || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty()) {
+                // Reconcile any reads deferred during the drag, even when
+                // release did not change the document or the kernel refused it.
+                // The Pen also needs a read when its own work has landed.
+                if kind == "finish" || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty())
+                {
                     s.refresh(cx);
                 }
             });
@@ -4077,5 +4093,152 @@ mod divider_reach_tests {
         assert!(super::on_divider_reach(b, point(px(400.), px(450. - reach + 1.)), &t));
         assert!(!super::on_divider_reach(b, point(px(400.), px(250.)), &t));
         assert!(!super::on_divider_reach(b, point(px(90.), px(250.)), &t));
+    }
+}
+
+#[cfg(test)]
+mod layer_drag_profile {
+    use super::{Drag, GizmoSurface, Hit, Host, Navigate, Tool, ViewFrame, read_at, snap};
+    use gpui::{App, AppContext, Bounds, Pixels, TestAppContext, Window};
+    use pm_engine_service::OverlayLine;
+    use std::{rc::Rc, sync::Arc, time::Instant};
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    struct Viewer;
+    impl Host for Viewer {
+        fn time(&self, _: &App) -> f64 {
+            fixture::TIME
+        }
+        fn playing(&self, _: &App) -> bool {
+            false
+        }
+        fn frame(&self, _: Bounds<Pixels>, _: &App) -> Option<ViewFrame> {
+            None
+        }
+        fn tool(&self, _: &App) -> Tool {
+            Tool::Select
+        }
+        fn overlay(
+            &self,
+            _: Vec<OverlayLine>,
+            _: Option<crate::gizmo_layer::Placement>,
+            _: &mut App,
+        ) {
+        }
+        fn navigate(&self, _: Navigate, _: &mut App) {}
+        fn layer_menu(&self, _: Option<String>, _: &mut Window, _: &mut App) {}
+        fn report(&self, message: String, _: &mut App) {
+            panic!("{message}")
+        }
+    }
+
+    #[gpui::test]
+    fn profile_639_layer_gizmo_snap_and_rows(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let gizmos = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                Rc::new(Viewer),
+            )
+        });
+        let initial = kernel.published(fixture::PROJECT).unwrap();
+        // Start with the live outline already owned by the pointer, as it
+        // is after on_move crosses the drag threshold.
+        gizmos.update(cx, |gizmos, _| {
+            gizmos.drag = Some(Drag {
+                hit: Hit::Body,
+                origin: Default::default(),
+                active: true,
+                poses: Arc::new(Vec::new()),
+                time: fixture::TIME,
+                click: None,
+                snaps: None,
+                copies: None,
+            });
+        });
+        let mut pane_cache = None;
+        let mut rows = crate::rows::LayerRows::default();
+        let key = crate::rows::key(&initial.snapshot);
+        assert!(rows.accept(key, crate::rows::list(&initial.snapshot), Some(key)));
+        let kept = rows.rows.clone();
+        let baseline = std::env::var_os("PM_PROFILE_DRAG_BASELINE").is_some();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            assert!(crate::studio_panes::pane_scene(&p, 1, &mut pane_cache).is_none());
+            let panes = start.elapsed();
+
+            let start = Instant::now();
+            gizmos.update(cx, |gizmos, cx| gizmos.refresh(cx));
+            cx.run_until_parked();
+            gizmos.read_with(cx, |gizmos, _| {
+                assert!(gizmos.draws_live_outline());
+                assert_eq!(gizmos.latest, 0, "a live outline needs no pose job");
+            });
+            let gizmo = start.elapsed();
+
+            let start = Instant::now();
+            rows.follow_transform_values(&p);
+            let key = crate::rows::key(&p.snapshot);
+            assert!(matches!(
+                rows.plan(key, crate::rows::layer_count(&p.snapshot)),
+                crate::rows::Plan::Current
+            ));
+            assert!(Arc::ptr_eq(&kept, &rows.rows));
+            let rows_elapsed = start.elapsed();
+            let start = Instant::now();
+            std::hint::black_box(snap::points(&p, &[fixture::TEXT.into()], fixture::TIME));
+            let snapping = start.elapsed();
+            after.push([panes, gizmo, rows_elapsed, snapping].map(|d| d.as_secs_f64() * 1000.));
+
+            if baseline {
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene(&p, 0.);
+                let panes = start.elapsed();
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene_with_bounds(&p, fixture::TIME, |id| {
+                    crate::text_host::query(&p, |q| q.bounds(None, id, fixture::TIME))
+                        .ok()
+                        .flatten()
+                });
+                let scene = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(read_at(&p, fixture::TIME));
+                let poses = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(crate::rows::list(&p.snapshot));
+                std::hint::black_box(crate::rows::keyframe_count(&p.snapshot));
+                let rows = start.elapsed();
+                before.push([panes, scene, poses, rows].map(|d| d.as_secs_f64() * 1000.));
+            }
+        });
+        if baseline {
+            fixture::report(
+                [
+                    "old Studio panes",
+                    "old gizmo scene",
+                    "old gizmo poses",
+                    "old rows",
+                ],
+                &before,
+            );
+        }
+        fixture::report(
+            [
+                "single Studio pane",
+                "gizmo refresh",
+                "rows reuse",
+                "snap (once per drag)",
+            ],
+            &after,
+        );
+        fixture::assert_budget(&after, 0..4);
     }
 }

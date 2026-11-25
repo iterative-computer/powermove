@@ -3,6 +3,7 @@
 //! display points per axis; ties go to the shorter guide.
 use super::{GizmoSurface, Pose, project_box};
 use gpui::*;
+use pm_eval::evaluator::outside_layer_span;
 use pm_kernel::QueryMirror;
 
 pub const DISTANCE: f64 = 8.;
@@ -38,21 +39,31 @@ pub fn points(p: &pm_kernel::Published, moving: &[String], time: f64) -> Option<
     let size = |k: &str| comp.get(k).and_then(crate::node_number).unwrap_or(0.);
     let mut out = corners_and_centre([0., 0., size("w"), size("h")]).to_vec();
     let mut mirror = QueryMirror::new(p);
-    for layer in pm_kernel::model::list_layers(root, None)
-        .into_iter()
-        .filter(|l| {
-            !moving.contains(&l.id) && !matches!(l.kind.as_str(), "audio" | "camera" | "group")
+    for (layer, id) in pm_kernel::model::layers_of(comp)
+        .filter_map(|layer| {
+            let id = pm_eval::node::string(layer.get("id"))?.as_str()?;
+            Some((layer, id))
+        })
+        .filter(|(layer, id)| {
+            !moving.iter().any(|moving| moving == id)
+                && !matches!(
+                    pm_eval::node::string(layer.get("type")).and_then(pm_model::JsString::as_str),
+                    Some("audio" | "camera" | "group")
+                )
         })
         .take(MAX_LAYERS)
     {
-        let q = mirror.queries();
-        if !q.active(None, &layer.id, time).unwrap_or(false) {
+        if outside_layer_span(layer, time) {
             continue;
         }
-        let Ok(Some(b)) = crate::text_host::query(p, |q| q.bounds(None, &layer.id, time)) else {
+        let q = mirror.queries();
+        if !q.active(None, id, time).unwrap_or(false) {
+            continue;
+        }
+        let Ok(Some(b)) = crate::text_host::query(p, |q| q.bounds(None, id, time)) else {
             continue;
         };
-        let Some((corners, _)) = project_box(mirror.queries(), &layer.id, time, b) else {
+        let Some((corners, _)) = project_box(mirror.queries(), id, time, b) else {
             continue;
         };
         if let Some(b) = box_of(corners.into_iter()) {
@@ -257,5 +268,23 @@ mod ruler_snap_tests {
             .0,
             [2., 5.]
         );
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    #[test]
+    fn snap_prefilter_preserves_paired_cuts_and_lets_the_evaluator_own_endpoints() {
+        let layer = |source| pm_model::Node::from_value(pm_model::json::parse(source).unwrap(), 1);
+        let plain = layer(r#"{"from":2,"dur":3}"#);
+        assert!(super::outside_layer_span(&plain, 1.));
+        assert!(super::outside_layer_span(&plain, 6.));
+        assert!(!super::outside_layer_span(&plain, 2.));
+        assert!(!super::outside_layer_span(&plain, 5.));
+        assert!(!super::outside_layer_span(&plain, 5.0000015));
+        let paired = layer(r#"{"from":2,"dur":3,"transitionOut":{"paired":"next"}}"#);
+        assert!(!super::outside_layer_span(&paired, 5.1));
+        let legacy = layer(r#"{"from":"2","dur":"3"}"#);
+        assert!(!super::outside_layer_span(&legacy, 1.));
     }
 }

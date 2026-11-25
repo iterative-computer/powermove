@@ -18,7 +18,7 @@ use crate::{
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
     transient::{
         Choice, ComposerPicker, Picker, PickerRow, composer_picker_frame, composer_picker_interior,
-        model_picker_frame,
+        model_picker_frame, submenu_frame,
     },
 };
 use foreign_types::ForeignType;
@@ -4406,6 +4406,7 @@ impl Host {
                             && e.r#type() == NSEventType::KeyDown
                         {
                             match chord(e).as_str() {
+                                "escape" if p.model.grouped => p.key("escape", e.isARepeat()),
                                 "escape" => p.hide(),
                                 // Keep Return in the palette even if AppKit
                                 // sends it to the editor window.
@@ -4436,8 +4437,9 @@ impl Host {
                                         | "shift+tab"
                                 ) || (key == "space" && (p.row_focus || !p.searchable))
                                     || (matches!(key.as_str(), "left" | "right")
-                                        && p.model.has_provider_headers()
-                                        && (p.row_focus || !p.searchable))
+                                        && (p.owns_submenu_arrow(&key)
+                                            || (p.model.has_provider_headers()
+                                                && (p.row_focus || !p.searchable))))
                                 {
                                     p.key(&key, e.isARepeat());
                                     return std::ptr::null_mut();
@@ -7139,6 +7141,7 @@ impl Host {
         if field && !self.fields.borrow().model.open {
             let mut p = self.fields.borrow_mut();
             p.model.choices = field_choices();
+            p.model.grouped = false;
             (p.anchor, p.model.page, p.dismiss) = (None, None, None);
             p.trigger = None;
             p.other_triggers.clear();
@@ -7167,6 +7170,48 @@ impl Host {
         placeholder: &str,
         composer: Option<(ComposerPicker, bool)>,
     ) {
+        self.open_field_menu(
+            owner,
+            choices,
+            anchor,
+            other_triggers,
+            page,
+            dismiss,
+            placeholder,
+            composer,
+            false,
+        );
+    }
+    pub fn open_add_menu(&mut self, choices: Vec<Choice>, anchor: Option<crate::layout::Rect>) {
+        let anchor = anchor.map(|mut anchor| {
+            anchor.x += (anchor.w - ADD_MENU_WIDTH) / 2.;
+            anchor.w = ADD_MENU_WIDTH;
+            anchor
+        });
+        self.open_field_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            None,
+            None,
+            "Search…",
+            None,
+            true,
+        );
+    }
+    fn open_field_menu(
+        &mut self,
+        owner: Option<Retained<NSWindow>>,
+        choices: Vec<Choice>,
+        anchor: Option<crate::layout::Rect>,
+        other_triggers: Vec<crate::layout::Rect>,
+        page: Option<usize>,
+        dismiss: Option<String>,
+        placeholder: &str,
+        composer: Option<(ComposerPicker, bool)>,
+        grouped: bool,
+    ) {
         if self.palette.borrow().model.open {
             self.palette.borrow_mut().hide();
         }
@@ -7194,6 +7239,7 @@ impl Host {
         p.other_triggers = other_triggers.into_iter().map(|r| rect(r, h)).collect();
         p.parent = owner;
         p.model.choices = choices;
+        p.model.grouped = grouped;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
         p.configure_field(composer);
         p.search
@@ -7429,14 +7475,29 @@ define_class!(
     #[unsafe(super(NSPanel))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMShellPopupWindow"]
+    #[ivars = PopupWindowState]
     struct PopupWindow;
     impl PopupWindow {
         #[unsafe(method(canBecomeKeyWindow))]
-        fn can_key(&self) -> bool { true }
+        fn can_key(&self) -> bool { self.ivars().accepts_keys.get() }
         #[unsafe(method(canBecomeMainWindow))]
         fn can_main(&self) -> bool { false }
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key(&self) {
+            unsafe { let _: () = msg_send![super(self), resignKeyWindow]; }
+            if let Some(popup) = self.ivars().popup.borrow().upgrade()
+                && let Ok(mut popup) = popup.try_borrow_mut()
+                && popup.model.grouped && popup.model.open
+            {
+                popup.dismiss(false);
+            }
+        }
     }
 );
+struct PopupWindowState {
+    accepts_keys: Cell<bool>,
+    popup: RefCell<std::rc::Weak<RefCell<Popup>>>,
+}
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -7483,8 +7544,25 @@ define_class!(
         fn pick(&self, sender: &NSControl) {
             if let Some(p) = self.ivars().upgrade() {
                 let mut p = p.borrow_mut();
-                let Some(row) = p.rows.get(sender.tag() as usize).map(|row| row.kind) else { return };
+                let place = sender.tag() as usize;
+                if let Some(parent) = p.flyout_parent.as_ref().and_then(std::rc::Weak::upgrade) {
+                    drop(p);
+                    let mut parent = parent.borrow_mut();
+                    if let Some(&index) = parent.model.submenu_choices().get(place) {
+                        parent.pick_choice(index, true);
+                    }
+                    return;
+                }
+                let Some(row) = p.rows.get(place).map(|row| row.kind) else { return };
                 let index = match row {
+                    PickerRow::Category(_) => {
+                        p.model.enter_category(place);
+                        p.row_focus = false;
+                        p.focus_search();
+                        p.light(false);
+                        p.sync_flyout();
+                        return;
+                    }
                     PickerRow::Provider(index) => {
                         if let Some((provider, expanded)) = p.model.toggle_provider(index, None) {
                             p.row_focus = true;
@@ -7557,7 +7635,22 @@ impl PopupList {
         if let Some(popup) = self.ivars().borrow().upgrade()
             && let Ok(mut popup) = popup.try_borrow_mut()
         {
-            popup.point(event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None)));
+            let at = event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None));
+            if let Some(parent) = popup
+                .flyout_parent
+                .as_ref()
+                .and_then(std::rc::Weak::upgrade)
+            {
+                let row = popup.row_at(at);
+                drop(popup);
+                if let Ok(mut parent) = parent.try_borrow_mut()
+                    && parent.model.point_submenu(row)
+                {
+                    parent.sync_flyout();
+                }
+            } else {
+                popup.point(at);
+            }
         }
     }
 }
@@ -7979,12 +8072,10 @@ fn rounded_popup_layer(view: &NSView, radius: f64) -> Retained<objc2_quartz_core
 }
 
 const POPUP_SHADOW_PAD: f64 = 52.;
+const ADD_MENU_WIDTH: f32 = 228.;
 
-fn popup_card_size(frame: NSSize) -> NSSize {
-    NSSize::new(
-        frame.width - 2. * POPUP_SHADOW_PAD,
-        frame.height - 2. * POPUP_SHADOW_PAD,
-    )
+fn popup_card_size(frame: NSSize, pad: f64) -> NSSize {
+    NSSize::new(frame.width - 2. * pad, frame.height - 2. * pad)
 }
 
 fn popup_shadow_path(host: &NSView, size: NSSize, radius: f64) {
@@ -8031,6 +8122,7 @@ fn popup_content_view(
     t: &Tokens,
     surface: Surface,
     opacity: f32,
+    pad: f64,
 ) -> (Retained<NSView>, Retained<NSView>, Retained<NSView>) {
     let root = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, size));
     root.setWantsLayer(true);
@@ -8038,10 +8130,10 @@ fn popup_content_view(
     layer.setBackgroundColor(None);
     layer.setOpacity(opacity);
 
-    let size = popup_card_size(size);
+    let size = popup_card_size(size, pad);
     let host = NSView::initWithFrame(
         NSView::alloc(mtm),
-        NSRect::new(NSPoint::new(POPUP_SHADOW_PAD, POPUP_SHADOW_PAD), size),
+        NSRect::new(NSPoint::new(pad, pad), size),
     );
     let sizing = NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
     host.setAutoresizingMask(sizing);
@@ -8050,7 +8142,13 @@ fn popup_content_view(
     let layer = host.layer().unwrap();
     layer.setMasksToBounds(false);
     layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
-    layer.setShadowOpacity(if t.scheme == Scheme::Dark { 0.42 } else { 0.22 });
+    layer.setShadowOpacity(if pad == 0. {
+        0.
+    } else if t.scheme == Scheme::Dark {
+        0.42
+    } else {
+        0.22
+    });
     layer.setShadowRadius(20.);
     layer.setShadowOffset(NSSize::new(0., -8.));
 
@@ -8336,10 +8434,20 @@ impl PopupLayoutCache {
 }
 
 fn popup_provider_summary(model: &Picker, chosen: &[PickerRow], index: usize) -> String {
+    if !model.provider_expanded(index) {
+        return model.provider_summary(index);
+    }
     model.provider_summary_with_count(index, || {
-        chosen.iter().filter(|row| {
-            matches!(row, PickerRow::Choice(i) if model.choices[*i].provider == model.choices[index].provider)
-        }).count()
+        chosen
+            .iter()
+            .filter(|row| match row {
+                PickerRow::Choice(i) => {
+                    let choice = &model.choices[*i];
+                    choice.provider == model.choices[index].provider && choice.is_provider_model()
+                }
+                _ => false,
+            })
+            .count()
     })
 }
 
@@ -8399,6 +8507,9 @@ pub struct Popup {
     /// Last hover command dispatched from a hovered/keyed menu row so leaving
     /// or dismissing the menu can clear the preview (e.g. `partHover:`).
     last_hover_command: Option<String>,
+    flyout: Option<Rc<RefCell<Popup>>>,
+    flyout_parent: Option<std::rc::Weak<RefCell<Popup>>>,
+    flyout_category: Option<usize>,
 }
 impl Popup {
     fn new(
@@ -8417,7 +8528,10 @@ impl Popup {
         };
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64 + 2. * POPUP_SHADOW_PAD, height as f64 + 2. * POPUP_SHADOW_PAD));
         let window: Retained<PopupWindow> = unsafe {
-            msg_send![PopupWindow::alloc(mtm),initWithContentRect:frame,styleMask:NSWindowStyleMask::Borderless,backing:NSBackingStoreType::Buffered,defer:false]
+            msg_send![super(PopupWindow::alloc(mtm).set_ivars(PopupWindowState {
+                accepts_keys: Cell::new(true),
+                popup: RefCell::new(std::rc::Weak::new()),
+            })),initWithContentRect:frame,styleMask:NSWindowStyleMask::Borderless,backing:NSBackingStoreType::Buffered,defer:false]
         };
         unsafe {
             window.setReleasedWhenClosed(false);
@@ -8433,7 +8547,8 @@ impl Popup {
         window.setHasShadow(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         appearance(&window, t);
-        let (root, shadow_host, body) = popup_content_view(mtm, frame.size, t, surface, 0.);
+        let (root, shadow_host, body) =
+            popup_content_view(mtm, frame.size, t, surface, 0., POPUP_SHADOW_PAD);
         window.setContentView(Some(&root));
         let (search, scroll, list) = popup_controls(
             mtm,
@@ -8503,6 +8618,9 @@ impl Popup {
             picked: false,
             built: None,
             last_hover_command: None,
+            flyout: None,
+            flyout_parent: None,
+            flyout_category: None,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -8520,6 +8638,7 @@ impl Popup {
                 chrome.clear.setTarget(Some(&target));
             }
             *p.list.ivars().borrow_mut() = Rc::downgrade(&popup);
+            *p.window.ivars().popup.borrow_mut() = Rc::downgrade(&popup);
         }
         popup.borrow_mut().me = Rc::downgrade(&popup);
         popup.borrow_mut().target = Some(target);
@@ -8581,6 +8700,9 @@ impl Popup {
         frame.size.width = self.composer.map_or(m.field_menu_width, |kind| {
             kind.width().min(interior.w)
         }) as f64 + 2. * POPUP_SHADOW_PAD;
+        if self.model.grouped {
+            frame.size.width = f64::from(ADD_MENU_WIDTH) + 2. * POPUP_SHADOW_PAD;
+        }
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
             model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
         } else if self.composer.is_some() {
@@ -8598,8 +8720,15 @@ impl Popup {
         let surface = self.surface;
         appearance(&self.window, t);
         let opacity = if self.model.open { 1. } else { 0. };
-        let (root, shadow_host, body) =
-            popup_content_view(self.window.mtm(), self.window.frame().size, t, surface, opacity);
+        let pad = self.shadow_pad();
+        let (root, shadow_host, body) = popup_content_view(
+            self.window.mtm(),
+            self.window.frame().size,
+            t,
+            surface,
+            opacity,
+            pad,
+        );
         self.search.removeFromSuperview();
         self.scroll.removeFromSuperview();
         body.addSubview(&self.search);
@@ -8622,7 +8751,7 @@ impl Popup {
         }
         self.glider.setFillColor(&popup_highlight(t));
         self.window.setContentView(Some(&root));
-        self.window.setHasShadow(false);
+        self.window.setHasShadow(pad == 0.);
         self.shadow_host = shadow_host;
         self.body = body;
         self.refresh();
@@ -8637,6 +8766,10 @@ impl Popup {
             let c = match row {
                 PickerRow::Choice(i) => {
                     i.hash(&mut h);
+                    &self.model.choices[i]
+                }
+                PickerRow::Category(i) => {
+                    row.hash(&mut h);
                     &self.model.choices[i]
                 }
                 PickerRow::Provider(i) => {
@@ -8668,6 +8801,7 @@ impl Popup {
                 c.swatch,
                 c.indent,
                 c.modified,
+                c.menu_icon,
                 self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
@@ -8676,6 +8810,10 @@ impl Popup {
             self.model.query.hash(&mut h);
         }
         self.model.has_provider_headers().hash(&mut h);
+        self.model.grouped.hash(&mut h);
+        if self.model.grouped {
+            self.model.query.is_empty().hash(&mut h);
+        }
         unlisted.hash(&mut h);
         self.model.note().hash(&mut h);
         self.composer.map(|kind| kind as u8).hash(&mut h);
@@ -8717,7 +8855,8 @@ impl Popup {
         self.built = Some(key);
         self.update_row_selection(None);
         let mut frame = self.window.frame();
-        let card = popup_card_size(frame.size);
+        let pad = self.shadow_pad();
+        let card = popup_card_size(frame.size, pad);
         let old_search = self.search.frame();
         let old_scroll = self.scroll.frame();
         let height = PopupLayout {
@@ -8755,7 +8894,7 @@ impl Popup {
             if self.composer != Some(ComposerPicker::Model) {
                 frame.origin.y += card.height - height;
             }
-            frame.size.height = height + 2. * POPUP_SHADOW_PAD;
+            frame.size.height = height + 2. * pad;
             if animate_height && !self.tokens.accessibility.reduce_motion {
                 let search = self.search.frame();
                 let scroll = self.scroll.frame();
@@ -8927,6 +9066,44 @@ mod popup_corner_tests {
                 }
             }
         }
+
+        let (sender, commands) = async_channel::unbounded();
+        let add = Popup::new(
+            &parent,
+            &solid,
+            Surface::Menu,
+            vec![
+                Choice::new("Cube", "new3d:box").within("Mesh"),
+                Choice::new("Sphere", "new3d:sphere").within("Mesh"),
+                Choice::new("Camera", "new3d:camera").within("Camera"),
+            ],
+            sender,
+        );
+        let button = {
+            let mut add = add.borrow_mut();
+            add.model.grouped = true;
+            add.model.open = true;
+            add.configure_field(None);
+            add.refresh();
+            assert_eq!(add.rows.len(), 2);
+            add.key("down", false);
+            add.key("right", false);
+            let flyout = add.flyout.as_ref().unwrap().clone();
+            assert!(!flyout.borrow().window.canBecomeKeyWindow());
+            assert_eq!(flyout.borrow().rows.len(), 2);
+            add.key("escape", false);
+            assert!(add.model.open);
+            assert!(!flyout.borrow().model.open);
+            assert!(!flyout.borrow().window.isVisible());
+            add.key("right", false);
+            let button = flyout.borrow().rows[1].button.clone();
+            button
+        };
+        unsafe { button.performClick(None) };
+        assert_eq!(commands.try_recv().unwrap().name, "new3d:sphere");
+        let add = add.borrow();
+        assert!(!add.model.open);
+        assert!(!add.flyout.as_ref().unwrap().borrow().window.isVisible());
     }
 }
 
@@ -8984,7 +9161,10 @@ pub fn check_palette_typing() {
         "⌘D".into(),
     );
     popup.refresh();
-    assert_eq!(popup_card_size(popup.window.frame().size).width, 540.);
+    assert_eq!(
+        popup_card_size(popup.window.frame().size, POPUP_SHADOW_PAD).width,
+        540.
+    );
     assert!(!popup.search.isBezeled());
     assert!(!popup.search.drawsBackground());
     // Concentric with the palette's corner (31652371b).
@@ -9459,6 +9639,7 @@ impl PopupLayout<'_> {
         let width = self.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let model_rows = self.model.choices.iter().any(|c| c.provider.is_some());
+        let browsing = self.model.grouped && self.model.query.is_empty();
         let is_palette = self.surface == Surface::Palette;
         let reuse_buttons = is_palette && !model_rows;
         let palette_query = is_palette.then(|| self.model.query.trim().to_lowercase());
@@ -9473,8 +9654,9 @@ impl PopupLayout<'_> {
         let checks = chosen.iter().any(|row| match *row {
             PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
             PickerRow::Provider(_) => true,
+            PickerRow::Category(_) => false,
         });
-        let sections = !model_rows && chosen.iter().any(|row| {
+        let sections = !self.model.grouped && !model_rows && chosen.iter().any(|row| {
             matches!(*row, PickerRow::Choice(i) if !self.model.choices[i].category.is_empty())
         });
         let edge = inset + t.space.md as f64;
@@ -9509,13 +9691,16 @@ impl PopupLayout<'_> {
         let shortcuts = self.shortcuts;
         for (place, &row) in chosen.iter().enumerate() {
             let (index, disclosure) = match row {
-                PickerRow::Choice(index) => (index, None),
+                PickerRow::Choice(index) | PickerRow::Category(index) => (index, None),
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
+            let flyout = matches!(row, PickerRow::Category(_));
             let c = &model.choices[index];
             let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
-            if disclosure.is_some() {
-                if seen_provider {
+            let section_break = browsing
+                && place > 0
+                && flyout != matches!(chosen[place - 1], PickerRow::Category(_));
+            if (disclosure.is_some() && seen_provider) || section_break {
                     let padding = f64::from(t.space.xs);
                     let thickness = self.list.window().map_or(1., |window| {
                         window.backingScaleFactor().recip()
@@ -9534,7 +9719,8 @@ impl PopupLayout<'_> {
                     self.list.addSubview(&line);
                     self.parts.push(Retained::into_super(line));
                     y += 2. * padding + thickness;
-                }
+            }
+            if disclosure.is_some() {
                 seen_provider = true;
             }
             if sections && category != Some(c.category.as_str()) {
@@ -9552,7 +9738,7 @@ impl PopupLayout<'_> {
                     y += shape.heading as f64;
                 }
             }
-            let detail = if disclosure.is_some() || is_palette {
+            let detail = if disclosure.is_some() || is_palette || browsing {
                 ""
             } else {
                 c.detail.as_str()
@@ -9572,6 +9758,45 @@ impl PopupLayout<'_> {
                 NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
+            let mut item_lead = lead;
+            let icon = |name: &str, x: f64| {
+                let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(name),
+                    None,
+                )?;
+                let icon = NSImageView::imageViewWithImage(&image, mtm);
+                icon.setContentTintColor(Some(&native_color(t.colors.secondary)));
+                icon.setSymbolConfiguration(Some(
+                    &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        f64::from(m.symbol_inline - 2.),
+                        unsafe { NSFontWeightRegular },
+                    ),
+                ));
+                icon.setAccessibilityElement(false);
+                centred(
+                    &icon,
+                    x,
+                    y,
+                    row_h,
+                    f64::from(m.symbol_inline),
+                    f64::from(m.symbol_inline),
+                );
+                self.list.addSubview(&icon);
+                Some(Retained::into_super(Retained::into_super(icon)))
+            };
+            if browsing {
+                if let Some(view) = c.menu_icon.and_then(|name| icon(name, edge)) {
+                    self.parts.push(view);
+                }
+                item_lead += f64::from(m.symbol_inline + t.space.sm);
+            }
+            if flyout {
+                trailing -= f64::from(m.symbol_inline);
+                if let Some(view) = icon("chevron.right", trailing) {
+                    self.parts.push(view);
+                }
+                trailing -= f64::from(t.space.sm);
+            }
             if !is_palette && let Some(glyphs) = shortcuts.get(&c.command) {
                 let hint = self.label(
                     glyphs,
@@ -9665,8 +9890,10 @@ impl PopupLayout<'_> {
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
             }
-            let display_label = if disclosure.is_some() {
+            let display_label = if disclosure.is_some() || flyout {
                 c.category.clone()
+            } else if self.model.grouped {
+                c.label.clone()
             } else {
                 c.display_label(&self.model.query)
             };
@@ -9733,7 +9960,7 @@ impl PopupLayout<'_> {
                 let mut title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
                 } else {
-                    lead + f64::from(c.indent.min(6)) * 12.
+                    item_lead + f64::from(c.indent.min(6)) * 12.
                 };
                 if disclosure.is_none()
                     && let Some(rgb) = c.swatch
@@ -9790,7 +10017,9 @@ impl PopupLayout<'_> {
             } else {
                 display_label
             };
-            let identifier = if disclosure.is_some() {
+            let identifier = if flyout {
+                format!("shell.add-category.{}", c.category)
+            } else if disclosure.is_some() {
                 format!("shell.model-provider.{}", c.provider.as_deref().unwrap_or_default())
             } else {
                 format!("shell.palette.{}", c.command)
@@ -9867,12 +10096,13 @@ impl PopupLayout<'_> {
         } else {
             0.
         };
+        let title_h = if model.grouped { body_h + inset } else { 0. };
         let (above, below) = if is_palette {
             (spotlight::HEADER, spotlight::FOOTER)
         } else {
             (
                 if self.searchable {
-                    inset * 2. + field_h
+                    inset * 2. + title_h + field_h
                 } else {
                     inset
                 },
@@ -9884,7 +10114,7 @@ impl PopupLayout<'_> {
         let (left, right, top) = if is_palette {
             (44., 44., (spotlight::HEADER - field_h) / 2.)
         } else {
-            (inset, inset, inset)
+            (inset, inset, inset + title_h)
         };
         let search_frame = NSRect::new(
             NSPoint::new(left, height - top - field_h),
@@ -9892,6 +10122,23 @@ impl PopupLayout<'_> {
         );
         if self.search.frame() != search_frame {
             self.search.setFrame(search_frame);
+        }
+        if model.grouped
+            && let Some(body) = unsafe { self.search.superview() }
+        {
+            let title = popup_label("Add", t.typography.body, t.colors.text, mtm);
+            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                f64::from(t.typography.body),
+                unsafe { NSFontWeightSemibold },
+            )));
+            title.setAccessibilityElement(true);
+            title.setFrame(NSRect::new(
+                NSPoint::new(edge, height - inset - body_h),
+                NSSize::new(width - 2. * edge, body_h),
+            ));
+            body.addSubview(&title);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(title)));
         }
         let scroll_frame = NSRect::new(NSPoint::new(0., below), NSSize::new(width, shown));
         if self.scroll.frame() != scroll_frame {
@@ -10105,6 +10352,7 @@ fn verify_provider_layout(t: &Tokens, model: &Picker, rows: &[PopupRow], parts: 
     let mut correct_label_colors = true;
     for row in rows {
         let (label, color) = match row.kind {
+            PickerRow::Category(_) => continue,
             PickerRow::Provider(index) => {
                 headers.push(row.rect);
                 (model.choices[index].category.clone(), t.colors.secondary)
@@ -10229,7 +10477,7 @@ impl Popup {
         let lit = lit.filter(|&place| {
             self.rows
                 .get(place)
-                .is_some_and(|row| matches!(row.kind, PickerRow::Choice(_)))
+                .is_some_and(|row| !matches!(row.kind, PickerRow::Provider(_)))
         });
         if self.lit_row_place == lit {
             return;
@@ -10258,7 +10506,7 @@ impl Popup {
             .and_then(|place| self.rows.get(place))
             .and_then(|row| match row.kind {
                 PickerRow::Choice(idx) => self.model.choices.get(idx),
-                PickerRow::Provider(_) => None,
+                PickerRow::Provider(_) | PickerRow::Category(_) => None,
             })
             .and_then(|choice| choice.hover_command.clone());
         if self.last_hover_command != next_hover {
@@ -10387,9 +10635,8 @@ impl Popup {
             timer.invalidate();
         }
     }
-    /// The pointer is at `at` in the list, or has left it.
-    fn point(&mut self, at: Option<NSPoint>) {
-        let row = at.and_then(|at| {
+    fn row_at(&self, at: Option<NSPoint>) -> Option<usize> {
+        at.and_then(|at| {
             self.rows
                 .iter()
                 .find(|row| {
@@ -10399,10 +10646,137 @@ impl Popup {
                         && at.y < row.rect.origin.y + row.rect.size.height
                 })
                 .map(|row| row.place)
-        });
-        if self.model.point(row) {
+        })
+    }
+    /// The pointer is at `at` in the list, or has left it.
+    fn point(&mut self, at: Option<NSPoint>) {
+        if self.model.point(self.row_at(at)) {
             self.light(true);
         }
+        if self.model.submenu.is_some() || self.flyout_category.is_some() {
+            self.sync_flyout();
+        }
+    }
+    fn shadow_pad(&self) -> f64 {
+        // AppKit's shadow leaves the adjoining parent rows clickable.
+        if self.flyout_parent.is_some() {
+            0.
+        } else {
+            POPUP_SHADOW_PAD
+        }
+    }
+    fn owns_submenu_arrow(&self, key: &str) -> bool {
+        self.model.grouped
+            && (self.model.submenu.is_some()
+                || (key == "right" && matches!(self.model.lit_row(), Some(PickerRow::Category(_)))))
+    }
+    fn close_flyout(&mut self) {
+        if self.flyout_category.take().is_some()
+            && let Some(flyout) = &self.flyout
+        {
+            let mut flyout = flyout.borrow_mut();
+            flyout.model.open = false;
+            flyout.window.setIgnoresMouseEvents(true);
+            gpui_macos::child_window::forget(&flyout.window);
+            flyout.window.orderOut(None);
+            if flyout.window.parentWindow().is_some() {
+                self.window.removeChildWindow(&flyout.window);
+            }
+        }
+    }
+    fn sync_flyout(&mut self) {
+        let Some(menu) = self.model.submenu else {
+            self.close_flyout();
+            return;
+        };
+        let Some(row) = self.rows.get(menu.parent) else {
+            return;
+        };
+        let Some(screen) = self.window.screen().or_else(|| self.parent.screen()) else {
+            return;
+        };
+        let screen = popup_rect(screen.visibleFrame());
+        let row = self
+            .window
+            .convertRectToScreen(self.list.convertRect_toView(row.rect, None));
+        let card = self.window.convertRectToScreen(self.shadow_host.frame());
+        let width = ADD_MENU_WIDTH.min(screen.w);
+        let max_height = screen.h;
+        let flyout = self.flyout.get_or_insert_with(|| {
+            let flyout = Self::new(
+                &self.window,
+                &self.tokens,
+                Surface::Menu,
+                Vec::new(),
+                self.sender.clone(),
+            );
+            {
+                let mut popup = flyout.borrow_mut();
+                popup.flyout_parent = Some(self.me.clone());
+                popup.window.ivars().accepts_keys.set(false);
+                popup.set_searchable(false);
+            }
+            flyout
+        });
+        let mut flyout = flyout.borrow_mut();
+        let mut bounds = flyout.window.frame();
+        let changed = self.flyout_category != Some(menu.parent);
+        let first_layout = flyout.built.is_none();
+        let restyle = first_layout || self.tokens != flyout.tokens;
+        let resize = bounds.size.width != f64::from(width) || flyout.max_height != max_height;
+        if changed {
+            let choices = self
+                .model
+                .submenu_choices()
+                .into_iter()
+                .map(|index| {
+                    let mut choice = self.model.choices[index].clone();
+                    choice.category.clear();
+                    choice.detail.clear();
+                    choice
+                })
+                .collect();
+            flyout.model.choices = choices;
+            flyout.list.scrollPoint(NSPoint::ZERO);
+        }
+        let lit = menu.lit();
+        let lit_changed = flyout.model.keyed != lit;
+        flyout.model.keyed = lit;
+        flyout.model.open = true;
+        if restyle || changed || resize {
+            flyout.max_height = max_height;
+            bounds.size.width = f64::from(width);
+            flyout.window.setFrame_display(bounds, false);
+            if restyle {
+                flyout.tokens = self.tokens.clone();
+                flyout.restyle();
+            } else {
+                flyout.refresh();
+            }
+        } else if lit_changed {
+            flyout.light(false);
+        }
+        if lit_changed || changed {
+            flyout.reveal();
+        }
+        let frame = submenu_frame(
+            screen,
+            popup_rect(card),
+            (row.origin.y
+                + row.size.height
+                + f64::from(popup_shape(&self.tokens, Surface::Menu).inset)) as f32,
+            (width, flyout.window.frame().size.height as f32),
+        );
+        let origin = NSPoint::new(f64::from(frame.x), f64::from(frame.y));
+        if flyout.window.frame().origin != origin {
+            flyout.window.setFrameOrigin(origin);
+        }
+        if self.flyout_category.is_none() {
+            flyout.window.setIgnoresMouseEvents(false);
+            gpui_macos::child_window::attach(&flyout.window, &self.window);
+            gpui_macos::child_window::show(&flyout.window, false);
+        }
+        self.flyout_category = Some(menu.parent);
     }
     /// Scrolls the keyboard's row into sight (the first row with its heading).
     fn reveal(&self) {
@@ -10434,6 +10808,7 @@ impl Popup {
                 self.model.page = (!q.trim().is_empty()).then_some(PALETTE_SEARCH_PAGE);
             }
             let (chosen, unlisted) = self.model.search_and_list(q);
+            self.close_flyout();
             let key = self.rows_key(&chosen, unlisted);
             if self.built == Some(key) {
                 self.list.scrollPoint(NSPoint::ZERO);
@@ -10452,7 +10827,7 @@ impl Popup {
     fn place_at_composer(&self) {
         let Some(anchor) = self.anchor else { return };
         let parent = popup_rect(self.parent.contentRectForFrameRect(self.parent.frame()));
-        let size = popup_card_size(self.window.frame().size);
+        let size = popup_card_size(self.window.frame().size, self.shadow_pad());
         let dimensions = (size.width as f32, size.height as f32);
         let frame = if self.composer == Some(ComposerPicker::Model) {
             model_picker_frame(parent, popup_rect(anchor), dimensions)
@@ -10475,6 +10850,12 @@ impl Popup {
     }
 
     fn press(&self, event: &NSEvent) -> Press {
+        if self.flyout_category.is_some()
+            && let Some(flyout) = &self.flyout
+            && event.windowNumber() == flyout.borrow().window.windowNumber()
+        {
+            return Press::Menu;
+        }
         if event.windowNumber() == self.window.windowNumber() {
             return if objc2_foundation::NSPointInRect(event.locationInWindow(), self.shadow_host.frame()) {
                 Press::Menu
@@ -10548,7 +10929,7 @@ impl Popup {
         }
         self.sync_badges();
         let p = self.parent.frame();
-        let s = popup_card_size(self.window.frame().size);
+        let s = popup_card_size(self.window.frame().size, self.shadow_pad());
         let origin = match self.anchor {
             // Under the control that opened it, its trailing edge on the
             // control's (as a field's pop-up menu); above it if there is no
@@ -10600,6 +10981,8 @@ impl Popup {
     }
     fn dismiss(&mut self, restore_focus: bool) {
         self.model.open = false;
+        self.model.submenu = None;
+        self.close_flyout();
         self.set_cmd_held(false);
         self.window.setIgnoresMouseEvents(true);
         if let Some(prev) = self.last_hover_command.take()
@@ -10685,6 +11068,8 @@ impl Popup {
                 Some(i) => Some(if reverse { i - 1 } else { i + 1 }),
             };
             self.row_focus = next.is_some();
+            self.model.submenu = None;
+            self.close_flyout();
             if next.is_some() {
                 self.model.keyed = next;
                 self.model.hover = None;
@@ -10724,9 +11109,14 @@ impl Popup {
         }
         if !self.model.open {
             self.hide();
-        } else if self.model.lit() != before || self.row_focus != was_row_focus {
-            self.light(!repeat);
-            self.reveal();
+        } else {
+            if self.model.lit() != before || self.row_focus != was_row_focus {
+                self.light(!repeat);
+                self.reveal();
+            }
+            if self.model.submenu.is_some() || self.flyout_category.is_some() {
+                self.sync_flyout();
+            }
         }
     }
 }

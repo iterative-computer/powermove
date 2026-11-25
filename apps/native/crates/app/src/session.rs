@@ -42,6 +42,20 @@ pub(crate) fn defer_studio_view(
     });
 }
 
+pub(crate) fn project_disabled_commands(
+    published: Option<&Published>,
+    layers: &[LayerInfo],
+) -> std::collections::BTreeSet<String> {
+    let mut disabled = crate::layer_commands::disabled(published, layers);
+    // Menus and the palette use the same layer eligibility as the viewport.
+    if published.is_some_and(pm_panel_studio3d::viewport::supports_navigation) {
+        disabled.remove("studio.view");
+    } else {
+        disabled.insert("studio.view".into());
+    }
+    disabled
+}
+
 /// Cancellation wins even if the sheet's abort callback also sent an answer.
 /// Poll both channels so Quit wakes a wait whose sheet was never visible.
 pub(crate) async fn recovery_answer<A>(
@@ -1963,6 +1977,7 @@ impl Controller {
     /// Rows follow the newest publication; large lists are built on a worker.
     fn sync_rows(&mut self, p: &Published, cx: &mut Context<Self>) {
         use crate::rows::{self, Plan};
+        self.rows.follow_transform_values(p);
         let key = rows::key(&p.snapshot);
         match self.rows.plan(key, rows::layer_count(&p.snapshot)) {
             Plan::Current => {}
@@ -2231,7 +2246,7 @@ impl Controller {
     }
     /// Menus, palette and toolbar enablement for the current document state.
     pub fn update_disabled(&mut self) {
-        self.disabled = crate::layer_commands::disabled(self.published.as_deref(), self.layers());
+        self.disabled = project_disabled_commands(self.published.as_deref(), self.layers());
     }
     /// One Undo step, then the selection it leads to.
     /// Project items as layers at the playhead, the first on top, in one

@@ -343,6 +343,7 @@ pub(crate) fn order_pass<'d>(
     assets: &dyn AssetResolver,
     view: Option<&View3d>,
     root_comp: bool,
+    skip_inactive_planes: bool,
 ) -> JsResult<(Vec<&'d Node>, Pass3d)> {
     let mut ctx = Pass3d::default();
     // Local View hides the other models in the editor's root composition.
@@ -366,7 +367,11 @@ pub(crate) fn order_pass<'d>(
             return Ok((pass, ctx));
         }
         // No 3D objects: `depthOrderedLayers` (the 2.5D order).
-        let ordered = scope.depth_ordered_layers(&pass, time)?;
+        let ordered = if skip_inactive_planes {
+            scope.depth_ordered_draw_layers(&pass, time)?
+        } else {
+            scope.depth_ordered_layers(&pass, time)?
+        };
         return Ok((ordered, ctx));
     }
     // The composition's scene is shared by its passes (group boundaries).

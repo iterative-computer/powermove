@@ -67,6 +67,26 @@ use crate::js_sem::{JsResult, JsValue};
 use crate::keyframes::{PreparedTrack, TemporalTrack, interpolates_color};
 use crate::node::{self, Got};
 
+/// A non-group layer whose numeric time span excludes `time`. The
+/// evaluator still owns endpoint activity and paired cuts, which can extend
+/// a layer's span. Useful when a caller can omit work for inactive layers.
+pub fn outside_layer_span(layer: &Node, time: f64) -> bool {
+    let (Some(from), Some(duration)) = (
+        node::number(layer.get("from")),
+        node::number(layer.get("dur")),
+    ) else {
+        return false;
+    };
+    const EPSILON: f64 = 1e-6;
+    // At the composition endpoint, both the sample and the layer's end
+    // may sit one epsilon away from the composition's end.
+    (time < from - EPSILON || time > from + duration + 2. * EPSILON)
+        && !node::is_str(layer.get("type"), "group")
+        && !["transitionIn", "transitionOut"]
+            .iter()
+            .any(|edge| layer.get(edge).and_then(|edge| edge.get("paired")).is_some())
+}
+
 /// Extension points for later lanes. Every method has the legacy behavior as
 /// its default.
 pub trait EvalHooks: Send + Sync {

@@ -154,6 +154,31 @@ fn ortho(axis: Axis, scene: Option<&pm_panel_studio3d::viewport::Scene>) -> View
     ViewCamera::Orthographic { axis, center, span }
 }
 
+/// The pane layout is the only consumer of this scene. In a single view
+/// the main viewer and its gizmos own their respective scene reads.
+pub(crate) fn pane_scene(
+    published: &pm_kernel::Published,
+    views: usize,
+    cached: &mut Option<(
+        u64,
+        Option<std::sync::Arc<pm_panel_studio3d::viewport::Scene>>,
+    )>,
+) -> Option<std::sync::Arc<pm_panel_studio3d::viewport::Scene>> {
+    if views == 1 {
+        *cached = None;
+        return None;
+    }
+    let edition = published.snapshot.document.edition();
+    if cached.as_ref().is_none_or(|(key, _)| *key != edition) {
+        let scene = pm_panel_studio3d::viewport::scene(published, 0.)
+            .ok()
+            .filter(|scene| !scene.items.is_empty())
+            .map(std::sync::Arc::new);
+        *cached = Some((edition, scene));
+    }
+    cached.as_ref().and_then(|(_, scene)| scene.clone())
+}
+
 impl Controller {
     /// Per display tick: panes follow `studioViews`, the shell's tiles, the
     /// document and their own choices.
@@ -162,16 +187,6 @@ impl Controller {
             self.close_studio_panes();
             return;
         };
-        // The scene's 3D layers, read once per revision (this runs per tick).
-        let revision = p.revision();
-        if self.studio_pane_scene.as_ref().map(|(r, _)| *r) != Some(revision) {
-            let scene = pm_panel_studio3d::viewport::scene(&p, 0.)
-                .ok()
-                .filter(|s| !s.items.is_empty())
-                .map(std::sync::Arc::new);
-            self.studio_pane_scene = Some((revision, scene));
-        }
-        let studio = self.studio_pane_scene.as_ref().and_then(|(_, s)| s.clone());
         // View ▸ 3D checkmarks follow the same settings as the bar.
         {
             let ui = |k: &str, d: &str| {
@@ -193,11 +208,18 @@ impl Controller {
                 current.iter().any(|(g, v)| *g == group && v == value)
             });
         }
-        let count = match p.ui_state.viewer.get("studioViews").and_then(pm_model::Value::as_str) {
-            Some("2") if studio.is_some() => 2usize,
-            Some("4") if studio.is_some() => 4,
+        let requested = match p
+            .ui_state
+            .viewer
+            .get("studioViews")
+            .and_then(pm_model::Value::as_str)
+        {
+            Some("2") => 2,
+            Some("4") => 4,
             _ => 1,
         };
+        let studio = pane_scene(&p, requested, &mut self.studio_pane_scene);
+        let count = if studio.is_some() { requested } else { 1 };
         {
             let host = self.host.borrow();
             if host.viewer_split.get() as usize != count {

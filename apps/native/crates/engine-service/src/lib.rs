@@ -588,6 +588,8 @@ struct View {
     retired_presenters: Vec<usize>,
     transient_snapshot: Option<Snapshot>,
     transient_content: Option<u64>,
+    /// An earlier edition with the same setup inputs as this snapshot.
+    setup_edition: Option<u64>,
     stamp: Stamp,
     content: u64,
     dirty: bool,
@@ -1010,6 +1012,10 @@ impl Viewer {
             )),
             Some(preview),
             Some(p.entry.is_some()),
+            |previous| {
+                p.entry.is_some()
+                    && p.only_transform_values_since(previous.doc_id, previous.revision)
+            },
         )
     }
     /// An edit is being dragged (`publish` says so from the kernel's open
@@ -1062,7 +1068,7 @@ impl Viewer {
         Ok(())
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.snapshot_traced(snapshot, None, None, None)
+        self.snapshot_traced(snapshot, None, None, None, |_| false)
     }
     fn snapshot_traced(
         &self,
@@ -1070,6 +1076,7 @@ impl Viewer {
         spans: Option<(f64, f64)>,
         preview: Option<studio::Preview>,
         editing: Option<bool>,
+        same_setup: impl FnOnce(&Snapshot) -> bool,
     ) -> Result<()> {
         self.edit(|v| {
             ensure!(
@@ -1096,6 +1103,10 @@ impl Viewer {
                     actor_ms,
                     publication_ms,
                 };
+                v.setup_edition = same_setup(&v.config.snapshot).then(|| {
+                    v.setup_edition
+                        .unwrap_or_else(|| v.config.snapshot.document.edition())
+                });
                 v.config.snapshot = snapshot;
                 // A drag's frame in flight is finished and shown, not
                 // abandoned for the next step; a resting picture gives way.
@@ -1997,6 +2008,7 @@ impl EngineService {
                 config,
                 transient_snapshot: None,
                 transient_content: None,
+                setup_edition: None,
                 stamp,
                 content,
                 dirty: true,
@@ -2277,6 +2289,7 @@ struct Work {
     stamp: Stamp,
     moves: u64,
     scene: Scene,
+    setup_edition: Option<u64>,
     /// What rendered frames are drawn from: a paused frame's media (never
     /// Automatic's HD proxies), whatever this frame's moment reads.
     rendered_media: Arc<pm_export::render::MediaPaths>,
@@ -3788,6 +3801,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 stamp: v.stamp,
                 moves: v.moves,
                 scene,
+                setup_edition: (moment == Moment::Scrub
+                    && v.editing
+                    && !capture
+                    && v.transient_snapshot.is_none())
+                .then_some(v.setup_edition)
+                .flatten(),
                 rendered_media: v.paused_paths.clone(),
                 spec: FrameSpec {
                     time,
@@ -3942,6 +3961,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             stamp,
             moves,
             scene,
+            setup_edition,
             rendered_media,
             spec,
             studio_preview,
@@ -3978,6 +3998,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
+            engine.reuse_scene_setup(&scene, setup_edition);
             let overrides = engine
                 .compat()
                 .filter(|store| store.producing_now())
@@ -3999,7 +4020,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             // Partial definitions while extensions load are never a fill's
             // source: its frames would be drawn without their effects.
+            // A position-only preview has no disk frame for its new revision.
+            // Index the final state once the edit rests or finishes.
             if !transient
+                && setup_edition.is_none()
                 && !engine.definitions_pending()
                 && shared.disk.observe(
                     &rendered,

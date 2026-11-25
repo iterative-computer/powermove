@@ -1314,16 +1314,7 @@ impl Controller {
                 h: 0.,
             }
         });
-        self.host.borrow_mut().open_menu(
-            None,
-            choices,
-            anchor,
-            Vec::new(),
-            Some(40),
-            None,
-            "Add 3D Object, Light, Camera, Null…",
-            None,
-        );
+        self.host.borrow_mut().open_add_menu(choices, anchor);
     }
     /// The Agent panel's pop-up menus (threads, model, access, slash): the
     /// field menu under the control that asked, standing above the popover
@@ -5439,12 +5430,70 @@ mod quick_look_tests {
             assert!(has(cmd), "missing Shift+A choice {cmd}");
         }
     }
+
+    #[test]
+    fn studio_add_choices_group_every_command_and_support_flat_search() {
+        use pm_shell::transient::{Picker, PickerRow};
+        let mut menu = Picker {
+            choices: super::studio_add_choices(),
+            grouped: true,
+            open: true,
+            ..Default::default()
+        };
+        let expected = [
+            ("Mesh", 9),
+            ("Light", 4),
+            ("3D Null", 1),
+            ("Camera", 1),
+            ("Light Presets", 5),
+            ("Environment", 3),
+            ("Nature", 6),
+        ];
+        let rows = menu.rows();
+        assert_eq!(rows.len(), expected.len());
+        let mut reachable = Vec::new();
+        for (place, (row, (label, count))) in rows.into_iter().zip(expected).enumerate() {
+            let index = match row {
+                PickerRow::Category(index) => {
+                    assert_eq!(menu.choices[index].category, label);
+                    menu.point(Some(place));
+                    let items = menu.submenu_choices();
+                    assert_eq!(items.len(), count);
+                    reachable.extend(items);
+                    index
+                }
+                PickerRow::Choice(index) => {
+                    assert_eq!(menu.choices[index].label, label);
+                    assert_eq!(count, 1);
+                    reachable.push(index);
+                    index
+                }
+                PickerRow::Provider(_) => panic!("unexpected provider row"),
+            };
+            assert!(menu.choices[index].menu_icon.is_some());
+        }
+        reachable.sort_unstable();
+        assert_eq!(reachable, (0..menu.choices.len()).collect::<Vec<_>>());
+        menu.search("spot".into());
+        assert!(menu.submenu.is_none());
+        assert_eq!(menu.navigate("enter").as_deref(), Some("new3d:spot"));
+    }
 }
 
 pub(crate) fn studio_add_choices() -> Vec<pm_shell::transient::Choice> {
     use pm_shell::transient::Choice;
     let item = |label: &str, cmd: &str, cat: &str, detail: &str, aliases: &[&str]| {
         let mut c = Choice::new(label, cmd).within(cat);
+        c.menu_icon = match cat {
+            "Mesh" => Some("cube"),
+            "Light" => Some("lightbulb"),
+            "Empty" => Some("plus.viewfinder"),
+            "Camera" => Some("video"),
+            "Light Presets" => Some("slider.horizontal.3"),
+            "Environment" => Some("globe"),
+            "Nature" => Some("leaf"),
+            _ => None,
+        };
         if !detail.is_empty() {
             c = c.detail(detail);
         }

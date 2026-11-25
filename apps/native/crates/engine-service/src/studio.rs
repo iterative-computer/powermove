@@ -327,6 +327,48 @@ fn attach_arc_source(
 }
 
 #[cfg(test)]
+mod plane_camera_tests {
+    use super::*;
+
+    #[test]
+    fn free_view_reprojects_grouped_25d_layers_without_a_camera_layer() {
+        let project = r#"{
+            "id":"c","w":640,"h":360,"fps":30,"dur":5,
+            "layers":[
+                {"id":"card","type":"group","threeD":true,"on":true,"from":0,"dur":2,"p":{}},
+                {"id":"child","type":"shape","group":"card","on":true,"from":0,"dur":2,
+                 "p":{"position.x":{"v":320},"position.y":{"v":180}}},
+                {"id":"control","type":"null","threeD":true,"on":true,"from":0,"dur":2,"p":{}},
+                {"id":"background","type":"solid","on":true,"from":0,"dur":5,"p":{}}
+            ]
+        }"#;
+        let doc = pm_model::Document::new(Some(pm_model::json::parse(project).unwrap()), 1);
+        let default = pm_eval::space3d::default_camera_25d(640., 360.);
+        let view = FreeView {
+            eye: [1., 0., default.position[2] - 1.],
+            target: [1., 0., -1.],
+            zoom: 1.,
+            ortho: false,
+            roll: 0.,
+        };
+        let camera = plane_camera(&Some(view).into(), &doc, "c", 0).unwrap();
+        assert_eq!(camera.position, view.eye);
+        assert_eq!(camera.target, view.target);
+        assert_eq!(camera.fov, default.fov);
+
+        let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+        let layers = comp.layers();
+        let mut ev = pm_eval::Evaluator::new();
+        let mut scope = pm_eval::Scope::open(&mut ev, &comp);
+        let shot = scope.plane_matrix(&layers[1], 0., false).unwrap();
+        let background = scope.plane_matrix(&layers[3], 0., false).unwrap();
+        scope.view_camera = Some(camera);
+        assert_ne!(scope.plane_matrix(&layers[1], 0., false).unwrap(), shot);
+        assert_eq!(scope.plane_matrix(&layers[3], 0., false).unwrap(), background);
+    }
+}
+
+#[cfg(test)]
 mod preview_tests {
     use super::Preview;
     #[test]

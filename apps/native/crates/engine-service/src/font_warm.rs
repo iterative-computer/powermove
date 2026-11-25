@@ -494,9 +494,9 @@ impl FontWarmer {
         doc: &Arc<pm_model::Document>,
         comp: &str,
         fonts: &pm_render::text::host::RenderFonts,
+        edition: u64,
     ) -> bool {
         let generation = fonts.generation();
-        let edition = doc.edition();
         if self
             .requested
             .iter()
@@ -564,7 +564,7 @@ impl Drop for FontWarmer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pm_text::answers::{Answers, Query, answer_batch};
     use pm_text::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
@@ -847,6 +847,24 @@ mod tests {
         (stop, thread)
     }
 
+    pub(crate) fn with_test_fonts<T>(
+        test: impl FnOnce(pm_render::text::host::RenderFonts) -> T,
+    ) -> T {
+        struct Pump(Arc<AtomicBool>, Option<std::thread::JoinHandle<()>>);
+        impl Drop for Pump {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+                self.1.take().unwrap().join().unwrap();
+            }
+        }
+
+        use pm_render::text::host::RenderFonts;
+        let broker = FontBroker::new();
+        let (stop, thread) = serve(&broker, &registry());
+        let _pump = Pump(stop, Some(thread));
+        test(RenderFonts::new(broker))
+    }
+
     fn wait_for(warmer: &FontWarmer, completed: u64) {
         let started = Instant::now();
         while warmer.completed() < completed {
@@ -878,7 +896,7 @@ mod tests {
         let mut warmer = FontWarmer::default();
         // The word starts far after the frame drawn first.
         let first = doc(&project(json!([word(13.733)]), &[]));
-        assert!(warmer.request(&first, ROOT, &fonts));
+        assert!(warmer.request(&first, ROOT, &fonts, first.edition()));
         wait_for(&warmer, 1);
         {
             let registry = lock(&registry);
@@ -922,7 +940,7 @@ mod tests {
         );
 
         // The same scene again asks nothing.
-        assert!(!warmer.request(&first, ROOT, &fonts));
+        assert!(!warmer.request(&first, ROOT, &fonts, first.edition()));
         stop.store(true, Ordering::Release);
         pump.join().unwrap();
     }
@@ -935,10 +953,10 @@ mod tests {
         let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
         let mut warmer = FontWarmer::default();
         let first = doc(&project(json!([word(0.0)]), &[]));
-        assert!(warmer.request(&first, ROOT, &fonts));
+        assert!(warmer.request(&first, ROOT, &fonts, first.edition()));
         wait_for(&warmer, 1);
         assert!(
-            !warmer.request(&first, ROOT, &fonts),
+            !warmer.request(&first, ROOT, &fonts, first.edition()),
             "the same scene is not warmed twice"
         );
 
@@ -949,7 +967,7 @@ mod tests {
             json!({"font": "Geist", "weight": 700, "size": 40, "text": "Bold"}),
         );
         let second = doc(&project(json!([word(0.0), bold]), &[]));
-        assert!(warmer.request(&second, ROOT, &fonts));
+        assert!(warmer.request(&second, ROOT, &fonts, second.edition()));
         wait_for(&warmer, 2);
         let desc = pm_text::compat::canvas::canvas_font(
             &TextContent::from_json(&json!({"font": "Geist", "weight": 700, "size": 40})),
@@ -966,7 +984,7 @@ mod tests {
         // nothing: every content was laid out already.
         let asked = broker.counts().0;
         let third = Arc::new((*second).clone());
-        assert!(warmer.request(&third, ROOT, &fonts));
+        assert!(warmer.request(&third, ROOT, &fonts, third.edition()));
         wait_for(&warmer, 3);
         assert_eq!(broker.counts().0, asked);
 
@@ -974,14 +992,14 @@ mod tests {
         // it asks again, and the registry's answers stand.
         let cold = lock(&registry).cold.len();
         broker.set_generation(broker.generation() + 1);
-        assert!(warmer.request(&third, ROOT, &fonts));
+        assert!(warmer.request(&third, ROOT, &fonts, third.edition()));
         wait_for(&warmer, 4);
         assert!(broker.counts().0 > asked);
         assert_eq!(lock(&registry).cold.len(), cold);
 
         // Replaced fonts (`Engine::set_fonts`) warm again as well.
         warmer.reset();
-        assert!(warmer.request(&third, ROOT, &fonts));
+        assert!(warmer.request(&third, ROOT, &fonts, third.edition()));
         wait_for(&warmer, 5);
         assert_eq!(broker.counts().2, 0, "no ask failed");
         stop.store(true, Ordering::Release);
@@ -996,7 +1014,7 @@ mod tests {
         let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
         let mut warmer = FontWarmer::with_timeout(Duration::from_millis(100));
         let first = doc(&project(json!([word(0.0)]), &[]));
-        assert!(warmer.request(&first, ROOT, &fonts));
+        assert!(warmer.request(&first, ROOT, &fonts, first.edition()));
         wait_for(&warmer, 1);
         assert_eq!(
             broker.counts().2,
@@ -1006,7 +1024,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&first), 1, "the warmer keeps no document");
         // A scene waiting behind a stuck ask is let go with the warmer.
         let second = doc(&project(json!([word(1.0)]), &[]));
-        assert!(warmer.request(&second, ROOT, &fonts));
+        assert!(warmer.request(&second, ROOT, &fonts, second.edition()));
         let dropped = Instant::now();
         drop(warmer);
         assert!(

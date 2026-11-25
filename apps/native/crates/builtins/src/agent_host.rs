@@ -242,7 +242,23 @@ impl AgentLink {
         }
         drop(environment);
         if let Some(saved) = self.compatible() {
-            providers.push(("compatible".into(), saved.model));
+            use pm_services::surfaces::providers::preset_for;
+            let label = match preset_for(&saved.base_url).id {
+                "ollama" => "Ollama",
+                "lmstudio" => "LM Studio",
+                "llamacpp" => "llama.cpp",
+                "jan" => "Jan",
+                "openrouter" => "OpenRouter",
+                "openai" => "OpenAI API",
+                "anthropic" => "Anthropic API",
+                "gemini" => "Gemini",
+                "groq" => "Groq",
+                "deepseek" => "DeepSeek",
+                "xai" => "xAI",
+                "mistral" => "Mistral",
+                _ => "OpenAI-compatible",
+            };
+            providers.push(("compatible".into(), label.into()));
         }
         let listed = self.model_choices(provider);
         // Only real models: no choice reads as the provider's default model.

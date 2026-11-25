@@ -1,7 +1,7 @@
 //! Layer rows for the temporary panels. Listing every layer is O(layers), so
 //! large compositions build their rows on a worker; the main thread only
 //! swaps in the finished `Arc`. Panels render only visible rows.
-use pm_kernel::{LayerInfo, document::Snapshot};
+use pm_kernel::{LayerInfo, Published, document::Snapshot};
 use std::sync::Arc;
 
 /// Compositions up to this size list their rows inline (about 30 µs a row in
@@ -88,6 +88,20 @@ impl LayerRows {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
+    /// Large rows and their key count are installed together by the worker.
+    /// An open gesture that only wrote transform values can keep both.
+    pub fn follow_transform_values(&mut self, publication: &Published) {
+        if publication.entry.is_some()
+            && self.pending.is_none()
+            && self.rows.len() > INLINE_LAYERS
+            && self.key.is_some_and(|(doc, revision)| {
+                publication.only_transform_values_since(doc, revision)
+            })
+        {
+            self.key = Some(key(&publication.snapshot));
+        }
+    }
+
     pub fn plan(&mut self, latest: Key, count: usize) -> Plan {
         if self.key == Some(latest) || self.pending.is_some() {
             return Plan::Current;

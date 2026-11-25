@@ -14,7 +14,7 @@ use pm_scene3d::navigation::{
     orbit, orbit_by, pan, side_view, sub, zoom_step,
 };
 use pm_scene3d::schema::Role;
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 
 /// The viewer's 3D tool (UI state `studioTool`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -236,6 +236,7 @@ pub struct State {
     light_orbit: Option<LightOrbit>,
     /// Fly navigation in progress (Shift+`).
     fly: Option<FlyRun>,
+    ui_write: RefCell<Option<async_channel::Receiver<()>>>,
     /// Navigating in camera view: the move previews here and is stored on
     /// the shot camera, as one undo step, when the gesture ends.
     cam_nav: Option<CamNav>,
@@ -460,50 +461,66 @@ impl GizmoSurface {
     }
     /// Writes a viewer UI key (`studioLook`, `studioTool`): not the document.
     pub(super) fn studio_ui(&self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
+        self.studio_ui_fields([(key, value)], cx);
+    }
+    fn studio_ui_fields<const N: usize>(
+        &self,
+        fields: [(&'static str, &'static str); N],
+        cx: &mut Context<Self>,
+    ) {
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        // A quick confirm or cancel must be published after entering Fly.
+        let (finished, pending) = async_channel::bounded(1);
+        let previous = self.studio.ui_write.replace(Some(pending));
         cx.background_executor()
             .spawn(async move {
+                let _finished = finished;
+                if let Some(previous) = previous {
+                    let _ = previous.recv().await;
+                }
                 let Some(p) = kernel.published(&project) else {
                     return;
                 };
-                // 2D/3D (the look) is also remembered per composition.
-                let comp = (key == "studioLook").then(|| p.snapshot.render_comp());
-                let kept = |ui: &pm_kernel::state::UiState| {
-                    comp.as_ref().is_none_or(|c| {
-                        ui.viewer
-                            .get("studioLookByComp")
-                            .and_then(|m| m.get(c))
-                            .and_then(pm_model::Value::as_str)
-                            == Some(value)
-                    })
-                };
-                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value)
-                    && kept(&p.ui_state)
-                {
+                let state = kernel.state();
+                let mut ui = state.ui.get(&project).unwrap_or(&p.ui_state).clone();
+                let Some(viewer) = ui.viewer.as_object_mut() else {
                     return;
-                }
-                let mut ui = p.ui_state.clone();
-                if let Some(v) = ui.viewer.as_object_mut() {
-                    v.insert(key, pm_model::Value::from(value));
-                    if let Some(c) = &comp {
-                        let mut by = v
+                };
+                let mut changed = false;
+                for (key, value) in fields {
+                    if viewer.get(key).and_then(pm_model::Value::as_str) != Some(value) {
+                        viewer.insert(key, value.into());
+                        changed = true;
+                    }
+                    // Remember 2D/3D separately for each composition.
+                    if key == "studioLook" {
+                        let comp = p.snapshot.render_comp();
+                        let mut by_comp = viewer
                             .get("studioLookByComp")
-                            .filter(|m| m.as_object().is_some())
+                            .and_then(pm_model::Value::as_object)
                             .cloned()
-                            .unwrap_or_else(|| pm_model::Value::Object(Default::default()));
-                        if let Some(m) = by.as_object_mut() {
-                            m.insert(c.as_str(), pm_model::Value::from(value));
+                            .unwrap_or_default();
+                        if by_comp.get(comp.as_str()).and_then(pm_model::Value::as_str)
+                            != Some(value)
+                        {
+                            by_comp.insert(comp.as_str(), value.into());
+                            viewer.insert("studioLookByComp", pm_model::Value::Object(by_comp));
+                            changed = true;
                         }
-                        v.insert("studioLookByComp", by);
                     }
                 }
-                let state = kernel.state();
-                let _ = kernel
-                    .state_transaction(pm_kernel::state::StateTransaction {
-                        expected_revision: Some(state.revision),
-                        ops: vec![pm_kernel::state::StateOp::Ui { project, next: ui }],
-                    })
-                    .await;
+                if changed {
+                    let _ = kernel
+                        .state_transaction(pm_kernel::state::StateTransaction {
+                            expected_revision: Some(state.revision),
+                            ops: vec![pm_kernel::state::StateOp::UiDocument {
+                                project,
+                                document: p.snapshot.doc_id,
+                                next: ui,
+                            }],
+                        })
+                        .await;
+                }
             })
             .detach();
     }
@@ -664,8 +681,11 @@ impl GizmoSurface {
         let start = self.studio.view().unwrap_or(scene.shot);
         let (was_free, prev_free) = (self.studio.free_look, self.studio.free);
         // Fly in the editor view; through the camera it is stored on confirm.
+        let camera = !was_free && scene.has_camera;
         self.studio.free_look = true;
-        self.studio.look_pending = Some(true);
+        if !camera {
+            self.studio.look_pending = Some(true);
+        }
         self.studio.free = Some(start);
         let this = cx.entity().downgrade();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
@@ -695,7 +715,7 @@ impl GizmoSurface {
         });
         self.studio.fly = Some(FlyRun {
             fly: super::fly::Fly::new(start),
-            camera: !was_free && scene.has_camera,
+            camera,
             was_free,
             prev_free,
             last: std::time::Instant::now(),
@@ -709,8 +729,12 @@ impl GizmoSurface {
             capture.set(true);
         }
         self.cursor = CursorStyle::Crosshair;
-        // The viewer shows the keys while flying (UI state, not the document).
-        self.studio_ui("studioFly", "on", cx);
+        // Switch the viewer controls and show the fly keys together.
+        if camera {
+            self.studio_ui("studioFly", "on", cx);
+        } else {
+            self.studio_ui_fields([("studioLook", "free"), ("studioFly", "on")], cx);
+        }
         self.studio_push_view(cx);
         self.draw(cx);
         cx.notify();
@@ -755,7 +779,7 @@ impl GizmoSurface {
     }
     /// Direct mouse-look while flying: pointer deltas turn the camera and stop
     /// turning the instant the pointer stops.
-    pub(super) fn studio_fly_pointer(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn studio_fly_pointer(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(run) = self.studio.fly.as_mut() else {
             return;
         };
@@ -808,16 +832,14 @@ impl GizmoSurface {
         // Kept in the editor view, the view simply stays where it flew to.
         // Otherwise back to the look it began in: the shot (now carrying the
         // flight, on confirm) or the editor view exactly as it was.
-        if keep && !run.camera {
-            self.studio_ui("studioLook", "free", cx);
-        } else {
+        if !keep || run.camera {
             self.studio.free_look = run.was_free;
             self.studio.look_pending = Some(run.was_free);
             self.studio.free = run.prev_free;
-            self.studio_ui("studioLook", if run.was_free { "free" } else { "camera" }, cx);
         }
         self.cursor = CursorStyle::Arrow;
-        self.studio_ui("studioFly", "off", cx);
+        let look = if self.studio.free_look { "free" } else { "camera" };
+        self.studio_ui_fields([("studioLook", look), ("studioFly", "off")], cx);
         self.studio_push_view(cx);
         self.draw(cx);
         cx.notify();

@@ -585,6 +585,9 @@ pub struct Engine {
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
+    /// Document edition and the equivalent edition for setup-only reads.
+    setup_edition: Option<(u64, u64)>,
+    studio_presence: Option<((u64, u64, String), bool)>,
     studio_content: Option<(
         u64,
         u64,
@@ -1312,6 +1315,8 @@ impl Engine {
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
+            setup_edition: None,
+            studio_presence: None,
             studio_content: None,
             visual_media: Default::default(),
             font_warm: Default::default(),
@@ -1465,12 +1470,31 @@ impl Engine {
             focus_group: focus_group_key(self.focus_group.as_deref()),
         }
     }
+    pub(crate) fn reuse_scene_setup(&mut self, scene: &Scene, edition: Option<u64>) {
+        self.setup_edition = edition.map(|edition| (scene.doc.edition(), edition));
+    }
+    fn setup_edition(&self, scene: &Scene) -> u64 {
+        let current = scene.doc.edition();
+        self.setup_edition
+            .filter(|(edition, _)| *edition == current)
+            .map_or(current, |(_, reused)| reused)
+    }
     /// Whether `scene` draws a 3D scene (path traced on this thread).
-    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
-        match &self.disk {
+    fn draws_studio(&mut self, scene: &Scene) -> bool {
+        let edition = self.setup_edition(scene);
+        if let Some(((known, content, comp), draws)) = &self.studio_presence
+            && *known == edition
+            && *content == scene.content
+            && *comp == scene.comp
+        {
+            return *draws;
+        }
+        let draws = match &self.disk {
             Some(disk) => disk.draws_studio(scene),
             None => crate::frame_inputs::draws_studio(&scene.doc, &scene.comp),
-        }
+        };
+        self.studio_presence = Some(((edition, scene.content, scene.comp.clone()), draws));
+        draws
     }
     /// What a frame of `scene` reads besides its document, as observed: its
     /// media files (looked at every 2 s, as the disk render cache looks)
@@ -1737,19 +1761,22 @@ impl Engine {
         // frame met later (while playing) waits for the registry's first
         // answer; the same scene costs a comparison. Before the effects:
         // definitions still loading must not hold it back.
+        let edition = self.setup_edition(scene);
         if let Some(fonts) = &self.fonts {
-            self.font_warm.request(&scene.doc, &scene.comp, fonts);
+            self.font_warm
+                .request(&scene.doc, &scene.comp, fonts, edition);
         }
+        let studio = self.draws_studio(scene);
         let key = (
             // A flat scene does not keep a Studio source holding its document.
             // A new snapshot must still be distinct if it reuses the allocation.
-            scene.doc.edition(),
+            if studio { scene.doc.edition() } else { edition },
             scene.content,
             scene.comp.clone(),
             self.studio_preview,
             // The frame cache still keys on every view. A flat composition's
             // custom camera changes only its projected layer vertices.
-            if self.studio_view == crate::studio::ViewCamera::Active || self.draws_studio(scene) {
+            if studio {
                 self.studio_view.key()
             } else {
                 crate::studio::ViewCamera::Active.key()
@@ -1812,7 +1839,7 @@ impl Engine {
         }
         if self.studio_content.as_ref() != Some(&key) {
             #[cfg(feature = "kernel")]
-            if self.draws_studio(scene) {
+            if studio {
                 crate::studio::attach_with_camera_fonts_progress(
                     &mut self.renderer,
                     scene.doc.clone(),
@@ -1886,7 +1913,7 @@ impl Engine {
     fn hdr_view(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
         let key = (
             scene.content,
-            scene.doc.revision(),
+            self.setup_edition(scene),
             scene.comp.clone(),
             self.observed_inputs(scene),
         );
@@ -2120,6 +2147,7 @@ impl Engine {
         let looked = hit.is_none()
             && shown.is_none()
             && !spec.exact
+            && self.setup_edition(scene) == scene.doc.edition()
             && self.focus_group.is_none()
             && self.studio_view == crate::studio::ViewCamera::Active;
         // A playing or paused frame waits a moment for its frame on disk
@@ -6088,4 +6116,136 @@ fn keep_paused_decoders() -> bool {
     }
     let app = objc2_app_kit::NSRunningApplication::currentApplication();
     app.isActive() && !app.isHidden()
+}
+
+#[cfg(all(test, feature = "kernel"))]
+mod layer_drag_profile {
+    use super::*;
+    use std::sync::Mutex;
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn one_active_title_in_a_639_layer_composition() {
+        crate::font_warm::tests::with_test_fonts(|fonts| {
+            if std::env::var_os("PM_PROFILE_DRAG_BASELINE").is_some() {
+                eprintln!("Before setup reuse");
+                profile_drag(fonts.sibling(), false);
+                eprintln!("After setup reuse");
+            }
+            profile_drag(fonts, true);
+        });
+    }
+
+    fn profile_drag(fonts: pm_render::text::host::RenderFonts, reuse_setup: bool) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let mut engine = Engine::new(Gpu::new("639-layer-drag").unwrap()).unwrap();
+        engine.set_fonts(fonts);
+        let scene = |p: &pm_kernel::Published| Scene {
+            doc: p.snapshot.document.clone(),
+            comp: p.snapshot.render_comp(),
+            media: Default::default(),
+            content: p.snapshot.doc_id,
+        };
+        let spec = FrameSpec {
+            exact: false,
+            moment: Moment::Scrub,
+            ..FrameSpec::exact(
+                Ticks::new((fixture::TIME * pm_protocol::common::TICKS_PER_SECOND as f64) as i64)
+                    .unwrap(),
+                Output {
+                    width: 1555,
+                    height: 875,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.;
+        let frame = |engine: &mut Engine, scene: &Scene, spec| {
+            let trace = Arc::new(Mutex::new(Trace::default()));
+            let start = Instant::now();
+            let submission = engine
+                .frame(scene, spec, None, &Default::default(), false, trace.clone())
+                .unwrap()
+                .expect("a render submission");
+            let encode = ms(start.elapsed());
+            assert!(submission.failures.is_empty(), "{:?}", submission.failures);
+            submission.commit();
+            submission.complete().unwrap();
+            let trace = trace.lock().unwrap();
+            (
+                encode,
+                (trace.render_submitted - trace.render_start) * 1000.,
+            )
+        };
+        let initial = kernel.published(fixture::PROJECT).unwrap();
+        let edition = initial.snapshot.document.edition();
+        frame(
+            &mut engine,
+            &scene(&initial),
+            FrameSpec {
+                moment: Moment::Paused,
+                ..spec
+            },
+        );
+        let studio_content = engine.studio_content.clone();
+        let tone_key = engine.hdr.as_ref().unwrap().0.clone();
+        let effects_registered = engine.effects_registered;
+        let mut samples = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            assert!(p.only_transform_values_since(initial.snapshot.doc_id, initial.revision()));
+            let scene = scene(&p);
+            engine.reuse_scene_setup(&scene, reuse_setup.then_some(edition));
+            engine.drag_frame = true;
+            engine.sync_studio(&scene, spec.time).unwrap();
+            engine.drag_frame = false;
+            let sync = ms(start.elapsed());
+
+            let hdr_start = Instant::now();
+            engine.sync_hdr(&scene);
+            let hdr = ms(hdr_start.elapsed());
+            let (encode, render) = frame(&mut engine, &scene, spec);
+
+            if reuse_setup {
+                assert_eq!(engine.studio_content, studio_content);
+                assert_eq!(engine.hdr.as_ref().unwrap().0, tone_key);
+                assert_eq!(engine.effects_registered, effects_registered);
+            }
+            samples.push([
+                ms(p.actor_work),
+                ms(p.publication_work),
+                sync,
+                hdr,
+                encode,
+                render,
+                ms(start.elapsed()),
+            ]);
+        });
+        fixture::report(
+            [
+                "kernel actor",
+                "kernel publish",
+                "sync_studio",
+                "HDR",
+                "engine encode after sync",
+                "pm-render",
+                "through GPU completion",
+            ],
+            &samples,
+        );
+        if reuse_setup {
+            fixture::assert_budget(&samples, [0, 1, 2, 3, 4, 5]);
+            let released = scene(&kernel.published(fixture::PROJECT).unwrap());
+            engine.reuse_scene_setup(&released, None);
+            engine.sync_studio(&released, spec.time).unwrap();
+            assert_eq!(engine.effects_registered, effects_registered + 1);
+            assert_ne!(engine.studio_content, studio_content);
+        }
+    }
 }
