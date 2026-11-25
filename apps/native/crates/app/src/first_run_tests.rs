@@ -1272,6 +1272,7 @@ fn pm348_refused_worker_updates_without_a_window() {
     assert!(flow.frame().details.is_some());
     assert!(!isolated.exists());
 }
+#[cfg(debug_assertions)] // `show_for_review` is a development-build switch
 #[test]
 fn each_review_frame_shows_on_its_own_and_its_buttons_do_nothing() {
     let (_temp, home) = home();
