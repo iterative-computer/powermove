@@ -481,6 +481,25 @@ impl PlatformWindow for TestWindow {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn render_region_to_texture(
+        &self,
+        scene: &Scene,
+        region: crate::Bounds<DevicePixels>,
+    ) -> anyhow::Result<crate::GpuSnapshot> {
+        let scale_factor = self.scale_factor();
+        let mut state = self.0.lock();
+        let size = state.bounds.size;
+        match &mut state.renderer {
+            Some(renderer) => renderer.render_scene_region_to_texture(
+                scene,
+                size.to_device_pixels(scale_factor),
+                region,
+            ),
+            None => anyhow::bail!("no HeadlessRenderer configured"),
+        }
+    }
+
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         Some(self)
     }

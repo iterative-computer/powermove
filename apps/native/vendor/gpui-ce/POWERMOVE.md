@@ -292,3 +292,8 @@ than guessing the system default. The Metal layer explicitly declares sRGB:
 packed `NativeTexture` surfaces contain display-encoded sRGB, and ColorSync must
 convert those colors for a Display P3 display. No new scene primitive or shader
 pipeline is added to GPUI for the wave itself.
+`Window::paint_snapshot_gpu` pictures the same operations into a GPU texture
+(`GpuSnapshot`: texture, event, value) through `PlatformWindow::render_region_to_texture`
+(Metal window and headless renderer): no readback, no CPU wait, no upload. A
+transition prepared from it waits on the event on the GPU, so its capture
+costs no stall.

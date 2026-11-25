@@ -72,6 +72,13 @@ struct Snapshots {
 /// All textures are display-encoded sRGB in BGRA8Unorm, GPUI's `NativeTexture` contract.
 /// GPUI's sRGB layer lets ColorSync convert to the display color space; do not label
 /// these bytes as Display P3 or use an sRGB Metal format (which would decode twice).
+/// A picture on the GPU, ready once `event` reaches `value` (a GPUI
+/// snapshot taken without reading it back).
+pub struct GpuPicture<'a> {
+    pub texture: &'a TextureRef,
+    pub event: &'a EventRef,
+    pub value: u64,
+}
 pub struct WaveRenderer {
     device: Device,
     queue: CommandQueue,
@@ -277,6 +284,75 @@ impl WaveRenderer {
                 .collect(),
             width: from.width(),
             height: from.height(),
+            style: style.clone(),
+            same: to.is_none(),
+        });
+        Ok(())
+    }
+    /// Pictures already on the GPU (`GpuPicture`), prepared without a CPU
+    /// wait or upload: the command buffer waits for each picture's event,
+    /// copies it into the mipmapped screen, blurs, and is committed. Frames
+    /// rendered after it on this queue see the result.
+    pub fn prepare_gpu(
+        &mut self,
+        from: GpuPicture<'_>,
+        to: Option<GpuPicture<'_>>,
+        width_pt: f64,
+        style: &WaveStyle,
+    ) -> Result<(), String> {
+        style.validate().map_err(|e| e.to_string())?;
+        let (w, h) = (from.texture.width() as u32, from.texture.height() as u32);
+        if w == 0 || h == 0 || !width_pt.is_finite() || width_pt <= 0. {
+            return Err("invalid picture size".into());
+        }
+        if let Some(to) = &to
+            && (to.texture.width() as u32, to.texture.height() as u32) != (w, h)
+        {
+            return Err("pictures must have equal dimensions".into());
+        }
+        self.release();
+        let cmd = self.queue.new_command_buffer();
+        let screen = |picture: &GpuPicture<'_>| {
+            cmd.encode_wait_for_event(picture.event, picture.value);
+            let sharp = self.texture(w, h, true);
+            let b = cmd.new_blit_command_encoder();
+            b.copy_from_texture(
+                picture.texture,
+                0,
+                0,
+                MTLOrigin { x: 0, y: 0, z: 0 },
+                MTLSize {
+                    width: w.into(),
+                    height: h.into(),
+                    depth: 1,
+                },
+                &sharp.texture,
+                0,
+                0,
+                MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+            b.generate_mipmaps(&sharp.texture);
+            b.end_encoding();
+            let near = self.blurred(cmd, &sharp.texture, width_pt, 7.);
+            let far = self.blurred(cmd, &sharp.texture, width_pt, style.blur.max(7.));
+            [sharp, near, far]
+        };
+        let [a, b, c] = screen(&from);
+        let [d, e, f] = match &to {
+            Some(to) => screen(to),
+            None => [a.clone(), b.clone(), c.clone()],
+        };
+        cmd.commit();
+        for _ in 0..3 {
+            self.outputs.push(self.texture(w, h, false));
+        }
+        self.snapshots = Some(Snapshots {
+            screens: [a, b, c, d, e, f],
+            particles: (0..style.particle_count.round() as usize)
+                .map(|i| Particle::new(i, style))
+                .collect(),
+            width: w,
+            height: h,
             style: style.clone(),
             same: to.is_none(),
         });

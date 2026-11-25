@@ -2967,6 +2967,15 @@ impl PlatformWindow for MacWindow {
         this.renderer.render_to_image(scene)
     }
 
+    fn render_region_to_texture(
+        &self,
+        scene: &gpui::Scene,
+        region: gpui::Bounds<gpui::DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        let mut this = self.0.lock();
+        this.renderer.render_region_to_texture(scene, region)
+    }
+
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 

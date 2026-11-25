@@ -1,4 +1,4 @@
-//! Reusable snapshot transition. No app screen installs this component.
+//! Reusable snapshot transition (the first-run stage's wave).
 //! Own the handle in a view; build a `DistortionWave` each render. Give both
 //! children opaque backgrounds. Platform child windows and deferred popovers
 //! cannot be pictured; put live controls/video in `overlay` instead.
@@ -199,6 +199,12 @@ impl WaveState {
         self.clock.reset();
         self.release();
         self.prepare = false;
+    }
+    /// `prepare` from inside a render: both children are pictured on the
+    /// next paint, before the run that needs them.
+    pub fn prepare_now(&mut self) {
+        self.release();
+        self.prepare = true;
     }
     /// Captures both children on the next paint, even while idle.
     pub fn prepare(&mut self, window: &mut Window) {
@@ -441,11 +447,13 @@ impl Element for DistortionWave {
         });
         let (capture, active) = *prepaint;
         if capture {
-            let from = window.paint_snapshot(bounds, cx, |w, c| self.from.paint(w, c));
+            // Pictured on the GPU: no readback, no wait, no upload; the
+            // wave's preparation waits on the pictures' events on the GPU.
+            let from = window.paint_snapshot_gpu(bounds, cx, |w, c| self.from.paint(w, c));
             let to = self
                 .to
                 .as_mut()
-                .map(|to| window.paint_snapshot(bounds, cx, |w, c| to.paint(w, c)));
+                .map(|to| window.paint_snapshot_gpu(bounds, cx, |w, c| to.paint(w, c)));
             self.state.update(cx, |s, _| {
                 let result = (|| -> Result<(), String> {
                     if s.renderer.is_none() {
@@ -465,10 +473,19 @@ impl Element for DistortionWave {
                     let height = f64::from(bounds.size.height);
                     let k = WaveStyle::scale(width, height);
                     let style = s.style.for_size(width, height, s.corner_radius);
-                    s.renderer
-                        .as_mut()
-                        .unwrap()
-                        .prepare(&from, to.as_ref(), width / k, &style)?;
+                    fn picture(p: &GpuSnapshot) -> pm_wave::GpuPicture<'_> {
+                        pm_wave::GpuPicture {
+                            texture: &p.texture,
+                            event: &p.event,
+                            value: p.value,
+                        }
+                    }
+                    s.renderer.as_mut().unwrap().prepare_gpu(
+                        picture(&from),
+                        to.as_ref().map(picture),
+                        width / k,
+                        &style,
+                    )?;
                     s.prepared_size = Some(bounds.size);
                     s.prepare = false;
                     Ok(())

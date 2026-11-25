@@ -80,9 +80,6 @@ impl Gesture {
 pub struct Editor {
     scene: Entity<WorkspaceView>,
     pub integration: Option<Rc<dyn crate::integration::Integration>>,
-    /// Lays the editor out in this size instead of its window's (an editor
-    /// drawn smaller than its window: the first-run film's).
-    pub frame: Option<Size<Pixels>>,
     pub layout: Layout,
     agent_build_slots: HashMap<String, (serde_json::Value, f32)>,
     pub tokens: Tokens,
@@ -284,7 +281,6 @@ impl Editor {
             scene: cx.new(|_| WorkspaceView(editor)),
             agent_build_slots: HashMap::new(),
             integration: None,
-            frame: None,
             layout,
             tokens,
             host,
@@ -3195,7 +3191,7 @@ impl Editor {
         let t = self.tokens.clone();
         let m = t.metrics;
         let c = t.colors.clone();
-        let viewport = self.frame.unwrap_or_else(|| w.viewport_size());
+        let viewport = w.viewport_size();
         let top = self
             .host
             .as_ref()

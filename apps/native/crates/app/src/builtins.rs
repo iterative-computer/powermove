@@ -3684,7 +3684,47 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         else {
             return;
         };
-        paint_clips(runtime, clips, done, cx);
+        cx.spawn(async move |cx| {
+            // One 100 ms deadline for the whole request: a realm that hasn't
+            // answered by then is left out of this paint. Answers are bounded
+            // here, on the worker, before they reach the main thread.
+            let shapes = cx
+                .background_executor()
+                .spawn(async move {
+                    let visible: std::collections::HashSet<String> = clips
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                        .collect();
+                    let tickets = runtime.paint_clips(&clips);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    let mut shapes = pm_panel_timeline::render::Decorations::new();
+                    let mut complete = true;
+                    for (_, ticket) in tickets {
+                        let Ok(ticket) = ticket else { continue };
+                        // A painter that threw has answered; one still running
+                        // past the deadline makes this paint incomplete.
+                        let answer = crate::ticket::answer(ticket, deadline);
+                        let Some(Ok(evaluation)) = answer else {
+                            complete &= answer.is_some();
+                            continue;
+                        };
+                        if let Some(answer) = painter_answer(&evaluation.value) {
+                            pm_panel_timeline::render::add_decorations(
+                                &mut shapes,
+                                &answer,
+                                &visible,
+                            );
+                        }
+                    }
+                    (shapes, complete)
+                })
+                .await;
+            cx.update(|cx| done(shapes.0, shapes.1, cx));
+        })
+        .detach();
     }
     fn extension_menu(
         &self,
@@ -4297,58 +4337,6 @@ impl Render for SurfaceWindow {
             })
             .into_any_element()
     }
-}
-
-/// Asks every v4 realm with a clip painter (`timeline.paint`) for its
-/// decorations of `clips`; `done` gets them merged, on the main thread (the
-/// app's timelines and the first-run film's).
-pub(crate) fn paint_clips(
-    runtime: Arc<Builtins>,
-    clips: Value,
-    done: crate::timeline_surface::PaintDone,
-    cx: &mut App,
-) {
-    cx.spawn(async move |cx| {
-        // One 100 ms deadline for the whole request: a realm that hasn't
-        // answered by then is left out of this paint. Answers are bounded
-        // here, on the worker, before they reach the main thread.
-        let shapes = cx
-            .background_executor()
-            .spawn(async move {
-                let visible: std::collections::HashSet<String> = clips
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c["id"].as_str().map(str::to_owned))
-                    .collect();
-                let tickets = runtime.paint_clips(&clips);
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(100);
-                let mut shapes = pm_panel_timeline::render::Decorations::new();
-                let mut complete = true;
-                for (_, ticket) in tickets {
-                    let Ok(ticket) = ticket else { continue };
-                    // A painter that threw has answered; one still running
-                    // past the deadline makes this paint incomplete.
-                    let answer = crate::ticket::answer(ticket, deadline);
-                    let Some(Ok(evaluation)) = answer else {
-                        complete &= answer.is_some();
-                        continue;
-                    };
-                    if let Some(answer) = painter_answer(&evaluation.value) {
-                        pm_panel_timeline::render::add_decorations(
-                            &mut shapes,
-                            &answer,
-                            &visible,
-                        );
-                    }
-                }
-                (shapes, complete)
-            })
-            .await;
-        cx.update(|cx| done(shapes.0, shapes.1, cx));
-    })
-    .detach();
 }
 
 #[derive(Debug, PartialEq, Eq)]

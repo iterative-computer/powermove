@@ -2987,6 +2987,39 @@ impl Window {
         Ok(image::imageops::crop_imm(&image, x, y, w, h).to_image())
     }
 
+    /// `paint_snapshot` on the GPU: the region is pictured into a texture
+    /// without reading it back or waiting, so a transition prepared from it
+    /// costs no stall (the consumer's GPU waits on the snapshot's event).
+    #[cfg(all(
+        target_os = "macos",
+        any(test, feature = "test-support", feature = "frame-capture")
+    ))]
+    pub fn paint_snapshot_gpu(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cx: &mut App,
+        paint: impl FnOnce(&mut Self, &mut App),
+    ) -> anyhow::Result<crate::GpuSnapshot> {
+        self.invalidator.debug_assert_paint();
+        let start = self.next_frame.scene.len();
+        paint(self, cx);
+        let mut captured = Scene::default();
+        captured.replay(start..self.next_frame.scene.len(), &self.next_frame.scene);
+        captured.finish();
+        let scale = self.scale_factor();
+        let region = Bounds::new(
+            point(
+                DevicePixels((f32::from(bounds.origin.x) * scale).round() as i32),
+                DevicePixels((f32::from(bounds.origin.y) * scale).round() as i32),
+            ),
+            size(
+                DevicePixels((f32::from(bounds.size.width) * scale).round().max(1.) as i32),
+                DevicePixels((f32::from(bounds.size.height) * scale).round().max(1.) as i32),
+            ),
+        );
+        self.platform_window.render_region_to_texture(&captured, region)
+    }
+
     /// Returns the current frame's quad and glyph sprite counts.
     #[cfg(any(test, feature = "headless-support"))]
     pub fn rendered_primitive_counts(&self) -> (usize, usize, usize, usize) {

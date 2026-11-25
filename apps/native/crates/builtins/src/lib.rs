@@ -1207,11 +1207,6 @@ impl Builtins {
     pub fn project_id(&self) -> &str {
         &self.broker.project
     }
-    /// The sequence the agent panel's next action is admitted against: a
-    /// host sending a panel action as its controls do (the first-run film).
-    pub fn agent_sequence(&self) -> std::result::Result<u64, String> {
-        Ok(self.agent_state()?.1.sequence())
-    }
     pub fn agent_current_thread(&self) -> Option<String> {
         // Toolbar actions must not wait for a busy agent worker either.
         self.agent_status();

@@ -298,6 +298,10 @@ pub struct MetalRenderer {
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     headless_render_target: Option<metal::Texture>,
+    /// Snapshot transitions: the reused full-size target and their event.
+    snapshot_target: Option<metal::Texture>,
+    snapshot_event: Option<metal::Event>,
+    snapshot_value: u64,
     /// When the last scene was encoded (`release_idle_targets`).
     last_draw: Option<std::time::Instant>,
     /// `PM_GPUI_PRESENT_TRACE`: how long the last draw waited for its drawable.
@@ -737,6 +741,9 @@ impl MetalRenderer {
             intermediate_texture_size: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             headless_render_target: None,
+            snapshot_target: None,
+            snapshot_event: None,
+            snapshot_value: 0,
             last_draw: None,
             acquire_seconds: 0.,
             async_in_flight: Default::default(),
@@ -1332,6 +1339,107 @@ impl MetalRenderer {
             self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
             command_buffer.commit();
             Ok(())
+        })
+    }
+
+    /// `render_scene_region_to_texture` at the window layer's drawable size.
+    pub fn render_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        region: Bounds<DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        let layer = self
+            .layer
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("render_region_to_texture requires a layer"))?;
+        let d = layer.drawable_size();
+        let size = gpui::size(
+            DevicePixels(d.width.ceil() as i32),
+            DevicePixels(d.height.ceil() as i32),
+        );
+        self.render_scene_region_to_texture(scene, size, region)
+    }
+
+    /// Pictures `region` of `scene` into a new GPU texture without reading
+    /// it back or waiting: the scene is drawn into a reused full-size
+    /// target, the region is blitted into the texture, and `snapshot_event`
+    /// is signalled at the returned value when it is done. Snapshot
+    /// transitions (Powermove's wave) wait on that event on the GPU.
+    pub fn render_scene_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        objc2::rc::autoreleasepool(|_| {
+            anyhow::ensure!(
+                size.width.0 > 0
+                    && size.height.0 > 0
+                    && region.size.width.0 > 0
+                    && region.size.height.0 > 0
+                    && region.origin.x.0 >= 0
+                    && region.origin.y.0 >= 0
+                    && region.origin.x.0 + region.size.width.0 <= size.width.0
+                    && region.origin.y.0 + region.size.height.0 <= size.height.0,
+                "snapshot region outside the target"
+            );
+            let needs_new_target = self.snapshot_target.as_ref().is_none_or(|texture| {
+                texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
+            });
+            if needs_new_target {
+                let d = metal::TextureDescriptor::new();
+                d.set_width(size.width.0 as u64);
+                d.set_height(size.height.0 as u64);
+                d.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                d.set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+                d.set_storage_mode(metal::MTLStorageMode::Private);
+                self.snapshot_target = Some(self.device.new_texture(&d));
+            }
+            let target = self.snapshot_target.clone().expect("just ensured");
+            let d = metal::TextureDescriptor::new();
+            d.set_width(region.size.width.0 as u64);
+            d.set_height(region.size.height.0 as u64);
+            d.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            d.set_usage(metal::MTLTextureUsage::ShaderRead | metal::MTLTextureUsage::RenderTarget);
+            d.set_storage_mode(metal::MTLStorageMode::Private);
+            let picture = self.device.new_texture(&d);
+            let mut instance_buffer = self.acquire_instance_buffer(scene);
+            let command_buffer =
+                self.draw_primitives_to_texture(scene, &mut instance_buffer, &target, size)?;
+            let blit = command_buffer.new_blit_command_encoder();
+            blit.copy_from_texture(
+                &target,
+                0,
+                0,
+                metal::MTLOrigin {
+                    x: region.origin.x.0 as u64,
+                    y: region.origin.y.0 as u64,
+                    z: 0,
+                },
+                metal::MTLSize {
+                    width: region.size.width.0 as u64,
+                    height: region.size.height.0 as u64,
+                    depth: 1,
+                },
+                &picture,
+                0,
+                0,
+                metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+            blit.end_encoding();
+            let event = self
+                .snapshot_event
+                .get_or_insert_with(|| self.device.new_event())
+                .clone();
+            self.snapshot_value += 1;
+            command_buffer.encode_signal_event(&event, self.snapshot_value);
+            self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
+            command_buffer.commit();
+            Ok(gpui::GpuSnapshot {
+                texture: picture,
+                event,
+                value: self.snapshot_value,
+            })
         })
     }
 
@@ -2735,6 +2843,15 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+
+    fn render_scene_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+    ) -> anyhow::Result<gpui::GpuSnapshot> {
+        self.renderer.render_scene_region_to_texture(scene, size, region)
     }
 }
 

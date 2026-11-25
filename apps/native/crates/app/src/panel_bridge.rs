@@ -29,15 +29,6 @@ pub struct Call {
     cancelled: Arc<AtomicBool>,
 }
 impl Call {
-    pub(crate) fn tool(&self) -> &str {
-        &self.tool
-    }
-    pub(crate) fn args(&self) -> &Value {
-        &self.args
-    }
-    pub(crate) fn answer(self, result: Result<Value>) {
-        let _ = self.reply.send(result);
-    }
     fn live(&self) -> Result<()> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Error::invalid(TIMED_OUT));
@@ -372,8 +363,17 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             Ok(workspace(windows, c, editor, window, cx))
         }),
         "panel_begin" => target.with(cx, |c, editor, _, cx| {
-            let slot = begin_panel_slot(editor, args, cx)?;
-            let (id, lease, title, planned) = (slot.id.clone(), slot.lease.clone(), slot.title.as_str(), slot.planned.clone());
+            let lease = args["_panel_session"].as_str().filter(|id| pm_mcp::panel_lease::live(id))
+                .ok_or_else(|| Error::invalid("Panel session has ended."))?;
+            if args["_panel_owner"].as_str().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
+                return Err(Error::invalid("Panel agent run has ended."));
+            }
+            let title = args["title"].as_str().unwrap_or_default().trim();
+            if title.is_empty() || title.chars().count() > 80 { return Err(Error::invalid("Give the panel a title up to 80 characters.")); }
+            let id = format!("panel-build-{}", pm_shell::workspace::new_id());
+            let planned = args["planned"].as_array().cloned().unwrap_or_default();
+            let height = args["size_hint"].as_f64().unwrap_or(300.) as f32;
+            let used = editor.update(cx, |e, _| e.reserve_agent_panel(&id, &args["placement"], height));
             c.update(cx, |v, cx| {
                 let mut state = crate::generated_panel::panel_build::State::default();
                 state.explicit = true;
@@ -392,7 +392,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 cx.notify();
             });
             editor.update(cx, |_, cx| cx.notify());
-            Ok(slot.answer())
+            Ok(json!({"build_id":id,"placement":used,"reserved_height":height.clamp(120.,1200.)}))
         }),
         "panel_build" => {
             let id = args["build_id"].as_str().unwrap_or_default().to_owned();
@@ -443,11 +443,13 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 call.live()?;
                 target.with(cx, |c, editor, _, cx| {
                     authorize_build(c.read(cx).agent_panel_builds.get(&id), &args)?;
-                    if event == "ready" {
-                        dock_built_panel(editor, &id, &target_id, cx);
-                    } else {
-                        editor.update(cx, |e, cx| { e.release_agent_panel(&id); cx.notify(); });
-                    }
+                    editor.update(cx, |e, cx| {
+                        if event == "ready" {
+                            for dock in &mut e.layout.docks { for group in &mut dock.groups { for tab in &mut group.tabs { if *tab == id { *tab = target_id.clone(); } } } }
+                            e.release_agent_panel(&id);
+                            e.commit_agent_panel_layout(cx);
+                        } else { e.release_agent_panel(&id); cx.notify(); }
+                    });
                     c.update(cx, |v, cx| {
                         v.forget_agent_build(&id); cx.notify();
                     });
@@ -456,7 +458,17 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             }
             Ok(json!({"build_id":id,"event":event,"accepted":true}))
         }
-        "set_panel_layout" => target.with(cx, |_, editor, _, cx| set_panel_layout(editor, args, cx)),
+        "set_panel_layout" => {
+            target.with(cx, |_, editor, _, cx| {
+                let (docks, name) = layout_plan(editor, args, cx)?;
+                let (id, name) = editor
+                    .update(cx, |e, cx| e.save_agent_layout(&name, docks, cx))
+                    .map_err(|e| Error::invalid(e.to_string()))?;
+                Ok(json!({"workspaceId":id,"name":name,"historyId":null,
+                    "note":"Saved as a new workspace and shown in this window. New projects use this workspace. Previous workspaces remain available in Window ▸ Workspace.",
+                    "layout":live_layout(editor, cx)}))
+            })
+        }
         // The scopes' numbers, counted on request: an agent judging a grade
         // does not depend on which panels a person has open.
         "get_panel_state" if panel == "scopes" => {
@@ -882,55 +894,6 @@ fn popover_rect(c: &Entity<Controller>, cx: &App) -> Option<layout::Rect> {
     let (w, h) = *b.window_sizes.get(AGENT)?;
     Some(layout::Rect { x: 0., y: 0., w, h })
 }
-/// A new panel's reserved slot (`panel_begin`), after its checks: the
-/// app's windows and the first-run film's editor.
-pub(crate) struct BuildSlot {
-    pub id: String,
-    pub lease: String,
-    pub title: String,
-    pub planned: Vec<Value>,
-    height: f32,
-    used: Value,
-}
-impl BuildSlot {
-    pub(crate) fn answer(&self) -> Value {
-        json!({"build_id":self.id,"placement":self.used,"reserved_height":self.height.clamp(120.,1200.)})
-    }
-}
-pub(crate) fn begin_panel_slot(editor: &Entity<Editor>, args: &Value, cx: &mut App) -> Result<BuildSlot> {
-    let lease = args["_panel_session"].as_str().filter(|id| pm_mcp::panel_lease::live(id))
-        .ok_or_else(|| Error::invalid("Panel session has ended."))?;
-    if args["_panel_owner"].as_str().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
-        return Err(Error::invalid("Panel agent run has ended."));
-    }
-    let title = args["title"].as_str().unwrap_or_default().trim();
-    if title.is_empty() || title.chars().count() > 80 { return Err(Error::invalid("Give the panel a title up to 80 characters.")); }
-    let id = format!("panel-build-{}", pm_shell::workspace::new_id());
-    let planned = args["planned"].as_array().cloned().unwrap_or_default();
-    let height = args["size_hint"].as_f64().unwrap_or(300.) as f32;
-    let used = editor.update(cx, |e, _| e.reserve_agent_panel(&id, &args["placement"], height));
-    Ok(BuildSlot { id, lease: lease.to_owned(), title: title.to_owned(), planned, height, used })
-}
-/// `panel_build ready`'s check on the editor: `target` is a registered
-/// panel, not the slot itself and not docked already.
-pub(crate) fn ready_target(editor: &Entity<Editor>, slot: &str, target: &str, cx: &App) -> Result<()> {
-    if !registered(editor, target, cx) || target == slot {
-        return Err(Error::invalid("Publish the new panel first, then supply its registered panelId."));
-    }
-    if editor.read(cx).layout.docks.iter().flat_map(|d| &d.groups).any(|g| g.tabs.contains(&target.to_owned())) {
-        return Err(Error::invalid("The target is already docked. Finish with a newly published panel."));
-    }
-    Ok(())
-}
-/// The build slot `slot` becomes the finished panel `target`, in exactly
-/// the slot's geometry, and the layout is kept.
-pub(crate) fn dock_built_panel(editor: &Entity<Editor>, slot: &str, target: &str, cx: &mut App) {
-    editor.update(cx, |e, cx| {
-        for dock in &mut e.layout.docks { for group in &mut dock.groups { for tab in &mut group.tabs { if tab == slot { *tab = target.to_owned(); } } } }
-        e.release_agent_panel(slot);
-        e.commit_agent_panel_layout(cx);
-    });
-}
 fn registered(editor: &Entity<Editor>, id: &str, cx: &App) -> bool {
     editor.read(cx).panels(cx).contains(id)
 }
@@ -1068,17 +1031,6 @@ fn workspace(
 
 /// set_panel_layout's checks (main's `setPanelLayout`): the docks and name
 /// of the new workspace.
-/// `set_panel_layout` on `editor`: the agent's layout saved as a new
-/// workspace and shown (the app's windows, and the first-run film's editor).
-pub(crate) fn set_panel_layout(editor: &Entity<Editor>, args: &Value, cx: &mut App) -> Result<Value> {
-    let (docks, name) = layout_plan(editor, args, cx)?;
-    let (id, name) = editor
-        .update(cx, |e, cx| e.save_agent_layout(&name, docks, cx))
-        .map_err(|e| Error::invalid(e.to_string()))?;
-    Ok(json!({"workspaceId":id,"name":name,"historyId":null,
-        "note":"Saved as a new workspace and shown in this window. New projects use this workspace. Previous workspaces remain available in Window ▸ Workspace.",
-        "layout":live_layout(editor, cx)}))
-}
 fn layout_plan(
     editor: &Entity<Editor>,
     args: &Value,

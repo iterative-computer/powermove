@@ -474,9 +474,6 @@ pub struct SurfaceView {
     quote_selection: Rc<RefCell<crate::v4_quote::Selection>>,
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
-    /// Text typed into a field that has no AppKit slot (offscreen), shown
-    /// by its drawn stand-in.
-    pub(crate) offscreen_text: BTreeMap<Id, String>,
     colour: Option<(Id, Entity<crate::colour_picker::Picker>, Subscription)>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
@@ -707,7 +704,6 @@ impl SurfaceView {
             natives,
             quote_selection: Default::default(),
             fields: BTreeMap::new(),
-            offscreen_text: BTreeMap::new(),
             colour: None,
             controls: BTreeMap::new(),
             cull: Default::default(),
@@ -4386,23 +4382,7 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let meta = props.get("metadata");
-        // The agent's composer (a text area that sends on Return): its text,
-        // as the first-run film's offscreen recording draws it.
-        if meta.and_then(|m| m.get("submitOnReturn")) == Some(&Value::Bool(true)) {
-            let local = self.offscreen_text.get(&node.id).filter(|s| !s.is_empty()).cloned();
-            let typed = local.is_some()
-                || props.get("value").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
-            let label = local.or_else(|| self.field_value_or_placeholder(node))?;
-            return Some(
-                div()
-                    .w_full()
-                    .text_color(rgb(if typed { t.colors.text } else { t.colors.muted }))
-                    .child(label)
-                    .into_any_element(),
-            );
-        }
-        if meta.and_then(|m| m.get("search")) != Some(&Value::Bool(true)) {
+        if props.get("metadata").and_then(|m| m.get("search")) != Some(&Value::Bool(true)) {
             return None;
         }
         let label = self.field_value_or_placeholder(node)?;
