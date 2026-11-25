@@ -92,6 +92,19 @@ impl Fixture {
         model: Model,
         build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
     ) -> (Handle, mpsc::Receiver<Value>) {
+        self.start_choice(run, scope, prompt, (None, None), model, build)
+    }
+
+    /// A turn on the picker's `(model, effort)`, as the panel sends it.
+    fn start_choice(
+        &self,
+        run: &str,
+        scope: std::path::PathBuf,
+        prompt: &str,
+        (model_id, effort): (Option<&str>, Option<&str>),
+        model: Model,
+        build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
+    ) -> (Handle, mpsc::Receiver<Value>) {
         let host = self.host.clone();
         let project = self.project.clone();
         let revision = self.revision;
@@ -101,8 +114,8 @@ impl Fixture {
                 run: run.into(),
                 prompt: prompt.into(),
                 provider: Provider::Aero,
-                model: None,
-                effort: None,
+                model: model_id.map(str::to_owned),
+                effort: effort.map(str::to_owned),
                 access: Access::Project,
                 approval: Default::default(),
                 computer_consent: false,
@@ -2487,4 +2500,447 @@ fn switching_a_track_to_offline_media_is_caught() {
         "live",
         "the refused switch is taken back"
     );
+}
+
+/// The picker's level on every route the Powermove harness runs, as the
+/// request leaves Powermove (PM-746): emulate (`PM_EMULATE`, its executable)
+/// answers OpenAI Responses, Chat Completions and Anthropic Messages on a
+/// loopback port of its own. Fake credentials only, in memory.
+mod routes {
+    use super::*;
+    use pm_agents::edge::{Chunk, Loopback, MemorySecrets, Net, NetRequest};
+    use pm_agents::launch::Environment;
+    use pm_agents::{codex_auth, compatible, sources};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::AtomicBool;
+
+    struct Emulate {
+        child: Child,
+        base: String,
+        _dir: tempfile::TempDir,
+    }
+    impl Drop for Emulate {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    /// emulate with `rules`, or `None` (the test is skipped, and says so)
+    /// when `PM_EMULATE` is unset.
+    fn emulate(rules: Value) -> Option<Emulate> {
+        let Some(bin) = std::env::var_os("PM_EMULATE") else {
+            eprintln!("skipped: PM_EMULATE (emulate's executable) is not set");
+            return None;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let models = [
+            "claude-opus-5-5",
+            "claude-opus-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-3-7-sonnet-20250219",
+        ];
+        let seed = json!({"ai":{"strict":false,"models":models,"rules":rules}});
+        let path = dir.path().join("seed.yaml");
+        std::fs::write(&path, seed.to_string()).unwrap();
+        let child = Command::new(bin)
+            .args(["start", "--service", "ai", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .arg("--seed")
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let emulate = Emulate {
+            child,
+            base: format!("http://127.0.0.1:{port}"),
+            _dir: dir,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let rules = format!("{}/_ai/rules", emulate.base);
+        let get = NetRequest {
+            method: "GET",
+            url: &rules,
+            headers: &[],
+            body: b"",
+        };
+        while pm_agents::edge::fetch(&Loopback, &get).map_or(true, |(code, _)| code != 200) {
+            assert!(Instant::now() < deadline, "emulate did not start");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Some(emulate)
+    }
+
+    /// One request as it left Powermove's fetch edge (credential headers
+    /// included), and the reply's bytes.
+    #[derive(Clone, Debug)]
+    struct Sent {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Value,
+        reply: String,
+    }
+    impl Sent {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+    }
+    /// The app's network as the routes see it: provider origins go to emulate.
+    #[derive(Debug)]
+    struct Wire {
+        base: String,
+        sent: Mutex<Vec<Sent>>,
+    }
+    impl Net for Wire {
+        fn stream(
+            &self,
+            request: &NetRequest<'_>,
+            stop: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let url = [
+                "https://chatgpt.com",
+                "https://api.openai.com",
+                "https://api.anthropic.com",
+            ]
+            .iter()
+            .find_map(|origin| request.url.strip_prefix(origin))
+            .map_or_else(
+                || request.url.to_owned(),
+                |rest| format!("{}{rest}", self.base),
+            );
+            let mut reply = Vec::new();
+            let streamed = Loopback.stream(
+                &NetRequest {
+                    url: &url,
+                    ..*request
+                },
+                stop,
+                &mut |chunk| {
+                    if let Chunk::Data(bytes) = &chunk {
+                        reply.extend_from_slice(bytes);
+                    }
+                    on(chunk)
+                },
+            );
+            self.sent.lock().unwrap().push(Sent {
+                url: request.url.into(),
+                headers: request.headers.to_vec(),
+                body: serde_json::from_slice(request.body).unwrap_or_default(),
+                reply: String::from_utf8_lossy(&reply).into(),
+            });
+            streamed
+        }
+    }
+
+    /// The saved custom endpoint (Settings › Providers › Custom).
+    #[derive(Debug)]
+    struct Custom(String);
+    impl compatible::ChatHost for Custom {
+        fn saved(&self) -> Option<compatible::Saved> {
+            Some(compatible::Saved {
+                base_url: self.0.clone(),
+                model: "gpt-5.5".into(),
+                vision: false,
+                models: vec![],
+            })
+        }
+        fn key(&self, _: &str) -> Option<String> {
+            Some("custom-fake-key".into())
+        }
+        fn stream(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Vec<u8>,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+        ) -> Result<u16, String> {
+            Err("unused".into())
+        }
+    }
+
+    struct Routes {
+        fixture: Fixture,
+        env: Environment,
+        wire: Arc<Wire>,
+        _emulate: Emulate,
+    }
+    fn routes(rules: Value) -> Option<Routes> {
+        let emulate = emulate(rules)?;
+        let fixture = Fixture::new();
+        let wire = Arc::new(Wire {
+            base: emulate.base.clone(),
+            sent: Mutex::default(),
+        });
+        let env = Environment {
+            profile: fixture.profile.path().join("app"),
+            keychain_prefix: "pm-effort-routes".into(),
+            secrets: Some(Arc::new(MemorySecrets::default())),
+            net: Some(wire.clone()),
+            compatible: Some(Arc::new(Custom(format!("{}/custom/v1", emulate.base)))),
+            vars: [(
+                "PM_CODEX_KEYRING_SERVICE".to_owned(),
+                "pm-effort-routes Codex Auth".to_owned(),
+            )]
+            .into(),
+            ..Environment::default()
+        };
+        // Codex's login item is keyed by its home's canonical path.
+        std::fs::create_dir_all(codex_auth::codex_home(&env)).unwrap();
+        Some(Routes {
+            fixture,
+            env,
+            wire,
+            _emulate: emulate,
+        })
+    }
+    impl Routes {
+        fn secret(&self, service: &str, account: &str, value: &[u8]) {
+            self.env
+                .secrets
+                .as_ref()
+                .unwrap()
+                .write(service, account, value)
+                .unwrap();
+        }
+        /// Codex's shared login item: an OpenAI API key, or a ChatGPT sign-in.
+        fn codex_login(&self, item: Value) {
+            let account = codex_auth::store_key(&codex_auth::codex_home(&self.env));
+            self.secret(
+                &codex_auth::service(&self.env),
+                &account,
+                item.to_string().as_bytes(),
+            );
+        }
+        /// One turn on the picker's `id` at `effort`; the model request it sent.
+        fn turn(&self, id: &str, effort: &str, prompt: &str) -> Vec<Sent> {
+            let before = self.wire.sent.lock().unwrap().len();
+            let live = sources::live(&self.env, id, effort).unwrap();
+            let run = format!("{}-{effort}", id.replace(['/', '.'], "-"));
+            let scope = self.fixture.profile.path().join("aero/sessions").join(&run);
+            let (turn, _notes) = self.fixture.start_choice(
+                &run,
+                scope,
+                prompt,
+                (Some(id), Some(effort)),
+                Model::live(live),
+                |tools| Box::new(tools),
+            );
+            let result = complete(&turn);
+            let sent = self.wire.sent.lock().unwrap()[before..].to_vec();
+            assert!(
+                matches!(result, RunResult::Success { .. }),
+                "{id} at {effort}: {result:?}; sent {sent:#?}"
+            );
+            assert!(!sent.is_empty(), "{id} at {effort} sent nothing");
+            sent
+        }
+    }
+
+    fn hello() -> Value {
+        json!([{"id":"hello","reply":[{"type":"reasoning","text":"Considering the request."},
+            {"type":"text","text":"Hello from emulate."}]}])
+    }
+
+    #[test]
+    fn the_openai_key_route_sends_each_picker_level_as_reasoning_effort() {
+        let Some(r) = routes(hello()) else { return };
+        r.codex_login(json!({"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-1234"}));
+        for level in compatible::efforts("gpt-6-sol") {
+            let sent = r.turn("openai/gpt-6-sol", &level, "Say hello.");
+            for request in &sent {
+                assert_eq!(request.url, "https://api.openai.com/v1/chat/completions");
+                assert_eq!(request.body["reasoning_effort"], level.as_str(), "{level}");
+                assert_eq!(
+                    request.header("authorization"),
+                    Some("Bearer sk-fake-openai-1234")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_chatgpt_sign_in_route_sends_each_picker_level_as_the_reasoning_effort() {
+        use base64::Engine as _;
+        let Some(r) = routes(hello()) else { return };
+        let claims =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
+        r.codex_login(json!({"auth_mode":"chatgpt","tokens":{"id_token":"x",
+            "access_token":format!("h.{claims}.s"),"refresh_token":"r","account_id":"acct-fake"}}));
+        for level in compatible::efforts("gpt-6-sol") {
+            let sent = r.turn("chatgpt/gpt-6-sol", &level, "Say hello.");
+            for request in &sent {
+                assert_eq!(
+                    request.url,
+                    "https://chatgpt.com/backend-api/codex/responses"
+                );
+                assert_eq!(
+                    request.body["reasoning"]["effort"],
+                    level.as_str(),
+                    "{level}"
+                );
+                assert_eq!(request.header("chatgpt-account-id"), Some("acct-fake"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_custom_route_sends_each_picker_level_as_reasoning_effort() {
+        let Some(r) = routes(hello()) else { return };
+        let levels = compatible::efforts("gpt-5.5");
+        assert!(!levels.is_empty());
+        for level in levels {
+            let sent = r.turn("custom/gpt-5.5", &level, "Say hello.");
+            for request in &sent {
+                assert_eq!(
+                    request.url,
+                    format!("{}/custom/v1/chat/completions", r._emulate.base)
+                );
+                assert_eq!(request.body["reasoning_effort"], level.as_str(), "{level}");
+                assert_eq!(
+                    request.header("authorization"),
+                    Some("Bearer custom-fake-key")
+                );
+            }
+        }
+    }
+
+    const ANTHROPIC_KEY: &str = "sk-ant-fake-abcdef12";
+
+    /// Each Claude family's own control: adaptive thinking with the effort, or
+    /// a thinking budget below the output limit; the key as `x-api-key`
+    /// with the API version, never a bearer; prompt caching on.
+    #[test]
+    fn the_anthropic_key_route_sends_each_picker_level_as_that_models_thinking_fields() {
+        let Some(r) = routes(hello()) else { return };
+        r.secret(
+            &sources::anthropic_service(&r.env),
+            "api-key",
+            ANTHROPIC_KEY.as_bytes(),
+        );
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-4-6",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let levels = sources::claude_efforts(model);
+            assert!(!levels.is_empty(), "{model}");
+            for level in levels {
+                let fields = sources::claude_effort_fields(model, &level).unwrap();
+                let sent = r.turn(&format!("anthropic/{model}"), &level, "Say hello.");
+                for request in &sent {
+                    let body = &request.body;
+                    assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
+                    assert_eq!(body["thinking"], fields["thinking"], "{model} {level}");
+                    assert_eq!(
+                        body["output_config"], fields["output_config"],
+                        "{model} {level}"
+                    );
+                    assert_eq!(body["max_tokens"], sources::CLAUDE_MAX_TOKENS);
+                    let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
+                    assert!(budget < u64::from(sources::CLAUDE_MAX_TOKENS));
+                    assert_eq!(body["cache_control"], json!({"type":"ephemeral"}));
+                    assert!(body.get("tool_choice").is_none(), "{body}");
+                    assert_eq!(request.header("x-api-key"), Some(ANTHROPIC_KEY));
+                    assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
+                    assert_eq!(request.header("authorization"), None);
+                }
+            }
+        }
+        // A level the chosen model doesn't take runs as the nearest one below.
+        let sent = r.turn("anthropic/claude-opus-4-6", "xhigh", "Say hello.");
+        assert_eq!(sent[0].body["output_config"]["effort"], "high");
+    }
+
+    /// The picker offers each Claude model the levels it takes, from the
+    /// key's own model list, and none for a model this table doesn't know.
+    #[test]
+    fn the_anthropic_model_list_offers_each_models_own_levels() {
+        let Some(r) = routes(hello()) else { return };
+        let models =
+            sources::key_models(&*r.wire, sources::Source::AnthropicKey, ANTHROPIC_KEY).unwrap();
+        let levels = |id: &str| {
+            let model = models.iter().find(|m| m.id == id).unwrap();
+            (model.efforts.join(" "), model.default_effort.clone())
+        };
+        let high = Some("high".to_owned());
+        assert_eq!(
+            levels("claude-opus-5-5"),
+            ("low medium high xhigh max".into(), high.clone())
+        );
+        assert_eq!(
+            levels("claude-opus-4-6"),
+            ("low medium high max".into(), high.clone())
+        );
+        assert_eq!(
+            levels("claude-haiku-4-5-20251001"),
+            ("low medium high".into(), high)
+        );
+        assert_eq!(levels("claude-3-7-sonnet-20250219"), (String::new(), None));
+    }
+
+    /// After a tool call, the next request sends the thinking block back
+    /// first in that assistant turn, with the signature the model gave it,
+    /// and keeps the cached prefix byte for byte.
+    #[test]
+    fn the_anthropic_route_sends_a_thinking_signature_back_after_a_tool_call() {
+        let rules = json!([
+            {"id":"look","match":{"hasToolResult":false},"times":1,"reply":[
+                {"type":"reasoning","text":"Reading the layer before answering."},
+                {"type":"tool_call","name":"project","arguments":{"op":"layer","args":{"layerId":"keeper"}}}]},
+            {"id":"answer","match":{"hasToolResult":true},"reply":[
+                {"type":"reasoning","text":"The layer is there."},
+                {"type":"text","text":"The layer is called Keep."}]}
+        ]);
+        let Some(r) = routes(rules) else { return };
+        r.secret(
+            &sources::anthropic_service(&r.env),
+            "api-key",
+            ANTHROPIC_KEY.as_bytes(),
+        );
+        let sent = r.turn(
+            "anthropic/claude-opus-5-5",
+            "high",
+            "What is the first layer called?",
+        );
+        assert_eq!(sent.len(), 2, "{sent:#?}");
+        let (first, second) = (&sent[0], &sent[1]);
+        // The signature the first reply streamed.
+        let signature = first
+            .reply
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find_map(|event| event["delta"]["signature"].as_str().map(str::to_owned))
+            .expect("a signature in the first reply");
+        assert!(!signature.is_empty());
+        let messages = second.body["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("the tool turn's assistant message");
+        let content = assistant["content"].as_array().unwrap();
+        assert_eq!(
+            content[0],
+            json!({"type":"thinking","thinking":"Reading the layer before answering.","signature":signature})
+        );
+        assert!(content.iter().any(|block| block["type"] == "tool_use"));
+        // The cache's prefix: the same tools and system prompt, and the
+        // first request's messages unchanged at the start of the second.
+        assert_eq!(second.body["tools"], first.body["tools"]);
+        assert_eq!(second.body["system"], first.body["system"]);
+        let opened = first.body["messages"].as_array().unwrap();
+        assert_eq!(&messages[..opened.len()], &opened[..]);
+        assert_eq!(second.body["cache_control"], json!({"type":"ephemeral"}));
+        assert_eq!(second.body["output_config"]["effort"], "high");
+    }
 }
