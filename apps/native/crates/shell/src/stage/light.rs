@@ -439,3 +439,31 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+mod gpu_cost {
+    #[test]
+    #[ignore = "measures the GPU; run by hand"]
+    fn the_light_pass_costs_little_gpu_time() {
+        let device = metal::Device::system_default().unwrap();
+        let mut r = super::LightRenderer::new(&device).unwrap();
+        let s = super::super::cue::CueSheet::default();
+        let q = device.new_command_queue();
+        let mut times = Vec::new();
+        for i in 0..60 {
+            let l =
+                super::super::intro::light_at(2.0 + i as f64 / 60., &s, true, (3024., 1964.), 2.);
+            let tex = r.render(l).unwrap();
+            let started = std::time::Instant::now();
+            let cmd = q.new_command_buffer();
+            cmd.encode_wait_for_event(&tex.event, tex.value);
+            cmd.commit();
+            cmd.wait_until_completed();
+            times.push(started.elapsed().as_secs_f64() * 1e3);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "light pass 3024x1964: p50 {:.2} ms p95 {:.2} ms max {:.2} ms",
+            times[30], times[57], times[59]
+        );
+    }
+}

@@ -81,7 +81,7 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
         (
             1. + 39. * (1. - settled),
             creep * (0.75 + 0.75 * flare - 0.35 * settled),
-            0.55 * creep * (1. - s.fall.at(t)) + 0.9 * flare,
+            1.0 * creep * (1. - s.fall.at(t)) + 0.9 * flare,
             creep * (0.3 + 0.7 * s.rise.at(t)),
         )
     } else {
