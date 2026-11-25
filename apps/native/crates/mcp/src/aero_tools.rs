@@ -1142,4 +1142,38 @@ mod tests {
         let next = tools.call("edit", &rename(revision, "Again"), &mut |_| false);
         assert_eq!(next.unwrap_err().code, "revision_conflict");
     }
+
+    /// A finding counts against the turn only when it is new: a rename
+    /// rewords an old finding, a fix removes one, and blank frames count
+    /// only where frames that showed something before are now blank.
+    #[test]
+    fn only_findings_the_turn_added_count() {
+        let hidden = |name: &str| {
+            json!({"code":"never-visible","severity":"warning","layerId":"veil",
+                "message":format!("“{name}” is fully transparent")})
+        };
+        let blank =
+            |ranges: Value| json!({"code":"empty-frames","severity":"error","ranges":ranges});
+        let check = |issues: Vec<Value>| json!({"fps":10,"sampledEveryFrames":1,"issues":issues});
+        let before = check(vec![
+            hidden("Loading veil"),
+            json!({"code":"no-media","severity":"warning","layerId":"clip","message":"“Clip” has no media"}),
+            blank(json!([[1.0, 2.0]])),
+        ]);
+        // Renamed, the media fixed, the same blank second.
+        let after = check(vec![hidden("Harness veil"), blank(json!([[1.0, 2.0]]))]);
+        assert_eq!(introduced(&before, &after), Vec::<Value>::new());
+        // Fewer blank frames than before is no failure.
+        let shrunk = check(vec![blank(json!([[1.2, 1.8]]))]);
+        assert_eq!(introduced(&before, &shrunk), Vec::<Value>::new());
+        // One more blank frame is; so is a finding on another layer.
+        let grown = check(vec![
+            blank(json!([[1.0, 2.1]])),
+            json!({"code":"never-visible","severity":"warning","layerId":"title","message":"“Title”"}),
+        ]);
+        assert_eq!(
+            introduced(&before, &grown),
+            grown["issues"].as_array().unwrap().clone()
+        );
+    }
 }
