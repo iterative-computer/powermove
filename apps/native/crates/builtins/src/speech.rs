@@ -148,14 +148,17 @@ fn reach(model: &Value) -> String {
         _ => "Many languages".into(),
     }
 }
-/// The facts line: size, languages, and when it can't make captions.
+/// The facts line: size, languages, and the timings a model gives when they
+/// are less than each word's (`timing`: `segment` for phrases, `none`).
 pub fn facts(model: &Value) -> String {
     let mut parts = vec![
         format_bytes(model["size"].as_u64().unwrap_or(0)),
         reach(model),
     ];
-    if model["wordTimestamps"] != true {
-        parts.push("Not for captions".into());
+    match model["timing"].as_str() {
+        Some("segment") => parts.push("Phrase timings".into()),
+        _ if model["wordTimestamps"] != true => parts.push("Text only, no timings".into()),
+        _ => {}
     }
     parts.join(" · ")
 }
@@ -270,8 +273,11 @@ mod tests {
         assert_eq!(rows[2]["error"], "Network down");
         assert_eq!(
             facts(&status["models"][2]),
-            "1.8 GB · Many languages · Not for captions"
+            "1.8 GB · Many languages · Text only, no timings"
         );
+        let phrases = json!({"size":831_000_000u64,"languages":"multi","languageCodes":["en","de"],
+            "wordTimestamps":false,"timing":"segment"});
+        assert_eq!(facts(&phrases), "831 MB · 2 languages · Phrase timings");
         let settings = rows_of(&status);
         assert_eq!(settings[0]["disabled"], true);
         assert_eq!(settings[1]["value"], "731 MB in Powermove’s data folder.");

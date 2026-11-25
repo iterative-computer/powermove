@@ -1334,6 +1334,7 @@ pub(crate) fn step_frame(
                         "languages": model.languages,
                         "languageCodes": model.language_codes,
                         "wordTimestamps": model.word_timestamps,
+                        "timing": model.timing,
                     }));
                     Choice {
                         badge: model.recommended.then(|| "Recommended".into()),

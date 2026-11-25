@@ -423,6 +423,7 @@ impl WelcomeView {
         let actions = choices
             .iter()
             .any(|c| c.pill.is_some() || c.status.is_some());
+        let long = choices.len() > LIST_ROWS_SHOWN;
         let mut group = div()
             .id("welcome-choices")
             .debug_selector(|| "welcome-choices".into())
@@ -437,7 +438,7 @@ impl WelcomeView {
         // More rows than the column holds over the pinned actions (the
         // speech models): the card keeps its height and its rows scroll in
         // it, an edge fading where there is more to see. Nothing else moves.
-        if choices.len() > LIST_ROWS_SHOWN {
+        if long {
             let offset = -f32::from(self.list_scroll.offset().y);
             let room = f32::from(self.list_scroll.max_offset().y);
             // The first layout says how far it can scroll: one frame more
@@ -447,6 +448,11 @@ impl WelcomeView {
             }
             let fade = |on: bool| px(if on { LIST_FADE } else { 0. }).into();
             group = group
+                // Each row's name, tag and meta on their two lines: the
+                // card takes some of the column's margin (still well inside
+                // the half).
+                .w(px(COLUMN + 2. * LIST_WIDEN))
+                .ml(px(-LIST_WIDEN))
                 .max_h(px(LIST_MAX_HEIGHT))
                 .overflow_y_scroll()
                 .track_scroll(&self.list_scroll)
@@ -461,9 +467,12 @@ impl WelcomeView {
         for (index, choice) in choices.iter().enumerate() {
             let selected = self.frame.chosen.as_ref() == Some(&choice.id);
             let id = choice.id.clone();
+            // In a card that scrolls, neither a row nor its hairline gives
+            // up height to the card.
             if index > 0 {
                 group = group.child(
                     div()
+                        .flex_none()
                         .ml(px(LIST_INSET))
                         .h(px(0.5))
                         .bg(rgba((c.text << 8) | 0x1f)),
@@ -497,8 +506,25 @@ impl WelcomeView {
                 .pill
                 .clone()
                 .map(|label| self.pill(&format!("pill:{}", choice.id), &label, window, cx));
-            // The detail wraps inside the text column rather than run under
-            // the row's pill; the tag sits on its own line start.
+            // A tag with a detail beside it (a speech model) sits after the
+            // name, smaller, so the row keeps two lines: the name, then the
+            // detail on one line. A tag alone (Powermove's agent) stands in
+            // for the detail, under the name.
+            let inline_tag = choice.badge.is_some() && choice.detail.is_some();
+            // A long list's rows are all two lines at one height.
+            let one_line = inline_tag || long;
+            let tag = |badge: String, size: f32| {
+                div()
+                    .flex_none()
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .bg(rgba((c.accent << 8) | 0x26))
+                    .text_size(px(size))
+                    .line_height(px(14.))
+                    .text_color(rgb(c.accent))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(badge)
+            };
             let subtitle = div()
                 .min_w(px(0.))
                 .flex()
@@ -508,23 +534,22 @@ impl WelcomeView {
                 .text_size(px(11.))
                 .line_height(px(14.))
                 .text_color(rgb(c.secondary))
-                .children(choice.badge.clone().map(|badge| {
-                    div()
-                        .px(px(5.))
-                        .rounded(px(4.))
-                        .bg(rgba((c.accent << 8) | 0x26))
-                        .text_color(rgb(c.accent))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(badge)
-                }))
-                // Beside the tag when it fits there, else on its own line
-                // under it, never squeezed into a column beside it.
                 .children(
                     choice
-                        .detail
+                        .badge
                         .clone()
-                        .map(|detail| div().max_w_full().child(detail)),
-                );
+                        .filter(|_| !inline_tag)
+                        .map(|badge| tag(badge, 11.)),
+                )
+                .children(choice.detail.clone().map(|detail| {
+                    // One line beside an inline tag's name; else it wraps in
+                    // the text column.
+                    div()
+                        .min_w(px(0.))
+                        .when(one_line, |d| d.flex_1().truncate())
+                        .when(!one_line, |d| d.max_w_full())
+                        .child(detail)
+                }));
             let row = div()
                 .id(SharedString::from(format!("choice-{}", choice.id)))
                 .debug_selector(|| format!("choice-{id}", id = id.clone()))
@@ -532,7 +557,9 @@ impl WelcomeView {
                 .aria_label(choice.label.clone())
                 .aria_selected(selected)
                 .tab_index(0)
+                .flex_none()
                 .min_h(px(LIST_ROW))
+                .when(long, |d| d.h(px(LIST_ROW)))
                 .px(px(LIST_INSET))
                 .py(px(8.))
                 .flex()
@@ -549,13 +576,29 @@ impl WelcomeView {
                         .gap(px(2.))
                         .child(
                             // One line: a long name gives way to the row's
-                            // status or pill, never wraps under it.
+                            // status or pill, never wraps under it; an
+                            // inline tag follows it.
                             div()
-                                .truncate()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(c.text))
-                                .child(choice.label.clone()),
+                                .min_w(px(0.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(c.text))
+                                        .child(choice.label.clone()),
+                                )
+                                .children(
+                                    choice
+                                        .badge
+                                        .clone()
+                                        .filter(|_| inline_tag)
+                                        .map(|badge| tag(badge, 10.)),
+                                ),
                         )
                         .child(subtitle),
                 )
@@ -844,7 +887,11 @@ impl WelcomeView {
                 div()
                     .id("welcome-content")
                     .debug_selector(|| "welcome-content".into())
-                    .w_full()
+                    // The column's width, and room either side for a long
+                    // list's wider card (its scroll clips what overhangs).
+                    .w(px(COLUMN + 2. * LIST_WIDEN))
+                    .flex_none()
+                    .px(px(LIST_WIDEN))
                     .mt(px(22.))
                     .flex_1()
                     .min_h(px(0.))
@@ -1911,6 +1958,7 @@ const LIST_ROW: f32 = 50.;
 const LIST_ROWS_SHOWN: usize = 4;
 const LIST_MAX_HEIGHT: f32 = 224.;
 const LIST_FADE: f32 = 18.;
+const LIST_WIDEN: f32 = 20.;
 const LIST_INSET: f32 = 16.;
 const ICON_TILE: f32 = 32.;
 /// The Claude logo's own colour.
