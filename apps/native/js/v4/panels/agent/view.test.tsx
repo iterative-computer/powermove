@@ -1965,3 +1965,23 @@ test("queued directions are marked on the user bubble", async () => {
   expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
   await root.dispose();
 });
+
+test("steering directions do not render a Steering label on the user bubble", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.runId = "run";
+  p.snapshot.rows = {
+    count: 3,
+    range: [0, 3],
+    items: [
+      { id: "user-0", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Start" } },
+      { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "like just the odd sounds and stuff", steering: true } },
+      { id: "user-2", commandId: "", chosen: {}, open: false, value: { role: "user", text: "also soften the kick", delivery: "steering" } },
+    ],
+  };
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(root.inspect().nodes.filter((node) => node.text === "Steering")).toHaveLength(0);
+  expect(has(root, "You said: like just the odd sounds and stuff")).toBe(true);
+  expect(has(root, "You said: also soften the kick")).toBe(true);
+  await root.dispose();
+});

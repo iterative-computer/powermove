@@ -1496,13 +1496,11 @@ interface Local {
 function UserMessageView({
   m,
   send,
-  pending,
   retry,
 }: {
   key?: string | number;
   m: Message;
   send: Send;
-  pending?: boolean;
   retry?: () => void;
 }) {
   const text = str(m.value.text);
@@ -1511,11 +1509,9 @@ function UserMessageView({
   const delivery =
     m.value.delivery === "queued"
       ? "Queued for next step"
-      : m.value.delivery === "steering"
-        ? "Steering"
-        : m.value.delivery === "failed"
-          ? "Couldn’t send"
-          : null;
+      : m.value.delivery === "failed"
+        ? "Couldn’t send"
+        : null;
   const shown =
     text ||
     (files.length
@@ -1550,7 +1546,7 @@ function UserMessageView({
             ))}
           </div>
         )}
-        {(citations.length > 0 || text || pending || delivery) && (
+        {(citations.length > 0 || text || delivery) && (
           <div
             style={{
               ...column,
@@ -1581,11 +1577,6 @@ function UserMessageView({
               );
             })}
             {text && <QuoteSource id={m.rowId} text={text} userMessage />}
-            {pending && (
-              <text role="status" label="Steering" style={faint}>
-                Steering
-              </text>
-            )}
             {delivery &&
               (retry ? (
                 <div style={{ ...row, gap: t("metrics.gap") }}>
@@ -1612,7 +1603,7 @@ function UserMessageView({
 const UserMessage = memo(
   UserMessageView,
   (a, b) =>
-    a.pending === b.pending && a.retry === b.retry &&
+    a.retry === b.retry &&
     JSON.stringify(a.m) === JSON.stringify(b.m),
 );
 const MEDIA_KIND: Record<string, string> = {
@@ -2624,11 +2615,11 @@ function Conversation({
         </div>
       );
     }
-    return item(e.message, e.pending === true);
+    return item(e.message);
   };
-  const item = (m: Message, pending = false) =>
+  const item = (m: Message) =>
     m.role === "user" ? (
-      <UserMessage key={m.key} m={m} send={send} pending={pending}
+      <UserMessage key={m.key} m={m} send={send}
         retry={m.value.delivery !== "failed" || s.runId !== null
           ? undefined
           : retryLocal?.id === m.rowId
