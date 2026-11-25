@@ -466,6 +466,11 @@ impl CloudHost for Http {
             }
             Err(error) => return Err(error),
         };
+        // Telemetry joins this install to the account's others by its
+        // opaque id (never the e-mail).
+        if let Some(id) = me["user"]["id"].as_str() {
+            pm_telemetry::identify(id);
+        }
         let account = Account {
             email: me["user"]["email"].as_str().unwrap_or_default().to_owned(),
             handle: me["publisher"]["handle"].as_str().map(str::to_owned),

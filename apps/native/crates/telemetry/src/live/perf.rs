@@ -20,8 +20,60 @@ const ROW: [AtomicU64; BUCKETS] = [ZERO; BUCKETS];
 static HISTOGRAM: [[AtomicU64; BUCKETS]; 5] = [ROW; 5];
 static PLAY_FRAMES: AtomicU64 = AtomicU64::new(0);
 static PLAY_MICROS: AtomicU64 = AtomicU64::new(0);
-/// The last target rate, as f32 bits.
-static PLAY_TARGET: AtomicU64 = AtomicU64::new(0);
+/// The last displayed played frame (host seconds, f64 bits).
+static PLAY_LAST: AtomicU64 = AtomicU64::new(0);
+/// 1 playing, 2 scrubbing; and when (main_thread clock, ms).
+static MOMENT: AtomicU64 = AtomicU64::new(0);
+static MOMENT_AT: AtomicU64 = AtomicU64::new(0);
+/// 1 drag, 2 scroll; and when.
+static INPUT: AtomicU64 = AtomicU64::new(0);
+static INPUT_AT: AtomicU64 = AtomicU64::new(0);
+
+/// What the person is doing now: playback and scrubbing from the viewer's
+/// last frames, then a drag or scroll in the last moment.
+pub fn context() -> PerfContext {
+    let now = crate::main_thread::now_ms();
+    if now.saturating_sub(MOMENT_AT.load(Relaxed)) < 500 {
+        match MOMENT.load(Relaxed) {
+            1 => return PerfContext::Playing,
+            2 => return PerfContext::Scrubbing,
+            _ => {}
+        }
+    }
+    if now.saturating_sub(INPUT_AT.load(Relaxed)) < 150 {
+        match INPUT.load(Relaxed) {
+            1 => return PerfContext::Dragging,
+            2 => return PerfContext::Scrolling,
+            _ => {}
+        }
+    }
+    PerfContext::Paused
+}
+
+#[inline]
+pub fn note_input(kind: u8) {
+    if super::on() {
+        INPUT.store(kind as u64, Relaxed);
+        INPUT_AT.store(crate::main_thread::now_ms(), Relaxed);
+    }
+}
+
+#[inline]
+pub fn note_viewer_frame(playing: bool, scrubbing: bool, displayed_at: Option<f64>) {
+    if !super::on() || !(playing || scrubbing) {
+        return;
+    }
+    MOMENT.store(if playing { 1 } else { 2 }, Relaxed);
+    MOMENT_AT.store(crate::main_thread::now_ms(), Relaxed);
+    if let (true, Some(at)) = (playing, displayed_at) {
+        let last = f64::from_bits(PLAY_LAST.swap(at.to_bits(), Relaxed));
+        // A gap longer than a quarter second is a new stretch of playback.
+        if last > 0. && at > last && at - last < 0.25 {
+            PLAY_MICROS.fetch_add(((at - last) * 1e6) as u64, Relaxed);
+            PLAY_FRAMES.fetch_add(1, Relaxed);
+        }
+    }
+}
 
 fn index(context: PerfContext) -> usize {
     PerfContext::ALL
@@ -42,18 +94,8 @@ pub fn frame(context: PerfContext, ms: f32) {
     HISTOGRAM[index(context)][bucket].fetch_add(1, Relaxed);
 }
 
-#[inline]
-pub fn playback(frames: u64, seconds: f64, target_fps: f32) {
-    if !super::on() || seconds <= 0. {
-        return;
-    }
-    PLAY_FRAMES.fetch_add(frames, Relaxed);
-    PLAY_MICROS.fetch_add((seconds * 1e6) as u64, Relaxed);
-    PLAY_TARGET.store(target_fps.to_bits() as u64, Relaxed);
-}
-
 /// Reads and clears the histograms.
-pub fn take() -> (Frames, Option<(f32, f32)>) {
+pub fn take() -> (Frames, Option<f32>) {
     let mut frames = Frames::default();
     for (slot, histogram) in frames.0.iter_mut().zip(&HISTOGRAM) {
         let counts: Vec<u64> = histogram.iter().map(|b| b.swap(0, Relaxed)).collect();
@@ -61,12 +103,7 @@ pub fn take() -> (Frames, Option<(f32, f32)>) {
     }
     let played = PLAY_FRAMES.swap(0, Relaxed);
     let micros = PLAY_MICROS.swap(0, Relaxed);
-    let playback = (micros > 0).then(|| {
-        (
-            (played as f64 / (micros as f64 / 1e6)) as f32,
-            f32::from_bits(PLAY_TARGET.load(Relaxed) as u32),
-        )
-    });
+    let playback = (micros > 0).then(|| (played as f64 / (micros as f64 / 1e6)) as f32);
     (frames, playback)
 }
 
@@ -156,11 +193,17 @@ mod tests {
         super::super::force_on_for_tests();
         frame(PerfContext::Scrolling, 9.);
         frame(PerfContext::Scrolling, 4.);
-        playback(60, 1., 60.);
+        for n in 0..=60 {
+            note_viewer_frame(true, false, Some(100. + n as f64 / 60.));
+        }
+        assert_eq!(context(), PerfContext::Playing);
         let (frames, playback) = take();
         let scrolling = frames.0[4].as_ref().unwrap();
         assert_eq!((scrolling.frames, scrolling.hitches_8ms), (2, 1));
-        assert_eq!(playback, Some((60., 60.)));
+        assert!(
+            playback.is_some_and(|fps| (fps - 60.).abs() < 0.5),
+            "{playback:?}"
+        );
         assert!(take().0.0[4].is_none());
     }
 }

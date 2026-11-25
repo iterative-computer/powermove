@@ -152,6 +152,10 @@ pub struct Controller {
     pub settling: Option<String>,
     /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
     pub(crate) open_timer: crate::diag::OpenTimer,
+    /// The open `project_opened` reports once its first publication arrives.
+    pub(crate) telemetry_open: Option<crate::telemetry::Opening>,
+    /// The panels this window showed at its last layout (`panel_opened`).
+    pub(crate) telemetry_panels: Option<std::collections::BTreeSet<String>>,
     /// Project commands asked for while the project was arriving, bound to
     /// that open: they run once it has settled here (`settled`).
     pub(crate) after_open: crate::after_open::AfterOpen,
@@ -736,6 +740,9 @@ impl pm_shell::integration::Integration for Bridge {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
+            crate::telemetry::panels_shown(&mut v.telemetry_panels, open, |id| {
+                v.extensions.stores.get(id).map(|(store, _)| store.clone())
+            });
             let mut effective: Vec<&str> = open.to_vec();
             for id in open {
                 if let Some(target) = v
@@ -1356,6 +1363,8 @@ impl Controller {
             revealed: Default::default(),
             settling: None,
             open_timer: Default::default(),
+            telemetry_open: None,
+            telemetry_panels: None,
             after_open: Default::default(),
             settling_open: 0,
             rows: Default::default(),
@@ -1521,6 +1530,9 @@ impl Controller {
             self.ghost_aspect = aspect;
             self.open_timer.begin();
             self.open_timer.mark("chosen", serde_json::json!({}));
+            if self.telemetry_open.as_ref().is_none_or(|o| o.settled) {
+                self.telemetry_open = crate::telemetry::opening(crate::telemetry::home_source());
+            }
         } else if aspect.is_some() {
             self.ghost_aspect = aspect;
         }
@@ -1764,6 +1776,11 @@ impl Controller {
         let Some(mut p) = self.kernel.published(&session.project) else {
             return;
         };
+        if self.telemetry_open.as_ref().is_some_and(|o| o.settled)
+            && let Some(opening) = self.telemetry_open.take()
+        {
+            crate::telemetry::project_opened(opening, p.clone());
+        }
         let switched = self.published.as_ref().is_some_and(|old| {
             old.snapshot.doc_id == p.snapshot.doc_id
                 && old.snapshot.open_comp() != p.snapshot.open_comp()
@@ -2529,6 +2546,7 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        crate::telemetry::note_source(&mut self.telemetry_open, &source);
         let received = match &source {
             SessionSource::File(path) => {
                 gpui_macos::ReceivedDrop::for_paths(std::slice::from_ref(path))
@@ -2941,6 +2959,9 @@ impl Controller {
                         info,
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
+                        if let Some(opening) = &mut v.telemetry_open {
+                            opening.settled = true;
+                        }
                         v.restoring = false;
                         if let Some((document, scope)) = &extension_scope {
                             v.reset_extensions();
@@ -2978,6 +2999,7 @@ impl Controller {
                     // A restored window whose project another restored
                     // window holds goes, without taking the front.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
+                        v.telemetry_open = None;
                         v.message = String::new();
                         if std::mem::take(&mut v.restoring) {
                             if pm_shell::live_window_ids().len() > 1 {
@@ -2989,6 +3011,7 @@ impl Controller {
                         }
                     }
                     Some(Err(error)) => {
+                        v.telemetry_open = None;
                         v.open_timer
                             .mark("failed", serde_json::json!({"message": error.to_string()}));
                         v.report_open_failure(&name, path, &error, cx)
@@ -2998,6 +3021,7 @@ impl Controller {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
                     other => {
+                        v.telemetry_open = None;
                         v.restoring = false;
                         v.message = format!("“{name}” couldn’t be opened.");
                         v.errors.borrow_mut().push(
@@ -3841,6 +3865,7 @@ impl Controller {
         let old_path = self.path.clone();
         let export_id = session.project.clone();
         let started = crate::diag::enabled().then(std::time::Instant::now);
+        let save_began = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 // The save panel already confirmed replacing an existing file.
@@ -3896,6 +3921,10 @@ impl Controller {
                         displaced,
                     })) => {
                         v.session = Some(session);
+                        crate::telemetry::project_saved(
+                            save_began.elapsed().as_millis() as u64,
+                            if file_save { as_path.clone().or_else(|| v.path.clone()) } else { None },
+                        );
                         let chosen = as_path.is_some();
                         if chosen {
                             v.path = as_path;
@@ -4401,6 +4430,9 @@ impl Controller {
             self.host.borrow().select_shape(&self.shape_variant);
         }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            if self.tool != cmd.name {
+                crate::telemetry::tool_selected(&cmd.name);
+            }
             self.tool = cmd.name.clone();
             // The Pen tool shows the selection's paths; others hide them.
             if let Some(gizmos) = self.builtins.gizmos.clone() {

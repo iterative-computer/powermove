@@ -1124,6 +1124,9 @@ impl Editor {
             };
             self.library_places.insert(rest.into(), place);
         }
+        if kind == "panel" && matches!(verb, "toggle" | "show" | "activate") {
+            crate::telemetry::panel_requested(rest);
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {

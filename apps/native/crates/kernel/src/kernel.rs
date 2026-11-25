@@ -980,6 +980,7 @@ impl Kernel {
             .iter()
             .filter_map(|change| match change {
                 crate::state::StateChange::Setting { key, value } => {
+                    report_setting(key, value.as_ref());
                     Some((key.clone(), value.clone()))
                 }
                 _ => None,
@@ -1089,3 +1090,26 @@ pub fn base_hash_of(project: &Value) -> String {
 
 #[allow(dead_code)]
 fn _paths(_: &Path) {}
+
+/// `settings_changed` for the allowlisted settings, with their new value.
+fn report_setting(key: &str, value: Option<&Value>) {
+    use pm_telemetry::SettingsChanged;
+    // Settings › Privacy: sharing follows the switch at once (and says so
+    // itself when it is turned back on).
+    if key == "shareUsageData" {
+        pm_telemetry::set_sharing(value.and_then(Value::as_bool) != Some(false));
+        return;
+    }
+    if !pm_telemetry::enabled() {
+        return;
+    }
+    let change = match (key, value.and_then(Value::as_str)) {
+        ("themeMode", Some("system")) => SettingsChanged::Theme("system"),
+        ("themeMode", Some("light")) => SettingsChanged::Theme("light"),
+        ("themeMode", Some("dark")) => SettingsChanged::Theme("dark"),
+        ("openProjectsIn", Some("tabs")) => SettingsChanged::ProjectWindows("tabs"),
+        ("openProjectsIn", Some("windows")) => SettingsChanged::ProjectWindows("windows"),
+        _ => return,
+    };
+    pm_telemetry::capture(pm_telemetry::Event::SettingsChanged(change));
+}

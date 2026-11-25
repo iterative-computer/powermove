@@ -11,6 +11,7 @@ export const sections = [
   "storage",
   "agents",
   "extensions",
+  "privacy",
   "about",
 ] as const;
 export type Section = (typeof sections)[number];
@@ -48,6 +49,11 @@ export const sectionCopy: Record<
     symbol: "person.crop.circle",
   },
   agents: { title: "Agents", description: "", symbol: "sparkles" },
+  privacy: {
+    title: "Privacy",
+    description: "What Powermove shares to get better.",
+    symbol: "hand.raised",
+  },
   about: { title: "About", description: "", symbol: "info.circle" },
   transcription: {
     title: "Transcription",
@@ -152,6 +158,27 @@ export function generalRows(multiWindow: boolean): Row[] {
       value: false,
       profileKey: "autoDownloadCloudMedia",
       detail: "Download offloaded files when opening a project.",
+    },
+    {
+      id: "share-usage-data",
+      section: "privacy",
+      group: "Usage Data",
+      label: "Share Anonymous Usage and Crash Reports",
+      control: "switch",
+      value: true,
+      profileKey: "shareUsageData",
+      detail:
+        "Which commands and panels you use, crashes, hangs and speed. Never your projects, files, names or prompts.",
+    },
+    {
+      id: "what-we-collect",
+      section: "privacy",
+      group: "Usage Data",
+      label: "What We Collect",
+      control: "action",
+      action: "privacy.what-we-collect",
+      actionLabel: "Read More",
+      detail: "Every event and property Powermove sends, in one list.",
     },
     {
       id: "open-projects-in",

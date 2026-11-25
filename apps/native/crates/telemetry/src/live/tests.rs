@@ -102,7 +102,7 @@ fn events_leave_in_batches_wait_offline_and_stop_when_sharing_is_off() {
         }));
     }
     crate::capture(Event::LayerAdded(LayerAdded { kind: "text" }));
-    crate::launched(800, 1200, false);
+    crate::launched(800, 1200);
     flush();
     let batches = seen.lock().unwrap().clone();
     let events: Vec<&Value> = batches.iter().flatten().collect();
@@ -118,6 +118,7 @@ fn events_leave_in_batches_wait_offline_and_stop_when_sharing_is_off() {
         .find(|e| e["event"] == "app_launched")
         .unwrap();
     assert_eq!(launched["properties"]["launch_to_interactive_ms"], 1200);
+    assert_eq!(launched["properties"]["first_run"], true);
     assert!(names(&seen).contains(&"layer_added".to_owned()));
     let id = command["distinct_id"].as_str().unwrap().to_owned();
     assert_eq!(

@@ -35,7 +35,6 @@ enum Msg {
     Launched {
         first_window_ms: u64,
         interactive_ms: u64,
-        first_run: bool,
         at: i64,
     },
     Identify(String),
@@ -75,12 +74,12 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-pub fn start(config: Config, mut state: prefs::State, mode: Mode) {
+pub fn start(config: Config, state: prefs::State, mode: Mode) {
     let (tx, rx) = sync_channel(QUEUE);
     let distinct_id = state
         .install_id
-        .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
-        .clone();
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let (channel, internal) = match mode {
         Mode::Production { channel } => (channel, false),
         _ => ("dev", true),
@@ -140,14 +139,13 @@ pub fn capture(event: Event) {
     }
 }
 
-pub fn launched(first_window_ms: u64, interactive_ms: u64, first_run: bool) {
+pub fn launched(first_window_ms: u64, interactive_ms: u64) {
     if let Some(shared) = SHARED.get()
         && on()
     {
         let _ = shared.tx.try_send(Msg::Launched {
             first_window_ms,
             interactive_ms,
-            first_run,
             at: now_ms(),
         });
     }
@@ -250,6 +248,8 @@ struct Worker {
     peaks: perf::Peaks,
     crash_last_session: bool,
     cold: bool,
+    /// The install id was made this launch.
+    first_run: bool,
 }
 
 impl Worker {
@@ -271,6 +271,7 @@ impl Worker {
             peaks: perf::Peaks::default(),
             crash_last_session: false,
             cold: false,
+            first_run: false,
         }
     }
 
@@ -284,6 +285,7 @@ impl Worker {
 
     fn run(mut self, rx: Receiver<Msg>) {
         self.crash_last_session = self.state.session_open;
+        self.first_run = self.state.install_id.is_none();
         let boot = system::boot_time();
         self.cold = boot.is_some() && self.state.last_boot != boot;
         self.state.last_boot = boot;
@@ -300,7 +302,6 @@ impl Worker {
                 Ok(Msg::Launched {
                     first_window_ms,
                     interactive_ms,
-                    first_run,
                     at,
                 }) => {
                     let event = Event::AppLaunched(AppLaunched {
@@ -311,7 +312,7 @@ impl Worker {
                         },
                         launch_to_first_window_ms: first_window_ms,
                         launch_to_interactive_ms: interactive_ms,
-                        first_run,
+                        first_run: self.first_run,
                         crash_last_session: self.crash_last_session,
                     });
                     self.add(event, at);
@@ -453,8 +454,7 @@ impl Worker {
         let event = Event::PerfSummary(Box::new(PerfSummary {
             window_s,
             frames,
-            playback_fps_achieved: playback.map(|p| p.0),
-            playback_fps_target: playback.map(|p| p.1),
+            playback_fps_achieved: playback,
             peak_footprint_mb: peaks.footprint >> 20,
             peak_metal_mb: peaks.metal.map(|m| m >> 20),
             thermal_state_max: perf::thermal_name(peaks.thermal),
@@ -636,13 +636,25 @@ fn report_panic(info: &std::panic::PanicInfo<'_>) {
         addrs.len() < 128
     });
     let mut frames = exception::resolve(&addrs);
-    // Our own hook plumbing sits inside the panic dispatcher: drop it.
-    if let Some(dispatcher) = frames.iter().take(24).position(|f| {
-        f.function
-            .as_deref()
-            .is_some_and(|n| n.contains("rust_panic_with_hook") || n.contains("panic_with_hook"))
-    }) {
-        frames.drain(..dispatcher);
+    // Our own hook plumbing sits inside the panic dispatcher: drop it (by
+    // the dispatcher's name, else our own frames by theirs).
+    let name = |f: &exception::Frame| f.function.clone().unwrap_or_default();
+    match frames
+        .iter()
+        .take(64)
+        .position(|f| name(f).contains("panic_with_hook"))
+    {
+        Some(dispatcher) => {
+            frames.drain(..dispatcher);
+        }
+        None => {
+            let ours = frames.iter().take(64).take_while(|f| {
+                let n = name(f);
+                n.starts_with("backtrace::") || n.contains("pm_telemetry::live")
+            });
+            let n = ours.count();
+            frames.drain(..n);
+        }
     }
     let message = info
         .payload()

@@ -27,6 +27,11 @@ use std::sync::Arc;
 /// key in a web page; not a secret: AGENTS.md "public client/site keys").
 pub const PROJECT_TOKEN: &str = "phc_mjXkSLMUHZjZknpg6SDFfGdtme6v5uSvjQG4SeF79Bbt"; // gitleaks:allow (public PostHog client key)
 pub const HOST: &str = "https://us.i.posthog.com";
+/// Settings › Privacy › What We Collect.
+pub const DOCS_URL: &str =
+    "https://github.com/iterative-computer/powermove/blob/main/docs/telemetry.md";
+/// The onboarding's one quiet line about it (the welcome window, PM-703).
+pub const NOTICE: &str = "Powermove shares anonymous usage and crash reports to get better. You can turn this off in Settings › Privacy.";
 
 /// The shipping bundles and their channel.
 pub const SHIPPING: [(&str, &str); 2] = [
@@ -146,6 +151,31 @@ pub fn set_sharing(on: bool) {
     }
 }
 
+/// Whether events are being taken this session (sharing on and running):
+/// call sites that would do work to build an event check this first.
+#[inline]
+pub fn enabled() -> bool {
+    #[cfg(feature = "telemetry")]
+    return live::on();
+    #[cfg(not(feature = "telemetry"))]
+    false
+}
+
+static STORE_EXTENSIONS: std::sync::RwLock<std::collections::BTreeSet<String>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+
+/// The extensions installed from the Store (public ids): only these are
+/// ever named in events; every other extension is "local".
+pub fn set_store_extensions(ids: impl IntoIterator<Item = String>) {
+    if let Ok(mut set) = STORE_EXTENSIONS.write() {
+        *set = ids.into_iter().collect();
+    }
+}
+
+pub fn is_store_extension(id: &str) -> bool {
+    STORE_EXTENSIONS.read().is_ok_and(|set| set.contains(id))
+}
+
 /// Queues one event (never blocks; dropped and counted when the queue is
 /// full).
 #[inline]
@@ -159,11 +189,11 @@ pub fn capture(event: Event) {
 /// The app is on screen: times from the process start to the first window
 /// and to the first frame a person can use.
 #[inline]
-pub fn launched(first_window_ms: u64, interactive_ms: u64, first_run: bool) {
+pub fn launched(first_window_ms: u64, interactive_ms: u64) {
     #[cfg(feature = "telemetry")]
-    live::launched(first_window_ms, interactive_ms, first_run);
+    live::launched(first_window_ms, interactive_ms);
     #[cfg(not(feature = "telemetry"))]
-    let _ = (first_window_ms, interactive_ms, first_run);
+    let _ = (first_window_ms, interactive_ms);
 }
 
 /// Milliseconds since this process started (for [`launched`]).
@@ -174,23 +204,34 @@ pub fn since_process_start_ms() -> u64 {
     0
 }
 
-/// One drawn frame and how long it took (an atomic add).
+/// One submitted frame and how long it took to build (an atomic add into
+/// the histogram of what the person is doing now).
 #[inline]
-pub fn frame(context: PerfContext, ms: f32) {
+pub fn frame(ms: f32) {
     #[cfg(feature = "telemetry")]
-    live::perf::frame(context, ms);
+    live::perf::frame(live::perf::context(), ms);
     #[cfg(not(feature = "telemetry"))]
-    let _ = (context, ms);
+    let _ = ms;
 }
 
-/// A stretch of playback that ended: frames presented over its length, and
-/// the rate the project asked for.
+/// A drag (`1`) or a scroll (`2`) is under way (frame context).
 #[inline]
-pub fn playback(frames_presented: u64, seconds: f64, target_fps: f32) {
+pub fn note_input(kind: u8) {
     #[cfg(feature = "telemetry")]
-    live::perf::playback(frames_presented, seconds, target_fps);
+    live::perf::note_input(kind);
     #[cfg(not(feature = "telemetry"))]
-    let _ = (frames_presented, seconds, target_fps);
+    let _ = kind;
+}
+
+/// A viewer frame was asked for while playing or scrubbing (frame
+/// context), and when a played one reached the display (host seconds), for
+/// the achieved playback rate.
+#[inline]
+pub fn note_viewer_frame(playing: bool, scrubbing: bool, displayed_at: Option<f64>) {
+    #[cfg(feature = "telemetry")]
+    live::perf::note_viewer_frame(playing, scrubbing, displayed_at);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = (playing, scrubbing, displayed_at);
 }
 
 /// Whether the app is the active app (hangs count only then: a background

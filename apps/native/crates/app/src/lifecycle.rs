@@ -889,6 +889,9 @@ fn finish_quit(cx: &mut App) {
                     crate::diag::line(serde_json::json!({"quit":"end_sheets"}));
                     crate::platform::end_all_sheets();
                 }
+                // The session's last events (a moment at most; what does not
+                // leave in time goes at the next launch).
+                pm_telemetry::quit(true);
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
                 // Everything is written and released: what is left is the

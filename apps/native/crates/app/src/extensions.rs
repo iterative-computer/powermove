@@ -1543,6 +1543,12 @@ impl Controller {
                 Some((panel["id"].as_str()?.to_owned(), (store, view)))
             })
             .collect();
+        pm_telemetry::set_store_extensions(
+            self.extensions
+                .stores
+                .values()
+                .map(|(store, _)| store.clone()),
+        );
         *self.extensions.owners.borrow_mut() = self
             .extensions
             .stores

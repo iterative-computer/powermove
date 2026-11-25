@@ -216,12 +216,13 @@ pub struct CommandInvoked {
     pub count: u32,
 }
 
-/// A panel, effect or extension: a built-in by its fixed id, a Store
-/// extension by its public catalogue id, anything else as "local".
+/// A panel, effect or extension: a built-in by its id in the app's own
+/// tables, a Store extension by its public catalogue id, anything else (a
+/// person's own extension) as "local", never by its name.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Origin {
-    BuiltIn(&'static str),
+    BuiltIn(String),
     Store(String),
     Local(LocalMarker),
 }
@@ -233,15 +234,27 @@ pub enum LocalMarker {
 }
 
 impl Origin {
-    /// A Store extension's catalogue id; anything that does not look like one
-    /// is sent as "local".
-    pub fn store(id: &str) -> Origin {
-        match clean_id(id) {
-            Some(id) => Origin::Store(id),
-            None => Origin::Local(LocalMarker::Local),
+    pub const LOCAL: Origin = Origin::Local(LocalMarker::Local);
+
+    /// A built-in, by an id from the app's own tables (the panel list, the
+    /// effect catalogue).
+    pub fn builtin(id: &str) -> Origin {
+        match clean_id(&id.to_ascii_lowercase()) {
+            Some(_) => Origin::BuiltIn(id.to_owned()),
+            None => Origin::LOCAL,
         }
     }
-    pub const LOCAL: Origin = Origin::Local(LocalMarker::Local);
+
+    /// An extension: by its id only when it came from the Store (see
+    /// `pm_telemetry::set_store_extensions`), else "local".
+    pub fn extension(id: &str) -> Origin {
+        if crate::is_store_extension(id)
+            && let Some(id) = clean_id(id)
+        {
+            return Origin::Store(id);
+        }
+        Origin::LOCAL
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -277,8 +290,10 @@ pub enum Outcome {
 /// the result.
 #[derive(Debug, Clone, Serialize)]
 pub struct Export {
-    pub format: &'static str,
-    pub codec: &'static str,
+    /// The export format's fixed name ("prores", "mp4", "webm", "png", …).
+    pub format: String,
+    /// The codec or ProRes profile's fixed name.
+    pub codec: String,
     pub resolution: &'static str,
     pub duration: &'static str,
     pub fps: f32,
@@ -311,8 +326,11 @@ pub struct AgentRunFinished {
     /// e.g. "high"; cleaned by [`clean_id`].
     pub effort: String,
     pub result: Outcome,
-    pub turns: u32,
-    pub tool_calls: u32,
+    /// Not counted by every harness yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u32>,
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -349,12 +367,10 @@ pub struct PerfSummary {
     /// `playing_hitches_16ms`, and so on for each context with frames.
     #[serde(flatten)]
     pub frames: Frames,
-    /// Playback over the window: frames presented a second, against the
-    /// project's rate.
+    /// Playback over the window: played frames that reached the display, a
+    /// second.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playback_fps_achieved: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playback_fps_target: Option<f32>,
     pub peak_footprint_mb: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_metal_mb: Option<u64>,
@@ -549,7 +565,7 @@ mod tests {
         .unwrap();
         assert_eq!(p, serde_json::json!({"panel_id":"local"}));
         let p = serde_json::to_value(PanelOpened {
-            panel_id: Origin::BuiltIn("timeline"),
+            panel_id: Origin::builtin("timeline"),
         })
         .unwrap();
         assert_eq!(p, serde_json::json!({"panel_id":"timeline"}));
@@ -570,7 +586,8 @@ mod tests {
         ] {
             assert_eq!(clean_id(bad), None, "{bad}");
         }
-        assert_eq!(Origin::store("My Local Thing"), Origin::LOCAL);
+        assert_eq!(Origin::extension("acme.not-from-the-store"), Origin::LOCAL);
+        assert_eq!(Origin::builtin("My Panel"), Origin::LOCAL);
     }
 
     #[test]
