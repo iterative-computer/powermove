@@ -2616,18 +2616,17 @@ impl Renderer {
         } else {
             false
         };
-        self.shaders.output.submitted(
-            &self.queue,
-            !abandoned
-                && !held
-                && pending.is_empty()
-                && unsupported.is_empty()
-                && !self.media.still_pending
-                && self.effects.fallback.fatal.is_none(),
-        );
+        let complete = !abandoned
+            && !held
+            && pending.is_empty()
+            && unsupported.is_empty()
+            && !self.media.still_pending
+            && self.effects.fallback.fatal.is_none();
+        self.shaders.output.submitted(&self.queue, complete);
         self.binds.end_frame();
         self.pool.end_submitted_frame(&self.queue, taken);
-        self.vector.end_frame();
+        self.vector
+            .end_frame(complete && self.effects.watchdog.stopped().is_none());
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()

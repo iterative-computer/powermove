@@ -924,10 +924,12 @@ impl VectorCache {
     /// Standalone coverage submissions within one frame are ordered on the
     /// same queue. Keep their shared scratch until the frame is submitted, so
     /// its next scene can reuse pages that are already held by the GPU.
-    pub(crate) fn end_frame(&mut self) {
+    /// A failed frame gives its standalone pages and uploads back even when
+    /// they fit the usual idle budget.
+    pub(crate) fn end_frame(&mut self, complete: bool) {
         let in_frame = self.frame_held() - self.frame_replaced;
         let own = self.scene_scratch_bytes().saturating_sub(in_frame);
-        if own > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
+        if !complete || own > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
             self.clear_own_scratch();
         }
     }
@@ -1879,7 +1881,7 @@ impl VectorCache {
         // A direct resolve is its own submission. An enclosing frame can
         // reuse these pages for any later standalone submissions it records.
         if !recording_frame {
-            self.end_frame();
+            self.end_frame(true);
         }
         if self.frame_held() > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
             self.frame_scratch_over = true;
@@ -2286,6 +2288,31 @@ mod scene_pool_tests {
     }
 
     #[test]
+    fn an_incomplete_frame_releases_standalone_coverage_within_the_idle_budget() {
+        let gpu = pm_gpu::Gpu::new("failed coverage frame").expect("GPU");
+        let mut cache = VectorCache::new();
+        cache.limit_frame_scratch(0);
+        cache.begin_frame();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        cache
+            .render_scene(
+                &gpu.device,
+                &gpu.queue,
+                Some(&mut encoder),
+                &scene(2.25, 3.5, 30.0),
+                PixelRect::new(0, 0, 64, 64),
+                Precision::Float16,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        assert!(!cache.own_pages.is_empty());
+        assert!(cache.scene_scratch_bytes() < MAX_SCENE_SCRATCH_BYTES.min(cache.max_bytes));
+        cache.end_frame(false);
+        assert!(cache.own_pages.is_empty());
+        assert!(cache.own_slots.inputs.is_empty());
+    }
+
+    #[test]
     fn standalone_scenes_reuse_oversize_coverage_until_the_frame_ends() {
         let gpu = pm_gpu::Gpu::new("oversize coverage reuse").expect("GPU");
         let rect = PixelRect::new(0, 0, 64, 64);
@@ -2322,7 +2349,7 @@ mod scene_pool_tests {
         assert!(values == cache.own_pages[0].values);
         assert!(atlas == cache.own_pages[0].texture);
         gpu.queue.submit([encoder.finish()]);
-        cache.end_frame();
+        cache.end_frame(true);
         assert!(cache.own_pages.is_empty());
         assert!(cache.own_slots.inputs.is_empty());
 
