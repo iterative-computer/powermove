@@ -795,6 +795,7 @@ define_class!(
         #[unsafe(method(coedit:))]
         fn coedit(&self, sender: &NSButton) {
             let name=match sender.tag() {1=>"agent.undoTurn",2=>"agent.pause",3=>"agent.stop",_=>"agent.steer"};
+            crate::telemetry::command(name, pm_telemetry::Via::Toolbar);
             self.send(Command{name:name.into(),args:vec![],token:None});
         }
         #[unsafe(method(act:))]
@@ -817,6 +818,12 @@ define_class!(
                     w.performClose(None);
                     return;
                 }
+                // A key equivalent the menu bar matched, or a click in it.
+                let via = match app.currentEvent().map(|e| e.r#type()) {
+                    Some(NSEventType::KeyDown) => pm_telemetry::Via::Shortcut,
+                    _ => pm_telemetry::Via::Menu,
+                };
+                crate::telemetry::command(name, via);
                 self.send(Command { name: name.clone(), args: args.clone(), token: None });
             }
         }
@@ -827,6 +834,20 @@ define_class!(
                 sender.representedObject().map(|o| Retained::cast_unchecked(o))
             };
             if let Some(name) = name {
+                // A row of the menu bar, or of a context menu (whose top
+                // menu is not the main menu).
+                // SAFETY: plain reads of the item's menu and its parents.
+                let mut top = unsafe { sender.menu() };
+                while let Some(up) = top.as_ref().and_then(|m| unsafe { m.supermenu() }) {
+                    top = Some(up);
+                }
+                let main = NSApplication::sharedApplication(self.mtm()).mainMenu();
+                let via = if top.is_some() && top == main {
+                    pm_telemetry::Via::Menu
+                } else {
+                    pm_telemetry::Via::ContextMenu
+                };
+                crate::telemetry::command(&name.to_string(), via);
                 self.send(Command { name: name.to_string(), args: vec![], token: None });
             }
         }
@@ -1095,6 +1116,7 @@ define_class!(
             };
             if let (Some(variant), Some(tx)) = (variant, &self.ivars().sender) {
                 let args = vec![serde_json::Value::from(variant.to_string())];
+                crate::telemetry::command("toolShape", pm_telemetry::Via::Toolbar);
                 let _ = tx.try_send(Command { name: "toolShape".into(), args, token: None });
             }
         }
@@ -1108,6 +1130,7 @@ define_class!(
                             && event.clickCount() == 2
                     });
                 let command = toolbar_click_command(command, double_click);
+                crate::telemetry::command(command, pm_telemetry::Via::Toolbar);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
         }
@@ -4707,6 +4730,7 @@ impl Host {
                     args,
                     class,
                 } => {
+                    crate::telemetry::command(&command, pm_telemetry::Via::Shortcut);
                     let _ = self.sender.try_send(Command {
                         name: command,
                         args,
@@ -9966,6 +9990,7 @@ impl Popup {
             save_palette_recent(&mut self.model.recents, name);
         }
         let (command, args) = menu::split_palette_command(name);
+        crate::telemetry::command(command, pm_telemetry::Via::Palette);
         let _ = self.sender.try_send(Command {
             name: command.to_owned(),
             args,

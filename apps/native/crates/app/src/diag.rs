@@ -230,138 +230,35 @@ pub fn install_probe(cx: &mut gpui::App) {
 }
 
 /// Where the main thread is during a stall (`PM_MAIN {"stall_stacks":..}`):
-/// a watchdog thread that, while the probe's heartbeat is over 50 ms late,
-/// suspends the main thread every 20 ms for a frame-pointer walk (no
-/// allocation while it is suspended), then reports the return addresses with
-/// the image's load address for `atos -l`. Tracing runs only.
+/// a watchdog thread that, while the main thread's heartbeat
+/// (`pm_telemetry::main_thread`, shared with the hang watchdog) is over 50 ms
+/// late, samples the main thread every 20 ms, then reports the return
+/// addresses with the image's load address for `atos -l`. Tracing runs only.
 mod stall_sampler {
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use pm_telemetry::main_thread as main;
     use std::time::Duration;
 
-    static MAIN: AtomicU32 = AtomicU32::new(0);
-    static BEAT: AtomicU64 = AtomicU64::new(0);
-    const DEPTH: usize = 48;
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct ArmThreadState64 {
-        x: [u64; 29],
-        fp: u64,
-        lr: u64,
-        sp: u64,
-        pc: u64,
-        cpsr: u32,
-        flags: u32,
-    }
-    const ARM_THREAD_STATE64: i32 = 6;
-    unsafe extern "C" {
-        fn thread_suspend(thread: u32) -> i32;
-        fn thread_resume(thread: u32) -> i32;
-        fn thread_get_state(thread: u32, flavor: i32, state: *mut u32, count: *mut u32) -> i32;
-        fn _dyld_get_image_vmaddr_slide(index: u32) -> isize;
-    }
-
-    fn now_ms() -> u64 {
-        super::start().elapsed().as_millis() as u64
-    }
     pub fn beat() {
-        BEAT.store(now_ms(), Ordering::Relaxed);
+        main::beat();
     }
     /// Call on the main thread.
     pub fn start() {
-        // SAFETY: plain libSystem queries about the calling thread.
-        let (port, top, size) = unsafe {
-            let me = libc::pthread_self();
-            (
-                libc::pthread_mach_thread_np(me),
-                libc::pthread_get_stackaddr_np(me) as u64,
-                libc::pthread_get_stacksize_np(me) as u64,
-            )
-        };
-        MAIN.store(port, Ordering::Relaxed);
-        beat();
+        main::install();
         let _ = std::thread::Builder::new()
             .name("pm-stall-sampler".into())
-            .spawn(move || watch(top - size, top));
+            .spawn(watch);
     }
 
-    /// One stack of the suspended main thread, into `out`; returns its depth.
-    fn sample(thread: u32, low: u64, high: u64, out: &mut [u64; DEPTH]) -> usize {
-        let mut state = ArmThreadState64::default();
-        let mut count = (std::mem::size_of::<ArmThreadState64>() / 4) as u32;
-        // SAFETY: the thread stays suspended while its stack is read; every
-        // frame pointer is bounds-checked against its stack before a read.
-        unsafe {
-            if thread_suspend(thread) != 0 {
-                return 0;
-            }
-            let mut n = 0;
-            if thread_get_state(
-                thread,
-                ARM_THREAD_STATE64,
-                (&mut state as *mut ArmThreadState64).cast(),
-                &mut count,
-            ) == 0
-            {
-                let strip = |a: u64| a & 0x0000_7FFF_FFFF_FFFF;
-                out[0] = strip(state.pc);
-                out[1] = strip(state.lr);
-                n = 2;
-                let mut fp = state.fp;
-                while n < DEPTH && fp >= low && fp + 16 <= high && fp % 8 == 0 {
-                    let frame = fp as *const u64;
-                    let next = *frame;
-                    let ret = strip(*frame.add(1));
-                    if ret == 0 {
-                        break;
-                    }
-                    out[n] = ret;
-                    n += 1;
-                    if next <= fp {
-                        break;
-                    }
-                    fp = next;
-                }
-            }
-            thread_resume(thread);
-            n
-        }
-    }
-
-    /// A system frame by its exported symbol (`dladdr`); the app's own frames
-    /// stay addresses for `atos -l`, as its symbols aren't exported.
-    fn frame_name(address: u64) -> String {
-        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
-        // SAFETY: dladdr only reads the loader's tables for this address.
-        let found = unsafe { libc::dladdr(address as *const libc::c_void, &mut info) } != 0;
-        let main = unsafe { _dyld_get_image_vmaddr_slide(0) } as u64 + 0x1_0000_0000;
-        if !found || info.dli_sname.is_null() || info.dli_fbase as u64 == main {
-            return format!("{address:#x}");
-        }
-        // SAFETY: dladdr returned NUL-terminated loader strings.
-        let (symbol, image) = unsafe {
-            (
-                std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy(),
-                std::ffi::CStr::from_ptr(info.dli_fname).to_string_lossy(),
-            )
-        };
-        let image = image.rsplit('/').next().unwrap_or_default().to_owned();
-        format!("{symbol} ({image})")
-    }
-
-    fn watch(low: u64, high: u64) {
-        let thread = MAIN.load(Ordering::Relaxed);
-        // SAFETY: a dyld query with no preconditions.
-        let load = 0x1_0000_0000u64.wrapping_add(unsafe { _dyld_get_image_vmaddr_slide(0) } as u64);
+    fn watch() {
+        let load = main::load_address();
         let mut stacks: Vec<Vec<String>> = vec![];
-        let mut buf = [0u64; DEPTH];
+        let mut buf = [0u64; main::DEPTH];
         loop {
             std::thread::sleep(Duration::from_millis(20));
-            let late = now_ms().saturating_sub(BEAT.load(Ordering::Relaxed));
-            if late > 55 {
+            if main::since_beat_ms() > 55 {
                 if stacks.len() < 8 {
-                    let n = sample(thread, low, high, &mut buf);
-                    stacks.push(buf[..n].iter().map(|a| frame_name(*a)).collect());
+                    let n = main::sample(&mut buf);
+                    stacks.push(buf[..n].iter().map(|a| main::frame_name(*a)).collect());
                 }
             } else if !stacks.is_empty() {
                 super::line(serde_json::json!({

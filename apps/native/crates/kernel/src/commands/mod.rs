@@ -133,6 +133,42 @@ pub use timing::TimingCommand;
 pub use transform::TransformCommand;
 
 /// Who is asking (`ORIGIN_TRUST` in `editing.ts`). Human origins may unlock a
+/// `effect_added` and `layer_added` for the effects and layers a person's
+/// committed edit adds (telemetry; nothing when it is off).
+pub(crate) fn report_additions(commands: &[Command]) {
+    if !pm_telemetry::enabled() {
+        return;
+    }
+    for command in commands {
+        match command {
+            Command::Effect(effects::EffectCommand::Add(add)) => {
+                // A built-in by its catalogue id; an extension's effect is
+                // "local" (no proof here that it came from the Store).
+                let kind = &add.definition.effect_type;
+                let effect_id = if pm_fx_defs::builtins().effect(kind).is_some() {
+                    pm_telemetry::Origin::builtin(kind)
+                } else {
+                    pm_telemetry::Origin::LOCAL
+                };
+                pm_telemetry::capture(pm_telemetry::Event::EffectAdded(
+                    pm_telemetry::EffectAdded { effect_id },
+                ));
+            }
+            Command::Layer(layers::LayerCommand::Add(add)) => {
+                let kind = layers::LAYER_TYPES
+                    .iter()
+                    .find(|t| **t == add.layer_type)
+                    .copied()
+                    .unwrap_or("other");
+                pm_telemetry::capture(pm_telemetry::Event::LayerAdded(pm_telemetry::LayerAdded {
+                    kind,
+                }));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// locked layer with a bare unlock and overwrite hand-edit markers;
 /// generated ones may not, so an agent's `[unlock, edit]` batch cannot
 /// defeat a lock.

@@ -141,6 +141,7 @@ mod surfaces;
 mod takes_notes_tests;
 mod takes_panel;
 mod tasks_window;
+mod telemetry;
 mod text_host;
 mod ticket;
 mod timeline_surface;
@@ -360,11 +361,11 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     // First, before anything is opened: a development build never starts
     // without a profile of its own (`profile_refusal`).
+    let info_plist = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
+        .and_then(|plist| std::fs::read_to_string(plist).ok());
     {
-        let info_plist = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
-            .and_then(|plist| std::fs::read_to_string(plist).ok());
         if let Some(refusal) = profile_refusal(
             &args,
             info_plist.as_deref(),
@@ -455,6 +456,10 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
+    // A person's app is never started with a profile or a lane flag.
+    let development = args.iter().any(|a| a == "--profile")
+        || std::env::var_os("PM_NATIVE_PROFILE").is_some()
+        || !lane_flags.is_empty();
     // The lane launcher's development flag (never the environment): sheets
     // wait while the app is inactive, and with `--open` stand for captures.
     #[cfg(debug_assertions)]
@@ -579,6 +584,8 @@ fn main() -> Result<()> {
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
     let device = engine.metal_device();
+    let telemetry_mode = telemetry::init(&profile, info_plist.as_deref(), development, &device);
+    diag::line(serde_json::json!({"telemetry": format!("{telemetry_mode:?}")}));
     let service = Rc::new(RefCell::new(
         FontService::new().map_err(anyhow::Error::msg)?,
     ));
@@ -600,6 +607,7 @@ fn main() -> Result<()> {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
                     diag::install_probe(cx);
+                    telemetry::install(window, cx);
                     error_log::persist(&profile, cx);
                     storage::install_cleanup(profile.clone(), cx);
                     notifications::install(cx);

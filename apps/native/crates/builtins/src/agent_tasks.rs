@@ -873,6 +873,10 @@ impl Tasks {
                 _ => result,
             };
             tasks.monitor.finish(&run, &result, now);
+            let counts = pm_agents::stats::take(&run);
+            if let Some(record) = tasks.monitor.run(&run) {
+                report_run(record, &result, counts, now);
+            }
             if let Some(root) = tasks.roots.get_mut(&run) {
                 root.settled = true;
                 root.ended = None;
@@ -1980,4 +1984,41 @@ impl Tasks {
         self.cancel(commands);
         Ok(())
     }
+}
+
+/// `agent_run_finished`: the harness, model, effort, result and duration of
+/// a settled run (never its prompt or any message).
+fn report_run(
+    run: &pm_agents::monitor::Run,
+    result: &RunResult,
+    counts: pm_agents::stats::RunStats,
+    now: u64,
+) {
+    use pm_telemetry::{AgentRunFinished, Event, Harness, Outcome, effort_id, model_id};
+    if !pm_telemetry::enabled() {
+        return;
+    }
+    let harness = match run.provider_instance_id {
+        pm_agents::Provider::Chatgpt => Harness::Codex,
+        pm_agents::Provider::Claude => Harness::ClaudeCode,
+        pm_agents::Provider::Compatible => Harness::Powermove,
+    };
+    let result = match result {
+        RunResult::Success { .. } => Outcome::Ok,
+        RunResult::Failure {
+            cancelled: true, ..
+        } => Outcome::Cancelled,
+        RunResult::Failure { .. } => Outcome::Failed,
+    };
+    pm_telemetry::capture(Event::AgentRunFinished(AgentRunFinished {
+        harness,
+        model: model_id(run.model.as_deref()),
+        effort: effort_id(run.reasoning_effort.as_deref()),
+        result,
+        turns: (counts.turns > 0).then_some(counts.turns),
+        tool_calls: Some(counts.tool_calls),
+        duration_ms: run.ended_at.unwrap_or(now).saturating_sub(run.started_at),
+        input_tokens: counts.input_tokens,
+        output_tokens: counts.output_tokens,
+    }));
 }

@@ -7,12 +7,17 @@ publish = false
 [[bin]]
 name = "powermove-native"
 path = "src/main.rs"
+[features]
+# Product telemetry (PostHog); the release/dist build turns it on.
+telemetry = ["pm-telemetry/telemetry"]
+
 [dependencies]
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-mcp = { path = "../mcp" }
 pm-export = { path = "../../../../engine/crates/pm-export" }
 url = "2.5"
 pm-shell = { path = "../shell" }
+pm-telemetry = { path = "../telemetry" }
 anyhow = "1"
 pm-kernel = { path = "../kernel" }
 pm-engine-service = { path = "../engine-service" }
