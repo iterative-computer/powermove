@@ -564,7 +564,13 @@ pub struct Driver {
     calls: Arc<AtomicUsize>,
     pub seen: Vec<Seen>,
     pub fetches: Arc<Mutex<Vec<FetchSeen>>>,
+    /// The model catalog the Gateway's catalog GET reads; None answers 404
+    /// (the core falls back to its built-in capabilities).
+    pub catalog: Option<String>,
 }
+
+/// A Gateway catalog listing `fake/model` with vision and a context window.
+pub const VISION_CATALOG: &str = r#"{"object":"list","data":[{"id":"fake/model","type":"language","tags":["tool-use","vision"],"context_window":200000,"max_tokens":8000}]}"#;
 
 impl Driver {
     pub fn new(runtime: Runtime, model: Model, endpoint: &str) -> Driver {
@@ -575,6 +581,7 @@ impl Driver {
             calls: Arc::new(AtomicUsize::new(0)),
             seen: Vec::new(),
             fetches: Arc::new(Mutex::new(Vec::new())),
+            catalog: None,
         }
     }
 
@@ -620,6 +627,7 @@ impl Driver {
                 self.model.clone(),
                 self.calls.clone(),
                 &self.endpoint,
+                self.catalog.clone(),
             );
         }
         self.seen.extend(new.iter().cloned());
@@ -652,6 +660,7 @@ impl Driver {
                 self.model.clone(),
                 self.calls.clone(),
                 &self.endpoint,
+                self.catalog.clone(),
             );
         }
     }
@@ -721,9 +730,19 @@ fn serve(
     model: Model,
     calls: Arc<AtomicUsize>,
     endpoint: &str,
+    catalog: Option<String>,
 ) {
     let endpoint = endpoint.to_string();
     std::thread::spawn(move || {
+        if let (Purpose::Catalog, Some(listing)) = (seen.purpose, &catalog) {
+            if seen.provider == "gateway" && seen.url.ends_with("/models") {
+                if remote.fetch_status(seen.fetch, 200, None) == Ok(Outcome::Applied) {
+                    push_all(remote, seen.fetch, listing.as_bytes());
+                }
+                let _ = remote.fetch_finish(seen.fetch, true);
+                return;
+            }
+        }
         // The model catalog (a GET to the provider's canonical URL) and
         // anything but the model route: answered here, Not Found. Tests
         // never reach the network.
