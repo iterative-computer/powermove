@@ -453,18 +453,31 @@ fn key_id(key: &str) -> String {
     format!("key:{:x}", Sha256::digest(key.as_bytes()))
 }
 
+/// fx's Codex reviewer model: the core refuses a Codex catalog that does
+/// not list it (`vendor/fx/src/gateway/openai_codex_models.zig:20`, `:141`),
+/// and a refused catalog drops the picked effort at every level.
+const CODEX_REVIEWER: &str = "gpt-5.6-luna";
+
 /// What the core's Codex catalog asks for (the npm version lookup, then
-/// `backend-api/codex/models`), answered here with the chosen model alone:
-/// the account's list already chose it, and nothing else may run.
+/// `backend-api/codex/models`), answered here with the chosen model and its
+/// one level (the account's list already chose them), plus the reviewer
+/// model the core requires.
 fn codex_catalog(model: &str, effort: &str) -> Value {
     let levels: Vec<Value> = if effort.is_empty() {
         vec![]
     } else {
         vec![json!({"effort": effort})]
     };
-    json!({"version": crate::runtime::CODEX_VERSION, "models":[{"slug":model,"visibility":"list","supported_in_api":true,
-        "priority":1,"supported_reasoning_levels":levels,"additional_speed_tiers":[],"input_modalities":["text","image"],
-        "context_window":272000}]})
+    let entry = |slug: &str, priority: u32, levels: Vec<Value>| {
+        json!({"slug":slug,"visibility":"list","supported_in_api":true,"priority":priority,
+            "supported_reasoning_levels":levels,"additional_speed_tiers":[],
+            "input_modalities":["text","image"],"context_window":272000})
+    };
+    let mut models = vec![entry(model, 1, levels)];
+    if model != CODEX_REVIEWER {
+        models.push(entry(CODEX_REVIEWER, 2, vec![]));
+    }
+    json!({"version": crate::runtime::CODEX_VERSION, "models": models})
 }
 
 #[cfg(test)]
