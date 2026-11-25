@@ -126,7 +126,11 @@ impl Session {
     }
     fn from_record(v: &Value) -> Result<Self> {
         if v.get("provider").is_some_and(|p| {
-            !p.is_null() && !matches!(p.as_str(), Some("chatgpt" | "claude" | "compatible"))
+            !p.is_null()
+                && !matches!(
+                    p.as_str(),
+                    Some("chatgpt" | "claude" | "compatible" | "aero")
+                )
         }) {
             return Err(Error::Invalid("unsupported provider record"));
         }
@@ -2540,6 +2544,15 @@ mod consent_tests {
             self.0.insert(key.into(), value.clone());
             Ok(())
         }
+    }
+    #[test]
+    fn a_saved_aero_thread_loads_and_an_unknown_provider_is_refused() {
+        let record = |provider: &str| {
+            json!({"id":"t","provider":provider,"conversation":[],"trace":[],"composerDraft":""})
+        };
+        let aero = Session::from_record(&record("aero"));
+        assert!(aero.is_ok(), "{:?}", aero.err());
+        assert!(Session::from_record(&record("bogus")).is_err());
     }
     #[test]
     fn launcher_attention_tracks_pending_consent_without_a_run() {
