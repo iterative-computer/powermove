@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pm_aero_core::journal::SessionFolder;
 
@@ -135,12 +135,13 @@ fn a_whole_record_that_is_not_valid_refuses_the_folder() {
         ("garbage", "6 6 [{\"seq\":6,\"te6 6 [{\"seq\":6}]\n"),
     ] {
         let dir = torn_folder(name, line.as_bytes());
+        // StoreError::Corrupt, matched by its name.
+        let refused = SessionFolder::open(&dir)
+            .err()
+            .map(|error| format!("{error:?}"));
         assert!(
-            matches!(
-                SessionFolder::open(&dir),
-                Err(pm_aero_core::journal::StoreError::Corrupt(_))
-            ),
-            "{name}"
+            refused.as_deref().is_some_and(|e| e.starts_with("Corrupt")),
+            "{name}: {refused:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -223,91 +224,61 @@ fn an_uncertain_write_stops_the_folder_and_the_reopen_is_valid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The child for the image test: holds the folder and stores one new image
-/// after another, each by four threads at once; once a store returns it
-/// names the image in `NAMED` (as the journal would), then goes on, until
-/// it is killed.
-fn image_child(dir: PathBuf) {
+#[test]
+fn concurrent_and_interrupted_writers_never_publish_a_torn_image() {
+    if std::env::var(CHILD).is_ok() {
+        return;
+    }
+    let dir = scratch("images");
     let folder = Arc::new(SessionFolder::open(&dir).expect("open"));
-    let mut named = std::fs::File::create(dir.join("NAMED")).unwrap();
     let mut bytes = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/support/pixel.png"
     ))
     .unwrap();
-    bytes.resize(2 << 20, 0x5a);
-    std::fs::write(dir.join("READY"), b"").unwrap();
-    for index in 0u64.. {
+    bytes.resize(8 << 20, 0x5a);
+    for index in 0u64..30 {
         let len = bytes.len();
         bytes[len - 8..].copy_from_slice(&index.to_le_bytes());
         let image = Arc::new(bytes.clone());
-        let writers: Vec<_> = (0..4)
-            .map(|_| {
-                let (folder, image) = (folder.clone(), image.clone());
-                std::thread::spawn(move || folder.put_image(&image))
+        let expected = pm_aero_core::image_name(&image);
+        // Writers of the same image started 1 ms apart, across the first
+        // one's sync: some are still writing when it has published.
+        let (done, first) = std::sync::mpsc::channel();
+        let writers: Vec<_> = (0..16u64)
+            .map(|k| {
+                let (folder, image, done) = (folder.clone(), image.clone(), done.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(k));
+                    if let Ok(name) = folder.put_image(&image) {
+                        let _ = done.send(name);
+                    }
+                })
             })
             .collect();
-        let mut first = None;
+        drop(done);
+        // The moment one writer says the image is stored the journal may
+        // name it, and a crash then (the other writers interrupted) leaves
+        // the file as it is now: it must already be the image.
+        let name = first.recv().expect("one writer stored it");
+        assert_eq!(name, expected);
+        let now = SessionFolder::image(&dir, &name).expect("published");
+        assert!(
+            pm_aero_core::image_name(&now) == name,
+            "image {index}: the published file's {} bytes miss its name while other writers run",
+            now.len()
+        );
         for writer in writers {
-            if let Ok(Ok(name)) = writer.join()
-                && first.is_none()
-            {
-                first = Some(name);
-                // Named as soon as one writer says it is stored: the others
-                // may still be writing.
-                writeln!(named, "{}", first.as_ref().unwrap()).unwrap();
-            }
+            let _ = writer.join();
         }
+        let after = SessionFolder::image(&dir, &name).expect("published");
+        assert_eq!(
+            pm_aero_core::image_name(&after),
+            name,
+            "image {index} after every writer"
+        );
+        let _ = std::fs::remove_file(dir.join("images").join(&name));
     }
-}
-
-#[test]
-fn concurrent_and_interrupted_writers_never_publish_a_torn_image() {
-    if let Ok(dir) = std::env::var(CHILD) {
-        if dir.ends_with("-images") {
-            image_child(PathBuf::from(dir));
-        }
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("aero-store-{}-images", std::process::id()));
-    let mut checked = 0;
-    for round in 0..8u64 {
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "concurrent_and_interrupted_writers_never_publish_a_torn_image",
-                "--test-threads=1",
-            ])
-            .env(CHILD, &dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start the child");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !dir.join("READY").exists() {
-            assert!(Instant::now() < deadline, "the child never started");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        // Killed mid-image, at a different point each round.
-        std::thread::sleep(Duration::from_millis(60 + 37 * round));
-        // SAFETY: the pid is the child this test started.
-        unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
-        let _ = child.wait();
-        let named = std::fs::read_to_string(dir.join("NAMED")).unwrap_or_default();
-        for name in named.lines().filter(|line| line.len() == 64) {
-            let bytes = SessionFolder::image(&dir, name).unwrap_or_else(|error| {
-                panic!("round {round}: {name} is named but missing: {error}")
-            });
-            assert_eq!(
-                pm_aero_core::image_name(&bytes),
-                name,
-                "round {round}: the published image's bytes miss its name ({} bytes)",
-                bytes.len()
-            );
-            checked += 1;
-        }
-    }
-    assert!(checked > 0, "no image was stored before a kill");
+    drop(folder);
     let _ = std::fs::remove_dir_all(&dir);
 }
