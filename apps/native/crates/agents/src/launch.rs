@@ -453,8 +453,8 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     if request.provider == Provider::Aero {
         use sha2::{Digest, Sha256};
         let crate::aero::Launcher(open) = environment.aero.clone()
-            .ok_or("Aero's development switch is off.")?;
-        let project = request.project.as_deref().ok_or("Open a composition before running Aero.")?;
+            .ok_or("Powermove's development switch is off.")?;
+        let project = request.project.as_deref().ok_or("Open a composition before running Powermove.")?;
         let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
         let scope = environment.profile.join("aero").join("sessions").join(&id);
         let authority = request.clone();

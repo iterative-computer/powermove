@@ -77,7 +77,7 @@ impl Model {
             || url.fragment().is_some()
         {
             return Err(
-                "Aero replay requires an explicit HTTP URL on a numeric loopback address.".into(),
+                "Powermove replay requires an explicit HTTP URL on a numeric loopback address.".into(),
             );
         }
         Ok(Self {
@@ -217,7 +217,7 @@ fn deliver_replay(
 ) -> Result<(), String> {
     let url = Url::parse(url).map_err(|e| e.to_string())?;
     if &url != base {
-        return Err("Aero refused a model request outside the configured replay endpoint.".into());
+        return Err("Powermove refused a model request outside the configured replay endpoint.".into());
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -405,7 +405,7 @@ fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
         .map_err(|e| e.to_string())?
     {
         Outcome::Applied => Ok(()),
-        other => Err(format!("Aero's fetch status was rejected: {other:?}")),
+        other => Err(format!("Powermove's fetch status was rejected: {other:?}")),
     }
 }
 
@@ -416,7 +416,7 @@ fn push(remote: Remote, fetch: u64, bytes: &[u8]) -> Result<(), String> {
                 Outcome::Applied => break,
                 Outcome::Stale => return Ok(()),
                 Outcome::Backpressure | Outcome::Busy => thread::sleep(Duration::from_millis(2)),
-                other => return Err(format!("Aero's fetch bytes were rejected: {other:?}")),
+                other => return Err(format!("Powermove's fetch bytes were rejected: {other:?}")),
             }
         }
     }
@@ -466,8 +466,8 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
     if text.contains("Completion checks failed") {
         return Reply::Text("The synthetic run reached the completion checks.".into());
     }
-    if text.contains("Aero demo edit") {
-        return Reply::Text("Renamed the first layer to Aero demo edit.".into());
+    if text.contains("Powermove demo edit") {
+        return Reply::Text("Renamed the first layer to Powermove demo edit.".into());
     }
     let request: Value = serde_json::from_slice(bytes).unwrap_or_default();
     if let Some(header) = find_text(&request, "Project at session start\n")
@@ -480,11 +480,11 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
         return Reply::Tool {
             name: "edit".into(),
             args: json!({"op":"commands","revision":revision,
-            "args":{"label":"Aero demo edit","commands":[{"type":"set_layer","target":id,
-            "patch":{"name":"Aero demo edit"}}]}}),
+            "args":{"label":"Powermove demo edit","commands":[{"type":"set_layer","target":id,
+            "patch":{"name":"Powermove demo edit"}}]}}),
         };
     }
-    Reply::Text("Aero is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
+    Reply::Text("Powermove is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
 }
 
 fn find_text<'a>(value: &'a Value, marker: &str) -> Option<&'a str> {
