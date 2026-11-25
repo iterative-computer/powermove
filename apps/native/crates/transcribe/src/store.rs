@@ -452,6 +452,31 @@ impl Store {
         }
         Ok(())
     }
+    /// Downloads `ids` one after another on a worker: each starts once the
+    /// one before it has finished or failed (a failure stays in `status`).
+    pub fn download_in_turn(&self, ids: Vec<String>) {
+        let store = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("pm-transcription-queue".into())
+            .spawn(move || {
+                for id in ids {
+                    if let Err(error) = store.download(&id) {
+                        eprintln!("[transcription] {id} couldn’t start downloading: {error}");
+                        continue;
+                    }
+                    let state = store.state.lock().unwrap();
+                    drop(
+                        store
+                            .finished
+                            .wait_while(state, |s| s.downloads.contains_key(&id))
+                            .unwrap(),
+                    );
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("[transcription] the download queue couldn’t start: {error}");
+        }
+    }
     /// Stop a download; what arrived stays for the next attempt.
     pub fn cancel(&self, id: &str) {
         if let Some(d) = self.state.lock().unwrap().downloads.get(id) {
@@ -698,13 +723,74 @@ mod tests {
         }
         panic!("download {id} never finished");
     }
+    /// Queued models download one at a time, in order, until each is ready.
+    #[test]
+    fn queued_downloads_run_one_at_a_time() {
+        let root = scratch("queue");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let mut first = fixture(&root.join("a"), &[1u8; 3_000_000]);
+        let mut second = fixture(&root.join("b"), &[2u8; 3_000_000]);
+        first.id = "first".into();
+        second.id = "second".into();
+        let store =
+            Store::open(&root.join("models"), vec![first, second], Arc::new(|| {})).unwrap();
+        store.download_in_turn(vec!["second".into(), "first".into()]);
+        let mut order = vec![];
+        for _ in 0..2000 {
+            let status = store.status();
+            let states: Vec<&str> = status["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["state"].as_str().unwrap())
+                .collect();
+            assert!(
+                states.iter().filter(|s| **s == "downloading").count() <= 1,
+                "{states:?}"
+            );
+            for (id, state) in ["first", "second"].iter().zip(&states) {
+                if *state != "absent" && !order.contains(id) {
+                    order.push(*id);
+                }
+            }
+            if states.iter().all(|s| *s == "ready") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let status = store.status();
+        assert!(
+            status["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["state"] == "ready"),
+            "{status}"
+        );
+        assert_eq!(order.first(), Some(&"second"), "{order:?}");
+    }
     #[test]
     fn the_pinned_catalog_is_mains() {
         let models = catalog();
         assert_eq!(models.len(), 7);
+        // Main's catalogue, but for one owner decision (2026-11-25): the
+        // native catalogue recommends Parakeet Unified EN and Cohere
+        // Transcribe (not Nemotron). The order is main's, so the default
+        // (the first model ready, as `reselect` picks it) is still
+        // Parakeet Unified EN.
         let first = &models[0];
         assert_eq!(first.id, "parakeet-unified-en-0.6b");
         assert!(first.recommended && first.featured && first.word_timestamps);
+        let recommended: Vec<_> = models
+            .iter()
+            .filter(|m| m.recommended)
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(
+            recommended,
+            ["parakeet-unified-en-0.6b", "cohere-transcribe-03-2026"]
+        );
         assert_eq!(first.lag, Some([0.32, 0.2, 0.]));
         assert!(
             first.files[0]

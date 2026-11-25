@@ -50,6 +50,8 @@ pub struct WelcomeView {
     sign_in_stage: Option<SignInStage>,
     /// The last wrong code's shake, and when it started.
     shake: (u64, f64),
+    /// A long list of choices (the speech models) scrolls in its card.
+    list_scroll: ScrollHandle,
 }
 impl WelcomeView {
     fn motion(&mut self) -> &mut Motion<u64> {
@@ -78,6 +80,7 @@ impl WelcomeView {
             code_field: None,
             sign_in_stage: None,
             shake: (0, 0.),
+            list_scroll: ScrollHandle::new(),
         }
     }
     /// A wave is carrying the card (`true`): its AppKit buttons paint their
@@ -422,6 +425,7 @@ impl WelcomeView {
             .any(|c| c.pill.is_some() || c.status.is_some());
         let mut group = div()
             .id("welcome-choices")
+            .debug_selector(|| "welcome-choices".into())
             .role(Role::RadioGroup)
             .w_full()
             .flex()
@@ -430,6 +434,30 @@ impl WelcomeView {
             .rounded_smoothing(t.radius.smoothing)
             .overflow_hidden()
             .bg(rgba((c.text << 8) | 0x0c));
+        // More rows than the column holds over the pinned actions (the
+        // speech models): the card keeps its height and its rows scroll in
+        // it, an edge fading where there is more to see. Nothing else moves.
+        if choices.len() > LIST_ROWS_SHOWN {
+            let offset = -f32::from(self.list_scroll.offset().y);
+            let room = f32::from(self.list_scroll.max_offset().y);
+            // The first layout says how far it can scroll: one frame more
+            // draws the lower fade.
+            if room == 0. && self.clock.is_none() && !self.list_scroll.bounds().is_empty() {
+                window.request_animation_frame();
+            }
+            let fade = |on: bool| px(if on { LIST_FADE } else { 0. }).into();
+            group = group
+                .max_h(px(LIST_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .track_scroll(&self.list_scroll)
+                .overflow_fade(Edges::<AbsoluteLength> {
+                    top: fade(offset > 1.),
+                    bottom: fade(room == 0. || offset < room - 1.),
+                    left: px(0.).into(),
+                    right: px(0.).into(),
+                })
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
+        }
         for (index, choice) in choices.iter().enumerate() {
             let selected = self.frame.chosen.as_ref() == Some(&choice.id);
             let id = choice.id.clone();
@@ -489,11 +517,13 @@ impl WelcomeView {
                         .font_weight(FontWeight::MEDIUM)
                         .child(badge)
                 }))
+                // Beside the tag when it fits there, else on its own line
+                // under it, never squeezed into a column beside it.
                 .children(
                     choice
                         .detail
                         .clone()
-                        .map(|detail| div().flex_1().min_w(px(0.)).child(detail)),
+                        .map(|detail| div().max_w_full().child(detail)),
                 );
             let row = div()
                 .id(SharedString::from(format!("choice-{}", choice.id)))
@@ -1876,6 +1906,11 @@ const WINDOW_TOP: f32 = 104.;
 /// height and side inset (where the hairlines start), the icons' tile.
 const LIST_RADIUS: f32 = 12.;
 const LIST_ROW: f32 = 50.;
+/// A list longer than this scrolls in its card (`LIST_MAX_HEIGHT`, four
+/// rows and the top of a fifth), its edges fading.
+const LIST_ROWS_SHOWN: usize = 4;
+const LIST_MAX_HEIGHT: f32 = 224.;
+const LIST_FADE: f32 = 18.;
 const LIST_INSET: f32 = 16.;
 const ICON_TILE: f32 = 32.;
 /// The Claude logo's own colour.

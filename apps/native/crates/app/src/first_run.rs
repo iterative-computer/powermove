@@ -236,8 +236,9 @@ pub(crate) struct Choices {
     pub timeline: String,
     /// The agent's provider: `aero` is Powermove's own harness.
     pub agent: String,
-    /// The speech model to download once the library is open, or `later`.
-    pub speech: String,
+    /// The speech models to download once the library is open, one after
+    /// another in the order asked for; none unless the person asks.
+    pub speech: Vec<String>,
     /// `import` (bring the After Effects workspace) or `fresh`.
     pub workspace: String,
 }
@@ -247,17 +248,10 @@ impl Default for Choices {
             timeline: "layers".into(),
             agent: "aero".into(),
             // Nothing downloads unless the person asks.
-            speech: LATER.into(),
+            speech: vec![],
             workspace: "import".into(),
         }
     }
-}
-/// The speech step's "not now".
-const LATER: &str = "later";
-/// The speech model the first run offers: the catalogue's first recommended
-/// one (Parakeet Unified EN).
-fn speech_model() -> Option<pm_transcribe::store::Model> {
-    pm_transcribe::store::catalog().into_iter().find(|m| m.recommended)
 }
 pub struct Flow {
     pub model: Model,
@@ -894,14 +888,9 @@ impl Flow {
             match onboarding.step {
                 Onboard::Timeline => self.choices.timeline = choice.into(),
                 Onboard::Agent => self.choices.agent = choice.into(),
-                // The model's row: a second press takes the download back.
-                Onboard::Transcription => {
-                    self.choices.speech = if self.choices.speech == choice {
-                        LATER.into()
-                    } else {
-                        choice.into()
-                    }
-                }
+                // A queued model's row: a press takes the download back
+                // (its Download pill asks for it).
+                Onboard::Transcription => self.choices.speech.retain(|id| id != choice),
                 Onboard::Workspace => self.choices.workspace = choice.into(),
                 _ => {}
             }
@@ -918,7 +907,12 @@ impl Flow {
                     };
                     return vec![Effect::Connect(provider)];
                 }
-                Onboard::Transcription => self.choices.speech = row.into(),
+                // Queued behind any asked for before it.
+                Onboard::Transcription => {
+                    if !self.choices.speech.iter().any(|id| id == row) {
+                        self.choices.speech.push(row.into());
+                    }
+                }
                 _ => {}
             }
             return vec![];
@@ -959,8 +953,8 @@ impl Flow {
                         _ => "gpt-5",
                     },
                 });
-                if self.choices.speech != LATER {
-                    raw["speechModel"] = self.choices.speech.clone().into();
+                if !self.choices.speech.is_empty() {
+                    raw["speechModels"] = self.choices.speech.clone().into();
                 }
                 if id == "import" {
                     raw["workspaceImport"] = "after-effects".into();
@@ -1324,22 +1318,34 @@ pub(crate) fn step_frame(
             ..Frame::default()
         }),
         Onboard::Transcription => {
-            let mut rows = vec![];
-            if let Some(model) = speech_model() {
-                let queued = choices.speech == model.id;
-                let size = pm_transcribe::store::format_bytes(model.size());
-                rows.push(Choice {
-                    mark: Some("waveform".into()),
-                    pill: (!queued).then(|| "Download".into()),
-                    // Short, so the model's name keeps its line.
-                    status: queued.then(|| "Queued".into()),
-                    ..row(
-                        &model.id,
-                        &model.name,
-                        &format!("{} · {size}", model.description.trim_end_matches('.')),
-                    )
-                });
-            }
+            // Every model in the catalogue, the recommended ones first
+            // (Parakeet Unified EN, the default, then Cohere Transcribe), then
+            // the catalogue's order; each line as Settings › Speech words it
+            // (size, languages, captions). None is preselected: nothing
+            // downloads unless asked.
+            let mut catalog = pm_transcribe::store::catalog();
+            catalog.sort_by_key(|m| !m.recommended);
+            let rows: Vec<Choice> = catalog
+                .into_iter()
+                .map(|model| {
+                    let queued = choices.speech.contains(&model.id);
+                    let facts = pm_builtins::speech::facts(&serde_json::json!({
+                        "size": model.size(),
+                        "languages": model.languages,
+                        "languageCodes": model.language_codes,
+                        "wordTimestamps": model.word_timestamps,
+                    }));
+                    Choice {
+                        badge: model.recommended.then(|| "Recommended".into()),
+                        pill: (!queued).then(|| "Download".into()),
+                        // Short, so the model's name keeps its line.
+                        status: queued.then(|| "Queued".into()),
+                        ..row(&model.id, &model.name, &facts)
+                    }
+                })
+                .collect();
+            let note = (!choices.speech.is_empty())
+                .then(|| "Downloads start when Powermove opens, one at a time.".to_owned());
             continuing(Frame {
                 surface: "S109".into(),
                 back: Some("Back to Agent Choice".into()),
@@ -1347,6 +1353,7 @@ pub(crate) fn step_frame(
                 outline: Some(steps_outline(Some(3))),
                 line: "Transcribe speech for captions, on this Mac.".into(),
                 choices: rows,
+                note,
                 // The model row shows its download, not a selection.
                 chosen: None,
                 preview: Some("speech".into()),
@@ -2200,13 +2207,18 @@ impl Library {
                     });
             }
             write_marker(&self.plan.profile, &choices)?;
-            // The speech model the person chose downloads while they work.
-            if let Some(id) = choices["speechModel"].as_str() {
+            // The speech models the person chose download while they work,
+            // one after another.
+            let speech: Vec<String> = choices["speechModels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if !speech.is_empty() {
                 crate::transcription::install(&self.plan.profile);
-                if let Some(store) = crate::transcription::store()
-                    && let Err(error) = store.download(id)
-                {
-                    eprintln!("The speech model couldn’t start downloading: {error}");
+                if let Some(store) = crate::transcription::store() {
+                    store.download_in_turn(speech);
                 }
             }
         }
@@ -2314,20 +2326,81 @@ mod step_frame_tests {
         }
     }
 
-    /// The speech model downloads only when asked: its row offers Download,
-    /// then says it will download once the person is in.
+    /// The speech step lists every model in the catalogue, in its order,
+    /// with the catalogue's Recommended tag and the line Settings › Speech
+    /// shows; nothing downloads unless asked.
     #[test]
-    fn the_speech_model_downloads_only_when_asked() {
+    fn the_speech_step_lists_every_catalogue_model() {
+        let mut catalog = pm_transcribe::store::catalog();
+        assert!(catalog.len() >= 7, "{}", catalog.len());
+        // The recommended ones lead, in the catalogue's order.
+        catalog.sort_by_key(|m| !m.recommended);
+        let frame = step_frame(
+            Onboard::Transcription,
+            &Choices::default(),
+            &Default::default(),
+            None,
+            None,
+        );
+        let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
+        let want: Vec<_> = catalog.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, want);
+        for (row, model) in frame.choices.iter().zip(&catalog) {
+            assert_eq!(row.label, model.name);
+            assert_eq!(row.badge.is_some(), model.recommended, "{}", model.id);
+            assert_eq!(row.pill.as_deref(), Some("Download"));
+            assert!(row.status.is_none());
+            let detail = row.detail.as_deref().unwrap();
+            assert!(
+                detail.contains(&pm_transcribe::store::format_bytes(model.size())),
+                "{detail}"
+            );
+            assert_eq!(
+                detail.contains("English only"),
+                model.languages == "en",
+                "{detail}"
+            );
+        }
+        // Parakeet Unified EN (the default) first, Cohere Transcribe second,
+        // both tagged; Nemotron not.
+        assert_eq!(
+            ids[..2],
+            ["parakeet-unified-en-0.6b", "cohere-transcribe-03-2026"]
+        );
+        let tagged: Vec<_> = frame
+            .choices
+            .iter()
+            .filter(|c| c.badge.is_some())
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(tagged, ["Parakeet Unified EN", "Cohere Transcribe"]);
+        assert_eq!(frame.note, None);
+    }
+    /// Download queues a model behind any asked for before it; its row then
+    /// says so, the others keep Download, and a press on a queued row takes
+    /// it back.
+    #[test]
+    fn speech_downloads_queue_in_order() {
         let mut choices = Choices::default();
         let none = Default::default();
         let frame = step_frame(Onboard::Transcription, &choices, &none, None, None);
-        let row = &frame.choices[0];
-        assert_eq!(row.pill.as_deref(), Some("Download"));
-        assert!(row.status.is_none());
-        choices.speech = row.id.clone();
+        let (first, second) = (frame.choices[0].id.clone(), frame.choices[6].id.clone());
+        choices.speech = vec![second.clone(), first.clone()];
         let frame = step_frame(Onboard::Transcription, &choices, &none, None, None);
-        assert!(frame.choices[0].pill.is_none());
-        assert_eq!(frame.choices[0].status.as_deref(), Some("Queued"));
+        for row in &frame.choices {
+            let queued = choices.speech.contains(&row.id);
+            assert_eq!(
+                row.status.as_deref(),
+                queued.then_some("Queued"),
+                "{}",
+                row.id
+            );
+            assert_eq!(row.pill.is_some(), !queued, "{}", row.id);
+        }
+        assert_eq!(
+            frame.note.as_deref(),
+            Some("Downloads start when Powermove opens, one at a time.")
+        );
     }
 
     /// Every step's title is sentence case without a full stop.

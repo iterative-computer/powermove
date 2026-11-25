@@ -1581,3 +1581,34 @@ fn change_and_escape_go_back_to_the_email_as_typed() {
     flow.action("back");
     titled(&flow.frame(), "Choose your timeline");
 }
+#[test]
+fn chosen_speech_models_download_in_the_order_asked() {
+    let (_temp, mut flow) = on_account();
+    flow.action("not_now");
+    flow.action("continue");
+    titled(&flow.frame(), "Speech to text");
+    let ids: Vec<String> = flow.frame().choices.iter().map(|c| c.id.clone()).collect();
+    flow.action(&format!("pill:{}", ids[6]));
+    flow.action(&format!("pill:{}", ids[0]));
+    flow.action(&format!("pill:{}", ids[2]));
+    // Asked twice, queued once.
+    flow.action(&format!("pill:{}", ids[0]));
+    // A press on a queued row takes it back.
+    flow.action(&format!("choose:{}", ids[2]));
+    // A press on a row not queued asks for nothing.
+    flow.action(&format!("choose:{}", ids[3]));
+    let frame = flow.frame();
+    let queued: Vec<_> = frame
+        .choices
+        .iter()
+        .filter(|c| c.status.is_some())
+        .map(|c| c.id.clone())
+        .collect();
+    assert_eq!(queued, [ids[0].clone(), ids[6].clone()]);
+    flow.action("continue");
+    let effects = flow.action("fresh");
+    let [Effect::Enter(Some(choices))] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(choices["speechModels"], json!([ids[6], ids[0]]));
+}
