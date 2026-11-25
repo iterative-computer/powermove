@@ -4,6 +4,10 @@
 //! connection, headers, deadlines, and credentials; nothing here does I/O
 //! beyond the reader it is handed. Tool selection, history checks, and limits
 //! follow the Chat Completions codec (`chat_completions_protocol.zig`).
+//!
+//! Powermove notice: modified from upstream fx (patch P-HOST-MESSAGES): a reply
+//! that says it finished with a block still open, or with unsigned thinking,
+//! fails instead of completing, so no half-sent tool call runs.
 const std = @import("std");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
@@ -898,6 +902,14 @@ const Reducer = struct {
         }
         const stop = self.stop orelse return error.InvalidFinishReason;
         var reason = stop.reason;
+        // Powermove (P-HOST-MESSAGES): a reply that says it finished must have
+        // closed every block and signed its thinking; otherwise a half-sent
+        // tool call could run and unsigned thinking be sent back. A reply cut
+        // at the output limit keeps the partial handling below.
+        if (reason == .stop or reason == .tool_calls) {
+            for (self.blocks.items) |block| if (block.open) return error.IncompleteStream;
+            for (self.thinking.items) |part| if (!part.redacted and part.signature.items.len == 0) return error.IncompleteStream;
+        }
         if (self.structured_name != null) {
             // The forced tool's input is the reply, not a call to run.
             if (self.tools.items.len != 0 and reason == .tool_calls) reason = .stop;
@@ -1588,6 +1600,41 @@ test "anthropic messages tool choice controls" {
     try std.testing.expectError(error.UnexpectedToolCall, test_consume(alloc, test_tool_wire, request, null));
     request.tool_choice = .required;
     try std.testing.expectError(error.RequiredToolMissing, test_consume(alloc, test_text_wire, request, null));
+}
+
+test "anthropic messages never completes a finished reply with a block still open or unsigned thinking" {
+    const alloc = std.testing.allocator;
+    // The tool call starts, then the reply says it finished without closing it.
+    const open_tool = sse_wire(&.{ test_start, test_tool_start, test_tool_delta, test_tool_use_stop, test_message_stop });
+    try std.testing.expectError(error.IncompleteStream, test_consume(alloc, open_tool, test_tool_request(), null));
+    const open_text = sse_wire(&.{ test_start, test_text_start, test_text_delta, test_end_turn, test_message_stop });
+    try std.testing.expectError(error.IncompleteStream, test_consume(alloc, open_text, test_request(), null));
+    const unsigned = sse_wire(&.{
+        test_start,
+        \\{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+        ,
+        \\{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Read it."}}
+        ,
+        test_stop_0,
+        \\{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}
+        ,
+        \\{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"x\"}"}}
+        ,
+        \\{"type":"content_block_stop","index":1}
+        ,
+        test_tool_use_stop,
+        test_message_stop,
+    });
+    try std.testing.expectError(error.IncompleteStream, test_consume(alloc, unsigned, test_tool_request(), null));
+    // A reply the output limit cut off still returns its partial text, and no call.
+    const cut = sse_wire(&.{ test_start, test_tool_start, test_tool_delta, "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":9}}", test_message_stop });
+    var result = try test_consume(alloc, cut, test_tool_request(), null);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(types.ProviderFinishReason.length, result.completed.completion.finish_reason);
+    // Closed blocks and signed thinking complete as before.
+    var signed = try test_consume(alloc, test_thinking_wire, test_tool_request(), null);
+    defer signed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), signed.completed.completion.tool_calls.len);
 }
 
 test "anthropic messages thinking blocks round-trip through provider state" {
