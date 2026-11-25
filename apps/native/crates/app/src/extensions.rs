@@ -707,6 +707,7 @@ impl Controller {
         }
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
+        shell.native_pending = None;
         shell.native_accessibility = vec![];
         drop(shell);
         // Dropping the host closes the realm off the main thread.
@@ -748,6 +749,7 @@ impl Controller {
             }
             let mut shell = self.host.borrow_mut();
             shell.native_present = None;
+            shell.native_pending = None;
             shell.native_accessibility = vec![];
             drop(shell);
             self.project_extension_scope = None;
@@ -773,6 +775,7 @@ impl Controller {
     pub(crate) fn start_extensions_for(&mut self, project: String, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
+        shell.native_pending = None;
         shell.native_accessibility = vec![];
         drop(shell);
         self.reset_extensions();
@@ -2367,6 +2370,13 @@ impl Controller {
             let m = &shell.tokens.metrics;
             f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
         };
+        let pending_views = views.clone();
+        shell.native_pending = Some(Rc::new(move || {
+            pending_views
+                .borrow()
+                .values()
+                .any(|page| page.try_borrow().is_ok_and(|host| host.composition_dirty()))
+        }));
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();

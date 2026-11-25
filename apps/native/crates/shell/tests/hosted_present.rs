@@ -20,6 +20,7 @@ fn main() {
     macos::viewer_slot(mtm);
     macos::pictures(mtm);
     macos::hidden_moves(mtm);
+    macos::sync_transaction_present(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -611,6 +612,75 @@ mod macos {
         // And hidden again with Home.
         viewer_slot::show(&view, &layer, false);
         assert!(view.isHidden());
+        window.close();
+    }
+
+    /// Hosted windows report `has_host`, expose external pending geometry
+    /// through `set_pending`, and apply native slot moves inside an explicit
+    /// `CATransaction` alongside GPUI's transactional Metal present.
+    pub fn sync_transaction_present(mtm: MainThreadMarker) {
+        use gpui_macos::composition::{SlotChange, register_tracked, set_pending};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 300.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        assert!(!probe::has_host(&gpui));
+
+        let moved = Rc::new(Cell::new(false));
+        let dirty = Rc::new(Cell::new(false));
+        let presented = Rc::new(Cell::new(0usize));
+        let reg = register_tracked(
+            &gpui,
+            {
+                let moved = moved.clone();
+                let presented = presented.clone();
+                Rc::new(move || {
+                    presented.set(presented.get() + 1);
+                    SlotChange::from(moved.get())
+                })
+            },
+            Rc::new(|_| true),
+        );
+        assert!(probe::has_host(&gpui));
+        set_pending(&gpui, {
+            let dirty = dirty.clone();
+            Rc::new(move || dirty.get())
+        });
+        // First frame after registration is fresh -> pending is true and present marks Moved.
+        assert!(probe::pending(&gpui));
+        assert!(probe::place_in_transaction(&gpui, true));
+        assert_eq!(presented.get(), 1);
+        // Clean frame with no pending external geometry.
+        assert!(!probe::pending(&gpui));
+        assert!(!probe::place_in_transaction(&gpui, true));
+        assert_eq!(presented.get(), 2);
+        // External native webview/panel dirty flag surfaces through pending() before moving.
+        dirty.set(true);
+        assert!(probe::pending(&gpui));
+        moved.set(true);
+        assert!(probe::place_in_transaction(&gpui, true));
+        assert_eq!(presented.get(), 3);
+        dirty.set(false);
+        moved.set(false);
+        assert!(!probe::pending(&gpui));
+
+        drop(reg);
+        assert!(!probe::has_host(&gpui));
+        probe::forget(&gpui);
         window.close();
     }
 }

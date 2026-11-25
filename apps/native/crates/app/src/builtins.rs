@@ -4404,11 +4404,9 @@ impl crate::gizmo::Host for ControllerDelegate {
             let center = v.viewer_center();
             v.view.navigate(change, center, limit);
             v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
-            if matches!(change, crate::gizmo::Navigate::Zoom { .. }) {
-                let mut host = v.host.borrow_mut();
-                host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
-                host.place_cached_viewer();
-            }
+            let mut host = v.host.borrow_mut();
+            host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
+            host.place_cached_viewer();
             cx.notify();
         });
     }

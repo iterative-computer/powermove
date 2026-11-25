@@ -2586,26 +2586,29 @@ impl PlatformWindow for MacWindow {
                 }
             }
         }
-        // Configure `presentsWithTransaction` and acquire/encode the Metal
-        // drawable BEFORE opening `CATransaction` or moving hosted AppKit
-        // views. That ensures:
-        // 1. `CAMetalLayer.presentsWithTransaction` is set before `nextDrawable`
-        //    and before `[CATransaction begin]`.
-        // 2. If Metal cannot acquire a drawable or encode `scene`, hosted
-        //    AppKit views stay in sync with the frozen Metal layer instead of
-        //    drifting ahead of it.
+        // Keep `CAMetalLayer.presentsWithTransaction` steady on hosted
+        // CADisplayLink windows instead of flipping true <-> false per frame.
+        // Rapid runtime toggling between async `presentDrawable` and
+        // transactional `present` races inside macOS `CAMetalLayer` and can
+        // drop/revert the GPUI layer while AppKit subviews keep moving.
+        // Wrap `set_presents_with_transaction`, `nextDrawable`, hosted AppKit
+        // slot moves, and `drawable.present()` inside ONE explicit
+        // `CATransaction`, and still skip moving AppKit views if Metal cannot
+        // acquire a drawable or encode `scene`.
         let now = std::time::Instant::now();
         let continuous = this
             .last_draw
             .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
         let direct = this.direct_moved.is_some();
+        let has_host = crate::composition::has_host(view);
         let will_move = crate::composition::pending(view, this.painted);
+        let async_override = std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_some();
         let sync = direct
             || forced
             || will_move
-            || (continuous
-                && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none()
-                && this.ca_display_link.is_none());
+            || (!this.renderer.display_link_bound() && has_host && !async_override)
+            || (continuous && !async_override && this.ca_display_link.is_none());
+        let transaction = (has_host || sync).then(crate::composition::begin_transaction);
         this.renderer.set_presents_with_transaction(sync);
         let Some(prepared) = this.renderer.prepare_draw(scene) else {
             // No drawable or encoding error: leave `this.painted` intact and
@@ -2613,13 +2616,17 @@ impl PlatformWindow for MacWindow {
             this.force_render_pending = true;
             let acquire = this.renderer.acquire_seconds * 1000.;
             drop(this);
+            drop(transaction);
             return trace("skip", false, acquire);
         };
         // A scene shown again (GPUI keeps presenting for a moment after fast
         // input) staged nothing new: hosted views stay as its paint put them.
         let painted = std::mem::take(&mut this.painted);
-        let transaction = crate::composition::present(view, painted);
-        let moved = transaction.as_ref().is_some_and(|t| t.moved());
+        let moved = if has_host {
+            crate::composition::present_in_transaction(view, painted).moved()
+        } else {
+            false
+        };
         this.last_draw = Some(now);
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) has moved its views by now, under a
@@ -3981,10 +3988,13 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
                 #[cfg(not(feature = "wgpu"))]
-                let direct = lock.direct_moved.is_some();
+                let keep_sync = lock.direct_moved.is_some()
+                    || (!lock.renderer.display_link_bound()
+                        && crate::composition::has_host(lock.native_view.as_ptr() as usize)
+                        && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
                 #[cfg(feature = "wgpu")]
-                let direct = false;
-                lock.renderer.set_presents_with_transaction(direct);
+                let keep_sync = false;
+                lock.renderer.set_presents_with_transaction(keep_sync);
                 lock.sync_present_requested = false;
                 lock.start_display_link();
             }
@@ -4119,10 +4129,13 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
         #[cfg(not(feature = "wgpu"))]
-        let direct = lock.direct_moved.is_some();
+        let keep_sync = lock.direct_moved.is_some()
+            || (!lock.renderer.display_link_bound()
+                && crate::composition::has_host(lock.native_view.as_ptr() as usize)
+                && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
         #[cfg(feature = "wgpu")]
-        let direct = false;
-        lock.renderer.set_presents_with_transaction(direct);
+        let keep_sync = false;
+        lock.renderer.set_presents_with_transaction(keep_sync);
         lock.sync_present_requested = false;
         lock.start_display_link();
     }

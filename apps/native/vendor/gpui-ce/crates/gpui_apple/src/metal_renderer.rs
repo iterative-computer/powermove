@@ -257,6 +257,11 @@ pub struct MetalRenderer {
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
+    /// The last command buffer submitted on the async `present_drawable` path.
+    /// Before switching `CAMetalLayer.presentsWithTransaction` from `false` to
+    /// `true`, we wait for it to finish so its in-flight async presentation
+    /// cannot race with or overwrite the transactional `IOSurface` on macOS.
+    last_async_command_buffer: Option<metal::CommandBuffer>,
     display_link_drawable: Option<metal::MetalDrawable>,
     /// A CAMetalDisplayLink owns the layer, which forbids `nextDrawable`: every
     /// drawable then comes from a display-link update. Cleared when the window
@@ -664,6 +669,7 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
+            last_async_command_buffer: None,
             display_link_drawable: None,
             display_link_bound: false,
             stale_updates: 0,
@@ -722,6 +728,14 @@ impl MetalRenderer {
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
+        if self.presents_with_transaction == presents_with_transaction {
+            return;
+        }
+        if presents_with_transaction
+            && let Some(prev) = self.last_async_command_buffer.take()
+        {
+            prev.wait_until_completed();
+        }
         self.presents_with_transaction = presents_with_transaction;
         if let Some(layer) = &self.layer {
             layer.set_presents_with_transaction(presents_with_transaction);
@@ -1070,6 +1084,11 @@ impl MetalRenderer {
             }
         };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
+        if self.presents_with_transaction || from_supplied {
+            self.last_async_command_buffer = None;
+        } else {
+            self.last_async_command_buffer = Some(command_buffer.clone());
+        }
 
         Some(PreparedDraw {
             command_buffer,
@@ -1337,7 +1356,11 @@ impl MetalRenderer {
         }
         // Captured objects survive dropped scenes and repeat for cached scene submissions.
         let completed = ConcreteBlock::new(move |buffer: &metal::CommandBufferRef| {
-            let succeeded = buffer.status() == metal::MTLCommandBufferStatus::Completed;
+            let status = buffer.status();
+            let succeeded = status == metal::MTLCommandBufferStatus::Completed;
+            if !succeeded {
+                log::error!("GPUI Metal command buffer failed with status {:?}", status);
+            }
             for t in &textures {
                 if !succeeded {
                     t.retire();

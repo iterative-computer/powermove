@@ -114,19 +114,26 @@ pub struct CacheKey {
     pub resources: u64,
 }
 impl CacheKey {
-    pub fn same_content(self, other: Self) -> bool {
+    /// Same rendered scene content regardless of viewer zoom/pan output
+    /// geometry (`width`, `height`, `crop`, `scale`). Whole-composition
+    /// surfaces stay valid under this key and serve any zoomed/panned crop
+    /// directly in the display pass without re-rendering.
+    pub fn same_scene_content(self, other: Self) -> bool {
         self.content == other.content
             && self.revision == other.revision
             && self.inputs == other.inputs
             && self.tone == other.tone
             && self.fonts == other.fonts
             && self.resources == other.resources
-            && self.width == other.width
-            && self.height == other.height
-            && self.crop == other.crop
             && self.studio_preview == other.studio_preview
             && self.studio_view == other.studio_view
             && self.focus_group == other.focus_group
+    }
+    pub fn same_content(self, other: Self) -> bool {
+        self.same_scene_content(other)
+            && self.width == other.width
+            && self.height == other.height
+            && self.crop == other.crop
     }
 }
 

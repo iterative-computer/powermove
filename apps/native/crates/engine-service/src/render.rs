@@ -520,6 +520,10 @@ struct CachedFrame {
     composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
+    /// True when `surface` holds the entire uncropped composition, so any
+    /// zoomed/panned viewer `Output` can sample its crop directly in the
+    /// display pass (`params.whole = 1`) without re-rendering.
+    whole: bool,
 }
 /// What a settled picture's renderer may keep of the cache remainder of the
 /// engine's grant (`cache`): an eighth, the worker's caches the rest.
@@ -1399,9 +1403,28 @@ impl Engine {
         }
     }
     /// A transient zoom surface must not leave a retained presentation cache.
+    /// Preserve reusable whole-composition surfaces in `self.cache` so
+    /// retargeting a viewer layer after zoom/pan still hits VRAM without
+    /// re-rendering the composition from scratch.
     pub fn forget_presenter(&mut self, presenter: usize) {
         let presenter = Presenter::Layer(presenter);
-        self.showing.retain(|(owner, _)| *owner != presenter);
+        let mut i = 0;
+        while i < self.showing.len() {
+            if self.showing[i].0 == presenter {
+                let (_, frame) = self.showing.remove(i);
+                if self.cache_enabled
+                    && frame.whole
+                    && !self
+                        .cache
+                        .iter()
+                        .any(|c| c.key == frame.key && c.composition == frame.composition)
+                {
+                    self.cache.push_back(frame);
+                }
+            } else {
+                i += 1;
+            }
+        }
         debug_assert!(self.showing.iter().all(|(owner, _)| *owner != presenter));
     }
     /// Input changes invalidate reusable pictures without ending the
@@ -1958,16 +1981,54 @@ impl Engine {
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
-        let size = spec.size_in(scene);
-        let drawn_whole = spec.whole_composition(scene).is_some();
+        let comp_size = composition_size(scene);
+        let zoom_whole_size = (!spec.exact
+            && spec.moment == Moment::Paused
+            && spec.scale >= 1.
+            && output.crop.is_some()
+            && !self.draws_studio(scene))
+        .then_some(comp_size)
+        .flatten()
+        .filter(|cs| {
+            u64::from(cs.width)
+                .saturating_mul(u64::from(cs.height))
+                .saturating_mul(8)
+                <= PAUSED_FULL_BYTES
+        });
+        let size = zoom_whole_size.unwrap_or_else(|| spec.size_in(scene));
+        let drawn_whole = spec.whole_composition(scene).is_some() || zoom_whole_size.is_some();
         let hdr = self.sync_hdr(scene);
-        let key = self.cache_key(scene, &spec, size);
-        // A revision, size or observed-input change retires all old cached
-        // frames. Leases held by submitted consumers still protect their
+        let key = if let Some(cs) = zoom_whole_size {
+            let mut k = self.cache_key(scene, &spec, cs);
+            k.crop = None;
+            k.finished = true;
+            k
+        } else {
+            self.cache_key(scene, &spec, size)
+        };
+        // A revision or observed-input change retires all old cached frames.
+        // Whole-composition surfaces stay cached across zoom/pan output
+        // geometry changes so zooming and panning sample them directly without
+        // re-rendering. Leases held by submitted consumers still protect their
         // storage until completion.
-        let current = |c: &CachedFrame| c.key.content != key.content || c.key.same_content(key);
+        let current = |c: &CachedFrame| {
+            c.key.content != key.content
+                || c.key.same_content(key)
+                || (c.whole && c.key.same_scene_content(key))
+        };
         // A frame is of its key and its composition.
         let of = |c: &CachedFrame| c.key == key && c.composition == scene.comp;
+        // A whole-composition surface of the same scene state and time serves
+        // any zoomed/panned viewer crop in the display pass without re-rendering.
+        let whole_match = |c: &CachedFrame| {
+            c.whole
+                && c.composition == scene.comp
+                && c.key.same_scene_content(key)
+                && c.key.time == key.time
+                && spec.scale >= 1.
+                && comp_size.is_some_and(|cs| c.surface.size == cs)
+                && (c.key.finished || c.key.moment == Moment::Paused)
+        };
         self.cache.retain(current);
         // A viewer's last good surface stays pinned until its replacement
         // is ready. Its old key cannot serve the new request. Offscreen
@@ -1981,7 +2042,7 @@ impl Engine {
             Presenter::Layer(layer.as_ptr() as usize)
         });
         if !spec.exact
-            && let Some(handed) = self.settled.take_if(|c| of(c))
+            && let Some(handed) = self.settled.take_if(|c| of(c) || whole_match(c))
         {
             self.showing.retain(|(of, _)| *of != viewer);
             // A main viewer and a popout of each of two projects.
@@ -1990,13 +2051,43 @@ impl Engine {
             }
             self.showing.push((viewer, handed));
         }
+        let mut whole_hit = false;
         let shown = (!spec.exact)
-            .then(|| self.showing.iter().find(|(_, c)| of(c)))
+            .then(|| {
+                self.showing
+                    .iter()
+                    .find(|(_, c)| of(c))
+                    .map(|(_, c)| (c.surface.clone(), c.failures.clone(), false))
+                    .or_else(|| {
+                        self.showing
+                            .iter()
+                            .find(|(_, c)| whole_match(c))
+                            .map(|(_, c)| (c.surface.clone(), c.failures.clone(), true))
+                    })
+            })
             .flatten()
-            .map(|(_, c)| (c.surface.clone(), c.failures.clone()));
+            .map(|(surface, failures, from_whole)| {
+                whole_hit |= from_whole;
+                (surface, failures)
+            });
         let hit = (self.cache_enabled && !spec.exact && shown.is_none())
-            .then(|| self.cache.iter().position(of))
+            .then(|| {
+                self.cache
+                    .iter()
+                    .position(of)
+                    .map(|idx| (idx, false))
+                    .or_else(|| {
+                        self.cache
+                            .iter()
+                            .position(whole_match)
+                            .map(|idx| (idx, true))
+                    })
+            })
             .flatten();
+        if let Some((_, true)) = hit {
+            whole_hit = true;
+        }
+        let hit = hit.map(|(idx, _)| idx);
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
         // A frame rendered on disk: shown in an uncropped viewer instead of
@@ -2005,7 +2096,6 @@ impl Engine {
         // export draws, so a paused playhead in a rendered range shows its
         // picture at once, whatever else the GPU is doing. A capture always
         // draws its own exact frame.
-        // Never upscaled: a canvas larger than the composition renders.
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
@@ -2021,16 +2111,16 @@ impl Engine {
             Moment::Paused => crate::render_cache::PAUSED_PATIENCE,
             Moment::Scrub => std::time::Duration::ZERO,
         };
-        // A paused frame shows the frame on disk only where it would draw
-        // that very picture itself: the final picture of the whole
-        // composition at its own size (its refinement at the paused Full
-        // scale, or a drawable that is the composition's size). Where a
-        // paused frame is drawn otherwise (zoomed in, at a reduced quality,
-        // or so far out that Full is bounded to the drawable), it is drawn
-        // as ever: whether a frame is rendered on disk never changes a
-        // paused picture.
-        let as_drawn = spec.moment != Moment::Paused || spec.settles_final(scene);
-        let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
+        // A paused frame shows the frame on disk when it would draw the whole
+        // composition at its own size (at Fit or zoomed/panned in Full/Auto).
+        let as_drawn = spec.moment != Moment::Paused
+            || spec.settles_final(scene)
+            || zoom_whole_size.is_some();
+        let fits = |disk_size: &Size| {
+            as_drawn
+                && ((canvas.0 <= disk_size.width && canvas.1 <= disk_size.height)
+                    || (zoom_whole_size.is_some() && comp_size == Some(*disk_size)))
+        };
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
         // Shown only while it still is this frame's picture.
@@ -2077,25 +2167,28 @@ impl Engine {
         }
         let from_disk = disk.is_some() || uploaded.is_some();
         // The source is the whole composition: presented as the drawable's
-        // window of the canvas, a rendered frame and a drawn one alike.
-        let whole = from_disk || drawn_whole;
+        // window of the canvas, a rendered frame, a cached whole surface, and
+        // a drawn one alike.
+        let whole = from_disk || drawn_whole || whole_hit;
         trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
         trace.lock().unwrap().disk = match (looked, from_disk) {
             (false, _) => 0,
             (true, false) => 1,
             (true, true) => 2,
         };
-        let size = disk.as_ref().map_or(size, |(size, _)| *size);
-        let size = uploaded.as_ref().map_or(size, |next| next.size);
+        let mut size = disk.as_ref().map_or(size, |(size, _)| *size);
+        size = uploaded.as_ref().map_or(size, |next| next.size);
         let (surface, failures) = if let Some(next) = uploaded {
             trace.lock().unwrap().cache_hit = true;
             (next.surface, Arc::from(Vec::new()))
         } else if let Some(shown) = shown {
             trace.lock().unwrap().cache_hit = true;
+            size = shown.0.size;
             shown
         } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
+            size = entry.surface.size;
             self.cache.push_back(entry);
             trace.lock().unwrap().cache_hit = true;
             found
@@ -2126,6 +2219,7 @@ impl Engine {
                 // every 3D picture. A bounded static title is cheap enough
                 // to keep its native grid here at Stop too.
                 if !spec.exact
+                    && zoom_whole_size.is_none()
                     && spec.final_picture(scene)
                     && !self.draws_studio(scene)
                     && self.text_grid_scale(scene, &spec.output).is_none()
@@ -2133,7 +2227,18 @@ impl Engine {
                     return Err(SettledPending.into());
                 }
                 let target = Target::wrap(surface.texture.clone());
-                let mut request = spec.request(scene)?;
+                let mut request = if let Some(cs) = zoom_whole_size {
+                    let mut req = pm_render::RenderRequest::sized(cs, Precision::Float16);
+                    req.motion_blur =
+                        pm_render::motion::MotionBlur::Kind(pm_protocol::frame::MotionBlurKind::Export);
+                    req.sampling = pm_render::sampling::Sampling::Final;
+                    req.read_ahead = false;
+                    req.output_kind = pm_render::OutputKind::Final;
+                    req.viewer = true;
+                    req
+                } else {
+                    spec.request(scene)?
+                };
                 request.output_tone = self.output_tone;
                 request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
                 // An exact read never takes a stand-in, whatever the moment,
@@ -2141,7 +2246,7 @@ impl Engine {
                 // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
                 let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
                 self.renderer.set_preview_media(
-                    preview && spec.preview_stills(scene),
+                    preview && zoom_whole_size.is_none() && spec.preview_stills(scene),
                     preview && spec.preview_video(),
                 );
                 self.renderer.set_draw_reuse(!spec.exact);
@@ -2217,11 +2322,13 @@ impl Engine {
                     && !stand_ins
                     && self.reads_observed(scene, &reads)
                 {
+                    let is_whole = drawn_whole || output.crop.is_none();
                     self.cache.push_back(CachedFrame {
                         key,
                         composition: scene.comp.clone(),
                         surface: surface.clone(),
                         failures: failures.clone(),
+                        whole: is_whole,
                     });
                 }
                 (surface, failures)
@@ -2235,11 +2342,13 @@ impl Engine {
             && !stand_ins
             && failures.is_empty()
             && self.cache_enabled
+            && !whole_hit
             && self
                 .cache
                 .iter()
                 .any(|c| of(c) && Arc::ptr_eq(&c.surface, &surface))
         {
+            let is_whole = drawn_whole || output.crop.is_none();
             self.showing.retain(|(id, _)| *id != viewer);
             if self.showing.len() >= 4 {
                 self.showing.remove(0);
@@ -2251,6 +2360,7 @@ impl Engine {
                     composition: scene.comp.clone(),
                     surface: surface.clone(),
                     failures: failures.clone(),
+                    whole: is_whole,
                 },
             ));
         }
@@ -2704,11 +2814,14 @@ impl Engine {
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     Settled::Failed(anyhow!("The GPU refused this frame: {error}"))
                 } else if exact && current && self.reads_observed(&done.scene, &done.reads) {
+                    let is_whole = done.key.crop.is_none()
+                        || composition_size(&done.scene) == Some(done.surface.size);
                     self.settled = Some(CachedFrame {
                         key: done.key,
                         composition: done.scene.comp.clone(),
                         surface: done.surface,
                         failures: failures.into(),
+                        whole: is_whole,
                     });
                     Settled::Kept
                 } else {
@@ -3996,6 +4109,7 @@ mod playback_pool_tests {
                 composition: scene.comp.clone(),
                 surface: surface.clone(),
                 failures: Arc::default(),
+                whole: true,
             });
         };
         // Paused pictures cached, and the settled picture shown and the
@@ -4130,6 +4244,7 @@ mod playback_pool_tests {
                     composition: scene.comp.clone(),
                     surface: surface.clone(),
                     failures: Arc::default(),
+                    whole: true,
                 });
             }
             // Alternate exact cached pictures and uncached stand-ins, with
@@ -5662,6 +5777,184 @@ mod frame_cache_tests {
             flat * 2 < whole,
             "the saved file is drawn: {flat} pixels, {whole} before"
         );
+    }
+
+    /// Zooming and panning a paused Full-resolution viewer reuses the cached
+    /// whole-composition surface directly in `viewer.metal` with zero
+    /// `pm_render` re-renders, even across `forget_presenter` (`retarget`).
+    #[test]
+    fn zooming_and_panning_a_paused_full_frame_reuses_whole_composition_without_rerendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let mut engine = Engine::new(Gpu::new("zoom-pan-whole-hit").unwrap()).unwrap();
+        let fit = Output {
+            width: 64,
+            height: 36,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let fit_spec = FrameSpec {
+            moment: Moment::Paused,
+            scale: FrameSpec::paused_full_scale(&scene, &fit),
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, fit)
+        };
+        assert!(fit_spec.scale > 1., "Fit should settle at comp_size");
+        // Settle the Fit whole-composition frame once.
+        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub = engine
+            .frame_settled(&scene, fit_spec, None, &Default::default(), true, trace)
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+
+        // Simulate a sequence of zoomed & panned crops (including >100% zoom)
+        // and a presenter retarget (`forget_presenter`). Every single frame
+        // must hit the cached whole-composition surface with zero pm_render.
+        let crops = [
+            (64, 36, 0, 0, 128, 72),
+            (64, 36, 32, 18, 128, 72),
+            (64, 36, 64, 36, 128, 72),
+            (64, 36, 100, 50, 256, 144),
+            (64, 36, 180, 90, 512, 288),
+            (64, 36, 16, 8, 192, 108),
+        ];
+        for (i, (w, h, x, y, cw, ch)) in crops.into_iter().enumerate() {
+            if i == 2 {
+                // Simulate layer swap on retarget: whole surface must stay cached.
+                engine.forget_presenter(0);
+            }
+            let out = Output {
+                width: w,
+                height: h,
+                display: 0,
+                headroom: 1.,
+                crop: Some(crate::policy::Crop {
+                    x,
+                    y,
+                    canvas_width: cw,
+                    canvas_height: ch,
+                }),
+            };
+            let spec = FrameSpec {
+                moment: Moment::Paused,
+                scale: 1.,
+                exact: false,
+                ..FrameSpec::exact(Ticks::ZERO, out)
+            };
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let t = trace.lock().unwrap();
+            assert!(t.cache_hit, "step {i}: zoom/pan must hit cached whole surface");
+            assert_eq!(
+                t.render_start, 0.,
+                "step {i}: zoom/pan must not invoke pm_render"
+            );
+            assert_eq!(sub.pixels().len(), (w * h) as usize);
+        }
+    }
+
+    /// Starting directly zoomed in renders the whole composition once so
+    /// subsequent pans and zooms hit VRAM cache with zero re-renders, while a
+    /// document edit invalidates the cached whole surface and re-renders.
+    #[test]
+    fn starting_zoomed_in_renders_once_then_pans_from_cache_and_invalidates_on_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene1 = scene(&stripes(dir.path()));
+        let mut engine = Engine::new(Gpu::new("zoom-pan-cold-start").unwrap()).unwrap();
+        let make_spec = |x, y, cw, ch| FrameSpec {
+            moment: Moment::Paused,
+            scale: 1.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 64,
+                    height: 36,
+                    display: 0,
+                    headroom: 1.,
+                    crop: Some(crate::policy::Crop {
+                        x,
+                        y,
+                        canvas_width: cw,
+                        canvas_height: ch,
+                    }),
+                },
+            )
+        };
+        // First zoomed frame renders the whole composition once.
+        let t0 = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub0 = engine
+            .frame(
+                &scene1,
+                make_spec(20, 10, 256, 144),
+                None,
+                &Default::default(),
+                true,
+                t0.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        sub0.commit();
+        sub0.complete().unwrap();
+        assert!(!t0.lock().unwrap().cache_hit);
+        assert!(t0.lock().unwrap().render_start > 0.);
+
+        // Panning and re-zooming immediately hit cache with zero pm_render.
+        for (x, y, cw, ch) in [(40, 20, 256, 144), (80, 40, 384, 216), (0, 0, 128, 72)] {
+            let t = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(
+                    &scene1,
+                    make_spec(x, y, cw, ch),
+                    None,
+                    &Default::default(),
+                    true,
+                    t.clone(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let t = t.lock().unwrap();
+            assert!(t.cache_hit, "pan/zoom ({x},{y},{cw},{ch}) must hit cache");
+            assert_eq!(t.render_start, 0.);
+        }
+
+        // Document revision bump invalidates the cached whole surface.
+        let scene2 = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                scene1.doc.root().map(pm_model::Node::to_value),
+                scene1.doc.revision() + 1,
+            )),
+            ..scene1.clone()
+        };
+        let t_edit = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub_edit = engine
+            .frame(
+                &scene2,
+                make_spec(40, 20, 256, 144),
+                None,
+                &Default::default(),
+                true,
+                t_edit.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        sub_edit.commit();
+        sub_edit.complete().unwrap();
+        assert!(
+            !t_edit.lock().unwrap().cache_hit,
+            "revision bump must invalidate whole surface"
+        );
+        assert!(t_edit.lock().unwrap().render_start > 0.);
     }
 }
 #[cfg(test)]

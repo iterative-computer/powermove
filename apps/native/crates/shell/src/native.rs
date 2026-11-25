@@ -3845,6 +3845,8 @@ pub struct Host {
     staged_native_panels: RefCell<Option<NativePanelGeometry>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
+    /// Reports whether `native_present` has pending geometry/visibility work.
+    pub native_pending: Option<Rc<dyn Fn() -> bool>>,
     /// Runs inside the composition transaction, with the window size.
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
@@ -4065,6 +4067,7 @@ impl Host {
             native_panel_fades: Rc::default(),
             staged_native_panels: RefCell::default(),
             native_style: None,
+            native_pending: None,
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
@@ -6229,22 +6232,28 @@ impl Host {
         }
         self.viewer_transform = Some((dimensions, zoom, pan));
     }
-    /// Keep the current drawable while pointer navigation scales its cached pixels.
+    /// Keep the current drawable while pointer navigation scales/pans its cached pixels.
     pub fn defer_viewer_raster(&mut self, active: bool) {
         if active {
-            if self.viewer_raster.is_none()
-                && let (Some(Some(g)), Some((dimensions, Some(zoom), pan))) =
+            if self.viewer_raster.is_none() {
+                if let Some((_, cached, old_zoom, old_pan)) = &self.viewer_cover {
+                    self.viewer_raster = Some((*cached, *old_zoom, *old_pan));
+                } else if let (Some(Some(g)), Some((dimensions, Some(zoom), pan))) =
                     (self.last_geometry, self.viewer_transform)
-            {
-                let mut cached = g;
-                if let Some(crop) = g.crop {
-                    let size = self.layer.drawable_size();
-                    let slot = [g.frame.size.width, g.frame.size.height];
-                    let x = (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + crop[0] as f64 / g.scale;
-                    let top = (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + crop[1] as f64 / g.scale;
-                    cached.layer = NSRect::new(NSPoint::new(x, slot[1] - top - size.height / g.scale), NSSize::new(size.width / g.scale, size.height / g.scale));
+                {
+                    let mut cached = g;
+                    if let Some(crop) = g.crop {
+                        let size = self.layer.drawable_size();
+                        let slot = [g.frame.size.width, g.frame.size.height];
+                        let x = (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + crop[0] as f64 / g.scale;
+                        let top = (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + crop[1] as f64 / g.scale;
+                        cached.layer = NSRect::new(
+                            NSPoint::new(x, slot[1] - top - size.height / g.scale),
+                            NSSize::new(size.width / g.scale, size.height / g.scale),
+                        );
+                    }
+                    self.viewer_raster = Some((cached, zoom, pan));
                 }
-                self.viewer_raster = Some((cached, zoom, pan));
             }
         } else if self.viewer_raster.take().is_some() {
             self.last_geometry = None;
@@ -6252,13 +6261,35 @@ impl Host {
     }
     /// Apply cached placement in the input transaction, alongside the overlay.
     pub fn place_cached_viewer(&mut self) {
-        if self.viewer_raster.is_none() { return; }
-        if let Some(g) = self.viewer_geometry() {
-            unsafe { let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer]; }
+        let Some((_, Some(zoom), pan)) = self.viewer_transform else {
+            return;
+        };
+        let Some(r) = self.viewer_rect.get() else {
+            return;
+        };
+        let slot = [r.w as f64, r.h as f64];
+        if let Some((cover, cached, old_zoom, old_pan)) = &self.viewer_cover {
+            let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, *old_pan, pan);
+            let target = self.viewer_geometry();
+            unsafe {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame];
+                if let Some(g) = target {
+                    let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer];
+                }
+                CATransaction::commit();
+            }
+            return;
         }
-        if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (&self.viewer_cover, self.viewer_transform, self.viewer_rect.get()) {
-            let frame = cached_zoom_frame(cached.layer, [r.w as f64, r.h as f64], zoom / old_zoom, *old_pan, pan);
-            unsafe { let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame]; }
+        if let Some((cached, old_zoom, old_pan)) = self.viewer_raster {
+            let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, old_pan, pan);
+            unsafe {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:frame];
+                CATransaction::commit();
+            }
         }
     }
     /// Render the settled size below the cached composite. Reveal only a complete frame.
@@ -6266,30 +6297,51 @@ impl Host {
         let Some((g, zoom, pan)) = self.viewer_raster.take() else {
             return false;
         };
-        if self.viewer_cover.is_some() {
-            self.last_geometry = None;
-            return false;
-        }
         // Configure the target before the worker can acquire its first drawable.
         // A default-size first frame must never qualify for the atomic reveal.
-        if let Some(target) = self.viewer_geometry() {
-            unsafe { let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer]; }
-            layer.set_contents_scale(target.scale);
-            layer.set_drawable_size(core_graphics::geometry::CGSize::new(
-                target.layer.size.width * target.scale,
-                target.layer.size.height * target.scale,
-            ));
-            self.viewer_crop.set(target.crop);
-        }
+        let target = self.viewer_geometry();
         unsafe {
-            let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
-            let old = self.layer.as_ptr() as *mut AnyObject;
-            if let Some(root) = self.viewer.layer() {
-                let _: () =
-                    msg_send![&*root, insertSublayer:layer.as_ptr() as *mut AnyObject, below:old];
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            if let Some(target) = target {
+                let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer];
+                layer.set_contents_scale(target.scale);
+                layer.set_drawable_size(core_graphics::geometry::CGSize::new(
+                    target.layer.size.width * target.scale,
+                    target.layer.size.height * target.scale,
+                ));
+                self.viewer_crop.set(target.crop);
             }
+            let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
+            if let Some((cover, _, _, _)) = &self.viewer_cover {
+                // Re-settled while a previous cover is still visible: keep the
+                // cover on top, replace the hidden staging layer below it, and
+                // retarget the viewer to the newest zoom/pan.
+                let old_staging = self.layer.as_ptr() as *mut AnyObject;
+                let _: () = msg_send![old_staging, removeFromSuperlayer];
+                let _: () = msg_send![old_staging, setDevice:std::ptr::null::<AnyObject>()];
+                if let Some(root) = self.viewer.layer() {
+                    let _: () = msg_send![
+                        &*root,
+                        insertSublayer:layer.as_ptr() as *mut AnyObject,
+                        below:cover.as_ptr() as *mut AnyObject
+                    ];
+                }
+            } else {
+                let old = self.layer.as_ptr() as *mut AnyObject;
+                if let Some(root) = self.viewer.layer() {
+                    let _: () = msg_send![
+                        &*root,
+                        insertSublayer:layer.as_ptr() as *mut AnyObject,
+                        below:old
+                    ];
+                }
+            }
+            CATransaction::commit();
         }
-        self.viewer_cover = Some((self.layer.clone(), g, zoom, pan));
+        if self.viewer_cover.is_none() {
+            self.viewer_cover = Some((self.layer.clone(), g, zoom, pan));
+        }
         self.layer = layer;
         self.last_geometry = None;
         true
@@ -6453,6 +6505,7 @@ impl Host {
     fn pending(&self) -> bool {
         self.last_geometry != Some(self.viewer_geometry())
             || self.staged_native_panels.borrow().is_some()
+            || self.native_pending.as_ref().is_some_and(|pending| pending())
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
         if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
@@ -6486,9 +6539,26 @@ impl Host {
                 // layer and AppKit sizes it; framing it here would move it to
                 // the content view's origin (the stray lower-left rectangle).
                 if self.viewer_transform.is_some() {
+                    let layer_frame = if self.viewer_cover.is_none()
+                        && let (Some((cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
+                            self.viewer_raster,
+                            self.viewer_transform,
+                            self.viewer_rect.get(),
+                        )
+                    {
+                        cached_zoom_frame(
+                            cached.layer,
+                            [r.w as f64, r.h as f64],
+                            zoom / old_zoom,
+                            old_pan,
+                            pan,
+                        )
+                    } else {
+                        g.layer
+                    };
                     unsafe {
                         let _: () =
-                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:layer_frame];
                     }
                 }
                 self.layer.set_contents_scale(g.scale);
@@ -11781,6 +11851,18 @@ mod cached_zoom_tests {
         assert_eq!(next.size, NSSize::new(800., 480.));
         assert!((next.origin.x + (200. - frame.origin.x) * 2. - 200.).abs() < 0.5);
         assert!((next.origin.y + (250. - frame.origin.y) * 2. - 250.).abs() < 0.5);
+    }
+    #[test]
+    fn panning_a_cropped_layer_shifts_bottom_up_origin_without_scaling() {
+        let slot = [940., 610.];
+        let frame = NSRect::new(NSPoint::new(12., 34.), NSSize::new(900., 560.));
+        let old_pan = [40., -20.];
+        let pan = [115., 30.];
+        let next = cached_zoom_frame(frame, slot, 1., old_pan, pan);
+        assert_eq!(next.size, frame.size);
+        // Top-down +dx shifts right (+x); top-down +dy shifts down (-y in bottom-up layer coords).
+        assert!((next.origin.x - (frame.origin.x + 75.)).abs() < 1e-6);
+        assert!((next.origin.y - (frame.origin.y - 50.)).abs() < 1e-6);
     }
 }
 

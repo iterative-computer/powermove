@@ -347,6 +347,55 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
     }
     Some(order)
 }
+/// Whether `view` has any registered composition host or managed native text /
+/// control slots that must stay synchronized with GPUI's `CAMetalLayer`.
+pub(crate) fn has_host(view: usize) -> bool {
+    HOSTS.with(|h| h.borrow().contains_key(&view))
+        || crate::native_text::has_slots(view)
+        || crate::native_control::has_slots(view)
+}
+
+/// RAII explicit `CATransaction` with implicit actions disabled.
+pub(crate) struct TransactionGuard;
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![class!(CATransaction), commit];
+        }
+    }
+}
+
+/// Opens an explicit `CATransaction` with implicit actions disabled.
+pub(crate) fn begin_transaction() -> TransactionGuard {
+    unsafe {
+        let _: () = msg_send![class!(CATransaction), begin];
+        let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+    }
+    TransactionGuard
+}
+
+/// Runs the registered host and managed text/control slot presenters inside an
+/// already-open `CATransaction`.
+pub(crate) fn present_in_transaction(view: usize, painted: bool) -> SlotChange {
+    let hook = HOSTS.with(|h| {
+        h.borrow_mut()
+            .get_mut(&view)
+            .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
+    });
+    let mut change = SlotChange::Unchanged;
+    if let Some((present, fresh)) = hook {
+        let host_change = gpui_util::measure("native composition", || present());
+        change = host_change.or(fresh.into());
+    }
+    if painted {
+        let text = crate::native_text::present(view);
+        change = change
+            .or(text)
+            .or(crate::native_control::present(view));
+    }
+    change
+}
+
 /// Opens the explicit CATransaction for this frame's slot publication and runs the
 /// host. When geometry moved, GPUI's drawable must be presented with the
 /// transaction ([`Transaction::moved`]); otherwise it presents asynchronously.
@@ -354,33 +403,13 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
 /// one: text and control slots, placed from what a paint staged, are left
 /// as they are.
 pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
-    let hook = HOSTS.with(|h| {
-        h.borrow_mut()
-            .get_mut(&view)
-            .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
-    });
-    if hook.is_none() && !crate::native_text::has_slots(view) && !crate::native_control::has_slots(view) {
+    if !has_host(view) {
         return None;
     }
-    unsafe {
-        let _: () = msg_send![class!(CATransaction), begin];
-        let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-    }
-    let mut transaction = Transaction {
-        change: SlotChange::Unchanged,
-    };
-    if let Some((present, fresh)) = hook {
-        let change = gpui_util::measure("native composition", || present());
-        transaction.change = change.or(fresh.into());
-    }
-    if painted {
-        let text = crate::native_text::present(view);
-        transaction.change = transaction
-            .change
-            .or(text)
-            .or(crate::native_control::present(view));
-    }
-    Some(transaction)
+    let _guard = begin_transaction();
+    std::mem::forget(_guard);
+    let change = present_in_transaction(view, painted);
+    Some(Transaction { change })
 }
 /// A frame drawn within this long after the previous one is "continuous".
 /// The legacy CVDisplayLink fallback couples frames within this interval.
@@ -511,6 +540,16 @@ pub mod probe {
     /// does; true when a hosted view moved.
     pub fn place(view: &NSView) -> bool {
         present(view as *const NSView as usize, true).is_some_and(|t| t.moved())
+    }
+    /// Whether a host is registered for `view`.
+    pub fn has_host(view: &NSView) -> bool {
+        super::has_host(view as *const NSView as usize)
+    }
+    /// Places what the last paint of `view` staged inside an explicit
+    /// `CATransaction`, mirroring `MacWindow::draw`.
+    pub fn place_in_transaction(view: &NSView, painted: bool) -> bool {
+        let _tx = super::begin_transaction();
+        super::present_in_transaction(view as *const NSView as usize, painted).moved()
     }
     pub fn forget(view: &NSView) {
         super::forget_paints(view as *const NSView as usize);
