@@ -166,7 +166,7 @@ impl AgentLink {
                     ("connected", String::new())
                 } else {
                     ("unavailable", "Aero's development switch is off.".into())
-                }
+                };
             }
             Provider::Chatgpt => "ChatGPT",
             Provider::Claude => "Claude",

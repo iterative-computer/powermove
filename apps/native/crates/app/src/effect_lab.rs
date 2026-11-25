@@ -140,52 +140,79 @@ pub(crate) fn render(
 pub(crate) fn probe(definition: &DefinitionSnapshot) -> Result<Value> {
     use pm_protocol::definitions::DefinitionKind;
     let size = Size::new(256, 144);
-    let shape = Geometry::new(&Shape::Full,size);
+    let shape = Geometry::new(&Shape::Full, size);
     let scratch = tempfile::tempdir()?;
     let mut assets = MapResolver::default();
     for (id, data) in [
-        ("backdrop", [48, 80, 124, 255].repeat((size.width * size.height) as usize)),
-        ("subject", [210, 175, 125, 255].repeat((size.width * size.height) as usize)),
+        (
+            "backdrop",
+            [48, 80, 124, 255].repeat((size.width * size.height) as usize),
+        ),
+        (
+            "subject",
+            [210, 175, 125, 255].repeat((size.width * size.height) as usize),
+        ),
     ] {
         let path = scratch.path().join(format!("{id}.png"));
-        std::fs::write(&path, png(&data,size.width,size.height)?)?;
-        assets.paths.insert(id.into(),path);
+        std::fs::write(&path, png(&data, size.width, size.height)?)?;
+        assets.paths.insert(id.into(), path);
     }
     let params = parameters(definition, &Map::new())?;
     let enabled = document(size, shape, definition, &params, 1)?;
-    let mut root = enabled.to_value().ok_or_else(|| anyhow!("Missing probe composition"))?;
-    let layers = root.as_object_mut().and_then(|root| root.get_mut("layers")).and_then(pm_model::Value::as_array_mut)
+    let mut root = enabled
+        .to_value()
+        .ok_or_else(|| anyhow!("Missing probe composition"))?;
+    let layers = root
+        .as_object_mut()
+        .and_then(|root| root.get_mut("layers"))
+        .and_then(pm_model::Value::as_array_mut)
         .ok_or_else(|| anyhow!("Missing probe layers"))?;
-    let subject = layers[0].as_object_mut().ok_or_else(|| anyhow!("Missing probe clip"))?;
+    let subject = layers[0]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Missing probe clip"))?;
     subject.insert("fx", pm_model::Value::Array(vec![]));
     subject.remove("transitionIn");
     let disabled = pm_model::Document::new(Some(root), 2);
     let mut renderer = Renderer::headless()?;
-    let errors = renderer.set_document_effects(&enabled, std::slice::from_ref(definition))
+    let errors = renderer
+        .set_document_effects(&enabled, std::slice::from_ref(definition))
         .map_err(|error| anyhow!(error))?;
-    ensure!(errors.is_empty(), "Probe shader did not compile: {errors:?}");
-    let mut request = RenderRequest::sized(size,Precision::Float16);
+    ensure!(
+        errors.is_empty(),
+        "Probe shader did not compile: {errors:?}"
+    );
+    let mut request = RenderRequest::sized(size, Precision::Float16);
     request.export = true;
-    let seconds = if definition.kind == DefinitionKind::Transition { 0.5 } else { 0.0 };
+    let seconds = if definition.kind == DefinitionKind::Transition {
+        0.5
+    } else {
+        0.0
+    };
     let ticks = Ticks::new(pm_time::ticks_from_seconds(seconds)?)?;
     let mut render = |doc: &pm_model::Document| -> Result<(Vec<f32>, f64)> {
         let start = std::time::Instant::now();
         let frame = renderer.render(doc, "effect-lab-comp", ticks, &request, &assets)?;
-        ensure!(frame.failures.is_empty(), "Probe frame failed: {:?}", frame.failures);
+        ensure!(
+            frame.failures.is_empty(),
+            "Probe frame failed: {:?}",
+            frame.failures
+        );
         renderer.wait_idle();
         let pixels = renderer.read_rgba_reusing(&frame)?;
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         renderer.recycle(frame);
-        Ok((pixels,ms))
+        Ok((pixels, ms))
     };
     let (_, _) = render(&enabled)?;
     let (baseline, _) = render(&disabled)?;
     let (pixels, ms) = render(&enabled)?;
-    Ok(json!({"definition":definition.id.as_str(),"time":seconds,"frameMs":ms,
-        "changed":pixels.iter().zip(&baseline).any(|(a,b)| (a-b).abs() > 1./255.),
-        "nan":pixels.iter().any(|value| !value.is_finite()),
-        "black":pixels.chunks_exact(4).all(|r| r[..3].iter().all(|value| *value < 1./255.))
-    }))
+    Ok(
+        json!({"definition":definition.id.as_str(),"time":seconds,"frameMs":ms,
+            "changed":pixels.iter().zip(&baseline).any(|(a,b)| (a-b).abs() > 1./255.),
+            "nan":pixels.iter().any(|value| !value.is_finite()),
+            "black":pixels.chunks_exact(4).all(|r| r[..3].iter().all(|value| *value < 1./255.))
+        }),
+    )
 }
 
 fn parameters(

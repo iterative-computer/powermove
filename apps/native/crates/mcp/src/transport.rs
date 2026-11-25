@@ -19,7 +19,6 @@ use std::{
 };
 pub(crate) const MAX_LINE: usize = 2 * 1024 * 1024;
 
-
 enum Listener {
     Tcp(TcpListener),
     Unix(UnixListener),
@@ -276,8 +275,12 @@ impl<T: ToolConnection> Rpc<T> {
         };
         Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
     }
-    pub(crate) fn initialized(&self) -> bool { self.initialized }
-    pub(crate) fn session_mut(&mut self) -> &mut T { &mut self.session }
+    pub(crate) fn initialized(&self) -> bool {
+        self.initialized
+    }
+    pub(crate) fn session_mut(&mut self) -> &mut T {
+        &mut self.session
+    }
 
     pub fn close(&mut self) -> Result<()> {
         self.session.disconnect()
@@ -353,11 +356,7 @@ fn constant_eq(a: &str, b: &str) -> bool {
         .fold(0u8, |diff, (a, b)| diff | (a ^ b))
         == 0
 }
-fn connection<T: ToolConnection>(
-    mut stream: Stream,
-    token: String,
-    mut session: T,
-) -> Result<()> {
+fn connection<T: ToolConnection>(mut stream: Stream, token: String, mut session: T) -> Result<()> {
     // macOS accepted sockets inherit the listener's nonblocking flag.
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -438,7 +437,8 @@ impl LoopbackServer {
         Self::start_unix_with(profile, move || McpSession::new(host.clone()))
     }
     pub fn start_unix_with<T: ToolConnection + Send + 'static>(
-        profile: &Path, factory: impl Fn() -> T + Send + Sync + 'static,
+        profile: &Path,
+        factory: impl Fn() -> T + Send + Sync + 'static,
     ) -> Result<Self> {
         Self::bind(profile, true, factory)
     }
@@ -467,7 +467,8 @@ impl LoopbackServer {
         let file = directory.join("connection.json");
         let _publication = descriptor_lock(&directory)?;
         recover_descriptor(&file)?;
-        let mut descriptor = json!({"version":1,"instanceId":instance,"pid":std::process::id(),"token":token});
+        let mut descriptor =
+            json!({"version":1,"instanceId":instance,"pid":std::process::id(),"token":token});
         let (listener, socket) = if unix {
             // A distinct name leaves a crashed instance's socket inert and
             // prevents shutdown from unlinking a replacement listener.
@@ -503,9 +504,7 @@ impl LoopbackServer {
         std::fs::remove_file(temp)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
-        let clients = Arc::new(Mutex::new(
-            std::collections::HashMap::<u64, Stream>::new(),
-        ));
+        let clients = Arc::new(Mutex::new(std::collections::HashMap::<u64, Stream>::new()));
         let sockets = clients.clone();
         let worker = thread::spawn(move || {
             let mut children: Vec<thread::JoinHandle<()>> = vec![];
@@ -594,10 +593,7 @@ pub fn proxy_stdio(profile: &Path, agent_run: Option<String>) -> Result<()> {
         Bridge::open(profile, agent_run)?,
     )
 }
-fn bridge_channel(
-    profile: &Path,
-    agent_run: Option<&str>,
-) -> Result<(Stream, BufReader<Stream>)> {
+fn bridge_channel(profile: &Path, agent_run: Option<&str>) -> Result<(Stream, BufReader<Stream>)> {
     let descriptor: Value =
         serde_json::from_slice(&std::fs::read(profile.join("mcp/connection.json"))?)
             .map_err(|_| Error::invalid("Invalid MCP descriptor"))?;
@@ -609,7 +605,8 @@ fn bridge_channel(
         return Err(Error::invalid("Invalid MCP descriptor version"));
     }
     let mut stream = if let Some(socket) = descriptor["socket"].as_str() {
-        let valid = socket.strip_suffix(".sock")
+        let valid = socket
+            .strip_suffix(".sock")
             .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
         if !valid {
             return Err(Error::invalid("Invalid MCP socket name"));
@@ -736,7 +733,11 @@ mod teardown_tests {
         let owned = closed.clone();
         let worker = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            connection(Stream::Tcp(stream), "synthetic".into(), Failing { closed: owned })
+            connection(
+                Stream::Tcp(stream),
+                "synthetic".into(),
+                Failing { closed: owned },
+            )
         });
         let mut client = TcpStream::connect(address).unwrap();
         client
