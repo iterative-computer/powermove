@@ -229,6 +229,26 @@ pub fn start(
 
 type End = (&'static str, String);
 
+/// The core's error for a failed model reply, in words a person can act on:
+/// it names Zig error codes (`IncompleteStream`), which the panel would
+/// otherwise show as they are. Messages already in words pass through.
+fn plain(message: &str) -> String {
+    let code = message.trim();
+    if code.is_empty() || !code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return message.to_owned();
+    }
+    match code {
+        "IncompleteStream" | "StreamClosed" | "ReadFailed" | "HostStreamFailed" => {
+            "The connection to the model dropped before its reply finished. Try again.".into()
+        }
+        "ContentFiltered" => "The provider's content filter stopped this reply.".into(),
+        "Refused" => "The model refused this request.".into(),
+        _ => format!(
+            "The model's reply couldn't be used ({code}). Try again, or choose another model in the picker."
+        ),
+    }
+}
+
 enum Callback {
     Tool(ToolLease),
     Hook(HookLease),
@@ -917,7 +937,7 @@ fn drive(
                             options
                                 .model
                                 .take_failure()
-                                .or_else(|| diagnostic.take())
+                                .or_else(|| diagnostic.take().map(|code: String| plain(&code)))
                                 .unwrap_or_else(|| format!("Aero ended the turn: {reason:?}")),
                         ),
                     });

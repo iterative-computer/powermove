@@ -261,9 +261,13 @@ fn a_turn_that_narrates_before_its_tool_calls_ends_with_its_last_answer_alone() 
 fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
     use pm_agents::edge::{Chunk, Idle, Net, NetRequest};
     use std::sync::atomic::AtomicBool;
-    #[derive(Debug)]
-    struct Broken {
-        silent: bool,
+    /// How the stream breaks after its first chunk: the connection errors,
+    /// the body just ends (emulate's disconnect), or nothing more arrives.
+    #[derive(Debug, Clone, Copy)]
+    enum Broken {
+        Reset,
+        Ends,
+        Silent,
     }
     impl Net for Broken {
         fn stream(
@@ -278,8 +282,10 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
 
 "#,
             ))?;
-            if !self.silent {
-                return Err("connection reset by peer".into());
+            match self {
+                Broken::Reset => return Err("connection reset by peer".into()),
+                Broken::Ends => return Ok(()),
+                Broken::Silent => {}
             }
             while !stop.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(5));
@@ -287,13 +293,12 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
             Err("Stopped.".into())
         }
     }
-    for (silent, expected) in [
+    let dropped = "The connection to the model dropped before its reply finished. Try again.";
+    for (broken, expected) in [
+        (Broken::Reset, dropped),
+        (Broken::Ends, dropped),
         (
-            false,
-            "The connection to the model dropped before its reply finished. Try again.",
-        ),
-        (
-            true,
+            Broken::Silent,
             "The model stopped responding: nothing arrived for 0.3 seconds. Try again.",
         ),
     ] {
@@ -308,7 +313,7 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
             model: "m".into(),
             catalog: None,
             net: Arc::new(Idle {
-                inner: Arc::new(Broken { silent }),
+                inner: Arc::new(broken),
                 after: Duration::from_millis(300),
             }),
             credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
