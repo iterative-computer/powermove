@@ -75,9 +75,13 @@ pub struct WaveState {
     on_finish: Option<Finish>,
     last_error: Option<String>,
     prepared_size: Option<Size<Pixels>>,
+    /// The renderer being made off the main thread (`warm`).
+    warming: Option<std::sync::mpsc::Receiver<Result<WaveRenderer, String>>>,
     /// Preparation failed: the run cuts at its midpoint instead of
     /// capturing again every frame (until `clear`/`reset`).
     failed: bool,
+    /// The first picture of a capture split over two frames (`paint`).
+    pending_from: Option<GpuSnapshot>,
 }
 impl WaveState {
     pub fn new(style: WaveStyle, source: impl Into<Source>) -> Result<Self, ValidationError> {
@@ -102,6 +106,8 @@ impl WaveState {
             last_error: None,
             prepared_size: None,
             failed: false,
+            warming: None,
+            pending_from: None,
         })
     }
     pub fn progress(&self) -> f64 {
@@ -200,6 +206,38 @@ impl WaveState {
         self.release();
         self.prepare = false;
     }
+    /// Makes the renderer (its Metal shaders compile) on a worker now, so
+    /// the first run's preparation never compiles on the main thread.
+    pub fn warm(&mut self, window: &Window) {
+        if self.renderer.is_some() || self.warming.is_some() {
+            return;
+        }
+        let Some(device) = device(window) else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("wave-renderer".into())
+            .spawn(move || {
+                let _ = tx.send(WaveRenderer::new(&device));
+            });
+        if spawned.is_ok() {
+            self.warming = Some(rx);
+        }
+    }
+    /// The renderer, waiting for a warm one if it is still being made.
+    fn renderer(&mut self, window: &Window) -> Result<&mut WaveRenderer, String> {
+        if self.renderer.is_none() {
+            let made = match self.warming.take() {
+                Some(rx) => rx.recv().map_err(|e| e.to_string())?,
+                None => {
+                    let device: metal::Device =
+                        device(window).ok_or("no Metal device for the wave")?;
+                    WaveRenderer::new(&device)
+                }
+            };
+            self.renderer = Some(made?);
+        }
+        Ok(self.renderer.as_mut().unwrap())
+    }
     /// `prepare` from inside a render: both children are pictured on the
     /// next paint, before the run that needs them.
     pub fn prepare_now(&mut self) {
@@ -217,6 +255,7 @@ impl WaveState {
     }
     fn release(&mut self) {
         self.last_frame = None;
+        self.pending_from = None;
         if let Some(r) = self.renderer.as_mut() {
             r.release();
         }
@@ -254,6 +293,16 @@ impl WaveState {
             }
         }
     }
+}
+
+/// The window's own Metal device; a headless window (offscreen captures)
+/// draws on the system's.
+fn device(window: &Window) -> Option<metal::Device> {
+    window
+        .gpu_context()
+        .and_then(|c| c.downcast::<metal::Device>().ok())
+        .map(|d| *d)
+        .or_else(metal::Device::system_default)
 }
 
 /// Two stacked views, frozen only during the wave; the overlay stays live above it.
@@ -323,7 +372,7 @@ impl TextureLease for FrameLease {
 }
 impl Element for DistortionWave {
     type RequestLayoutState = ();
-    type PrepaintState = (bool, bool);
+    type PrepaintState = (bool, bool, bool);
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::View(self.state.entity_id()))
     }
@@ -384,8 +433,9 @@ impl Element for DistortionWave {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> (bool, bool) {
-        let (capture, active, revealed) = self.state.update(cx, |s, cx| {
+    ) -> (bool, bool, bool) {
+        let has_to = self.to.is_some();
+        let (capture, active, revealed, first) = self.state.update(cx, |s, cx| {
             s.tick(cx);
             if s.prepared_size.is_some_and(|size| size != bounds.size) {
                 s.invalidate();
@@ -393,18 +443,21 @@ impl Element for DistortionWave {
             let p = s.progress();
             if s.failed {
                 // No wave: a cut at the midpoint.
-                return (false, false, p >= 0.5);
+                return (false, false, p >= 0.5, false);
             }
             let active = p > 0. && p < 1.;
             let capture = (s.prepare || active)
                 && !s.renderer.as_ref().is_some_and(WaveRenderer::is_prepared);
-            (capture, active, p >= 1.)
+            // Prepared ahead (and showing `from`), the capture takes two
+            // frames: `from` first.
+            let first = capture && !active && p <= 0. && has_to && s.pending_from.is_none();
+            (capture, active, p >= 1., first)
         });
         if capture || !active && (!revealed || self.to.is_none()) {
             self.from.prepaint(window, cx);
         }
         if let Some(to) = self.to.as_mut()
-            && (capture || !active && revealed)
+            && (capture && !first || !active && revealed)
         {
             to.prepaint(window, cx);
         }
@@ -414,7 +467,7 @@ impl Element for DistortionWave {
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.prepaint(window, cx);
         }
-        (capture, active)
+        (capture, active, first)
     }
     fn paint(
         &mut self,
@@ -422,7 +475,7 @@ impl Element for DistortionWave {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        prepaint: &mut (bool, bool),
+        prepaint: &mut (bool, bool, bool),
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -445,28 +498,30 @@ impl Element for DistortionWave {
                 });
             }
         });
-        let (capture, active) = *prepaint;
+        let (capture, active, first) = *prepaint;
         if capture {
             // Pictured on the GPU: no readback, no wait, no upload; the
             // wave's preparation waits on the pictures' events on the GPU.
-            let from = window.paint_snapshot_gpu(bounds, cx, |w, c| self.from.paint(w, c));
+            // Prepared ahead of a run, the two pictures are taken on two
+            // frames so neither frame carries both. The picture is painted
+            // in place as it is taken.
+            let from = match self.state.update(cx, |s, _| s.pending_from.take()) {
+                Some(from) => Ok(from),
+                None => window.paint_snapshot_gpu(bounds, cx, |w, c| self.from.paint(w, c)),
+            };
+            if first && let Ok(from) = from {
+                self.state.update(cx, |s, _| s.pending_from = Some(from));
+                window.request_animation_frame();
+                return;
+            }
             let to = self
                 .to
                 .as_mut()
                 .map(|to| window.paint_snapshot_gpu(bounds, cx, |w, c| to.paint(w, c)));
+
             self.state.update(cx, |s, _| {
                 let result = (|| -> Result<(), String> {
-                    if s.renderer.is_none() {
-                        // The window's own device; a headless window (offscreen
-                        // captures) draws on the system's.
-                        let device = window
-                            .gpu_context()
-                            .and_then(|c| c.downcast::<metal::Device>().ok())
-                            .map(|d| *d)
-                            .or_else(metal::Device::system_default)
-                            .ok_or("no Metal device for the wave")?;
-                        s.renderer = Some(WaveRenderer::new(&device)?);
-                    }
+                    s.renderer(window)?;
                     let from = from.map_err(|e| e.to_string())?;
                     let to = to.transpose().map_err(|e| e.to_string())?;
                     let width = f64::from(bounds.size.width);

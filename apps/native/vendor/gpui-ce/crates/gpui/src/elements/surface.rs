@@ -229,6 +229,7 @@ pub struct GpuSnapshot {
     pub texture: metal::Texture,
     /// Signalled by the producing command buffer, on the same device.
     pub event: metal::Event,
+    /// The event's value once the picture is drawn.
     pub value: u64,
 }
 
