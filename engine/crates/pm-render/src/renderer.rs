@@ -2459,6 +2459,12 @@ impl Renderer {
                 final_frame: request.export
                     || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
+                allow_vector_trim: request.viewer
+                    && !request.export
+                    && !request.read_ahead
+                    && !scrub
+                    && region.is_some()
+                    && expanded_request.is_some(),
                 // The depth and id surface reads the frame's images after
                 // the frame: nothing it may read goes back early.
                 recycle: self.early_target_release && depth_id.is_none(),

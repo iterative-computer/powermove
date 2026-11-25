@@ -1077,6 +1077,40 @@ impl Exec<'_> {
         out
     }
 
+    // Submit the draws that already recorded their reads of the rasters
+    // before allocating the effect's pass targets. The queue retains every
+    // resource still in use, including inputs to the rest of the frame.
+    fn trim_vector_before_effect(&mut self, encoder: &mut wgpu::CommandEncoder, rect: Region) {
+        const LARGE_EFFECT_PIXELS: u64 = 12 << 20;
+        const LARGE_VECTOR_BYTES: u64 = 384 << 20;
+        if !self.allow_vector_trim
+            || self.final_frame
+            || !self.recycle
+            || self.effects.slices.is_some()
+            || u64::from(rect.width) * u64::from(rect.height) < LARGE_EFFECT_PIXELS
+            || self.vector.bytes() < LARGE_VECTOR_BYTES
+        {
+            return;
+        }
+        self.allow_vector_trim = false;
+        let completed = std::mem::replace(
+            encoder,
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm frame after oversized vector draws"),
+            }),
+        );
+        self.effects.uniforms.flush(self.queue);
+        let submission = self.queue.submit([completed.finish()]);
+        self.vector.trim(0);
+        self.binds.clear();
+        // Let completed draws give back their GPU references. A slow
+        // submission still goes through the frame's usual hang handling.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(std::time::Duration::from_millis(250)),
+        });
+    }
+
     /// `content`: where `input` can be non-zero ([`effect_input_bounds`]).
     #[allow(clippy::too_many_arguments)]
     fn run_effects(
@@ -1090,6 +1124,7 @@ impl Exec<'_> {
         view: Option<crate::plan::OutputView>,
         content: Option<(u32, u32, u32, u32)>,
     ) -> Result<Option<EffectOutput>, String> {
+        self.trim_vector_before_effect(encoder, rect);
         let mut ready = vec![];
         for producer in effects.passes.input_plans() {
             if ready
