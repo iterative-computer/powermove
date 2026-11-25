@@ -658,3 +658,153 @@ fn a_scroll_layer_inside_a_body_that_fits_replays_its_steps(cx: &mut TestAppCont
         );
     }
 }
+
+/// The thumbnail's quad: found by its width in the drawn scene.
+const THUMB: f32 = 41.;
+
+/// A scroll layer of rows whose thumbnails clip to rounded corners (the
+/// Project grid's).
+struct Thumbs {
+    handle: ScrollHandle,
+}
+impl Render for Thumbs {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("thumbs")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .scroll_layer()
+            .children(rows(3))
+            .child(
+                div().flex_none().h(px(40.)).w_full().child(
+                    div()
+                        .w(px(30.))
+                        .h(px(30.))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .child(div().w(px(THUMB)).h(px(30.)).bg(rgb(0x00ff00))),
+                ),
+            )
+            .children(rows(20))
+    }
+}
+
+/// The thumbnail as drawn: its bounds and its clip (rectangle and rounded
+/// shape), in device pixels.
+fn thumb(
+    vcx: &mut VisualTestContext,
+) -> (
+    Bounds<gpui::ScaledPixels>,
+    gpui::ContentMask<gpui::ScaledPixels>,
+) {
+    vcx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quad = window
+            .painted_quads()
+            .into_iter()
+            .find(|q| (q.bounds.size.width.0 / scale - THUMB).abs() < 0.01)
+            .expect("the thumbnail is drawn");
+        (quad.bounds, quad.content_mask)
+    })
+}
+
+/// PM-710 review: a replayed step moves a rounded clip with its content, so
+/// a thumbnail draws exactly as a full draw at the same offset draws it (its
+/// rounded shape stayed where it was recorded: the thumbnail was sliced or
+/// vanished until the next full draw).
+#[gpui::test]
+fn a_replayed_step_moves_rounded_clips_with_the_content(cx: &mut TestAppContext) {
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| Thumbs {
+            handle: handle.clone(),
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    vcx.run_until_parked();
+    let (before, mask) = thumb(&mut vcx);
+    assert!(
+        mask.corner_radii.top_left.0 > 0.,
+        "the thumbnail clips to rounded corners"
+    );
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(20.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    let replayed = thumb(&mut vcx);
+    assert!(
+        replayed.0.origin.y < before.origin.y,
+        "the step moved the thumbnail"
+    );
+    // The steps stop: drawn in full at the same offset.
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    assert_eq!(
+        replayed,
+        thumb(&mut vcx),
+        "replayed as a full draw draws it"
+    );
+}
+
+/// A driven scroll layer (the timeline's rows) whose content fits.
+struct DrivenFits {
+    handle: ScrollHandle,
+    staged: Rc<RefCell<Staged>>,
+}
+impl Render for DrivenFits {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("driven")
+            .flex()
+            .flex_col()
+            .w(px(100.))
+            .h(px(200.))
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .scroll_layer_driven()
+            .children(rows(1))
+            .child(marked_row(self.staged.clone()))
+    }
+}
+
+/// PM-710 review: a driven layer is kept whatever its extent; its owner
+/// steps it on every wheel event, and a step it can no longer replay drew
+/// the owner's view again each time (the timeline with a few tracks).
+#[gpui::test]
+fn a_driven_layer_with_nothing_to_scroll_still_replays_its_owners_steps(cx: &mut TestAppContext) {
+    let staged = Rc::new(RefCell::new(Staged::default()));
+    let handle = ScrollHandle::new();
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let panel = cx.new(|_| DrivenFits {
+            handle: handle.clone(),
+            staged: staged.clone(),
+        });
+        Root {
+            panel: panel.into(),
+            ticker: cx.new(|_| Ticker(0)),
+        }
+    });
+    let mut vcx: VisualTestContext = vcx.clone();
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    vcx.run_until_parked();
+    let paints = staged.borrow().paints;
+    let stepped =
+        vcx.update(|window, cx| window.step_scroll_layer(&handle, point(px(0.), px(0.)), cx));
+    assert!(stepped, "the owner's step replays");
+    vcx.run_until_parked();
+    assert_eq!(staged.borrow().paints, paints, "not painted again");
+}

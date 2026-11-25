@@ -4224,11 +4224,13 @@ impl Window {
     ) -> Option<crate::scroll_layer::ScrollLayerKey> {
         let key = crate::scroll_layer::key(offset);
         let edges = self.scroll_layer_edges.take().filter(|e| e.key == key);
-        // Nothing to scroll (content no larger than the div): no step can
-        // move it, so it records nothing and a layer inside it stays a layer
-        // of its own (PM-710: a panel's body that fits its slot made the
+        // Nothing to scroll (content no larger than the div): no wheel step
+        // can move it, so it records nothing and a layer inside it stays a
+        // layer of its own (PM-710: a panel's body that fits its slot made the
         // panel's own scroller a nested layer, which draws its view again).
-        if self.last_scroll_max.x <= px(0.) && self.last_scroll_max.y <= px(0.) {
+        // A driven layer is stepped by its owner whatever its extent (the
+        // timeline steps its rows layer on every vertical wheel event).
+        if !driven && self.last_scroll_max.x <= px(0.) && self.last_scroll_max.y <= px(0.) {
             self.scroll_layers.remove(&key);
             return None;
         }

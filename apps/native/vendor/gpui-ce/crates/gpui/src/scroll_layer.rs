@@ -149,6 +149,7 @@ impl ScrollLayer {
                 );
             }
             hitbox.content_mask.bounds.origin += delta;
+            hitbox.content_mask.shape.origin += delta;
             hitbox.content_mask = hitbox.content_mask.intersect(&self.clip);
             hitbox
         })
@@ -196,53 +197,61 @@ fn shift_bounds(bounds: &mut Bounds<ScaledPixels>, delta: Point<ScaledPixels>) {
     bounds.origin.y += delta.y;
 }
 
+/// A recorded clip moves with what it clips: its rectangle and its rounded
+/// shape (PM-710 review: a rounded thumbnail kept its shape at the recorded
+/// place and was sliced or hidden after a replayed step).
+fn shift_mask(mask: &mut ContentMask<ScaledPixels>, delta: Point<ScaledPixels>) {
+    shift_bounds(&mut mask.bounds, delta);
+    shift_bounds(&mut mask.shape, delta);
+}
+
 fn shift(primitive: &mut Primitive, delta: Point<ScaledPixels>) {
     match primitive {
         Primitive::Shadow(s) => {
             shift_bounds(&mut s.bounds, delta);
             shift_bounds(&mut s.element_bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::Quad(q) => {
             shift_bounds(&mut q.bounds, delta);
-            shift_bounds(&mut q.content_mask.bounds, delta);
+            shift_mask(&mut q.content_mask, delta);
         }
         Primitive::Path(p) => {
             shift_bounds(&mut p.bounds, delta);
-            shift_bounds(&mut p.content_mask.bounds, delta);
+            shift_mask(&mut p.content_mask, delta);
             for v in &mut p.vertices {
                 v.xy_position.x += delta.x;
                 v.xy_position.y += delta.y;
-                shift_bounds(&mut v.content_mask.bounds, delta);
+                shift_mask(&mut v.content_mask, delta);
             }
         }
         Primitive::Underline(u) => {
             shift_bounds(&mut u.bounds, delta);
-            shift_bounds(&mut u.content_mask.bounds, delta);
+            shift_mask(&mut u.content_mask, delta);
         }
         Primitive::MonochromeSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::SubpixelSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::PolychromeSprite(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::Surface(s) => {
             shift_bounds(&mut s.bounds, delta);
-            shift_bounds(&mut s.content_mask.bounds, delta);
+            shift_mask(&mut s.content_mask, delta);
         }
         Primitive::BackdropFilter(f) => {
             shift_bounds(&mut f.bounds, delta);
-            shift_bounds(&mut f.content_mask.bounds, delta);
+            shift_mask(&mut f.content_mask, delta);
         }
         Primitive::FilterBoundary(b) => {
             shift_bounds(&mut b.bounds, delta);
-            shift_bounds(&mut b.content_mask.bounds, delta);
+            shift_mask(&mut b.content_mask, delta);
         }
     }
 }
