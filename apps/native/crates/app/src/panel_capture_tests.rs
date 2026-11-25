@@ -1232,7 +1232,7 @@ fn capture_threads_layout() {
                     let pinned = composer.is_some_and(|composer| {
                         composer.top() >= header.bottom() - px(0.5)
                             && (f32::from(composer.bottom()) - (h - 8.)).abs() <= 0.5
-                            && ["agent-field", "agent-model", "agent-effort", "agent-access"]
+                            && ["agent-composer-text", "agent-options", "agent-model", "agent-effort", "agent-access"]
                                 .into_iter()
                                 .all(|id| {
                                     bounds(id).is_some_and(|part| {

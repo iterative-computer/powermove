@@ -921,7 +921,7 @@ function Picker({
   text,
   disabled,
   opened,
-  icon,
+  quiet: secondary = false,
   title,
   open,
   flexible = false,
@@ -931,12 +931,13 @@ function Picker({
   text: string;
   disabled: boolean;
   opened: boolean;
-  icon?: string;
+  /** A run option beside the model: its value in the secondary ink. */
+  quiet?: boolean;
   flexible?: boolean;
   title: string;
   open: (anchor: number) => void;
 }) {
-  const ink = t(disabled ? "colors.muted" : icon ? "colors.secondary" : "colors.text");
+  const ink = t(disabled ? "colors.muted" : secondary ? "colors.secondary" : "colors.text");
   return (
     <button
       id={id}
@@ -965,14 +966,13 @@ function Picker({
         height: t("metrics.control"),
         paddingLeft: t("metrics.pill_inset"),
         paddingRight: t("metrics.pill_inset"),
-        ...(opened || !icon ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
-        borderRadius: t("metrics.panel_radius"),
+        // Quiet on the composer's surface; filled only while its menu is
+        // open, with the corner of the row's other controls.
+        ...(opened ? { background: t("colors.selected_fill") } : {}),
+        borderRadius: t("metrics.inner_radius"),
         color: ink,
       }}
     >
-      {icon && <div metadata={{ symbol: icon }} style={{
-        flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
-      }} />}
       <text
         style={{
           ...quiet,
@@ -2695,6 +2695,17 @@ function Composer({
       ? "Add direction…"
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
+  // The composer's one surface: lifted off the panel; in the popover, whose
+  // ground is the floating surface, a step more. Drops add only the
+  // selected-fill wash. The draft is written on it (the field takes the
+  // same fill, so no well shows).
+  const surface = t(
+    dropTarget
+      ? "colors.selected_fill"
+      : n.presentation === "popover"
+        ? "colors.raised"
+        : "colors.floating",
+  );
   const openModelMenu = useRef<{ anchor: number; rows: string } | null>(null);
   const requestModelMenu: Menu = async (request) => {
     const open = {
@@ -2909,227 +2920,139 @@ function Composer({
             paths: (e.drag?.data["public.file-url"] ?? []) as string[],
           });
       }}
-      // v1's two surfaces: a tray holding the run options, and inset in it
-      // the field with the draft and its actions.
+      // One surface: the draft written straight on it, and under the draft
+      // one row of its actions and run options. Its corner follows the
+      // panel's (or the popover's) corner it sits `text_padding` inside.
       style={{
         ...column,
         flexShrink: 0,
         gap: t("metrics.gap"),
-        // A slight lift over the panel, as v1's tray; the field is set into it.
-        background: t("colors.raised"),
-        borderRadius: t("metrics.popover_radius"),
-        padding: t("metrics.composer_tray"),
+        background: surface,
+        borderRadius: t(
+          n.presentation === "popover"
+            ? "metrics.composer_popover_radius"
+            : "metrics.composer_radius",
+        ),
+        borderWidth: t("metrics.border"),
+        borderColor: t("colors.hairline"),
+        padding: t("metrics.gap"),
         marginLeft: t("metrics.text_padding"),
         marginRight: t("metrics.text_padding"),
         marginBottom: t("metrics.text_padding"),
       }}
     >
-      <div
-        id="agent-field"
-        style={{
-          ...column,
-          gap: t("metrics.gap"),
-          background: t(
-            dropTarget ? "colors.selected_fill" : "colors.floating",
-          ),
-          borderRadius: t("metrics.panel_radius"),
-          // A quiet hairline edge (v1's, its composer having the keyboard
-          // whenever the panel opens). Drops add only the selected-fill wash.
-          borderWidth: t("metrics.border"),
-          borderColor: t("colors.hairline"),
-          paddingTop: t("metrics.gap"),
-          paddingBottom: t("metrics.gap"),
-          paddingLeft: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
-        }}
-      >
-        {s.attachments.length > 0 && (
-          <div
-            style={{
-              ...row,
-              alignItems: "start",
-              flexWrap: "wrap",
-              gap: t("metrics.gap"),
-            }}
-          >
-            {s.attachments.map((a) => (
-              <AttachmentTile
-                key={a.id}
-                a={a}
-                armed={s.draft.armed === a.id}
-                send={send}
-              />
-            ))}
-          </div>
-        )}
-        <CitationChips key={s.threadId} s={s} send={send} />
-        {dropTarget && (
-          <text
-            style={{
-              ...quiet,
-              color: t("colors.accent_text"),
-              paddingLeft: t("metrics.text_padding"),
-            }}
-          >
-            Drop to attach
-          </text>
-        )}
-        <Field
-          // Keep the same editor throughout a send. A thread change or a
-          // new showing starts with that thread’s own draft.
-          key={`${s.threadId}:composer-${shown}`}
-          multiline
-          id="agent-composer-text"
-          label="Message Powermove agent"
-          title="Return to send · Shift-Return for a new line · / for shortcuts"
-          value={s.draft.text}
-          disabled={disabled}
-          metadata={{
-            placeholder,
-            submitOnReturn: true,
-            ...(s.draft.sent === undefined ? {} : { composerEpoch: s.draft.sent }),
-            ...(optimistic === undefined ? {} : { composerSending: optimistic }),
-            attachmentProject: s.projectId,
-            attachmentThread: s.threadId,
-          }}
-          state={{ keyboardFocus: n.keyboardFocus === "composer" }}
-          tabIndex={0}
-          onInput={(event) => {
-            edit(event);
-            composerNode.current = Number(event.currentTarget);
-            if (!focused.current) {
-              focused.current = true;
-              send({ type: "focus", focused: true });
-            }
-          }}
-          onChange={edit}
-          onKeyDown={(event) => {
-            event.stopPropagation();
-            const action = composerKey(event, s.draft.sent);
-            if (event.key === "Enter" && !event.shiftKey && !event.composing) {
-              if (!event.repeat && !disabled) submit(action);
-            } else {
-              send(action);
-            }
-          }}
-          style={{
-            ...reading,
-            background: t("colors.floating"),
-            minWidth: t("metrics.hit"),
-          }}
-        />
+      {s.attachments.length > 0 && (
         <div
           style={{
             ...row,
+            alignItems: "start",
+            flexWrap: "wrap",
             gap: t("metrics.gap"),
-            height: t("metrics.control"),
           }}
         >
-          <UI.ToolbarItem
-            id="agent-attach"
-            label="Add attachments"
-            title={
-              s.attachments.length >= 6
-                ? "A message can carry six attachments"
-                : "Add images, video, audio or documents"
-            }
-            metadata={{ symbol: "plus" }}
-            disabled={disabled || s.attachments.length >= 6}
-            style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
-            onClick={() => send({ type: "attach" })}
-          />
-          {/* v1's: drag a box anywhere over the editor; the agent gets
-              what was under it (the composition there, or the window). */}
-          <UI.ToolbarItem
-            id="agent-pick-region"
-            label="Select part of the screen"
-            title={
-              s.attachments.length >= 6
-                ? "A message can carry six attachments"
-                : "Select part of the screen for the agent"
-            }
-            metadata={{ symbol: "rectangle.dashed" }}
-            disabled={disabled || s.attachments.length >= 6}
-            style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
-            onClick={() => send({ type: "pickRegion" })}
-          />
-          <div style={{ flexGrow: 1 }} />
-          {working && (
-            <button
-              id="agent-stop"
-              role="button"
-              label="Stop current run"
-              title="Stop current run"
-              tabIndex={0}
-              disabled={s.stopping}
-              metadata={{ symbol: "stop.fill" }}
-              onClick={stop}
-              style={{
-                ...target,
-                ...row,
-                justifyContent: "center",
-                flexShrink: 0,
-                width: t("metrics.control"),
-                height: t("metrics.control"),
-                borderRadius: t("metrics.inner_radius"),
-                background: t("colors.text"),
-                color: t("colors.floating"),
-                symbolSize: t("metrics.symbol_inline"),
-              }}
+          {s.attachments.map((a) => (
+            <AttachmentTile
+              key={a.id}
+              a={a}
+              armed={s.draft.armed === a.id}
+              send={send}
             />
-          )}
-          {(!working || hasDraft) && (
-            <button
-              id="agent-send"
-              role="button"
-              label={sendLabel}
-              title={sendLabel}
-              tabIndex={0}
-              disabled={disabled || submitting || !s.sendable}
-              metadata={{ symbol: "return" }}
-              onClick={(event) => {
-                const text = event.value;
-                const composerEpoch = event.composerEpoch ?? s.draft.sent;
-                if (!event.composing && !disabled && s.sendable)
-                  submit({
-                    type: "submit",
-                    ...(typeof text === "string" ? { text } : {}),
-                    ...(composerEpoch === undefined ? {} : { composerEpoch }),
-                  });
-              }}
-              style={{
-                ...target,
-                ...row,
-                justifyContent: "center",
-                flexShrink: 0,
-                width: t("metrics.control"),
-                height: t("metrics.control"),
-                borderRadius: t("metrics.inner_radius"),
-                symbolSize: t("metrics.symbol_panel"),
-                // A quiet square until there is something to send (v1's).
-                background: t(
-                  !disabled && !submitting && s.sendable ? "colors.accent" : "colors.raised",
-                ),
-                color: t(
-                  !disabled && !submitting && s.sendable
-                    ? "colors.selected_text"
-                    : "colors.muted",
-                ),
-              }}
-            />
-          )}
+          ))}
         </div>
-      </div>
+      )}
+      <CitationChips key={s.threadId} s={s} send={send} />
+      {dropTarget && (
+        <text
+          style={{
+            ...quiet,
+            color: t("colors.accent_text"),
+            paddingLeft: t("metrics.text_padding"),
+          }}
+        >
+          Drop to attach
+        </text>
+      )}
+      <Field
+        // Keep the same editor throughout a send. A thread change or a
+        // new showing starts with that thread’s own draft.
+        key={`${s.threadId}:composer-${shown}`}
+        multiline
+        id="agent-composer-text"
+        label="Message Powermove agent"
+        title="Return to send · Shift-Return for a new line · / for shortcuts"
+        value={s.draft.text}
+        disabled={disabled}
+        metadata={{
+          placeholder,
+          submitOnReturn: true,
+          ...(s.draft.sent === undefined ? {} : { composerEpoch: s.draft.sent }),
+          ...(optimistic === undefined ? {} : { composerSending: optimistic }),
+          attachmentProject: s.projectId,
+          attachmentThread: s.threadId,
+        }}
+        state={{ keyboardFocus: n.keyboardFocus === "composer" }}
+        tabIndex={0}
+        onInput={(event) => {
+          edit(event);
+          composerNode.current = Number(event.currentTarget);
+          if (!focused.current) {
+            focused.current = true;
+            send({ type: "focus", focused: true });
+          }
+        }}
+        onChange={edit}
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          const action = composerKey(event, s.draft.sent);
+          if (event.key === "Enter" && !event.shiftKey && !event.composing) {
+            if (!event.repeat && !disabled) submit(action);
+          } else {
+            send(action);
+          }
+        }}
+        style={{
+          ...reading,
+          background: surface,
+          minWidth: t("metrics.hit"),
+        }}
+      />
       <div
         id="agent-options"
+        // Every control carries its own padding: the row adds none, so a
+        // dock at its narrowest still shows each value whole.
         style={{
           ...row,
-          gap: t("metrics.pill_inset"),
           height: t("metrics.control"),
-          paddingLeft: t("metrics.pill_inset"),
-          paddingRight: t("metrics.pill_inset"),
         }}
       >
+        <UI.ToolbarItem
+          id="agent-attach"
+          label="Add attachments"
+          title={
+            s.attachments.length >= 6
+              ? "A message can carry six attachments"
+              : "Add images, video, audio or documents"
+          }
+          metadata={{ symbol: "plus" }}
+          disabled={disabled || s.attachments.length >= 6}
+          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+          onClick={() => send({ type: "attach" })}
+        />
+        {/* v1's: drag a box anywhere over the editor; the agent gets
+            what was under it (the composition there, or the window). */}
+        <UI.ToolbarItem
+          id="agent-pick-region"
+          label="Select part of the screen"
+          title={
+            s.attachments.length >= 6
+              ? "A message can carry six attachments"
+              : "Select part of the screen for the agent"
+          }
+          metadata={{ symbol: "rectangle.dashed" }}
+          disabled={disabled || s.attachments.length >= 6}
+          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+          onClick={() => send({ type: "pickRegion" })}
+        />
         <Picker
           id="agent-model"
           flexible
@@ -3146,7 +3069,7 @@ function Composer({
             title="Reasoning effort"
             label={`Reasoning effort, ${effortName}`}
             text={effortName}
-            icon="brain"
+            quiet
             disabled={!menu || choicesLocked}
             opened={openPicker === "effort"}
             open={(anchor) => {
@@ -3178,10 +3101,11 @@ function Composer({
         )}
         <Picker
           id="agent-access"
+          flexible
           title="Approvals"
           label={`Approvals, ${ACCESS[s.settings.access].label}`}
           text={ACCESS[s.settings.access].label}
-          icon="checkmark.shield"
+          quiet
           disabled={!menu || working || s.composerDisabled}
           opened={openPicker === "access"}
           open={(anchor) => {
@@ -3207,6 +3131,71 @@ function Composer({
             });
           }}
         />
+        <div style={{ flexGrow: 1 }} />
+        {working && (
+          <button
+            id="agent-stop"
+            role="button"
+            label="Stop current run"
+            title="Stop current run"
+            tabIndex={0}
+            disabled={s.stopping}
+            metadata={{ symbol: "stop.fill" }}
+            onClick={stop}
+            style={{
+              ...target,
+              ...row,
+              justifyContent: "center",
+              flexShrink: 0,
+              width: t("metrics.control"),
+              height: t("metrics.control"),
+              borderRadius: t("metrics.inner_radius"),
+              background: t("colors.text"),
+              color: t("colors.floating"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        )}
+        {(!working || hasDraft) && (
+          <button
+            id="agent-send"
+            role="button"
+            label={sendLabel}
+            title={sendLabel}
+            tabIndex={0}
+            disabled={disabled || submitting || !s.sendable}
+            metadata={{ symbol: "return" }}
+            onClick={(event) => {
+              const text = event.value;
+              const composerEpoch = event.composerEpoch ?? s.draft.sent;
+              if (!event.composing && !disabled && s.sendable)
+                submit({
+                  type: "submit",
+                  ...(typeof text === "string" ? { text } : {}),
+                  ...(composerEpoch === undefined ? {} : { composerEpoch }),
+                });
+            }}
+            style={{
+              ...target,
+              ...row,
+              justifyContent: "center",
+              flexShrink: 0,
+              width: t("metrics.control"),
+              height: t("metrics.control"),
+              borderRadius: t("metrics.inner_radius"),
+              symbolSize: t("metrics.symbol_panel"),
+              // A quiet square until there is something to send (v1's).
+              background: t(
+                !disabled && !submitting && s.sendable ? "colors.accent" : "colors.raised",
+              ),
+              color: t(
+                !disabled && !submitting && s.sendable
+                  ? "colors.selected_text"
+                  : "colors.muted",
+              ),
+            }}
+          />
+        )}
       </div>
     </div>
   );

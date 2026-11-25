@@ -132,7 +132,7 @@ test("the user message keeps a fill and radius without a border while working an
   root.dispose();
 });
 
-test("focus order follows the thread bar, conversation and composer as the original panel's", async () => {
+test("focus order follows the thread bar, conversation and the composer's one row, left to right", async () => {
   const { root, commits } = mount();
   const p = states.selected();
   p.snapshot.sendable = true;
@@ -154,17 +154,17 @@ test("focus order follows the thread bar, conversation and composer as the origi
     "agent-composer-text",
     "agent-attach",
     "agent-pick-region",
-    "agent-send",
     "agent-model",
     "agent-effort",
     "agent-access",
+    "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
     "Agent conversation",
   );
   root.dispose();
 });
-test("only the model gives up space in the docked composer", async () => {
+test("the model and approvals give up space in the docked composer's one row; effort keeps its width", async () => {
   const { root } = mount();
   const p = states.selected();
   p.native.presentation = "docked";
@@ -172,17 +172,52 @@ test("only the model gives up space in the docked composer", async () => {
   p.snapshot.settings.effort = "high";
   await root.render(<AgentView publication={p} send={() => {}} />);
   const nodes = root.inspect().nodes;
-  const model = byId(root, "agent-model");
-  expect(model.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
-  for (const id of ["agent-effort", "agent-access"]) {
+  const label = (picker: ReturnType<typeof byId>) =>
+    nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
+  for (const id of ["agent-model", "agent-access"]) {
     const picker = byId(root, id);
-    expect(picker.props.style).toMatchObject({ flexShrink: 0 });
-    const label = nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
-    expect(label?.props.style).toMatchObject({ flexShrink: 0 });
-    expect(label?.props.metadata).toBeUndefined();
+    expect(picker.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
+    expect(label(picker)?.props.style).toMatchObject({ flexShrink: 1, textOverflow: "ellipsis" });
   }
+  const effort = byId(root, "agent-effort");
+  expect(effort.props.style).toMatchObject({ flexShrink: 0 });
+  expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
+  expect(label(effort)?.props.metadata).toBeUndefined();
+  // Every control sits in the composer's one row, on its one surface.
+  const options = byId(root, "agent-options");
+  for (const id of ["agent-attach", "agent-pick-region", "agent-model", "agent-effort", "agent-access"])
+    expect(options.children).toContain(byId(root, id).id);
+  expect(byId(root, "agent-composer").children).toContain(options.id);
   expect(byId(root, "agent-threads")).toBeDefined();
   expect(byId(root, "agent-new")).toBeDefined();
+  root.dispose();
+});
+
+test("the composer is one surface: the draft sits on it with no inset field, its corner concentric with the panel or popover", async () => {
+  const { root } = mount();
+  for (const presentation of ["docked", "popover"] as const) {
+    const p = fixture();
+    p.native.presentation = presentation;
+    await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+    const composer = byId(root, "agent-composer");
+    expect(composer.props.style).toMatchObject({
+      borderRadius: {
+        token: presentation === "popover" ? "metrics.composer_popover_radius" : "metrics.composer_radius",
+      },
+      borderWidth: { token: "metrics.border" },
+      borderColor: { token: "colors.hairline" },
+      background: { token: presentation === "popover" ? "colors.raised" : "colors.floating" },
+    });
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-field")).toBe(false);
+    // The draft is written on the surface: its field takes the surface's own
+    // fill (never the kit's well).
+    const text = byId(root, "agent-composer-text");
+    expect(composer.children).toContain(text.id);
+    expect(text.props.style.background).toEqual(composer.props.style.background);
+    // Pickers are quiet on the surface until their menu is open.
+    for (const id of ["agent-model", "agent-effort", "agent-access"])
+      expect(byId(root, id).props.style).not.toHaveProperty("background");
+  }
   root.dispose();
 });
 

@@ -417,8 +417,11 @@ pub struct Metrics {
     pub export_preview: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
-    /// The agent composer's tray around its field (v1's 4 pt).
-    pub composer_tray: f32,
+    /// The agent composer's corner: concentric with the panel corner it
+    /// sits `text_padding` inside (`radius.nested(panel_radius, text_padding)`).
+    pub composer_radius: f32,
+    /// The same in the Agent popover (`radius.nested(popover_radius, text_padding)`).
+    pub composer_popover_radius: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -822,12 +825,12 @@ impl Tokens {
             self.translucency.panel,
         )
     }
-    /// Header, idle composer tray (field, actions and pickers) and bottom inset.
+    /// Header, the idle composer (one line of draft over its row of
+    /// controls, inside its edge and padding) and the bottom inset.
     pub fn agent_panel_minimum_height(&self) -> f32 {
         let m = &self.metrics;
         let text = (self.typography.body * 1.5 + 6.).max(m.hit);
-        m.header + m.text_padding + 2. * m.composer_tray
-            + 4. * m.gap + 2. * m.border + 2. * m.control + text
+        m.header + m.text_padding + 2. * m.border + 3. * m.gap + m.control + text
     }
 
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
@@ -972,7 +975,9 @@ impl Tokens {
                 export_job_progress_height: 2.,
                 export_preview: 315.,
                 composer_max_lines: 10.,
-                composer_tray: space.xs,
+                // Derived with the panel corners (`derive_composer_radii`).
+                composer_radius: 0.,
+                composer_popover_radius: 0.,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
@@ -1095,7 +1100,14 @@ impl Tokens {
         tokens.enforce_accessibility();
         tokens.derive_fills();
         tokens.derive_media_geometry();
+        tokens.derive_composer_radii();
         tokens
+    }
+    /// The composer sits `text_padding` inside its panel's bottom corners.
+    fn derive_composer_radii(&mut self) {
+        let (r, m) = (self.radius, &mut self.metrics);
+        m.composer_radius = r.nested(m.panel_radius, m.text_padding);
+        m.composer_popover_radius = r.nested(m.popover_radius, m.text_padding);
     }
     fn derive_media_geometry(&mut self) {
         let m = &mut self.metrics;
@@ -1195,6 +1207,7 @@ impl Tokens {
         next.enforce_accessibility();
         next.derive_fills();
         next.derive_media_geometry();
+        next.derive_composer_radii();
         *self = next;
         Ok(())
     }
