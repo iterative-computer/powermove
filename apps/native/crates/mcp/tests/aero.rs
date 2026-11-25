@@ -1510,3 +1510,61 @@ fn steers_kept_across_stop_run_in_order_on_the_next_send() {
     let order = steer_order(&bodies, &[steers[0], steers[1], "Now tidy the timeline."]);
     assert_eq!(order, [steers[0], steers[1], "Now tidy the timeline."]);
 }
+
+/// P1-6: a steer the core admits but then answers with a REQUEST_DONE that
+/// is not FX_OK (FX_STALE, or an error: here the turn's steer queue is full)
+/// comes back and runs as a prompt. Every steer the panel was told was
+/// accepted reaches the model.
+#[test]
+fn a_steer_answered_not_ok_comes_back_and_reaches_the_model() {
+    let fixture = Fixture::new();
+    let bodies = Arc::new(Mutex::new(String::new()));
+    let seen = bodies.clone();
+    let (turn, _) = fixture.start(
+        Model::fake(move |input| {
+            seen.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(input));
+            Reply::Text("ok".into())
+        }),
+        |tools| Box::new(tools),
+    );
+    let mut replies = Vec::new();
+    for index in 0..80 {
+        let text = format!("Steer number {index:03} now");
+        match turn.send_checked(Action::Steer {
+            run: "cut".into(),
+            prompt: text.clone(),
+            images: Vec::new(),
+        }) {
+            Ok(reply) => replies.push((text, reply)),
+            Err(_) => break,
+        }
+    }
+    let accepted: Vec<String> = replies
+        .into_iter()
+        .filter_map(|(text, reply)| {
+            reply
+                .recv_timeout(Duration::from_secs(20))
+                .ok()
+                .filter(|ok| *ok)
+                .map(|_| text)
+        })
+        .collect();
+    let (result, _) = complete_with_progress(&turn);
+    assert!(matches!(result, RunResult::Success { .. }), "{result:?}");
+    assert!(
+        accepted.len() > 10,
+        "only {} steers were accepted",
+        accepted.len()
+    );
+    let bodies = bodies.lock().unwrap();
+    let lost: Vec<_> = accepted
+        .iter()
+        .filter(|text| !bodies.contains(text.as_str()))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "accepted steers never reached the model: {lost:?}"
+    );
+}
