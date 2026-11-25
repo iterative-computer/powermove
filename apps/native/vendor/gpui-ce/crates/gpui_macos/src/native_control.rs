@@ -146,6 +146,17 @@ impl NativeControlSlot {
             layer.setMasksToBounds(true);
         }
         wrapper.addSubview(&control);
+        // PM-696 probe: a checkbox marked `pm-plain-checkbox` is drawn as a
+        // plain orange layer (its slot's wrapper), the control unseen.
+        let id: Option<Retained<objc2_foundation::NSString>> =
+            unsafe { objc2::msg_send![&*control, identifier] };
+        if id.is_some_and(|id| id.to_string() == "pm-plain-checkbox")
+            && let Some(layer) = wrapper.layer()
+        {
+            control.setAlphaValue(0.);
+            let orange = objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(0.95, 0.45, 0.1, 1.);
+            layer.setBackgroundColor(Some(&orange.CGColor()));
+        }
         let state = Rc::new(State {
             gpui: unsafe { Retained::retain(gpui as *const NSView as *mut NSView).unwrap() },
             wrapper,

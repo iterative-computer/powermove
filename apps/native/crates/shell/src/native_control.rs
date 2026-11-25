@@ -1099,6 +1099,12 @@ fn make_control(
             ));
             if matches!(kind, Kind::Checkbox) {
                 v.setButtonType(NSButtonType::Switch);
+                // PM-696 probe (PM_PLAIN_CHECKBOX=1): its slot shows a plain
+                // orange layer in place of the control's own drawing.
+                if std::env::var_os("PM_PLAIN_CHECKBOX").is_some_and(|v| v == "1") {
+                    let id = NSString::from_str("pm-plain-checkbox");
+                    let _: () = unsafe { msg_send![&*v, setIdentifier: &*id] };
+                }
             } else if matches!(kind, Kind::Radio) {
                 v.setButtonType(NSButtonType::Radio);
             } else {
