@@ -1,21 +1,58 @@
 {
   "fill-specializations": [
     {
-      "value": "system-light"
+      "value": {
+        "linear-gradient": [
+          "extended-srgb:0.17647,0.17647,0.18824,1.00000",
+          "extended-srgb:0.09020,0.09020,0.09804,1.00000"
+        ]
+      }
     },
     {
       "appearance": "dark",
-      "value": "system-dark"
+      "value": {
+        "linear-gradient": [
+          "extended-srgb:0.13725,0.13725,0.14902,1.00000",
+          "extended-srgb:0.06667,0.06667,0.07451,1.00000"
+        ]
+      }
     }
   ],
   "groups": [
     {
       "layers": [
         {
+          "image-name": "playhead-trail.svg",
+          "name": "Motion trail",
+          "opacity-specializations": [
+            {
+              "value": 0.96
+            },
+            {
+              "appearance": "tinted",
+              "value": 0.52
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "name": "Trail",
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "specular": false
+    },
+    {
+      "layers": [
+        {
           "fill-specializations": [
             {
               "value": {
-                "automatic-gradient": "extended-srgb:0.09000,0.09000,0.09000,1.00000"
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.44314,0.12549,1.00000",
+                  "extended-srgb:0.89412,0.29804,0.01569,1.00000"
+                ]
               }
             },
             {
@@ -25,64 +62,37 @@
               }
             }
           ],
-          "image-name": "Powermove light.svg",
-          "name": "Graphite \u00b7 light appearance",
-          "position": {
-            "scale": 4.8809125231834125,
-            "translation-in-points": [
-              2.1041923996091088,
-              1.441516745110812
-            ]
-          }
-        }
-      ],
-      "name": "Light and mono",
-      "opacity-specializations": [
-        {
-          "value": 1
+          "image-name": "playhead-stem.svg",
+          "name": "Playhead stem"
         },
         {
-          "appearance": "dark",
-          "value": 0
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.46275,0.14510,1.00000",
+                  "extended-srgb:0.89804,0.30588,0.01961,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name": "playhead-head.svg",
+          "name": "Playhead head"
         }
       ],
+      "lighting": "combined",
+      "name": "Playhead",
       "shadow": {
         "kind": "neutral",
         "opacity": 0.22
       },
-      "translucency": {
-        "enabled": true,
-        "value": 0.12
-      }
-    },
-    {
-      "layers": [
-        {
-          "image-name": "Powermove light.svg",
-          "name": "Silver \u00b7 dark appearance",
-          "position": {
-            "scale": 4.8809125231834125,
-            "translation-in-points": [
-              2.1041923996091088,
-              1.441516745110812
-            ]
-          }
-        }
-      ],
-      "name": "Dark",
-      "opacity-specializations": [
-        {
-          "value": 0
-        },
-        {
-          "appearance": "dark",
-          "value": 1
-        }
-      ],
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.22
-      },
+      "specular": true,
       "translucency": {
         "enabled": true,
         "value": 0.12
