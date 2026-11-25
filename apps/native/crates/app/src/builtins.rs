@@ -1079,6 +1079,8 @@ impl Controller {
                 }
                 c.informational = o["informational"] == true;
                 c.is_default = o["default"] == true;
+                c.section = o["section"] == true;
+                c.icon = o["icon"].as_str().map(str::to_owned);
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })

@@ -116,8 +116,14 @@ pub struct Choice {
     /// Choosing it keeps the menu open (a provider row: its models follow
     /// in the same menu); the owner sends the menu's new rows.
     pub stays: bool,
-    /// Read-only text below the choices, outside keyboard and pointer selection.
+    /// Read-only text below the choices, outside keyboard and pointer
+    /// selection; with a provider, a greyed row in that provider's group.
     pub informational: bool,
+    /// In a menu of provider groups, a row outside them listed under its
+    /// own plain section heading (the harness), not a group.
+    pub section: bool,
+    /// A small mark drawn before the row's title (a symbol name).
+    pub icon: Option<String>,
     /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
@@ -293,14 +299,22 @@ impl Picker {
         }
     }
 
+    /// Provider groups get their collapsible headers when there are two
+    /// or more, or when plain sections stand beside even one.
     pub fn has_provider_headers(&self) -> bool {
         let mut providers = self
             .choices
             .iter()
             .filter_map(|choice| choice.provider.as_ref());
-        providers
-            .next()
-            .is_some_and(|first| providers.any(|provider| provider != first))
+        providers.next().is_some_and(|first| {
+            providers.any(|provider| provider != first)
+                || self.choices.iter().any(|choice| choice.section)
+        })
+    }
+    /// A displayed row a person can light and choose: not a provider's
+    /// greyed, read-only row.
+    fn selectable(&self, row: PickerRow) -> bool {
+        !matches!(row, PickerRow::Choice(i) if self.choices[i].informational)
     }
 
     pub fn rows(&self) -> Vec<PickerRow> {
@@ -327,14 +341,21 @@ impl Picker {
         (rows, unlisted)
     }
 
+    /// A group is open while searched, else as last left; one never
+    /// touched opens only when it has nothing to choose (Aerolite's note).
     pub fn provider_expanded(&self, index: usize) -> bool {
+        let provider = &self.choices[index].provider;
         !self.query.trim().is_empty()
-            || self.choices[index]
-                .provider
+            || provider
                 .as_ref()
                 .and_then(|provider| self.provider_choices.get(provider))
                 .copied()
-                .unwrap_or(false)
+                .unwrap_or_else(|| {
+                    self.choices
+                        .iter()
+                        .filter(|choice| &choice.provider == provider)
+                        .all(|choice| choice.informational)
+                })
     }
 
     pub fn provider_summary(&self, index: usize) -> String {
@@ -429,26 +450,12 @@ impl Picker {
             .map_or(0, |page| self.matches().len().saturating_sub(page))
     }
     /// The one read-only line below the choices (an informational row
-    /// outside any section).
+    /// outside any provider group).
     pub fn note(&self) -> Option<&str> {
         self.choices
             .iter()
-            .find(|c| c.informational && c.category.is_empty())
+            .find(|c| c.informational && c.provider.is_none())
             .map(|c| c.label.as_str())
-    }
-    /// Read-only rows listed in their own section, as a native menu's
-    /// disabled items: (place among the choices, section, text). They show
-    /// only while nothing is searched and are never lit or chosen.
-    pub fn section_notes(&self) -> Vec<(usize, &str, &str)> {
-        if !self.query.trim().is_empty() {
-            return Vec::new();
-        }
-        self.choices
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.informational && !c.category.is_empty())
-            .map(|(i, c)| (i, c.category.as_str(), c.label.as_str()))
-            .collect()
     }
     pub fn selected(&self) -> Option<usize> {
         self.rows().iter().position(
@@ -471,7 +478,9 @@ impl Picker {
             .enumerate()
             .filter_map(|(i, c)| {
                 if c.informational {
-                    return None;
+                    // A provider's greyed row stands in its group while
+                    // nothing is searched.
+                    return (c.provider.is_some() && trimmed.is_empty()).then_some(((0, 0, 0), i));
                 }
                 if c.search_only {
                     if trimmed.is_empty() {
@@ -571,7 +580,8 @@ impl Picker {
     /// The pointer is over `row`, or has left the rows. True if the light moved.
     pub fn point(&mut self, row: Option<usize>) -> bool {
         let before = self.lit();
-        self.hover = row;
+        let rows = self.rows();
+        self.hover = row.filter(|&place| rows.get(place).is_some_and(|&row| self.selectable(row)));
         before != self.lit()
     }
     /// Lights the first row whose label starts with `typed` (a menu with no
@@ -580,7 +590,8 @@ impl Picker {
         let typed = typed.to_lowercase();
         let found = self.rows().iter().position(|row| {
             matches!(row, PickerRow::Choice(i)
-                if self.choices[*i].label.to_lowercase().starts_with(&typed))
+                if !self.choices[*i].informational
+                    && self.choices[*i].label.to_lowercase().starts_with(&typed))
         });
         if found.is_some() {
             self.keyed = found;
@@ -592,15 +603,33 @@ impl Picker {
         let rows = self.rows();
         let n = rows.len();
         let lit = self.lit().filter(|&i| i < n);
+        // The next row the keyboard can light, past greyed ones.
+        let step = |from: Option<usize>, back: bool| {
+            let first = match from {
+                Some(i) if back => (i + n - 1) % n,
+                Some(i) => (i + 1) % n,
+                None if back => n - 1,
+                None => 0,
+            };
+            (0..n)
+                .map(|k| {
+                    if back {
+                        (first + n - k) % n
+                    } else {
+                        (first + k) % n
+                    }
+                })
+                .find(|&place| self.selectable(rows[place]))
+        };
         let to = match key {
             "escape" => {
                 self.open = false;
                 None
             }
-            "up" if n > 0 => Some(lit.map_or(n - 1, |i| (i + n - 1) % n)),
-            "down" if n > 0 => Some(lit.map_or(0, |i| (i + 1) % n)),
-            "home" if n > 0 => Some(0),
-            "end" if n > 0 => Some(n - 1),
+            "up" if n > 0 => step(lit, true),
+            "down" if n > 0 => step(lit, false),
+            "home" if n > 0 => step(None, false),
+            "end" if n > 0 => step(None, true),
             "left" => lit.and_then(|place| {
                 let PickerRow::Choice(index) = rows[place] else {
                     return None;
@@ -616,6 +645,9 @@ impl Picker {
                     return None;
                 };
                 let choice = &self.choices[index];
+                if choice.informational {
+                    return None;
+                }
                 self.open = choice.stays;
                 return Some(choice.command.clone());
             }
@@ -701,30 +733,67 @@ mod palette_layer_tests {
     }
 
     #[test]
-    fn a_sectioned_informational_row_stays_in_its_section_and_is_never_chosen() {
+    fn harness_section_stands_beside_one_provider_group_whose_greyed_row_is_never_chosen() {
+        let harness = |label: &str, id: &str, on: bool| Choice {
+            section: true,
+            ..Choice::new(label, format!("provider:{id}"))
+                .within("Harness")
+                .checked(on)
+                .stays(true)
+        };
         let mut picker = Picker {
             choices: vec![
-                Choice::new("GPT Sol", "model:sol").within("OpenAI"),
+                harness("Powermove", "aero", true),
+                harness("Codex", "chatgpt", false),
+                Choice::new("GPT Sol", "model:sol")
+                    .within("OpenAI")
+                    .for_provider("openai")
+                    .checked(true),
                 Choice {
                     informational: true,
-                    ..Choice::new("Aerolite · Coming later", "").within("Powermove")
+                    ..Choice::new("Aerolite", "")
+                        .within("Powermove")
+                        .for_provider("powermove")
                 },
-                Choice::new("High", "effort:high").within("Effort"),
+                Choice {
+                    section: true,
+                    ..Choice::new("Add a provider…", "providers:")
+                },
             ],
             ..Default::default()
         };
+        picker.open_providers(Default::default());
+        // One provider group still gets its header beside the harness.
+        let mut lone = picker.clone();
+        lone.choices.remove(3);
+        assert!(lone.has_provider_headers());
         assert_eq!(picker.note(), None);
         assert_eq!(
-            picker.section_notes(),
-            vec![(1, "Powermove", "Aerolite · Coming later")]
+            picker.rows(),
+            vec![
+                PickerRow::Choice(0),
+                PickerRow::Choice(1),
+                PickerRow::Provider(2),
+                PickerRow::Choice(2),
+                PickerRow::Provider(3),
+                PickerRow::Choice(3),
+                PickerRow::Choice(4),
+            ]
         );
-        assert_eq!(picker.filtered(), vec![0, 2]);
+        assert_eq!(picker.provider_summary(3), "1");
+        // The keyboard passes over Aerolite; the pointer never lights it.
+        picker.keyed = Some(3);
         picker.navigate("down");
         picker.navigate("down");
-        assert_eq!(picker.navigate("enter").as_deref(), Some("effort:high"));
-        picker.search("Aero".into());
-        assert!(picker.section_notes().is_empty());
-        assert!(picker.filtered().is_empty());
+        assert_eq!(picker.lit(), Some(6));
+        picker.navigate("up");
+        assert_eq!(picker.lit(), Some(4));
+        assert!(!picker.point(Some(5)));
+        assert_eq!(picker.hover, None);
+        assert_eq!(picker.navigate("end"), None);
+        assert_eq!(picker.navigate("enter").as_deref(), Some("providers:"));
+        picker.search("Aerolite".into());
+        assert!(!picker.filtered().contains(&3));
     }
 }
 

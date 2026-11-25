@@ -2874,15 +2874,18 @@ pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) 
         return None;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
-    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    // Black at the glyph's coverage, premultiplied: a template takes its
+    // shape. A mark with its own colour is drawn in it and never tinted.
+    let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+    let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
     for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
-        p.copy_from_slice(&[0, 0, 0, a]);
+        p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
     }
     let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
-    image.setTemplate(true);
+    image.setTemplate(glyph.color.is_none());
     image.setAccessibilityDescription(Some(&NSString::from_str(label)));
     Some(image)
 }
@@ -9155,7 +9158,7 @@ struct PopupLayout<'a> {
     target: Option<&'a PopupTarget>,
     shortcuts: &'a HashMap<String, String>,
 }
-impl<'a> PopupLayout<'a> {
+impl PopupLayout<'_> {
     fn label(
         &mut self,
         text: &str,
@@ -9309,9 +9312,16 @@ impl<'a> PopupLayout<'a> {
             PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
             PickerRow::Provider(_) => true,
         });
-        let sections = !model_rows && chosen.iter().any(|row| {
-            matches!(*row, PickerRow::Choice(i) if !self.model.choices[i].category.is_empty())
+        // Plain section headings: every row's in a list, only the rows
+        // outside the provider groups (the harness) in a model menu.
+        let sectioned = |c: &Choice| !model_rows || c.section;
+        let sections = chosen.iter().any(|row| {
+            matches!(*row, PickerRow::Choice(i)
+                if sectioned(&self.model.choices[i]) && !self.model.choices[i].category.is_empty())
         });
+        // The previous row stood in a plain section: a provider group
+        // after it starts under a separator.
+        let mut after_section = false;
         let edge = inset + t.space.md as f64;
         let lead = edge
             + if checks {
@@ -9342,59 +9352,15 @@ impl<'a> PopupLayout<'a> {
         // Keep immutable model/shortcut references independent of the view pool.
         let model = self.model;
         let shortcuts = self.shortcuts;
-        // A section's read-only rows (disabled menu items) stand where they
-        // are listed, under their own heading.
-        let notes = if sections {
-            model.section_notes()
-        } else {
-            Vec::new()
-        };
-        let mut noted = 0;
-        let mut section_notes = |layout: &mut Self,
-                                 before: usize,
-                                 y: &mut f64,
-                                 category: &mut Option<&'a str>| {
-            while let Some(&(_, section, text)) = notes.get(noted).filter(|(at, ..)| *at < before) {
-                noted += 1;
-                if *category != Some(section) {
-                    *category = Some(section);
-                    let heading = layout.label(section, caption, t.colors.muted, None);
-                    heading.setFrame(NSRect::new(
-                        NSPoint::new(
-                            edge,
-                            *y + shape.heading as f64 - caption_h - t.space.xs as f64,
-                        ),
-                        NSSize::new(width - edge * 2., caption_h),
-                    ));
-                    *y += shape.heading as f64;
-                }
-                let note = popup_label(text, t.typography.body, t.colors.muted, mtm);
-                note.setAccessibilityElement(true);
-                centred(
-                    &note,
-                    lead,
-                    *y,
-                    row_h,
-                    (width - lead - edge).max(0.),
-                    body_h,
-                );
-                layout.list.addSubview(&note);
-                layout
-                    .parts
-                    .push(Retained::into_super(Retained::into_super(note)));
-                *y += row_h;
-            }
-        };
         for (place, &row) in chosen.iter().enumerate() {
             let (index, disclosure) = match row {
                 PickerRow::Choice(index) => (index, None),
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
-            section_notes(&mut self, index, &mut y, &mut category);
             let c = &model.choices[index];
             let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
             if disclosure.is_some() {
-                if seen_provider {
+                if seen_provider || after_section {
                     let padding = f64::from(t.space.xs);
                     let thickness = self.list.window().map_or(1., |window| {
                         window.backingScaleFactor().recip()
@@ -9416,7 +9382,8 @@ impl<'a> PopupLayout<'a> {
                 }
                 seen_provider = true;
             }
-            if sections && category != Some(c.category.as_str()) {
+            after_section = disclosure.is_none() && c.section;
+            if sections && sectioned(c) && category != Some(c.category.as_str()) {
                 category = Some(c.category.as_str());
                 if c.category.is_empty()
                     && place > 0
@@ -9456,7 +9423,8 @@ impl<'a> PopupLayout<'a> {
                     y += shape.heading as f64;
                 }
             }
-            let detail = if disclosure.is_some() || is_palette {
+            // A provider's greyed row says why on the right, as Default does.
+            let detail = if disclosure.is_some() || is_palette || c.informational {
                 ""
             } else {
                 c.detail.as_str()
@@ -9533,6 +9501,11 @@ impl<'a> PopupLayout<'a> {
                 );
                 self.list.addSubview(&chevron);
                 self.parts.push(Retained::into_super(Retained::into_super(chevron)));
+            } else if !is_palette && c.informational && !c.detail.is_empty() {
+                let hint = self.label(&c.detail, caption, t.colors.faint, None);
+                let w = hint.fittingSize().width.ceil();
+                centred(&hint, trailing - w, y, row_h, w, caption_h);
+                trailing -= w + t.space.md as f64;
             } else if !is_palette && c.is_default {
                 let hint = self.label("Default", caption, t.colors.muted, None);
                 let w = hint.fittingSize().width.ceil();
@@ -9568,9 +9541,36 @@ impl<'a> PopupLayout<'a> {
             };
             let title_color = if disclosure.is_some() {
                 t.colors.secondary
+            } else if c.informational {
+                t.colors.muted
             } else {
                 t.colors.text
             };
+            // A row's own small mark (a harness) stands before its title.
+            let marked = disclosure
+                .is_none()
+                .then_some(c.icon.as_deref())
+                .flatten()
+                .and_then(|name| {
+                    crate::icons::glyph(name)
+                        .and_then(|g| glyph_image(g, m.symbol_inline as f64, ""))
+                });
+            if let Some(image) = &marked {
+                let mark = NSImageView::imageViewWithImage(image, mtm);
+                mark.setContentTintColor(Some(&native_color(t.colors.secondary)));
+                mark.setAccessibilityElement(false);
+                centred(
+                    &mark,
+                    lead,
+                    y,
+                    row_h,
+                    m.symbol_inline as f64,
+                    m.symbol_inline as f64,
+                );
+                self.list.addSubview(&mark);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(mark)));
+            }
             let title_size = t.typography.body;
             if let Some(query) = &palette_query {
                 if place == self.cache.palette_rows.len() {
@@ -9628,6 +9628,8 @@ impl<'a> PopupLayout<'a> {
                 };
                 let title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
+                } else if marked.is_some() {
+                    lead + f64::from(m.symbol_inline + t.space.sm)
                 } else {
                     lead
                 };
@@ -9663,6 +9665,8 @@ impl<'a> PopupLayout<'a> {
                 format!("{display_label}, {summary}")
             } else if c.is_default {
                 format!("{display_label}, Default")
+            } else if c.informational && !c.detail.is_empty() {
+                format!("{display_label}, {}", c.detail)
             } else {
                 display_label
             };
@@ -9686,6 +9690,8 @@ impl<'a> PopupLayout<'a> {
                 disclosure,
                 reuse_buttons,
             );
+            // A greyed row reads as a dimmed menu item and takes no press.
+            button.setEnabled(!c.informational);
             self.rows.push(PopupRow {
                 place,
                 kind: row,
@@ -9694,7 +9700,6 @@ impl<'a> PopupLayout<'a> {
             });
             y += item_h;
         }
-        section_notes(&mut self, usize::MAX, &mut y, &mut category);
         if unlisted > 0 && !is_palette {
             let note = self.label(
                 &format!("{unlisted} more · type to narrow"),
@@ -9895,6 +9900,8 @@ pub fn capture_agent_picker(
             c.checked = o["checked"].as_bool();
             c.is_default = o["default"] == true;
             c.informational = o["informational"] == true;
+            c.section = o["section"] == true;
+            c.icon = o["icon"].as_str().map(str::to_owned);
             c
         }).collect(),
         ..Default::default()
@@ -10096,6 +10103,9 @@ impl Popup {
             self.hide();
             return;
         };
+        if choice.informational {
+            return;
+        }
         let (name, stays) = (choice.command.clone(), choice.stays);
         self.dispatch_choice(&name);
         if close || !stays {

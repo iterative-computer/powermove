@@ -20,6 +20,10 @@ const OPENAI: Mark = Mark {
     // The official SVG already contains clear space around the mark.
     scale: 1.,
 };
+const CLAUDE_CODE: Mark = Mark {
+    svg: include_bytes!("../../../assets/settings-agent-icons/claude-code.svg"),
+    scale: 2. / 3.,
+};
 const OPENCODE: Mark = Mark {
     svg: include_bytes!("../../../assets/settings-agent-icons/opencode.svg"),
     scale: 2. / 3.,
@@ -33,7 +37,9 @@ fn resolve<T>(
 ) -> Option<T> {
     // See the asset attribution for the product marks that require prior approval.
     let (apps, mark, fallback): (&[&str], Option<&Mark>, _) = match id {
-        "claude-code" | "claude-desktop" => (&["Claude"], None, "terminal"),
+        // Claude Code is a command-line tool: its own mark, not the Claude app's icon.
+        "claude-code" => (&[], Some(&CLAUDE_CODE), "terminal"),
+        "claude-desktop" => (&["Claude"], None, "terminal"),
         "codex" => (&["Codex", "ChatGPT"], Some(&OPENAI), "terminal"),
         "gemini-cli" => (&["Gemini"], None, "terminal"),
         "opencode" => (&["OpenCode"], Some(&OPENCODE), "terminal"),
@@ -190,8 +196,7 @@ pub(super) fn capture_app_icon(name: &str) -> Option<Retained<NSImage>> {
 mod tests {
     use super::*;
 
-    const CLIENTS: [(&str, &str); 5] = [
-        ("claude-code", "Claude"),
+    const CLIENTS: [(&str, &str); 4] = [
         ("codex", "Codex"),
         ("claude-desktop", "Claude"),
         ("gemini-cli", "Gemini"),
@@ -235,6 +240,7 @@ mod tests {
         for (id, apps, expected) in [
             ("codex", &["Codex", "ChatGPT"][..], OPENAI.svg),
             ("opencode", &["OpenCode"][..], OPENCODE.svg),
+            ("claude-code", &[][..], CLAUDE_CODE.svg),
         ] {
             let mut lookups = Vec::new();
             let image = resolve(
@@ -254,7 +260,6 @@ mod tests {
     #[test]
     fn clients_without_a_bundled_mark_use_a_neutral_symbol() {
         for (id, bundle) in [
-            ("claude-code", "Claude"),
             ("claude-desktop", "Claude"),
             ("gemini-cli", "Gemini"),
         ] {

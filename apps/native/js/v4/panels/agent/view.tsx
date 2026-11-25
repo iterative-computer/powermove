@@ -845,17 +845,32 @@ export function harnessModel(s: Snapshot, n?: NativeFacts): string {
   const group = n?.modelGroups?.[s.settings.provider];
   return group?.find(([, , on]) => on)?.[0] ?? s.catalog.models[0]?.[0] ?? "";
 }
-/** The mark the chooser shows for a provider group's models. */
-function providerMark(group: string): string {
-  return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "claude" : "compatible";
+/** The mark the chooser shows for a harness's model: Claude Code's own
+ * under Claude Code, else its provider group's (OpenAI's blossom, a neutral
+ * sparkle for Anthropic keys and the rest). */
+function providerMark(harness: string, group: string): string {
+  if (harness === "claude") return "claude";
+  return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "anthropic" : "compatible";
+}
+/** Each harness's own small mark in the menu's Harness section. */
+function harnessMark(harness: string): string {
+  return harness === "aero" ? "powermove" : harness === "chatgpt" ? "chatgpt" : "claude";
+}
+/** The Powermove harness has no account for the chosen harness yet: the
+ * chooser leads to Settings › Providers. */
+export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
+  return (
+    harnessMode(s) &&
+    s.runId === null &&
+    (n.connection === "waiting" || (n.connection === "unavailable" && !!n.signedOut))
+  );
 }
 /** The one quiet line under a signed-out composer: what the chosen harness
- * runs on, and where to sign in. */
+ * runs on, and where to sign in. One line at the narrowest dock. */
 export function signInCopy(harness: string): string {
-  if (harness === "chatgpt") return "Sign in to ChatGPT in Settings › Providers to use Codex.";
-  if (harness === "claude")
-    return "Sign in to Claude or add an Anthropic key in Settings › Providers to use Claude Code.";
-  return "Sign in to a provider in Settings › Providers.";
+  if (harness === "chatgpt") return "Sign in to ChatGPT in Settings › Providers";
+  if (harness === "claude") return "Sign in to Claude in Settings › Providers";
+  return "Add a provider in Settings › Providers";
 }
 /** One row of the window's field menu (the kit's searchable menu). */
 export interface MenuOption {
@@ -870,8 +885,13 @@ export interface MenuOption {
   provider?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
   stays?: boolean;
-  /** Quiet status text, not a choice. */
+  /** Quiet status text, not a choice; with a provider, a greyed row in
+   * that provider's group (its `detail` on the right). */
   informational?: boolean;
+  /** A row outside the provider groups, under its own plain heading. */
+  section?: boolean;
+  /** The row's small mark (a symbol name). */
+  icon?: string;
 }
 /** Opens the field menu at `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -955,15 +975,17 @@ function Trigger({
  * control. The name opens the model menu and the effort its own menu (the
  * window's composer menus); a model with no effort levels shows none. */
 function ModelChooser({
-  provider,
+  mark,
   model,
   effort,
   disabled,
   opened,
   openModels,
   openEffort,
+  signedOut = false,
 }: {
-  provider: string;
+  /** The provider mark before the name; none while signed out. */
+  mark: string | null;
   model: string;
   /** Null for a model with no effort levels. */
   effort: string | null;
@@ -971,6 +993,9 @@ function ModelChooser({
   opened: string | null;
   openModels: (anchor: number) => void;
   openEffort: (anchor: number) => void;
+  /** The Powermove harness has no account: the name half reads "Connect a
+   * provider" and its menu offers the harnesses and Settings › Providers. */
+  signedOut?: boolean;
 }) {
   const name = t(disabled ? "colors.faint" : "colors.secondary");
   const quietInk = t(disabled ? "colors.faint" : "colors.muted");
@@ -1035,23 +1060,25 @@ function ModelChooser({
     <div id="agent-chooser" style={{ ...row, ...shrink }}>
       {part(
         "agent-model",
-        `Model, ${model}`,
-        "Model",
+        signedOut ? "Connect a provider" : `Model, ${model}`,
+        signedOut ? "Harness and providers" : "Model",
         openModels,
         true,
         effort === null,
         true,
         <>
-          <div
-            metadata={{ symbol: `provider.${provider}` }}
-            style={{
-              flexShrink: 0,
-              width: t("metrics.symbol_panel"),
-              height: t("metrics.symbol_panel"),
-              symbolSize: t("metrics.symbol_panel"),
-              color: name,
-            }}
-          />
+          {mark !== null && (
+            <div
+              metadata={{ symbol: `provider.${mark}` }}
+              style={{
+                flexShrink: 0,
+                width: t("metrics.symbol_panel"),
+                height: t("metrics.symbol_panel"),
+                symbolSize: t("metrics.symbol_panel"),
+                color: name,
+              }}
+            />
+          )}
           <text
             style={{
               ...shrink,
@@ -1090,119 +1117,6 @@ function ModelChooser({
           </>,
         )}
     </div>
-  );
-}
-/** The composer's one chooser with the Powermove harness: the model's
- * provider mark, the model, its effort in the quiet ink and one chevron, as
- * one pill that opens one menu (harness, models, effort, Add a provider…).
- * Signed out, it reads "Connect a provider" and opens Settings › Providers. */
-function HarnessChooser({
-  mark,
-  model,
-  effort,
-  signedOut,
-  disabled,
-  opened,
-  open,
-  connect,
-}: {
-  mark: string;
-  model: string;
-  /** Null for a model with no effort levels. */
-  effort: string | null;
-  signedOut: boolean;
-  disabled: boolean;
-  opened: boolean;
-  open: (anchor: number) => void;
-  connect: () => void;
-}) {
-  const off = disabled && !signedOut;
-  const name = t(off ? "colors.faint" : "colors.secondary");
-  const quietInk = t(off ? "colors.faint" : "colors.muted");
-  const press = (anchor: number) => {
-    if (signedOut) connect();
-    else if (!disabled) open(anchor);
-  };
-  const label = signedOut
-    ? "Connect a provider"
-    : `Model, ${model}${effort ? `, ${effort}` : ""}`;
-  return (
-    <button
-      id="agent-model"
-      role="button"
-      tabIndex={0}
-      label={label}
-      title={signedOut ? "Open Settings › Providers" : "Harness, model and effort"}
-      disabled={off}
-      open={opened}
-      {...(signedOut ? {} : { "aria-haspopup": "menu", "aria-expanded": opened })}
-      metadata={{ menuAnchor: true }}
-      preventDefault={{ keydown: ["Enter", " "] }}
-      onClick={(e) => press(Number(e.currentTarget))}
-      onKeyDown={(e) => {
-        if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-        if (e.key === "Enter" || e.key === " ") press(Number(e.currentTarget));
-      }}
-      style={{
-        ...target,
-        ...row,
-        ...shrink,
-        gap: t("space.sm"),
-        height: t("metrics.hit"),
-        paddingLeft: t("space.md"),
-        paddingRight: t("space.md"),
-        ...(opened ? { background: t("colors.selected_fill") } : {}),
-        borderRadius: t("metrics.inner_radius"),
-      }}
-    >
-      {!signedOut && (
-        <div
-          metadata={{ symbol: `provider.${mark}` }}
-          style={{
-            flexShrink: 0,
-            width: t("metrics.symbol_panel"),
-            height: t("metrics.symbol_panel"),
-            symbolSize: t("metrics.symbol_panel"),
-            color: name,
-          }}
-        />
-      )}
-      <text
-        style={{
-          ...shrink,
-          fontSize: t("typography.reading"),
-          color: name,
-          whiteSpace: "nowrap",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {signedOut ? "Connect a provider" : model.replace(/\s*\([^)]*context[^)]*\)/i, "")}
-      </text>
-      {!signedOut && effort && (
-        <text
-          style={{
-            flexShrink: 0,
-            fontSize: t("typography.reading"),
-            color: quietInk,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {effort}
-        </text>
-      )}
-      {!signedOut && (
-        <div
-          metadata={{ symbol: "composer.chevron" }}
-          style={{
-            flexShrink: 0,
-            width: t("metrics.composer_symbol"),
-            height: t("metrics.composer_symbol"),
-            symbolSize: t("metrics.composer_symbol"),
-            color: quietInk,
-          }}
-        />
-      )}
-    </button>
   );
 }
 function Header({
@@ -2907,8 +2821,7 @@ function Composer({
   // With the Powermove harness, signed out keeps the composer as it is: a
   // draft can be written; the chooser and one line under it lead to
   // Settings › Providers.
-  const signedOut =
-    harness && !working && (n.connection === "waiting" || (n.connection === "unavailable" && !!n.signedOut));
+  const signedOut = harnessSignedOut(s, n);
   const fieldDisabled = harness ? s.composerDisabled : disabled;
   const acceptsFiles = !disabled && s.attachments.length < 6;
   const dropTarget = acceptsFiles && (dragging || n.dropTarget);
@@ -2967,44 +2880,54 @@ function Composer({
     provider: string;
     epoch: number;
   } | null>(null);
-  // With the Powermove harness (the development switch), one menu holds
-  // it all, as sections: the harness (a row keeps the menu open and the
-  // rest follows it), the models it can run under their provider (Settings
-  // › Providers), that model's effort, then the way to add a provider.
+  // With the Powermove harness (the development switch), the model menu
+  // opens on the Harness section (a row keeps the menu open and the rest
+  // follows it), then the models the chosen harness can run in their
+  // provider groups (Settings › Providers), then the way to add one.
+  // Effort keeps its own menu. Signed out, it offers the harnesses and the
+  // way to connect a provider.
   const harnessRows = (s: Snapshot): MenuOption[] => {
     const harness = s.settings.provider;
-    const shown = harnessModel(s, native.current);
     const rows: MenuOption[] = s.catalog.providers.map(([id, label]) => ({
       label,
       value: `provider:${id}`,
       checked: id === harness,
       category: "Harness",
+      section: true,
+      icon: `provider.${harnessMark(id)}`,
       stays: true,
     }));
+    if (harnessSignedOut(s, native.current)) {
+      rows.push({ label: "Connect a provider…", value: "providers:", category: "", section: true });
+      return rows;
+    }
+    const shown = harnessModel(s, native.current);
+    const defaults = new Set(
+      native.current.modelGroups?.[harness]?.filter(([, , on]) => on).map(([id]) => id),
+    );
     const models: MenuOption[] = pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
       label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
       detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
       value: `model:${v}`,
       checked: v === shown,
+      default: defaults.has(v) || undefined,
       category: providerGroup(harness, v),
+      provider: providerGroup(harness, v).toLowerCase(),
     }));
     if (harness === "aero")
-      models.push({ label: "Aerolite · Coming later", value: "", category: "Powermove", informational: true });
+      models.push({
+        label: "Aerolite",
+        detail: "Coming later",
+        value: "",
+        category: "Powermove",
+        provider: "powermove",
+        informational: true,
+      });
     const order = ["OpenAI", "Anthropic", "Custom", "Development", "Powermove"];
     const rank = (r: MenuOption) => order.indexOf(r.category ?? "") >>> 0;
     models.sort((a, b) => rank(a) - rank(b));
     rows.push(...models);
-    rows.push(
-      ...s.catalog.efforts
-        .filter((e) => e && e !== "default")
-        .map((value) => ({
-          label: effortLabel(value),
-          value: `effort:${value}`,
-          checked: value === s.settings.effort,
-          category: "Effort",
-        })),
-    );
-    rows.push({ label: "Add a provider…", value: "providers:", category: "" });
+    rows.push({ label: "Add a provider…", value: "providers:", category: "", section: true });
     if (native.current.findingModels && !models.some((r) => r.value.startsWith("model:")))
       rows.push({ label: "Finding models…", value: "", informational: true });
     return rows;
@@ -3060,10 +2983,6 @@ function Composer({
       if (kind === "providers") {
         setOpenPicker(null);
         send({ type: "openSettings" });
-      } else if (kind === "effort") {
-        setOpenPicker(null);
-        if (value !== now.settings.effort)
-          send({ type: "setModel", model: now.settings.model, effort: value });
       } else if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
         awaiting.current = { anchor, provider: value, epoch };
@@ -3129,8 +3048,8 @@ function Composer({
     s.settings.model,
     s.catalog.providers,
     s.catalog.models,
-    s.catalog.efforts,
-    s.settings.effort,
+    n.connection,
+    n.signedOut,
     n.findingModels,
     n.modelGroups,
     n.connectedModelName,
@@ -3418,28 +3337,28 @@ function Composer({
             symbolSize: t("metrics.composer_add_symbol"),
           }}
         />
-        {harness ? (
-          <HarnessChooser
-            mark={providerMark(providerGroup(s.settings.provider, shownModel))}
-            model={named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider))}
-            effort={efforts.length > 0 ? effortName : null}
-            signedOut={signedOut}
-            disabled={!menu || choicesLocked}
-            opened={openPicker === "model"}
-            open={openModels}
-            connect={() => send({ type: "openSettings" })}
-          />
-        ) : (
-          <ModelChooser
-            provider={s.settings.provider}
-            model={modelName}
-            effort={efforts.length > 0 ? effortName : null}
-            disabled={!menu || choicesLocked}
-            opened={openPicker}
-            openModels={openModels}
-            openEffort={openEffort}
-          />
-        )}
+        <ModelChooser
+          mark={
+            signedOut
+              ? null
+              : harness
+                ? providerMark(s.settings.provider, providerGroup(s.settings.provider, shownModel))
+                : s.settings.provider
+          }
+          model={
+            signedOut
+              ? "Connect a provider"
+              : harness
+                ? named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider))
+                : modelName
+          }
+          effort={!signedOut && efforts.length > 0 ? effortName : null}
+          disabled={!menu || choicesLocked}
+          opened={openPicker}
+          openModels={openModels}
+          openEffort={openEffort}
+          signedOut={signedOut}
+        />
         <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
         {working && (
           <button
