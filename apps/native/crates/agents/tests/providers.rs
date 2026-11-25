@@ -8,7 +8,7 @@
 //! every `security` call gives up after five seconds instead of waiting on a
 //! prompt. Nothing here reaches the network.
 use pm_agents::account::{Accounts, State};
-use pm_agents::edge::{KeychainFile, Loopback, NetRequest, Reroute, Secrets, fetch};
+use pm_agents::edge::{KeychainFile, Loopback, NetRequest, Reroute, fetch};
 use pm_agents::launch::Environment;
 use pm_agents::{Provider, aero, codex_auth, sources};
 use serde_json::Value;
@@ -335,7 +335,7 @@ fn chatgpt_sign_in_is_shared_refreshed_by_codex_alone_and_signed_out_for_both() 
         .collect();
     let seen = stats(&f.base);
     assert_eq!(seen["reused"], 0, "a refresh token was spent twice: {seen}");
-    assert!(seen["refreshes"].as_u64().unwrap() >= before + 1);
+    assert!(seen["refreshes"].as_u64().unwrap() > before);
     let latest = codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
         .unwrap()
         .unwrap()
