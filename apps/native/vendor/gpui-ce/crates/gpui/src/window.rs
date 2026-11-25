@@ -4174,6 +4174,7 @@ impl Window {
     /// come from its recording, shifted to its offset now.
     fn reuse_hitboxes(&mut self, range: Range<usize>) {
         let previous = self.scroll_layer_frame - 1;
+        let scale_factor = self.scale_factor();
         let mut inside: Vec<(usize, crate::scroll_layer::ScrollLayerKey)> = self
             .scroll_layers
             .iter()
@@ -4198,7 +4199,7 @@ impl Window {
                 .extend(self.rendered_frame.hitboxes[at..start].iter().cloned());
             let begin = self.next_frame.hitboxes.len();
             if layer.shiftable {
-                self.next_frame.hitboxes.extend(layer.shifted_hitboxes());
+                self.next_frame.hitboxes.extend(layer.shifted_hitboxes(scale_factor));
             } else {
                 self.next_frame.hitboxes.extend(
                     self.rendered_frame.hitboxes[start..layer.hitbox_range.end]
@@ -4253,6 +4254,7 @@ impl Window {
         let mask = crate::scroll_layer::recording_mask(&clip, reach);
         let max = self.last_scroll_max;
         let view = self.current_view();
+        let element_offset = self.element_offset();
         let frame = self.scroll_layer_frame;
         let start = self.next_frame.hitboxes.len();
         let deferred = self.next_frame.deferred_draws.len();
@@ -4267,6 +4269,7 @@ impl Window {
                 max,
                 clip: clip.clone(),
                 edges: None,
+                base: Point::default(),
                 ops: Vec::new(),
                 hitboxes: Vec::new(),
                 hitbox_range: 0..0,
@@ -4280,6 +4283,7 @@ impl Window {
         layer.view = view;
         layer.offset = offset.clone();
         layer.recorded = *offset.borrow();
+        layer.base = element_offset - layer.recorded;
         layer.reach = reach;
         layer.max = max;
         layer.clip = clip;

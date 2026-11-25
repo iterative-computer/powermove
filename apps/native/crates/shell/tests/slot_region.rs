@@ -5,6 +5,7 @@
 //! frame draws, for a scroll layer replaying its steps, nested layers, a
 //! cached view inside a layer and a plain scroller that draws again, paused
 //! or while another view draws every frame (playback).
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyView, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SlotRegion,
@@ -663,9 +664,12 @@ fn a_scroll_layer_inside_a_body_that_fits_replays_its_steps(cx: &mut TestAppCont
 const THUMB: f32 = 41.;
 
 /// A scroll layer of rows whose thumbnails clip to rounded corners (the
-/// Project grid's).
+/// Project grid's), in a viewport that may clip to rounded corners itself.
 struct Thumbs {
     handle: ScrollHandle,
+    rounded_viewport: bool,
+    /// False: a plain scroller, drawn in full at every offset (the reference).
+    layer: bool,
 }
 impl Render for Thumbs {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -675,9 +679,13 @@ impl Render for Thumbs {
             .flex_col()
             .w(px(100.))
             .h(px(200.))
+            // Rounded corners clip only where both axes do.
+            .when(self.rounded_viewport, |d| {
+                d.rounded(px(12.)).overflow_x_hidden()
+            })
             .overflow_y_scroll()
             .track_scroll(&self.handle)
-            .scroll_layer()
+            .when(self.layer, |d| d.scroll_layer())
             .children(rows(3))
             .child(
                 div().flex_none().h(px(40.)).w_full().child(
@@ -712,16 +720,22 @@ fn thumb(
     })
 }
 
-/// PM-710 review: a replayed step moves a rounded clip with its content, so
-/// a thumbnail draws exactly as a full draw at the same offset draws it (its
-/// rounded shape stayed where it was recorded: the thumbnail was sliced or
-/// vanished until the next full draw).
-#[gpui::test]
-fn a_replayed_step_moves_rounded_clips_with_the_content(cx: &mut TestAppContext) {
+/// The same rows in a window of their own, drawn at `offset` as a plain
+/// scroller (no layer): the picture a replay must reproduce.
+fn plain_draw(
+    cx: &mut TestAppContext,
+    rounded_viewport: bool,
+    offset: Point<Pixels>,
+) -> (
+    Bounds<gpui::ScaledPixels>,
+    gpui::ContentMask<gpui::ScaledPixels>,
+) {
     let handle = ScrollHandle::new();
     let (_, vcx) = cx.add_window_view(|_, cx| {
         let panel = cx.new(|_| Thumbs {
             handle: handle.clone(),
+            rounded_viewport,
+            layer: false,
         });
         Root {
             panel: panel.into(),
@@ -730,33 +744,77 @@ fn a_replayed_step_moves_rounded_clips_with_the_content(cx: &mut TestAppContext)
     });
     let mut vcx: VisualTestContext = vcx.clone();
     vcx.run_until_parked();
-    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    handle.set_offset(offset);
+    vcx.update(|window, _| window.refresh());
     vcx.run_until_parked();
-    let (before, mask) = thumb(&mut vcx);
-    assert!(
-        mask.corner_radii.top_left.0 > 0.,
-        "the thumbnail clips to rounded corners"
-    );
-    vcx.simulate_event(ScrollWheelEvent {
-        position: point(px(50.), px(20.)),
-        delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
-        ..Default::default()
-    });
-    vcx.run_until_parked();
-    let replayed = thumb(&mut vcx);
-    assert!(
-        replayed.0.origin.y < before.origin.y,
-        "the step moved the thumbnail"
-    );
-    // The steps stop: drawn in full at the same offset.
-    vcx.executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    vcx.run_until_parked();
-    assert_eq!(
-        replayed,
-        thumb(&mut vcx),
-        "replayed as a full draw draws it"
-    );
+    assert_eq!(handle.offset(), offset);
+    thumb(&mut vcx)
+}
+
+/// PM-710 review: a replayed step draws a thumbnail with rounded corners
+/// exactly as a plain draw at the same offset draws it, at a 2x window:
+/// - a whole step: its rounded shape moves with it (it stayed where it was
+///   recorded, and the thumbnail was sliced or vanished);
+/// - a step of a fraction of a device pixel (-0.3 pt is -0.6 device pixels,
+///   which a plain draw snaps): the replay moves by whole device pixels;
+/// - half outside a viewport that clips to rounded corners itself: it keeps
+///   its own corners, as a plain draw chooses.
+/// A layer's own full draw (after the steps stop) draws so too.
+#[gpui::test]
+fn a_replayed_step_moves_rounded_clips_with_the_content(cx: &mut TestAppContext) {
+    for (rounded_viewport, dy, what) in [
+        (false, -30., "a whole step"),
+        (false, -0.3, "a fractional step"),
+        (true, -130., "half outside a rounded viewport"),
+    ] {
+        let handle = ScrollHandle::new();
+        let (_, vcx) = cx.add_window_view(|_, cx| {
+            let panel = cx.new(|_| Thumbs {
+                handle: handle.clone(),
+                rounded_viewport,
+                layer: true,
+            });
+            Root {
+                panel: panel.into(),
+                ticker: cx.new(|_| Ticker(0)),
+            }
+        });
+        let mut vcx: VisualTestContext = vcx.clone();
+        assert_eq!(vcx.update(|window, _| window.scale_factor()), 2.);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        let (before, mask) = thumb(&mut vcx);
+        assert!(
+            mask.corner_radii.top_left.0 > 0.,
+            "{what}: the thumbnail clips to rounded corners"
+        );
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+        let replayed = thumb(&mut vcx);
+        assert!(
+            replayed.0.origin.y < before.origin.y,
+            "{what}: the step moved the thumbnail"
+        );
+        let reference = plain_draw(cx, rounded_viewport, handle.offset());
+        assert_eq!(
+            replayed, reference,
+            "{what}: replayed as a plain draw draws it"
+        );
+        // The steps stop: the layer draws in full at the same offset.
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(400));
+        vcx.run_until_parked();
+        assert_eq!(
+            thumb(&mut vcx),
+            reference,
+            "{what}: the layer's full draw as a plain draw"
+        );
+    }
 }
 
 /// A driven scroll layer (the timeline's rows) whose content fits.
