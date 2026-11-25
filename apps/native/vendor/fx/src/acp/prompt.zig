@@ -1,5 +1,6 @@
-// Powermove notice: modified from upstream fx (patch P-TOOLS): a host tool
-// call goes to Config.host_tool_bridge when the embedder installed one.
+// Powermove notice: modified from upstream fx (patches P-TOOLS, P-STEPS): a
+// host tool call goes to Config.host_tool_bridge when the embedder installed
+// one, and a turn the step limit ended stops as max_model_turns.
 const std = @import("std");
 const observation = @import("../core/agent/runtime/observation.zig");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
@@ -350,6 +351,9 @@ const AcpContext = struct {
     message_id: acp_types.MessageIdBuffer = undefined,
     message_kind: ?AgentMessageKind = null,
     stop_reason: acp_types.StopReason = .end_turn,
+    /// Powermove (P-STEPS): the turn the step limit ended, from its typed
+    /// finalization cause, or 0.
+    step_limited_turn: u64 = 0,
     /// The request ended on fx's content-filter status: the filter blocked
     /// the reply and every resend of it.
     content_filter_blocked: bool = false,
@@ -2284,6 +2288,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .context_registry = ctx.state.cfg.context_registry,
         .context_enabled = ctx.state.context_enabled,
         .finalize_turn = finalizeTurn,
+        .note_turn_end_cause = noteTurnEndCause,
         .take_steering_boundary = takeSteeringBoundary,
         // The web core's host keeps its steering queue, so the core asks it
         // while a reply streams whether a steer should cut it short.
@@ -2625,11 +2630,21 @@ fn availableModelCapabilities(
     );
 }
 
+fn noteTurnEndCause(raw_ctx: *anyopaque, turn_id: u64, cause: @import("../core/agent/runtime/deps.zig").TurnEndCause) void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+    switch (cause) {
+        .step_limit => ctx.step_limited_turn = turn_id,
+    }
+}
+
 fn finalizeTurn(raw_ctx: *anyopaque, turn_id: u64, outcome: types.TurnPresentationOutcome, disposition: ?types.ProviderCompletionDisposition) !void {
     std.debug.assert(turn_id != 0);
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     if (disposition == .length_limited) {
         ctx.stop_reason = .max_output_tokens;
+    } else if (outcome == .failed and ctx.step_limited_turn == turn_id) {
+        // Powermove (P-STEPS): fx's own max_model_turns, from the typed cause.
+        ctx.stop_reason = .max_model_turns;
     } else if (outcome == .failed or outcome == .paused) {
         ctx.stop_reason = .refused;
     }

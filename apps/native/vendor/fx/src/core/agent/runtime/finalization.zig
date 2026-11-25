@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-STEPS): the guard
+// carries the turn's typed end cause to the embedder.
 const std = @import("std");
 const hooks = @import("../../hooks/hooks.zig");
 const types = @import("../../shared/types.zig");
@@ -40,6 +42,9 @@ pub const TurnFinalizationGuard = struct {
     lifecycle: LifecycleContext,
     state: State = .open,
     outcome: ?types.TurnPresentationOutcome = null,
+    /// Powermove (P-STEPS): set by the branch that ends the turn, when the
+    /// outcome alone does not say why (the step limit ends it as failed).
+    end_cause: ?deps_mod.TurnEndCause = null,
     compacted_execution: execution_memory.CompactedExecutionBoundary = .{},
     /// The runtime context this turn captured for the session, if it did.
     /// Every save of the turn carries it, so a streamed turn keeps one prefix
@@ -194,6 +199,7 @@ pub const TurnFinalizationGuard = struct {
         // waits for it.
         const stop_detached = self.stops_steering_detached_commands(outcome);
 
+        if (self.end_cause) |cause| if (self.deps.note_turn_end_cause) |note| note(self.deps.ctx, self.turn_id, cause);
         self.deps.finalize_turn(self.deps.ctx, self.turn_id, outcome, disposition) catch |err| {
             self.state = .fatal;
             if (stop_detached) self.stop_steering_detached_commands();

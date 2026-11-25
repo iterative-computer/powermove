@@ -252,6 +252,7 @@ pub const Header = extern struct {
 
 const FX_FETCH_MODEL: u32 = 1;
 const FX_FETCH_CATALOG: u32 = 2;
+const FX_FETCH_BUSY: i32 = 3;
 
 pub const FetchRequest = extern struct {
     struct_size: u32,
@@ -337,8 +338,21 @@ const Fault = enum(u32) {
     tool_result = 4,
     journal_append = 5,
     tool_call = 6,
+    input_locked = 7,
+    host_transport = 8,
+    create = 9,
+    destroy = 10,
 };
-const fault_count = 7;
+const fault_count = 11;
+
+/// FX_FAULT_CREATE is process-wide: no runtime exists yet when it fires.
+var create_fault: std.atomic.Value(i64) = .init(-1);
+
+/// Counts `counter` down; true on the armed hit.
+fn faultHit(counter: *std.atomic.Value(i64)) bool {
+    if (counter.load(.monotonic) < 0) return false;
+    return counter.fetchSub(1, .acq_rel) == 0;
+}
 
 // ---------------------------------------------------------------------------
 // Limits (the header's FX_MAX_*)
@@ -625,6 +639,12 @@ const EventQueue = struct {
     drained_bytes: std.ArrayList(u8) = .empty,
     drained_names: std.ArrayList(Span) = .empty,
     drained_name_strs: std.ArrayList(Str) = .empty,
+    /// Where a drain builds what it hands out before it can no longer fail;
+    /// never handed out itself, so a failed drain leaves the previous
+    /// drain's borrows and the queue as they were (Sol's 2a item 5).
+    spare_bytes: std.ArrayList(u8) = .empty,
+    spare_names: std.ArrayList(Span) = .empty,
+    spare_name_strs: std.ArrayList(Str) = .empty,
     closed: bool = false,
 
     fn deinit(self: *EventQueue) void {
@@ -634,6 +654,9 @@ const EventQueue = struct {
         self.drained_bytes.deinit(alloc_c);
         self.drained_names.deinit(alloc_c);
         self.drained_name_strs.deinit(alloc_c);
+        self.spare_bytes.deinit(alloc_c);
+        self.spare_names.deinit(alloc_c);
+        self.spare_name_strs.deinit(alloc_c);
     }
 
     fn full(self: *const EventQueue, total: usize) bool {
@@ -808,16 +831,19 @@ const Runtime = struct {
     journal_acked: u64 = 0,
     journal_failed: ?[]u8 = null,
     flushes: std.ArrayList(Flush) = .empty,
-    /// The turn running when the core opened its current fetch.
-    fetch_turn: u64 = 0,
-    /// The running turn printed the core's step-limit notice: libfx ends
-    /// such a turn as a failed one ("refused"), which the header reports as
-    /// FX_STOP_MAX_STEPS.
-    step_limited: bool = false,
+    /// The running turn fx_turn_cancel cancelled, or 0. A fetch the core
+    /// publishes for it afterwards is published retired.
+    cancelled_turn: u64 = 0,
+    /// Guarded by `fetch.mutex`, not `lock`: the turn the published fetch
+    /// serves, set in the same critical section that publishes it.
+    fetch_owner: u64 = 0,
     /// Partial frame bytes, if the core's writer ever splits a frame.
     line: std.ArrayList(u8) = .empty,
     /// What the last fx_fetch_take handed out.
     taken: std.heap.ArenaAllocator = .init(alloc_c),
+    /// Where a take builds its answer; swapped with `taken` only once the
+    /// take can no longer fail, so a failed take keeps the previous borrows.
+    taking: std.heap.ArenaAllocator = .init(alloc_c),
 
     const Flush = struct {
         rpc_id: i64,
@@ -841,12 +867,14 @@ const Runtime = struct {
     }
 
     /// The C entry stops the core: an event or frame could not be delivered,
-    /// or initialize failed. Core threads wind down; nothing parks.
+    /// or initialize failed. The failure is published and the host woken
+    /// first, without a lock; closing the input comes after and never waits
+    /// on a parked thread (Sol's 2a item 2). Core threads wind down.
     fn failTransport(self: *Runtime, message: []const u8) void {
-        if (self.state.cmpxchgStrong(FX_RUNTIME_RUNNING, FX_RUNTIME_FAILED, .acq_rel, .acquire) != null) return;
         self.fail_message.set(&.{message});
-        self.closeInput();
+        if (self.state.cmpxchgStrong(FX_RUNTIME_RUNNING, FX_RUNTIME_FAILED, .acq_rel, .acquire) != null) return;
         self.ready.notify();
+        self.closeInput();
     }
 
     /// Parks a core thread of a panicked runtime at a boundary with the host.
@@ -855,11 +883,30 @@ const Runtime = struct {
     }
 
     fn fault(self: *Runtime, point: Fault) void {
-        const counter = &self.faults[@intFromEnum(point)];
-        if (counter.load(.monotonic) < 0) return;
-        if (counter.fetchSub(1, .acq_rel) == 0) {
+        if (faultHit(&self.faults[@intFromEnum(point)])) {
             std.debug.panic("fault injected at {s}", .{@tagName(point)});
         }
+    }
+
+    /// FX_FAULT_INPUT_LOCKED: the thread holding the input lock waits (up to
+    /// two seconds) for the runtime to stop running, then panics there, so a
+    /// host call failing the transport meets a lock a parked thread holds.
+    fn faultInputLocked(self: *Runtime) void {
+        if (!faultHit(&self.faults[@intFromEnum(Fault.input_locked)])) return;
+        const started = nowMs();
+        while (self.running() and nowMs() -| started < 2000) {
+            const ts: std.c.timespec = .{ .sec = 0, .nsec = 1_000_000 };
+            _ = std.c.nanosleep(&ts, null);
+        }
+        std.debug.panic("fault injected at {s}", .{@tagName(Fault.input_locked)});
+    }
+
+    /// FX_FAULT_HOST_TRANSPORT: the host call fails the runtime's transport,
+    /// as one whose answer cannot be delivered would.
+    fn faultHostTransport(self: *Runtime) bool {
+        if (!faultHit(&self.faults[@intFromEnum(Fault.host_transport)])) return false;
+        self.failTransport("fault injected at host_transport");
+        return true;
     }
 
     // --- callbacks ------------------------------------------------------------
@@ -923,6 +970,7 @@ const Runtime = struct {
         const io = io_mod.getIo();
         self.input.mutex.lockUncancelable(io);
         defer self.input.mutex.unlock(io);
+        self.faultInputLocked();
         return self.inputLocked(bytes, .control);
     }
 
@@ -944,10 +992,28 @@ const Runtime = struct {
         return FX_OK;
     }
 
+    /// Closes the core's input so its reader sees the end. Never waits on a
+    /// thread that panicked holding the input lock: a host call gives up (as
+    /// it does after the busy bound; destroy closes the input later), and a
+    /// core thread parks, as at any boundary of a panicked runtime.
     fn closeInput(self: *Runtime) void {
-        // Called on core threads (failTransport) and by destroy; both may
-        // block briefly, since a panicked runtime never reaches here.
-        self.input.close();
+        const io = io_mod.getIo();
+        const on_host = tl_guard != null;
+        var spins: usize = 0;
+        const started = nowMs();
+        while (true) {
+            if (self.input.mutex.tryLock()) break;
+            if (self.panicked()) {
+                if (on_host) return;
+                park();
+            }
+            if (on_host and nowMs() -| started > busy_bound_ms) return;
+            spins += 1;
+            if (spins < 64) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
+        }
+        self.input.closed = true;
+        self.input.wake.broadcast(io);
+        self.input.mutex.unlock(io);
     }
 
     // --- events ---------------------------------------------------------------
@@ -986,19 +1052,6 @@ const Runtime = struct {
         };
         queue.mutex.unlock(io);
         if (was_empty) self.ready.notify();
-    }
-
-    /// Queues a control event from a host call.
-    fn queueEventHost(self: *Runtime, event: QueuedEvent, data: EventText) Status {
-        const got = hostLock(self, &self.events.mutex);
-        if (got != .locked) return acquireStatus(got);
-        const was_empty = self.events.appendLocked(event, data) catch {
-            self.events.mutex.unlock(io_mod.getIo());
-            return FX_E_OOM;
-        };
-        self.events.mutex.unlock(io_mod.getIo());
-        if (was_empty) self.ready.notify();
-        return FX_OK;
     }
 
     // --- the core's thread --------------------------------------------------------
@@ -1124,6 +1177,7 @@ const Runtime = struct {
         self.steers.deinit(alloc_c);
         self.line.deinit(alloc_c);
         self.taken.deinit();
+        self.taking.deinit();
         if (self.journal_failed) |reason| alloc_c.free(reason);
         if (self.session_id) |id| alloc_c.free(id);
         for (self.tools) |tool| alloc_c.free(tool.name);
@@ -1308,11 +1362,9 @@ const Runtime = struct {
                     self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
                     self.queueEvent(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(StopReason.@"error") }, .{}, .control);
                 } else {
-                    var reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
-                    self.lock.lockUncancelable(io);
-                    if (reason == .refusal and self.step_limited) reason = .max_steps;
-                    self.step_limited = false;
-                    self.lock.unlock(io);
+                    // The step limit arrives typed, as max_model_turns
+                    // (patch P-STEPS), never read from the reply's text.
+                    const reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
                     self.queueEvent(.{
                         .kind = .turn_end,
                         .turn = turn,
@@ -1398,12 +1450,6 @@ const Runtime = struct {
             // engine.js drops the core's context notices from the reply.
             if (!thought and std.mem.startsWith(u8, text, "[context]")) return;
             self.fault(.streaming);
-            if (!thought and std.mem.find(u8, text, step_limit_notice) != null) {
-                const io = io_mod.getIo();
-                self.lock.lockUncancelable(io);
-                self.step_limited = true;
-                self.lock.unlock(io);
-            }
             self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text }, .delta);
         } else if (std.mem.eql(u8, kind, "user_message_chunk")) {
             const content = update.object.get("content") orelse return;
@@ -1490,10 +1536,6 @@ const Runtime = struct {
             self.mustRespond(self.respondError(rpc_id, "Journal flush failed", false));
     }
 };
-
-/// What the core's agent loop says when the step limit ends a turn
-/// (core/agent/runtime/config.zig, default_step_limit_notice).
-const step_limit_notice = @import("core/agent/runtime/config.zig").Config.default_step_limit_notice;
 
 /// The Gateway credential the core is given, never a secret: the host sets
 /// the real authorization header at its fetch edge.
@@ -1628,15 +1670,73 @@ fn cancelled(flag: ?*std.atomic.Value(bool)) bool {
 // The fetch bridge's core side: the provider's transport
 // ---------------------------------------------------------------------------
 
+/// Publishes the core's request (Sol's 2a item 3). It holds `lock` from
+/// reading the running turn to publication, and fx_turn_cancel holds `lock`
+/// throughout, so the two are linearised: a cancel either finds the
+/// published fetch and retires it, or comes first and the fetch is published
+/// retired. The fetch's turn is set under the bridge lock with the request,
+/// so fx_fetch_take reads both in one critical section.
 fn fetchOpen(raw: ?*anyopaque, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
     const self: *Runtime = @ptrCast(@alignCast(raw.?));
     self.parkIfPanicked();
     const io = io_mod.getIo();
-    // Recorded before the request is published, so fx_fetch_take sees it.
     self.lock.lockUncancelable(io);
-    self.fetch_turn = self.turn;
-    self.lock.unlock(io);
-    return core.FetchBridge.open(&self.fetch, method, url, headers, body);
+    defer self.lock.unlock(io);
+    const turn = self.turn;
+    const retired = turn != 0 and turn == self.cancelled_turn;
+
+    // FetchBridge.open (libfx_core_runtime.zig), with the owner and the
+    // retired publication added.
+    const bridge = &self.fetch;
+    bridge.mutex.lockUncancelable(io);
+    defer bridge.mutex.unlock(io);
+    if (bridge.next_handle == 0) return error.HostStreamUnavailable;
+    const handle = bridge.next_handle;
+    const decision = fetch_state.decide(bridge.phase, .{ .open = handle });
+    switch (decision.action) {
+        .unavailable, .shutting_down => return error.HostStreamUnavailable,
+        .applied => {},
+        else => unreachable,
+    }
+    const max = core.max_fetch_request_bytes;
+    if (body.len > max or method.len > max or url.len > max or headers.len > max) return error.HostStreamBackpressure;
+    const request: struct {
+        handle: fetch_state.Handle,
+        method: []const u8,
+        url: []const u8,
+        headers: []const u8,
+    } = .{ .handle = handle, .method = method, .url = url, .headers = headers };
+    var writer: std.Io.Writer.Allocating = .init(alloc_c);
+    defer writer.deinit();
+    try std.json.Stringify.value(request, .{}, &writer.writer);
+    const metadata = writer.writer.buffered();
+    if (metadata.len > max - body.len) return error.HostStreamBackpressure;
+    bridge.clearPendingRequest();
+    try bridge.request.ensureTotalCapacity(alloc_c, metadata.len);
+    try bridge.request_body.ensureTotalCapacity(alloc_c, body.len);
+    bridge.request.appendSliceAssumeCapacity(metadata);
+    bridge.request_body.appendSliceAssumeCapacity(body);
+    bridge.response_offset = 0;
+    bridge.response.clearRetainingCapacity();
+    bridge.phase = decision.phase;
+    bridge.next_handle = if (bridge.next_handle == std.math.maxInt(fetch_state.Handle)) 0 else bridge.next_handle + 1;
+    self.fetch_owner = turn;
+    if (retired) _ = retireFetchLocked(bridge);
+    bridge.wake.broadcast(io);
+    bridge.ready.?.notify();
+    return handle;
+}
+
+/// Retires the published or running fetch, as a cancel does. The caller
+/// holds the bridge lock. True if there was one.
+fn retireFetchLocked(bridge: *core.FetchBridge) bool {
+    const decision = fetch_state.decide(bridge.phase, .cancel);
+    if (decision.action != .applied) return false;
+    bridge.last_consumed_handle = fetch_state.consumed_after(bridge.phase, bridge.last_consumed_handle, .cancel);
+    bridge.clearPendingRequest();
+    bridge.phase = decision.phase;
+    bridge.wake.broadcast(io_mod.getIo());
+    return true;
 }
 
 /// The response status, waiting in pulses: 0 means "not yet", so the
@@ -1822,17 +1922,28 @@ fn leave(handle: u64) void {
     _ = slots[index].state.fetchSub(1, .acq_rel);
 }
 
-/// Claims a free slot for `runtime` and publishes it; returns its handle.
-fn claimSlot(runtime: *Runtime) ?u64 {
-    for (&slots, 0..) |*slot, index| {
+/// Reserves a usable slot, before anything is started for the runtime
+/// (Sol's 2a item 2): with every usable slot taken, create fails first.
+fn reserveSlot() ?usize {
+    for (0..slots.len) |index| {
         const bit = @as(u64, 1) << @intCast(index);
-        if (slot_claim.fetchOr(bit, .acq_rel) & bit != 0) continue;
-        const generation = slot.state.load(.acquire) >> gen_shift;
-        slot.runtime.store(runtime, .release);
-        slot.state.store((generation << gen_shift) | occupied_bit, .release);
-        return handleOf(index, generation);
+        if (slot_claim.fetchOr(bit, .acq_rel) & bit == 0) return index;
     }
     return null;
+}
+
+/// Gives back a reservation no handle was issued for.
+fn releaseSlot(index: usize) void {
+    _ = slot_claim.fetchAnd(~(@as(u64, 1) << @intCast(index)), .acq_rel);
+}
+
+/// Publishes `runtime` in its reserved slot; returns its handle.
+fn publishSlot(index: usize, runtime: *Runtime) u64 {
+    const slot = &slots[index];
+    const generation = slot.state.load(.acquire) >> gen_shift;
+    slot.runtime.store(runtime, .release);
+    slot.state.store((generation << gen_shift) | occupied_bit, .release);
+    return handleOf(index, generation);
 }
 
 /// Starts closing `handle`: no new call enters, and this waits for the calls
@@ -1986,12 +2097,28 @@ export fn fx_runtime_create(cfg_ptr: ?*align(1) const Config, host_ptr: ?*align(
     if (!aligned(u64, out_address)) return FX_E_INVALID;
     const out_ptr: *u64 = @ptrFromInt(out_address);
     out_ptr.* = 0;
-    var initializing_io = false;
-    const status = hostCall(null, .{ cfg_ptr, host_ptr, host_ctx, out_ptr, &initializing_io }, createBody);
-    // A panic while starting the process-wide io leaves it failed for good.
-    if (status == FX_E_FAILED and initializing_io) io_state.store(3, .release);
+    var progress: CreateProgress = .{};
+    const status = hostCall(null, .{ cfg_ptr, host_ptr, host_ctx, out_ptr, &progress }, createBody);
+    if (status == FX_E_FAILED) {
+        // A panic unwound create. While starting the process-wide io, it
+        // leaves the io failed for good. After the slot was reserved, the
+        // reservation and the count go back; a runtime already made is
+        // abandoned (it is PANICKED, its threads park), and no handle names it.
+        if (progress.initializing_io) io_state.store(3, .release);
+        if (progress.slot) |index| if (!progress.published) {
+            releaseSlot(index);
+            _ = active_runtimes.fetchSub(1, .acq_rel);
+            out_ptr.* = 0;
+        };
+    }
     return status;
 }
+
+const CreateProgress = struct {
+    initializing_io: bool = false,
+    slot: ?usize = null,
+    published: bool = false,
+};
 
 fn createBody(_: ?*Runtime, args: anytype) Status {
     const cfg = readSized(Config, args[0], @sizeOf(Config)) catch |err| return sizedStatus(err);
@@ -1999,12 +2126,21 @@ fn createBody(_: ?*Runtime, args: anytype) Status {
     if (cfg.flags != 0) return FX_E_UNSUPPORTED;
     var host: Host = .{};
     if (args[1] != null) host = readSized(Host, args[1], @sizeOf(Host)) catch |err| return sizedStatus(err);
-    if (io_state.load(.acquire) != 2) args[4].* = true;
+    const progress: *CreateProgress = args[4];
+    if (io_state.load(.acquire) != 2) progress.initializing_io = true;
     const io_status = ensureIo();
-    args[4].* = false;
+    progress.initializing_io = false;
     if (io_status != FX_OK) return io_status;
     if (!claimRuntimeCount()) return FX_E_LIMIT;
+    // Slots whose generations ran out lower the limit.
+    const index = reserveSlot() orelse {
+        _ = active_runtimes.fetchSub(1, .acq_rel);
+        return FX_E_LIMIT;
+    };
+    progress.slot = index;
     const runtime = createRuntime(&cfg, host, args[2]) catch |err| {
+        progress.slot = null;
+        releaseSlot(index);
         _ = active_runtimes.fetchSub(1, .acq_rel);
         return switch (err) {
             error.Invalid => FX_E_INVALID,
@@ -2013,13 +2149,11 @@ fn createBody(_: ?*Runtime, args: anytype) Status {
             error.ReadyChannelFailed => FX_E_IO,
         };
     };
-    const handle = claimSlot(runtime) orelse {
-        // Slots whose generations ran out lower the limit.
-        stopHealthy(runtime);
-        _ = active_runtimes.fetchSub(1, .acq_rel);
-        return FX_E_LIMIT;
-    };
-    args[3].* = handle;
+    // From here a panic fails this runtime (it is abandoned, see the export).
+    tl_guard.?.runtime = runtime;
+    if (faultHit(&create_fault)) std.debug.panic("fault injected at {s}", .{@tagName(Fault.create)});
+    args[3].* = publishSlot(index, runtime);
+    progress.published = true;
     return FX_OK;
 }
 
@@ -2192,40 +2326,47 @@ fn createRuntime(cfg: *const Config, host: Host, host_ctx: ?*anyopaque) CreateEr
     return runtime;
 }
 
-/// Stops a runtime no handle names yet (create's last failure) and frees it.
-fn stopHealthy(runtime: *Runtime) void {
-    runtime.closing.store(true, .seq_cst);
-    runtime.events.mutex.lockUncancelable(io_mod.getIo());
-    runtime.events.closed = true;
-    runtime.events.space.broadcast(io_mod.getIo());
-    runtime.events.mutex.unlock(io_mod.getIo());
-    runtime.input.close();
-    runtime.fetch.shutdown();
-    runtime.deinit();
+export fn fx_runtime_destroy(handle: u64) callconv(.c) Status {
+    var progress: DestroyProgress = .{};
+    const status = hostCall(null, .{ handle, &progress }, destroyBody);
+    if (progress.runtime) |runtime| if (!progress.retired) {
+        // A panic unwound destroy after it began (Sol's 2a item 2): the
+        // runtime is PANICKED and abandoned, and its handle is retired all
+        // the same, once the callbacks already running have returned.
+        runtime.closing.store(true, .seq_cst);
+        runtime.waitCallbacks();
+        endClose(handle);
+        return FX_OK;
+    };
+    return status;
 }
 
-export fn fx_runtime_destroy(handle: u64) callconv(.c) Status {
-    return hostCall(null, .{handle}, destroyBody);
-}
+const DestroyProgress = struct {
+    runtime: ?*Runtime = null,
+    retired: bool = false,
+};
 
 fn destroyBody(_: ?*Runtime, args: anytype) Status {
     const handle: u64 = args[0];
+    const progress: *DestroyProgress = args[1];
     const runtime = beginClose(handle) orelse return FX_E_CLOSED;
-    // From here a panic on this thread still retires the handle: the guard
-    // records which runtime it serves.
+    progress.runtime = runtime;
+    // From here a panic on this thread fails this runtime, and the export
+    // still retires the handle.
     tl_guard.?.runtime = runtime;
     runtime.closing.store(true, .seq_cst);
+    runtime.fault(.destroy);
     // No callback starts after this; one already running finishes first.
     runtime.waitCallbacks();
     if (!runtime.panicked()) shutdown(runtime);
     if (runtime.panicked()) {
         // Abandoned: never joined, freed or closed (header, fx_runtime_destroy).
         runtime.waitCallbacks();
-        endClose(handle);
-        return FX_OK;
+    } else {
+        runtime.deinit();
     }
-    runtime.deinit();
     endClose(handle);
+    progress.retired = true;
     return FX_OK;
 }
 
@@ -2398,19 +2539,25 @@ fn promptBody(runtime: ?*Runtime, args: PromptArgs) Status {
         break :build true;
     };
     if (!built) return FX_E_OOM;
+    // TURN_START's room is had before the turn starts, so a started turn is
+    // always reported and FX_BUSY or FX_E_OOM start nothing. Lock order:
+    // `lock`, the event lock, the input lock.
+    const io = io_mod.getIo();
+    const queue = &self.events;
+    const got = hostLock(self, &queue.mutex);
+    if (got != .locked) return acquireStatus(got);
+    defer queue.mutex.unlock(io);
+    if (queue.closed) return FX_E_FAILED;
+    queue.events.ensureUnusedCapacity(alloc_c, 1) catch return FX_E_OOM;
+    queue.pending_bytes.ensureUnusedCapacity(alloc_c, id.len) catch return FX_E_OOM;
     const turn = self.nextRequest();
     status = self.sendRequest(.prompt, turn, "session/prompt", params.written());
     if (status != FX_OK) return status;
     self.turn = turn;
     // Queued before `lock` is released: the turn's first update waits for
     // `lock` to learn its turn, so TURN_START is always first.
-    status = self.queueEventHost(.{ .kind = .turn_start, .turn = turn }, .{ .text = id });
-    if (status != FX_OK) {
-        // The turn started but cannot be reported: the runtime fails, and
-        // FX_EVENT_EXITED ends it for the host.
-        self.failTransport("the core could not queue an event (out of memory)");
-        return FX_E_FAILED;
-    }
+    const was_empty = queue.appendLocked(.{ .kind = .turn_start, .turn = turn }, .{ .text = id }) catch unreachable;
+    if (was_empty) self.ready.notify();
     args.turn.* = turn;
     return FX_OK;
 }
@@ -2518,6 +2665,9 @@ export fn fx_turn_cancel(handle: u64, turn: u64) callconv(.c) Status {
     return hostCall(handle, .{turn}, cancelBody);
 }
 
+/// Every lock the cancel needs is taken before anything changes, so FX_BUSY
+/// and every error change nothing (Sol's 2a item 3). Lock order: `lock`,
+/// then the bridge lock, then the input lock.
 fn cancelBody(runtime: ?*Runtime, args: anytype) Status {
     const self = runtime.?;
     const turn: u64 = args[0];
@@ -2525,14 +2675,25 @@ fn cancelBody(runtime: ?*Runtime, args: anytype) Status {
     if (status != FX_OK) return status;
     defer unlock(self);
     if (turn == 0 or turn != self.turn or self.session_id == null) return FX_STALE;
+    // Cancelled already: nothing more to do.
+    if (self.cancelled_turn == turn) return FX_OK;
     const io = io_mod.getIo();
     var frame: std.Io.Writer.Allocating = .init(alloc_c);
     defer frame.deinit();
     frame.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":") catch return FX_E_OOM;
     jsonrpc.writeJsonStr(self.session_id.?, &frame.writer) catch return FX_E_OOM;
     frame.writer.writeAll("}}\n") catch return FX_E_OOM;
-    const sent = self.hostInput(frame.written(), .control);
+    const bridge = &self.fetch;
+    const got_fetch = hostLock(self, &bridge.mutex);
+    if (got_fetch != .locked) return acquireStatus(got_fetch);
+    defer bridge.mutex.unlock(io);
+    const got_input = hostLock(self, &self.input.mutex);
+    if (got_input != .locked) return acquireStatus(got_input);
+    const sent = self.inputLocked(frame.written(), .control);
+    self.input.mutex.unlock(io);
     if (sent != FX_OK) return sent;
+    // Applied: nothing below can fail.
+    self.cancelled_turn = turn;
     // The turn's tool calls get tool_cancel from their threads.
     var calls = self.calls.valueIterator();
     while (calls.next()) |record| if (record.*.turn == turn) {
@@ -2540,21 +2701,9 @@ fn cancelBody(runtime: ?*Runtime, args: anytype) Status {
     };
     self.calls_changed.broadcast(io);
     // The turn's fetch is retired now, even while the core waits for its
-    // response headers; the host sees RETIRED after the wake.
-    if (self.fetch_turn == turn) {
-        const got = hostLock(self, &self.fetch.mutex);
-        if (got != .locked) return acquireStatus(got);
-        const bridge = &self.fetch;
-        const decision = fetch_state.decide(bridge.phase, .cancel);
-        if (decision.action == .applied) {
-            bridge.last_consumed_handle = fetch_state.consumed_after(bridge.phase, bridge.last_consumed_handle, .cancel);
-            bridge.clearPendingRequest();
-            bridge.phase = decision.phase;
-            bridge.wake.broadcast(io);
-        }
-        bridge.mutex.unlock(io);
-        if (decision.action == .applied) self.ready.notify();
-    }
+    // response headers; the host sees RETIRED after the wake. One the core
+    // publishes later for this turn is published retired (fetchOpen).
+    if (self.fetch_owner == turn and retireFetchLocked(bridge)) self.ready.notify();
     return FX_OK;
 }
 
@@ -2627,33 +2776,38 @@ fn drainBody(runtime: ?*Runtime, args: DrainArgs) Status {
         },
     }
     defer queue.mutex.unlock(io);
-    // Whatever the previous drain handed out is released now.
-    queue.drained_bytes.clearRetainingCapacity();
-    queue.drained_names.clearRetainingCapacity();
-    queue.drained_name_strs.clearRetainingCapacity();
     const count = @min(args.cap, queue.events.items.len);
-    if (count > 0) {
+    if (count == 0) {
+        // An empty drain ends the previous drain's borrows too.
+        queue.drained_bytes.clearRetainingCapacity();
+        queue.drained_names.clearRetainingCapacity();
+        queue.drained_name_strs.clearRetainingCapacity();
+    } else {
         const everything = count == queue.events.items.len;
-        if (everything) {
-            std.mem.swap(std.ArrayList(u8), &queue.pending_bytes, &queue.drained_bytes);
-            std.mem.swap(std.ArrayList(Span), &queue.pending_names, &queue.drained_names);
-        } else {
+        // Everything that can fail comes first, in the spare storage.
+        queue.spare_bytes.clearRetainingCapacity();
+        queue.spare_names.clearRetainingCapacity();
+        queue.spare_name_strs.clearRetainingCapacity();
+        if (!everything) {
             // A partial drain copies what it hands out; the rest stays.
-            queue.drained_bytes.appendSlice(alloc_c, queue.pending_bytes.items) catch return FX_E_OOM;
-            queue.drained_names.appendSlice(alloc_c, queue.pending_names.items) catch return FX_E_OOM;
+            queue.spare_bytes.appendSlice(alloc_c, queue.pending_bytes.items) catch return FX_E_OOM;
+            queue.spare_names.appendSlice(alloc_c, queue.pending_names.items) catch return FX_E_OOM;
         }
         var name_total: usize = 0;
         for (queue.events.items[0..count]) |event| name_total += event.name_count;
-        queue.drained_name_strs.ensureTotalCapacity(alloc_c, name_total) catch return FX_E_OOM;
-        const arena = queue.drained_bytes.items;
+        queue.spare_name_strs.ensureTotalCapacity(alloc_c, name_total) catch return FX_E_OOM;
+        // A whole drain hands out the pending arena itself (no copy); its
+        // buffers keep their addresses when the lists are swapped below.
+        const arena = if (everything) queue.pending_bytes.items else queue.spare_bytes.items;
+        const spans = if (everything) queue.pending_names.items else queue.spare_names.items;
         for (queue.events.items[0..count], 0..) |event, index| {
             var names: ?[*]const Str = null;
             if (event.name_count > 0) {
-                const first = queue.drained_name_strs.items.len;
-                for (queue.drained_names.items[event.names_start..][0..event.name_count]) |span| {
-                    queue.drained_name_strs.appendAssumeCapacity(EventQueue.spanStr(arena, span));
+                const first = queue.spare_name_strs.items.len;
+                for (spans[event.names_start..][0..event.name_count]) |span| {
+                    queue.spare_name_strs.appendAssumeCapacity(EventQueue.spanStr(arena, span));
                 }
-                names = queue.drained_name_strs.items[first..].ptr;
+                names = queue.spare_name_strs.items[first..].ptr;
             }
             writeEvent(args, index, .{
                 .kind = @intFromEnum(event.kind),
@@ -2671,13 +2825,21 @@ fn drainBody(runtime: ?*Runtime, args: DrainArgs) Status {
                 .usage = event.usage,
             });
         }
+        // Applied: the previous drain's borrows end here.
         if (everything) {
+            std.mem.swap(std.ArrayList(u8), &queue.pending_bytes, &queue.drained_bytes);
+            std.mem.swap(std.ArrayList(Span), &queue.pending_names, &queue.drained_names);
+            queue.pending_bytes.clearRetainingCapacity();
+            queue.pending_names.clearRetainingCapacity();
             queue.events.clearRetainingCapacity();
         } else {
+            std.mem.swap(std.ArrayList(u8), &queue.spare_bytes, &queue.drained_bytes);
+            std.mem.swap(std.ArrayList(Span), &queue.spare_names, &queue.drained_names);
             const rest = queue.events.items.len - count;
             std.mem.copyForwards(QueuedEvent, queue.events.items[0..rest], queue.events.items[count..]);
             queue.events.items.len = rest;
         }
+        std.mem.swap(std.ArrayList(Str), &queue.spare_name_strs, &queue.drained_name_strs);
         queue.space.broadcast(io);
     }
     var written = count;
@@ -2768,21 +2930,22 @@ fn fetchTakeBody(runtime: ?*Runtime, args: anytype) Status {
     const self = runtime.?;
     const out: *FetchRequest = args[0];
     if (!self.running()) return FX_E_FAILED;
-    // The turn the fetch serves: recorded by the core before it published it.
-    const got_lock = hostLock(self, &self.lock);
-    if (got_lock != .locked) return acquireStatus(got_lock);
-    const turn = self.fetch_turn;
-    unlock(self);
     const io = io_mod.getIo();
     const bridge = &self.fetch;
     const got = hostLock(self, &bridge.mutex);
     if (got != .locked) return acquireStatus(got);
     defer bridge.mutex.unlock(io);
     const decision = fetch_state.decide(bridge.phase, .take_request);
-    // Every FX_OK or FX_EMPTY ends the previous take's borrows.
-    _ = self.taken.reset(.retain_capacity);
-    if (decision.action != .applied) return FX_EMPTY;
-    const arena = self.taken.allocator();
+    // Every FX_OK or FX_EMPTY ends the previous take's borrows; nothing else
+    // does (Sol's 2a item 5).
+    if (decision.action != .applied) {
+        _ = self.taken.reset(.retain_capacity);
+        return FX_EMPTY;
+    }
+    // The turn the fetch serves, published with it under this lock.
+    const turn = self.fetch_owner;
+    _ = self.taking.reset(.retain_capacity);
+    const arena = self.taking.allocator();
     const Metadata = struct {
         handle: fetch_state.Handle,
         method: []const u8,
@@ -2812,6 +2975,9 @@ fn fetchTakeBody(runtime: ?*Runtime, args: anytype) Status {
     out.body = Bytes.of(body);
     bridge.clearPendingRequest();
     bridge.phase = decision.phase;
+    // The take succeeded: the previous one's borrows end now.
+    std.mem.swap(std.heap.ArenaAllocator, &self.taken, &self.taking);
+    _ = self.taking.reset(.retain_capacity);
     return FX_OK;
 }
 
@@ -2908,8 +3074,13 @@ export fn fx_fetch_disposition_get(handle: u64, fetch: u64) callconv(.c) i32 {
             const self = runtime.?;
             if (!self.running()) return 0;
             const id = fetchHandle(a[0]) orelse return 0;
-            const got = hostLock(self, &self.fetch.mutex);
-            if (got != .locked) return 0;
+            switch (hostLock(self, &self.fetch.mutex)) {
+                .locked => {},
+                .failed => return 0,
+                // Never RETIRED for contention: the host keeps the request
+                // and asks again (Sol's 2a item 3).
+                .busy => return FX_FETCH_BUSY,
+            }
             defer self.fetch.mutex.unlock(io_mod.getIo());
             return @intFromEnum(fetch_state.disposition(self.fetch.phase, self.fetch.last_consumed_handle, id));
         }
@@ -2926,17 +3097,28 @@ export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
         fn body(runtime: ?*Runtime, a: anytype) Status {
             const self = runtime.?;
             const append_id: u64 = a[0];
+            if (self.faultHostTransport()) return FX_E_FAILED;
             const status = lockLive(self);
             if (status != FX_OK) return status;
             defer unlock(self);
             if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
             if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
+            // The flushes it releases are answered in one write that either
+            // lands whole or not at all; only then is the ack applied (Sol's
+            // 2a item 5).
+            var replies: std.Io.Writer.Allocating = .init(alloc_c);
+            defer replies.deinit();
+            for (self.flushes.items) |flush| if (flush.upto <= append_id) {
+                writeResult(&replies.writer, flush.rpc_id, "{}") catch return FX_E_OOM;
+            };
+            if (replies.written().len > 0) {
+                const sent = self.hostInput(replies.written(), .control);
+                if (sent != FX_OK) return sent;
+            }
             self.journal_acked = append_id;
             var index: usize = 0;
             while (index < self.flushes.items.len) {
-                const flush = self.flushes.items[index];
-                if (flush.upto <= append_id) {
-                    self.mustRespond(self.respond(flush.rpc_id, "{}", true));
+                if (self.flushes.items[index].upto <= append_id) {
                     _ = self.flushes.orderedRemove(index);
                 } else index += 1;
             }
@@ -2958,12 +3140,39 @@ export fn fx_journal_fail(handle: u64, append: u64, reason: Str, fenced: bool) c
             if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
             if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
             const message = if (a[2]) "another writer holds this session's journal" else text;
-            self.journal_failed = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch return FX_E_OOM;
-            for (self.flushes.items) |flush| self.mustRespond(self.respondError(flush.rpc_id, self.journal_failed.?, true));
+            const failure = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch return FX_E_OOM;
+            // As fx_journal_ack: the waiting flushes' answers land whole
+            // before the failure is recorded.
+            var replies: std.Io.Writer.Allocating = .init(alloc_c);
+            defer replies.deinit();
+            for (self.flushes.items) |flush| writeError(&replies.writer, flush.rpc_id, failure) catch {
+                alloc_c.free(failure);
+                return FX_E_OOM;
+            };
+            if (replies.written().len > 0) {
+                const sent = self.hostInput(replies.written(), .control);
+                if (sent != FX_OK) {
+                    alloc_c.free(failure);
+                    return sent;
+                }
+            }
+            self.journal_failed = failure;
             self.flushes.clearRetainingCapacity();
             return FX_OK;
         }
     }.body);
+}
+
+fn writeResult(w: *std.Io.Writer, rpc_id: i64, result_json: []const u8) !void {
+    try w.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":", .{rpc_id});
+    try w.writeAll(result_json);
+    try w.writeAll("}\n");
+}
+
+fn writeError(w: *std.Io.Writer, rpc_id: i64, message: []const u8) !void {
+    try w.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"error\":{{\"code\":-32000,\"message\":", .{rpc_id});
+    try jsonrpc.writeJsonStr(message, w);
+    try w.writeAll("}}\n");
 }
 
 export fn fx_hook_answer(handle: u64, question: u64, kind: i32, text: Str) callconv(.c) Status {
@@ -2986,6 +3195,13 @@ export fn fx_hook_answer(handle: u64, question: u64, kind: i32, text: Str) callc
 
 export fn fx_test_arm_fault(handle: u64, point: u32, skip: u32) callconv(.c) Status {
     if (point == 0 or point >= fault_count) return FX_E_INVALID;
+    // FX_FAULT_CREATE is process-wide (handle 0); every other point is a
+    // runtime's.
+    if (point == @intFromEnum(Fault.create)) {
+        if (handle != 0) return FX_E_INVALID;
+        create_fault.store(@intCast(skip), .release);
+        return FX_OK;
+    }
     return hostCall(handle, .{ point, skip }, struct {
         fn body(runtime: ?*Runtime, a: anytype) Status {
             runtime.?.faults[a[0]].store(@intCast(a[1]), .release);

@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-STEPS): the step
+// limit's exhaustion branch marks its finalization with a typed cause.
 const std = @import("std");
 const sort_utils = @import("../../shared/sort_utils.zig");
 const toolbox = @import("../../tooling/toolbox.zig");
@@ -13592,6 +13594,8 @@ fn processQueuedPromptLoop(
         .last_tool_call_name = last_tool_call_name,
         .last_tool_call_id = last_tool_call_id,
     });
+    // Powermove (P-STEPS): the cause travels typed, not in the notice text.
+    finalization.end_cause = .step_limit;
     try finishFailedTurnWithNotice(
         deps,
         finalization,

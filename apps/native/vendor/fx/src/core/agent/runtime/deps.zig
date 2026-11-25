@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-STEPS): a turn's
+// typed end cause reaches the embedder through note_turn_end_cause.
 const std = @import("std");
 const observation = @import("observation.zig");
 const cache_warmer = @import("cache_warmer.zig");
@@ -197,6 +199,10 @@ pub const RefreshedGatewayCredential = struct {
     gateway_team_label: ?[]u8 = null,
 };
 
+/// Why a turn ended, when finalization's outcome alone does not say
+/// (Powermove, P-STEPS).
+pub const TurnEndCause = enum { step_limit };
+
 pub const AgentRuntimeDeps = struct {
     /// The steps of `start_workspace_capture`.
     pub const WorkspaceCaptureStep = enum { begin, capture, settle };
@@ -240,6 +246,9 @@ pub const AgentRuntimeDeps = struct {
     snapshot_root_permission_mode: ?*const fn (ctx: *anyopaque) PermissionMode = null,
     tool_activity_recorder: ?ToolActivityRecorder = null,
     finalize_turn: *const fn (ctx: *anyopaque, turn_id: u64, outcome: types.TurnPresentationOutcome, disposition: ?types.ProviderCompletionDisposition) anyerror!void = acknowledgePromptFinalization,
+    /// Powermove (P-STEPS): told the turn's typed end cause, if it has one,
+    /// right before finalize_turn.
+    note_turn_end_cause: ?*const fn (ctx: *anyopaque, turn_id: u64, cause: TurnEndCause) void = null,
     /// Classifies one observed steering boundary. Continued text is arena-owned
     /// non-authoritative context; handoff leaves the prompt host-owned.
     take_steering_boundary: ?*const fn (
