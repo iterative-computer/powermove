@@ -194,11 +194,11 @@ impl Model {
             Gate::Done => {
                 let r = self.result.clone().unwrap_or_default();
                 let title = if r.brought_in == 0 && r.could_not_load > 0 {
-                    "Your Extensions Couldn’t Load"
+                    "Your extensions couldn’t load"
                 } else if r.brought_in == 0 {
-                    "Nothing New to Bring In"
+                    "Nothing new to bring in"
                 } else {
-                    "Your Extensions Are In"
+                    "Your extensions are in"
                 };
                 let lead = match (r.brought_in, r.could_not_load) {
                     (0, 0) => "They were already in Powermove.".to_owned(),
@@ -340,9 +340,9 @@ impl Model {
         if items.is_empty() {
             None
         } else if items.iter().any(|i| i.tone == Tone::Warning) {
-            Some("Needs a Look")
+            Some("Needs a look")
         } else {
-            Some("Not Brought In")
+            Some("Not brought in")
         }
     }
     /// Everything that comes in (the offer) or came in (the summary), by
@@ -371,9 +371,9 @@ impl Model {
         names.sort_by_key(|n| n.to_lowercase());
         Some((
             if self.gate == Gate::Offer {
-                "To Bring In"
+                "To bring in"
             } else {
-                "Brought In"
+                "Brought in"
             },
             names,
         ))

@@ -255,6 +255,9 @@ pub struct Flow {
     /// The agent step's sign-ins, by provider: what each row says in place
     /// of its Connect button.
     accounts: std::collections::BTreeMap<String, String>,
+    /// A development review shows one frame and does nothing else
+    /// (`PM_NATIVE_REVIEW_FRAME`).
+    review: bool,
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -268,6 +271,7 @@ impl Flow {
             onboarding: None,
             choices: Choices::default(),
             accounts: Default::default(),
+            review: false,
             details: None,
             low_disk: None,
             report_unread: false,
@@ -282,6 +286,15 @@ impl Flow {
     }
     /// Where the launch starts.
     pub fn start(&mut self) -> Vec<Effect> {
+        // Development builds: one first-launch frame on its own, for review
+        // (`PM_NATIVE_REVIEW_FRAME=consent|ready|low-disk|original-running|
+        // original-elsewhere|denied|library-failed`); nothing runs.
+        #[cfg(debug_assertions)]
+        if let Ok(name) = std::env::var("PM_NATIVE_REVIEW_FRAME")
+            && self.show_for_review(&name)
+        {
+            return vec![];
+        }
         if self.plan.launch == Launch::Migrate {
             return vec![Effect::Run(Run::Ordinary)];
         }
@@ -318,11 +331,52 @@ impl Flow {
     }
     /// Whether this launch has a Welcome window to show.
     pub fn visible(&self) -> bool {
-        self.plan.launch == Launch::Migrate
+        self.review
+            || self.plan.launch == Launch::Migrate
             || self.onboarding.is_some()
             || self.extensions.is_some()
             || self.recent.is_some()
             || matches!(self.entry, Entry::Failed { .. })
+    }
+    /// Puts the flow on the named frame for review, with plausible synthetic
+    /// numbers. False for a name it doesn't know.
+    #[cfg(debug_assertions)]
+    fn show_for_review(&mut self, name: &str) -> bool {
+        use pm_first_launch::surfaces::migration::Summary;
+        let summary = |projects| Summary {
+            projects,
+            history_refusals: 0,
+            missing_projects: 0,
+            blocked_owners: 0,
+            proxy_only: 0,
+            already_offline: 0,
+            not_reached: 0,
+        };
+        match name {
+            "consent" => self.model.gate = Gate::Consent,
+            "denied" => self.model.gate = Gate::Denied,
+            "ready" => {
+                self.model.gate = Gate::Complete;
+                self.model.summary = Some(summary(4));
+            }
+            "low-disk" => {
+                self.model.gate = Gate::LowDisk;
+                self.low_disk = Some(("2.4 GB".into(), "1.1 GB".into()));
+            }
+            "original-running" => self.model.gate = Gate::WaitingLocal,
+            "original-elsewhere" => self.model.gate = Gate::WaitingUnknown,
+            "library-failed" => {
+                self.entry = Entry::Failed {
+                    details: "The library is in use by another copy of Powermove.".into(),
+                }
+            }
+            _ => return false,
+        }
+        self.review = true;
+        // The window outside the stage: no intro, no steps.
+        self.plan.onboard = false;
+        self.onboarding = None;
+        true
     }
     fn after_migration(&mut self) -> Vec<Effect> {
         // The copy brought the original app's onboarding marker; the steps
@@ -653,6 +707,11 @@ impl Flow {
         vec![]
     }
     pub fn action(&mut self, id: &str) -> Vec<Effect> {
+        // A reviewed frame only quits: its buttons never copy, ask macOS or
+        // touch the Keychain.
+        if self.review {
+            return if id == "quit" { vec![Effect::Quit] } else { vec![] };
+        }
         self.error = None;
         match (&self.entry, id) {
             (Entry::Waiting, _) => {}
@@ -901,7 +960,8 @@ pub(crate) fn step_frame(
                 rows.push(Choice {
                     mark: Some("waveform".into()),
                     pill: (!queued).then(|| "Download".into()),
-                    status: queued.then(|| "Downloads once you’re in".into()),
+                    // Short, so the model's name keeps its line.
+                    status: queued.then(|| "Queued".into()),
                     ..row(
                         &model.id,
                         &model.name,
@@ -1006,6 +1066,7 @@ fn library_failed_frame(details: &str) -> Frame {
         title: "Your library couldn’t open".into(),
         line: "Nothing was changed. If Powermove is open in another window or on another account, quit it, then try again.".into(),
         details: Some(details.to_owned()),
+        preview: Some("home".into()),
         buttons: vec![
             Button::new("quit", "Quit Powermove").leading(),
             Button::new("try_again", "Try Again"),
@@ -1036,6 +1097,7 @@ fn recent_frame(recent: &Recent) -> Frame {
                 }),
                 spinner: true,
                 buttons: vec![quit],
+                preview: Some("home".into()),
                 ..Frame::default()
             }
         }
@@ -1046,7 +1108,8 @@ fn recent_frame(recent: &Recent) -> Frame {
             status: Some("Waiting for the original app to quit…".into()),
             spinner: true,
             buttons: vec![quit, Button::new("open_native", "Open Without It")],
-            ..Frame::default()
+            preview: Some("home".into()),
+                ..Frame::default()
         },
         Recent::Failed {
             reason,
@@ -1066,7 +1129,8 @@ fn recent_frame(recent: &Recent) -> Frame {
             details: Some(details.clone()),
             buttons: vec![quit, Button::new("open_native", "Open Powermove")],
             default: Some("open_native".into()),
-            ..Frame::default()
+            preview: Some("home".into()),
+                ..Frame::default()
         },
     }
 }
@@ -1861,7 +1925,7 @@ mod step_frame_tests {
         choices.speech = row.id.clone();
         let frame = step_frame(Onboard::Transcription, &choices, &none, None);
         assert!(frame.choices[0].pill.is_none());
-        assert!(frame.choices[0].status.as_deref().is_some_and(|s| s.starts_with("Downloads once")));
+        assert_eq!(frame.choices[0].status.as_deref(), Some("Queued"));
     }
 
     /// Every step's title is sentence case without a full stop.

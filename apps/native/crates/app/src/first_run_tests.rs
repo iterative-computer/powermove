@@ -1014,7 +1014,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
     assert!(saw_progress);
     let frame = flow.frame();
     assert_eq!(frame.surface, "N006");
-    titled(&frame, "Your Extensions Are In");
+    titled(&frame, "Your extensions are in");
     assert!(
         frame
             .line
@@ -1036,7 +1036,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
         ]
     );
     // Exceptions first and in full, by display name, with their reasons.
-    assert_eq!(frame.rows_title.as_deref(), Some("Needs a Look"));
+    assert_eq!(frame.rows_title.as_deref(), Some("Needs a look"));
     assert_eq!(frame.rows[0].text, "Broken Glow");
     let reason = frame.rows[0].detail.as_deref().unwrap();
     assert!(
@@ -1271,4 +1271,40 @@ fn pm348_refused_worker_updates_without_a_window() {
     assert!(!flow.frame().spinner);
     assert!(flow.frame().details.is_some());
     assert!(!isolated.exists());
+}
+#[test]
+fn each_review_frame_shows_on_its_own_and_its_buttons_do_nothing() {
+    let (_temp, home) = home();
+    for (name, title) in [
+        ("consent", "Keep your sign-ins"),
+        ("denied", "Keychain access wasn’t allowed"),
+        ("ready", "Your library is ready"),
+        ("low-disk", "Not enough space"),
+        ("original-running", "Quit the original app to continue"),
+        ("original-elsewhere", "The original app might still be open"),
+        ("library-failed", "Your library couldn’t open"),
+    ] {
+        let mut flow = Flow::new(plan(&home));
+        assert!(flow.show_for_review(name), "{name}");
+        assert!(flow.visible(), "{name}");
+        let frame = flow.frame();
+        titled(&frame, title);
+        // Its own window, not the stage; nothing copies or asks macOS.
+        assert!(!flow.plan.onboard, "{name}");
+        for button in &frame.buttons {
+            let effects = flow.action(&button.id);
+            assert!(
+                effects.is_empty() || effects == vec![Effect::Quit],
+                "{name}: {} did {effects:?}",
+                button.id
+            );
+        }
+    }
+    let mut flow = Flow::new(plan(&home));
+    assert!(!flow.show_for_review("nothing"));
+    // A ready library without review rows offers only to open it.
+    assert!(flow.show_for_review("ready"));
+    let frame = flow.frame();
+    assert!(frame.rows.is_empty());
+    assert_eq!(frame.default_action(), Some("open_native"));
 }

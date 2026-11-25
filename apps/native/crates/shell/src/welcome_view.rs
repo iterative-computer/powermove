@@ -32,6 +32,9 @@ pub struct WelcomeView {
     /// The card on the first-run stage: sized to its content on the
     /// stage's room, its buttons AppKit's.
     pub stage: bool,
+    /// The two-column window outside the stage (a later launch's extension
+    /// offer, recent work, a failure): it paints its own ground.
+    pub ground: bool,
     /// The stage card's AppKit buttons, by id and label.
     natives: std::collections::HashMap<(String, String), Entity<NativeControl>>,
     /// While a wave carries the card: the snapshot its buttons paint.
@@ -57,6 +60,7 @@ impl WelcomeView {
             body_extent: None,
             clock: None,
             stage: false,
+            ground: false,
             natives: Default::default(),
             snapshot: None,
             snapshots: 0,
@@ -495,7 +499,10 @@ impl WelcomeView {
                         .flex_col()
                         .gap(px(2.))
                         .child(
+                            // One line: a long name gives way to the row's
+                            // status or pill, never wraps under it.
                             div()
+                                .truncate()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(c.text))
@@ -506,6 +513,7 @@ impl WelcomeView {
                 .children(choice.status.clone().map(|status| {
                     div()
                         .flex_none()
+                        .whitespace_nowrap()
                         .text_size(px(11.))
                         .text_color(rgb(c.secondary))
                         .child(status)
@@ -635,7 +643,32 @@ impl WelcomeView {
             controls = controls.child(row.child(status.clone()));
         }
         if !frame.stats.is_empty() {
-            controls = controls.child(self.stats(&kit));
+            // One quiet line ("38 brought in · 1 couldn’t load"): the column
+            // keeps its room for the list and the actions.
+            let line = frame
+                .stats
+                .iter()
+                .map(|stat| {
+                    let mut label = stat.label.clone();
+                    if let Some(first) = label.get(..1)
+                        && !label.starts_with("Powermove")
+                    {
+                        label.replace_range(..1, &first.to_lowercase());
+                    }
+                    format!("{} {label}", stat.value)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            controls = controls.child(
+                div()
+                    .id("welcome-stats")
+                    .role(Role::Label)
+                    .aria_label(line.clone())
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(rgb(c.secondary))
+                    .child(line),
+            );
         }
         if !frame.steps.is_empty() {
             controls = controls.child(self.steps(&kit, sliding.then(|| self.time())));
@@ -802,6 +835,7 @@ impl WelcomeView {
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .when(self.ground, |d| d.child(stage_ground()))
             .child(left)
             .child(right)
     }
@@ -1485,6 +1519,7 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
     let bytes: &'static [u8] = match id {
         "welcome" => include_bytes!("../assets/onboarding/welcome.png"),
         "home" => include_bytes!("../assets/onboarding/home.png"),
+        "effects" => include_bytes!("../assets/onboarding/effects.png"),
         "workspace" => include_bytes!("../assets/onboarding/workspace.png"),
         "timeline-layers" => include_bytes!("../assets/onboarding/timeline-layers.png"),
         "timeline-tracks" => include_bytes!("../assets/onboarding/timeline-tracks.png"),
@@ -1675,6 +1710,11 @@ pub fn open_welcome_window(
         ),
         cx,
     );
+    // The same two-column window as the first-run steps: dark whatever the
+    // system's appearance (its left half is the stage's), with the
+    // person's accessibility settings.
+    let dark = |accessibility| Tokens::new(pm_design::Scheme::Dark, accessibility);
+    let tokens = dark(tokens.accessibility);
     cx.open_window(
         WindowOptions::new()
             .window_bounds(Some(WindowBounds::Windowed(bounds)))
@@ -1685,8 +1725,13 @@ pub fn open_welcome_window(
             }))
             .is_resizable(false)
             .is_minimizable(false),
-        |window, cx| {
-            let view = cx.new(|cx| WelcomeView::new(tokens, frame, on_action, cx));
+        move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = WelcomeView::new(tokens, frame, on_action, cx);
+                view.stage = true;
+                view.ground = true;
+                view
+            });
             window.on_window_should_close(cx, move |_, cx| {
                 if quits {
                     cx.quit();
@@ -1695,8 +1740,8 @@ pub fn open_welcome_window(
             });
             view.update(cx, |view, cx| {
                 view.hold_focus(window, cx);
-                cx.observe_window_appearance(window, |v, _, cx| {
-                    v.tokens = crate::macos::tokens();
+                cx.observe_window_appearance(window, move |v, _, cx| {
+                    v.tokens = dark(crate::macos::tokens().accessibility);
                     cx.notify();
                 })
                 .detach();
