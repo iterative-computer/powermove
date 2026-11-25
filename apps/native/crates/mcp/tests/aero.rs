@@ -2200,7 +2200,7 @@ fn an_edit_in_a_closed_composition_is_checked_there() {
     let bodies = bodies.lock().unwrap();
     // Refused for the blank frames it makes in "pre" (the open composition
     // is unchanged). Whether the refused write is taken back in a
-    // composition the editor doesn't show is the kernel's abort: PM-731.
+    // composition the editor doesn't show is the kernel's abort: PM-734.
     assert!(bodies[1].contains("Project check failed"), "{}", bodies[1]);
     assert!(
         bodies[1].contains("newly blank span totaling 4s"),
