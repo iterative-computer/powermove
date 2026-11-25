@@ -50,6 +50,30 @@ impl<K: Copy + Eq + Hash> Hovers<K> {
             }
         }
     }
+    /// As [`Self::hover`], at once: a hover that a scroll moved (AppKit
+    /// moves no hover while a view scrolls; the view's next full draw shows
+    /// where it is, with no wash animating every frame meanwhile).
+    pub fn set(&mut self, key: K, hovered: bool) {
+        if hovered {
+            if let Some(previous) = self.current.replace(key).filter(|p| *p != key) {
+                self.washes.remove(&previous);
+            }
+            self.washes.insert(key, Animated::unit(1.));
+        } else {
+            if self.current == Some(key) {
+                self.current = None;
+            }
+            self.washes.remove(&key);
+        }
+    }
+    /// Every wash where it is heading, at once (a scroll began: no wash
+    /// animates while a view scrolls, and none is left fading over it).
+    pub fn finish(&mut self) {
+        self.washes.retain(|_, w| w.target[0] > 0.);
+        for w in self.washes.values_mut() {
+            *w = Animated::unit(w.target[0]);
+        }
+    }
     /// Wash amount, 0–1.
     pub fn amount(&self, key: K) -> f32 {
         self.washes.get(&key).map_or(0., |w| w.get().clamp(0., 1.))
@@ -220,5 +244,22 @@ mod tests {
         m.presence(7, false, &t);
         settle(&mut m, 0.4);
         assert!(m.presence(7, false, &t) < 0.01);
+    }
+    /// PM-732: while a view scrolls its washes do not animate: a scroll
+    /// finishes them where they head, and a hover it moves is set at once.
+    #[test]
+    fn a_scroll_leaves_no_wash_animating() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let mut h = Hovers::<u32>::default();
+        h.hover(1, true, &t);
+        h.step(0.02);
+        h.hover(2, true, &t);
+        assert!(h.step(0.01), "a wash in, another fading out");
+        h.finish();
+        assert!(!h.step(0.01), "nothing moves after the scroll began");
+        assert_eq!((h.amount(1), h.amount(2)), (0., 1.));
+        h.set(3, true);
+        assert!(!h.step(0.01), "a hover the scroll moved is set at once");
+        assert_eq!((h.amount(2), h.amount(3)), (0., 1.));
     }
 }

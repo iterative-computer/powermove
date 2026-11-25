@@ -300,6 +300,10 @@ export function EffectControls(props: PanelProps) {
               rowCount: p.count,
               effectCount: p.effectCount,
               focus: p.focus,
+              // Embedded in Properties, whose content scrolls: the list is
+              // no scroller of its own (a nested one scrolled a few points
+              // by itself and drew Properties again on every step, PM-732).
+              ...(props.embedded ? { scrollOwner: "parent" } : {}),
             }}
             onFocus={() => setKeyboard(props.keyboardFocus === true)}
             onPointerDown={() => setKeyboard(false)}

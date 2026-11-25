@@ -1090,8 +1090,13 @@ fn compile(
         style: compiled.sheet,
         hidden,
         // The native timeline scrolls its outline; a nested scroller would double it.
+        // `scrollOwner` "child" (a virtual list inside scrolls) or "parent" (it
+        // sits in a scroller of its own panel: Properties' Effects, PM-732).
         scroll_y: meta.and_then(|m| m.get("nativeFirstRow")).is_none()
-            && meta.and_then(|m| m.get("scrollOwner")).and_then(Value::as_str) != Some("child")
+            && !matches!(
+                meta.and_then(|m| m.get("scrollOwner")).and_then(Value::as_str),
+                Some("child" | "parent")
+            )
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
