@@ -23,7 +23,9 @@
  *    with each other and with WORKER calls. fx_host callbacks run on
  *    core-owned threads (the runtime's thread or one of its prompt or tool
  *    workers), never on a host thread, and never while a call into this API
- *    is on that thread's stack; a callback must not call this API.
+ *    is on that thread's stack. A callback must not call this API, with two
+ *    exceptions: tool_call may answer its own call with fx_tool_result, and
+ *    hook its own question with fx_hook_answer, before it returns.
  *
  * 2. Liveness. No function waits for the core to do work, except
  *    fx_runtime_destroy (below). A function may wait for a lock the core
@@ -61,9 +63,9 @@
  * 5. Outputs. Every out pointer must be non-NULL and aligned for its type,
  *    or the call returns FX_E_INVALID and writes nothing. Otherwise every
  *    out scalar (handle, request, turn, count) is written on every return:
- *    the value on FX_OK, 0 on any other result. An out struct is written in
- *    full (up to its struct_size) on FX_OK and zeroed (up to its struct_size)
- *    on any other result.
+ *    the value on FX_OK, 0 on any other result. An out struct's struct_size
+ *    is the host's and is never written: the core writes its bytes from 4 up
+ *    to struct_size, in full on FX_OK and zeroed on any other result.
  *
  * 6. Sizes and growth (ABI evolution). Structs the host passes in begin with
  *    uint32_t struct_size, set to sizeof() as the host compiled them. The
@@ -88,27 +90,50 @@
  *    keeps a host pointer. fx_tool_result copies its text exactly once.
  *
  * 8. Borrows the core hands out. A pointer the core hands out stays valid
- *    for the window each function or callback states, and on a runtime that
- *    failed or panicked for as long as the process lives (its memory is
- *    abandoned, never freed). The host never frees one. Reading a borrowed
- *    pointer on another thread is allowed if the host orders that read
- *    before the call that ends the window (the call happens-after the read).
+ *    for the window each function or callback states. The host never frees
+ *    one. Reading a borrowed pointer on another thread is allowed if the host
+ *    orders that read before the call that ends the window (the call
+ *    happens-after the read). On a RUNNING, EXITED or FAILED runtime every
+ *    window ends at fx_runtime_destroy at the latest, which frees the memory.
+ *    On a PANICKED runtime (one that panicked before or during destroy) the
+ *    memory is abandoned, never freed: a window that only destroy would end
+ *    (a lease, the runtime info message, the last drain's or take's
+ *    borrows) stays open for as long as the process lives. A window that a
+ *    later call ends (the next fx_events_drain or fx_fetch_take returning
+ *    FX_OK) still ends then.
  *
- * 9. Leases. A tool call or hook question hands the host borrowed input that
- *    stays valid, from any thread, until the host answers it: tool calls with
- *    fx_tool_result, hook questions with fx_hook_answer. Answering ends the
- *    lease: the host must not read that input once it has made the call. The
- *    core waits for every lease to be answered, even a cancelled one; only
- *    fx_runtime_destroy ends leases without answers (rule 10). Each lease is
- *    answered exactly once: a second answer is FX_STALE.
+ * 9. Leases and callback windows. A tool call or hook question hands the
+ *    host borrowed input with two windows:
+ *    - the callback window: the struct and all its strings are valid on the
+ *      callback's thread until the callback returns, even if the host answers
+ *      inside it (rule 1);
+ *    - the lease: the same struct and strings are valid on any thread from
+ *      the callback's start until the host's answer consumes the lease
+ *      (tool calls: fx_tool_result; hook questions: fx_hook_answer). The host
+ *      must not read them once the consuming call has returned, except
+ *      inside a callback window that is still open.
+ *    Which outcomes consume a lease: FX_OK and, for fx_tool_result,
+ *    FX_E_TOO_LARGE. Every other outcome leaves it open and its input valid:
+ *    FX_STALE (it was consumed before), FX_BUSY, FX_E_OOM (retry),
+ *    FX_E_INVALID, FX_E_UNSUPPORTED (answer again, differently), FX_E_FAILED
+ *    (the runtime stopped: nothing can answer it; on EXITED or FAILED the
+ *    lease ends at fx_runtime_destroy, on PANICKED never: rule 8) and
+ *    FX_E_CLOSED (destroyed: rule 10). The core waits for every lease to be
+ *    consumed, a cancelled one included; only fx_runtime_destroy ends leases
+ *    without answers. Each lease is consumed exactly once.
  *
  * 10. Teardown. Before calling fx_runtime_destroy the host must: unregister
  *    the ready fd from every poller; stop every thread that reads a borrowed
  *    pointer of this runtime (lease inputs, events, the fetch request, the
- *    runtime info message); and not call it from a callback. host_ctx and
- *    the callback code must stay valid until fx_runtime_destroy has
- *    returned. No callback runs after it returns, on a healthy or a failed
- *    runtime.
+ *    runtime info message), unless the runtime is PANICKED (rule 8); and not
+ *    call it from a callback. host_ctx and the callback code must stay valid
+ *    until fx_runtime_destroy has returned. No callback runs after it
+ *    returns, on a healthy, stopped or panicked runtime, nor after a destroy
+ *    a panic cut short. What survives a destroy of a PANICKED runtime: its
+ *    memory (every open borrow stays readable, rule 8) and its ready fd (left
+ *    open, never closed, so no late wake reaches a reused descriptor; the
+ *    host must not close it either). Nothing else: the handle is retired, and
+ *    the runtime's parked threads never call back and never touch host_ctx.
  *
  * 11. Requests and turns: acceptance and completion. A function that starts
  *    work in the core (fx_session_open, fx_session_stage_images,
@@ -134,16 +159,44 @@
  *    PANICKED the same way and returns FX_E_FAILED from that call: the host
  *    thread is never parked. Other runtimes are unaffected. A panicked
  *    runtime is never joined or freed; fx_runtime_destroy retires its handle.
+ *    A panic inside fx_runtime_create issues no handle (FX_E_FAILED, *out 0);
+ *    one inside fx_runtime_destroy still retires the handle (FX_OK). A
+ *    failure the C entry publishes (FAILED) or a panic (PANICKED) is visible
+ *    to fx_runtime_info_get and wakes the ready fd before the core takes any
+ *    lock, so no host call waits on a thread that parked holding one.
  *
  * 13. Credentials (the fetch edge). No credential ever enters the core, and
  *    the core hands out no credential-carrying header: fx_fetch_take strips
  *    authorization, proxy-authorization, cookie, x-api-key, api-key and
  *    x-goog-api-key whatever the core built (the Gateway path builds
- *    "Bearer host-managed", a placeholder). The host adds credentials only to
- *    a request whose destination origin (scheme, host and port of url) is the
- *    canonical origin of the provider fx_fetch_request.provider names, for
- *    both model and catalog requests, and never to any other destination
- *    (loopback fakes and endpoint_url overrides included).
+ *    "Bearer host-managed", a placeholder). The host keeps a trusted
+ *    allowlist: for each provider, the origins (scheme, host and port) it
+ *    trusts with that provider's credentials, and for each such origin the
+ *    headers to add, as many as the provider needs (authorization and an
+ *    account id header, say). For every request, model or catalog, the host
+ *    adds exactly the headers the allowlist gives for the provider
+ *    fx_fetch_request.provider names and the origin of its url, and drops
+ *    any header the allowlist names that the core set for any other
+ *    destination. Every other destination gets no credential: loopback
+ *    fakes, endpoint_url overrides, and the public lookups (version and
+ *    capability GETs) a provider's catalog makes on other origins. The HTTP
+ *    client never follows a redirect with the headers it was given: the host
+ *    re-checks each hop's origin against the allowlist and builds that hop's
+ *    headers the same way, so a redirect elsewhere carries none.
+ *
+ * 14. Retry versus failure. A call that returns FX_BUSY or FX_BACKPRESSURE
+ *    changed nothing: make the same call again (after the next wake for
+ *    FX_BACKPRESSURE, shortly for FX_BUSY). FX_E_OOM changed nothing and may
+ *    be retried. Any other FX_E_* status means the call as made can never
+ *    succeed on this runtime; FX_E_FAILED and FX_E_CLOSED mean nothing on it
+ *    will (open the session again in a new runtime). After admission (FX_OK)
+ *    the work is the core's: its outcome comes only in its terminal event,
+ *    and the host does not repeat the call. A terminal event with FX_STALE
+ *    means the work met a newer state (a turn that ended) and did nothing:
+ *    the host may send it anew (a steer as a prompt). A terminal event with
+ *    an error status, a TURN_END with FX_STOP_ERROR, or FX_EVENT_EXITED ends
+ *    the work for good: the host may make a new request, but nothing it
+ *    admitted is retried by the core.
  */
 #ifndef FX_CORE_H
 #define FX_CORE_H
@@ -235,9 +288,10 @@ uint32_t fx_core_abi_version(void);
 #define FX_TOOL_WRITES     (1u << 1) /* changes state: runs alone, never re-run after a crash */
 
 /* A host tool call (fx_host.tool_call). The struct and its strings are
- * borrowed for the lease (rule 9): until the host calls fx_tool_result for
- * `call`, or fx_runtime_destroy. input_json is the core's own copy of the
- * model's input, handed out without another copy. */
+ * borrowed for the callback window and the lease (rule 9): on the callback's
+ * thread until it returns, and on any thread until an fx_tool_result for
+ * `call` consumes the lease (or fx_runtime_destroy). input_json is the core's
+ * own copy of the model's input, handed out without another copy. */
 typedef struct fx_tool_call {
   uint32_t struct_size;  /* sizeof(fx_tool_call) as the core compiled it */
   uint32_t flags;        /* the tool's FX_TOOL_* */
@@ -270,9 +324,10 @@ typedef uint32_t fx_hook_kind;
 #define FX_HOOK_PRE_TOOL 1u /* before a host tool runs (fx's PreToolUse, P-PRETOOL) */
 #define FX_HOOK_STOP     2u /* before a turn ends (fx's Stop, the completion gate, P-STOP) */
 
-/* A hook question (fx_host.hook). Borrowed for the lease (rule 9): until the
- * host calls fx_hook_answer for `question` (returning FX_HOOK_ALLOW from the
- * callback answers it at once), or fx_runtime_destroy. */
+/* A hook question (fx_host.hook). Borrowed for the callback window and the
+ * lease (rule 9): until the hook returns, and until an fx_hook_answer for
+ * `question` consumes the lease (returning FX_HOOK_ALLOW from the callback
+ * consumes it as the callback returns), or fx_runtime_destroy. */
 typedef struct fx_hook_question {
   uint32_t struct_size;
   fx_hook_kind kind;
@@ -294,17 +349,24 @@ typedef int32_t fx_hook_verdict;
 /*
  * The host's callbacks. Each runs on a core-owned thread and must return
  * quickly: it records or enqueues and never blocks, waits on the host, or
- * calls this API. host_ctx is the value given to fx_runtime_create; the core
- * never dereferences it. A NULL callback means the host does not take part:
+ * calls this API (except the answers rule 1 allows). host_ctx is the value
+ * given to fx_runtime_create; the core never dereferences it. A NULL
+ * callback means the host does not take part:
  * no tool is called (the model reads "the host has no tools"), the session is
  * not journaled, and every hook is allowed.
  *
- * Ordering. For one call: tool_call returns before tool_cancel starts;
- * tool_cancel runs at most once, on the same thread as tool_call, and only
- * while the call is unanswered. Up to max_concurrent_tools calls are
- * unanswered at once; a call to a FX_TOOL_WRITES tool is made only when no
- * other call is unanswered, and no call is made while it is. Callbacks for
- * one runtime may run concurrently on its different threads.
+ * Ordering. For one call: tool_call returns before tool_cancel starts, and
+ * tool_cancel runs at most once, on the same thread as tool_call. A cancel is
+ * admitted when the core sees the call's turn cancelled (fx_turn_cancel) or
+ * steered past it while the call is unconsumed; it is then delivered without
+ * a lock held, so it may arrive after, or while, the host's answer consumes
+ * the call. It carries ids only: the host ignores a cancel for a call it has
+ * answered, and a cancel never extends or ends the lease. None is admitted
+ * once fx_runtime_destroy has started or the runtime has stopped. Up to
+ * max_concurrent_tools calls are unconsumed at once; a call to a
+ * FX_TOOL_WRITES tool is made only when no other call is unconsumed, and no
+ * call is made while it is. Callbacks for one runtime may run concurrently
+ * on its different threads.
  */
 typedef struct fx_host {
   uint32_t struct_size; /* the core reads only callbacks that fit entirely */
@@ -312,8 +374,8 @@ typedef struct fx_host {
 
   void (*tool_call)(void *host_ctx, const fx_tool_call *call);
   /* The turn that made `call` was cancelled, or steered past it. The host
-   * stops the work if it can and must still answer (rule 9); the core drops
-   * that result. */
+   * stops the work if it can and must still answer (rule 9) unless it has
+   * already; the core drops that result. See Ordering. */
   void (*tool_cancel)(void *host_ctx, uint64_t call, uint64_t turn);
   void (*journal_append)(void *host_ctx, const fx_journal_append *append);
   /* NULL means every hook is allowed. A turn's stop hook is asked at most
@@ -379,9 +441,12 @@ typedef struct fx_config {
  * Errors: FX_E_INVALID (NULL, struct_size too small, oversized or malformed
  * string, bad tool, bad endpoint, a limit out of bounds), FX_E_UNSUPPORTED
  * (another abi_version, unknown non-zero bytes), FX_E_LIMIT, FX_E_OOM,
- * FX_E_THREAD, FX_E_IO. If initialize then fails in the core, the runtime
- * becomes FAILED with the core's message (fx_runtime_info_get), and every
- * request made meanwhile ends with FX_EVENT_EXITED. */
+ * FX_E_THREAD, FX_E_IO, and FX_E_FAILED when the core panicked inside the
+ * call (rule 12: no handle was issued, and *out is 0). A slot is reserved
+ * before anything starts, so FX_E_LIMIT starts nothing. If initialize then
+ * fails in the core, the runtime becomes FAILED with the core's message
+ * (fx_runtime_info_get), and every request made meanwhile ends with
+ * FX_EVENT_EXITED. */
 fx_status fx_runtime_create(const fx_config *cfg, const fx_host *host, void *host_ctx,
                             fx_runtime *out);
 
@@ -394,7 +459,9 @@ fx_status fx_runtime_create(const fx_config *cfg, const fx_host *host, void *hos
  * while destroy waits, destroy waits only for callbacks already running, then
  * retires the handle: memory and descriptors are abandoned, never freed or
  * closed, so borrows stay readable and a late wake cannot reach a reused
- * descriptor. FX_OK, or FX_E_CLOSED (already destroyed, or never issued). */
+ * descriptor (rules 8 and 10). A panic inside destroy itself does the same:
+ * the handle is retired once running callbacks return, and destroy returns
+ * FX_OK. FX_OK, or FX_E_CLOSED (already destroyed, or never issued). */
 fx_status fx_runtime_destroy(fx_runtime rt);
 
 /* ANY. The read end of the runtime's readiness socket (non-blocking,
@@ -474,6 +541,26 @@ typedef struct fx_named_bytes {
  * FX_RECOVERY_CALL again: the model reads that the call may or may not have
  * run, and decides.
  *
+ * Deduplication covers the last completed message id only, as libfx's
+ * snapshot keeps it (one last turn id, FX_RECOVERY_LAST_TURN): a prompt
+ * repeating the id of the turn that ended last is recognised, in this
+ * runtime and after recovery; an older completed id is not remembered and
+ * would start a new turn. The host makes every message id unique and retries
+ * only its latest prompt with the same id; ids it has seen complete earlier
+ * it recognises itself, from its own store.
+ *
+ * Rich input. The core keeps an input's text and images only once it is in
+ * the session: a prompt from fx_turn_prompt's FX_OK, a steer from its
+ * FX_EVENT_STEER_JOINED. Until then the host keeps the full input it handed
+ * in. A steer that comes back (FX_EVENT_STEER_RETURNED, or a REQUEST_DONE
+ * that is not FX_OK) carries only its message id: the host sends it as a
+ * prompt from its own copy. Across a crash the durable copy is the host's:
+ * with FX_OPEN_INPUTS_DURABLE it stores every prompt and steer (text and
+ * images) before handing it in and keeps it until the journal append that
+ * holds it is acknowledged and that input has joined or ended; recovery then
+ * names follow-ups (FX_RECOVERY_FOLLOW_UP: text and message id) and the host
+ * re-sends each from its store, images included.
+ *
  * Images. An image's name is the lowercase hex SHA-256 of its raw encoded
  * bytes (64 characters). With FX_OPEN_IMAGE_STORE the host stores every
  * image it hands in (prompt, steer and tool result) under its name before
@@ -525,10 +612,12 @@ typedef struct fx_input {
 
 /* WORKER. Starts a turn with input (copied; the core keeps it as history).
  * message_id (FX_MAX_MESSAGE_ID) names the input in the journal: a retry
- * with the same id is recognised (see "Open versus resume"), never run
- * twice. On FX_OK *turn is the new turn and its FX_EVENT_TURN_START is
- * queued. FX_E_STATE before the session is open, while a turn runs (steer it
- * instead) or after a journal failure; FX_E_TOO_LARGE; FX_BACKPRESSURE.
+ * with the id of the turn that ended last is recognised and never run twice
+ * (see "Deduplication"). On FX_OK *turn is the new turn and its
+ * FX_EVENT_TURN_START is queued; any other status started nothing (FX_BUSY
+ * and FX_E_OOM included). FX_E_STATE before the session is open, while a
+ * turn runs (steer it instead) or after a journal failure; FX_E_TOO_LARGE;
+ * FX_BACKPRESSURE.
  * BUILD: images return FX_E_UNSUPPORTED until milestone 2b (P-IMAGES). */
 fx_status fx_turn_prompt(fx_runtime rt, const fx_input *input, fx_str message_id, uint64_t *turn);
 
@@ -545,7 +634,9 @@ fx_status fx_turn_resume(fx_runtime rt, uint64_t *turn);
  * FX_EVENT_REQUEST_DONE: FX_OK queued for the turn, FX_STALE the turn ended
  * before the core read it, or an error. A steer still queued when its turn
  * ends comes back as FX_EVENT_STEER_RETURNED before that turn's TURN_END, to
- * be sent as a prompt. Text is at most FX_MAX_STEER_TEXT. A steer with images
+ * be sent as a prompt; the host keeps the steer's full input until it joins
+ * or comes back ("Rich input"). Text is at most FX_MAX_STEER_TEXT. A steer
+ * with images
  * cannot join a turn: the turn ends at its next safe point and the steer
  * comes back as FX_EVENT_STEER_RETURNED (the handoff). BUILD: images return
  * FX_E_UNSUPPORTED until milestone 2b (P-IMAGES). */
@@ -560,10 +651,16 @@ fx_status fx_turn_withdraw(fx_runtime rt, uint64_t turn, fx_str message_id, uint
 
 /* ANY. Cancels running turn `turn`: its fetch is retired at once (a host
  * waiting on its response headers sees FX_FETCH_RETIRED and a wake), its
- * unanswered tool calls get tool_cancel, and it ends with FX_EVENT_TURN_END
- * (FX_STOP_CANCELLED) unless it was already ending. FX_OK, or FX_STALE when
- * `turn` is not the running turn (nothing changed: a late cancel never
- * reaches a later turn). Never FX_BACKPRESSURE. */
+ * unconsumed tool calls get tool_cancel, and it ends with FX_EVENT_TURN_END
+ * (FX_STOP_CANCELLED) unless it was already ending. The cancel is
+ * linearised against fetch publication: a fetch the core published for
+ * `turn` before the cancel is retired by it, and one the core publishes for
+ * `turn` after it is published already retired (fx_fetch_take never hands it
+ * out), so no request of a cancelled turn starts afterwards. The cancel is
+ * applied whole or not at all: FX_OK (applied now, or `turn` was cancelled
+ * already), FX_STALE when `turn` is not the running turn, FX_BUSY or
+ * FX_E_OOM (nothing changed: call it again). A late cancel never reaches a
+ * later turn. Never FX_BACKPRESSURE. */
 fx_status fx_turn_cancel(fx_runtime rt, uint64_t turn);
 
 /* WORKER. Asks for a checkpoint of the journaled session. Terminal event for
@@ -655,11 +752,15 @@ typedef struct fx_event {
  * it: at least FX_EVENT_SIZE_V2, a multiple of 8); the core writes its fields
  * and zeroes the rest of each element. *count is how many it wrote. Every
  * call that returns FX_OK, cap 0 and *count 0 included, ends the borrows of
- * the previous drain. After the runtime stops, the drain delivers the events
+ * the previous drain; one that returns anything else (FX_BUSY, FX_E_OOM)
+ * changed nothing: the previous drain's borrows stay valid, nothing was
+ * taken from the queue, and the host drains again. After the runtime stops,
+ * the drain delivers the events
  * queued before it stopped, then FX_EVENT_EXITED once, then nothing; if the
  * core panicked holding the event queue, it delivers FX_EVENT_EXITED with
  * FX_EXITED_EVENTS_LOST at once. Never blocks on the core. FX_OK,
- * FX_E_INVALID, FX_E_CLOSED or FX_BUSY (on a stopped runtime too). A text
+ * FX_E_INVALID, FX_E_CLOSED, FX_E_OOM or FX_BUSY (on a stopped runtime
+ * too). A text
  * delta costs the core one copy into its event arena; a drain that takes
  * everything queued costs no copy. */
 fx_status fx_events_drain(fx_runtime rt, fx_event *buf, size_t cap, size_t event_size,
@@ -676,14 +777,16 @@ typedef struct fx_tool_output {
   bool is_error;             /* text is an agent-oriented error */
 } fx_tool_output; /* frozen: a richer output is a new struct and function */
 
-/* ANY. Answers tool call `call`, ending its lease (rule 9). out is copied
- * once, into memory the core owns. An answer consumes the call exactly when
- * it returns FX_OK or FX_E_TOO_LARGE (the model then reads that the result
- * exceeded the limit). FX_STALE: already answered, nothing changed (a
- * cancelled call's answer is FX_OK: it ends the lease, and the core drops
- * the result). FX_E_INVALID: a NULL or malformed output, or an id never
- * issued; the call stays unanswered. A runtime that is not running answers
- * FX_E_FAILED; on a panicked runtime the lease's memory stays readable.
+/* ANY, and from the tool_call callback for its own call (rule 1). Answers
+ * tool call `call`. out is copied once, into memory the core owns. Which
+ * outcomes consume the lease is rule 9's list: FX_OK, or FX_E_TOO_LARGE (the
+ * model then reads that the result exceeded the limit), consume it; a
+ * cancelled call's answer is FX_OK too (it ends the lease, and the core
+ * drops the result). FX_STALE: consumed before, nothing changed.
+ * FX_E_INVALID: a NULL or malformed output, or an id never issued; FX_BUSY,
+ * FX_E_OOM: retry. These leave the call unconsumed. A runtime that is not
+ * running answers FX_E_FAILED and consumes nothing (rule 9 says when the
+ * lease ends then).
  * BUILD: images return FX_E_UNSUPPORTED (the call stays unanswered) until
  * milestone 2b (P-IMAGES). */
 fx_status fx_tool_result(fx_runtime rt, uint64_t call, const fx_tool_output *out);
@@ -722,7 +825,9 @@ typedef struct fx_fetch_request {
  * sends it (adding credentials per rule 13) and streams the answer back with
  * the calls below, in order: fx_fetch_status once, then fx_fetch_push any
  * number of times, then fx_fetch_finish; fx_fetch_finish(ok=false) may come
- * at any point, before the status included, for a transport failure. */
+ * at any point, before the status included, for a transport failure. Any
+ * other status (FX_BUSY, FX_E_OOM, FX_E_INVALID) took nothing: the previous
+ * take's borrows stay valid and the request stays published. */
 fx_status fx_fetch_take(fx_runtime rt, fx_fetch_request *out);
 
 /* ANY. The response status line arrived. retry_after_s is Retry-After in
@@ -744,11 +849,15 @@ typedef int32_t fx_fetch_disposition;
 #define FX_FETCH_RETIRED  0 /* the core gave it up (cancel, steer, deadline, stop): abort the HTTP request */
 #define FX_FETCH_ACTIVE   1 /* the core still reads it */
 #define FX_FETCH_CONSUMED 2 /* the core has all it needs: drain the rest quietly */
+#define FX_FETCH_BUSY     3 /* the core could not tell within FX_BUSY_BOUND_MS: keep the
+                             * request running and ask again shortly; never a reason to abort */
 
 /* ANY. Where the core stands on fetch. Checked by the host after every wake
  * while the HTTP request runs; the core wakes the ready fd whenever it
- * retires a fetch. Returns FX_FETCH_RETIRED for a closed or stopped runtime,
- * an unknown fetch, or a lock contended past the bound. */
+ * retires a fetch. Returns FX_FETCH_RETIRED for a closed or stopped runtime
+ * or an unknown fetch, and FX_FETCH_BUSY, never RETIRED, when the bridge's
+ * lock stayed contended past the bound (rule 2): contention never aborts a
+ * live HTTP request. */
 fx_fetch_disposition fx_fetch_disposition_get(fx_runtime rt, uint64_t fetch);
 
 /* ------------------------------------------------------------------------ */
@@ -757,14 +866,18 @@ fx_fetch_disposition fx_fetch_disposition_get(fx_runtime rt, uint64_t fetch);
 
 /* ANY. The store holds every append up to and including `append` durably
  * (acknowledging a later one acknowledges the earlier). Releases barriers
- * waiting on them. FX_OK; FX_STALE (already acknowledged, or after a
- * journal failure); FX_E_INVALID (an id the core never sent). Never
- * FX_BACKPRESSURE. */
+ * waiting on them. Applied whole or not at all: on FX_OK the barriers'
+ * answers are queued for the core; on any other status nothing changed, the
+ * ack was not consumed, and the host acknowledges again. FX_OK; FX_STALE
+ * (already acknowledged, or after a journal failure); FX_E_INVALID (an id
+ * the core never sent); FX_BUSY or FX_E_OOM (retry). Never FX_BACKPRESSURE. */
 fx_status fx_journal_ack(fx_runtime rt, uint64_t append);
 
 /* ANY. The store refused `append` (reason copied; empty for a default
- * message). See "Durable sessions" for fenced. FX_OK; FX_STALE (already
- * acknowledged, or a failure was already reported); FX_E_INVALID. */
+ * message). See "Durable sessions" for fenced. Applied whole or not at all,
+ * as fx_journal_ack: FX_OK; FX_STALE (already acknowledged, or a failure was
+ * already reported); FX_E_INVALID; FX_BUSY or FX_E_OOM (nothing changed:
+ * retry). */
 fx_status fx_journal_fail(fx_runtime rt, uint64_t append, fx_str reason, bool fenced);
 
 /* ------------------------------------------------------------------------ */
@@ -777,12 +890,14 @@ typedef int32_t fx_hook_answer_kind;
 #define FX_ANSWER_REWRITE   2  /* PRE_TOOL: run with text as the new input JSON */
 #define FX_ANSWER_CONTINUE  3  /* STOP: continue the turn; text is the message the model reads */
 
-/* ANY. Answers a question the hook returned FX_HOOK_PENDING for, ending its
- * lease (rule 9). text (copied) is the block reason, the rewritten input or
- * the continuation message; empty for ALLOW. FX_OK; FX_STALE (answered
- * already, or its turn was cancelled: the answer is dropped, the lease ends);
- * FX_E_INVALID (an id never issued, or a kind the question does not take:
- * the question stays open). BUILD: no question is asked until milestone 2b
+/* ANY, and from the hook callback for its own question (rule 1). Answers a
+ * question the hook returned FX_HOOK_PENDING for. text (copied) is the block
+ * reason, the rewritten input or the continuation message; empty for ALLOW.
+ * As fx_tool_result, FX_OK consumes the lease (rule 9), for a question whose
+ * turn was cancelled too (the answer is dropped); FX_STALE (consumed
+ * already), FX_E_INVALID (an id never issued, or a kind the question does
+ * not take), FX_BUSY and FX_E_OOM leave the question open. BUILD: no
+ * question is asked until milestone 2b
  * (P-STOP, P-PRETOOL), so every id is FX_E_INVALID. */
 fx_status fx_hook_answer(fx_runtime rt, uint64_t question, fx_hook_answer_kind kind, fx_str text);
 
@@ -798,9 +913,21 @@ fx_status fx_hook_answer(fx_runtime rt, uint64_t question, fx_hook_answer_kind k
 #define FX_FAULT_TOOL_RESULT    4u /* inside fx_tool_result on the host's thread, holding the runtime lock */
 #define FX_FAULT_JOURNAL_APPEND 5u /* a core thread, sending a journal append, holding the runtime lock */
 #define FX_FAULT_TOOL_CALL      6u /* a core thread, about to make a tool call */
+#define FX_FAULT_INPUT_LOCKED   7u /* a core thread, holding the input queue lock: it waits (up to
+                                    * 2 s) for the runtime to stop running, then panics */
+#define FX_FAULT_HOST_TRANSPORT 8u /* not a panic: fx_journal_ack fails the runtime's transport, as
+                                    * a host call whose answer cannot be delivered would */
+#define FX_FAULT_CREATE         9u /* process-wide (rt 0): inside fx_runtime_create, after the core
+                                    * thread started, before the handle is issued */
+#define FX_FAULT_DESTROY       10u /* inside fx_runtime_destroy, after it began */
+#define FX_FAULT_DRAIN_OOM     11u /* not a panic: fx_events_drain fails as out of memory, last */
+#define FX_FAULT_TAKE_OOM      12u /* not a panic: fx_fetch_take fails as out of memory, last */
+#define FX_FAULT_REPLY_OOM     13u /* not a panic: fx_journal_ack or _fail cannot queue the answers
+                                    * it owes waiting barriers (out of memory) */
 
-/* ANY. Arms `point` on runtime rt: the (skip + 1)-th time a thread reaches it
- * from now, that thread panics there. FX_OK, FX_E_INVALID, FX_E_CLOSED. */
+/* ANY. Arms `point` on runtime rt (FX_FAULT_CREATE: on the process, with rt
+ * 0): the (skip + 1)-th time a thread reaches it from now, that thread
+ * panics there. FX_OK, FX_E_INVALID, FX_E_CLOSED. */
 fx_status fx_test_arm_fault(fx_runtime rt, uint32_t point, uint32_t skip);
 
 /* ANY. Sets the generation slot `slot` (0-based) gives its next runtime, so

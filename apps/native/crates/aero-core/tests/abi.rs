@@ -5,9 +5,13 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pm_aero_core::{Error, Host, Purpose, Runtime, Steered, sys};
-use support::{Driver, GATEWAY_KEY, Seen, config, on_worker, text_model};
+use support::{
+    CODEX_ACCOUNT, CODEX_KEY, Driver, GATEWAY_KEY, SYNTHETIC_CREDENTIALS, Seen, config, on_worker,
+    text_model,
+};
 
 struct NoTools;
 impl Host for NoTools {}
@@ -340,6 +344,40 @@ fn a_turns_end_comes_before_the_next_turns_start() {
     });
 }
 
+/// The trusted allowlist's headers, as the edge sent them to `fetch`.
+fn credential_headers(fetch: &support::FetchSeen) -> Vec<(String, String)> {
+    fetch
+        .outgoing
+        .iter()
+        .filter(|(name, _)| {
+            SYNTHETIC_CREDENTIALS
+                .iter()
+                .any(|c| name.eq_ignore_ascii_case(c.header))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Pumps until a catalog request to `origin` was served (the synthetic
+/// catalog leg ran), or fails after `secs`.
+fn catalog_leg(driver: &mut Driver, origin: &str, secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !driver
+        .fetches
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|f| f.purpose == Purpose::Catalog && f.url.starts_with(origin))
+    {
+        driver.pump(20);
+        assert!(
+            Instant::now() < deadline,
+            "no catalog request to {origin}: {:#?}",
+            driver.fetches.lock().unwrap()
+        );
+    }
+}
+
 #[test]
 fn credentials_never_cross_the_edge() {
     on_worker(|| {
@@ -350,9 +388,8 @@ fn credentials_never_cross_the_edge() {
         let mut driver = Driver::new(runtime, text_model("x"), ENDPOINT);
         driver.open();
         driver.turn("hi", "hi-1");
+        catalog_leg(&mut driver, "https://ai-gateway.vercel.sh/", 20);
         let fetches = driver.fetches.lock().unwrap().clone();
-        assert!(!fetches.is_empty());
-        let mut saw_catalog = false;
         for fetch in &fetches {
             assert_eq!(fetch.provider, "gateway");
             // The core's placeholder never leaves it, whatever the route.
@@ -363,22 +400,72 @@ fn credentials_never_cross_the_edge() {
                 );
                 assert!(!value.contains("host-managed"), "{name}: {value}");
             }
-            let auth: Vec<_> = fetch
-                .outgoing
-                .iter()
-                .filter(|(n, _)| n.eq_ignore_ascii_case("authorization"))
-                .collect();
+            let sent = credential_headers(fetch);
             if fetch.url.starts_with("https://ai-gateway.vercel.sh/") {
-                // The catalog at the Gateway's canonical origin: its key, only.
-                saw_catalog |= fetch.purpose == Purpose::Catalog;
-                assert_eq!(auth.len(), 1);
-                assert_eq!(auth[0].1, GATEWAY_KEY);
+                // The Gateway's canonical origin: its key, only.
+                assert_eq!(
+                    sent,
+                    vec![("authorization".to_string(), GATEWAY_KEY.to_string())]
+                );
             } else {
                 // The loopback fake (the endpoint override): no credential.
-                assert!(auth.is_empty(), "credential sent to {}", fetch.url);
+                assert!(sent.is_empty(), "credential sent to {}", fetch.url);
             }
         }
-        eprintln!("fetches: {fetches:#?}; catalog seen: {saw_catalog}");
+        driver.runtime.close();
+    });
+}
+
+#[test]
+fn every_allowlisted_header_reaches_its_origin_only() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        // Codex: authorization and an account id for its origin; its catalog
+        // looks its version up on a public origin first.
+        let cfg = pm_aero_core::Config {
+            provider: "codex",
+            model: "",
+            endpoint_url: "",
+            ..config(ENDPOINT, &[])
+        };
+        let runtime = Runtime::create(&cfg, Arc::new(NoTools)).expect("create");
+        let mut driver = Driver::new(runtime, text_model("x"), ENDPOINT);
+        driver.open();
+        // Every request is answered 404 (none is the loopback endpoint).
+        let turn = driver.runtime.prompt("hi", "c-1").expect("prompt");
+        driver.until(
+            30,
+            |e| matches!(e, Seen::TurnEnd { turn: t, .. } if *t == turn),
+        );
+        catalog_leg(&mut driver, "https://", 20);
+        let fetches = driver.fetches.lock().unwrap().clone();
+        let mut at_origin = 0;
+        let mut elsewhere = 0;
+        for fetch in &fetches {
+            assert_eq!(fetch.provider, "codex");
+            let sent = credential_headers(fetch);
+            if fetch.url.starts_with("https://chatgpt.com/") {
+                at_origin += 1;
+                let mut sent = sent;
+                sent.sort();
+                assert_eq!(
+                    sent,
+                    vec![
+                        ("authorization".to_string(), CODEX_KEY.to_string()),
+                        ("chatgpt-account-id".to_string(), CODEX_ACCOUNT.to_string()),
+                    ],
+                    "{}",
+                    fetch.url
+                );
+            } else {
+                elsewhere += 1;
+                assert!(sent.is_empty(), "credential sent to {}", fetch.url);
+            }
+        }
+        assert!(at_origin > 0, "no request to Codex's origin: {fetches:#?}");
+        assert!(elsewhere > 0, "no public lookup: {fetches:#?}");
         driver.runtime.close();
     });
 }

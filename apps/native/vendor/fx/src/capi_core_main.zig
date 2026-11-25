@@ -342,8 +342,11 @@ const Fault = enum(u32) {
     host_transport = 8,
     create = 9,
     destroy = 10,
+    drain_oom = 11,
+    take_oom = 12,
+    reply_oom = 13,
 };
-const fault_count = 11;
+const fault_count = 14;
 
 /// FX_FAULT_CREATE is process-wide: no runtime exists yet when it fires.
 var create_fault: std.atomic.Value(i64) = .init(-1);
@@ -899,6 +902,12 @@ const Runtime = struct {
             _ = std.c.nanosleep(&ts, null);
         }
         std.debug.panic("fault injected at {s}", .{@tagName(Fault.input_locked)});
+    }
+
+    /// FX_FAULT_DRAIN_OOM, _TAKE_OOM, _REPLY_OOM: not a panic; the host call
+    /// fails as out of memory at its last fallible step.
+    fn faultOom(self: *Runtime, point: Fault) bool {
+        return faultHit(&self.faults[@intFromEnum(point)]);
     }
 
     /// FX_FAULT_HOST_TRANSPORT: the host call fails the runtime's transport,
@@ -2796,6 +2805,7 @@ fn drainBody(runtime: ?*Runtime, args: DrainArgs) Status {
         var name_total: usize = 0;
         for (queue.events.items[0..count]) |event| name_total += event.name_count;
         queue.spare_name_strs.ensureTotalCapacity(alloc_c, name_total) catch return FX_E_OOM;
+        if (self.faultOom(.drain_oom)) return FX_E_OOM;
         // A whole drain hands out the pending arena itself (no copy); its
         // buffers keep their addresses when the lists are swapped below.
         const arena = if (everything) queue.pending_bytes.items else queue.spare_bytes.items;
@@ -2964,6 +2974,7 @@ fn fetchTakeBody(runtime: ?*Runtime, args: anytype) Status {
     }
     const body = arena.dupe(u8, bridge.request_body.items) catch return FX_E_OOM;
     const provider = arena.dupe(u8, self.provider_name) catch return FX_E_OOM;
+    if (self.faultOom(.take_oom)) return FX_E_OOM;
     out.purpose = if (std.ascii.eqlIgnoreCase(metadata.method, "GET")) FX_FETCH_CATALOG else FX_FETCH_MODEL;
     out.fetch = @intCast(metadata.handle);
     out.turn = turn;
@@ -3112,6 +3123,7 @@ export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
                 writeResult(&replies.writer, flush.rpc_id, "{}") catch return FX_E_OOM;
             };
             if (replies.written().len > 0) {
+                if (self.faultOom(.reply_oom)) return FX_E_OOM;
                 const sent = self.hostInput(replies.written(), .control);
                 if (sent != FX_OK) return sent;
             }
@@ -3150,7 +3162,7 @@ export fn fx_journal_fail(handle: u64, append: u64, reason: Str, fenced: bool) c
                 return FX_E_OOM;
             };
             if (replies.written().len > 0) {
-                const sent = self.hostInput(replies.written(), .control);
+                const sent = if (self.faultOom(.reply_oom)) FX_E_OOM else self.hostInput(replies.written(), .control);
                 if (sent != FX_OK) {
                     alloc_c.free(failure);
                     return sent;

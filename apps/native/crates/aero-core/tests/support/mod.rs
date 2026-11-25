@@ -406,7 +406,9 @@ pub struct FetchSeen {
 /// Synthetic values only: the lane never uses a real credential.
 pub const GATEWAY_KEY: &str = "Bearer synthetic-gateway-key";
 pub const CODEX_KEY: &str = "Bearer synthetic-codex-key";
-pub const SYNTHETIC_CREDENTIALS: [pm_aero_core::Credential<'static>; 2] = [
+pub const CODEX_ACCOUNT: &str = "synthetic-account";
+/// The trusted allowlist: two headers for Codex's origin.
+pub const SYNTHETIC_CREDENTIALS: [pm_aero_core::Credential<'static>; 3] = [
     pm_aero_core::Credential {
         provider: "gateway",
         origin: "https://ai-gateway.vercel.sh",
@@ -419,7 +421,32 @@ pub const SYNTHETIC_CREDENTIALS: [pm_aero_core::Credential<'static>; 2] = [
         header: "authorization",
         value: CODEX_KEY,
     },
+    pm_aero_core::Credential {
+        provider: "codex",
+        origin: "https://chatgpt.com",
+        header: "chatgpt-account-id",
+        value: CODEX_ACCOUNT,
+    },
 ];
+
+/// Threads in this process.
+pub fn thread_count() -> i32 {
+    // SAFETY: an all-zero proc_taskinfo is valid; the call writes at most
+    // its size.
+    unsafe {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+        let got = libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            (&mut info as *mut libc::proc_taskinfo).cast(),
+            size,
+        );
+        assert_eq!(got, size, "proc_pidinfo");
+        info.pti_threadnum
+    }
+}
 
 /// Drives one runtime: waits on its ready fd, drains its events and serves
 /// its fetches with the fake model (one thread per fetch, as the app's HTTP
@@ -491,6 +518,36 @@ impl Driver {
         }
         self.seen.extend(new.iter().cloned());
         new
+    }
+
+    /// Serves the fetches the core published, without draining events.
+    pub fn serve_only(&mut self) {
+        let remote = self.runtime.remote();
+        while let Ok(Some(request)) = self.runtime.fetches.take() {
+            let seen = FetchSeen {
+                fetch: request.fetch,
+                turn: request.turn,
+                purpose: request.purpose,
+                provider: request.provider.to_string(),
+                method: request.method.to_string(),
+                url: request.url.to_string(),
+                headers: request
+                    .headers()
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect(),
+                outgoing: request.outgoing_headers(&SYNTHETIC_CREDENTIALS),
+            };
+            let body = String::from_utf8_lossy(request.body).into_owned();
+            self.fetches.lock().unwrap().push(seen.clone());
+            serve(
+                remote,
+                seen,
+                body,
+                self.model.clone(),
+                self.calls.clone(),
+                &self.endpoint,
+            );
+        }
     }
 
     /// Pumps until `done` holds for an event, or panics after `secs`.
@@ -596,7 +653,11 @@ fn serve(
                         )
                     },
                     |chunk| {
-                        if live.get() && remote.fetch_disposition(seen.fetch) == Disposition::Active
+                        if live.get()
+                            && matches!(
+                                remote.fetch_disposition(seen.fetch),
+                                Disposition::Active | Disposition::Busy
+                            )
                         {
                             push_all(remote, seen.fetch, chunk);
                         } else {

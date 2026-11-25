@@ -22,9 +22,11 @@
 
 pub mod sys;
 
+use std::any::Any;
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -277,12 +279,45 @@ impl Shared {
         self.changed.notify_all();
     }
 
+    /// Waits for every lease, unless the runtime panics meanwhile: a
+    /// panicked runtime's memory is abandoned, never freed, so its leases
+    /// stay readable after destroy and teardown goes on at once (a worker
+    /// holding a lease may be waiting on the closing thread, Sol's 2a item 2).
     fn wait_leases(&self) {
         let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
         leases.closing = true;
-        while leases.open > 0 {
-            leases = self.changed.wait(leases).unwrap_or_else(|e| e.into_inner());
+        while leases.open > 0 && !panicked(self.handle()) {
+            leases = self
+                .changed
+                .wait_timeout(leases, Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
+    }
+}
+
+/// Whether the runtime `handle` names panicked (lock-free).
+fn panicked(handle: u64) -> bool {
+    // SAFETY: an all-zero fx_runtime_info is a valid value.
+    let mut info: sys::fx_runtime_info = unsafe { std::mem::zeroed() };
+    info.struct_size = std::mem::size_of::<sys::fx_runtime_info>() as u32;
+    // SAFETY: `info` is valid for the call; any thread may make it.
+    let status = unsafe { sys::fx_runtime_info_get(handle, &mut info) };
+    status == sys::FX_OK && info.state == sys::FX_RUNTIME_PANICKED
+}
+
+/// Runs host code on a callback's stack: a panic never unwinds into the
+/// core, and neither does one from dropping its payload (Sol's 2a item 2).
+fn contain(body: impl FnOnce()) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(body)) {
+        drop_payload(payload);
+    }
+}
+
+/// Drops a panic payload; one whose drop panics again is forgotten.
+fn drop_payload(payload: Box<dyn Any + Send>) {
+    if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(again);
     }
 }
 
@@ -375,6 +410,12 @@ impl ToolLease {
 
     fn send(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
         assert_off_main();
+        self.send_unchecked(text, is_error)
+    }
+
+    /// `send` without the main-thread assertion, for the drop path, which
+    /// must not panic while a panic unwinds.
+    fn send_unchecked(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
         let out = sys::fx_tool_output {
             text: sys::fx_str::of(text),
             images: std::ptr::null(),
@@ -400,12 +441,14 @@ impl Drop for ToolLease {
         }
         // Never leave the core waiting: a tool that panicked or forgot its
         // lease answers with an error the model can read.
+        // Answering from the tool_call callback's own stack is allowed
+        // (header rule 1), so this may run there.
         let text = if std::thread::panicking() {
             "The host tool failed (it panicked)."
         } else {
             "The host dropped this tool call without answering."
         };
-        let _ = self.send(text, true);
+        let _ = self.send_unchecked(text, true);
         self.shared.lease_closed();
     }
 }
@@ -415,6 +458,10 @@ unsafe extern "C" fn host_tool_call(ctx: *mut c_void, info: *const sys::fx_tool_
     // fx_runtime_destroy has returned, after which no callback runs. info is
     // valid for the callback and its strings for the lease.
     let (host, info) = unsafe { (&*(ctx as *const HostBox), &*info) };
+    contain(|| tool_call_contained(host, info));
+}
+
+fn tool_call_contained(host: &HostBox, info: &sys::fx_tool_call) {
     let mut lease = ToolLease {
         shared: host.shared.clone(),
         call: info.call,
@@ -431,17 +478,15 @@ unsafe extern "C" fn host_tool_call(ctx: *mut c_void, info: *const sys::fx_tool_
         let _ = lease.send("The session is closing.", true);
         return;
     }
-    // A panic must not unwind into the core; the lease, dropped while
-    // unwinding, answers the call.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.host.tool_call(lease)));
+    // A panic stops at `contain`; the lease, dropped while unwinding,
+    // answers the call.
+    host.host.tool_call(lease);
 }
 
 unsafe extern "C" fn host_tool_cancel(ctx: *mut c_void, call: u64, turn: u64) {
     // SAFETY: as host_tool_call.
     let host = unsafe { &*(ctx as *const HostBox) };
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        host.host.tool_cancel(call, turn)
-    }));
+    contain(|| host.host.tool_cancel(call, turn));
 }
 
 /// A journal append, borrowed for the [`Host::journal_append`] call.
@@ -466,9 +511,7 @@ unsafe extern "C" fn host_journal_append(ctx: *mut c_void, info: *const sys::fx_
         barrier: info.flags & sys::FX_APPEND_BARRIER != 0,
         events_json: str_in(info, info.events_json),
     };
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        host.host.journal_append(append)
-    }));
+    contain(|| host.host.journal_append(append));
 }
 
 /// Why a turn ended.
@@ -720,8 +763,11 @@ pub enum Purpose {
     Catalog,
 }
 
-/// A credential the host's fetch edge may add: only to requests for
-/// `provider` whose destination origin is `origin` (header rule 13).
+/// One entry of the fetch edge's trusted allowlist (header rule 13): header
+/// `header` with `value` goes only to requests for `provider` whose
+/// destination origin is `origin`. Several entries for one provider and
+/// origin add several headers (an account id beside authorization). A header
+/// any entry names never reaches another destination, whoever set it.
 #[derive(Clone, Copy, Debug)]
 pub struct Credential<'a> {
     pub provider: &'a str,
@@ -753,21 +799,36 @@ impl<'a> FetchRequest<'a> {
             .map(move |header| (str_in(headers, header.name), str_in(headers, header.value)))
     }
 
-    /// The headers to send: the core's, plus the first credential whose
-    /// provider and origin match this request's. Credentials never reach any
-    /// other destination (a loopback fake, an endpoint override).
+    /// The headers to send to this request's URL: [`Self::headers_for`]
+    /// with `self.url`.
     pub fn outgoing_headers(&self, credentials: &[Credential<'_>]) -> Vec<(String, String)> {
+        self.headers_for(self.url, credentials)
+    }
+
+    /// The headers to send to `url`: this request's URL, or a redirect hop's
+    /// absolute URL. The HTTP client never follows a redirect with headers
+    /// on its own: it asks again for every hop, so the allowlist is checked
+    /// against each destination. The core's headers, less every header an
+    /// allowlist entry names, plus every entry for this provider and `url`'s
+    /// origin. Credentials never reach any other destination (a loopback
+    /// fake, an endpoint override, a public lookup, a redirect elsewhere).
+    pub fn headers_for(&self, url: &str, credentials: &[Credential<'_>]) -> Vec<(String, String)> {
         let mut headers: Vec<(String, String)> = self
             .headers()
+            .filter(|(name, _)| {
+                !credentials
+                    .iter()
+                    .any(|c| name.eq_ignore_ascii_case(c.header))
+            })
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        if let Some(origin) = origin_of(self.url)
-            && let Some(credential) = credentials
+        if let Some(origin) = origin_of(url) {
+            for credential in credentials
                 .iter()
-                .find(|c| c.provider == self.provider && c.origin == origin)
-        {
-            headers.retain(|(name, _)| !name.eq_ignore_ascii_case(credential.header));
-            headers.push((credential.header.to_string(), credential.value.to_string()));
+                .filter(|c| c.provider == self.provider && c.origin == origin)
+            {
+                headers.push((credential.header.to_string(), credential.value.to_string()));
+            }
         }
         headers
     }
@@ -814,6 +875,9 @@ pub enum Disposition {
     Active,
     /// The core has all it needs: drain the rest quietly.
     Consumed,
+    /// The core could not tell within the busy bound: keep the request and
+    /// ask again shortly (never a reason to abort it).
+    Busy,
 }
 
 /// A steer's fate at the call.
@@ -1155,8 +1219,10 @@ impl Runtime {
     }
 
     /// Destroys the runtime on this (worker) thread: new tool calls are
-    /// answered at once, every lease is waited for, then the core is
-    /// stopped and freed. Never call it on the main thread.
+    /// answered at once, every lease is waited for (not on a panicked
+    /// runtime, whose leases stay readable), then the core is stopped and
+    /// freed. Never call it on the main thread, nor while this thread holds
+    /// a lease of a runtime that has not panicked.
     pub fn close(mut self) {
         assert_off_main();
         self.closed = true;
@@ -1165,9 +1231,15 @@ impl Runtime {
 
     #[doc(hidden)]
     pub fn arm_fault(&self, point: u32, skip: u32) -> Result<(), Error> {
-        // SAFETY: plain value call.
-        applied(unsafe { sys::fx_test_arm_fault(self.handle(), point, skip) })
+        self.remote().arm_fault(point, skip)
     }
+}
+
+/// Arms the process-wide FX_FAULT_CREATE (tests only).
+#[doc(hidden)]
+pub fn arm_create_fault(skip: u32) -> Result<(), Error> {
+    // SAFETY: plain value call.
+    applied(unsafe { sys::fx_test_arm_fault(0, sys::FX_FAULT_CREATE, skip) })
 }
 
 /// Waits for the leases, destroys the runtime, frees the host box.
@@ -1252,6 +1324,7 @@ impl Remote {
         match unsafe { sys::fx_fetch_disposition_get(self.handle, fetch) } {
             sys::FX_FETCH_ACTIVE => Disposition::Active,
             sys::FX_FETCH_CONSUMED => Disposition::Consumed,
+            sys::FX_FETCH_BUSY => Disposition::Busy,
             _ => Disposition::Retired,
         }
     }
@@ -1288,6 +1361,12 @@ impl Remote {
     #[doc(hidden)]
     pub fn handle(&self) -> u64 {
         self.handle
+    }
+
+    #[doc(hidden)]
+    pub fn arm_fault(&self, point: u32, skip: u32) -> Result<(), Error> {
+        // SAFETY: plain value call.
+        applied(unsafe { sys::fx_test_arm_fault(self.handle, point, skip) })
     }
 }
 
@@ -1328,6 +1407,72 @@ mod tests {
         assert_eq!(size_of::<sys::fx_tool_output>(), 40);
         assert_eq!(size_of::<sys::fx_input>(), 32);
         assert_eq!(size_of::<sys::fx_image>(), 32);
+    }
+
+    #[test]
+    fn the_allowlist_adds_every_header_for_its_origin_and_rechecks_redirects() {
+        let core_headers = [
+            sys::fx_header {
+                name: sys::fx_str::of("originator"),
+                value: sys::fx_str::of("fx"),
+            },
+            // A header the allowlist names, set by the core: never forwarded.
+            sys::fx_header {
+                name: sys::fx_str::of("ChatGPT-Account-Id"),
+                value: sys::fx_str::of("core-set"),
+            },
+        ];
+        let request = FetchRequest {
+            fetch: 1,
+            turn: 1,
+            purpose: Purpose::Model,
+            provider: "codex",
+            method: "POST",
+            url: "https://chatgpt.com/backend-api/codex/responses",
+            headers: &core_headers,
+            body: b"",
+        };
+        let allowlist = [
+            Credential {
+                provider: "gateway",
+                origin: "https://chatgpt.com",
+                header: "x-gateway",
+                value: "wrong-provider",
+            },
+            Credential {
+                provider: "codex",
+                origin: "https://chatgpt.com",
+                header: "authorization",
+                value: "Bearer synthetic",
+            },
+            Credential {
+                provider: "codex",
+                origin: "https://chatgpt.com",
+                header: "chatgpt-account-id",
+                value: "synthetic-account",
+            },
+        ];
+        let own = |url: &str| -> Vec<(String, String)> { request.headers_for(url, &allowlist) };
+        let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+        let with_credentials = vec![
+            pair("originator", "fx"),
+            pair("authorization", "Bearer synthetic"),
+            pair("chatgpt-account-id", "synthetic-account"),
+        ];
+        assert_eq!(request.outgoing_headers(&allowlist), with_credentials);
+        // A redirect hop on the same origin (default port spelled out) keeps them.
+        assert_eq!(own("https://ChatGPT.com:443/elsewhere"), with_credentials);
+        // A hop to any other origin carries none, the core's own included.
+        for hop in [
+            "https://evil.example/x",
+            "http://chatgpt.com/downgrade",
+            "https://chatgpt.com:8443/port",
+            "https://chatgpt.com.evil.example/x",
+            "https://user@evil.example/x",
+            "ftp://chatgpt.com/x",
+        ] {
+            assert_eq!(own(hop), vec![pair("originator", "fx")], "{hop}");
+        }
     }
 
     #[test]

@@ -350,6 +350,7 @@ pub type fx_fetch_disposition = i32;
 pub const FX_FETCH_RETIRED: fx_fetch_disposition = 0;
 pub const FX_FETCH_ACTIVE: fx_fetch_disposition = 1;
 pub const FX_FETCH_CONSUMED: fx_fetch_disposition = 2;
+pub const FX_FETCH_BUSY: fx_fetch_disposition = 3;
 
 pub const FX_FAULT_FETCH_LOCKED: u32 = 1;
 pub const FX_FAULT_EVENT_LOCKED: u32 = 2;
@@ -357,6 +358,13 @@ pub const FX_FAULT_STREAMING: u32 = 3;
 pub const FX_FAULT_TOOL_RESULT: u32 = 4;
 pub const FX_FAULT_JOURNAL_APPEND: u32 = 5;
 pub const FX_FAULT_TOOL_CALL: u32 = 6;
+pub const FX_FAULT_INPUT_LOCKED: u32 = 7;
+pub const FX_FAULT_HOST_TRANSPORT: u32 = 8;
+pub const FX_FAULT_CREATE: u32 = 9;
+pub const FX_FAULT_DESTROY: u32 = 10;
+pub const FX_FAULT_DRAIN_OOM: u32 = 11;
+pub const FX_FAULT_TAKE_OOM: u32 = 12;
+pub const FX_FAULT_REPLY_OOM: u32 = 13;
 
 /// Declares the C functions, or (without the core) stubs of them.
 macro_rules! abi {

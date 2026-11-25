@@ -433,3 +433,109 @@ fn a_sibling_panic_mid_callback_waits_for_the_callback_then_calls_nothing() {
         driver.runtime.close();
     });
 }
+
+/// Journals in memory and acks nothing itself.
+struct Collect(Mutex<Sender<(u64, bool)>>);
+impl Host for Collect {
+    fn journaled(&self) -> bool {
+        true
+    }
+    fn journal_append(&self, append: JournalAppend<'_>) {
+        let _ = self.0.lock().unwrap().send((append.append, append.barrier));
+    }
+}
+
+#[test]
+fn a_host_call_failing_the_transport_never_waits_on_the_input_lock() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        let (send, _appends) = channel();
+        let mut driver = victim(
+            text_model("never"),
+            Arc::new(Collect(Mutex::new(send))),
+            &[],
+        );
+        // Opening a journaled session makes the core write its journal_open
+        // request: that core thread then holds the input lock and, armed,
+        // waits for the runtime to stop before it panics there.
+        driver
+            .runtime
+            .arm_fault(sys::FX_FAULT_INPUT_LOCKED, 0)
+            .unwrap();
+        driver
+            .runtime
+            .arm_fault(sys::FX_FAULT_HOST_TRANSPORT, 0)
+            .unwrap();
+        driver.runtime.open_session("").expect("open");
+        std::thread::sleep(Duration::from_millis(500));
+        // This host call fails the transport while the lock is held: the
+        // failure is published first, the core thread panics holding the
+        // lock, and the call gives up on it instead of waiting for ever.
+        let remote = driver.remote();
+        let (done_tx, done) = channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = remote.journal_ack(1);
+            let _ = done_tx.send((result, started.elapsed()));
+        });
+        let (result, took) = done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the host call is stranded on the input lock");
+        assert_eq!(result, Err(Error::Failed));
+        assert!(took < Duration::from_secs(1), "the host call took {took:?}");
+        expect_panicked(&mut driver, "input_locked");
+        calls_return_at_once(&mut driver);
+        bystander_runs();
+        close_quickly(driver);
+    });
+}
+
+#[test]
+fn wrapper_close_with_an_outstanding_lease_on_a_panicked_runtime() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        let (send, leases) = channel();
+        let mut driver = victim(
+            tool_then_text(&[r#"{"q":"a"}"#, r#"{"q":"b"}"#]),
+            Arc::new(Queue(Mutex::new(send))),
+            &TOOLS,
+        );
+        driver.open();
+        driver.runtime.prompt("go", "w-1").expect("prompt");
+        let first = lease_from(&mut driver, &leases);
+        let second = lease_from(&mut driver, &leases);
+        let (held, answered) = if first.input_json().contains('a') {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        // The runtime panics inside the other lease's answer.
+        driver
+            .runtime
+            .arm_fault(sys::FX_FAULT_TOOL_RESULT, 0)
+            .unwrap();
+        assert_eq!(answered.answer("b", false), Err(Error::Failed));
+        expect_panicked(&mut driver, "tool_result");
+        // Close on this thread, which still holds a lease: it does not wait
+        // for it, since a panicked runtime's memory is never freed.
+        let remote = driver.remote();
+        let started = Instant::now();
+        driver.runtime.close();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "close waited {:?} for a lease",
+            started.elapsed()
+        );
+        // The lease's input is still readable after destroy (header rule 8),
+        // and its late answer finds the handle closed.
+        assert_eq!(held.input_json(), r#"{"q":"a"}"#);
+        assert_eq!(held.name(), "lookup");
+        assert_eq!(held.answer("late", false), Err(Error::Closed));
+        assert_eq!(remote.cancel(1), Err(Error::Closed));
+        bystander_runs();
+    });
+}

@@ -165,3 +165,50 @@ fn the_fetch_stream_keeps_its_order() {
         driver.runtime.close();
     });
 }
+
+#[test]
+fn a_cancel_before_publication_retires_the_turns_later_fetch() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        let runtime = Runtime::create(&config(ENDPOINT, &[]), Arc::new(NoTools)).expect("create");
+        let mut driver = Driver::new(runtime, answers_then_holds(0), ENDPOINT);
+        driver.open();
+        let remote = driver.remote();
+        for round in 0..20 {
+            // Cancelled before the core can have published the turn's model
+            // request: whatever it publishes for the turn afterwards is
+            // published retired, so it is never handed out.
+            let turn = driver
+                .runtime
+                .prompt("go", &format!("c-{round}"))
+                .expect("prompt");
+            assert_eq!(remote.cancel(turn), Ok(Outcome::Applied));
+            // A second cancel of the same turn has nothing more to do.
+            assert_eq!(remote.cancel(turn), Ok(Outcome::Applied));
+            match driver.until(
+                10,
+                |e| matches!(e, Seen::TurnEnd { turn: t, .. } if *t == turn),
+            ) {
+                Seen::TurnEnd { reason, .. } => assert_eq!(reason, StopReason::Cancelled),
+                _ => unreachable!(),
+            }
+            assert!(
+                !driver
+                    .fetches
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f.turn == turn && f.purpose == Purpose::Model),
+                "round {round}: a cancelled turn's request was handed out"
+            );
+        }
+        // The session goes on.
+        driver.model = Arc::new(|_| Reply::Sse(sse_text("after")));
+        let (next, reason) = driver.turn("again", "again-1");
+        assert_eq!(reason, StopReason::EndTurn);
+        assert_eq!(driver.text_of(next), "after");
+        driver.runtime.close();
+    });
+}

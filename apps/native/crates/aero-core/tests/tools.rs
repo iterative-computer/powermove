@@ -252,6 +252,23 @@ impl Host for Panics {
     }
 }
 
+/// A panic payload whose own drop panics (Sol's 2a item 2): dropping it on
+/// the callback's stack must not abort at the C boundary.
+struct Bomb;
+impl Drop for Bomb {
+    fn drop(&mut self) {
+        panic!("the panic payload's drop panics too");
+    }
+}
+
+struct PanicsWithBomb;
+impl Host for PanicsWithBomb {
+    fn tool_call(&self, call: ToolLease) {
+        let _keep = call;
+        std::panic::panic_any(Bomb);
+    }
+}
+
 struct Drops;
 impl Host for Drops {
     fn tool_call(&self, call: ToolLease) {
@@ -267,6 +284,7 @@ fn a_panicking_or_dropped_tool_still_answers_the_core() {
         }
         for (host, expected) in [
             (Arc::new(Panics) as Arc<dyn Host>, "saw panic"),
+            (Arc::new(PanicsWithBomb), "saw panic"),
             (Arc::new(Drops), "saw drop"),
         ] {
             let tools = [lookup(true, false)];
@@ -358,6 +376,48 @@ fn the_step_limit_is_enforced() {
         driver.runtime.close();
     });
 }
+
+/// The step limit arrives typed (P-STEPS): a reply that quotes the core's
+/// step-limit notice in a turn that then fails for another reason (here
+/// repeated malformed tool input, which libfx ends as refused) is a
+/// refusal, not the step limit.
+#[test]
+fn a_quoted_step_limit_notice_is_not_the_step_limit() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        struct Answers;
+        impl Host for Answers {
+            fn tool_call(&self, call: ToolLease) {
+                let _ = call.answer("ok", false);
+            }
+        }
+        let tools = [lookup(true, false)];
+        let runtime =
+            Runtime::create(&config(ENDPOINT, &tools), Arc::new(Answers)).expect("create");
+        let quote = support::json_string(&format!("The log said: {STEP_LIMIT_NOTICE} "));
+        let reply = format!(
+            "data: {{\"type\":\"text-delta\",\"id\":\"0\",\"delta\":{quote}}}\n\n{}",
+            sse_tool_calls("lookup", &[r#"{"q":"#])
+        );
+        let model: Model = Arc::new(move |_| Reply::Sse(reply.clone()));
+        let mut driver = Driver::new(runtime, model, ENDPOINT);
+        driver.open();
+        let (turn, reason) = driver.turn("quote it", "q-1");
+        assert!(
+            driver.text_of(turn).contains(STEP_LIMIT_NOTICE),
+            "the reply quoted the notice: {:#?}",
+            driver.seen
+        );
+        assert_eq!(reason, StopReason::Refusal, "{:#?}", driver.seen);
+        driver.runtime.close();
+    });
+}
+
+/// core/agent/runtime/config.zig, default_step_limit_notice.
+const STEP_LIMIT_NOTICE: &str =
+    "Agent step limit reached; continue with a follow-up prompt if needed.";
 
 /// Records when the host is dropped (teardown freed it).
 struct Tracked {
