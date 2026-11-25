@@ -3026,3 +3026,48 @@ fn completion_service_unavailability_is_a_readable_limit_not_lost_reply() {
     drop(state);
     panel.panels.close();
 }
+
+/// PM-730: the launcher's task switch never waits on the Agent state. Here
+/// an agent's project check holds the shared tool host, and a launch holds
+/// the Agent state while its completion waits for that host: the switch
+/// answers "busy" at once, and switches once the launch lets go.
+#[test]
+fn the_launcher_task_switch_never_waits_behind_a_check() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    let agent = panel.agent();
+    let id = thread_id(&agent);
+    let host = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let (checking, check_held) = std::sync::mpsc::channel();
+    let check = {
+        let host = host.clone();
+        thread::spawn(move || {
+            let _check = host.lock().unwrap();
+            checking.send(()).unwrap();
+            thread::sleep(Duration::from_millis(600));
+        })
+    };
+    check_held.recv().unwrap();
+    let (launching, launch_held) = std::sync::mpsc::channel();
+    let launch = {
+        let (agent, host) = (agent.clone(), host.clone());
+        thread::spawn(move || {
+            let _state = agent.lock().unwrap();
+            launching.send(()).unwrap();
+            let _host = host.lock().unwrap();
+        })
+    };
+    launch_held.recv().unwrap();
+    let started = Instant::now();
+    let switched = panel.panels.agent_launcher_try_switch(&id);
+    let waited = started.elapsed();
+    assert_eq!(switched, Ok(false));
+    assert!(
+        waited < Duration::from_millis(100),
+        "the switch waited {waited:?}"
+    );
+    check.join().unwrap();
+    launch.join().unwrap();
+    assert_eq!(panel.panels.agent_launcher_try_switch(&id), Ok(true));
+}

@@ -4251,6 +4251,25 @@ impl Controller {
         })
         .detach();
     }
+    /// The launcher's task switch. The main thread never waits on the Agent
+    /// panel's state (a launch can hold it while its completion waits behind
+    /// an agent's project check): busy, it tries again on the next frame.
+    fn switch_agent_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self
+            .builtins
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.agent_launcher_try_switch(&id) == Ok(false));
+        if busy {
+            let this = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                let _ = this.update(cx, |s, cx| s.switch_agent_task(id, window, cx));
+            });
+            return;
+        }
+        self.open_agent_from_launcher(window, cx);
+    }
+
     pub fn command(
         &mut self,
         cmd: &ShellCommand,
@@ -4697,10 +4716,7 @@ impl Controller {
             "agent.launcher.open" => self.open_agent_from_launcher(window, cx),
             "agent.launcher.task" => {
                 if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
-                    if let Some(runtime) = &self.builtins.runtime {
-                        let _ = runtime.agent_launcher_switch(id);
-                    }
-                    self.open_agent_from_launcher(window, cx);
+                    self.switch_agent_task(id.to_owned(), window, cx);
                 }
             }
             "agent.stop" => {
