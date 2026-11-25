@@ -1,7 +1,8 @@
-// Powermove notice: modified from upstream fx (patches P-PANIC, P-STOP): the
-// prompt worker starts in its runtime's panic context
-// (core/shared/panic_context.zig), and an embedder's lifecycle hooks
-// (Config.host_hooks) are registered before the hook runtime freezes.
+// Powermove notice: modified from upstream fx (patches P-PANIC, P-STOP,
+// P-IMAGES): the prompt worker starts in its runtime's panic context
+// (core/shared/panic_context.zig), an embedder's lifecycle hooks
+// (Config.host_hooks) are registered before the hook runtime freezes, and
+// libfx/handoff refuses a turn that takes no more steering.
 const std = @import("std");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const managed_execution = @import("../core/execution/managed_execution.zig");
@@ -1888,7 +1889,14 @@ fn handleKernelHandoff(
             .code = ErrorCode.invalid_params,
             .message = "Unknown libfx session",
         });
-    if (active.steering.requestHandoff(&active.cancel_flag)) {
+    // Powermove (P-IMAGES): a turn that takes no more steering refuses the
+    // handoff, as libfx/steer does, so the host runs it as the next prompt.
+    const interrupts = active.steering.requestHandoffChecked(&active.cancel_flag) catch
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "No prompt is running",
+        });
+    if (interrupts) {
         debug_trace.logf("acp", "libfx handoff interrupts the streaming reply", .{});
     }
     try state.writer.writeResponse(alloc, msg.id, "null");

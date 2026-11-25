@@ -413,6 +413,34 @@ const max_image_bytes = 8 * 1024 * 1024;
 /// returns FX_E_TOO_LARGE, as beyond the header's FX_MAX_* limits.
 const max_model_image_bytes = image_data.max_encoded_image_bytes / 4 * 3;
 const max_prompt_images_bytes = 6 * 1024 * 1024;
+/// What a journaled session's prompt or tool result may hold inline: a
+/// reopen loads at most the core's snapshot bound (4 MiB) of journal after
+/// the checkpoint, and a turn's journal holds its input twice (its first
+/// progress and its commit), so one whose turn could never reopen is
+/// refused before it is committed (Sol's m2 item 3). An image store names
+/// images instead of holding them. The host's store refuses the rest (a
+/// turn that grows past the bound) as it comes.
+const max_journal_record_bytes = (core.agent_checkpoint.max_checkpoint_bytes - 256 * 1024) / 2;
+
+/// Bytes `raw` raw image bytes take as base64.
+fn base64Len(raw: usize) usize {
+    return (raw + 2) / 3 * 4;
+}
+
+fn imagesBytes(images: []const Image) usize {
+    var total: usize = 0;
+    for (images) |image| total += image.data.len;
+    return total;
+}
+
+/// Whether a journaled session's record for text and images could fit what
+/// a reopen loads (max_journal_record_bytes); images count as base64 unless
+/// the host keeps an image store. The caller holds `lock`.
+fn journalRecordFits(self: *const Runtime, text_len: usize, images: []const Image) bool {
+    if (!self.journaled) return true;
+    const inline_images = if (self.image_store) 0 else base64Len(imagesBytes(images));
+    return text_len + inline_images <= max_journal_record_bytes;
+}
 /// A hook answer's text: the core's own bounds for a block reason, a
 /// continuation and rewritten input (core/hooks/definitions.zig).
 const max_hook_reason = hook_defs.Limits.reason_bytes;
@@ -802,6 +830,9 @@ const Steer = struct {
     /// A steer with images: it never joins; the turn hands off at its next
     /// safe point and the steer comes back (P-IMAGES).
     handoff: bool = false,
+    /// The fx_turn_withdraw request waiting on libfx's answer, or 0. The
+    /// steer stays until that answer says it was withdrawn (Sol's m2 item 6).
+    withdraw_request: u64 = 0,
 };
 
 const Tool = struct {
@@ -936,6 +967,12 @@ const Runtime = struct {
     journal_sent: u64 = 0,
     journal_acked: u64 = 0,
     journal_failed: ?[]u8 = null,
+    /// The turn running when the store failed: it ends with FX_STOP_ERROR
+    /// whatever the core answers (Sol's m2 item 2).
+    failed_turn: u64 = 0,
+    /// A journaled turn the core finished whose appends are not all
+    /// acknowledged yet: its TURN_END waits for them (or for a failure).
+    pending_end: ?PendingEnd = null,
     flushes: std.ArrayList(Flush) = .empty,
     /// The running turn fx_turn_cancel cancelled, or 0. A fetch the core
     /// publishes for it afterwards is published retired.
@@ -953,6 +990,14 @@ const Runtime = struct {
 
     const Flush = struct {
         rpc_id: i64,
+        upto: u64,
+    };
+
+    const PendingEnd = struct {
+        turn: u64,
+        reason: StopReason,
+        usage: Usage,
+        /// The last append the turn sent.
         upto: u64,
     };
 
@@ -1549,56 +1594,58 @@ const Runtime = struct {
             .journal_open => self.onJournalOpened(arena, pending.request, result, err, message),
             .prompt => {
                 const turn = pending.request;
-                // Steers still queued when the turn ends come back first.
-                var returned: std.ArrayList(Steer) = .empty;
-                while (self.steers.items.len > 0) {
-                    returned.append(arena, self.steers.items[0]) catch break;
-                    _ = self.steers.orderedRemove(0);
-                }
                 // The core's hook dispatch copied every answer it was handed.
                 self.freeHookTexts();
                 self.clearReservedCalls();
-                self.lock.unlock(io);
-                for (returned.items) |steer| {
-                    self.queueEvent(.{ .kind = .steer_returned, .turn = turn, .request = steer.request }, .{ .text2 = steer.message_id }, .control);
-                    alloc_c.free(steer.message_id);
-                }
                 var reason: StopReason = .@"error";
                 var usage: Usage = .{};
-                if (err != null) {
-                    self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
-                } else {
+                if (err == null) {
                     // The step limit arrives typed, as max_model_turns
                     // (patch P-STEPS), never read from the reply's text.
                     reason = StopReason.fromAcp(stringField(result, "stopReason") orelse "");
                     usage = promptUsage(result);
                 }
-                self.endTurn(turn, reason, usage);
+                // A journaled turn ends once what it appended is durable: its
+                // TURN_END waits for the acks, or ends it as an error if the
+                // store fails them (Sol's m2 item 2).
+                const durable = !self.journaled or self.journal_failed != null or self.journal_acked >= self.journal_sent;
+                if (!durable) self.pending_end = .{ .turn = turn, .reason = reason, .usage = usage, .upto = self.journal_sent };
+                self.lock.unlock(io);
+                if (err != null) self.queueEvent(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = message }, .control);
+                if (durable) self.endTurn(turn, reason, usage, false);
             },
-            .steer => {
+            .steer, .handoff => {
+                // A text steer queued for the turn, or a steer with images
+                // queued as the handoff (it comes back at the turn's end).
+                // libfx answers one that arrived after its turn stopped
+                // taking input with "No prompt is running": it comes back
+                // now, as FX_STALE. One that already came back at its
+                // turn's end (STEER_RETURNED) is settled: FX_OK, so it never
+                // comes back twice (Sol's m2 item 6).
                 var status: Status = FX_OK;
-                if (err != null) {
-                    // libfx answers a steer that arrived after its turn with
-                    // "No prompt is running": the turn ended first.
+                if (err != null and self.findSteer(pending.request) != null) {
                     status = if (std.mem.find(u8, message, "No prompt is running") != null) FX_STALE else FX_E_FAILED;
                     self.dropSteer(pending.request);
                 }
                 self.lock.unlock(io);
                 self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
             },
-            .handoff => {
-                // A steer with images: queued as the handoff; it comes back
-                // at the turn's end.
-                const status: Status = if (err == null) FX_OK else FX_E_FAILED;
-                if (err != null) self.dropSteer(pending.request);
-                self.lock.unlock(io);
-                self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
-            },
             .withdraw => {
+                // Settled on libfx's answer: the steer leaves only once it
+                // was withdrawn. One libfx placed, or a handoff it cannot
+                // withdraw by id, stays and comes back at the turn's end;
+                // one that came back already is FX_STALE.
                 var status: Status = FX_E_FAILED;
+                const index = self.findWithdraw(pending.request);
+                if (index) |at| self.steers.items[at].withdraw_request = 0;
                 if (err == null) {
                     const outcome = stringField(result, "result") orelse "";
-                    status = if (std.mem.eql(u8, outcome, "withdrawn")) FX_OK else FX_STALE;
+                    status = FX_STALE;
+                    if (std.mem.eql(u8, outcome, "withdrawn")) if (index) |at| {
+                        alloc_c.free(self.steers.items[at].message_id);
+                        _ = self.steers.orderedRemove(at);
+                        status = FX_OK;
+                    };
                 }
                 self.lock.unlock(io);
                 self.queueEvent(.{ .kind = .request_done, .request = pending.request, .status = status }, .{ .text = if (status == FX_E_FAILED) message else "" }, .control);
@@ -1627,25 +1674,54 @@ const Runtime = struct {
         }
     }
 
-    /// Queues `turn`'s TURN_END and ends the turn in one critical section
-    /// with `lock` and the event lock, so a host that has drained TURN_END
-    /// can start the next turn at once. A control event: it never waits for
-    /// room; one that cannot be queued fails the runtime.
-    fn endTurn(self: *Runtime, turn: u64, reason: StopReason, usage: Usage) void {
-        self.parkIfPanicked();
+    /// Ends `turn` in one critical section with `lock` and the event lock:
+    /// its steers still queued come back (STEER_RETURNED), a store failure
+    /// that hit it shows as ERROR and makes it FX_STOP_ERROR, TURN_END is
+    /// queued, and the turn is cleared. A steer is admitted either before
+    /// (and comes back here) or after (and fx_turn_steer says FX_STALE), and
+    /// a host that has drained TURN_END can start the next turn at once
+    /// (Sol's m2 item 6). Control events: they never wait for room; one that
+    /// cannot be queued fails the runtime. `on_host`: called from a host
+    /// call (an ack or failure that releases the end), which never parks.
+    fn endTurn(self: *Runtime, turn: u64, reason_in: StopReason, usage: Usage, on_host: bool) void {
+        if (!on_host) self.parkIfPanicked();
         const io = io_mod.getIo();
         const queue = &self.events;
         self.lock.lockUncancelable(io);
         queue.mutex.lockUncancelable(io);
+        const current = self.turn == turn;
+        const failure: ?[]const u8 = if (self.failed_turn == turn) self.journal_failed else null;
+        const reason: StopReason = if (failure != null) .@"error" else reason_in;
         var appended = true;
         var was_empty = false;
-        if (!queue.closed) {
-            if (queue.appendLocked(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(reason), .usage = usage }, .{})) |empty| {
-                was_empty = empty;
-            } else |_| appended = false;
+        if (!queue.closed) queue: {
+            if (current) for (self.steers.items) |steer| {
+                const empty = queue.appendLocked(.{ .kind = .steer_returned, .turn = turn, .request = steer.request }, .{ .text2 = steer.message_id }) catch {
+                    appended = false;
+                    break :queue;
+                };
+                was_empty = was_empty or empty;
+            };
+            if (failure) |text| {
+                const empty = queue.appendLocked(.{ .kind = .@"error", .turn = turn, .status = FX_E_FAILED }, .{ .text = text }) catch {
+                    appended = false;
+                    break :queue;
+                };
+                was_empty = was_empty or empty;
+            }
+            const empty = queue.appendLocked(.{ .kind = .turn_end, .turn = turn, .code = @intFromEnum(reason), .usage = usage }, .{}) catch {
+                appended = false;
+                break :queue;
+            };
+            was_empty = was_empty or empty;
         }
-        if (self.turn == turn) {
+        if (current) {
             self.turn = 0;
+            if (self.pending_end) |end| if (end.turn == turn) {
+                self.pending_end = null;
+            };
+            for (self.steers.items) |steer| alloc_c.free(steer.message_id);
+            self.steers.clearRetainingCapacity();
             // A turn that ended, however, is the one a retry of its message
             // id names ("Deduplication"); a failed or yielded one is not.
             const ended = self.turn_message_id;
@@ -1720,6 +1796,20 @@ const Runtime = struct {
             .flags = flags,
             .id = @intCast(@max(0, intField(result, "turns") orelse 0)),
         }, .{ .text = session_id }, .control);
+    }
+
+    /// Where the steer `request` is, if it has not joined or come back. The
+    /// caller holds `lock`.
+    fn findSteer(self: *Runtime, request: u64) ?usize {
+        for (self.steers.items, 0..) |steer, index| if (steer.request == request) return index;
+        return null;
+    }
+
+    /// Where the steer fx_turn_withdraw request `request` names is. The
+    /// caller holds `lock`.
+    fn findWithdraw(self: *Runtime, request: u64) ?usize {
+        for (self.steers.items, 0..) |steer, index| if (steer.withdraw_request == request) return index;
+        return null;
     }
 
     /// Forgets the steer `request`. The caller holds `lock`.
@@ -1800,8 +1890,9 @@ fn sinkText(raw: *anyopaque, kind: host_event_sink.TextKind, text: []const u8) h
     const self = sinkRuntime(raw);
     if (text.len == 0) return;
     const thought = kind == .thought;
-    // engine.js drops the core's context notices from the reply.
-    if (!thought and std.mem.startsWith(u8, text, "[context]")) return;
+    // Every reply delta is the model's or the core's own text for the user:
+    // the core's context notices never reach the sink (prompt.zig routes
+    // them by provenance), so no text is dropped by its prefix.
     const turn = self.currentTurn();
     if (!thought) self.fault(.streaming);
     self.queueEvent(.{ .kind = if (thought) .thought_delta else .text_delta, .turn = turn }, .{ .text = text }, .delta);
@@ -3188,6 +3279,8 @@ fn promptBody(runtime: ?*Runtime, args: PromptArgs) Status {
     };
     if (text.len == 0 and images.len == 0) return FX_E_INVALID;
     if (self.session != .open or self.turn != 0 or self.journal_failed != null) return FX_E_STATE;
+    // What a reopen could never load is never committed.
+    if (!journalRecordFits(self, text.len, images)) return FX_E_TOO_LARGE;
     // A retry of the turn that ended last runs nothing ("Deduplication").
     if (self.last_turn_id) |last| if (std.mem.eql(u8, last, id)) return repeatTurn(self, id, args.turn);
     // The open turn's own id continues it, as fx_turn_resume does.
@@ -3449,10 +3542,10 @@ fn withdrawBody(runtime: ?*Runtime, args: WithdrawArgs) Status {
     const request = self.nextRequest();
     status = self.sendRequest(.withdraw, request, "libfx/withdraw", extra.written());
     if (status != FX_OK) return status;
-    // A withdrawn steer no longer comes back at the turn's end.
-    for (self.steers.items, 0..) |steer, index| if (std.mem.eql(u8, steer.message_id, id)) {
-        alloc_c.free(steer.message_id);
-        _ = self.steers.orderedRemove(index);
+    // The steer stays until libfx says it was withdrawn: until then it can
+    // still join (and its STEER_JOINED names its request) or come back.
+    for (self.steers.items) |*steer| if (std.mem.eql(u8, steer.message_id, id)) {
+        steer.withdraw_request = request;
         break;
     };
     args.request.* = request;
@@ -3701,15 +3794,17 @@ fn toolResultBody(runtime: ?*Runtime, args: ToolResultArgs) Status {
     };
     var outcome: Status = FX_OK;
     var images: ?[]core_types.ToolImage = null;
-    if (raw_images.len > 0 and text.len <= self.max_tool_result_bytes) {
-        images = toolImages(raw_images, self.image_store) catch |err| switch (err) {
+    // A journaled session's result must fit one reopenable record.
+    const max_text = if (self.journaled) @min(self.max_tool_result_bytes, max_journal_record_bytes) else self.max_tool_result_bytes;
+    if (raw_images.len > 0 and text.len <= max_text) {
+        images = if (!journalRecordFits(self, text.len, raw_images)) null else toolImages(raw_images, self.image_store) catch |err| switch (err) {
             error.Invalid => return FX_E_INVALID,
             error.OutOfMemory => return FX_E_OOM,
             error.TooLarge => null,
         };
         if (images == null) outcome = FX_E_TOO_LARGE;
     }
-    const source = if (text.len > self.max_tool_result_bytes)
+    const source = if (text.len > max_text)
         "Host tool result exceeded the configured limit"
     else if (outcome == FX_E_TOO_LARGE)
         "Host tool images exceeded the limit"
@@ -3981,21 +4076,32 @@ export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
             if (self.faultHostTransport()) return FX_E_FAILED;
             const status = lockLive(self);
             if (status != FX_OK) return status;
-            defer unlock(self);
-            if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
-            if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
+            // Unlocked by hand: an end it releases takes the lock again.
+            if (append_id == 0 or append_id > self.journal_sent) {
+                unlock(self);
+                return FX_E_INVALID;
+            }
+            if (append_id <= self.journal_acked or self.journal_failed != null) {
+                unlock(self);
+                return FX_STALE;
+            }
             // The flushes it releases are answered in one write that either
             // lands whole or not at all; only then is the ack applied (Sol's
             // 2a item 5).
             var replies: std.Io.Writer.Allocating = .init(alloc_c);
             defer replies.deinit();
             for (self.flushes.items) |flush| if (flush.upto <= append_id) {
-                writeResult(&replies.writer, flush.rpc_id, "{}") catch return FX_E_OOM;
+                writeResult(&replies.writer, flush.rpc_id, "{}") catch {
+                    unlock(self);
+                    return FX_E_OOM;
+                };
             };
             if (replies.written().len > 0) {
-                if (self.faultOom(.reply_oom)) return FX_E_OOM;
-                const sent = self.hostInput(replies.written(), .control);
-                if (sent != FX_OK) return sent;
+                const sent = if (self.faultOom(.reply_oom)) FX_E_OOM else self.hostInput(replies.written(), .control);
+                if (sent != FX_OK) {
+                    unlock(self);
+                    return sent;
+                }
             }
             self.journal_acked = append_id;
             var index: usize = 0;
@@ -4004,6 +4110,14 @@ export fn fx_journal_ack(handle: u64, append: u64) callconv(.c) Status {
                     _ = self.flushes.orderedRemove(index);
                 } else index += 1;
             }
+            // A finished turn waiting for its appends ends now.
+            var released: ?Runtime.PendingEnd = null;
+            if (self.pending_end) |end| if (end.upto <= append_id) {
+                released = end;
+                self.pending_end = null;
+            };
+            unlock(self);
+            if (released) |end| self.endTurn(end.turn, end.reason, end.usage, true);
             return FX_OK;
         }
     }.body);
@@ -4018,28 +4132,53 @@ export fn fx_journal_fail(handle: u64, append: u64, reason: Str, fenced: bool) c
             if (!isUtf8(text)) return FX_E_INVALID;
             const status = lockLive(self);
             if (status != FX_OK) return status;
-            defer unlock(self);
-            if (append_id == 0 or append_id > self.journal_sent) return FX_E_INVALID;
-            if (append_id <= self.journal_acked or self.journal_failed != null) return FX_STALE;
+            // Unlocked by hand: an end it releases takes the lock again.
+            if (append_id == 0 or append_id > self.journal_sent) {
+                unlock(self);
+                return FX_E_INVALID;
+            }
+            if (append_id <= self.journal_acked or self.journal_failed != null) {
+                unlock(self);
+                return FX_STALE;
+            }
             const message = if (a[2]) "another writer holds this session's journal" else text;
-            const failure = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch return FX_E_OOM;
+            const failure = alloc_c.dupe(u8, if (message.len == 0) "the journal store refused an append" else message) catch {
+                unlock(self);
+                return FX_E_OOM;
+            };
             // As fx_journal_ack: the waiting flushes' answers land whole
             // before the failure is recorded.
             var replies: std.Io.Writer.Allocating = .init(alloc_c);
             defer replies.deinit();
             for (self.flushes.items) |flush| writeError(&replies.writer, flush.rpc_id, failure) catch {
                 alloc_c.free(failure);
+                unlock(self);
                 return FX_E_OOM;
             };
             if (replies.written().len > 0) {
                 const sent = if (self.faultOom(.reply_oom)) FX_E_OOM else self.hostInput(replies.written(), .control);
                 if (sent != FX_OK) {
                     alloc_c.free(failure);
+                    unlock(self);
                     return sent;
                 }
             }
             self.journal_failed = failure;
             self.flushes.clearRetainingCapacity();
+            // The running turn ends with FX_STOP_ERROR, between barriers
+            // too (Sol's m2 item 2): one the core finished ends now; one
+            // still running is cancelled, so it stops before it does more
+            // than the store holds, and its end reports the failure.
+            const running = self.turn;
+            self.failed_turn = running;
+            const released = self.pending_end;
+            self.pending_end = null;
+            unlock(self);
+            if (released) |end| {
+                self.endTurn(end.turn, end.reason, end.usage, true);
+            } else if (running != 0) {
+                _ = cancelBody(self, .{running});
+            }
             return FX_OK;
         }
     }.body);

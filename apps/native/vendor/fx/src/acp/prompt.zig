@@ -3856,6 +3856,12 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const session = if (ctx.state.active_session) |*active| active else return;
     if (!try session.session_rt.claimContextNotice(ctx.alloc, text)) return;
+    // Powermove (P-EVENTS): a context notice is the core's note for the
+    // model, not reply text; the embedded host's reply carries only the
+    // model's and the user-facing operational text, routed by where it
+    // comes from rather than by a "[context]" prefix (engine.js's filter
+    // dropped model text that happened to start with one).
+    if (ctx.state.cfg.host_event_sink != null) return;
     // ACP v1 Session Notices where the client shows them;
     // otherwise a message, as ACP allows.
     if (ctx.state.client_notices) return ctx.sendNotice(text) catch {};

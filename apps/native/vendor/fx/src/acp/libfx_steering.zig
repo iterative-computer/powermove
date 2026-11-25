@@ -1,3 +1,5 @@
+//! Powermove notice: modified from upstream fx (patch P-IMAGES):
+//! requestHandoffChecked says when the turn takes no more steering.
 //! When a libfx steer interrupts, waits, joins, or hands off a turn. TLA+
 //! model: `tests/tla/sdk/DurableSteer.tla`.
 
@@ -203,9 +205,17 @@ pub const Runtime = struct {
     /// boundary. Returns true when it interrupts the reply now. A turn that
     /// takes no more steering is ending anyway, and the request does nothing.
     pub fn requestHandoff(self: *Runtime, cancel_flag: *std.atomic.Value(bool)) bool {
+        return self.requestHandoffChecked(cancel_flag) catch false;
+    }
+
+    /// Powermove (P-IMAGES): as `requestHandoff`, but a turn that no longer
+    /// takes steering says so (`error.SteeringNotActive`), so the host's
+    /// handoff comes back to it instead of being taken by a turn that ends
+    /// without it (Sol's m2 item 6).
+    pub fn requestHandoffChecked(self: *Runtime, cancel_flag: *std.atomic.Value(bool)) error{SteeringNotActive}!bool {
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
-        if (!self.accepting or self.user_cancelled) return false;
+        if (!self.accepting or self.user_cancelled) return error.SteeringNotActive;
         self.handoff_pending = true;
         return self.claimInterruptLocked(cancel_flag);
     }

@@ -514,9 +514,24 @@ typedef struct fx_named_bytes {
  * acknowledges with fx_journal_ack only what is durable. A barrier append
  * holds the core until it is acknowledged. fx_journal_fail with fenced=true
  * means another writer holds the session; fenced=false means the store
- * failed. Either way the running turn ends with FX_STOP_ERROR, the core
- * appends nothing more, and every later fx_turn_prompt returns FX_E_STATE:
- * the host opens the session again, in a new runtime, from what it stored.
+ * failed. Either way the running turn ends with FX_STOP_ERROR, between
+ * barriers too (the core cancels it, and FX_EVENT_ERROR with the reason
+ * comes before its TURN_END), the core appends nothing more, and every
+ * later fx_turn_prompt returns FX_E_STATE: the host opens the session
+ * again, in a new runtime, from what it stored. A journaled turn's TURN_END
+ * comes once every append the turn sent is acknowledged (or one failed):
+ * FX_STOP_END_TURN means the whole turn is durable.
+ *
+ * What reopens. fx_session_open loads at most 4 MiB of journal after the
+ * checkpoint, so the host stores only heads that fit: it refuses
+ * (fx_journal_fail, fenced=false) an append that would make the journal
+ * after its stored checkpoint larger, and checkpoints when the session is
+ * quiet. A turn's journal holds its input twice (its first progress and its
+ * commit), so a journaled session takes a prompt or tool result only if its
+ * text plus its images as base64 (none with FX_OPEN_IMAGE_STORE, which names
+ * them) is at most 1.875 MiB: fx_turn_prompt answers FX_E_TOO_LARGE, and a
+ * tool result past it is answered as too large. With an image store, images
+ * up to the core's model bounds reopen.
  *
  * Checkpoints. FX_EVENT_CHECKPOINT's bytes are a libfx journal snapshot (its
  * own format, versioned inside; a newer one is refused at open). Its id is
@@ -624,7 +639,8 @@ typedef struct fx_input {
  * Images (raw bytes, copied once, base64-encoded only into the model
  * request by the core): FX_E_INVALID when the bytes are not the type `mime`
  * names, FX_E_TOO_LARGE past the core's model bounds (3.75 MiB per image,
- * 6 MiB per prompt) as past FX_MAX_*. */
+ * 6 MiB per prompt) as past FX_MAX_*, and on a journaled session past the
+ * bound in "What reopens" (a turn a reopen could never load). */
 fx_status fx_turn_prompt(fx_runtime rt, const fx_input *input, fx_str message_id, uint64_t *turn);
 
 /* WORKER. Continues the turn a crash left open (FX_RECOVERY_OPEN_TURN), with
@@ -644,14 +660,23 @@ fx_status fx_turn_resume(fx_runtime rt, uint64_t *turn);
  * with images
  * cannot join a turn: the turn ends at its next safe point and the steer
  * comes back as FX_EVENT_STEER_RETURNED (the handoff); its images never
- * reach the core. */
+ * reach the core.
+ * Every accepted steer settles exactly once: it joins (STEER_JOINED with
+ * its request), is withdrawn (its withdraw's REQUEST_DONE says FX_OK), or
+ * comes back once, either as FX_EVENT_STEER_RETURNED before its own turn's
+ * TURN_END or as a REQUEST_DONE that is not FX_OK. Admission and the turn's
+ * end are atomic: a steer is admitted before the turn ends (and comes back
+ * at its end) or this call says FX_STALE. One that came back as
+ * STEER_RETURNED before the core answered it gets REQUEST_DONE FX_OK. */
 fx_status fx_turn_steer(fx_runtime rt, uint64_t turn, const fx_input *input, fx_str message_id,
                         uint64_t *request);
 
 /* WORKER. Withdraws a steer of turn `turn` that has not joined. FX_STALE
  * when `turn` is not the running turn. On FX_OK, FX_EVENT_REQUEST_DONE for
- * *request says FX_OK (withdrawn) or FX_STALE (it had joined, or the turn
- * ended). */
+ * *request says FX_OK (withdrawn: it never comes back) or FX_STALE (it had
+ * joined, it came back already, or it comes back at the turn's end; a steer
+ * with images, which the core cannot take back, always does). The steer
+ * stays the core's until that answer, so a join meanwhile names it. */
 fx_status fx_turn_withdraw(fx_runtime rt, uint64_t turn, fx_str message_id, uint64_t *request);
 
 /* ANY. Cancels running turn `turn`: its fetch is retired at once (a host
@@ -796,7 +821,8 @@ typedef struct fx_tool_output {
  * Images: FX_E_INVALID (unconsumed) when one is not the type it names;
  * past the core's bounds (8 images, 3.75 MiB each, 6 MiB together) the
  * answer is FX_E_TOO_LARGE, and the model reads that the images exceeded
- * the limit. */
+ * the limit. A journaled session's result text and inline images are also
+ * bounded by "What reopens": past it, FX_E_TOO_LARGE as above. */
 fx_status fx_tool_result(fx_runtime rt, uint64_t call, const fx_tool_output *out);
 
 /* ------------------------------------------------------------------------ */

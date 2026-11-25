@@ -284,3 +284,32 @@ fn a_retried_message_id_never_runs_twice() {
         driver.runtime.close();
     });
 }
+
+#[test]
+fn model_text_that_starts_like_a_context_notice_streams_intact() {
+    on_worker(|| {
+        if !pm_aero_core::available() {
+            return;
+        }
+        let (host, _leases) = queue();
+        let runtime = Runtime::create(&config(ENDPOINT, &LOOKUP), host).expect("create");
+        // The model's own first chunk is "[context]": routing goes by where
+        // text comes from, never by its prefix (Sol's m2 item 7).
+        let pieces = sse_pieces(&["[context]", " from the model"]);
+        let mut driver = Driver::new(
+            runtime,
+            Arc::new(move |_| Reply::Chunks(pieces.clone(), Duration::from_millis(5))),
+            ENDPOINT,
+        );
+        driver.open();
+        let (turn, reason) = driver.turn("say it", "c-1");
+        assert_eq!(reason, StopReason::EndTurn);
+        assert_eq!(driver.text_of(turn), "[context] from the model");
+        let (turn, _) = {
+            driver.model = support::text_model("[context] whole");
+            driver.turn("again", "c-2")
+        };
+        assert_eq!(driver.text_of(turn), "[context] whole");
+        driver.runtime.close();
+    });
+}
