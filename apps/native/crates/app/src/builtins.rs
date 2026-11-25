@@ -1059,6 +1059,17 @@ impl Controller {
         // the menus are: the chosen row's value.
         if request.input["picker"] == "chooser" {
             let spec = pm_shell::ChooserSpec::from_request(&request.input);
+            // The composer it stands clear of.
+            let composer = request.input["avoid"].as_str().and_then(|element| {
+                let view = self.builtins.views.get(&request.panel)?;
+                let b = view.read(cx).element_bounds(element)?;
+                Some(pm_shell::layout::Rect {
+                    x: f32::from(b.origin.x),
+                    y: f32::from(b.origin.y),
+                    w: f32::from(b.size.width),
+                    h: f32::from(b.size.height),
+                })
+            });
             let values: Vec<Value> = options.iter().map(|o| o["value"].clone()).collect();
             let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
             if request.input["refresh"] == true {
@@ -1078,7 +1089,7 @@ impl Controller {
             let shown = if request.input["update"] == true {
                 host.update_chooser(spec, dismiss)
             } else if let Some(anchor) = anchor {
-                host.open_chooser(owner, anchor, spec, dismiss);
+                host.open_chooser(owner, anchor, composer, spec, dismiss);
                 true
             } else {
                 false

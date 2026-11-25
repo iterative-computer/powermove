@@ -951,6 +951,8 @@ export type Menu = (request: {
   picker?: "model" | "effort" | "access" | "add" | "chooser";
   /** The chooser's card. */
   chooser?: ChooserCard;
+  /** The `id` of the element the chooser stands clear of (the composer). */
+  avoid?: string;
   search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
@@ -2963,8 +2965,13 @@ function Composer({
     // line says where to sign in.
     const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
     if (harnessSignedOut(s, n) || !listed.length || fault) {
-      if (fault) options.push({ kind: "status", label: `${harnessName} couldn’t start.`, value: "" });
-      else if (n.findingModels) options.push({ kind: "status", label: "Finding models…", value: "" });
+      // The compact card says it once: what's wrong, then its one button.
+      const status = fault
+        ? `${harnessName} couldn’t start.`
+        : n.findingModels && !harnessSignedOut(s, n)
+          ? "Finding models…"
+          : signInCopy(harness);
+      options.push({ kind: "status", label: status, value: "" });
       options.push(
         fault
           ? { kind: "action", label: "Try Again", value: "retry:" }
@@ -3011,15 +3018,20 @@ function Composer({
         stays: true,
       })),
     );
-    options.push({ kind: "action", label: "Add a provider…", value: "providers:" });
+    options.push({ kind: "add", label: "Add a provider…", value: "providers:" });
     const label = named(s.catalog.models, shown, harnessName);
     const context = modelContext(label);
+    // What the provider reports about this model and its account; nothing
+    // else (no usage or speed: none is reported or wired).
+    const facts: [string, string][] = [];
+    if (context) facts.push(["Context", context]);
+    facts.push(["Account", accountHeading(harness, shown, n)]);
     return {
       options,
       chooser: {
         title: modelBase(label),
         icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
-        facts: context ? [["Context", context]] : [],
+        facts,
       },
     };
   };
@@ -3055,7 +3067,7 @@ function Composer({
     if (!harnessMode(s))
       return { picker: "model" as const, search: modelSearch(s), placeholder: "Search models", options: modelRows(s) };
     const { options, chooser } = chooserRequest(s);
-    return { picker: "chooser" as const, placeholder: "Search models", options, chooser };
+    return { picker: "chooser" as const, placeholder: "Search models", avoid: "agent-composer", options, chooser };
   };
   const modelMenu = (
     anchor: number,
@@ -3261,14 +3273,8 @@ function Composer({
   // Send and Stop are one circle at the row's end: a dim disc while there
   // is nothing to send, the text ink once there is (or while a run can be
   // stopped). With a draft during a run, Stop steps back beside Send.
-  // Send is a rounded rectangle of the pill's highlight box (its height and
-  // corner), so the row reads as one family; Stop keeps its approved circle.
-  const stopFace = (lit: boolean): Style => ({
-    ...sendFace(lit),
-    width: t("metrics.composer_control"),
-    height: t("metrics.composer_control"),
-    borderRadius: t("metrics.composer_control"),
-  });
+  // Send and Stop are rounded rectangles of the pill's highlight box (its
+  // height and corner), so the row reads as one family (no circles).
   function sendFace(lit: boolean): Style {
     return {
     ...row,
@@ -3295,6 +3301,8 @@ function Composer({
       id="agent-composer"
       role="group"
       label="Message composer"
+      // The chooser stands clear of the composer: its bounds are measured.
+      metadata={{ menuAnchor: true }}
       state={{ dropTarget }}
       data-pm-drop="files"
       onDragOver={() => {
@@ -3325,7 +3333,7 @@ function Composer({
         borderColor: t("colors.hairline"),
         marginLeft: t("metrics.text_padding"),
         marginRight: t("metrics.text_padding"),
-        marginBottom: t(signedOut ? "space.sm" : "metrics.text_padding"),
+        marginBottom: t("metrics.text_padding"),
       }}
     >
       {(s.attachments.length > 0 || dropTarget || (s.draft.citations?.length ?? 0) > 0) && (
@@ -3488,7 +3496,7 @@ function Composer({
             onClick={stop}
             style={hitBox}
           >
-            <div metadata={{ symbol: "composer.stop" }} style={stopFace(!hasDraft && !s.stopping)} />
+            <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
           </button>
         )}
         {(!working || hasDraft) && (
@@ -3517,29 +3525,7 @@ function Composer({
       </div>
     </div>
   );
-  if (!signedOut) return composer;
-  // Signed out: the one quiet line, under the composer and in line with
-  // its draft.
-  return (
-    <>
-      {composer}
-      <text
-        id="agent-sign-in"
-        role="status"
-        style={{
-          ...faint,
-          flexShrink: 0,
-          marginLeft: t("metrics.text_padding"),
-          marginRight: t("metrics.text_padding"),
-          paddingLeft: t("space.md"),
-          paddingRight: t("space.md"),
-          marginBottom: t("metrics.text_padding"),
-        }}
-      >
-        {signInCopy(s.settings.provider)}
-      </text>
-    </>
-  );
+  return composer;
 }
 
 // ── The panel ────────────────────────────────────────────────────────────

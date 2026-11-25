@@ -785,6 +785,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -1722,6 +1725,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -2634,6 +2638,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -3571,6 +3578,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -4483,6 +4491,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -5425,6 +5436,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -6331,6 +6343,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -7268,6 +7283,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -10192,6 +10208,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -11178,6 +11197,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -11549,6 +11569,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -12252,7 +12275,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "colors.text",
           },
           "borderRadius": {
-            "token": "metrics.composer_control",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.raised",
@@ -12260,14 +12283,14 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "display": "flex",
           "flexDirection": "row",
           "height": {
-            "token": "metrics.composer_control",
+            "token": "metrics.hit",
           },
           "justifyContent": "center",
           "symbolSize": {
             "token": "metrics.composer_symbol",
           },
           "width": {
-            "token": "metrics.composer_control",
+            "token": "metrics.hit",
           },
         },
       },
@@ -12514,6 +12537,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -12889,6 +12913,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -13592,7 +13619,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "colors.composer_send_idle",
           },
           "borderRadius": {
-            "token": "metrics.composer_control",
+            "token": "metrics.inner_radius",
           },
           "color": {
             "token": "colors.muted",
@@ -13600,14 +13627,14 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "display": "flex",
           "flexDirection": "row",
           "height": {
-            "token": "metrics.composer_control",
+            "token": "metrics.hit",
           },
           "justifyContent": "center",
           "symbolSize": {
             "token": "metrics.composer_symbol",
           },
           "width": {
-            "token": "metrics.composer_control",
+            "token": "metrics.hit",
           },
         },
       },
@@ -13854,6 +13881,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -14942,6 +14970,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -15924,6 +15955,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -16450,6 +16482,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -17404,6 +17439,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -18077,6 +18113,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -19053,6 +19092,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -19726,6 +19766,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -20702,6 +20745,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -21607,6 +21651,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -22549,6 +22596,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -23453,6 +23501,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -24403,6 +24454,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -25311,6 +25363,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": true,
@@ -26316,6 +26371,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -26998,6 +27054,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -27969,6 +28028,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -28647,6 +28707,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -29623,6 +29686,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
     "setListeners",
     "setListeners",
@@ -30210,6 +30274,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -31188,6 +31255,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -31780,6 +31848,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -32758,6 +32829,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -33670,6 +33742,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -34607,6 +34682,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -35519,6 +35595,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -36456,6 +36535,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -37368,6 +37448,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "data-pm-drop": "files",
         "id": "agent-composer",
         "label": "Message composer",
+        "metadata": {
+          "menuAnchor": true,
+        },
         "role": "group",
         "state": {
           "dropTarget": false,
@@ -38305,6 +38388,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "insertBefore",
     "insertBefore",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",

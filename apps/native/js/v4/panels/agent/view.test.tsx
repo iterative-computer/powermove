@@ -2114,11 +2114,18 @@ test("with the Powermove harness the pill opens the chooser: the harness rail, m
     ["effort", "Low", false, null, false, true],
     ["effort", "Medium", false, null, false, true],
     ["effort", "High", true, null, false, true],
-    ["action", "Add a provider…", null, null, false, false],
+    ["add", "Add a provider…", null, null, false, false],
   ]);
   expect(first.options.find((o) => o.label === "Aerolite")!.detail).toBe("Coming later");
   expect(first.options.find((o) => o.label === "Medium")!.default).toBe(true);
-  expect(first.chooser).toEqual({ title: "GPT-6 Sol", icon: "provider.chatgpt", facts: [["Context", "272K"]] });
+  expect(first.chooser).toEqual({
+    title: "GPT-6 Sol",
+    icon: "provider.chatgpt",
+    facts: [
+      ["Context", "272K"],
+      ["Account", "ChatGPT"],
+    ],
+  });
   // A model and a level keep the chooser open (its card follows); Add a
   // provider… closes it for Settings › Providers.
   expect(asked.filter((r) => !r.refresh).map((r) => !!r.update)).toEqual([false, true, true]);
@@ -2172,7 +2179,7 @@ test("with the Codex and Claude Code harnesses the chooser heads their models wi
       />,
     );
     await root.drive(byId(root, "agent-model").id, "click");
-    expect(chooserRows(asked[0]!).filter(([kind]) => kind !== "harness" && kind !== "action")).toEqual([
+    expect(chooserRows(asked[0]!).filter(([kind]) => kind !== "harness" && kind !== "add")).toEqual([
       ["heading", heading, null, harness === "claude" ? "provider.claude" : "provider.chatgpt", false, false],
       ["model", "Model One", false, `provider.${harness === "claude" ? "claude" : "chatgpt"}`, false, true],
       ["model", "Model Two", true, `provider.${harness === "claude" ? "claude" : "chatgpt"}`, false, true],
@@ -2182,7 +2189,7 @@ test("with the Codex and Claude Code harnesses the chooser heads their models wi
 });
 test("a harness with no models offers one action and no card; one that couldn't start offers Try Again", async () => {
   for (const [connection, rows, action] of [
-    ["connected", [["action", "Connect a provider…"]], "providers:"],
+    ["connected", [["status", "Sign in to Claude in Settings › Providers"], ["action", "Connect a provider…"]], "providers:"],
     ["unavailable", [["status", "Claude Code couldn’t start."], ["action", "Try Again"]], "retry:"],
   ] as const) {
     const { root } = mount();
@@ -2239,10 +2246,17 @@ test("two context variants of one model never read alike, in the chooser or the 
   const names = asked[0]!.options.filter((o) => o.kind === "model").map((o) => o.label);
   expect(names).toEqual(["Opus 5.5", "Opus 5.5 (1M)", "Sonnet 5.5"]);
   expect(new Set(names).size).toBe(names.length);
-  expect(asked[0]!.chooser).toEqual({ title: "Opus 5.5", icon: "provider.claude", facts: [["Context", "1M"]] });
+  expect(asked[0]!.chooser).toEqual({
+    title: "Opus 5.5",
+    icon: "provider.claude",
+    facts: [
+      ["Context", "1M"],
+      ["Account", "Claude"],
+    ],
+  });
   root.dispose();
 });
-test("Stop keeps the approved 22 pt circle while Send is the pill's highlight box", async () => {
+test("Stop is the same rounded rect as Send: the pill's highlight box (no circles)", async () => {
   const { root } = mount();
   const p = fixture();
   p.snapshot.catalog = harnessCatalog([["chatgpt/gpt-6-sol", "GPT-6 Sol"]]);
@@ -2250,8 +2264,9 @@ test("Stop keeps the approved 22 pt circle while Send is the pill's highlight bo
   p.snapshot.runId = "run-1";
   await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
   const stop = root.inspect().nodes.find((n) => n.props.metadata?.symbol === "composer.stop")!;
-  for (const key of ["width", "height", "borderRadius"])
-    expect(stop.props.style[key]).toEqual({ token: "metrics.composer_control" });
+  expect(stop.props.style.width).toEqual({ token: "metrics.hit" });
+  expect(stop.props.style.height).toEqual({ token: "metrics.hit" });
+  expect(stop.props.style.borderRadius).toEqual({ token: "metrics.inner_radius" });
   root.dispose();
 });
 test("with the Powermove harness a rail harness keeps the chooser open and switches the harness", async () => {
@@ -2275,7 +2290,7 @@ test("with the Powermove harness a rail harness keeps the chooser open and switc
   expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
   root.dispose();
 });
-test("with the Powermove harness signed out: the pill reads Connect a provider and opens the rail with one Connect a provider… action, no card; one quiet line per harness under the composer", async () => {
+test("with the Powermove harness signed out: the pill reads Connect a provider and opens the rail and one compact card (status, Connect a provider…); no line under the composer", async () => {
   for (const [harness, line] of [
     ["aero", "Add a provider in Settings › Providers"],
     ["chatgpt", "Sign in to ChatGPT in Settings › Providers"],
@@ -2302,6 +2317,7 @@ test("with the Powermove harness signed out: the pill reads Connect a provider a
     );
     expect(segmented(root)).toEqual([]);
     expect(root.inspect().nodes.some((n) => n.props.id === "agent-connect")).toBe(false);
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-sign-in")).toBe(false);
     expect(byId(root, "agent-welcome")).toBeDefined();
     const pill = byId(root, "agent-model");
     expect(pill.props.label).toBe("Connect a provider");
@@ -2310,14 +2326,15 @@ test("with the Powermove harness signed out: the pill reads Connect a provider a
     expect(inside.map((n) => n.props.metadata?.symbol ?? textOf(root, n))).toEqual(["Connect a provider", "composer.chevron"]);
     expect(byId(root, "agent-composer-text").props.disabled).toBeFalsy();
     expect(byId(root, "agent-send").props.disabled).toBe(true);
-    expect(textOf(root, byId(root, "agent-sign-in"))).toBe(line);
     await root.drive(pill.id, "click");
     await Promise.resolve();
     expect(asked[0]!.picker).toBe("chooser");
+    expect(asked[0]!.avoid).toBe("agent-composer");
     expect(chooserRows(asked[0]!).map(([kind, label, checked]) => [kind, label, checked])).toEqual([
       ["harness", "Powermove", harness === "aero"],
       ["harness", "Codex", harness === "chatgpt"],
       ["harness", "Claude Code", harness === "claude"],
+      ["status", line, null],
       ["action", "Connect a provider…", null],
     ]);
     expect(asked[0]!.chooser).toBeUndefined();
