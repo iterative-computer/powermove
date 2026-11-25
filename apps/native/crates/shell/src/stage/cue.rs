@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn positions_report_the_transition_running_out_of_a_scene() {
         let sheet = CueSheet::default();
-        let p = sheet.at(4.5);
+        let p = sheet.at(4.2);
         assert_eq!(p.scene, Scene::Composer);
         assert!(p.leaving.is_none());
         let (out, progress) = sheet.at(5.6 - 0.55).leaving.unwrap();
