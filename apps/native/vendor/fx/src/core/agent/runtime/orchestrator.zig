@@ -1,5 +1,6 @@
-// Powermove notice: modified from upstream fx (patch P-STEPS): the step
-// limit's exhaustion branch marks its finalization with a typed cause.
+// Powermove notice: modified from upstream fx (patches P-STEPS, P-STOP): the
+// step limit's exhaustion branch marks its finalization with a typed cause,
+// and a Stop hook that continued a turn is asked again at its next end.
 const std = @import("std");
 const sort_utils = @import("../../shared/sort_utils.zig");
 const toolbox = @import("../../tooling/toolbox.zig");
@@ -10809,6 +10810,10 @@ fn processQueuedPromptLoop(
                         .content = synthetic,
                         .recovery_prompt = true,
                     });
+                    // Powermove (P-STOP): the gate is asked again at the
+                    // next terminal candidate; the embedder's handler bounds
+                    // its own continuations (max_stop_continuations).
+                    stop_state.dispatched = false;
                     continue;
                 },
             }
@@ -13579,6 +13584,10 @@ fn processQueuedPromptLoop(
                         .content = synthetic,
                         .recovery_prompt = true,
                     });
+                    // Powermove (P-STOP): the gate is asked again at the
+                    // next terminal candidate; the embedder's handler bounds
+                    // its own continuations (max_stop_continuations).
+                    stop_state.dispatched = false;
                     continue;
                 },
             }
