@@ -1,24 +1,26 @@
 //! The first-run intro's cue sheet: every beat of the stage is a time here,
-//! and the stage reads nothing else for timing. Pure data, so the intro is
-//! tested without a screen. About six and a half seconds from launch to an
-//! interactive Welcome window.
+//! and the stage reads nothing else for timing. The times and curves are
+//! Dia's opening measured frame by frame (60 fps) and fitted: near-critically
+//! damped springs for the mark's rise and scale, long cubic fades for the
+//! credit and the light (lane notes, w101). Pure data, so the intro is
+//! tested without a screen.
 //!
 //! Music: `CueSheet::music` names a licensed track's slot; the default is
 //! silent. `retimed` scales every beat to another tempo.
+use pm_wave::{WaveStyle, WaveType, bezier_ease};
 
 /// What the stage shows at a time, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// The desktop dims under a black veil.
+    /// The desktop dims; the mark's light shows at the bottom edge.
     Dim,
-    /// The credit line, quiet, near the top.
+    /// The credit, quiet, in the upper middle.
     Credit,
     /// The mark rises from below the bottom edge into the centre.
     Mark,
-    /// The mark's light softens and spreads; the picture holds still for
-    /// the wave to picture it.
-    Spread,
-    /// The wave draws the Welcome window out of the light.
+    /// The mark at rest, breathing; the wave's pictures are taken.
+    Rest,
+    /// The wave draws the Welcome window out of the mark's light.
     Wave,
     /// The Welcome window, interactive.
     Window,
@@ -37,45 +39,156 @@ pub struct Music {
     pub file: &'static str,
     pub bpm: f64,
 }
+/// A cubic fade: from `at`, over `seconds`, on `curve` (CSS cubic-bezier).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fade {
+    pub at: f64,
+    pub seconds: f64,
+    pub curve: [f64; 4],
+}
+impl Fade {
+    pub fn at(&self, t: f64) -> f64 {
+        bezier_ease(self.curve, (t - self.at) / self.seconds)
+    }
+}
+/// A damped spring released at `at`: 0 → 1 with angular frequency `omega`
+/// (rad/s) and damping ratio `zeta`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    pub at: f64,
+    pub omega: f64,
+    pub zeta: f64,
+}
+impl Spring {
+    pub fn at(&self, t: f64) -> f64 {
+        let tau = (t - self.at).max(0.);
+        let (w, z) = (self.omega, self.zeta);
+        if (z - 1.).abs() < 1e-6 {
+            return 1. - (1. + w * tau) * (-w * tau).exp();
+        }
+        if z < 1. {
+            let wd = w * (1. - z * z).sqrt();
+            1. - (-z * w * tau).exp() * ((wd * tau).cos() + z * w / wd * (wd * tau).sin())
+        } else {
+            let r = (z * z - 1.).sqrt();
+            let (r1, r2) = (-w * (z - r), -w * (z + r));
+            1. - (r2 * (r1 * tau).exp() - r1 * (r2 * tau).exp()) / (r2 - r1)
+        }
+    }
+    /// When it is within `within` (a fraction) of rest for good.
+    pub fn settled(&self, within: f64) -> f64 {
+        let mut t = self.at + 12.;
+        while t > self.at && (1. - self.at(t)).abs() < within {
+            t -= 1. / 120.;
+        }
+        t
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueSheet {
-    /// The veil is down (the house lights are out).
-    pub dimmed: f64,
-    /// The credit: fades in, its second line in, fades out.
-    pub credit: (f64, f64, f64),
-    /// Light first shows at the bottom edge.
-    pub edge_light: f64,
-    /// The mark rises from below the edge, and settles in the centre.
-    pub rise: (f64, f64),
-    /// The wordmark settles under the mark.
-    pub words: f64,
-    /// The mark's light softens and spreads.
-    pub spread: f64,
+    /// The desktop dims (Dia's room light going down).
+    pub dim: Spring,
+    /// The mark's top shows at the bottom edge and creeps up.
+    pub creep: Fade,
+    /// The credit's first line, its second, and both going.
+    pub credit: (Fade, Fade, Fade),
+    /// The mark's centre rises; its scale comes down (they start apart).
+    pub rise: Spring,
+    pub shrink: Spring,
+    /// The light at the bottom edge flares as the mark launches, then falls.
+    pub flare: Fade,
+    pub fall: Fade,
+    /// The white-hot body comes down to its gradient.
+    pub exposure: Fade,
+    /// The wordmark, uncovered as the mark passes, rides up into place.
+    pub words: Fade,
     /// Everything holds still from here so the wave's pictures are taken
     /// before it starts, never on the frame that needs them.
     pub hold: f64,
     /// The wave starts drawing the Welcome window.
     pub window: f64,
+    /// The wave's own length (its style's duration, unchanged).
     pub wave_seconds: f64,
+    /// The fraction of the wave after which nothing of it shows: the window
+    /// is live from there.
+    pub wave_visible: f64,
     pub sounds: Vec<Sound>,
     /// OWNER: a licensed track goes here; `None` is the silent default.
     pub music: Option<Music>,
     pub bpm: f64,
 }
+/// The wave the window arrives with: the original's Vertical defaults.
+pub fn wave_style() -> WaveStyle {
+    WaveStyle::new(WaveType::Vertical)
+}
 impl Default for CueSheet {
     fn default() -> Self {
+        let wave = wave_style();
         Self {
-            dimmed: 1.2,
-            credit: (1.0, 1.6, 3.8),
-            edge_light: 1.7,
-            rise: (2.8, 4.3),
-            words: 3.9,
-            spread: 4.8,
-            hold: 5.25,
-            window: 5.4,
-            wave_seconds: 1.1,
+            dim: Spring {
+                at: 0.51,
+                omega: 2.42,
+                zeta: 1.07,
+            },
+            creep: Fade {
+                at: 0.72,
+                seconds: 2.40,
+                curve: [0.13, 0.19, 0.29, 0.92],
+            },
+            credit: (
+                Fade {
+                    at: 0.91,
+                    seconds: 2.11,
+                    curve: [0.35, 0.53, 0.41, 0.85],
+                },
+                Fade {
+                    at: 1.62,
+                    seconds: 0.92,
+                    curve: [0.27, -0.29, 0.59, 1.07],
+                },
+                Fade {
+                    at: 3.08,
+                    seconds: 1.26,
+                    curve: [0.24, 0.06, 0., -0.07],
+                },
+            ),
+            rise: Spring {
+                at: 3.07,
+                omega: 2.81,
+                zeta: 1.075,
+            },
+            shrink: Spring {
+                at: 3.03,
+                omega: 2.02,
+                zeta: 0.976,
+            },
+            flare: Fade {
+                at: 3.08,
+                seconds: 0.68,
+                curve: [0.27, 0.12, 0.19, 1.13],
+            },
+            fall: Fade {
+                at: 3.72,
+                seconds: 1.24,
+                curve: [0.75, 0.65, 0., 0.94],
+            },
+            exposure: Fade {
+                at: 3.90,
+                seconds: 1.53,
+                curve: [0.32, 0.79, 0.70, 0.95],
+            },
+            words: Fade {
+                at: 5.30,
+                seconds: 1.68,
+                curve: [0.30, 0.92, 0.56, 0.91],
+            },
+            hold: 6.55,
+            window: 6.7,
+            wave_seconds: wave.duration(),
+            wave_visible: 0.5,
             sounds: vec![Sound {
-                at: 2.8,
+                at: 3.07,
                 id: "chime",
             }],
             music: None,
@@ -86,29 +199,29 @@ impl Default for CueSheet {
 impl CueSheet {
     /// When the Welcome window is interactive.
     pub fn length(&self) -> f64 {
-        self.window + self.wave_seconds
+        self.window + self.wave_seconds * self.wave_visible
     }
     pub fn phase(&self, t: f64) -> Phase {
-        if t < self.credit.0 {
+        if t < self.credit.0.at {
             Phase::Dim
-        } else if t < self.rise.0 {
+        } else if t < self.shrink.at {
             Phase::Credit
-        } else if t < self.spread {
+        } else if t < self.hold {
             Phase::Mark
         } else if t < self.window {
-            Phase::Spread
+            Phase::Rest
         } else if t < self.length() {
             Phase::Wave
         } else {
             Phase::Window
         }
     }
-    /// What VoiceOver reads for a phase. OWNER-COPY: the credit.
+    /// What VoiceOver reads for a phase.
     pub fn title(&self, phase: Phase) -> &'static str {
         match phase {
             Phase::Dim => "Powermove",
-            Phase::Credit => "[Presenter] presents",
-            Phase::Mark | Phase::Spread => "Powermove",
+            Phase::Credit => "Iterative Computer presents",
+            Phase::Mark | Phase::Rest => "Powermove",
             Phase::Wave | Phase::Window => "Welcome to Powermove",
         }
     }
@@ -116,20 +229,24 @@ impl CueSheet {
     pub fn retimed(&self, bpm: f64) -> Self {
         let k = self.bpm / bpm.max(1.);
         let mut s = self.clone();
-        for v in [
-            &mut s.dimmed,
+        for f in [
+            &mut s.creep,
             &mut s.credit.0,
             &mut s.credit.1,
             &mut s.credit.2,
-            &mut s.edge_light,
-            &mut s.rise.0,
-            &mut s.rise.1,
+            &mut s.flare,
+            &mut s.fall,
+            &mut s.exposure,
             &mut s.words,
-            &mut s.spread,
-            &mut s.hold,
-            &mut s.window,
-            &mut s.wave_seconds,
         ] {
+            f.at *= k;
+            f.seconds *= k;
+        }
+        for spring in [&mut s.dim, &mut s.rise, &mut s.shrink] {
+            spring.at *= k;
+            spring.omega /= k;
+        }
+        for v in [&mut s.hold, &mut s.window, &mut s.wave_seconds] {
             *v *= k;
         }
         for sound in &mut s.sounds {
@@ -150,14 +267,6 @@ pub fn smooth(x: f64) -> f64 {
     let x = x.clamp(0., 1.);
     x * x * (3. - 2. * x)
 }
-pub fn ease_out(x: f64) -> f64 {
-    let x = x.clamp(0., 1.);
-    1. - (1. - x).powi(3)
-}
-/// 0 to 1 over `(from, to)` seconds, smoothed.
-pub fn span(t: f64, from: f64, to: f64) -> f64 {
-    smooth((t - from) / (to - from))
-}
 
 #[cfg(test)]
 mod tests {
@@ -166,26 +275,37 @@ mod tests {
     fn the_intro_runs_in_order_to_an_interactive_window() {
         let s = CueSheet::default();
         let order = [
-            s.credit.0,
-            s.edge_light,
-            s.rise.0,
-            s.words,
-            s.rise.1,
-            s.spread,
+            s.dim.at,
+            s.creep.at,
+            s.credit.0.at,
+            s.credit.1.at,
+            s.shrink.at,
+            s.rise.at,
+            s.exposure.at,
+            s.words.at,
             s.hold,
             s.window,
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
         assert!(
-            s.credit.2 > s.rise.0 && s.credit.2 < s.rise.1,
-            "the credit goes as the mark rises"
+            s.rise.settled(0.01) < s.hold,
+            "the mark rests before the wave's pictures are taken"
         );
-        assert!((6.0..=8.0).contains(&s.length()), "interactive in 6–8 s");
+        assert!((7.0..=10.0).contains(&s.length()), "{}", s.length());
         assert_eq!(s.phase(0.5), Phase::Dim);
-        assert_eq!(s.phase(3.0), Phase::Mark);
-        assert_eq!(s.phase(5.3), Phase::Spread);
-        assert_eq!(s.phase(5.9), Phase::Wave);
-        assert_eq!(s.phase(9.), Phase::Window);
+        assert_eq!(s.phase(3.5), Phase::Mark);
+        assert_eq!(s.phase(6.6), Phase::Rest);
+        assert_eq!(s.phase(7.0), Phase::Wave);
+        assert_eq!(s.phase(12.), Phase::Window);
+    }
+    #[test]
+    fn the_springs_match_dias_measured_rise() {
+        // Dia's disc centre (fractions of the height) at measured times.
+        let s = CueSheet::default();
+        let y = |t: f64| 1.781 + (0.4997 - 1.781) * s.rise.at(t);
+        for (t, measured) in [(3.3, 1.6129), (3.6, 1.2467), (4.0, 0.8790), (4.5, 0.6522), (5.0, 0.5605)] {
+            assert!((y(t) - measured).abs() < 0.03, "{t}: {} vs {measured}", y(t));
+        }
     }
     #[test]
     fn retiming_scales_every_beat_and_keeps_the_silent_default() {
@@ -193,12 +313,12 @@ mod tests {
         assert!(s.music.is_none());
         let fast = s.retimed(120.);
         assert!((fast.length() - s.length() * 100. / 120.).abs() < 1e-9);
-        assert!((fast.sounds[0].at - s.sounds[0].at * 100. / 120.).abs() < 1e-9);
+        assert!((fast.rise.at(fast.rise.at + 0.5) - s.rise.at(s.rise.at + 0.6)).abs() < 1e-9);
     }
     #[test]
     fn sounds_fire_once_between_two_frames() {
         let s = CueSheet::default();
-        assert_eq!(s.sounds_between(2.79, 2.81).count(), 1);
-        assert_eq!(s.sounds_between(2.81, 2.82).count(), 0);
+        assert_eq!(s.sounds_between(3.06, 3.08).count(), 1);
+        assert_eq!(s.sounds_between(3.08, 3.09).count(), 0);
     }
 }

@@ -2987,30 +2987,6 @@ impl Window {
         Ok(image::imageops::crop_imm(&image, x, y, w, h).to_image())
     }
 
-    /// This window's last presented frame, pictured whole on the GPU (no
-    /// readback, no wait): another window's transition can arrive at it.
-    #[cfg(all(
-        target_os = "macos",
-        any(test, feature = "test-support", feature = "frame-capture")
-    ))]
-    pub fn rendered_frame_gpu(&self) -> anyhow::Result<crate::GpuSnapshot> {
-        let size = self.viewport_size();
-        let scale = self.scale_factor();
-        let region = Bounds::new(
-            point(DevicePixels(0), DevicePixels(0)),
-            crate::size(
-                DevicePixels((f32::from(size.width) * scale).round().max(1.) as i32),
-                DevicePixels((f32::from(size.height) * scale).round().max(1.) as i32),
-            ),
-        );
-        anyhow::ensure!(
-            self.rendered_frame.scene.len() > 0,
-            "the window has not drawn a frame yet"
-        );
-        self.platform_window
-            .render_region_to_texture(&self.rendered_frame.scene, region)
-    }
-
     /// `paint_snapshot` on the GPU: the region is pictured into a texture
     /// without reading it back or waiting, so a transition prepared from it
     /// costs no stall (the consumer's GPU waits on the snapshot's event).

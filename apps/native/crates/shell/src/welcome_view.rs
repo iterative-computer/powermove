@@ -209,13 +209,26 @@ impl WelcomeView {
             .aria_label(button.label.clone())
             .aria_disabled(!enabled)
             .tab_index(0)
-            .px(px(m.inset))
-            .h(px(m.row))
             .flex()
             .items_center()
-            .rounded(px(m.control_radius))
-            .text_size(px(t.typography.body))
+            .justify_center()
             .child(button.label.clone());
+        // Headless (no AppKit): the stage's large glass button, drawn.
+        element = if self.stage {
+            element
+                .min_w(px(m.row * 4.))
+                .px(px(m.inset * 1.5))
+                .h(px(m.row * 1.45))
+                .rounded_full()
+                .text_size(px(t.typography.reading))
+                .font_weight(FontWeight::MEDIUM)
+        } else {
+            element
+                .px(px(m.inset))
+                .h(px(m.row))
+                .rounded(px(m.control_radius))
+                .text_size(px(t.typography.body))
+        };
         element = if primary {
             element.bg(rgb(c.accent)).text_color(rgb(c.selected_text))
         } else {
@@ -686,14 +699,15 @@ impl Render for WelcomeView {
                         |d| {
                             // On the stage the welcome is a title card.
                             let size = if self.stage && frame.centred {
-                                t.typography.display * 2.2
+                                t.typography.display * 1.75
                             } else {
                                 t.typography.display
                             };
                             d.text_size(px(size))
                                 .when(self.stage && frame.centred, |d| {
                                     d.font_weight(FontWeight(t.typography.display_weight))
-                                        .line_height(relative(1.08))
+                                        .line_height(relative(1.06))
+                                        .letter_spacing(px(-size * 0.018))
                                 })
                         },
                     )
@@ -857,7 +871,13 @@ impl Render for WelcomeView {
             .flex_none()
             .w_full()
             .gap(px(m.gap))
-            .pt(px(if frame.top { t.space.xl } else { m.inset }));
+            .pt(px(if frame.top {
+                t.space.xl
+            } else if self.stage && frame.centred {
+                t.space.xxl
+            } else {
+                m.inset
+            }));
         for button in frame.buttons.iter().filter(|b| b.leading) {
             footer = footer.child(self.button(button, window, cx));
         }
@@ -880,17 +900,9 @@ impl Render for WelcomeView {
             .relative()
             .map(|d| {
                 if self.stage {
-                    // The window's content, as a card on the room: the same
-                    // size, its corners concentric with the groups inside.
-                    let mut ground = Rgba::from(rgb(c.window));
-                    ground.alpha = if t.accessibility.reduce_transparency { 1. } else { 0.94 };
-                    d.w(px(m.welcome_width))
-                        .h(px(m.welcome_height))
-                        .rounded(px(m.group_radius + m.sheet_inset))
-                        .border_1()
-                        .border_color(rgba((c.text << 8) | 0x14))
-                        .bg(ground)
-                        .elevated(&t, Elevation::Raised)
+                    // The stage draws the window's ground; the card is its
+                    // content, so a step's content cross-fades on one ground.
+                    d.size_full()
                 } else {
                     d.size_full().bg(rgb(c.window))
                 }
@@ -906,7 +918,10 @@ impl Render for WelcomeView {
                         .pt(px(if self.stage { m.sheet_inset + m.inset } else { m.toolbar }))
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
-                    d.justify_center()
+                    d.justify_center().when(self.stage && frame.animate, |d| {
+                        // Under the stage's lit mark (`stage::WINDOW_MARK_Y`).
+                        d.pt(px(m.welcome_height * 0.30))
+                    })
                 }
             })
             .font_family(pm_design::TEXT_FONT)

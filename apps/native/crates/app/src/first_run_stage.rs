@@ -7,24 +7,7 @@ use pm_shell::{
     welcome::{Button, Frame},
     welcome_view::{OnAction, WelcomeView},
 };
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
-
-/// What the stage's engine needs from the app: its fonts and its folder of
-/// translated shaders. Set once at startup.
-#[derive(Clone)]
-pub struct FilmInputs {
-    pub fonts: pm_render::text::host::RenderFonts,
-    pub shader_cache: Option<PathBuf>,
-}
-thread_local! {
-    static INPUTS: RefCell<Option<FilmInputs>> = const { RefCell::new(None) };
-}
-pub fn set_inputs(inputs: FilmInputs) {
-    INPUTS.with(|i| *i.borrow_mut() = Some(inputs));
-}
-fn inputs() -> Option<FilmInputs> {
-    INPUTS.with(|i| i.borrow().clone())
-}
+use std::{cell::RefCell, rc::Rc};
 
 /// The stage and the card on it.
 #[derive(Clone)]
@@ -55,13 +38,8 @@ impl StageWindow {
             next.update(cx, |c, cx| c.hold_focus(window, cx));
         });
     }
-    /// The last step: the wave carries the card away and the room's lights
-    /// come up on the app's first window, opened behind the stage.
-    ///
-    /// The app's first window opens behind the stage; once it has drawn,
-    /// its picture (taken on the GPU from its own frame) is where the wave
-    /// arrives. Without one (it has not drawn yet) the wave arrives in the
-    /// room and the lights come up on the window all the same.
+    /// The last step: the window eases out and the room's lights come up
+    /// on the app's first window, opened behind the stage a moment before.
     pub fn hand_off(&self, cx: &mut gpui::App) {
         let stage = self.window;
         cx.spawn(async move |cx| {
@@ -70,51 +48,13 @@ impl StageWindow {
                 .timer(std::time::Duration::from_millis(120))
                 .await;
             cx.update(|cx| {
-                let arrival = arrival(stage, cx);
                 let _ = stage.update(cx, |stage, _, cx| {
-                    stage.hand_off(arrival, |window, _| window.remove_window(), cx);
+                    stage.hand_off(|window, _| window.remove_window(), cx);
                 });
             });
         })
         .detach();
     }
-}
-
-/// The app's newest window as it last drew, placed where it sits on the
-/// stage, on its own ground (its AppKit toolbar is not in GPUI's picture).
-fn arrival(stage: WindowHandle<Stage>, cx: &mut gpui::App) -> Option<pm_shell::stage::Arrival> {
-    let stage_any: gpui::AnyWindowHandle = stage.into();
-    let origin = stage
-        .update(cx, |_, window, _| window.bounds().origin)
-        .ok()?;
-    let editor = cx.windows().into_iter().rev().find(|w| *w != stage_any)?;
-    let tokens = pm_shell::tokens();
-    editor
-        .update(cx, |_, window, _| {
-            let snapshot = window.rendered_frame_gpu().ok()?;
-            let picture = gpui::NativeTexture::new(
-                snapshot.texture,
-                snapshot.event,
-                snapshot.value,
-                std::sync::Arc::new(NoLease),
-            )
-            .ok()?;
-            let at = window.bounds();
-            Some(pm_shell::stage::Arrival {
-                picture,
-                at: gpui::Bounds::new(at.origin - origin, at.size),
-                ground: tokens.colors.window,
-                radius: tokens.radius.window,
-            })
-        })
-        .ok()
-        .flatten()
-}
-/// The window's picture is its own texture: nothing to give back.
-#[derive(Debug)]
-struct NoLease;
-impl gpui::TextureLease for NoLease {
-    fn gpu_completed(&self, _: bool) {}
 }
 
 /// Opens the stage over the display with `frame` in its window; `intro`
@@ -129,25 +69,12 @@ pub fn open(
     // The stage is a screening room: its own dark scheme whatever the
     // system's, with the person's accessibility settings.
     let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, pm_shell::tokens().accessibility);
-    let inputs = inputs().ok_or_else(|| anyhow::anyhow!("the stage has no engine inputs"))?;
     let card = Rc::new(RefCell::new(None::<Entity<WelcomeView>>));
     let made = card.clone();
     let action = on_action.clone();
     let window = pm_shell::stage::open_stage(
-        move |window, cx| {
-            let room = window.bounds().size;
-            let pictures = crate::stage_pictures::EnginePictures::start(
-                inputs.fonts,
-                inputs.shader_cache,
-                (f64::from(room.width), f64::from(room.height)),
-            );
-            let mut stage = Stage::new(
-                tokens.clone(),
-                CueSheet::default(),
-                Box::new(pictures),
-                intro,
-                cx,
-            );
+        move |_, cx| {
+            let mut stage = Stage::new(tokens.clone(), CueSheet::default(), intro, cx);
             stage.on_sound(on_sound);
             let c = cx.new(|cx| {
                 let mut c = WelcomeView::new(tokens, frame, action, cx);
@@ -171,7 +98,7 @@ pub fn open(
     })
 }
 
-/// The intro again (Help › Welcome to Powermove, `--replay-onboarding`):
+/// The intro again (Help › Replay Intro, `--replay-onboarding`):
 /// the intro, then a window whose one action closes the stage. Nothing is
 /// set up again.
 pub fn replay(cx: &mut gpui::App) {

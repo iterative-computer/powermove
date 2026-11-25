@@ -4704,60 +4704,6 @@ impl Headless {
         h.engine.set_fonts(fonts);
         Ok(h)
     }
-    /// The engine the first-run stage draws its reels with: the built-in
-    /// catalog, the app's translated-shader folder (`shader_cache`) and the
-    /// app's fonts. It runs on its own worker beside the viewer's.
-    pub fn for_surfaces(
-        fonts: pm_render::text::host::RenderFonts,
-        shader_cache: Option<std::path::PathBuf>,
-    ) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| {
-            let mut engine = render::Engine::with_shader_cache(
-                pm_gpu::Gpu::new("pm-surfaces")?,
-                shader_cache,
-            )?;
-            engine.set_fonts(fonts);
-            Ok(Self { engine })
-        })
-    }
-    /// The device surfaces for [`Self::draw_srgb`] are made on.
-    pub fn metal_device(&self) -> metal::Device {
-        self.engine.metal().to_owned()
-    }
-    /// One frame drawn for a GPUI surface: the picture, converted on the
-    /// engine's queue to display-encoded sRGB in `target` (BGRA8, the
-    /// output's size, on [`Self::metal_device`]), then `event` signalled at
-    /// `value` for the consumer's GPU to wait on. Never waits itself and
-    /// reads nothing back; an error leaves `event` unsignalled at `value`.
-    /// The committed command buffer comes back: it runs on the engine's
-    /// own queue after the frame's work, so its completion is the frame's.
-    pub fn draw_srgb(
-        &mut self,
-        scene: &Scene,
-        spec: FrameSpec,
-        target: &metal::TextureRef,
-        event: &metal::EventRef,
-        value: u64,
-    ) -> Result<metal::CommandBuffer> {
-        objc2::rc::autoreleasepool(|_| {
-            let s = self
-                .engine
-                .frame_settled(
-                    scene,
-                    spec,
-                    None,
-                    &OverlayGeometry::default(),
-                    false,
-                    Arc::default(),
-                )?
-                .ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
-            self.engine.encode_srgb(&s, target)?;
-            s.command.encode_signal_event(event, value);
-            s.commit();
-            self.engine.poll();
-            Ok(s.command.clone())
-        })
-    }
     pub fn mastering(&mut self, mode: color::Mastering) -> Result<()> {
         mode.params()?;
         self.engine.mastering = mode;

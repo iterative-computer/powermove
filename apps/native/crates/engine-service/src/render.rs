@@ -562,8 +562,6 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
-    /// The hand-over to a GPUI surface (`encode_srgb`), made with its first use.
-    srgb: Option<metal::RenderPipelineState>,
     pub cache_enabled: bool,
     studio_content: Option<(
         usize,
@@ -1289,7 +1287,6 @@ impl Engine {
             media_look: crate::render_cache::MEDIA_RECHECK,
             offscreen: None,
             capture_target: None,
-            srgb: None,
             cache_enabled: true,
             studio_content: None,
             visual_media: Default::default(),
@@ -2812,74 +2809,6 @@ pub fn picture_hash(width: u32, height: u32, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Extended linear Display P3 (the offscreen picture) to display-encoded
-/// sRGB, clipped to SDR: what GPUI's packed surfaces hold (`Picture::srgb8`
-/// on the GPU, one texel each).
-const SRGB_HANDOVER: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-vertex float4 vs(uint i [[vertex_id]]) {
-    float2 q=float2(float((i<<1)&2),float(i&2));
-    return float4(q*2-1,0,1);
-}
-float enc(float v) { v=clamp(v,0.0,1.0); return v<=0.0031308 ? v*12.92 : 1.055*pow(v,1.0/2.4)-0.055; }
-fragment half4 fs(float4 p [[position]], texture2d<float> src [[texture(0)]]) {
-    float3 c=src.read(uint2(p.xy)).rgb;
-    c=select(c,float3(0),isnan(c)||isinf(c));
-    float3x3 m=float3x3(float3(1.2249402,-0.0420570,-0.0196376),float3(-0.2249402,1.0420570,-0.0786361),float3(0,0,1.0982736));
-    float3 s=m*c;
-    return half4(half(enc(s.r)),half(enc(s.g)),half(enc(s.b)),1.0h);
-}
-"#;
-impl Engine {
-    /// Converts the offscreen picture `submission` drew into `target`
-    /// (BGRA8, its size), on the submission's own command buffer: nothing
-    /// is read back and nothing waits.
-    pub(crate) fn encode_srgb(&mut self, submission: &Submission, target: &metal::TextureRef) -> Result<()> {
-        let source = self
-            .offscreen
-            .as_ref()
-            .ok_or_else(|| anyhow!("no offscreen picture to hand over"))?;
-        anyhow::ensure!(
-            submission.drawable.is_none()
-                && target.width() == u64::from(submission.width)
-                && target.height() == u64::from(submission.height)
-                && target.pixel_format() == metal::MTLPixelFormat::BGRA8Unorm,
-            "the hand-over target must be an offscreen frame's size in BGRA8"
-        );
-        if self.srgb.is_none() {
-            let library = self
-                .metal
-                .new_library_with_source(SRGB_HANDOVER, &metal::CompileOptions::new())
-                .map_err(|s| anyhow!(s))?;
-            let desc = metal::RenderPipelineDescriptor::new();
-            let vertex = library.get_function("vs", None).map_err(anyhow::Error::msg)?;
-            let fragment = library.get_function("fs", None).map_err(anyhow::Error::msg)?;
-            desc.set_vertex_function(Some(&vertex));
-            desc.set_fragment_function(Some(&fragment));
-            desc.color_attachments()
-                .object_at(0)
-                .unwrap()
-                .set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
-            self.srgb = Some(
-                self.metal
-                    .new_render_pipeline_state(&desc)
-                    .map_err(|s| anyhow!(s))?,
-            );
-        }
-        let desc = metal::RenderPassDescriptor::new();
-        let color = desc.color_attachments().object_at(0).unwrap();
-        color.set_texture(Some(target));
-        color.set_load_action(metal::MTLLoadAction::DontCare);
-        color.set_store_action(metal::MTLStoreAction::Store);
-        let pass = submission.command.new_render_command_encoder(desc);
-        pass.set_render_pipeline_state(self.srgb.as_ref().unwrap());
-        pass.set_fragment_texture(0, Some(source));
-        pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
-        pass.end_encoding();
-        Ok(())
-    }
-}
 impl Submission {
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();

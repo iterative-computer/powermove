@@ -1,10 +1,8 @@
-//! The first-run stage drawn offscreen with the real engine and the app's
-//! fonts (`--stage-capture <folder>`, development and soak builds): stills
-//! of the intro, one recording of the whole run, the room's frame costs and
-//! the run's pacing at 120 Hz. No window reaches the screen: a headless GPUI window and the
-//! engine's offscreen frames. The font registry answers on this, the main,
-//! thread.
-use crate::stage_pictures::EnginePictures;
+//! The first-run stage drawn offscreen (`--stage-capture <folder>`,
+//! development and soak builds): stills of the intro, frames every quarter
+//! second for the side-by-side with Dia, one recording of the whole run at
+//! full size, and the run's pacing at 120 Hz. No window reaches the screen:
+//! a headless GPUI window drawing with Metal.
 use gpui::{prelude::*, *};
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
@@ -17,34 +15,6 @@ use std::{rc::Rc, sync::Arc, time::Instant};
 /// The 14-inch MacBook Pro's display, in points.
 pub(crate) const ROOM: (f32, f32) = (1512., 982.);
 
-/// The app's fonts, answered on the main thread; without a registry (a test
-/// thread) every ask is refused and text draws nothing.
-fn fonts() -> (pm_render::text::host::RenderFonts, Box<dyn FnMut()>) {
-    let broker = pm_text::host::FontBroker::new();
-    broker.set_wake(Arc::new(|| {}));
-    let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
-    match pm_text::host::FontService::new() {
-        Ok(mut service) => {
-            broker.set_generation(service.generation());
-            let pump = Box::new(move || pm_text::host::serve(&mut service, broker.take_asks()));
-            (fonts, pump)
-        }
-        Err(_) => {
-            broker.close();
-            (fonts, Box::new(|| {}))
-        }
-    }
-}
-pub(crate) fn pictures(room: (f32, f32)) -> EnginePictures {
-    let (fonts, pump) = fonts();
-    let mut pictures = EnginePictures::start(
-        fonts,
-        Some(std::env::temp_dir().join("pm-stage-shader-cache")),
-        (f64::from(room.0), f64::from(room.1)),
-    );
-    pictures.exact = Some(pump);
-    pictures
-}
 pub(crate) fn welcome_frame() -> Frame {
     Frame {
         surface: "S107".into(),
@@ -83,10 +53,9 @@ pub(crate) fn headless() -> HeadlessAppContext {
     cx.allow_parking();
     cx
 }
-/// The stage with the film: `film` false shows the card alone.
 /// The stage with the intro (`intro` false: the window at once). `exact`
-/// waits for each room picture (recordings); otherwise frames paint the
-/// newest one, as the window does.
+/// waits for the light's renderer (recordings); otherwise a frame before it
+/// is ready paints no room, as the window does.
 pub(crate) fn open(
     cx: &mut HeadlessAppContext,
     tokens: Tokens,
@@ -94,19 +63,10 @@ pub(crate) fn open(
     exact: bool,
 ) -> WindowHandle<Stage> {
     cx.open_window(size(px(ROOM.0), px(ROOM.1)), move |_, cx| {
-        let mut room = pictures(ROOM);
-        if !exact {
-            room.exact = None;
-        }
         let stage = cx.new(|cx| {
-            let mut stage = Stage::new(
-                tokens.clone(),
-                CueSheet::default(),
-                Box::new(room),
-                intro,
-                cx,
-            );
+            let mut stage = Stage::new(tokens.clone(), CueSheet::default(), intro, cx);
             stage.clock = Some(0.);
+            stage.wait = exact;
             stage
         });
         let card = cx.new(|cx| {
@@ -134,69 +94,77 @@ pub(crate) fn frame_at(
     cx.run_until_parked();
     cx.capture_screenshot(window.into()).unwrap()
 }
-/// Stills of every scene and wave, one recording of the whole run (raw
-/// frames encoded by ffmpeg), and the pictures' costs, into `out`.
-/// `stills_only` leaves out the recording and the timing.
-/// Stills of the intro, one recording of the whole run (raw frames encoded
-/// by ffmpeg) with a step and the hand-off, the room's costs and the
-/// pacing, into `out`.
-pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
+/// A step's card on the stage.
+fn step_card(cx: &mut App, tokens: &Tokens) -> Entity<WelcomeView> {
+    cx.new(|cx| {
+        let mut card = WelcomeView::new(tokens.clone(), timeline_frame(), Rc::new(|_, _| {}), cx);
+        card.stage = true;
+        card
+    })
+}
+/// Stills of the intro, frames every quarter second over 0–6 s (the
+/// side-by-side with Dia), and one recording of the whole run at full size
+/// and 60 fps with a step and the hand-off, into `out`; `stills_only`
+/// leaves out the frames and the recording. `reduced` runs with Reduce
+/// Motion.
+pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out)?;
-    if !stills_only {
-        time_the_room();
-        pacing(&out)?;
-    }
-    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let accessibility = Accessibility {
+        reduce_motion: reduced,
+        ..Accessibility::default()
+    };
+    let tokens = Tokens::new(Scheme::Dark, accessibility);
     let mut cx = headless();
     let window = open(&mut cx, tokens.clone(), true, true);
     let sheet = CueSheet::default();
+    let wave = |p: f64| sheet.window + sheet.wave_seconds * p;
     let stills: Vec<(&str, f64)> = vec![
-        ("0-dim", 0.8),
-        ("1-credit", 2.2),
-        ("2-mark-rising", sheet.rise.0 + 0.45),
-        ("3-mark-settled", sheet.rise.1 + 0.3),
-        ("4-light-spreads", sheet.hold),
-        ("5-mid-wave", sheet.window + sheet.wave_seconds * 0.5),
-        ("6-window", sheet.length() + 0.5),
+        ("1-credit", 2.6),
+        ("2-mid-rise", 3.6),
+        ("3-rest", sheet.hold - 0.05),
+        ("4-mid-wave", wave(0.12)),
+        ("4b-wave", wave(0.2)),
+        ("5-window", sheet.length() + 0.3),
     ];
-    let fps = if stills_only { 20. } else { 30. };
-    let end = sheet.length() + 3.;
+    let step_at = sheet.length() + 1.;
+    let hand_off_at = step_at + 1.4;
+    let end = if stills_only { sheet.length() + 0.4 } else { hand_off_at + 1.2 };
+    let fps = 60.;
     let first = frame_at(&mut cx, window, 0.);
     let (w, h) = (first.width(), first.height());
     let mut ffmpeg = (!stills_only).then(|| {
+        std::fs::create_dir_all(out.join("quarter")).ok();
         std::process::Command::new("ffmpeg")
-            .args([
-                "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
-            ])
+            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
             .arg(format!("{w}x{h}"))
             .args([
-                "-r", "30", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+                "-r", "60", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14",
             ])
-            .arg(out.join("stage-run.mp4"))
+            .arg(out.join("intro.mp4"))
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("ffmpeg encodes the recording")
     });
     let mut stdin = ffmpeg.as_mut().map(|f| f.stdin.take().unwrap());
-    let mut n = 0;
-    let mut stepped = false;
-    let mut handed = false;
+    let (mut stepped, mut handed) = (false, false);
     let mut next_still = 0;
+    let mut n = 0u32;
     loop {
         let t = f64::from(n) / fps;
-        if t > end || stills_only && next_still >= stills.len() {
+        if t > end {
             break;
         }
-        if !stills_only && t >= sheet.length() + 1. && !stepped {
+        // Stills only: jump between the stills (the springs and the wave
+        // are functions of the clock).
+        if stills_only && next_still < stills.len() && t + 0.5 / fps < stills[next_still].1 - 1. / fps {
+            n = (stills[next_still].1 * fps).round() as u32;
+            continue;
+        }
+        if !stills_only && t >= step_at && !stepped {
             stepped = true;
             cx.update_window(window.into(), |view, _, cx| {
                 let stage = view.downcast::<Stage>().unwrap();
-                let card = cx.new(|cx| {
-                    let mut card =
-                        WelcomeView::new(tokens.clone(), timeline_frame(), Rc::new(|_, _| {}), cx);
-                    card.stage = true;
-                    card
-                });
+                let card = step_card(cx, &tokens);
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
                     s.set_card(card, cx);
@@ -204,13 +172,13 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
             })
             .unwrap();
         }
-        if !stills_only && t >= end - 1.5 && !handed {
+        if !stills_only && t >= hand_off_at && !handed {
             handed = true;
             cx.update_window(window.into(), |view, _, cx| {
                 let stage = view.downcast::<Stage>().unwrap();
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
-                    s.hand_off(None, |_, _| {}, cx);
+                    s.hand_off(|_, _| {}, cx);
                 });
             })
             .unwrap();
@@ -219,6 +187,9 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
         while next_still < stills.len() && stills[next_still].1 <= t + 0.5 / fps {
             image.save(out.join(format!("{}.png", stills[next_still].0)))?;
             next_still += 1;
+        }
+        if !stills_only && n % 15 == 0 && t <= 6.0 + 1e-9 {
+            image.save(out.join("quarter").join(format!("{:05.2}.png", t)))?;
         }
         if let Some(stdin) = stdin.as_mut() {
             use std::io::Write;
@@ -230,32 +201,8 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
     if let Some(mut ffmpeg) = ffmpeg {
         anyhow::ensure!(ffmpeg.wait()?.success(), "ffmpeg failed");
     }
-    eprintln!("{n} frames recorded");
+    eprintln!("{n} frames at {w}x{h}");
     Ok(())
-}
-
-/// The room through the stage's path (no GPUI): what a frame costs from
-/// the request to the GPU's end, on the engine's worker.
-fn time_the_room() {
-    let mut room = pictures(ROOM);
-    room.measure = true;
-    let px_ = ((ROOM.0 * 2. * 0.5) as u32, (ROOM.1 * 2. * 0.5) as u32);
-    use pm_shell::stage::Pictures;
-    for i in 0..90 {
-        let _ = room.picture(f64::from(i) / 24., px_);
-    }
-    let mut costs: Vec<f64> = room.measured.drain(..).skip(5).collect();
-    costs.sort_by(f64::total_cmp);
-    if let Some(max) = costs.last() {
-        eprintln!(
-            "room {}x{}: request to GPU end p50 {:.2} ms p95 {:.2} ms max {:.2} ms (worker, not the main thread)",
-            px_.0,
-            px_.1,
-            costs[costs.len() / 2],
-            costs[costs.len() * 95 / 100],
-            max
-        );
-    }
 }
 
 /// The run at 120 Hz as the window runs it: the room is not waited for (a
@@ -274,15 +221,15 @@ pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
         false,
     );
     let sheet = CueSheet::default();
-    // Warm: the room's engine starts and the window draws once.
+    // Warm: the shaders compile on their workers and the window draws once.
     for t in [0., 0.1] {
         frame_at(&mut cx, window, t);
     }
     std::thread::sleep(std::time::Duration::from_secs(2));
-    // The intro, a step in the window (its wave), and the hand-off's wave.
+    // The intro, the window's wave, a step in the window, and the hand-off.
     let step_at = sheet.length() + 0.6;
-    let hand_off_at = step_at + sheet.wave_seconds + 0.4;
-    let end = hand_off_at + sheet.wave_seconds + 0.6;
+    let hand_off_at = step_at + 1.2;
+    let end = hand_off_at + 1.2;
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut rows = Vec::new();
     let mut n = 0u32;
@@ -298,12 +245,7 @@ pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
             stepped = true;
             cx.update_window(window.into(), |view, _, cx| {
                 let stage = view.downcast::<Stage>().unwrap();
-                let card = cx.new(|cx| {
-                    let mut card =
-                        WelcomeView::new(tokens.clone(), timeline_frame(), Rc::new(|_, _| {}), cx);
-                    card.stage = true;
-                    card
-                });
+                let card = step_card(cx, &tokens);
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
                     s.set_card(card, cx);
@@ -317,7 +259,7 @@ pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
                 let stage = view.downcast::<Stage>().unwrap();
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
-                    s.hand_off(None, |_, _| {}, cx);
+                    s.hand_off(|_, _| {}, cx);
                 });
             })
             .unwrap();

@@ -297,7 +297,7 @@ impl WaveState {
 
 /// The window's own Metal device; a headless window (offscreen captures)
 /// draws on the system's.
-fn device(window: &Window) -> Option<metal::Device> {
+pub(crate) fn device(window: &Window) -> Option<metal::Device> {
     window
         .gpu_context()
         .and_then(|c| c.downcast::<metal::Device>().ok())

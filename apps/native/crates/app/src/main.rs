@@ -51,7 +51,6 @@ mod first_run;
 mod first_run_stage;
 #[cfg(any(debug_assertions, test))]
 mod stage_capture;
-mod stage_pictures;
 mod generated_panel;
 mod gizmo;
 mod gizmo_layer;
@@ -402,10 +401,11 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|a| a == "--stage-capture") {
         let out = args
             .get(1)
-            .context("Usage: powermove-native --stage-capture <folder> [stills|pacing]")?;
+            .context("Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing]")?;
         return match args.get(2).and_then(|a| a.to_str()) {
             Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
-            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills")),
+            Some("reduced") => stage_capture::run(PathBuf::from(out), true, true),
+            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills"), false),
         };
     }
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
@@ -528,10 +528,6 @@ fn main() -> Result<()> {
     }));
     let fonts = RenderFonts::new(broker.clone());
     let text_fonts = fonts.clone();
-    first_run_stage::set_inputs(first_run_stage::FilmInputs {
-        fonts: fonts.clone(),
-        shader_cache: Some(profile.join("shader-cache")),
-    });
     let worker_profile = profile.clone();
     let (bridge, bridge_calls) = panel_bridge::channel();
     let bridge_windows = panel_bridge::Shared::default();
@@ -620,7 +616,7 @@ fn main() -> Result<()> {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
                     // Development builds: the first-run intro again, over the
-                    // app (`--replay-onboarding 1`), as Help › Welcome to Powermove.
+                    // app (`--replay-onboarding 1`), as Help › Replay Intro.
                     #[cfg(debug_assertions)]
                     if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
                         cx.defer(first_run_stage::replay);

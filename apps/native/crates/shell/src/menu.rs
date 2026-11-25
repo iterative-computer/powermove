@@ -628,7 +628,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Help",
             vec![
                 Item::command("Powermove Help", "help", ""),
-                Item::command("Welcome to Powermove", "welcomeIntro", ""),
+                Item::command("Replay Intro", "welcomeIntro", ""),
             ],
         ),
     ]
