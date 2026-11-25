@@ -666,6 +666,74 @@ fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppCont
     vcx.run_until_parked();
     assert_eq!(last_range(&mut vcx), Some((0, 10)));
 }
+/// PM-743: a list given more rows in a slot that keeps its size
+/// (effects added in Effect Controls) asks for the rows that now show. It
+/// asked only when it scrolled or its size changed, so the panel kept its
+/// old window and drew nothing more until it was scrolled.
+#[gpui::test]
+fn a_list_given_more_rows_asks_for_the_rows_that_now_show(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let list = |count: u64| json!({"count": count, "range": [0, 2], "itemSize": 20, "style": {"width": 100, "height": 200}});
+    let mut surface = Surface::default();
+    surface
+        .apply(Commit {
+            base_revision: 0,
+            ops: node_ops(1, 0, "virtual-list", list(2), &["rangechange"]),
+        })
+        .unwrap();
+    let first = Publication {
+        panel: "timeline".into(),
+        generation: 1,
+        surface: Arc::new(surface.clone()),
+    };
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child =
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx));
+        Tall {
+            child,
+            height: 200.,
+        }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let last_range = |vcx: &mut VisualTestContext| {
+        view.update(vcx, |v, _| {
+            v.log
+                .iter()
+                .rev()
+                .find(|(_, e, _)| e == "rangechange")
+                .and_then(|(_, _, d)| d.range)
+        })
+    };
+    assert_eq!(last_range(&mut vcx), Some((0, 2)), "both rows show");
+    // Eight more rows, the list's size the same: the window it has is the
+    // two rows it held.
+    surface
+        .apply(Commit {
+            base_revision: surface.revision(),
+            ops: vec![Op::SetProps {
+                id: 1,
+                patch: list(10).as_object().unwrap().clone(),
+            }],
+        })
+        .unwrap();
+    let next = Publication {
+        panel: "timeline".into(),
+        generation: 1,
+        surface: Arc::new(surface),
+    };
+    view.update(&mut vcx, |v, cx| v.publish(next, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        last_range(&mut vcx),
+        Some((0, 10)),
+        "it asks for the ten that show"
+    );
+}
 /// PM-447: the Project panel's grid takes its width even when its list was
 /// published again after the tree the window drew (a page, a rename, an
 /// import republish it while a project lands). The width goes to the

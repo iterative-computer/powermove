@@ -535,6 +535,8 @@ pub struct SurfaceView {
     /// commit and draw again (PM-311).
     sent_ranges: HashMap<Id, RangeRequest>,
     pending_ranges: HashMap<Id, (RangeRequest, Task<()>)>,
+    /// Each virtual list's row count when it last worked out its range.
+    asked_counts: HashMap<Id, usize>,
     pending_samples: HashMap<Id, Task<()>>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
@@ -754,6 +756,7 @@ impl SurfaceView {
             dragging: None,
             list_widths: HashMap::new(),
             sent_ranges: HashMap::new(),
+            asked_counts: HashMap::new(),
             pending_ranges: HashMap::new(),
             pending_samples: HashMap::new(),
             scrub_gesture: None,
@@ -4833,6 +4836,17 @@ impl SurfaceView {
             element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
                 cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
             }));
+            // Published with another row count than it last asked from (rows
+            // added or removed, its size the same: effects added in Effect
+            // Controls): it asks for the rows that show now, or it keeps the
+            // window it had and draws none of the new rows (PM-743).
+            if self
+                .asked_counts
+                .get(&id)
+                .is_some_and(|count| *count != geometry.count)
+            {
+                cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
+            }
             // A list laid out from its width (a grid's columns) hears of a
             // new width as soon as a frame lays it out (measured after
             // layout: a panel maximized or resized draws nothing more until
@@ -6542,6 +6556,7 @@ impl SurfaceView {
         let Some(scroll) = self.scrolls.get(&id) else {
             return;
         };
+        self.asked_counts.insert(id, geometry.count);
         let bounds = scroll.bounds();
         let height = f32::from(bounds.size.height) as f64;
         // A wheel step can leave the offset past the end until the next
