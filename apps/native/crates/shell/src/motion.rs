@@ -50,6 +50,22 @@ impl<K: Copy + Eq + Hash> Hovers<K> {
             }
         }
     }
+    /// As [`Self::hover`], at once: a hover that a scroll moved (AppKit
+    /// moves no hover while a view scrolls; the view's next full draw shows
+    /// where it is, with no wash animating every frame meanwhile).
+    pub fn set(&mut self, key: K, hovered: bool) {
+        if hovered {
+            if let Some(previous) = self.current.replace(key).filter(|p| *p != key) {
+                self.washes.remove(&previous);
+            }
+            self.washes.insert(key, Animated::unit(1.));
+        } else {
+            if self.current == Some(key) {
+                self.current = None;
+            }
+            self.washes.remove(&key);
+        }
+    }
     /// Wash amount, 0–1.
     pub fn amount(&self, key: K) -> f32 {
         self.washes.get(&key).map_or(0., |w| w.get().clamp(0., 1.))

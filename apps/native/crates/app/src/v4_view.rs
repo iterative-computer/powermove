@@ -4307,11 +4307,14 @@ impl SurfaceView {
     fn hover_probe(&self, id: Id, cx: &mut Context<Self>) -> AnyElement {
         let (painted, view) = (self.painted_groups.clone(), cx.entity().downgrade());
         let rendered = self.hovered_groups.contains(&id);
+        // A scroll moves the rows under a still pointer: the draw that ends
+        // it finds the group (PM-732).
+        let scrolling = self.scrolling();
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
             move |_, hitbox, window, cx| {
                 painted.borrow_mut().insert(id, hitbox.id);
-                if hitbox.is_hovered(window) != rendered {
+                if !scrolling && hitbox.is_hovered(window) != rendered {
                     let view = view.clone();
                     cx.defer(move |cx| {
                         let _ = view.update(cx, |_, cx| cx.notify());
@@ -5880,16 +5883,26 @@ impl SurfaceView {
         let group = node.hover_group;
         if wash || events.hover || group {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                // The pointer crossed a group: draw again, which finds the
-                // groups under it (`hovered_groups`).
-                if group {
-                    let _ = hovered;
-                    cx.notify();
-                }
-                if wash {
-                    let tokens = v.table.tokens.clone();
-                    v.motion.hovers.hover(id, *hovered, &tokens);
-                    cx.notify();
+                // While the panel scrolls, the rows move under a still
+                // pointer: its hover moves without a draw or a wash, and the
+                // draw that ends the scroll shows it (PM-732: each hover
+                // crossed drew Properties again, and its wash every frame).
+                if v.scrolling() {
+                    if wash {
+                        v.motion.hovers.set(id, *hovered);
+                    }
+                } else {
+                    // The pointer crossed a group: draw again, which finds
+                    // the groups under it (`hovered_groups`).
+                    if group {
+                        let _ = hovered;
+                        cx.notify();
+                    }
+                    if wash {
+                        let tokens = v.table.tokens.clone();
+                        v.motion.hovers.hover(id, *hovered, &tokens);
+                        cx.notify();
+                    }
                 }
                 if events.hover {
                     let event = if *hovered {
@@ -6736,7 +6749,7 @@ impl Render for SurfaceView {
             }))
             .children(self.cull.outer_mark())
             .children(self.body_rest_on_move(cx))
-            .on_scroll_wheel(cx.listener(|v, _: &ScrollWheelEvent, _, cx| v.body_wheeled(cx)))
+            .children(self.body_wheel_watch(cx))
     }
 }
 pub(crate) struct Tooltip {

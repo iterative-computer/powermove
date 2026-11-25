@@ -410,6 +410,31 @@ impl SurfaceView {
         })
         .detach();
     }
+    /// Wheel steps over the panel, seen before any of its own scrollers
+    /// takes them (one that scrolls stops the event there, PM-732: the
+    /// panel never knew it was being scrolled, so its scrollers never became
+    /// layers and Properties drew again on every step).
+    pub(super) fn body_wheel_watch(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        self.cull.outer.as_ref()?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let shown = window.content_mask().bounds.intersect(&bounds);
+                    let view = view.clone();
+                    window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Capture && shown.contains(&e.position) {
+                            let _ = view.update(cx, |v, cx| v.body_wheeled(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        )
+    }
     /// While its body is being scrolled: the pointer moving anywhere in the
     /// window ends the scroll for the panel (a person scrolls, then moves on),
     /// so the next draw (that hover's, a resize's) keeps only the rows near
@@ -432,6 +457,11 @@ impl SurfaceView {
             .absolute()
             .into_any_element(),
         )
+    }
+    /// Whether the panel is being scrolled (its body or its own scrollers),
+    /// until the steps rest or the pointer moves.
+    pub(crate) fn scrolling(&self) -> bool {
+        self.cull.wheeling.is_some()
     }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.
