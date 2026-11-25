@@ -55,7 +55,7 @@ If Powermove is open in another window or on another account, quit it, then try
 again.`, Details, `Quit Powermove` and `Try Again`. This also opens the window on a
 launch that had none. The editor never opens without its library.
 
-**Normal path.** With nothing to review, `Your Library Is Ready` is skipped and the editor
+**Normal path.** With nothing to review, `Your library is ready` is skipped and the editor
 opens by itself. No click is needed unless encrypted values exist (N002) or a row below
 has something to say.
 
@@ -101,7 +101,7 @@ Never show a decrypted value, an item name beyond the prompt, or a count of secr
 From `Outcome::Complete{projects, history_refusals, missing_projects, blocked_owners,
 proxy_only, already_offline}`.
 
-**Summary** — last gate screen. Title `Your Library Is Ready`, line `{n} projects were
+**Summary** — last gate screen. Title `Your library is ready`, line `{n} projects were
 copied. Your original app stays unchanged.` If all counts but `projects` are zero there
 are no rows. Otherwise a grouped card with one row per non-zero count, omitting others:
 

@@ -229,7 +229,7 @@ impl Model {
             Gate::Consent | Gate::InterruptedConsent => (if self.gate == Gate::Consent { "Keep Your Sign-Ins".into() } else { "The Keychain Request Didn’t Finish".into() }, if self.gate == Gate::Consent { crate::secrets::PROMPT.into() } else { "Powermove stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.".into() }, None, vec![Button::new("skip_secret_consent", "Not Now"), Button::new("resume_with_secret_consent", "Continue")], Some("resume_with_secret_consent")),
             Gate::WaitingForMacos => ("Keep Your Sign-Ins".into(), crate::secrets::PROMPT.into(), Some("Waiting for macOS…".into()), vec![Button { id: "skip_secret_consent", label: "Not Now", enabled: false }, Button { id: "resume_with_secret_consent", label: "Continue", enabled: false }], None),
             Gate::Denied => ("Keychain Access Wasn’t Allowed".into(), format!("{} Your sign-ins and extension values stay in the original app. You can continue and sign in here.", self.keychain_error.as_deref().unwrap_or("macOS didn’t allow access to the sign-in key.")), None, vec![Button::new("skip_secret_consent", "Continue Without Them"), Button::new("resume_with_secret_consent", "Try Again")], Some("skip_secret_consent")),
-            Gate::Complete => ("Your Library Is Ready".into(), format!("{} Your original app stays unchanged.", copied(self.summary.as_ref().map_or(0, |s| s.projects))), None, if self.report_needs_review || self.summary.as_ref().is_some_and(|s| !s.rows().is_empty()) { vec![Button::new("show_report", "Show Report…"), Button::new("open_native", "Open Powermove")] } else { vec![Button::new("open_native", "Open Powermove")] }, Some("open_native")),
+            Gate::Complete => (LIBRARY_READY.into(), format!("{} Your original app stays unchanged.", copied(self.summary.as_ref().map_or(0, |s| s.projects))), None, if self.report_needs_review || self.summary.as_ref().is_some_and(|s| !s.rows().is_empty()) { vec![Button::new("show_report", "Show Report…"), Button::new("open_native", "Open Powermove")] } else { vec![Button::new("open_native", "Open Powermove")] }, Some("open_native")),
         };
         let mut buttons = buttons;
         if !matches!(self.gate, Gate::Complete | Gate::WaitingForMacos) {
@@ -487,6 +487,9 @@ impl Summary {
         .collect()
     }
 }
+/// The title of the library's finished copy, in the first run's sentence
+/// case; the app's own "opening" frame shows it too.
+pub const LIBRARY_READY: &str = "Your library is ready";
 pub const PROXY_EXPORT_WARNING: &str =
     "This uses proxy-only media, so quality may be lower. Relink the originals for full quality.";
 pub const REPORT_SECTIONS: [(&str, &str); 8] = [

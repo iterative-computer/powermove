@@ -49,7 +49,9 @@ mod figma_paste;
 mod file_coordination;
 mod first_run;
 mod first_run_stage;
-#[cfg(any(debug_assertions, test))]
+// Development builds only (it draws with `pm_shell::capture_app`); the
+// stage tests run in them.
+#[cfg(debug_assertions)]
 mod stage_capture;
 mod generated_panel;
 mod gizmo;
@@ -883,5 +885,5 @@ mod utility_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod transition_capture_tests;
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", debug_assertions))]
 mod stage_tests;

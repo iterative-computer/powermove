@@ -799,7 +799,7 @@ impl Flow {
             }
             (Entry::Entering, None) => Frame {
                 surface: "N003".into(),
-                title: "Your library is ready".into(),
+                title: pm_first_launch::surfaces::migration::LIBRARY_READY.into(),
                 status: Some("Opening Powermove…".into()),
                 spinner: true,
                 ..Frame::default()
