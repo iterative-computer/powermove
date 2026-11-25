@@ -590,8 +590,11 @@ impl WelcomeView {
             window.request_animation_frame();
         }
         let spoken = frame.title.replace('\n', " ");
+        // The mark, title, line and content, from the mark's height down to
+        // where the actions start.
         let mut column = div()
             .w(px(COLUMN))
+            .h(px(CONTENT_BOTTOM - LOGO_TOP))
             .flex()
             .flex_col()
             .items_center()
@@ -753,7 +756,19 @@ impl WelcomeView {
             || frame.note.is_some()
             || frame.details.is_some();
         if has_controls {
-            column = column.child(controls.mt(px(22.)));
+            // Between the title and the actions: a list taller than the
+            // room scrolls here; it never moves the actions.
+            column = column.child(
+                div()
+                    .id("welcome-content")
+                    .debug_selector(|| "welcome-content".into())
+                    .w_full()
+                    .mt(px(22.))
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .child(controls),
+            );
         }
         // One primary action, the column's width; the others, and Back, as
         // quiet links under it.
@@ -762,15 +777,31 @@ impl WelcomeView {
             .as_ref()
             .and_then(|id| frame.buttons.iter().find(|b| &b.id == id))
             .or_else(|| frame.buttons.iter().find(|b| !b.leading));
-        if let Some(button) = primary.cloned() {
-            column = column.child(
-                div()
-                    .mt(px(22.))
-                    .flex()
-                    .justify_center()
-                    .child(self.button(&button, window, cx)),
-            );
-        }
+        // The actions sit at one place on every frame (the owner: the next
+        // button never moves): the primary, then the links under it.
+        let mut actions = div()
+            .id("welcome-actions")
+            .debug_selector(|| "welcome-actions".into())
+            .absolute()
+            .left_0()
+            .w(px(HALF))
+            .top(px(ACTIONS_TOP))
+            .flex()
+            .flex_col()
+            .items_center();
+        actions = actions.child(
+            div()
+                .id("welcome-primary")
+                .debug_selector(|| "welcome-primary".into())
+                .h(px(PRIMARY_HEIGHT))
+                .flex()
+                .justify_center()
+                .children(
+                    primary
+                        .cloned()
+                        .map(|button| self.button(&button, window, cx)),
+                ),
+        );
         let mut links: Vec<(String, String)> = frame
             .buttons
             .iter()
@@ -781,8 +812,10 @@ impl WelcomeView {
             links.push(("back".into(), "Back".into()));
         }
         if !links.is_empty() {
-            column = column.child(
+            actions = actions.child(
                 div()
+                    .id("welcome-links")
+                    .debug_selector(|| "welcome-links".into())
                     .mt(px(12.))
                     .flex()
                     .justify_center()
@@ -838,6 +871,7 @@ impl WelcomeView {
             .when(self.ground, |d| d.child(stage_ground()))
             .child(left)
             .child(right)
+            .child(actions)
     }
     /// A group's heading, as Settings heads its groups.
     fn section_title(&self, title: &str) -> impl IntoElement + use<> {
@@ -1428,6 +1462,11 @@ const FIELD_LIGHT: u32 = 0xff7a2e;
 const FIELD_DEEP: u32 = 0xa3301a;
 const COLUMN: f32 = 330.;
 const TITLE_SIZE: f32 = 26.;
+/// The window picture on the field: its scale (of the app's own size) and
+/// its corner on the field; it runs off the right and bottom edges.
+const WINDOW_SCALE: f32 = 0.88;
+const WINDOW_LEFT: f32 = 32.;
+const WINDOW_TOP: f32 = 104.;
 /// The stage's grouped list: its corner (continuous), the row's least
 /// height and side inset (where the hairlines start), the icons' tile.
 const LIST_RADIUS: f32 = 12.;
@@ -1441,6 +1480,10 @@ const CLAUDE_ORANGE: u32 = 0xd97757;
 const PRIMARY_WIDTH: f32 = 280.;
 const PRIMARY_HEIGHT: f32 = 36.;
 const LOGO_TOP: f32 = 104.;
+/// Where the content's room ends, and where the actions start: the primary
+/// at one height on every frame, its links 12 under it, 64 above the bottom.
+const ACTIONS_TOP: f32 = 510.;
+const CONTENT_BOTTOM: f32 = ACTIONS_TOP - 20.;
 
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
 /// under Reduce Motion. Also the kit's indeterminate progress row.
@@ -1557,23 +1600,13 @@ fn picture(name: &str) -> Option<(std::sync::Arc<RenderImage>, (u32, u32))> {
     let bytes: &'static [u8] = match name {
         "grain" => include_bytes!("../assets/onboarding/grain.png"),
         "welcome" => include_bytes!("../assets/onboarding/welcome.png"),
-        "home" => include_bytes!("../assets/onboarding/home.png"),
-        "effects" => include_bytes!("../assets/onboarding/effects.png"),
-        "workspace" => include_bytes!("../assets/onboarding/workspace.png"),
         "timeline-layers" => include_bytes!("../assets/onboarding/timeline-layers.png"),
         "timeline-tracks" => include_bytes!("../assets/onboarding/timeline-tracks.png"),
         "agent" => include_bytes!("../assets/onboarding/agent.png"),
         "speech" => include_bytes!("../assets/onboarding/speech.png"),
-        "v1-welcome" => include_bytes!("../assets/onboarding/v1-welcome.png"),
-        "v1-timeline-layers" => include_bytes!("../assets/onboarding/v1-timeline-layers.png"),
-        "v1-timeline-tracks" => include_bytes!("../assets/onboarding/v1-timeline-tracks.png"),
-        "v1-agent" => include_bytes!("../assets/onboarding/v1-agent.png"),
-        "v1-speech" => include_bytes!("../assets/onboarding/v1-speech.png"),
-        "v2-welcome" => include_bytes!("../assets/onboarding/v2-welcome.png"),
-        "v2-timeline-layers" => include_bytes!("../assets/onboarding/v2-timeline-layers.png"),
-        "v2-timeline-tracks" => include_bytes!("../assets/onboarding/v2-timeline-tracks.png"),
-        "v2-agent" => include_bytes!("../assets/onboarding/v2-agent.png"),
-        "v2-speech" => include_bytes!("../assets/onboarding/v2-speech.png"),
+        "workspace" => include_bytes!("../assets/onboarding/workspace.png"),
+        "home" => include_bytes!("../assets/onboarding/home.png"),
+        "effects" => include_bytes!("../assets/onboarding/effects.png"),
         _ => return None,
     };
     let decode = || {
@@ -1597,51 +1630,34 @@ fn picture(name: &str) -> Option<(std::sync::Arc<RenderImage>, (u32, u32))> {
             .clone()
     })
 }
-/// How the right half shows the product (three designs under review).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Right {
-    /// One element of the real UI, large (about 2×), cropped hard.
-    Zoom,
-    /// A real Powermove window, a little smaller, floating on the field.
-    Window,
-    /// That window set back, with the step's element large in front of it.
-    Stack,
-}
-fn right() -> Right {
-    // Development builds pick a design for review (`PM_NATIVE_WELCOME_RIGHT`).
-    #[cfg(debug_assertions)]
-    if let Ok(v) = std::env::var("PM_NATIVE_WELCOME_RIGHT") {
-        match v.as_str() {
-            "v2" => return Right::Window,
-            "v3" => return Right::Stack,
-            _ => {}
-        }
-    }
-    Right::Zoom
-}
-/// `name` shown at `density` picture pixels a point, its corner at
-/// (`left`, `top`) on the field, with a soft shadow and a hairline rim.
-fn piece(name: &str, density: f32, left: f32, top: f32, radius: f32, shadow: f32) -> Option<Div> {
-    let (image, (w, h)) = picture(name)?;
-    let (w, h) = (w as f32 / density, h as f32 / density);
+/// The product beside a step: a real Powermove window (a lane capture of the
+/// app on a synthetic project, framed on the step's subject) floating on the
+/// field at a little under its size, with its own corners, a hairline rim and
+/// a soft shadow, running off the field's right and bottom edges.
+fn preview(id: &str, window: &Window) -> Option<AnyElement> {
+    let _ = window;
+    let (image, (w, h)) = picture(id)?;
+    // The captures are two pixels a point; shown at `WINDOW_SCALE`.
+    let (w, h) = (w as f32 / 2. * WINDOW_SCALE, h as f32 / 2. * WINDOW_SCALE);
+    let radius = 16. * WINDOW_SCALE;
     Some(
         div()
             .absolute()
-            .left(px(left))
-            .top(px(top))
+            .left(px(WINDOW_LEFT))
+            .top(px(WINDOW_TOP))
             .w(px(w))
             .h(px(h))
             .rounded(px(radius))
             .shadow(vec![
                 BoxShadow {
-                    color: hsla(14. / 360., 0.8, 0.08, 0.55 * shadow).into(),
+                    color: hsla(14. / 360., 0.8, 0.08, 0.55).into(),
                     offset: point(px(0.), px(28.)),
                     blur_radius: px(64.),
                     spread_radius: px(-8.),
                     inset: false,
                 },
                 BoxShadow {
-                    color: hsla(0., 0., 0., 0.25 * shadow).into(),
+                    color: hsla(0., 0., 0., 0.25).into(),
                     offset: point(px(0.), px(2.)),
                     blur_radius: px(6.),
                     spread_radius: px(0.),
@@ -1656,34 +1672,9 @@ fn piece(name: &str, density: f32, left: f32, top: f32, radius: f32, shadow: f32
                     .border(px(0.5))
                     .border_color(hsla(0., 0., 1., 0.22))
                     .child(img(ImageSource::Render(image)).size_full()),
-            ),
+            )
+            .into_any_element(),
     )
-}
-/// The product beside a step: real pictures of the app on a demo project
-/// (`assets/onboarding`), large and legible, running off the field's right
-/// and bottom edges, with depth.
-fn preview(id: &str, window: &Window) -> Option<AnyElement> {
-    let _ = window;
-    let designed = matches!(
-        id,
-        "welcome" | "timeline-layers" | "timeline-tracks" | "agent" | "speech"
-    );
-    let shown = match (designed, right()) {
-        // The step's element at about twice the product's size.
-        (true, Right::Zoom) => piece(&format!("v1-{id}"), 2., 36., 56., 14., 1.)?,
-        // A real window at three quarters of its size, its own corners and
-        // rim, running off the bottom and the right.
-        (true, Right::Window) => piece(&format!("v2-{id}"), 2. / 0.75, 44., 112., 12., 1.)?,
-        // The window set back and quiet, the step's element large in front.
-        (true, Right::Stack) => div()
-            .absolute()
-            .inset_0()
-            .child(piece(&format!("v2-{id}"), 2. / 0.55, 28., 44., 9., 0.6)?.opacity(0.5))
-            .child(piece(&format!("v1-{id}"), 2. / 0.8, 88., 214., 14., 1.3)?),
-        // The other frames: their picture at the product's own size.
-        (false, _) => piece(id, 2., 36., 56., 12., 1.)?,
-    };
-    Some(shown.into_any_element())
 }
 
 /// The Powermove mark, `size` points high, filled with `color`.
