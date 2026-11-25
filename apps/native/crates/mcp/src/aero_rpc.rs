@@ -200,14 +200,14 @@ struct Run {
     wall_secs: u64,
     max_steps: u32,
     max_gate_continuations: u32,
-    provider: Replay,
+    provider: ModelSource,
     #[serde(default)]
     ablate: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
-enum Replay {
+enum ModelSource {
     Replay {
         #[serde(rename = "baseUrl")]
         base_url: String,
@@ -290,7 +290,7 @@ fn start(
         ));
     }
     let model = match request.provider {
-        Replay::Replay { base_url } => Model::replay(&base_url).map_err(Error::invalid)?,
+        ModelSource::Replay { base_url } => Model::replay(&base_url).map_err(Error::invalid)?,
         _ => {
             return Err(Error::invalid(
                 "Aero eval requires an explicit recorded replay provider.",

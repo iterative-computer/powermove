@@ -11,9 +11,11 @@ pub struct Model {
     transport: Transport,
 }
 
+type Fake = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
+
 #[derive(Clone)]
 enum Transport {
-    Fake(Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>),
+    Fake(Fake),
     Replay(Url),
 }
 

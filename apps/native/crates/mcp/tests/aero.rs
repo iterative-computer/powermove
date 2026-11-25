@@ -448,10 +448,8 @@ impl Wire {
         };
         wire.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}));
         let init = wire.next();
-        assert_eq!(
-            init["result"]["capabilities"]["experimental"]["powermoveEval"].is_object(),
-            true
-        );
+        let flags = &init["result"]["capabilities"]["experimental"]["powermoveEval"];
+        assert_eq!(flags["evaluator"], false, "{init}");
         wire.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
             "params":{"name":"open_project","arguments":{"projectId":fixture.project}}}));
         assert_eq!(wire.next()["result"]["isError"], false);
