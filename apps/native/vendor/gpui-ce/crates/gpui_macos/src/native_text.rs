@@ -384,6 +384,10 @@ define_class!(
 /// prompt reads at 1.5), centred in that height: the gap past the font's own
 /// line goes between lines and half of it above the first.
 pub const COMPOSER_LEADING: f64 = 1.5;
+/// A composer's text container inset (width, height): its first line box
+/// starts `COMPOSER_INSET.1` down and, with AppKit's 5 pt line fragment
+/// padding, its text 7 pt in (8 pt inside the composer's 1 pt edge).
+pub const COMPOSER_INSET: (f64, f64) = (2., 7.);
 fn composer_leading(v: &NSTextView, points: f64) {
     use objc2_app_kit::{NSLayoutManager, NSMutableParagraphStyle, NSParagraphStyleAttributeName};
     let font = NSFont::systemFontOfSize(points);
@@ -400,7 +404,7 @@ fn composer_leading(v: &NSTextView, points: f64) {
         typing = Retained::cast_unchecked(mutable);
         v.setTypingAttributes(&typing);
     }
-    v.setTextContainerInset(NSSize::new(4., 3. + gap / 2.));
+    v.setTextContainerInset(NSSize::new(COMPOSER_INSET.0, COMPOSER_INSET.1 + gap / 2.));
 }
 pub fn valid_number(value: &str) -> bool {
     value.trim().parse::<f64>().is_ok_and(f64::is_finite)
