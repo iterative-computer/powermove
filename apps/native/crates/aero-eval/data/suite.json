@@ -1,6 +1,6 @@
 {
  "format": "aero-eval-suite",
- "version": 1,
+ "version": 2,
  "tasks": [
   {
    "id": "cut-drop-flubbed-take",
@@ -23,6 +23,27 @@
         "expect": {
          "eq": 0
         }
+       }
+      },
+      {
+       "name": "the kept clips are the same takes, on, with their media and trims",
+       "kept": {
+        "select": {
+         "type": "video"
+        },
+        "ids": [
+         "t1",
+         "broll",
+         "t3",
+         "t4"
+        ],
+        "same": [
+         "/on",
+         "/d/asset",
+         "/d/trim",
+         "/d/speed",
+         "/dur"
+        ]
        }
       },
       {
@@ -73,6 +94,126 @@
        }
       }
      ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          198,
+          59,
+          59
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      3.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          210,
+          180,
+          40
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      5.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          59,
+          89,
+          200
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      7.0
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          150,
+          58,
+          169
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
     }
    ],
    "limits": {
@@ -93,6 +234,26 @@
     {
      "grader": "project",
      "assertions": [
+      {
+       "name": "the same takes, on, with their media and speed",
+       "kept": {
+        "select": {
+         "type": "video"
+        },
+        "ids": [
+         "t1",
+         "t2",
+         "t3",
+         "broll",
+         "t4"
+        ],
+        "same": [
+         "/on",
+         "/d/asset",
+         "/d/speed"
+        ]
+       }
+      },
       {
        "name": "each clip is one second",
        "field": {
@@ -144,6 +305,156 @@
        }
       }
      ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      0.5
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          198,
+          59,
+          59
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      1.5
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          59,
+          160,
+          60
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      2.5
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          59,
+          89,
+          200
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      3.5
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          210,
+          180,
+          40
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
+    },
+    {
+     "grader": "frame-stats",
+     "times": [
+      4.5
+     ],
+     "quantifier": "all",
+     "checks": [
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          150,
+          58,
+          169
+         ],
+         "tol": 10
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.02,
+        "y": 0.02,
+        "w": 0.1,
+        "h": 0.1
+       }
+      }
+     ]
     }
    ],
    "limits": {
@@ -174,6 +485,28 @@
         "expect": {
          "len_ge": 1
         }
+       }
+      },
+      {
+       "name": "nothing laid over the plate",
+       "count": {
+        "select": {},
+        "expect": {
+         "eq": 1
+        }
+       }
+      },
+      {
+       "name": "the plate keeps its picture",
+       "kept": {
+        "select": {},
+        "ids": [
+         "plate"
+        ],
+        "same": [
+         "/on",
+         "/d/asset"
+        ]
        }
       }
      ]
@@ -266,6 +599,30 @@
          "len_ge": 1
         }
        }
+      },
+      {
+       "name": "the plate keeps its own picture",
+       "kept": {
+        "select": {},
+        "ids": [
+         "ref",
+         "plate"
+        ],
+        "same": [
+         "/d/asset"
+        ]
+       }
+      },
+      {
+       "name": "reference untouched",
+       "unchanged": {
+        "select": {
+         "name": "Reference"
+        },
+        "ignore": [
+         "/selected"
+        ]
+       }
       }
      ]
     },
@@ -315,6 +672,9 @@
            65
           ]
          }
+        },
+        "instances": {
+         "eq": 1
         }
        }
       },
@@ -431,26 +791,66 @@
        "expect": {
         "le": 1.5
        }
+      },
+      {
+       "stat": "detail",
+       "ratio": true,
+       "region": {
+        "x": 0.05,
+        "y": 0.75,
+        "w": 0.3,
+        "h": 0.2
+       },
+       "expect": {
+        "ge": 0.9
+       }
       }
      ]
     },
     {
      "grader": "frame-stats",
      "times": [
+      1.0,
       2.0
      ],
      "quantifier": "all",
      "checks": [
       {
-       "stat": "delta-e-baseline",
-       "expect": {
-        "ge": 1.5
-       },
+       "stat": "detail",
+       "ratio": true,
        "region": {
-        "x": 0.5,
-        "y": 0.35,
+        "x": 0.05,
+        "y": 0.75,
         "w": 0.3,
-        "h": 0.4
+        "h": 0.2
+       },
+       "expect": {
+        "le": 0.6
+       }
+      },
+      {
+       "stat": "delta-e-baseline",
+       "region": {
+        "x": 0.05,
+        "y": 0.05,
+        "w": 0.3,
+        "h": 0.3
+       },
+       "expect": {
+        "le": 3.0
+       }
+      },
+      {
+       "stat": "detail",
+       "ratio": true,
+       "region": {
+        "x": 0.25,
+        "y": 0.42,
+        "w": 0.33,
+        "h": 0.16
+       },
+       "expect": {
+        "ge": 0.8
        }
       }
      ]
@@ -525,6 +925,22 @@
         "w": 0.12,
         "h": 0.12
        }
+      },
+      {
+       "stat": {
+        "channel-shift": {
+         "max": 24
+        }
+       },
+       "region": {
+        "x": 0.25,
+        "y": 0.38,
+        "w": 0.5,
+        "h": 0.24
+       },
+       "expect": {
+        "ge": 2
+       }
       }
      ]
     },
@@ -585,6 +1001,19 @@
        "expect": {
         "ge": 3.0
        }
+      },
+      {
+       "stat": "detail",
+       "ratio": true,
+       "region": {
+        "x": 0.05,
+        "y": 0.05,
+        "w": 0.3,
+        "h": 0.3
+       },
+       "expect": {
+        "ge": 1.5
+       }
       }
      ]
     },
@@ -643,11 +1072,37 @@
     {
      "grader": "frame-stats",
      "times": [
+      2.5,
+      2.5333,
+      2.5667,
+      2.6,
+      2.6333,
+      2.6667,
+      2.7,
+      2.7333,
+      2.7667,
       2.8,
+      2.8333,
+      2.8667,
       2.9,
+      2.9333,
+      2.9667,
       3.0,
+      3.0333,
+      3.0667,
       3.1,
-      3.2
+      3.1333,
+      3.1667,
+      3.2,
+      3.2333,
+      3.2667,
+      3.3,
+      3.3333,
+      3.3667,
+      3.4,
+      3.4333,
+      3.4667,
+      3.5
      ],
      "quantifier": "any",
      "checks": [
@@ -664,6 +1119,16 @@
            31,
            138,
            138
+          ],
+          [
+           96,
+           40,
+           18
+          ],
+          [
+           8,
+           54,
+           54
           ]
          ],
          "tol": 8
@@ -671,45 +1136,6 @@
        },
        "expect": {
         "ge": 0.9
-       }
-      },
-      {
-       "stat": {
-        "near": {
-         "rgb": [
-          232,
-          116,
-          59
-         ],
-         "tol": 8
-        }
-       },
-       "expect": {
-        "between": [
-         0.15,
-         0.85
-        ]
-       }
-      },
-      {
-       "stat": {
-        "near": {
-         "rgb": [
-          232,
-          116,
-          59
-         ],
-         "tol": 8
-        }
-       },
-       "expect": {
-        "ge": 0.9
-       },
-       "region": {
-        "x": 0,
-        "y": 0,
-        "w": 0.08,
-        "h": 1
        }
       },
       {
@@ -724,13 +1150,96 @@
         }
        },
        "expect": {
-        "ge": 0.9
+        "between": [
+         0.15,
+         0.75
+        ]
+       }
+      },
+      {
+       "stat": {
+        "near-any": {
+         "colors": [
+          [
+           232,
+           116,
+           59
+          ],
+          [
+           96,
+           40,
+           18
+          ]
+         ],
+         "tol": 8
+        }
        },
        "region": {
-        "x": 0.92,
+        "x": 0,
         "y": 0,
-        "w": 0.08,
+        "w": 0.05,
         "h": 1
+       },
+       "expect": {
+        "ge": 0.9
+       }
+      },
+      {
+       "stat": {
+        "near-any": {
+         "colors": [
+          [
+           31,
+           138,
+           138
+          ],
+          [
+           8,
+           54,
+           54
+          ]
+         ],
+         "tol": 8
+        }
+       },
+       "region": {
+        "x": 0.95,
+        "y": 0,
+        "w": 0.05,
+        "h": 1
+       },
+       "expect": {
+        "ge": 0.9
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          96,
+          40,
+          18
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.02
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          8,
+          54,
+          54
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.02
        }
       }
      ]
@@ -786,11 +1295,37 @@
     {
      "grader": "frame-stats",
      "times": [
+      2.5,
+      2.5333,
+      2.5667,
       2.6,
+      2.6333,
+      2.6667,
+      2.7,
+      2.7333,
+      2.7667,
       2.8,
+      2.8333,
+      2.8667,
+      2.9,
+      2.9333,
+      2.9667,
       3.0,
+      3.0333,
+      3.0667,
+      3.1,
+      3.1333,
+      3.1667,
       3.2,
-      3.4
+      3.2333,
+      3.2667,
+      3.3,
+      3.3333,
+      3.3667,
+      3.4,
+      3.4333,
+      3.4667,
+      3.5
      ],
      "quantifier": "any",
      "checks": [
@@ -832,7 +1367,133 @@
        "region": {
         "x": 0,
         "y": 0,
+        "w": 0.05,
+        "h": 0.08
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.95,
+        "y": 0,
+        "w": 0.05,
+        "h": 0.08
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0,
+        "y": 0.92,
+        "w": 0.05,
+        "h": 0.08
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.95,
+        "y": 0.92,
+        "w": 0.05,
+        "h": 0.08
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.47,
+        "y": 0,
         "w": 0.06,
+        "h": 0.05
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.47,
+        "y": 0.95,
+        "w": 0.06,
+        "h": 0.05
+       }
+      },
+      {
+       "stat": {
+        "near": {
+         "rgb": [
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0,
+        "y": 0.45,
+        "w": 0.04,
         "h": 0.1
        }
       },
@@ -840,9 +1501,37 @@
        "stat": {
         "near": {
          "rgb": [
-          31,
-          138,
-          138
+          232,
+          116,
+          59
+         ],
+         "tol": 8
+        }
+       },
+       "expect": {
+        "ge": 0.9
+       },
+       "region": {
+        "x": 0.96,
+        "y": 0.45,
+        "w": 0.04,
+        "h": 0.1
+       }
+      },
+      {
+       "stat": {
+        "near-any": {
+         "colors": [
+          [
+           31,
+           138,
+           138
+          ],
+          [
+           8,
+           54,
+           54
+          ]
          ],
          "tol": 8
         }
@@ -897,6 +1586,9 @@
      "probe": {
       "steps": [
        {
+        "seek": 0.0
+       },
+       {
         "click": "Drop"
        }
       ]
@@ -904,7 +1596,31 @@
      "playhead": {
       "approx": 2.5,
       "tol": 0.04
-     }
+     },
+     "contains_any": [
+      [
+       "0:00",
+       "0.0"
+      ],
+      [
+       "2.5",
+       "2:15",
+       "0:02"
+      ],
+      [
+       "5.0",
+       "0:05",
+       "5:00"
+      ]
+     ],
+     "after": [
+      {
+       "name": "clicking adds no marker",
+       "markers-added": {
+        "count": 0
+       }
+      }
+     ]
     },
     {
      "grader": "rubric",
@@ -965,6 +1681,15 @@
          "approx": 0.5,
          "tol": 0.001
         }
+       }
+      },
+      {
+       "name": "the click is what set it",
+       "changed": {
+        "select": {
+         "name": "Clip"
+        },
+        "path": "/d/speed"
        }
       },
       {
@@ -1061,6 +1786,32 @@
         "w": 0.12,
         "h": 0.12
        }
+      },
+      {
+       "stat": "mean-l",
+       "relative": true,
+       "region": {
+        "x": 0.25,
+        "y": 0.38,
+        "w": 0.5,
+        "h": 0.24
+       },
+       "expect": {
+        "ge": 0.3
+       }
+      },
+      {
+       "stat": "chroma",
+       "relative": true,
+       "region": {
+        "x": 0.25,
+        "y": 0.38,
+        "w": 0.5,
+        "h": 0.24
+       },
+       "expect": {
+        "le": 3
+       }
       }
      ]
     }
@@ -1100,8 +1851,19 @@
      "panel": "shot-notes.panel",
      "contains": [
       "Background plate",
-      "Title"
-     ]
+      "Title",
+      "hero shot"
+     ],
+     "probe": {
+      "steps": [
+       {
+        "type": {
+         "field": "Title",
+         "text": "hero shot"
+        }
+       }
+      ]
+     }
     }
    ],
    "limits": {
@@ -1323,17 +2085,21 @@
      "probe": {
       "steps": [
        {
+        "seek": 2.0
+       },
+       {
         "click": "Tap"
        }
       ]
      },
      "after": [
       {
-       "name": "a marker was dropped",
-       "root": {
-        "path": "/markers",
-        "expect": {
-         "len_ge": 1
+       "name": "one marker dropped at the playhead",
+       "markers-added": {
+        "count": 1,
+        "t": {
+         "approx": 2.0,
+         "tol": 0.02
         }
        }
       },
@@ -1347,6 +2113,36 @@
          "/selected"
         ]
        }
+      }
+     ],
+     "frames": [
+      {
+       "times": [
+        2.0167,
+        2.05
+       ],
+       "checks": [
+        {
+         "stat": "mean-l",
+         "expect": {
+          "ge": 95
+         }
+        }
+       ]
+      },
+      {
+       "times": [
+        1.95,
+        2.1167
+       ],
+       "checks": [
+        {
+         "stat": "delta-e-baseline",
+         "expect": {
+          "le": 1.0
+         }
+        }
+       ]
       }
      ]
     },
@@ -1385,6 +2181,9 @@
      "probe": {
       "steps": [
        {
+        "seek": 1.0
+       },
+       {
         "type": {
          "field": "Name",
          "text": "Ada Park"
@@ -1414,6 +2213,20 @@
        }
       },
       {
+       "name": "it starts at the playhead",
+       "field": {
+        "select": {
+         "text_contains": "Ada Park"
+        },
+        "path": "/from",
+        "expect": {
+         "approx": 1.0,
+         "tol": 0.04
+        },
+        "any": true
+       }
+      },
+      {
        "name": "it slides in",
        "any-of": [
         {
@@ -1421,7 +2234,8 @@
           "select": {
            "text_contains": "Ada Park"
           },
-          "param": "position.x"
+          "param": "position.x",
+          "changes": true
          }
         },
         {
@@ -1429,7 +2243,8 @@
           "select": {
            "text_contains": "Ada Park"
           },
-          "param": "position.y"
+          "param": "position.y",
+          "changes": true
          }
         },
         {
@@ -1437,7 +2252,8 @@
           "select": {
            "name_prefix": "Lower third"
           },
-          "param": "position.x"
+          "param": "position.x",
+          "changes": true
          }
         },
         {
@@ -1445,7 +2261,8 @@
           "select": {
            "name_prefix": "Lower third"
           },
-          "param": "position.y"
+          "param": "position.y",
+          "changes": true
          }
         }
        ]

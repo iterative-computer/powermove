@@ -53,7 +53,68 @@ impl GraderSpec {
             _ => Vec::new(),
         }
     }
+    /// Host capabilities this grader's evidence comes from (the names the
+    /// runner's capability check reports as lacking).
+    pub fn needs(&self) -> Vec<&'static str> {
+        use crate::runner::capabilities as cap;
+        let new = |id: &str| id.starts_with("$new");
+        let mut n = Vec::new();
+        match self {
+            GraderSpec::Project(s) => {
+                if s.assertions.iter().any(|a| a.check.uses_new()) {
+                    n.push(cap::OWNERS);
+                }
+            }
+            GraderSpec::ExtensionsLoad(s) => {
+                n.push(cap::HEALTH);
+                for q in &s.require {
+                    if new(&q.id) {
+                        n.push(cap::OWNERS);
+                    }
+                    match q.kind.as_str() {
+                        "transition" => n.push(cap::TRANSITIONS),
+                        "theme" => n.push(cap::THEMES),
+                        "panel" => n.push(cap::PANELS),
+                        _ => {}
+                    }
+                }
+            }
+            GraderSpec::Frames(_) | GraderSpec::FrameStats(_) => n.push(cap::FRAMES),
+            GraderSpec::FrameTime(s) => {
+                n.push(cap::TIMING);
+                if new(&s.target) {
+                    n.push(cap::OWNERS);
+                }
+            }
+            GraderSpec::Panel(s) => {
+                n.extend([cap::PANELS, cap::PROBES]);
+                if new(&s.panel) {
+                    n.push(cap::OWNERS);
+                }
+                if s.seeks() {
+                    n.push(cap::SEEK);
+                }
+                if !s.frames.is_empty() {
+                    n.push(cap::FRAMES);
+                }
+            }
+            GraderSpec::Theme(_) => n.extend([cap::THEMES, cap::OWNERS]),
+            // A rubric is decided by the evaluator or the owner's spot-check;
+            // the grader reports which is missing.
+            GraderSpec::Rubric(_) => {}
+        }
+        n.sort();
+        n.dedup();
+        n
+    }
     pub fn grade(&self, cx: &Context) -> Verdict {
+        if let Some(lack) = self
+            .needs()
+            .into_iter()
+            .find(|n| cx.artifacts.host_lacks.iter().any(|l| l == n))
+        {
+            return Verdict::unavailable(self.name(), format!("unavailable: host lacks {lack}"));
+        }
         match self {
             GraderSpec::Project(s) => project::grade(s, cx),
             GraderSpec::ExtensionsLoad(s) => extensions::grade(s, cx),
@@ -77,12 +138,16 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
-    pub fn path(&self, p: &Path) -> PathBuf {
+    /// A file the artifacts name: always relative and inside the run folder
+    /// (no absolute paths, no `..`, no symlinks).
+    pub fn path(&self, p: &Path) -> Result<PathBuf, String> {
         if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.run_dir.join(p)
+            return Err(format!(
+                "{} is absolute; artifacts name run files",
+                p.display()
+            ));
         }
+        crate::runner::paths::inside(self.run_dir, &self.run_dir.join(p))
     }
     /// Resolve an id that may be `$new:<kind>`: any contribution of that kind
     /// registered by an extension the run created or updated.

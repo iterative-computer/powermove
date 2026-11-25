@@ -8,15 +8,20 @@ fails on a fixture whose bytes no longer match its pin.
 
 Stills are drawn by the script at 1280x720: a colour chart (grey ramps,
 primaries, skin and nature tones), the same chart with lifted blacks, low
-contrast and a cool cast, a dusk scene (sky gradient, sun, ground), and two
-flat colour cards. The one video is the public engine fixture
-`engine/fixtures/h264-aac.mp4` (160x90, red then green, 2 s, 440 Hz tone).
+contrast and a cool cast, a dusk scene (sky gradient, sun, and a ground of
+8-pixel paving, the fine detail the blur task measures), and two colour cards
+with a dark bar near Shot A's right edge and Shot B's left edge (so a push,
+where both shots move, reads differently from a wipe or a slide). The videos
+are the public engine fixture `engine/fixtures/h264-aac.mp4` (160x90, red then
+green, 2 s, 440 Hz tone) and five 2 s flat-colour takes in `media/`, one
+colour per take so each can be told apart on screen. `media/make-takes.sh`
+made them from FFmpeg colour sources; generate.py packs the committed files.
 Projects are PMV4 containers with their media embedded, packed the way
 `apps/native/crates/acceptance/data/fixtures/generate-portable.py` packs them.
 
 | Project | Made of | Used by |
 |---|---|---|
-| `interview.pmv` | five 2 s clips of the video (Take 1, Take 2, Take 3, B-roll, Take 4) and a text lower third | cut tasks |
+| `interview.pmv` | five 2 s clips, each its own take from `media/` (Take 1 red, Take 2 green, Take 3 blue, B-roll yellow, Take 4 purple), and a text lower third | cut tasks |
 | `speed.pmv` | two clips (Clip, Clip 2) | speed-button panel |
 | `chart-plate.pmv` | the chart as Plate | late-afternoon grade |
 | `grade-match.pmv` | the cast chart as Plate, the clean chart as Reference (switched off) | grade match; `references/grade-match/chart.png` is the clean chart |

@@ -2,9 +2,10 @@
 """Generate the Aero eval fixtures. Python 3.9+, standard library only.
 
 Everything here is synthetic and public: stills are drawn by this script, the
-only video is the public engine fixture engine/fixtures/h264-aac.mp4 (160x90,
-red then green, 2 s), and the broken extensions are written below. Projects
-are PMV4 containers packed the way
+videos are the public engine fixture engine/fixtures/h264-aac.mp4 (160x90,
+red then green, 2 s) and five flat-colour takes in media/ (made by
+media/make-takes.sh from FFmpeg colour sources), and the broken extensions are
+written below. Projects are PMV4 containers packed the way
 apps/native/crates/acceptance/data/fixtures/generate-portable.py packs them.
 
 Run from anywhere:  python3 generate.py
@@ -24,6 +25,11 @@ CLIP = REPO / 'engine' / 'fixtures' / 'h264-aac.mp4'
 
 DAWN = (232, 116, 59)
 DUSK = (31, 138, 138)
+# Position bars: near Shot A's right edge and Shot B's left edge, so a push
+# (both shots move) reads differently from a wipe or a slide.
+DAWN_BAR = (96, 40, 18)
+DUSK_BAR = (8, 54, 54)
+TAKES = ['take-1', 'take-2', 'take-3', 'broll', 'take-4']
 
 
 # ---------------------------------------------------------------- stills
@@ -46,6 +52,13 @@ def png(width, height, rows):
 
 def solid(rgb):
     row = bytes(rgb) * W
+    return png(W, H, [row] * H)
+
+
+def card(rgb, bar, x0, x1):
+    """A flat card with a full-height bar between x0 and x1 (fractions of W)."""
+    a, b = int(W * x0), int(W * x1)
+    row = bytes(rgb) * a + bytes(bar) * (b - a) + bytes(rgb) * (W - b)
     return png(W, H, [row] * H)
 
 
@@ -81,7 +94,8 @@ def cast(c):
 
 
 def hero_rows():
-    """A synthetic dusk scene: sky gradient, horizon, sun, dark ground."""
+    """A synthetic dusk scene: sky gradient, horizon, sun, and a ground of
+    8-pixel paving (fine detail a blur visibly removes)."""
     out = []
     horizon = int(H * 0.68)
     sun = (int(W * 0.66), int(H * 0.52), 70)
@@ -93,11 +107,14 @@ def hero_rows():
         else:
             t = (y - horizon) / (H - horizon)
             sky = (int(50 - 30 * t), int(44 - 24 * t), int(36 - 20 * t))
+        lit = tuple(min(255, v + 46) for v in sky)
         dy = y - sun[1]
         for x in range(W):
             dx = x - sun[0]
             if y < horizon and dx * dx + dy * dy < sun[2] ** 2:
                 row += bytes((255, 214, 150))
+            elif y >= horizon and (x // 8 + y // 8) % 2:
+                row += bytes(lit)
             else:
                 row += bytes(sky)
         out.append(bytes(row))
@@ -118,9 +135,9 @@ def image(id_, name, asset, from_=0, dur=6, **extra):
     return layer(id_, 'image', name, from_, dur, dict(asset=asset, fit='cover', w=W, h=H), **extra)
 
 
-def clip(id_, name, from_, dur=2, trim=0):
+def clip(id_, name, from_, dur=2, trim=0, asset='clip'):
     return layer(id_, 'video', name, from_, dur,
-                 dict(asset='clip', fit='cover', w=160, h=90, trim=trim, speed=1))
+                 dict(asset=asset, fit='cover', w=160, h=90, trim=trim, speed=1))
 
 
 def text(id_, name, body, from_=0, dur=6, size=120):
@@ -164,8 +181,9 @@ def build():
     chart = png(W, H, chart_rows())
     chart_cast = png(W, H, chart_rows(cast))
     hero = png(W, H, hero_rows())
-    dawn, dusk = solid(DAWN), solid(DUSK)
+    dawn, dusk = card(DAWN, DAWN_BAR, 0.80, 0.86), card(DUSK, DUSK_BAR, 0.14, 0.20)
     clip_bytes = CLIP.read_bytes()
+    takes = {t: (HERE / 'media' / f'{t}.mp4').read_bytes() for t in TAKES}
 
     promo_layers = lambda: [image('bg', 'Background plate', 'hero'),
                             text('title', 'Title', 'SUMMER DROP')]
@@ -175,10 +193,11 @@ def build():
     out = {}
     out['interview.pmv'] = pack(project('interview', 'Interview', 12, [
         text('lower', 'Lower third', 'Dana Reyes — Director', 0.5, 4, size=48),
-        clip('t1', 'Take 1', 0), clip('t2', 'Take 2', 2), clip('t3', 'Take 3', 4),
-        clip('broll', 'B-roll', 6), clip('t4', 'Take 4', 8),
-    ], {'clip': dict(id='clip', kind='video', name='Interview take.mp4', w=160, h=90, dur=2)}),
-        [('clip', 'video/mp4', clip_bytes)])
+        clip('t1', 'Take 1', 0, asset='take-1'), clip('t2', 'Take 2', 2, asset='take-2'),
+        clip('t3', 'Take 3', 4, asset='take-3'), clip('broll', 'B-roll', 6, asset='broll'),
+        clip('t4', 'Take 4', 8, asset='take-4'),
+    ], {t: dict(id=t, kind='video', name=f'{t}.mp4', w=160, h=90, dur=2) for t in TAKES}),
+        [(t, 'video/mp4', takes[t]) for t in TAKES])
     out['speed.pmv'] = pack(project('speed', 'Speed ramp', 8, [
         clip('clip1', 'Clip', 0, 2), clip('clip2', 'Clip 2', 2, 2),
     ], {'clip': dict(id='clip', kind='video', name='Street.mp4', w=160, h=90, dur=2)}),

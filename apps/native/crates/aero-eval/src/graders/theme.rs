@@ -1,7 +1,11 @@
 //! A restyle: the active theme comes from the run's extension and its resolved
-//! tokens meet the brief (hue, lightness, contrast).
+//! tokens meet the brief (hue, lightness, contrast). Alpha counts: a
+//! foreground is composited over the background it is drawn on before its
+//! contrast is measured, and a translucent token whose surface is unknown (a
+//! background, or a token checked on its own) is refused, never read as
+//! opaque.
 use super::Context;
-use crate::image::{contrast_ratio, hue_chroma, lab, parse_css_color};
+use crate::image::{contrast_ratio, hue_chroma, lab, over, parse_css_color, parse_css_rgba};
 use crate::verdict::Verdict;
 use serde::{Deserialize, Serialize};
 
@@ -62,15 +66,16 @@ pub fn grade(spec: &ThemeSpec, cx: &Context) -> Verdict {
             ),
         );
     }
+    let raw = |name: &str| t.tokens.get(name).map_or("absent", String::as_str);
     let color = |name: &str| t.tokens.get(name).and_then(|s| parse_css_color(s));
     for c in &spec.tokens {
         let Some(rgb) = color(&c.token) else {
             v.check(
                 false,
                 format!(
-                    "{} is {}, not a colour this grader reads",
+                    "{} is {}, not an opaque colour this grader reads",
                     c.token,
-                    t.tokens.get(&c.token).map_or("absent", String::as_str)
+                    raw(&c.token)
                 ),
             );
             continue;
@@ -92,22 +97,43 @@ pub fn grade(spec: &ThemeSpec, cx: &Context) -> Verdict {
             ok,
             format!(
                 "{} {} has hue {h:.0}°, chroma {ch:.0}, L* {l:.0}",
-                c.token, t.tokens[&c.token]
+                c.token,
+                raw(&c.token)
             ),
         );
     }
     for c in &spec.contrast {
-        match (color(&c.fg), color(&c.bg)) {
-            (Some(f), Some(b)) => {
-                let r = contrast_ratio(f, b);
+        let fg = t.tokens.get(&c.fg).and_then(|s| parse_css_rgba(s));
+        match (fg, color(&c.bg)) {
+            (Some((f, alpha)), Some(b)) => {
+                let shown = over(f, alpha, b);
+                let r = contrast_ratio(shown, b);
                 v.check(
                     r >= c.ge,
-                    format!("{} on {} contrast {r:.1}:1 (≥ {}:1)", c.fg, c.bg, c.ge),
+                    format!(
+                        "{} ({}) on {} ({}) contrast {r:.1}:1 (≥ {}:1){}",
+                        c.fg,
+                        raw(&c.fg),
+                        c.bg,
+                        raw(&c.bg),
+                        c.ge,
+                        if alpha < 1.0 {
+                            format!(", composited at alpha {alpha:.2}")
+                        } else {
+                            String::new()
+                        }
+                    ),
                 );
             }
             _ => v.check(
                 false,
-                format!("{} or {} is not a readable colour", c.fg, c.bg),
+                format!(
+                    "{} ({}) on {} ({}): the foreground is not a colour or the background is not opaque",
+                    c.fg,
+                    raw(&c.fg),
+                    c.bg,
+                    raw(&c.bg)
+                ),
             ),
         }
     }

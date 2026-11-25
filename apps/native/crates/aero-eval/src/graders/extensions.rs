@@ -35,7 +35,17 @@ fn one() -> usize {
 pub fn grade(spec: &LoadSpec, cx: &Context) -> Verdict {
     let mut v = Verdict::new("extensions-load");
     let r = &cx.artifacts.extensions;
-    let live: Vec<_> = r.changed.iter().filter(|c| c.action != "removed").collect();
+    for c in r.changed.iter().filter(|c| c.action == "refused") {
+        v.check(
+            false,
+            format!("{} contains a symlink, so nothing in it was read", c.id),
+        );
+    }
+    let live: Vec<_> = r
+        .changed
+        .iter()
+        .filter(|c| c.action == "created" || c.action == "updated")
+        .collect();
     v.check(
         live.len() >= spec.min_changed,
         format!(

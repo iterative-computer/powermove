@@ -133,8 +133,16 @@ pub fn grade(spec: &RubricSpec, cx: &Context) -> Verdict {
         }
         (None, None) => {
             v.status = Status::Unavailable;
-            v.evidence
-                .push("missing: no usable evaluator verdict and no spot-check".into());
+            let lack = cx
+                .artifacts
+                .host_lacks
+                .iter()
+                .any(|l| l == crate::runner::capabilities::EVALUATOR);
+            v.evidence.push(if lack {
+                "unavailable: host lacks a fresh evaluator, and there is no spot-check".into()
+            } else {
+                "missing: no usable evaluator verdict and no spot-check".into()
+            });
         }
     }
     v

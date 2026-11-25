@@ -89,7 +89,9 @@ pub enum Check {
         start: Option<f64>,
     },
     /// Every matching layer carries an effect of this type (or `$new:effect`)
-    /// whose parameters meet the expectations; `present: false` forbids it.
+    /// that is switched on and whose parameters meet the expectations;
+    /// `present: false` forbids it. `instances` bounds how many instances of
+    /// the type a layer carries (on or off).
     Effect {
         select: Selector,
         #[serde(rename = "type")]
@@ -98,9 +100,12 @@ pub enum Check {
         params: BTreeMap<String, Expect>,
         #[serde(default = "yes")]
         present: bool,
+        #[serde(default)]
+        instances: Option<Box<Expect>>,
     },
-    /// A keyframed channel: an effect parameter (with `effect`), a transform
-    /// channel (`position.x`), or a JSON pointer from the layer (`/d/...`).
+    /// A keyframed channel: an effect parameter (with `effect`, on a switched
+    /// on instance), a transform channel (`position.x`), or a JSON pointer
+    /// from the layer (`/d/...`). `changes`: the first and last keys differ.
     Animated {
         select: Selector,
         #[serde(default)]
@@ -112,6 +117,8 @@ pub enum Check {
         first: Option<Box<KeyExpect>>,
         #[serde(default)]
         last: Option<Box<KeyExpect>>,
+        #[serde(default)]
+        changes: bool,
     },
     /// A transition on a matching layer's in, out, or either side.
     Transition {
@@ -128,6 +135,25 @@ pub enum Check {
         select: Selector,
         #[serde(default)]
         ignore: Vec<String>,
+    },
+    /// The matching layers are exactly the layers with these ids (none new,
+    /// none renamed into place) and each still has its value from before the
+    /// run at every `same` pointer (enabled state, source, trim, speed).
+    Kept {
+        select: Selector,
+        ids: Vec<String>,
+        #[serde(default)]
+        same: Vec<String>,
+    },
+    /// Each matching layer's value at `path` differs from before (the change
+    /// happened in this step, not earlier).
+    Changed { select: Selector, path: String },
+    /// Markers added since before: exactly `count`, each at a time meeting
+    /// `t`; markers that were there stay.
+    MarkersAdded {
+        count: usize,
+        #[serde(default)]
+        t: Option<Box<Expect>>,
     },
     /// A JSON pointer from the composition root.
     Root { path: String, expect: Box<Expect> },
@@ -310,6 +336,7 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
             effect,
             params,
             present,
+            instances,
         } => {
             let ls = by_start(after, select);
             if ls.is_empty() {
@@ -338,6 +365,18 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
                 if !*present {
                     pass &= fx.is_empty();
                     lines.push(format!("{} has {} {effect}", name(l), fx.len()));
+                    continue;
+                }
+                if let Some(x) = instances
+                    && !x.holds(Some(&Value::from(fx.len())))
+                {
+                    pass = false;
+                    lines.push(format!(
+                        "{} has {} instances of {effect}, expected {}",
+                        name(l),
+                        fx.len(),
+                        x.describe()
+                    ));
                     continue;
                 }
                 // Any one instance meeting every parameter expectation counts.
@@ -381,6 +420,7 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
             keys_ge,
             first,
             last,
+            changes,
         } => {
             let ls = by_start(after, select);
             if ls.is_empty() {
@@ -391,12 +431,14 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
             let mut pass = true;
             for l in ls {
                 let channel = match &types {
+                    // A switched-off instance animates nothing.
                     Some(types) => l.get("fx").and_then(Value::as_array).and_then(|a| {
                         a.iter()
                             .filter(|e| {
-                                e.get("type")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|t| types.iter().any(|x| x == t))
+                                e.get("on").and_then(Value::as_bool) != Some(false)
+                                    && e.get("type")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|t| types.iter().any(|x| x == t))
                             })
                             .find_map(|e| e.pointer(&format!("/p/{param}")))
                     }),
@@ -417,9 +459,15 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
                         })
                     })
                 };
+                let moves = !*changes
+                    || keys
+                        .first()
+                        .zip(keys.last())
+                        .is_some_and(|(a, b)| a.get("v") != b.get("v"));
                 let good = keys.len() >= *keys_ge
                     && key_ok(keys.first(), first)
-                    && key_ok(keys.last(), last);
+                    && key_ok(keys.last(), last)
+                    && moves;
                 pass &= good;
                 lines.push(format!(
                     "{} {param}: {} keys {}",
@@ -519,12 +567,118 @@ fn check(c: &Check, after: &Value, before: Option<&Value>, cx: &Context) -> Outc
             }
             ok(false, format!("none holds: {}", lines.join(" | ")))
         }
+        Check::Kept { select, ids, same } => {
+            let Some(before) = before else {
+                return Err("the project before the run was not collected".into());
+            };
+            let got: Vec<&Value> = by_start(after, select);
+            let mut have: Vec<&str> = got
+                .iter()
+                .map(|l| l.get("id").and_then(Value::as_str).unwrap_or("?"))
+                .collect();
+            have.sort();
+            let mut want: Vec<&str> = ids.iter().map(String::as_str).collect();
+            want.sort();
+            let mut problems = Vec::new();
+            if have != want {
+                problems.push(format!("layer ids {have:?}, expected {want:?}"));
+            }
+            let was = layers(before);
+            for l in &got {
+                let id = l.get("id");
+                let Some(b) = was.iter().find(|b| b.get("id") == id) else {
+                    continue;
+                };
+                for p in same {
+                    if l.pointer(p) != b.pointer(p) {
+                        problems.push(format!(
+                            "{} {p} is {} (was {})",
+                            name(l),
+                            show(l.pointer(p)),
+                            show(b.pointer(p))
+                        ));
+                    }
+                }
+            }
+            ok(
+                problems.is_empty(),
+                if problems.is_empty() {
+                    format!("{} kept layers with their {}", got.len(), same.join(", "))
+                } else {
+                    problems.join("; ")
+                },
+            )
+        }
+        Check::Changed { select, path } => {
+            let Some(before) = before else {
+                return Err("the state before this step was not collected".into());
+            };
+            let ls = by_start(after, select);
+            if ls.is_empty() {
+                return ok(false, format!("no layer matches {}", select.describe()));
+            }
+            let was = layers(before);
+            let mut pass = true;
+            let mut lines = Vec::new();
+            for l in ls {
+                let old = was
+                    .iter()
+                    .find(|b| b.get("id") == l.get("id"))
+                    .and_then(|b| b.pointer(path));
+                let new = l.pointer(path);
+                pass &= old != new;
+                lines.push(format!("{} {path} {} → {}", name(l), show(old), show(new)));
+            }
+            ok(pass, lines.join("; "))
+        }
+        Check::MarkersAdded { count, t } => {
+            let Some(before) = before else {
+                return Err("the state before this step was not collected".into());
+            };
+            let list = |p: &Value| -> Vec<Value> {
+                p.get("markers")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let (was, now) = (list(before), list(after));
+            let lost = was.iter().filter(|m| !now.contains(m)).count();
+            let added: Vec<&Value> = now.iter().filter(|m| !was.contains(m)).collect();
+            let times_ok = t
+                .as_ref()
+                .is_none_or(|e| added.iter().all(|m| e.holds(m.get("t"))));
+            ok(
+                added.len() == *count && lost == 0 && times_ok,
+                format!(
+                    "{} markers added at {:?}, {lost} lost; expected {count}{}",
+                    added.len(),
+                    added.iter().map(|m| show(m.get("t"))).collect::<Vec<_>>(),
+                    t.as_ref()
+                        .map(|e| format!(" at {}", e.describe()))
+                        .unwrap_or_default()
+                ),
+            )
+        }
         Check::Root { path, expect } => {
             let got = after.pointer(path);
             ok(
                 expect.holds(got),
                 format!("{path} = {}, expected {}", show(got), expect.describe()),
             )
+        }
+    }
+}
+
+impl Check {
+    /// Whether the check names a contribution the run registered (`$new:…`).
+    pub fn uses_new(&self) -> bool {
+        let new = |s: &str| s.starts_with("$new");
+        match self {
+            Check::Effect { effect, .. } => new(effect),
+            Check::Animated { effect, .. } => effect.as_deref().is_some_and(new),
+            Check::Transition { transition, .. } => new(transition),
+            Check::AnyOf(c) => c.iter().any(Check::uses_new),
+            _ => false,
         }
     }
 }

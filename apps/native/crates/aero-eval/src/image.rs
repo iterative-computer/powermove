@@ -239,14 +239,23 @@ pub fn percentile(v: &[f64], p: f64) -> f64 {
     s[rank.min(s.len()) - 1]
 }
 
-/// Parse `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`/`rgba(…)`.
-pub fn parse_css_color(s: &str) -> Option<[u8; 3]> {
+/// Parse `#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`, `rgb(…)`/`rgba(…)` and
+/// `transparent` into a colour and its alpha (0..1).
+pub fn parse_css_rgba(s: &str) -> Option<([u8; 3], f64)> {
     let s = s.trim();
+    if s.eq_ignore_ascii_case("transparent") {
+        return Some(([0, 0, 0], 0.0));
+    }
     if let Some(hex) = s.strip_prefix('#') {
-        let n = |i: usize, w: usize| u8::from_str_radix(&hex[i..i + w], 16).ok();
+        let n = |i: usize, w: usize| u8::from_str_radix(hex.get(i..i + w)?, 16).ok();
         return match hex.len() {
-            3 | 4 => Some([n(0, 1)? * 17, n(1, 1)? * 17, n(2, 1)? * 17]),
-            6 | 8 => Some([n(0, 2)?, n(2, 2)?, n(4, 2)?]),
+            3 => Some(([n(0, 1)? * 17, n(1, 1)? * 17, n(2, 1)? * 17], 1.0)),
+            4 => Some((
+                [n(0, 1)? * 17, n(1, 1)? * 17, n(2, 1)? * 17],
+                (n(3, 1)? * 17) as f64 / 255.0,
+            )),
+            6 => Some(([n(0, 2)?, n(2, 2)?, n(4, 2)?], 1.0)),
+            8 => Some(([n(0, 2)?, n(2, 2)?, n(4, 2)?], n(6, 2)? as f64 / 255.0)),
             _ => None,
         };
     }
@@ -258,7 +267,7 @@ pub fn parse_css_color(s: &str) -> Option<[u8; 3]> {
         .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
         .filter(|p| !p.is_empty())
         .collect();
-    if parts.len() < 3 {
+    if !(3..=4).contains(&parts.len()) {
         return None;
     }
     let mut out = [0u8; 3];
@@ -269,7 +278,29 @@ pub fn parse_css_color(s: &str) -> Option<[u8; 3]> {
             p.parse::<f64>().ok()?.clamp(0.0, 255.0).round() as u8
         };
     }
-    Some(out)
+    let alpha = match parts.get(3) {
+        None => 1.0,
+        Some(a) => match a.strip_suffix('%') {
+            Some(pc) => pc.parse::<f64>().ok()? / 100.0,
+            None => a.parse::<f64>().ok()?,
+        }
+        .clamp(0.0, 1.0),
+    };
+    Some((out, alpha))
+}
+
+/// An opaque colour only: a translucent one is not a colour on its own.
+pub fn parse_css_color(s: &str) -> Option<[u8; 3]> {
+    parse_css_rgba(s).filter(|(_, a)| *a >= 1.0).map(|(c, _)| c)
+}
+
+/// `fg` at `alpha` over the opaque `bg`, in sRGB as browsers blend.
+pub fn over(fg: [u8; 3], alpha: f64, bg: [u8; 3]) -> [u8; 3] {
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        out[i] = (fg[i] as f64 * alpha + bg[i] as f64 * (1.0 - alpha)).round() as u8;
+    }
+    out
 }
 
 /// WCAG 2 relative luminance and contrast ratio.

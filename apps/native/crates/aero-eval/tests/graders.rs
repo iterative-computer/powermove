@@ -516,6 +516,7 @@ fn panels_are_judged_on_what_the_probe_observed() {
         "after": [{"name": "half speed", "field": {"select": {"name": "Clip"}, "path": "/d/speed", "expect": {"approx": 0.5}}}]}),
     );
     let mut clip = layer("c", "Clip", "video", 0.0, 2.0);
+    let before = clip.clone();
     clip["d"] = json!({"speed": 0.5});
     let mut a = Artifacts::default();
     a.extensions.changed = vec![ChangedExtension {
@@ -534,8 +535,9 @@ fn panels_are_judged_on_what_the_probe_observed() {
         text: vec!["Intro 0:00".into(), "Drop 0:02.5".into()],
         steps: vec!["ok".into()],
         playhead: Some(2.5),
+        project_before: Some(interview(vec![before])),
         project_after: Some(interview(vec![clip])),
-        capture: None,
+        ..Default::default()
     }];
     let v = grade(&g, &a, Path::new("/"));
     assert_eq!(v.status, Status::Pass, "{:?}", v.evidence);
