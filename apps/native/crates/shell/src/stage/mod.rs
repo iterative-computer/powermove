@@ -42,8 +42,8 @@ const SLIDE_OUT: f32 = 6.;
 /// quiet-md's quick fade (critically damped) and its vanish.
 /// The mark in the Welcome window: its height (points) and centre (a
 /// fraction of the window's height).
-pub const WINDOW_MARK: f32 = 80.;
-pub const WINDOW_MARK_Y: f32 = 0.2;
+pub const WINDOW_MARK: f32 = 96.;
+pub const WINDOW_MARK_Y: f32 = 0.42;
 const ARRIVE: Spring = Spring::new(520., 46.);
 const LEAVE: Spring = Spring::new(900., 60.);
 
@@ -431,7 +431,11 @@ impl Stage {
         };
         let light = light::Light {
             size: [width, height],
-            centre: [width / 2., height * (-0.3 + (0.3 + WINDOW_MARK_Y) * w)],
+            // In the right column's panel (`welcome_view::LEFT_COLUMN`).
+            centre: [
+                (crate::welcome_view::LEFT_COLUMN * scale + width) / 2.,
+                height * (-0.3 + (0.3 + WINDOW_MARK_Y) * w),
+            ],
             scale: mark / 112.,
             exposure: 1.,
             bloom: 0.5 * w,

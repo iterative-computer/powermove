@@ -765,6 +765,7 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
             surface: "S108".into(),
             back: Some("Back to Welcome".into()),
             title: "Pick Your Timeline.".into(),
+            outline: Some(steps_outline(Some(0))),
             line: "Work the way you already do. You can switch anytime from the timeline panel."
                 .into(),
             cards: true,
@@ -789,6 +790,7 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
             surface: "S109".into(),
             back: Some("Back to Timeline Choice".into()),
             title: "Pick Your Agent.".into(),
+            outline: Some(steps_outline(Some(1))),
             line: "It builds what you ask for, right in the editor. You can switch anytime from the agent’s composer."
                 .into(),
             choices: vec![
@@ -808,6 +810,7 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
             surface: "S109".into(),
             back: Some("Back to Agent Choice".into()),
             title: "Pick Your Speech Model.".into(),
+            outline: Some(steps_outline(Some(2))),
             line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
                 .into(),
             // Models download from Settings › Transcription (S092) and the
@@ -820,6 +823,7 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
             back: Some("Back to Speech Model Choice".into()),
             eyebrow: Some("After Effects".into()),
             title: "Grab Your Suitcase.".into(),
+            outline: Some(steps_outline(Some(3))),
             line: "Bring your panels and tools along. Your agent will unpack them in Powermove."
                 .into(),
             error: error,
@@ -833,10 +837,30 @@ pub(crate) fn step_frame(step: Onboard, timeline: &str, agent: &str, error: Opti
         Onboard::Starting | Onboard::Complete => Frame {
             surface: "S110".into(),
             title: "Grab Your Suitcase.".into(),
+            outline: Some(steps_outline(Some(4))),
             status: Some("Opening Powermove…".into()),
             spinner: true,
             ..Frame::default()
         },
+    }
+}
+
+/// The first run's four steps, the one under way (`None`: the Welcome).
+fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
+    pm_shell::welcome::Outline {
+        steps: ["Timeline", "Agent", "Speech Model", "Workspace"]
+            .map(str::to_owned)
+            .to_vec(),
+        // Each step's own line, shortened.
+        notes: [
+            "Work the way you already do.",
+            "It builds what you ask for, in the editor.",
+            "Captions and transcripts, on this Mac.",
+            "Bring your panels and tools along.",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        current,
     }
 }
 
@@ -849,21 +873,7 @@ pub(crate) fn welcome_frame() -> Frame {
         // Two lines, as v1.2.0 (read as one sentence).
         title: "Welcome to\nPowermove.".into(),
         line: "Four quick choices, then your editor.\nYou can change any of them later.".into(),
-        outline: Some(pm_shell::welcome::Outline {
-            steps: ["Timeline", "Agent", "Speech Model", "Workspace"]
-                .map(str::to_owned)
-                .to_vec(),
-            // Each step's own line, shortened.
-            notes: [
-                "Work the way you already do.",
-                "It builds what you ask for, in the editor.",
-                "Captions and transcripts, on this Mac.",
-                "Bring your panels and tools along.",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            current: None,
-        }),
+        outline: Some(steps_outline(None)),
         centred: true,
         buttons: vec![Button::new("begin", "Begin")],
         default: Some("begin".into()),

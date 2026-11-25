@@ -342,7 +342,7 @@ fn thread_cpu() -> f64 {
 
 /// The Welcome in its real window (`--stage-capture <folder> window`): the
 /// window the first run shows once the wave has drawn it, with its AppKit
-/// title bar and controls, at the Welcome and at two steps. The window
+/// title bar and controls, at the Welcome and at each step. The window
 /// stands off every display and the app never activates, so nothing reaches
 /// the screen; each still is the window as the window server composites it.
 /// AppKit draws the window of an app that is not active in its inactive
@@ -413,6 +413,8 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
             ("1-welcome", None),
             ("2-timeline", Some(Step::Timeline)),
             ("3-agent", Some(Step::Agent)),
+            ("4-speech-model", Some(Step::Transcription)),
+            ("5-workspace", Some(Step::Workspace)),
         ];
         cx.spawn(async move |cx| {
             for (name, step) in shots {

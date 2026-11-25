@@ -126,7 +126,9 @@ impl WelcomeView {
             );
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
             if primary && self.stage {
-                control.prominent(self.primary_width());
+                control.prominent(PRIMARY_WIDTH);
+            } else if self.stage {
+                control.extra_large();
             }
             control
         });
@@ -138,15 +140,6 @@ impl WelcomeView {
         .detach();
         self.natives.insert(key, control.clone());
         control
-    }
-    /// The stage's one primary action: wide on the Welcome, where it is the
-    /// only action; a step's Continue is narrower, at the column's end.
-    fn primary_width(&self) -> f32 {
-        if self.frame.outline.is_some() || self.frame.centred {
-            PRIMARY_WIDTH
-        } else {
-            STEP_PRIMARY_WIDTH
-        }
     }
     /// Gives the view the keys, and takes them back when the control that had
     /// them leaves with its step (Begin, Back): GPUI then leaves the window
@@ -234,19 +227,18 @@ impl WelcomeView {
         element = if self.stage && primary {
             // The extra-large glass button (`NativeControl::prominent`).
             element
-                .w(px(self.primary_width()))
+                .w(px(PRIMARY_WIDTH))
                 .h(px(PRIMARY_HEIGHT))
                 .rounded_full()
                 .text_size(px(t.typography.heading))
                 .font_weight(FontWeight::MEDIUM)
         } else if self.stage {
+            // Beside it, the same size.
             element
-                .min_w(px(m.row * 4.))
-                .px(px(m.inset * 1.5))
-                .h(px(m.row * 1.45))
+                .px(px(18.))
+                .h(px(PRIMARY_HEIGHT))
                 .rounded_full()
-                .text_size(px(t.typography.reading))
-                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(t.typography.heading))
         } else {
             element
                 .px(px(m.inset))
@@ -388,167 +380,159 @@ impl WelcomeView {
         }
         card
     }
-    /// The Welcome, as macOS welcome windows set theirs: under the mark (on
-    /// the stage, the one it lights at `stage::WINDOW_MARK_Y`) the title on one line, its line,
-    /// the four steps ahead in a row, and the one primary action, extra
-    /// large, low in the window. Fixed to the window's size, so it lines up
-    /// with the mark the stage lights in it.
-    fn welcome(
-        &mut self,
-        outline: Option<&welcome::Outline>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let t = self.tokens.clone();
-        let (c, m) = (&t.colors, &t.metrics);
-        let frame = self.frame.clone();
-        let h = m.welcome_height;
-        let title = frame.title.replace('\n', " ");
-        let spoken = title.clone();
-        let size = 34.;
-        let mut root = div()
-            .id("welcome")
-            .role(Role::Group)
-            .accessibility_id("shell.welcome")
-            .aria_label(spoken.clone())
-            .relative()
-            .size_full()
-            .font_family(pm_design::TEXT_FONT)
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::on_key));
-        if !self.stage {
-            // A Welcome window without the stage (the stage could not open):
-            // its own ground, and the mark drawn in it.
-            root = root.bg(rgb(c.window));
-            if frame.animate {
-                let time = if t.accessibility.reduce_motion {
-                    welcome::ANIMATION_SECONDS
-                } else {
-                    self.time()
-                };
-                if time < welcome::ANIMATION_SECONDS && self.clock.is_none() {
-                    window.request_animation_frame();
-                }
-                root = root.child(mark_canvas(time, &t));
-            }
-        }
-        let centred = |top: f32| {
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(top))
-                .flex()
-                .flex_col()
-                .items_center()
-                .text_center()
-        };
-        let title_top = h * 0.345;
-        root = root
-            .child(
-                centred(title_top).child(
-                    div()
-                        .id("welcome-title")
-                        .debug_selector(|| "welcome-title".into())
-                        .role(Role::Heading)
-                        .aria_label(spoken)
-                        .text_size(px(size))
-                        .font_weight(FontWeight::BOLD)
-                        .line_height(relative(1.15))
-                        .letter_spacing(px(-size * 0.014))
-                        .text_color(rgb(c.text))
-                        .child(title),
-                ),
-            )
-            .child(
-                centred(title_top + size * 1.15 + 10.).child(
-                    div()
-                        .id("welcome-line")
-                        .role(Role::Label)
-                        .aria_label(frame.line.replace('\n', " "))
-                        .text_size(px(15.))
-                        .line_height(relative(1.4))
-                        .text_color(rgb(c.secondary))
-                        .child(frame.line.clone()),
-                ),
-            )
-            .children(outline.map(|o| centred(h * 0.565).child(self.steps_ahead(o))));
-        let mut footer = centred(0.).top_auto().bottom(px(PRIMARY_BOTTOM));
-        for button in frame.buttons.iter() {
-            footer = footer.child(self.button(button, window, cx));
-        }
-        root.child(footer)
-    }
-    /// The steps ahead in one grouped panel: four equal columns, each a
-    /// numeral in a ring and the step's name, its line under them in the
-    /// secondary ink; hairlines between.
-    fn steps_ahead(&self, outline: &welcome::Outline) -> impl IntoElement + use<> {
+    /// The stage's window in two columns, as Arc's Create Account window
+    /// is built: on the left the information (the step's title and line,
+    /// the steps and how far along they are, Powermove's mark and name);
+    /// on the right, in a panel of its own, the action (the step's choices
+    /// or progress, its one primary action on the panel's bottom line). On
+    /// the Welcome the panel holds the lit mark (`stage::WINDOW_MARK_X`).
+    fn columns(&self, info: Div, action: Div, window: &mut Window) -> Div {
         let t = &self.tokens;
         let c = &t.colors;
-        let hairline = rgba((c.text << 8) | 0x14);
-        let mut row = div()
+        let hairline = rgba((c.text << 8) | 0x12);
+        let left = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(px(LEFT_COLUMN))
+            .flex()
+            .flex_col()
+            .pt(px(COLUMN_TOP))
+            .pb(px(PRIMARY_BOTTOM + 12.))
+            .px(px(COLUMN_INSET))
+            .child(info)
+            .child(div().flex_1())
+            .child(self.identity(window));
+        let right = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .left(px(LEFT_COLUMN))
+            .bg(rgba((c.text << 8) | 0x08))
+            .border_l_1()
+            .border_color(hairline)
+            .flex()
+            .flex_col()
+            .pt(px(COLUMN_TOP))
+            .pb(px(PRIMARY_BOTTOM))
+            .px(px(PANEL_INSET))
+            .child(action);
+        div().relative().size_full().child(left).child(right)
+    }
+    /// The steps as a list down the left column: a numeral in a ring for
+    /// each step to come, the step under way in the accent, a check for one
+    /// done. On the Welcome (none under way) each step has its line.
+    fn steps_list(&self, outline: &welcome::Outline, window: &mut Window) -> Stateful<Div> {
+        let t = &self.tokens;
+        let c = &t.colors;
+        let welcome = outline.current.is_none();
+        let mut list = div()
             .id("welcome-outline")
             .debug_selector(|| "welcome-outline".into())
             .role(Role::List)
             .aria_label(format!("Steps: {}", outline.steps.join(", ")))
-            .w(px(STEPS_WIDTH))
             .flex()
-            .items_stretch()
-            .rounded(px(STEPS_RADIUS))
-            .bg(rgba((c.text << 8) | 0x0a))
-            .border_1()
-            .border_color(hairline);
+            .flex_col()
+            .gap(px(if welcome { 16. } else { 14. }));
         for (index, step) in outline.steps.iter().enumerate() {
-            let note = outline.notes.get(index).cloned().unwrap_or_default();
-            if index > 0 {
-                row = row.child(div().flex_none().w(px(1.)).my(px(16.)).bg(hairline));
-            }
-            let ring = div()
+            let current = outline.current == Some(index);
+            let done = outline.current.is_some_and(|at| index < at);
+            let marker = div()
                 .flex_none()
-                .size(px(18.))
+                .size(px(20.))
                 .rounded_full()
-                .border_1()
-                .border_color(rgba((c.secondary << 8) | 0x80))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(c.secondary))
-                .child(format!("{}", index + 1));
-            row = row.child(
+                .font_weight(FontWeight::SEMIBOLD);
+            let marker = if current {
+                marker
+                    .bg(rgb(c.accent))
+                    .text_color(rgb(c.selected_text))
+                    .child(format!("{}", index + 1))
+            } else if done {
+                marker
+                    .border_1()
+                    .border_color(rgba((c.accent << 8) | 0xa0))
+                    .child(crate::symbol::symbol(
+                        "checkmark",
+                        9.,
+                        crate::symbol::Weight::Semibold,
+                        c.accent,
+                        window,
+                    ))
+            } else {
+                marker
+                    .border_1()
+                    .border_color(rgba((c.secondary << 8) | 0x80))
+                    .text_color(rgb(c.secondary))
+                    .child(format!("{}", index + 1))
+            };
+            let note = outline.notes.get(index).filter(|_| welcome).cloned();
+            list = list.child(
                 div()
                     .id(SharedString::from(format!("welcome-outline-{index}")))
                     .role(Role::ListItem)
-                    .aria_label(format!("{step}: {note}"))
-                    .flex_1()
-                    .min_w(px(0.))
+                    .aria_label(match &note {
+                        Some(note) => format!("{step}: {note}"),
+                        None if current => format!("{step}, now"),
+                        None if done => format!("{step}, done"),
+                        None => step.clone(),
+                    })
                     .flex()
-                    .flex_col()
-                    .gap(px(7.))
-                    .px(px(18.))
-                    .py(px(16.))
-                    .text_left()
-                    .child(
-                        div().flex().items_center().gap(px(8.)).child(ring).child(
-                            div()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c.text))
-                                .child(step.clone()),
-                        ),
-                    )
+                    .items_start()
+                    .gap(px(12.))
+                    .child(marker)
                     .child(
                         div()
-                            .w_full()
-                            .text_size(px(12.5))
-                            .line_height(relative(1.4))
-                            .text_color(rgb(c.secondary))
-                            .child(note),
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .pt(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .line_height(px(18.))
+                                    .font_weight(if current || welcome {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if current || welcome {
+                                        rgb(c.text)
+                                    } else {
+                                        rgb(c.secondary)
+                                    })
+                                    .child(step.clone()),
+                            )
+                            .children(note.map(|note| {
+                                div()
+                                    .text_size(px(12.5))
+                                    .line_height(relative(1.4))
+                                    .text_color(rgb(c.secondary))
+                                    .child(note)
+                            })),
                     ),
             );
         }
-        row
+        list
+    }
+    /// Powermove's mark and name at the foot of the left column.
+    fn identity(&self, _: &mut Window) -> Div {
+        let t = &self.tokens;
+        let c = &t.colors;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(c.secondary))
+            .child(mark_glyph(13., c.secondary))
+            .child("Powermove")
     }
     /// A group's heading, as Settings heads its groups.
     fn section_title(&self, title: &str) -> impl IntoElement + use<> {
@@ -823,10 +807,6 @@ impl WelcomeView {
 }
 impl Render for WelcomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.frame.outline.is_some() || (self.stage && self.frame.centred) {
-            let outline = self.frame.outline.clone();
-            return self.welcome(outline.as_ref(), window, cx);
-        }
         self.motion.frame(window);
         let kit = Kit::new(&self.tokens, &self.motion, Self::motion, window, cx);
         let t = self.tokens.clone();
@@ -847,6 +827,9 @@ impl Render for WelcomeView {
             window.request_animation_frame();
         }
         let spoken = frame.title.replace('\n', " ");
+        // The stage's window: information in the left column, the action in
+        // the right (Arc's Create Account window's structure).
+        let two = self.stage;
         // A step's screens (`top`) keep their title at one height and their
         // buttons at the bottom; the others centre as one block.
         let air = px(t.space.xxl);
@@ -856,20 +839,33 @@ impl Render for WelcomeView {
             .flex_col()
             .gap(px(m.gap))
             .w_full()
-            .max_w(px(if self.stage {
-                STEPS_WIDTH
-            } else {
-                m.sheet_width_wide
-            }))
-            .max_h(relative(1.))
-            .min_h(px(0.))
-            .when(frame.top, |d| d.h_full().gap(px(0.)))
-            .when(self.stage && !frame.top && !frame.centred, |d| {
-                // A step on the stage: its title and line, then air, then
-                // its choices.
-                d.h_full().gap(px(28.))
+            .when(!two, |d| {
+                d.max_w(px(m.sheet_width_wide))
+                    .max_h(relative(1.))
+                    .min_h(px(0.))
             })
-            .when(frame.centred, |d| d.items_center().text_center());
+            .when(frame.top && !two, |d| d.h_full().gap(px(0.)))
+            .when(two, |d| d.gap(px(0.)))
+            .when(frame.centred && !two, |d| d.items_center().text_center());
+        // On the stage: the step's action, in the right column's panel.
+        let mut action = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(m.gap + 4.))
+            .w_full()
+            .flex_1()
+            .min_h(px(0.));
+        macro_rules! act {
+            ($e:expr $(,)?) => {{
+                let e = $e;
+                if two {
+                    action = action.child(e);
+                } else {
+                    content = content.child(e);
+                }
+            }};
+        }
         let mut header = div()
             .flex()
             .flex_col()
@@ -881,7 +877,7 @@ impl Render for WelcomeView {
             } else {
                 m.gap
             }))
-            .when(frame.centred, |d| d.items_center());
+            .when(frame.centred && !two, |d| d.items_center());
         if let Some(label) = &frame.eyebrow {
             header = header.child(
                 div()
@@ -907,23 +903,16 @@ impl Render for WelcomeView {
                             // On the stage the welcome is a title card.
                             // On the stage the window is larger than the
                             // Welcome window: its type steps up with it.
-                            let size = match (self.stage, frame.centred) {
-                                (true, true) => t.typography.display * 1.75,
-                                // A step's title: the Welcome's, a step down.
-                                (true, false) => STEP_TITLE,
-                                _ => t.typography.display,
+                            let size = if self.stage {
+                                STEP_TITLE
+                            } else {
+                                t.typography.display
                             };
-                            d.text_size(px(size))
-                                .when(self.stage && !frame.centred, |d| {
-                                    d.font_weight(FontWeight::BOLD)
-                                        .line_height(relative(1.15))
-                                        .letter_spacing(px(-size * 0.012))
-                                })
-                                .when(self.stage && frame.centred, |d| {
-                                    d.font_weight(FontWeight(t.typography.display_weight))
-                                        .line_height(relative(1.06))
-                                        .letter_spacing(px(-size * 0.018))
-                                })
+                            d.text_size(px(size)).when(self.stage, |d| {
+                                d.font_weight(FontWeight::BOLD)
+                                    .line_height(relative(1.15))
+                                    .letter_spacing(px(-size * 0.012))
+                            })
                         },
                     )
                     .text_color(rgb(c.text))
@@ -935,7 +924,7 @@ impl Render for WelcomeView {
                     .role(Role::Label)
                     .aria_label(frame.line.clone())
                     .text_size(px(if self.stage {
-                        t.typography.reading * 1.15
+                        LINE_SIZE
                     } else {
                         t.typography.reading
                     }))
@@ -944,6 +933,9 @@ impl Render for WelcomeView {
                     .child(frame.line.clone()),
             );
         content = content.child(header);
+        if let Some(outline) = &frame.outline {
+            content = content.child(div().mt(px(32.)).child(self.steps_list(outline, window)));
+        }
         let spaced = |d: Div| if frame.top { d.mt(air) } else { d };
         if let Some(status) = &frame.status {
             let mut row = div()
@@ -959,18 +951,17 @@ impl Render for WelcomeView {
             if frame.spinner {
                 row = row.child(spinner(if spin { self.time() } else { 0. }, &t));
             }
-            content = content.child(spaced(div()).child(row.child(status.clone())));
+            // Progress belongs to the action: on the stage, in the panel.
+            act!(spaced(div()).child(row.child(status.clone())));
         }
         if !frame.stats.is_empty() {
-            content = content.child(spaced(div().flex_none()).child(self.stats(&kit)));
+            act!(spaced(div().flex_none()).child(self.stats(&kit)));
         }
         if !frame.steps.is_empty() {
-            content = content.child(
-                spaced(div().flex_none()).child(self.steps(&kit, sliding.then(|| self.time()))),
-            );
+            act!(spaced(div().flex_none()).child(self.steps(&kit, sliding.then(|| self.time()))));
         }
         if !frame.choices.is_empty() {
-            content = content.child(self.choices(&kit, cx));
+            act!(self.choices(&kit, cx));
         }
         // The rows and the names scroll together in the room left between the
         // header and the buttons; a fade at the bottom says there's more.
@@ -1032,12 +1023,12 @@ impl Render for WelcomeView {
                         )),
                 );
             }
-            content = content.child(wrapper);
-        } else if frame.top {
+            act!(wrapper);
+        } else if frame.top && !two {
             content = content.child(div().flex_1());
         }
         if let Some(error) = &frame.error {
-            content = content.child(
+            act!(
                 div()
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.danger))
@@ -1045,7 +1036,7 @@ impl Render for WelcomeView {
             );
         }
         if let Some(note) = &frame.note {
-            content = content.child(
+            act!(
                 div()
                     .when(frame.top, |d| d.mt(px(t.space.xl)))
                     .text_size(px(t.typography.body))
@@ -1055,7 +1046,7 @@ impl Render for WelcomeView {
             );
         }
         if let Some(details) = &frame.details {
-            content = content.child(
+            act!(
                 div()
                     .id("welcome-details")
                     .debug_selector(|| "welcome-details".into())
@@ -1073,7 +1064,7 @@ impl Render for WelcomeView {
                     })),
             );
             if self.details_open {
-                content = content.child(
+                act!(
                     div()
                         .id("welcome-details-text")
                         .role(Role::Label)
@@ -1085,27 +1076,27 @@ impl Render for WelcomeView {
                 );
             }
         }
-        if self.stage && !frame.top && !frame.centred {
-            // The step's action stands on the window's bottom line, where
-            // the Welcome's Begin is.
-            content = content.child(div().flex_1());
+        if two {
+            // The action stands on the panel's bottom line.
+            action = action.child(div().flex_1());
         }
         let mut footer = div()
             .flex()
             .flex_none()
             .w_full()
+            .items_center()
             .gap(px(m.gap))
-            .pt(px(if frame.top {
+            .pt(px(if two {
+                20.
+            } else if frame.top {
                 t.space.xl
-            } else if self.stage && frame.centred {
-                t.space.xxl
             } else {
                 m.inset
             }));
         for button in frame.buttons.iter().filter(|b| b.leading) {
             footer = footer.child(self.button(button, window, cx));
         }
-        footer = if frame.centred {
+        footer = if frame.centred && !two {
             footer.justify_center()
         } else {
             footer.child(div().flex_1())
@@ -1113,7 +1104,12 @@ impl Render for WelcomeView {
         for button in frame.buttons.iter().filter(|b| !b.leading) {
             footer = footer.child(self.button(button, window, cx));
         }
-        content = content.child(footer);
+        act!(footer);
+        let body = if two {
+            self.columns(content, action, window).into_any_element()
+        } else {
+            content.into_any_element()
+        };
         // The accessibility tree hangs off an identified, labelled root, as in
         // the editor; without it VoiceOver sees only the traffic lights.
         let mut root = div()
@@ -1131,15 +1127,10 @@ impl Render for WelcomeView {
                     d.size_full().bg(rgb(c.window))
                 }
             })
-            .flex()
-            .flex_col()
-            .items_center()
-            .p(px(if self.stage {
-                m.sheet_inset * 2.
-            } else {
-                m.sheet_inset
-            }))
-            .map(|d| {
+            .when(!two, |d| {
+                d.flex().flex_col().items_center().p(px(m.sheet_inset))
+            })
+            .when(!two, |d| {
                 if frame.top {
                     // Clear of the title bar, with the sheet's own air below.
                     d.justify_start()
@@ -1150,13 +1141,7 @@ impl Render for WelcomeView {
                         }))
                         .pb(px(m.sheet_inset + m.inset))
                 } else {
-                    d.justify_center().when(self.stage, |d| {
-                        // A step: its title at one height, its action on
-                        // the window's bottom line (`welcome`'s Begin).
-                        d.justify_start()
-                            .pt(px(m.welcome_height * 0.2))
-                            .pb(px(PRIMARY_BOTTOM))
-                    })
+                    d.justify_center()
                 }
             })
             .font_family(pm_design::TEXT_FONT)
@@ -1204,7 +1189,7 @@ impl Render for WelcomeView {
                     .on_click(cx.listener(|v, _, _, cx| v.act("back", cx))),
             );
         }
-        root.child(content)
+        root.child(body)
     }
 }
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
@@ -1213,18 +1198,23 @@ impl Render for WelcomeView {
 /// the first point after them (macOS 26 and 27, measured).
 const TITLEBAR_MIDDLE: f32 = 16.;
 const TITLEBAR_LEADING: f32 = 84.;
-/// The Welcome's primary action: the extra-large glass button's width and
-/// (drawn, headless) height.
-const PRIMARY_WIDTH: f32 = 220.;
-const STEP_PRIMARY_WIDTH: f32 = 160.;
+/// The stage's window in two columns: the left column's width (the right
+/// is the action's panel), where both start under the title bar, and their
+/// side insets.
+pub const LEFT_COLUMN: f32 = 340.;
+const COLUMN_TOP: f32 = 84.;
+const COLUMN_INSET: f32 = 40.;
+const PANEL_INSET: f32 = 40.;
+/// A step's supporting line on the stage.
+const LINE_SIZE: f32 = 14.;
+/// The stage's one primary action per step: the extra-large glass button's
+/// width and (drawn, headless) height.
+const PRIMARY_WIDTH: f32 = 160.;
 const PRIMARY_HEIGHT: f32 = 44.;
 /// The primary action's distance from the window's bottom edge.
 const PRIMARY_BOTTOM: f32 = 48.;
-/// A step's title (the Welcome's is 34).
+/// A step's title on the stage.
 const STEP_TITLE: f32 = 28.;
-/// The Welcome's panel of steps ahead: its width and corner radius.
-const STEPS_WIDTH: f32 = 720.;
-const STEPS_RADIUS: f32 = 14.;
 
 pub fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let colour = tokens.colors.secondary;
@@ -1258,6 +1248,49 @@ pub fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
 }
 /// The first-run mark, drawn on the window's own ground. Its bloom is stacked
 /// translucent strokes; the mark itself stays hollow, as in the original scene.
+/// The Powermove mark, `size` points high, filled with `color`.
+fn mark_glyph(size: f32, color: u32) -> impl IntoElement + use<> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let mark = &welcome::MARK;
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for p in mark.iter() {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let scale = f64::from(size) / (hi[1] - lo[1]);
+            let width = (hi[0] - lo[0]) * scale;
+            let at = |x: f64, y: f64| {
+                point(
+                    bounds.origin.x
+                        + px(((x - lo[0]) * scale) as f32)
+                        + (bounds.size.width - px(width as f32)) / 2.,
+                    bounds.origin.y + px(((y - lo[1]) * scale) as f32),
+                )
+            };
+            let mut builder = PathBuilder::fill();
+            builder.move_to(at(mark[0][0], mark[0][1]));
+            for i in 0..mark.len() {
+                let (a, b) = (mark[i], mark[(i + 1) % mark.len()]);
+                builder.cubic_bezier_to(
+                    at(b[0], b[1]),
+                    at(a[0] + a[4], a[1] + a[5]),
+                    at(b[0] + b[2], b[1] + b[3]),
+                );
+            }
+            builder.close();
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, rgb(color));
+            }
+        },
+    )
+    .w(px(size * 1.24))
+    .h(px(size))
+}
+
 fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let accent = tokens.colors.accent;
     let ground = tokens.colors.window;
