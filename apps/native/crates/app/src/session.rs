@@ -888,23 +888,8 @@ fn composition_size(w: f64, h: f64) -> [f64; 2] {
 fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
     clock.or(asked).unwrap_or(0.)
 }
-/// Whether the kernel holds an edit open that Undo should seal first: any
-/// open edit but an agent's or extension's structural edit that is still
-/// applying (it ends by itself, and the kernel holds the Undo until then).
-pub(crate) fn entry_left_open(published: &Published) -> bool {
-    published.entry.as_ref().is_some_and(|e| !e.applying)
-}
-/// The history calls an Undo makes. An edit left open (its owner never
-/// ended it) would take the Undo into itself, so it is sealed first and is
-/// the step undone.
-pub(crate) fn undo_calls(left_open: bool) -> Vec<HistoryCall> {
-    let mut calls = Vec::with_capacity(2);
-    if left_open {
-        calls.push(HistoryCall::Seal);
-    }
-    calls.push(HistoryCall::Undo);
-    calls
-}
+/// Shown while an Undo or a save waits for an agent's edit to finish.
+pub(crate) const UNDO_WAITING: &str = "Undo waits for the agent's edit to finish";
 impl Controller {
     /// Toggles that are on: menu checkmarks, and `list_commands` for agents.
     pub(crate) fn checked_commands(&self, cx: &App) -> std::collections::BTreeSet<String> {
@@ -1934,6 +1919,13 @@ impl Controller {
             self.workspace_json
                 .follow(&mut self.panel_builds, &previous.workspace, &p.workspace);
         }
+        // An Undo or a save waits for an agent's edit still applying (PM-718).
+        let was_waiting = self.published.as_ref().is_some_and(|q| q.history.waiting);
+        if p.history.waiting && !was_waiting {
+            self.message = UNDO_WAITING.into();
+        } else if !p.history.waiting && self.message == UNDO_WAITING {
+            self.message.clear();
+        }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
@@ -2012,12 +2004,12 @@ impl Controller {
             }
         }
     }
-    /// The kernel holds an edit open although nothing is being edited: no
-    /// pointer button is down (a drag, a scrub), no text is being typed and
-    /// no agent's edit is applying (that one ends by itself; Undo waits).
-    pub fn edit_left_open(&self, cx: &App) -> bool {
-        self.published.as_deref().is_some_and(entry_left_open)
-            && objc2_app_kit::NSEvent::pressedMouseButtons() == 0
+    /// The person is not editing: no pointer button is down (a drag, a
+    /// scrub) and no text is being typed. An edit the kernel still holds
+    /// open then is one its owner left open; the kernel decides that when
+    /// the call runs (and waits for an agent's edit that is applying).
+    pub fn not_editing(&self, cx: &App) -> bool {
+        objc2_app_kit::NSEvent::pressedMouseButtons() == 0
             && !self
                 .builtins
                 .gizmos
@@ -3810,8 +3802,11 @@ impl Controller {
         }
         // An edit left open (its owner never ended it: no button is held,
         // nothing is typed) would refuse the save: it is finished first, as
-        // Undo does, and the save takes it.
-        if self.edit_left_open(cx) {
+        // Undo does, and the save takes it. The kernel seals what is open
+        // when the call runs; an agent's edit still applying is waited for,
+        // at most `UNDO_WAIT_LIMIT` (under the 3 s the save waits), so the
+        // save always finishes.
+        if self.not_editing(cx) {
             self.call(Call::History(HistoryCall::Seal), cx);
         }
         if as_path.is_none()
@@ -4874,9 +4869,11 @@ impl Controller {
             "renderPending" => self.render_pending(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
-                for call in undo_calls(self.edit_left_open(cx)) {
-                    self.call(Call::History(call), cx);
-                }
+                let seal_left_open = self.not_editing(cx);
+                self.call(
+                    Call::History(HistoryCall::EditorUndo { seal_left_open }),
+                    cx,
+                );
             }
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
             "precompose" => {

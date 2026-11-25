@@ -2483,12 +2483,16 @@ mod tests {
         )
         .unwrap();
         edit(&k);
-        let left_open = crate::session::entry_left_open(&k.published("test").unwrap());
-        assert!(left_open);
-        for call in crate::session::undo_calls(left_open) {
-            k.call_blocking("test", Request::new(Caller::native(), call))
-                .unwrap();
-        }
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        )
+        .unwrap();
         let p = k.published("test").unwrap();
         assert!(p.entry.is_none(), "no edit is left open");
         assert!(!p.history.can_undo, "the move was undone");
@@ -2496,9 +2500,10 @@ mod tests {
         actor.shutdown();
     }
     /// PM-718: the editor's Undo while an agent's edit is applying (an MCP
-    /// mutation lease, open across the agent's writes). The edit is not
-    /// sealed half-way; the Undo waits for it and takes it back whole, and
-    /// the person's step below it stays.
+    /// mutation lease, open across the agent's writes), sent as the editor
+    /// sends it when no button is down. The edit is not sealed half-way; the
+    /// Undo waits for it (the publication says so) and takes it back whole,
+    /// and the person's step below it stays.
     #[test]
     fn undo_while_an_agent_edit_applies_takes_it_back_whole_once_it_lands() {
         let (_dir, actor, _session) = fixture();
@@ -2535,13 +2540,18 @@ mod tests {
         };
         k.call_blocking("test", Request::new(agent, name("Agent half")))
             .unwrap();
-        let left_open = crate::session::entry_left_open(&k.published("test").unwrap());
-        assert!(!left_open, "an applying agent edit is not left open");
-        let calls = crate::session::undo_calls(left_open);
-        assert!(matches!(calls.as_slice(), [HistoryCall::Undo]));
-        let undo = k.call("test", Request::new(Caller::native(), HistoryCall::Undo));
+        let undo = k.call(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        );
         k.call_blocking("test", Request::new(agent, name("Agent whole")))
             .unwrap();
+        assert!(k.published("test").unwrap().history.waiting);
         assert!(
             undo.try_take().is_none(),
             "Undo ran inside the agent's edit"
@@ -2565,6 +2575,7 @@ mod tests {
             Reply::Bool(true)
         ));
         let p = k.published("test").unwrap();
+        assert!(!p.history.waiting);
         assert_eq!(p.history.undo_label.as_deref(), Some("Rename"));
         assert_eq!(p.history.redo_label.as_deref(), Some("Agent edit"));
         actor.shutdown();
