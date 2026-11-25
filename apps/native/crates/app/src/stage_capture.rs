@@ -157,6 +157,7 @@ pub fn run(out: std::path::PathBuf, stills_only: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out)?;
     if !stills_only {
         time_the_stage_pictures();
+        pacing(&out)?;
     }
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
     let mut cx = headless();
@@ -303,4 +304,74 @@ fn time_the_stage_pictures() {
         );
     }
     assert!(pictures.failure().is_none(), "{:?}", pictures.failure());
+}
+
+/// The film at 120 Hz as the window runs it: pictures are not waited for
+/// (a frame paints the newest one), and each frame's main-thread work
+/// (layout, paint, the frame's own captures) is timed. Offscreen: no
+/// display presents, so this is the work per frame against the 8.33 ms
+/// interval, not a measure of presentation.
+fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let mut cx = headless();
+    let window = open(&mut cx, tokens, true);
+    cx.update_window(window.into(), |view, _, cx| {
+        let stage = view.downcast::<Stage>().unwrap();
+        stage.update(cx, |s, cx| s.settle(cx));
+    })
+    .unwrap();
+    let sheet = CueSheet::default();
+    let end = sheet.length() + 1.;
+    let mut rows = Vec::new();
+    let mut n = 0u32;
+    loop {
+        let t = f64::from(n) / 120.;
+        if t > end {
+            break;
+        }
+        let started = Instant::now();
+        cx.update_window(window.into(), |view, w, cx| {
+            let stage = view.downcast::<Stage>().unwrap();
+            stage.update(cx, |s, _| s.clock = Some(t));
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        let scene = format!("{:?}", sheet.at(t).scene);
+        rows.push((t, scene, ms));
+        n += 1;
+        // Real time between frames, so the engine and the agent's tools
+        // keep their own pace beside it.
+        let spare = (1. / 120.) - started.elapsed().as_secs_f64();
+        if spare > 0. {
+            std::thread::sleep(std::time::Duration::from_secs_f64(spare));
+        }
+    }
+    let mut report = String::from("t,scene,ms\n");
+    for (t, scene, ms) in &rows {
+        report.push_str(&format!("{t:.4},{scene},{ms:.2}\n"));
+    }
+    std::fs::write(out.join("pacing.csv"), report)?;
+    let mut by: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    for (_, scene, ms) in &rows {
+        by.entry(scene.split('(').next().unwrap_or("").to_owned())
+            .or_default()
+            .push(*ms);
+    }
+    by.insert("all".into(), rows.iter().map(|r| r.2).collect());
+    for (scene, mut v) in by {
+        v.sort_by(f64::total_cmp);
+        let over = v.iter().filter(|ms| **ms > 1000. / 120.).count();
+        eprintln!(
+            "pacing {scene:<12} frames {:>5}  p50 {:>6.2} ms  p95 {:>6.2}  p99 {:>6.2}  max {:>7.2}  over 8.33 ms: {over}",
+            v.len(),
+            v[v.len() / 2],
+            v[v.len() * 95 / 100],
+            v[v.len() * 99 / 100],
+            v[v.len() - 1]
+        );
+    }
+    Ok(())
 }

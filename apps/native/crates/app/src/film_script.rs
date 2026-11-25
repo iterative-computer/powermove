@@ -38,7 +38,11 @@ fn call_when_loaded(
     }
 }
 
-pub fn apply(tools: &mut crate::mcp::Connection, profile: &Path, change: Change) -> anyhow::Result<()> {
+pub fn apply(
+    tools: &mut crate::mcp::Connection,
+    profile: &Path,
+    change: Change,
+) -> anyhow::Result<()> {
     let _ = profile;
     // The agent's extension changes ask for a staging folder, as a run that
     // writes code does.
@@ -95,7 +99,10 @@ fn stage(stage: &Path, id: &str) -> anyhow::Result<()> {
     let (manifest, entry, source) = extension(id);
     let dir = stage.join(id);
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
     std::fs::write(dir.join(entry), source)?;
     Ok(())
 }
@@ -115,7 +122,11 @@ pub const GLASS: &str = "glass-timeline";
 /// upper half, a darker foot.
 fn glass_timeline(tools: &mut crate::mcp::Connection, staging: &Path) -> anyhow::Result<()> {
     stage(staging, GLASS)?;
-    publish(tools, GLASS, "Glass clips on the timeline: soft corners, a lit top edge and a sheen")?;
+    publish(
+        tools,
+        GLASS,
+        "Glass clips on the timeline: soft corners, a lit top edge and a sheen",
+    )?;
     Ok(())
 }
 const GLASS_SOURCE: &str = r##"// Glass clips: each clip keeps its colour; light sits on it as on a slab
@@ -165,7 +176,6 @@ export function activate({ timeline }: { timeline: any }) {
 
 export const view = () => <text>Clips on the timeline are drawn as glass.</text>;
 "##;
-
 
 /// The light leak's extension and transition ids.
 pub const LEAK: &str = "light-leak";
@@ -316,7 +326,7 @@ fn classic_layout(tools: &mut crate::mcp::Connection) -> anyhow::Result<()> {
             "docks": [
                 {"id": "left", "size": 300, "panels": [{"id": "assets", "size": 260}, {"id": "layer-effects", "flex": true}]},
                 {"id": "center", "panels": [{"id": "viewer", "flex": true}]},
-                {"id": "right", "size": 300, "panels": [{"id": "fxbrowser", "size": 320}, {"id": "inspector", "flex": true}]},
+                {"id": "right", "size": 300, "panels": [{"id": "fxbrowser", "size": 300}, {"id": "inspector", "flex": true}, {"id": BEATS, "size": 130}]},
                 {"id": "bottom", "size": 330, "panels": [{"id": "timeline", "flex": true}]},
             ],
         }),
@@ -332,7 +342,10 @@ mod tests {
     /// runtime), so the film's changes fail only if the app does.
     #[test]
     fn the_films_extensions_pass_the_publish_check() {
-        let root = tempfile::Builder::new().prefix("pm-film-check-").tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("pm-film-check-")
+            .tempdir()
+            .unwrap();
         for id in [GLASS, LEAK, BEATS] {
             stage(root.path(), id).unwrap();
             let raw = extension(id).0;

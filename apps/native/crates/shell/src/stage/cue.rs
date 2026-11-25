@@ -3,8 +3,9 @@
 //! else for timing. Pure data, so the film is tested without a screen.
 //!
 //! Music: `CueSheet::music` names the licensed track's slot; the default is
-//! silent. The sheet is cut for a 20 s piece at 100 BPM in 4/4 (one bar is
-//! 2.4 s; each change takes a bar and a half); `retimed` scales it.
+//! silent. The sheet is cut for a 21.2 s piece at 100 BPM in 4/4 (one bar is
+//! 2.4 s; a change takes a bar and a half, the last two bars, so its wave
+//! lands before the wave into the card); `retimed` scales it.
 use pm_wave::WaveType;
 
 /// One picture on the stage, in film order.
@@ -89,7 +90,7 @@ pub struct Music {
 pub struct CueSheet {
     pub cues: Vec<Cue>,
     pub sounds: Vec<Sound>,
-    /// OWNER: a licensed track goes here (20 s at 100 BPM, 4/4, with a bed
+    /// OWNER: a licensed track goes here (21.2 s at 100 BPM, 4/4, with a bed
     /// that can loop under the card). `None` is the silent default.
     pub music: Option<Music>,
     /// The tempo the times below are cut to.
@@ -139,7 +140,7 @@ impl Default for CueSheet {
                     Some(Wave(WaveType::Center)),
                     Change::ClassicLayout.prompt(),
                 ),
-                cue(20.0, Card, None, "Welcome to Powermove"),
+                cue(21.2, Card, None, "Welcome to Powermove"),
             ],
             sounds: vec![Sound {
                 at: 1.4,
@@ -233,7 +234,7 @@ mod tests {
         let sheet = CueSheet::default();
         assert!(sheet.cues.windows(2).all(|w| w[0].at < w[1].at));
         assert_eq!(sheet.cues.last().unwrap().scene, Scene::Card);
-        assert_eq!(sheet.length(), 20.);
+        assert_eq!(sheet.length(), 21.2);
         for change in Change::ALL {
             assert!(sheet.start_of(Scene::Beat(change)).is_some());
         }
@@ -262,7 +263,7 @@ mod tests {
         let sheet = CueSheet::default();
         assert!(sheet.music.is_none());
         let fast = sheet.retimed(120.);
-        assert!((fast.length() - 20. * 100. / 120.).abs() < 1e-9);
+        assert!((fast.length() - 21.2 * 100. / 120.).abs() < 1e-9);
         assert!((fast.sounds[0].at - 1.4 * 100. / 120.).abs() < 1e-9);
     }
     #[test]

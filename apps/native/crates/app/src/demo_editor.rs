@@ -8,10 +8,10 @@ use crate::timeline_surface::TimelineSurface;
 use crate::v4_view::{Natives, SurfaceView};
 use gpui::{prelude::*, *};
 use pm_builtins::{Builtins, Publication};
+use pm_compat_runner::host::{ExtensionHost, HostConfig};
 use pm_kernel::{KernelActor, KernelConfig, KernelHandle, session::SessionSource};
 use pm_shell::{stage::Change, view::Editor};
 use serde_json::Value;
-use pm_compat_runner::host::{ExtensionHost, HostConfig};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -292,12 +292,16 @@ fn film_surface(call: crate::panel_bridge::Call, editor: WeakEntity<Editor>, cx:
             if !e.panels(cx).contains(panel) {
                 Err(pm_mcp::Error::invalid("Unknown panel ID."))
             } else if e.layout.find(panel).is_none() {
-                Err(pm_mcp::Error::invalid("The film's editor opens docked panels only."))
+                Err(pm_mcp::Error::invalid(
+                    "The film's editor opens docked panels only.",
+                ))
             } else {
                 Ok(serde_json::json!({"panelId": panel, "open": true}))
             }
         }
-        tool => Err(pm_mcp::Error::invalid(format!("The film's editor has no {tool}."))),
+        tool => Err(pm_mcp::Error::invalid(format!(
+            "The film's editor has no {tool}."
+        ))),
     };
     call.answer(result);
 }
@@ -512,7 +516,12 @@ impl DemoEditor {
     /// Whether the viewer draws with the definition `id` (a transition or
     /// effect an extension registered).
     pub fn draws_with(&self, id: &str) -> bool {
-        self.viewer.is_some() && self.resources.definitions.iter().any(|d| d.id.as_str() == id)
+        self.viewer.is_some()
+            && self
+                .resources
+                .definitions
+                .iter()
+                .any(|d| d.id.as_str() == id)
     }
     /// What the agent's extensions changed, taken in on the main thread
     /// without waiting: new v4 surfaces mount on a worker (their panels and
@@ -524,7 +533,8 @@ impl DemoEditor {
         if self.seen_revision != Some(publication.revision) {
             self.seen_revision = Some(publication.revision);
             for surface in self.extensions.surfaces() {
-                let (Some(id), Some(hash)) = (surface["id"].as_str(), surface["graph"]["hash"].as_str())
+                let (Some(id), Some(hash)) =
+                    (surface["id"].as_str(), surface["graph"]["hash"].as_str())
                 else {
                     continue;
                 };
@@ -533,9 +543,16 @@ impl DemoEditor {
                 {
                     continue;
                 }
-                let title = surface["manifest"]["name"].as_str().unwrap_or(id).to_owned();
+                let title = surface["manifest"]["name"]
+                    .as_str()
+                    .unwrap_or(id)
+                    .to_owned();
                 let (tx, rx) = mpsc::channel();
-                let (runtime, id_, graph) = (self.runtime.clone(), id.to_owned(), surface["graph"].clone());
+                let (runtime, id_, graph) = (
+                    self.runtime.clone(),
+                    id.to_owned(),
+                    surface["graph"].clone(),
+                );
                 let replacing = self.surfaces.contains_key(id);
                 std::thread::Builder::new()
                     .name("film-extension".into())
@@ -547,7 +564,8 @@ impl DemoEditor {
                             .mount_extension(&id_, &graph, None)
                             .map_err(|e| e.to_string())
                             .and_then(|ticket| {
-                                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                                let deadline =
+                                    std::time::Instant::now() + std::time::Duration::from_secs(20);
                                 crate::ticket::answer(ticket, deadline)
                                     .ok_or_else(|| "it did not finish mounting".to_owned())?
                                     .map(drop)
@@ -557,29 +575,33 @@ impl DemoEditor {
                         let _ = tx.send(result);
                     })
                     .expect("the film's extension mounts");
-                self.mounting_surfaces.push((id.to_owned(), hash.to_owned(), title, rx));
+                self.mounting_surfaces
+                    .push((id.to_owned(), hash.to_owned(), title, rx));
             }
         }
         let mut arrived = false;
-        self.mounting_surfaces.retain(|(id, hash, title, rx)| match rx.try_recv() {
-            Ok(result) => {
-                match result {
-                    Ok(()) => {
-                        self.surfaces.insert(id.clone(), hash.clone());
-                        if let Some(dock) = &self.dock {
-                            let mut contributed = dock.contributed.borrow_mut();
-                            contributed.retain(|(c, _)| c != id);
-                            contributed.push((id.clone(), title.clone()));
+        self.mounting_surfaces
+            .retain(|(id, hash, title, rx)| match rx.try_recv() {
+                Ok(result) => {
+                    match result {
+                        Ok(()) => {
+                            self.surfaces.insert(id.clone(), hash.clone());
+                            if let Some(dock) = &self.dock {
+                                let mut contributed = dock.contributed.borrow_mut();
+                                contributed.retain(|(c, _)| c != id);
+                                contributed.push((id.clone(), title.clone()));
+                            }
+                            arrived = true;
                         }
-                        arrived = true;
+                        Err(error) => {
+                            eprintln!("The film's extension {id} could not start: {error}")
+                        }
                     }
-                    Err(error) => eprintln!("The film's extension {id} could not start: {error}"),
+                    false
                 }
-                false
-            }
-            Err(mpsc::TryRecvError::Empty) => true,
-            Err(mpsc::TryRecvError::Disconnected) => false,
-        });
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(mpsc::TryRecvError::Disconnected) => false,
+            });
         if arrived && let Some(editor) = &self.editor {
             editor.update(cx, |_, cx| cx.notify());
         }
@@ -1008,7 +1030,7 @@ impl FilmDemo {
     }
 }
 impl pm_shell::stage::Demo for FilmDemo {
-    fn editor(&mut self, window: &mut Window, cx: &mut App) -> AnyElement {
+    fn editor(&mut self, size: Size<Pixels>, window: &mut Window, cx: &mut App) -> AnyElement {
         self.collect(false);
         let ground = self.tokens.colors.window;
         let Some(editor) = self.started(false).and_then(|e| e.editor(cx)) else {
@@ -1029,6 +1051,7 @@ impl pm_shell::stage::Demo for FilmDemo {
             self.viewer = Some(viewer.into());
         }
         let _ = window;
+        editor.update(cx, |e, _| e.frame = Some(size));
         div()
             .size_full()
             .bg(rgb(ground))
@@ -1059,12 +1082,8 @@ impl pm_shell::stage::Demo for FilmDemo {
             .child(div().flex_none().w_full().h(px(420.)).child(agent))
             .into_any_element()
     }
-    fn composer_home(&self, area: Size<Pixels>) -> Bounds<Pixels> {
-        let (w, h) = (px(560.), px(132.));
-        Bounds::new(
-            point((area.width - w) / 2., area.height - h - px(36.)),
-            size(w, h),
-        )
+    fn composer_size(&self) -> Size<Pixels> {
+        size(px(560.), px(132.))
     }
     fn apply(&mut self, change: Change, _cx: &mut App) {
         if let Some(editor) = self.started(false) {
@@ -1100,8 +1119,7 @@ impl pm_shell::stage::Demo for FilmDemo {
                 editor.answer_calls(cx);
                 let _ = editor.editor(cx);
             }
-            let waiting =
-                !self.asked.is_empty() || self.applied.keys().any(|c| !self.arrived(*c));
+            let waiting = !self.asked.is_empty() || self.applied.keys().any(|c| !self.arrived(*c));
             if !waiting || std::time::Instant::now() > deadline {
                 break;
             }

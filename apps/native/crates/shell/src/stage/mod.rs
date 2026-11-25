@@ -49,12 +49,12 @@ pub struct Composer {
 /// The editor the film changes, and the agent's composer: the app's real
 /// ones (`demo_editor`), on the film's own project and kernel.
 pub trait Demo {
-    /// The live editor, filling the stage.
-    fn editor(&mut self, window: &mut Window, cx: &mut App) -> AnyElement;
+    /// The live editor, laid out in `size` (its window on the stage).
+    fn editor(&mut self, size: Size<Pixels>, window: &mut Window, cx: &mut App) -> AnyElement;
     /// The agent's composer showing `composer`.
     fn composer(&mut self, composer: &Composer, window: &mut Window, cx: &mut App) -> AnyElement;
-    /// The composer's place in the editor (window points).
-    fn composer_home(&self, area: Size<Pixels>) -> Bounds<Pixels>;
+    /// The composer's size on the stage.
+    fn composer_size(&self) -> Size<Pixels>;
     /// Applies `change` through the agent's own path.
     fn apply(&mut self, change: Change, cx: &mut App);
     /// Whether `change` has reached the editor on screen.
@@ -72,8 +72,13 @@ pub type OnSound = Rc<dyn Fn(&str, &mut App)>;
 /// Seconds the room takes to fade in after a Skip, and out after the hand-off.
 const SKIP_FADE: f64 = 0.35;
 const LIGHTS_UP: f64 = 0.45;
-/// A change that hasn't landed this long after it was applied waves anyway.
-const LAND_PATIENCE: f64 = 0.8;
+/// Room under the editor's window for the composer.
+const COMPOSER_ROOM: Pixels = px(150.);
+/// A change still on its way this long after it was applied holds the
+/// film (its clock stops on "Working…") until it lands, for at most
+/// `MAX_HOLD` seconds; then the wave goes anyway.
+const LAND_PATIENCE: f64 = 0.4;
+const MAX_HOLD: f64 = 8.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WaveKey {
@@ -122,6 +127,10 @@ pub struct Stage {
     wave: Entity<WaveState>,
     wave_for: Option<WaveKey>,
     landing: Option<Landing>,
+    /// The film holds its clock while a change is still on its way:
+    /// since when (raw clock), and how long it has held before.
+    hold_from: Option<f64>,
+    held: f64,
     last_t: f64,
     on_sound: Option<OnSound>,
     focus: FocusHandle,
@@ -167,6 +176,8 @@ impl Stage {
             wave,
             wave_for: None,
             landing: None,
+            hold_from: None,
+            held: 0.,
             last_t: -1.,
             on_sound: None,
             focus: cx.focus_handle(),
@@ -184,9 +195,13 @@ impl Stage {
     }
     /// The film's time: seconds since the stage opened, moved on by Skip.
     pub fn now(&self) -> f64 {
+        let raw = self.raw();
+        // A hold stops the film where it began.
+        raw.min(self.hold_from.unwrap_or(raw)) + self.offset - self.held
+    }
+    fn raw(&self) -> f64 {
         self.clock
             .unwrap_or_else(|| self.opened.elapsed().as_secs_f64())
-            + self.offset
     }
     pub fn card(&self) -> Option<&Entity<WelcomeView>> {
         self.card.as_ref()
@@ -219,6 +234,10 @@ impl Stage {
         if t >= card {
             return;
         }
+        if let Some(from) = self.hold_from.take() {
+            self.held += self.raw() - from;
+        }
+        let t = self.now();
         self.offset += card - t;
         self.skipped_at = Some(card);
         self.landing = None;
@@ -299,10 +318,20 @@ impl Stage {
     /// The editor's window on the stage: the app as it will open, standing
     /// in the room rather than filling the display.
     pub fn editor_rect(area: Size<Pixels>) -> Bounds<Pixels> {
-        let size = size(area.width * 0.9, area.height * 0.84);
+        let margin = area.height * 0.03;
+        let size = size(area.width * 0.9, area.height - margin * 2. - COMPOSER_ROOM);
+        Bounds::new(point((area.width - size.width) / 2., margin), size)
+    }
+    /// The composer's place in the film: on the stage, under the app's
+    /// window, so it never covers what it changes.
+    fn composer_home(area: Size<Pixels>, composer: Size<Pixels>) -> Bounds<Pixels> {
+        let rect = Self::editor_rect(area);
         Bounds::new(
-            point((area.width - size.width) / 2., area.height * 0.045),
-            size,
+            point(
+                (area.width - composer.width) / 2.,
+                rect.origin.y + rect.size.height + (COMPOSER_ROOM - composer.height) / 2.,
+            ),
+            composer,
         )
     }
     fn room_picture(&mut self, t: f64, area: Size<Pixels>, scale: f32) -> AnyElement {
@@ -350,9 +379,9 @@ impl Stage {
                 let radius = px(self.tokens.radius.window);
                 let content = match (editor, self.demo.as_mut()) {
                     (EditorPicture::Held(image), _) => still(image),
-                    (EditorPicture::Live, Some(demo)) => demo.editor(window, cx),
+                    (EditorPicture::Live, Some(demo)) => demo.editor(rect.size, window, cx),
                     (EditorPicture::Capture(frozen), Some(demo)) => {
-                        freeze(demo.editor(window, cx), frozen, true).into_any_element()
+                        freeze(demo.editor(rect.size, window, cx), frozen, true).into_any_element()
                     }
                     (_, None) => div().into_any_element(),
                 };
@@ -396,10 +425,9 @@ impl Stage {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let position = self.sheet.at(t);
+        let reduce_motion = self.reduce_motion();
         let demo = self.demo.as_mut()?;
-        let rect = Self::editor_rect(area);
-        let home = demo.composer_home(rect.size);
-        let home = Bounds::new(rect.origin + home.origin, home.size);
+        let home = Self::composer_home(area, demo.composer_size());
         let alone = Self::composer_alone(area, home);
         let (bounds, opacity, composer) = match position.scene {
             Scene::Mark => {
@@ -422,10 +450,20 @@ impl Stage {
                 )
             }
             Scene::Composer => {
-                // The composer travels home under the wave into the editor.
-                let travel = match position.leaving {
-                    Some((Transition::Wave(_), p)) => beats::smooth(p) as f32,
+                // The composer travels home under the wave into the editor;
+                // under Reduce Motion it fades out here and in at home.
+                let p = match position.leaving {
+                    Some((Transition::Wave(_), p)) => p,
                     _ => 0.,
+                };
+                let (travel, opacity) = if reduce_motion {
+                    let home_now = p >= 0.5;
+                    (
+                        if home_now { 1. } else { 0. },
+                        (1. - 2. * p).abs().max(0.) as f32,
+                    )
+                } else {
+                    (beats::smooth(p) as f32, 1.)
                 };
                 let b = Bounds::new(
                     alone.origin + (home.origin - alone.origin) * travel,
@@ -433,7 +471,7 @@ impl Stage {
                 );
                 (
                     b,
-                    1.,
+                    opacity,
                     Composer {
                         text: String::new(),
                         composing: Composing::Typing(0),
@@ -589,12 +627,26 @@ impl Stage {
                 demo.apply(change, cx);
             }
         }
-        let landing = self.landing.as_mut().unwrap();
-        if landing.landed.is_none() {
+        let waiting = self
+            .landing
+            .as_ref()
+            .and_then(|l| l.landed.is_none().then_some(l.applied));
+        if let Some(Some(applied)) = waiting {
             let arrived = self.demo.as_ref().is_some_and(|d| d.landed(change, cx));
-            let applied = landing.applied.unwrap();
-            if arrived || t - applied > LAND_PATIENCE {
-                landing.landed = Some(t);
+            let raw = self.raw();
+            let holding = self.hold_from.map_or(0., |from| raw - from);
+            if arrived || holding > MAX_HOLD {
+                // The film goes on from where it held.
+                if let Some(from) = self.hold_from.take() {
+                    self.held += raw - from;
+                }
+                let now = self.now();
+                if let Some(landing) = self.landing.as_mut() {
+                    landing.landed = Some(now);
+                }
+            } else if t - applied > LAND_PATIENCE && self.hold_from.is_none() {
+                // Still working: the film waits with it, on "Working…".
+                self.hold_from = Some(raw);
             }
         }
         let landing = self.landing.as_ref().unwrap();
@@ -787,8 +839,10 @@ impl Render for Stage {
         } else if self.clock.is_none() {
             window.request_animation_frame();
         }
-        let mut stage_alpha = self.room(t);
-        let mut veil = self.veil(t);
+        // The house lights go down from when the stage opens, film or not.
+        let opened = self.raw();
+        let mut stage_alpha = self.room(opened);
+        let mut veil = self.veil(opened);
         let card_index = self.sheet.cues.len() - 1;
         let picture: AnyElement = if self.hand_off.is_some() {
             let start = self.hand_off.as_ref().unwrap().start;
@@ -833,8 +887,10 @@ impl Render for Stage {
             let next = position.index + 1;
             let source = match self.sheet.cues[position.index].scene {
                 Scene::Composer => {
-                    let rect = Self::editor_rect(area);
-                    let home = self.demo.as_ref().map(|d| d.composer_home(rect.size));
+                    let home = self
+                        .demo
+                        .as_ref()
+                        .map(|d| Self::composer_home(area, d.composer_size()));
                     home.map_or(Bounds::new(point(px(0.), px(0.)), area), |h| {
                         Self::composer_alone(area, h)
                     })
