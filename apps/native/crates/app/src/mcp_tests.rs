@@ -1994,3 +1994,131 @@ fn eval_host_seeks_times_an_effect_and_reports_registrations() {
     drop(input);
     served.join().unwrap().unwrap();
 }
+
+fn aero_tools(fixture: &Fixture, name: &str) -> pm_mcp::session::aero_tools::Tools {
+    let scope = fixture.host.profile.join("aero/sessions").join(name);
+    std::fs::create_dir_all(&scope).unwrap();
+    pm_mcp::session::aero_tools::Tools::open(
+        fixture.tools.automation.clone(),
+        "test",
+        None,
+        &scope,
+        pm_agents::Access::Project,
+        None,
+    )
+    .unwrap()
+}
+
+/// P1-3: the editor writes while Aero reads the project (the editor's
+/// writes reach the kernel actor directly, between Aero's reads). Every
+/// answer's data belongs to the revision it is stamped with.
+#[test]
+fn a_human_edit_between_reads_never_mislabels_project_state() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let mut tools = aero_tools(&fixture, "race");
+    let kernel = fixture.host.kernel.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let edits = Arc::new(std::sync::Mutex::new(Vec::<(u64, String)>::new()));
+    let human = {
+        let (stop, edits) = (stop.clone(), edits.clone());
+        std::thread::spawn(move || {
+            let mut i = 0;
+            while !stop.load(Ordering::Acquire) {
+                i += 1;
+                let name = format!("Human take {i:04}");
+                let ack = kernel
+                    .call_blocking(
+                        "test",
+                        Request::new(
+                            Caller::native(),
+                            Call::Transact {
+                                label: Some("UI edit".into()),
+                                body: WriteBody::Commands(vec![
+                                    CompCommand::Set {
+                                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                            name: Some(name.clone()),
+                                            ..Default::default()
+                                        }),
+                                    }
+                                    .into(),
+                                ]),
+                                expected_revision: None,
+                            },
+                        ),
+                    )
+                    .unwrap();
+                edits.lock().unwrap().push((ack.revision, name));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let mut checked = 0;
+    for _ in 0..300 {
+        let Ok(state) = tools.call("project", r#"{"op":"summary"}"#, &mut |_| false) else {
+            continue;
+        };
+        let revision = state["revision"].as_u64().unwrap();
+        let text = state.to_string();
+        let expected = edits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, _)| *at <= revision)
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, name)| name.clone());
+        if let Some(expected) = expected {
+            assert!(
+                text.contains(&expected),
+                "data from another revision was stamped {revision}: expected {expected}"
+            );
+            checked += 1;
+        }
+    }
+    stop.store(true, Ordering::Release);
+    human.join().unwrap();
+    assert!(checked > 50, "only {checked} reads were checked");
+}
+
+/// P1-5: the project is reopened (a new document under the same id) while
+/// an Aero run is bound to the old one: its next edit is a terminal
+/// conflict and the new document is untouched.
+#[test]
+fn reopening_the_project_during_a_run_never_edits_the_new_document() {
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        add(&mut session, "plate");
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+    }
+    let mut tools = aero_tools(&fixture, "reopen");
+    let revision = fixture.host.kernel.published("test").unwrap().revision();
+    // Reopen the saved project: a new document under the same id.
+    fixture.host.save(fixture.host.current().unwrap(), None).unwrap();
+    fixture
+        .host
+        .shell(ShellCall::Close(fixture.host.current().unwrap()))
+        .unwrap();
+    fixture
+        .host
+        .open(
+            "test".into(),
+            SessionSource::Library {
+                profile: fixture.host.profile.clone(),
+                project: "test".into(),
+            },
+        )
+        .unwrap();
+    let _ = tools.call("project", r#"{"op":"summary"}"#, &mut |_| false);
+    let edit = json!({"op":"commands","revision":revision,"args":{"commands":[
+        {"type":"set_layer","target":"plate","patch":{"name":"Old run"}}]}})
+    .to_string();
+    let error = tools.call("edit", &edit, &mut |_| false).unwrap_err();
+    assert_eq!(error.code, "revision_conflict", "{}", error.message);
+    let document = document(&fixture.host.kernel.published("test").unwrap());
+    assert_ne!(document["layers"][0]["name"], "Old run");
+}
