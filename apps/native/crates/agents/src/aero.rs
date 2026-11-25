@@ -628,10 +628,8 @@ fn drive(
                 .collect();
             let id = format!("{}/{}", call.turn(), call.model_call_id());
             outputs.insert(id, crate::trace::truncate(&result.text, 1000));
-            match call.answer_images(&result.text, &image_refs, failed) {
-                Ok(_) | Err(pm_aero_core::Error::Unsupported) => {}
-                Err(error) => return Err(err(error)),
-            }
+            call.answer_images_or_text(&result.text, &image_refs, failed)
+                .map_err(err)?;
         }
         if let Some(fetch) = runtime.fetches.take().map_err(err)? {
             if fetch.purpose == pm_aero_core::Purpose::Catalog {

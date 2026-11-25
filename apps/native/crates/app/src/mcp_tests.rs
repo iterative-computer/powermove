@@ -1679,59 +1679,318 @@ fn aero_repairs_a_compile_error_and_loads_the_published_extension() {
         session.dispatch("apply_commands", &json!({"commands":[
             {"type":"add_layer","id":"plate","name":"Plate","layerType":"solid","from":0,"duration":2}
         ]})).unwrap();
-        session.dispatch("finish_session", &json!({"commit":true})).unwrap();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
     }
-    let jobs = crate::mcp_services::connect_engine(&fixture.tools, Default::default(), Default::default()).unwrap();
+    // Project frames need the app binary as the engine worker (libtest cannot
+    // serve --engine-job): lane runs pass it as PM_TIMELINE_ENGINE_WORKER.
+    let worker = std::env::var_os("PM_TIMELINE_ENGINE_WORKER");
+    let jobs = match &worker {
+        Some(worker) => crate::mcp_services::connect_engine_with_executable(
+            &fixture.tools,
+            Default::default(),
+            Default::default(),
+            worker.into(),
+        ),
+        None => crate::mcp_services::connect_engine(
+            &fixture.tools,
+            Default::default(),
+            Default::default(),
+        ),
+    }
+    .unwrap();
+    let frames = worker.is_some();
     let scope = fixture.host.profile.join("aero/sessions/extension");
     let host = fixture.tools.automation.clone();
     let source = include_str!("../../../js/compat/api-pack/samples/gradient-tint/index.ts");
     let manifest = include_str!("../../../js/compat/api-pack/samples/gradient-tint/manifest.json");
     let step = AtomicUsize::new(0);
+    let revisions = host.clone();
     let model = Model::fake(move |request| {
         let tool = |name: &str, op: &str, args: Value| Reply::Tool {
-            name: name.into(), args: json!({"op":op,"args":args}),
+            name: name.into(),
+            args: json!({"op":op,"args":args}),
         };
+        let text = String::from_utf8_lossy(request);
         match step.fetch_add(1, Ordering::Relaxed) {
-            0 => tool("files","write",json!({"path":"gradient-tint/manifest.json","text":manifest})),
-            1 => tool("files","write",json!({"path":"gradient-tint/index.ts","text":"const valid = 1;\nexport default function ( {"})),
-            2 => tool("extension","check",json!({"id":"gradient-tint"})),
+            0 => tool(
+                "files",
+                "write",
+                json!({"path":"gradient-tint/manifest.json","text":manifest}),
+            ),
+            1 => tool(
+                "files",
+                "write",
+                json!({"path":"gradient-tint/index.ts","text":"const valid = 1;\nexport default function ( {"}),
+            ),
+            2 => tool("extension", "check", json!({"id":"gradient-tint"})),
             3 => {
                 assert!(String::from_utf8_lossy(request).contains("index.ts:2:"));
-                tool("files","write",json!({"path":"gradient-tint/index.ts","text":source}))
+                tool(
+                    "files",
+                    "write",
+                    json!({"path":"gradient-tint/index.ts","text":source}),
+                )
             }
-            4 => tool("extension","check",json!({"id":"gradient-tint"})),
-            5 => tool("extension","publish",json!({"extensions":[{"id":"gradient-tint","action":"created"}]})),
+            4 => tool("extension", "check", json!({"id":"gradient-tint"})),
+            5 => tool(
+                "extension",
+                "publish",
+                json!({"extensions":[{"id":"gradient-tint","action":"created","summary":"Gradient tint effect"}]}),
+            ),
+            6 => {
+                // The publish probe rendered the effect over a reference clip.
+                assert!(text.contains(r#"\"changed\":true"#), "{text}");
+                assert!(text.contains(r#"\"nan\":false"#) && text.contains(r#"\"black\":false"#));
+                let revision = revisions.lock().unwrap().revision("test").unwrap();
+                Reply::Tool {
+                    name: "edit".into(),
+                    args: json!({"op":"commands","revision":revision,
+                    "args":{"commands":[{"type":"add_effect","target":"plate","effect":"gradient-tint.effect"}]}}),
+                }
+            }
+            7 if frames => tool("look", "frames", json!({"times":[0.5],"width":160})),
+            8 if frames => {
+                assert!(text.contains("Capture id"), "{text}");
+                Reply::Text("Published the repaired gradient tint.".into())
+            }
             _ => Reply::Text("Published the repaired gradient tint.".into()),
         }
     });
     let report: aero::Report = Arc::new(|_| {});
-    let handle = aero::start(Launch {
-        run: "extension".into(), prompt: "Make a gradient tint effect.".into(),
-        provider:Provider::Aero, model:None, effort:None, access:Access::Project,
-        approval:Default::default(), computer_consent:false, workspace:scope.clone(),
-        images:Vec::new(), role:None, files:Vec::new(), project:Some("test".into()),
-    }, "extension".into(), scope, Options {
-        model, wall:Duration::from_secs(45), report:Some(report),
-        ..Options::development()
-    }, move |scope| {
-        pm_mcp::session::aero_tools::Tools::open(host,"test",None,scope,Access::Project,None)
+    let handle = aero::start(
+        Launch {
+            run: "extension".into(),
+            prompt: "Make a gradient tint effect.".into(),
+            provider: Provider::Aero,
+            model: None,
+            effort: None,
+            access: Access::Project,
+            approval: Default::default(),
+            computer_consent: false,
+            workspace: scope.clone(),
+            images: Vec::new(),
+            role: None,
+            files: Vec::new(),
+            project: Some("test".into()),
+        },
+        "extension".into(),
+        scope,
+        Options {
+            model,
+            wall: Duration::from_secs(45),
+            report: Some(report),
+            ..Options::development()
+        },
+        move |scope| {
+            pm_mcp::session::aero_tools::Tools::open(
+                host,
+                "test",
+                None,
+                scope,
+                Access::Project,
+                None,
+            )
             .map(|tools| Box::new(tools) as Box<dyn aero::Session>)
             .map_err(|e| e.to_string())
-    });
+        },
+    );
     let deadline = Instant::now() + Duration::from_secs(50);
     let result = loop {
         match handle.try_event() {
-            Ok(Event::Completed { result,.. }) => break result,
+            Ok(Event::Completed { result, .. }) => break result,
             Ok(Event::Trace { value, .. }) if value["kind"] == "tool-end" => eprintln!("{value}"),
-            Ok(_) | Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline =>
-                std::thread::sleep(Duration::from_millis(5)),
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
             event => panic!("Aero did not complete: {event:?}"),
         }
     };
-    assert_eq!(result,RunResult::success("Published the repaired gradient tint.".into(),Access::Project));
+    assert_eq!(
+        result,
+        RunResult::success(
+            "Published the repaired gradient tint.".into(),
+            Access::Project
+        )
+    );
     let published = fixture.host.kernel.published("test").unwrap();
     let resources = jobs.resources(&published, true, &|| false).unwrap();
-    assert!(resources.definitions.iter().any(|d| d.id.as_str() == "gradient-tint.effect"));
+    assert!(
+        resources
+            .definitions
+            .iter()
+            .any(|d| d.id.as_str() == "gradient-tint.effect")
+    );
+    let document = fixture
+        .tools
+        .automation
+        .lock()
+        .unwrap()
+        .read_document("test")
+        .unwrap();
+    let plate = document["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|layer| layer["id"] == "plate")
+        .cloned()
+        .unwrap();
+    assert_eq!(plate["fx"][0]["type"], "gradient-tint.effect", "{plate}");
+    // The eval host attributes the registration to the extension that made it.
+    let (engine, view) = {
+        let host = fixture.tools.automation.lock().unwrap();
+        (host.engine.clone().unwrap(), host.view("test").unwrap())
+    };
+    let registrations = engine
+        .eval_registrations("test", view.document, view.revision)
+        .unwrap();
+    assert!(
+        registrations["registeredEffects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "gradient-tint.effect" && row["extension"] == "gradient-tint"),
+        "{registrations}"
+    );
     drop(handle);
     drop(jobs);
+}
+
+/// The eval runner's evidence tools on the real app tool host, over the same
+/// stdio loop `powermove-native --listen` serves.
+#[test]
+fn eval_host_seeks_times_an_effect_and_reports_registrations() {
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct Lines(Vec<u8>, mpsc::Sender<Value>);
+    impl Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            while let Some(end) = self.0.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.0.drain(..=end).collect();
+                let _ = self.1.send(serde_json::from_slice(&line).unwrap());
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        session
+            .dispatch(
+                "apply_commands",
+                &json!({"commands":[
+                    {"type":"add_layer","id":"plate","name":"Plate","layerType":"solid","from":0,"duration":2},
+                    {"type":"add_effect","target":"plate","effect":"blur"}
+                ]}),
+            )
+            .unwrap();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+    }
+    let _jobs =
+        crate::mcp_services::connect_engine(&fixture.tools, Default::default(), Default::default())
+            .unwrap();
+    let (reader, mut input) = std::io::pipe().unwrap();
+    let (sender, output) = mpsc::channel();
+    let automation = fixture.tools.automation.clone();
+    let profile = fixture.host.profile.clone();
+    let served = std::thread::spawn(move || {
+        pm_mcp::aero_rpc::serve(
+            std::io::BufReader::new(reader),
+            Lines(Vec::new(), sender),
+            automation,
+            profile,
+        )
+    });
+    let mut id = 0;
+    let mut send = |method: &str, params: Value| -> Value {
+        id += 1;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        output.recv_timeout(Duration::from_secs(60)).unwrap()
+    };
+    let tool = |send: &mut dyn FnMut(&str, Value) -> Value, name: &str, args: Value| {
+        let answer = send("tools/call", json!({"name":name,"arguments":args}));
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        (answer["result"]["isError"] == true, text)
+    };
+    let init = send("initialize", json!({"protocolVersion":"2025-06-18"}));
+    let flags = &init["result"]["capabilities"]["experimental"]["powermoveEval"];
+    assert_eq!(flags["transitions"], true, "{flags}");
+    assert_eq!(flags["evaluator"], false);
+    let names: Vec<_> = send("tools/list", json!({}))["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    for name in ["measure_frame_time", "set_playhead", "render_frames"] {
+        assert!(names.iter().any(|n| n == name), "{name} missing: {names:?}");
+    }
+    let (failed, text) = tool(&mut send, "open_project", json!({"projectId":"test"}));
+    assert!(!failed, "{text}");
+    let (failed, text) = tool(&mut send, "set_playhead", json!({"time":1.25}));
+    assert!(!failed, "{text}");
+    let ui = fixture.host.kernel.state().ui.get("test").cloned().unwrap();
+    assert_eq!(
+        ui.transport
+            .as_object()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| t.as_f64()),
+        Some(1.25)
+    );
+    let (failed, text) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"blur","times":[0.5],"samples":2,"width":160}),
+    );
+    assert!(!failed, "{text}");
+    let timed: Value = serde_json::from_str(&text).unwrap();
+    for key in ["enabledMs", "disabledMs"] {
+        let samples = timed[key].as_array().unwrap();
+        assert_eq!(samples.len(), 2, "{timed}");
+        assert!(
+            samples
+                .iter()
+                .all(|ms| ms.as_f64().is_some_and(|ms| ms > 0.))
+        );
+    }
+    // A target that is not active at the asked time is refused, not timed.
+    let (failed, text) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"blur","times":[2.5],"samples":1,"width":160}),
+    );
+    assert!(failed && text.contains("not active"), "{text}");
+    let (failed, _) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"no-such-effect","times":[0.5],"samples":1,"width":160}),
+    );
+    assert!(failed);
+    let (failed, text) = tool(&mut send, "get_workspace_state", json!({}));
+    assert!(!failed, "{text}");
+    let state: Value = serde_json::from_str(&text).unwrap();
+    // Built-ins are the engine's; registrations list extension definitions.
+    for key in ["registeredEffects", "registeredTransitions", "registeredPanels"] {
+        assert!(state[key].is_array(), "{key}: {state}");
+    }
+    assert!(state["extensions"].is_array());
+    drop(input);
+    served.join().unwrap().unwrap();
 }

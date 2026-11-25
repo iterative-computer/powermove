@@ -218,6 +218,9 @@ fn find_text<'a>(value: &'a Value, marker: &str) -> Option<&'a str> {
 struct ReviewInput {
     op: String,
     args: Review,
+    /// Every tool shares one input schema; review is not revision-bound.
+    #[serde(rename = "revision")]
+    _revision: Option<u64>,
 }
 
 #[derive(Deserialize)]

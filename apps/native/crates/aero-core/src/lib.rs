@@ -513,6 +513,32 @@ impl ToolLease {
         result
     }
 
+    /// [`Self::answer_images`], except that a core which cannot take images
+    /// yet gets the text alone with a note: FX_E_UNSUPPORTED leaves the lease
+    /// open, to be answered again differently (header rule 1).
+    pub fn answer_images_or_text(
+        mut self,
+        text: &str,
+        images: &[Image<'_>],
+        is_error: bool,
+    ) -> Result<Answered, Error> {
+        assert_off_main();
+        let raw: Vec<_> = images.iter().map(Image::raw).collect();
+        let mut result = self.send_output(text, &raw, is_error);
+        if matches!(result, Err(Error::Unsupported)) && !raw.is_empty() {
+            let note = format!(
+                "{text}\n{} image(s) were rendered but this core cannot show images to the model yet.",
+                raw.len()
+            );
+            result = self.send_output(&note, &[], is_error);
+        }
+        if result.is_ok() {
+            self.answered = true;
+            self.shared.lease_closed();
+        }
+        result
+    }
+
     fn send(&self, text: &str, is_error: bool) -> Result<Answered, Error> {
         assert_off_main();
         self.send_unchecked(text, &[], is_error)

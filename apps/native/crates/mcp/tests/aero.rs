@@ -655,6 +655,7 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
         tools: Tools,
         started: mpsc::Sender<()>,
         release: mpsc::Receiver<()>,
+        done: mpsc::Sender<()>,
     }
     impl aero::Session for Delayed {
         fn context(&mut self) -> Result<Value, String> {
@@ -668,7 +669,9 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
         ) -> Result<aero::ToolResult, String> {
             let _ = self.started.send(());
             let _ = self.release.recv();
-            aero::Session::call(&mut self.tools, tool, input, approve)
+            let result = aero::Session::call(&mut self.tools, tool, input, approve);
+            let _ = self.done.send(());
+            result
         }
         fn failures(&mut self) -> Vec<String> {
             Vec::new()
@@ -681,6 +684,7 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
     let revision = fixture.revision;
     let (started, ready) = mpsc::channel();
     let (release, held) = mpsc::channel();
+    let (done, finished) = mpsc::channel();
     let (turn, _) = fixture.start(
         Model::fake(move |_| {
             call(
@@ -698,6 +702,7 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
                 tools,
                 started,
                 release: held,
+                done,
             })
         },
     );
@@ -706,11 +711,10 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
     assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
     // The tool already holds its lease: it finishes as one transaction.
     release.send(()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while keeper_name(&fixture) != "Stopped edit" {
-        assert!(Instant::now() < deadline, "the leased edit never landed");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // The edit's lease commits when the call returns (reads may see its
+    // changes earlier, before its history entry exists).
+    finished.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(keeper_name(&fixture), "Stopped edit");
     let layers = |fixture: &Fixture| {
         fixture
             .host
@@ -727,4 +731,47 @@ fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
     undo_once(&fixture);
     assert_eq!(keeper_name(&fixture), "Keep");
     assert_eq!(layers(&fixture), 2, "both commands undo as one step");
+}
+
+#[test]
+fn review_grades_in_a_fresh_session_that_never_sees_the_generator() {
+    let fixture = Fixture::new();
+    let evaluated = Arc::new(AtomicUsize::new(0));
+    let count = evaluated.clone();
+    let step = AtomicUsize::new(0);
+    let (turn, _) = fixture.start(
+        Model::fake(move |input| {
+            let text = String::from_utf8_lossy(input);
+            if text.contains("You are an independent evaluator") {
+                count.fetch_add(1, Ordering::Relaxed);
+                // Only the evidence reaches the evaluator: no generator
+                // instructions, prompt or tool history.
+                assert!(!text.contains("You are Aero"), "{text}");
+                assert!(!text.contains("Cut the flubbed take"), "{text}");
+                assert!(text.contains("Two layers remain"), "{text}");
+                return Reply::Text(
+                    json!({"evaluator":"fresh","rubric":"cut","scores":{"clean":{"score":4,"evidence":"Two layers remain"}}})
+                        .to_string(),
+                );
+            }
+            match step.fetch_add(1, Ordering::Relaxed) {
+                0 => call(
+                    "review",
+                    "evaluate",
+                    None,
+                    json!({"result":{"summary":"Two layers remain"},"rubric":{"id":"cut","criteria":["clean"]}}),
+                ),
+                _ => {
+                    assert!(text.contains(r#"\"evaluator\":\"fresh\""#), "{text}");
+                    Reply::Text("Reviewed.".into())
+                }
+            }
+        }),
+        |tools| Box::new(tools),
+    );
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Reviewed.".into(), Access::Project)
+    );
+    assert_eq!(evaluated.load(Ordering::Relaxed), 1);
 }

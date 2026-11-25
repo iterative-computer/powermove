@@ -1784,127 +1784,215 @@ impl EngineHook for EngineJobs {
 
     fn eval_registrations(&self, project: &str, document: u64, revision: u64) -> Result<Value> {
         use pm_protocol::definitions::DefinitionKind;
-        let published = self.published_at(project,document,revision)?;
-        let resources = self.resources(&published,true,&never).map_err(failed)?;
-        let host = self.extensions.lock().unwrap().get(&document).map(|entry| (
-            entry.host.clone(), entry.v4.clone(),
-        ));
-        let mut owners = std::collections::BTreeMap::<String,String>::new();
+        let published = self.published_at(project, document, revision)?;
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let host = self
+            .extensions
+            .lock()
+            .unwrap()
+            .get(&document)
+            .map(|entry| (entry.host.clone(), entry.v4.clone()));
+        let mut owners = std::collections::BTreeMap::<String, String>::new();
         let mut panels = Vec::new();
         if let Some((host, runtime)) = host {
             let publication = host.publication();
             for (extension, definitions) in publication.provides {
-                for id in definitions { owners.insert(id,extension.clone()); }
+                for id in definitions {
+                    owners.insert(id, extension.clone());
+                }
             }
             if let Some(contributions) = publication.contributions {
                 for panel in contributions["panels"].as_array().into_iter().flatten() {
-                    if let (Some(id),Some(owner)) = (panel["id"].as_str(),panel["ownerId"].as_str()) {
+                    if let (Some(id), Some(owner)) =
+                        (panel["id"].as_str(), panel["ownerId"].as_str())
+                    {
                         panels.push(json!({"id":id,"extension":owner,"parameters":[]}));
                     }
                 }
             }
             for (owner, definition) in runtime.iter().flat_map(|rt| rt.extension_effects()) {
-                owners.insert(definition.id.as_str().into(),owner);
+                owners.insert(definition.id.as_str().into(), owner);
             }
         }
-        let definitions = |kind| resources.definitions.iter().filter(|def| def.kind == kind).map(|def| {
+        let definitions = |kind| {
+            resources.definitions.iter().filter(|def| def.kind == kind).map(|def| {
             let id = def.id.as_str();
             json!({"id":id,"extension":owners.get(id),"parameters":def.params.iter().map(|param|param.key()).collect::<Vec<_>>()})
-        }).collect::<Vec<_>>();
-        Ok(json!({"registeredEffects":definitions(DefinitionKind::Effect),
-            "registeredTransitions":definitions(DefinitionKind::Transition),"registeredPanels":panels}))
+        }).collect::<Vec<_>>()
+        };
+        Ok(
+            json!({"registeredEffects":definitions(DefinitionKind::Effect),
+            "registeredTransitions":definitions(DefinitionKind::Transition),"registeredPanels":panels}),
+        )
     }
 
-    fn extension_probe(&self, project: &str, document: u64, revision: u64, ids: &[String]) -> Result<Value> {
+    fn extension_probe(
+        &self,
+        project: &str,
+        document: u64,
+        revision: u64,
+        ids: &[String],
+    ) -> Result<Value> {
         use pm_protocol::definitions::DefinitionKind;
-        let published = self.published_at(project,document,revision)?;
-        let resources = self.resources(&published,true,&never).map_err(failed)?;
-        let registrations = self.eval_registrations(project,document,revision)?;
-        let owned = ["registeredEffects","registeredTransitions"].into_iter().flat_map(|key| {
-            registrations[key].as_array().into_iter().flatten()
-        }).filter(|row| row["extension"].as_str().is_some_and(|id| ids.iter().any(|expected| expected == id)))
-          .filter_map(|row| row["id"].as_str()).collect::<std::collections::BTreeSet<_>>();
+        let published = self.published_at(project, document, revision)?;
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let registrations = self.eval_registrations(project, document, revision)?;
+        let owned = ["registeredEffects", "registeredTransitions"]
+            .into_iter()
+            .flat_map(|key| registrations[key].as_array().into_iter().flatten())
+            .filter(|row| {
+                row["extension"]
+                    .as_str()
+                    .is_some_and(|id| ids.iter().any(|expected| expected == id))
+            })
+            .filter_map(|row| row["id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         // Authored definitions are namespaced by the optional registration
         // origin in a live window. Do not infer ownership from source files.
         let mut probes = Vec::new();
         for definition in &resources.definitions {
-            if matches!(definition.kind,DefinitionKind::Effect | DefinitionKind::Transition)
-                && owned.contains(definition.id.as_str()) {
+            if matches!(
+                definition.kind,
+                DefinitionKind::Effect | DefinitionKind::Transition
+            ) && owned.contains(definition.id.as_str())
+            {
                 probes.push(crate::effect_lab::probe(definition).map_err(failed)?);
             }
         }
         Ok(json!(probes))
     }
 
-    fn measure_frame_time(&self, project: &str, document: u64, revision: u64, args: &Value) -> Result<Value> {
-        let target = args["target"].as_str().filter(|id| !id.is_empty())
+    fn measure_frame_time(
+        &self,
+        project: &str,
+        document: u64,
+        revision: u64,
+        args: &Value,
+    ) -> Result<Value> {
+        let target = args["target"]
+            .as_str()
+            .filter(|id| !id.is_empty())
             .ok_or_else(|| Error::invalid("Name the enabled effect or transition to measure."))?;
-        let times = args["times"].as_array().filter(|times| !times.is_empty() && times.len() <= 24)
+        let times = args["times"]
+            .as_array()
+            .filter(|times| !times.is_empty() && times.len() <= 24)
             .ok_or_else(|| Error::invalid("Supply from 1 to 24 frame times."))?;
-        let samples = args["samples"].as_u64().filter(|n| (1..=32).contains(n))
+        let samples = args["samples"]
+            .as_u64()
+            .filter(|n| (1..=32).contains(n))
             .ok_or_else(|| Error::invalid("Choose from 1 to 32 paired measurements."))?;
-        let width = args["width"].as_u64().filter(|n| (160..=1920).contains(n))
-            .ok_or_else(|| Error::invalid("Choose an output width from 160 to 1920."))? as u32;
-        let published = self.published_at(project,document,revision)?;
+        let width = args["width"]
+            .as_u64()
+            .filter(|n| (160..=1920).contains(n))
+            .ok_or_else(|| Error::invalid("Choose an output width from 160 to 1920."))?
+            as u32;
+        let published = self.published_at(project, document, revision)?;
         let comp = published.snapshot.render_comp();
         let comp = comp.as_str();
         let original = &published.snapshot.document;
         let mut raw: Value = serde_json::from_str(&to_canonical_string(
-            &original.to_value().ok_or_else(|| Error::invalid("Missing composition"))?
-        )).map_err(failed)?;
-        let project_node = if raw["compId"].as_str() == Some(comp) || raw["comps"].get(comp).is_none() {
-            &mut raw
-        } else {
+            &original
+                .to_value()
+                .ok_or_else(|| Error::invalid("Missing composition"))?,
+        ))
+        .map_err(failed)?;
+        // The stored document keeps every composition, the main one included,
+        // under comps; a document without that entry keeps its layers at the root.
+        let project_node = if raw["comps"].get(comp).is_some() {
             &mut raw["comps"][comp]
+        } else {
+            &mut raw
         };
         let w = project_node["w"].as_f64().unwrap_or(1920.);
         let h = project_node["h"].as_f64().unwrap_or(1080.);
         let height = (h * f64::from(width) / w).round().clamp(2., 1920.) as u32;
         let mut active = Vec::new();
         for layer in project_node["layers"].as_array_mut().into_iter().flatten() {
-            if layer["on"] == false { continue; }
+            if layer["on"] == false {
+                continue;
+            }
             let from = layer["from"].as_f64().unwrap_or_default();
             let end = from + layer["dur"].as_f64().unwrap_or_default();
             for effect in layer["fx"].as_array_mut().into_iter().flatten() {
                 if (effect["type"] == target || effect["id"] == target) && effect["on"] != false {
                     effect["on"] = json!(false);
-                    active.push((from,end));
+                    active.push((from, end));
                 }
             }
-            for edge in ["transitionIn","transitionOut"] {
+            for edge in ["transitionIn", "transitionOut"] {
                 if layer[edge]["type"] == target {
                     let duration = layer[edge]["dur"].as_f64().unwrap_or_default();
-                    active.push(if edge == "transitionIn" {(from,from+duration)} else {(end-duration,end)});
+                    active.push(if edge == "transitionIn" {
+                        (from, from + duration)
+                    } else {
+                        (end - duration, end)
+                    });
                     layer[edge] = Value::Null;
                 }
             }
         }
-        let times = times.iter().map(|time| time.as_f64().filter(|time| time.is_finite()
-            && active.iter().any(|(from,end)| time >= from && time < end))
-            .ok_or_else(|| Error::invalid(format!("{target} is not active at frame time {time}."))))
-            .collect::<Result<Vec<_>>>()?;
-        let mut disabled = pm_model::Document::new(Some(pm_model::json::parse(&raw.to_string()).map_err(failed)?), revision + 1);
-        disabled.set_saving_app_version(original.saving_app_version().map(str::to_owned));
-        let resources = self.resources(&published,true,&never).map_err(failed)?;
-        let media = crate::media::for_session(&published.snapshot,&published.media,published.path.as_deref(),
-            &crate::media::cache_root(&self.profile)).map_err(failed)?;
-        let resolver = pm_render::MapResolver { paths:media.catalog.originals.into_iter().collect(), ..Default::default() };
-        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
-        let failures = renderer.set_document_effects(original, &resources.definitions).map_err(failed)?;
-        if !failures.is_empty() || !renderer.missing_effects().is_empty() {
-            return Err(Error::invalid("Some effects failed to load. Fix the definitions before timing the project."));
+        if active.is_empty() {
+            return Err(Error::invalid(format!(
+                "{target} is not a switched-on effect or transition of a switched-on layer in composition {comp}. Name an effect type, effect id or transition type the composition uses."
+            )));
         }
-        let mut request = pm_render::RenderRequest::sized(Size::new(width,height),Precision::Float16);
+        let times = times
+            .iter()
+            .map(|time| {
+                time.as_f64()
+                    .filter(|time| {
+                        time.is_finite()
+                            && active.iter().any(|(from, end)| time >= from && time < end)
+                    })
+                    .ok_or_else(|| {
+                        Error::invalid(format!("{target} is not active at frame time {time}."))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut disabled = pm_model::Document::new(
+            Some(pm_model::json::parse(&raw.to_string()).map_err(failed)?),
+            revision + 1,
+        );
+        disabled.set_saving_app_version(original.saving_app_version().map(str::to_owned));
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let media = crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        )
+        .map_err(failed)?;
+        let resolver = pm_render::MapResolver {
+            paths: media.catalog.originals.into_iter().collect(),
+            ..Default::default()
+        };
+        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
+        let failures = renderer
+            .set_document_effects(original, &resources.definitions)
+            .map_err(failed)?;
+        if !failures.is_empty() || !renderer.missing_effects().is_empty() {
+            return Err(Error::invalid(
+                "Some effects failed to load. Fix the definitions before timing the project.",
+            ));
+        }
+        let mut request =
+            pm_render::RenderRequest::sized(Size::new(width, height), Precision::Float16);
         request.export = true;
         let mut enabled_ms = Vec::new();
         let mut disabled_ms = Vec::new();
         for time in times {
-            let ticks = Ticks::new(pm_time::ticks_from_seconds(time).map_err(failed)?).map_err(failed)?;
+            let ticks =
+                Ticks::new(pm_time::ticks_from_seconds(time).map_err(failed)?).map_err(failed)?;
             let mut render = |tree: &pm_model::Document| -> Result<f64> {
                 let started = Instant::now();
-                let frame = renderer.render(tree,comp,ticks,&request,&resolver).map_err(failed)?;
+                let frame = renderer
+                    .render(tree, comp, ticks, &request, &resolver)
+                    .map_err(failed)?;
                 if !frame.failures.is_empty() {
-                    return Err(Error::invalid(format!("Frame {time} failed: {:?}", frame.failures)));
+                    return Err(Error::invalid(format!(
+                        "Frame {time} failed: {:?}",
+                        frame.failures
+                    )));
                 }
                 renderer.wait_idle();
                 let ms = started.elapsed().as_secs_f64() * 1000.;
@@ -1923,7 +2011,7 @@ impl EngineHook for EngineJobs {
                 }
             }
         }
-        self.published_at(project,document,revision)?;
+        self.published_at(project, document, revision)?;
         Ok(json!({"revision":revision,"enabledMs":enabled_ms,"disabledMs":disabled_ms}))
     }
 
