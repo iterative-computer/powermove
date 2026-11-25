@@ -3996,6 +3996,94 @@ fn a_panel_scrolled_by_its_own_list_replays_the_steps(cx: &mut TestAppContext) {
     }
 }
 
+/// PM-732 review: a scroll moves a hover without drawing it, so the end of
+/// the scroll draws it: one notch puts the next row under the still
+/// pointer, and once the steps rest (no input) the panel draws again with
+/// that row hovered. It kept the row the notch left until something else
+/// drew the panel.
+#[gpui::test]
+fn the_end_of_a_scroll_draws_the_row_it_moved_under_the_pointer(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","width":100});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    let list =
+        json!({"display":"flex","flexDirection":"column","width":100,"height":90,"flexShrink":0});
+    ops.extend(node_ops(2, 1, "scroll", json!({ "style": list }), &[]));
+    for i in 0..40u64 {
+        ops.extend(node_ops(
+            3 + i,
+            2,
+            "div",
+            json!({"id": format!("row-{i}"), "metadata": {"hoverGroup": true},
+                "style":{"width":100,"height":20,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = "inspector".into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let body = cx.new(|_| Body {
+            child,
+            handle: Default::default(),
+            height: 100.,
+        });
+        BodyHolder { body }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let body = root.read_with(&vcx, |r, _| r.body.clone());
+    let view = body.read_with(&vcx, |b, _| b.child.clone());
+    for _ in 0..2 {
+        view.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    let at = point(px(50.), px(50.));
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.run_until_parked();
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(16));
+        vcx.simulate_frame();
+    }
+    let hovered = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.hovered_row_for_test());
+    assert_eq!(
+        hovered(&vcx).as_deref(),
+        Some("row-2"),
+        "the row under the pointer"
+    );
+    // One notch: the next row comes under the still pointer.
+    vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-20.))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    vcx.simulate_frame();
+    assert!(view.read_with(&vcx, |v, _| v.scrolling()));
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    // No input: the steps rest.
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    vcx.run_until_parked();
+    assert!(
+        !view.read_with(&vcx, |v, _| v.scrolling()),
+        "the scroll ended"
+    );
+    assert!(
+        view.read_with(&vcx, |v, _| v.renders) > rendered,
+        "the end of the scroll drew the panel"
+    );
+    assert_eq!(
+        hovered(&vcx).as_deref(),
+        Some("row-3"),
+        "the row the notch moved under the pointer is hovered"
+    );
+}
+
 /// PM-732: a list in a scroller of its own panel (`scrollOwner: "parent"`,
 /// Properties' Effects) is no scroller; one that owns its scroll is.
 #[gpui::test]
