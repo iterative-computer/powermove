@@ -3671,6 +3671,19 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
         ) {
             lock.cursor_visible.store(true, Ordering::Relaxed);
         }
+        // Powermove P-FEEL-OBSERVE: drags and scrolls for frame telemetry.
+        #[cfg(not(feature = "wgpu"))]
+        if gpui_apple::feel::observing() {
+            match &event {
+                PlatformInput::MouseMove(m) if m.pressed_button.is_some() => {
+                    gpui_apple::feel::observed_input(1)
+                }
+                PlatformInput::ScrollWheel(_) | PlatformInput::Pinch(_) => {
+                    gpui_apple::feel::observed_input(2)
+                }
+                _ => {}
+            }
+        }
         // Powermove P-FEEL: input-to-photon probe (`PM_FEEL_TRACE`).
         #[cfg(not(feature = "wgpu"))]
         if gpui_apple::feel::enabled() {

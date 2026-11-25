@@ -728,6 +728,11 @@ impl ProviderRuns {
                 let stopped = matches!(event, Event::Stopped(_));
                 let completed = matches!(event, Event::Completed { .. });
                 let run = running.target.run.clone().ok_or(Error::Stale)?;
+                if let Event::Trace { value, .. } = event
+                    && value["kind"] == "tool-start"
+                {
+                    pm_agents::stats::tool_call(&run, &value["itemId"].to_string());
+                }
                 let thread = running.target.thread.clone();
                 match event {
                     Event::Completed { result, .. } if !running.finished => {

@@ -41,3 +41,12 @@ bars, knockouts by mask, no thinner strokes or outlines.
   rename.
 - `plus.svg`: drawn full size in a 2 px line; Pierre's plus (10 of 16 px, 1.5 px) reads
   small beside the search glass.
+- `plus-thin.svg`: the Agent composer's "+", the same plus in Pierre's 1.5 px line, drawn
+  large and light beside the draft.
+- `stop.svg`: the composer's Stop inside its circle, a 10 px square with 1.5 px corners.
+
+The composer's Send arrow is Pierre's `IconArrow` turned a quarter, its chevron
+`IconChevronSm`, and the provider mark beside a model's name Pierre's `IconSparkle`
+(Claude and API or local models: Anthropic asks permission before its artwork is
+bundled) or OpenAI's blossom from `app/assets/settings-agent-icons` (see its
+`ATTRIBUTION.md`).

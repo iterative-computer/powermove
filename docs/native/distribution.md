@@ -101,12 +101,21 @@ python3 apps/native/packaging/package.py bundle \
   --update-config "$BUNDLED_UPDATE_CONFIG" \
   --sparkle-framework "$VERIFIED_SPARKLE_FRAMEWORK" \
   --sparkle-feed "$SPARKLE_APPCAST_HTTPS_URL" --sparkle-key "$SPARKLE_PUBLIC_KEY"
+python3 apps/native/packaging/package.py symbols \
+  --executable "$NATIVE_BINARY" --destination "$NEW_SYMBOLS" \
+  --version "$BUNDLE_VERSION" --build "$BUILD_NUMBER"
 python3 apps/native/packaging/package.py sign "$NEW_APP"
 python3 apps/native/packaging/package.py notarize "$NEW_APP"
 python3 apps/native/packaging/package.py transition-zip "$NEW_APP" "$NEW_ZIP"
 apps/native/packaging/build-dmg.sh "$NEW_APP" "$NEW_DMG"
 python3 apps/native/packaging/package.py notarize "$NEW_DMG"
 ```
+
+The shipping binary is built with telemetry on and its commit named:
+`PM_BUILD_COMMIT=$(git rev-parse --short=10 HEAD) CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+cargo build --release -p pm-native-app --features telemetry` (docs/telemetry.md). `symbols`
+writes the binary's dSYM and uploads it to PostHog error tracking only when the release
+secret `POSTHOG_CLI_API_KEY` is set (`POSTHOG_CLI_DRY_RUN=1` checks the command offline).
 
 These variables are operator inputs, not defaults or release authorization.
 `PM_CODESIGN_IDENTITY` selects an existing Developer ID identity at run time;

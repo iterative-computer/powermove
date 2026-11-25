@@ -2058,7 +2058,84 @@ fn side_group_heights(
         let minimum = side_group_minimum(group, t, natural.get(group.active()).copied());
         *height = height.min(viewport_height).max(minimum);
     }
+    fit_agent_column(groups, &mut heights, viewport_height - gaps, t, natural);
     heights
+}
+
+/// The Agent's composer is the panel's bottom edge, so a column showing the
+/// Agent fits its viewport rather than scrolling (PM-717: at 1440 × 900,
+/// under Properties and Effects, Send sat under the status bar). The other
+/// groups give way first, down to their least (their bodies scroll), then
+/// the Agent, down to its composer. Columns without it scroll as before.
+fn fit_agent_column(
+    groups: &[Group],
+    heights: &mut [f32],
+    room: f32,
+    t: &Tokens,
+    natural: &BTreeMap<String, f32>,
+) {
+    let Some(agent) = groups
+        .iter()
+        .position(|g| !g.collapsed && g.active() == "agent")
+    else {
+        return;
+    };
+    let least: Vec<f32> = groups
+        .iter()
+        .map(|g| side_group_minimum(g, t, natural.get(g.active()).copied()))
+        .collect();
+    let mut over = heights.iter().sum::<f32>() - room;
+    for agent_turn in [false, true] {
+        if over <= 0. {
+            break;
+        }
+        let turn: Vec<usize> = (0..groups.len())
+            .filter(|&i| (i == agent) == agent_turn)
+            .collect();
+        let slack: f32 = turn.iter().map(|&i| (heights[i] - least[i]).max(0.)).sum();
+        if slack <= 0. {
+            continue;
+        }
+        let take = over.min(slack);
+        for &i in &turn {
+            heights[i] -= (heights[i] - least[i]).max(0.) * take / slack;
+        }
+        over -= take;
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_column_showing_the_agent_fits_its_viewport() {
+    let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+    let group = |id: &str, size: Option<f32>| Group {
+        tabs: vec![id.into()],
+        active: 0,
+        collapsed: false,
+        size,
+    };
+    // PM-717's column at 1440 × 900: Properties at its content, Effects and
+    // the Agent at their saved heights, more than the column holds.
+    let groups = [
+        group("inspector", None),
+        group("fxbrowser", Some(250.)),
+        group("agent", Some(330.)),
+    ];
+    let natural = BTreeMap::from([("inspector".to_owned(), 282.)]);
+    let gaps = 2. * t.metrics.dock_gap;
+    let viewport = 780.;
+    let h = side_group_heights(&groups, viewport, 900., &t, &natural, &BTreeMap::new());
+    assert!(h.iter().sum::<f32>() + gaps <= viewport + 0.01, "{h:?}");
+    // The others gave way; the Agent keeps its height.
+    assert_eq!(h[2], 330.);
+    // Short of room even at the others' least: the Agent comes down too,
+    // never below its composer.
+    let h = side_group_heights(&groups, 420., 900., &t, &natural, &BTreeMap::new());
+    assert!(h.iter().sum::<f32>() + gaps <= 420. + 0.01, "{h:?}");
+    assert!(h[2] >= t.agent_panel_minimum_height() && h[2] < 330.);
+    // Without the Agent a column still scrolls past its viewport.
+    let h = side_group_heights(&groups[..2], 300., 900., &t, &natural, &BTreeMap::new());
+    assert!(h.iter().sum::<f32>() > 300.);
 }
 
 #[cfg(test)]

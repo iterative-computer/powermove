@@ -1951,6 +1951,36 @@ fn print(cases: &[Case]) {
     }
 }
 
+/// `PM_UI_LATENCY_TELEMETRY=1` (a binary built `--features telemetry`):
+/// telemetry runs during the catalogue as in the app, capturing every
+/// command, tool, panel and frame. The bench attaches no library, so
+/// Settings never answers: the worker holds events in memory and nothing
+/// can leave the process (PM-715's "bench with telemetry on").
+fn telemetry_for_the_bench() {
+    if std::env::var_os("PM_UI_LATENCY_TELEMETRY").is_none() {
+        return;
+    }
+    // SAFETY: set before telemetry starts reading the environment.
+    unsafe { std::env::set_var("PM_TELEMETRY_DEV", "1") };
+    let profile = tempfile::tempdir().expect("telemetry profile").keep();
+    let mode = pm_telemetry::init(pm_telemetry::Config {
+        profile,
+        app_version: "bench".into(),
+        build: "bench".into(),
+        bundle_id: Some("com.powermove.native.dev.bench".into()),
+        headless: false,
+        development: true,
+        debug_build: cfg!(debug_assertions),
+        displays: (1, 2.),
+        metal_bytes: None,
+    });
+    assert_eq!(mode, pm_telemetry::Mode::Internal, "build the bench with --features telemetry");
+    assert!(pm_telemetry::enabled() && !pm_telemetry::sharing());
+    pm_telemetry::main_thread::install();
+    gpui_macos::feel::observe(pm_telemetry::frame, pm_telemetry::note_input);
+    eprintln!("ui-latency: telemetry on (capturing, nothing leaves)");
+}
+
 #[gpui::test]
 fn ui_latency_catalogue(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -1961,6 +1991,7 @@ fn ui_latency_catalogue(cx: &mut TestAppContext) {
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
     }
+    telemetry_for_the_bench();
     let mut cases = vec![];
     // Priority first: the tester's "moving and resizing shapes lags".
     guarded(&mut cases, "viewer", |out| viewer_cases(cx, out));

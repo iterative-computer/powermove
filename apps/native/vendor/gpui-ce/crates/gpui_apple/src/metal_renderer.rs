@@ -994,6 +994,8 @@ impl MetalRenderer {
     /// `None` when there is no drawable or encoding failed: nothing was shown
     /// and nothing needs undoing.
     pub fn prepare(&mut self, scene: &Scene) -> Option<PreparedFrame> {
+        // The frame's work ends here, before any wait for a drawable.
+        crate::feel::observed_frame();
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {

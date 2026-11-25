@@ -845,7 +845,7 @@ export type Menu = (request: {
   placeholder: string;
   options: MenuOption[];
   /** Composer pop-ups track their button rather than the legacy field menu. */
-  picker?: "model" | "effort" | "access";
+  picker?: "model" | "effort" | "access" | "add";
   search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
@@ -915,30 +915,52 @@ function Trigger({
     </UI.ToolbarItem>
   );
 }
-function Picker({
-  id,
-  label,
-  text,
+/** The composer's model chooser: the provider's mark, the model's name, its
+ * reasoning effort in the secondary ink and one chevron, read as one
+ * control. The name opens the model menu and the effort its own menu (the
+ * window's composer menus); a model with no effort levels shows none. */
+function ModelChooser({
+  provider,
+  model,
+  effort,
   disabled,
   opened,
-  quiet: secondary = false,
-  title,
-  open,
-  flexible = false,
+  openModels,
+  openEffort,
 }: {
-  id: string;
-  label: string;
-  text: string;
+  provider: string;
+  model: string;
+  /** Null for a model with no effort levels. */
+  effort: string | null;
   disabled: boolean;
-  opened: boolean;
-  /** A run option beside the model: its value in the secondary ink. */
-  quiet?: boolean;
-  flexible?: boolean;
-  title: string;
-  open: (anchor: number) => void;
+  opened: string | null;
+  openModels: (anchor: number) => void;
+  openEffort: (anchor: number) => void;
 }) {
-  const ink = t(disabled ? "colors.muted" : secondary ? "colors.secondary" : "colors.text");
-  return (
+  const name = t(disabled ? "colors.faint" : "colors.secondary");
+  const quietInk = t(disabled ? "colors.faint" : "colors.muted");
+  const chevron = (
+    <div
+      metadata={{ symbol: "composer.chevron" }}
+      style={{
+        flexShrink: 0,
+        width: t("metrics.composer_symbol"),
+        height: t("metrics.composer_symbol"),
+        symbolSize: t("metrics.composer_symbol"),
+        color: quietInk,
+      }}
+    />
+  );
+  const part = (
+    id: string,
+    label: string,
+    title: string,
+    open: (anchor: number) => void,
+    first: boolean,
+    last: boolean,
+    flexible: boolean,
+    children: ComponentChildren,
+  ) => (
     <button
       id={id}
       role="button"
@@ -946,9 +968,9 @@ function Picker({
       label={label}
       title={title}
       disabled={disabled}
-      open={opened}
+      open={opened === id.slice("agent-".length)}
       aria-haspopup="menu"
-      aria-expanded={opened}
+      aria-expanded={opened === id.slice("agent-".length)}
       metadata={{ menuAnchor: true }}
       preventDefault={{ keydown: ["Enter", " "] }}
       onClick={(e) => {
@@ -962,31 +984,77 @@ function Picker({
         ...target,
         ...row,
         ...(flexible ? shrink : { flexShrink: 0 }),
-        gap: t("metrics.pill_inset"),
-        height: t("metrics.control"),
-        paddingLeft: t("metrics.pill_inset"),
-        paddingRight: t("metrics.pill_inset"),
-        // Quiet on the composer's surface; filled only while its menu is
-        // open, with the corner of the row's other controls.
-        ...(opened ? { background: t("colors.selected_fill") } : {}),
+        gap: t("space.sm"),
+        height: t("metrics.hit"),
+        // The two halves meet without a seam: each pads only its outer side.
+        paddingLeft: t(first ? "space.md" : "space.xs"),
+        paddingRight: t(last ? "space.md" : "space.hair"),
+        ...(opened === id.slice("agent-".length) ? { background: t("colors.selected_fill") } : {}),
         borderRadius: t("metrics.inner_radius"),
-        color: ink,
       }}
     >
-      <text
-        style={{
-          ...quiet,
-          ...(flexible ? { ...shrink, textOverflow: "ellipsis" } : { flexShrink: 0 }),
-          color: ink,
-          whiteSpace: "nowrap",
-        }}
-      >
-        {text}
-      </text>
-      <div metadata={{ symbol: "chevron.up.chevron.down" }} style={{
-        flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
-      }} />
+      {children}
     </button>
+  );
+  return (
+    <div id="agent-chooser" style={{ ...row, ...shrink }}>
+      {part(
+        "agent-model",
+        `Model, ${model}`,
+        "Model",
+        openModels,
+        true,
+        effort === null,
+        true,
+        <>
+          <div
+            metadata={{ symbol: `provider.${provider}` }}
+            style={{
+              flexShrink: 0,
+              width: t("metrics.symbol_panel"),
+              height: t("metrics.symbol_panel"),
+              symbolSize: t("metrics.symbol_panel"),
+              color: name,
+            }}
+          />
+          <text
+            style={{
+              ...shrink,
+              fontSize: t("typography.reading"),
+              color: name,
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {model.replace(/\s*\([^)]*context[^)]*\)/i, "")}
+          </text>
+          {effort === null && chevron}
+        </>,
+      )}
+      {effort !== null &&
+        part(
+          "agent-effort",
+          `Reasoning effort, ${effort}`,
+          "Reasoning effort",
+          openEffort,
+          false,
+          true,
+          false,
+          <>
+            <text
+              style={{
+                flexShrink: 0,
+                fontSize: t("typography.reading"),
+                color: quietInk,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {effort}
+            </text>
+            {chevron}
+          </>,
+        )}
+    </div>
   );
 }
 function Header({
@@ -2693,7 +2761,7 @@ function Composer({
     ? "Connect an agent to start"
     : working
       ? "Add direction…"
-      : "Describe a change…";
+      : "Ask, edit, build anything.";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
   // The composer's one surface: lifted off the panel; in the popover, whose
   // ground is the floating surface, a step more. Drops add only the
@@ -2901,6 +2969,88 @@ function Composer({
       if (typeof id === "string") send({ type: "chooseSlash", id });
     });
   }, [slashDraft]);
+  // The "+" menu: what can go with the draft, then how far the agent may go
+  // on its own (Approvals). Its rows are the window's composer menu.
+  const full = s.attachments.length >= 6;
+  const canAttach = !disabled;
+  const canApprove = !!menu && !working && !s.composerDisabled;
+  const openAdd = (anchor: number) => {
+    awaiting.current = null;
+    const epoch = ++menuEpoch.current;
+    setOpenPicker("add");
+    const options: MenuOption[] = [];
+    if (canAttach && full)
+      options.push({ label: "A message can carry six attachments", value: "", informational: true });
+    else if (canAttach)
+      options.push(
+        { label: "Add Files…", value: "attach" },
+        // v1's: drag a box anywhere over the editor; the agent gets what
+        // was under it (the composition there, or the window).
+        { label: "Select Part of the Screen", value: "pickRegion" },
+      );
+    if (canApprove)
+      options.push(
+        ...(Object.keys(ACCESS) as Access[]).map((value) => ({
+          label: ACCESS[value].label,
+          detail: ACCESS[value].detail,
+          value,
+          checked: value === s.settings.access,
+          category: "Approvals",
+        })),
+      );
+    void menu?.({ anchor, picker: "add", search: false, placeholder: "", options }).then((choice) => {
+      if (menuEpoch.current !== epoch) return;
+      setOpenPicker(null);
+      if (choice === "attach") send({ type: "attach" });
+      else if (choice === "pickRegion") send({ type: "pickRegion" });
+      else if (typeof choice === "string" && choice in ACCESS && choice !== s.settings.access)
+        send({ type: "setAccess", access: choice as Access });
+    });
+  };
+  const openEffort = (anchor: number) => {
+    awaiting.current = null;
+    const epoch = ++menuEpoch.current;
+    setOpenPicker("effort");
+    void menu?.({
+      anchor,
+      picker: "effort",
+      search: false,
+      placeholder: "",
+      options: efforts.map((value) => ({
+        label: effortLabel(value),
+        value,
+        checked: value === s.settings.effort,
+      })),
+    }).then((choice) => {
+      if (menuEpoch.current !== epoch) return;
+      setOpenPicker(null);
+      if (typeof choice === "string" && choice !== s.settings.effort)
+        send({ type: "setModel", model: s.settings.model, effort: choice });
+    });
+  };
+  const ready = !disabled && !submitting && s.sendable;
+  // Send and Stop are one circle at the row's end: a dim disc while there
+  // is nothing to send, the text ink once there is (or while a run can be
+  // stopped). With a draft during a run, Stop steps back beside Send.
+  const circle = (lit: boolean): Style => ({
+    ...row,
+    justifyContent: "center",
+    width: t("metrics.composer_control"),
+    height: t("metrics.composer_control"),
+    borderRadius: t("metrics.composer_control"),
+    background: t(lit ? "colors.text" : "colors.composer_send_idle"),
+    color: t(lit ? (n.presentation === "popover" ? "colors.raised" : "colors.floating") : "colors.muted"),
+    symbolSize: t("metrics.composer_symbol"),
+  });
+  const hitBox: Style = {
+    ...target,
+    ...row,
+    justifyContent: "center",
+    flexShrink: 0,
+    width: t("metrics.hit"),
+    height: t("metrics.hit"),
+    borderRadius: t("metrics.hit"),
+  };
   return (
     <div
       id="agent-composer"
@@ -2920,13 +3070,12 @@ function Composer({
             paths: (e.drag?.data["public.file-url"] ?? []) as string[],
           });
       }}
-      // One surface: the draft written straight on it, and under the draft
-      // one row of its actions and run options. Its corner follows the
-      // panel's (or the popover's) corner it sits `text_padding` inside.
+      // One surface: the draft written straight on it, then under it one
+      // row: "+", the model chooser, and Send at the end. Its corner follows
+      // the panel's (or the popover's) corner it sits `text_padding` inside.
       style={{
         ...column,
         flexShrink: 0,
-        gap: t("metrics.gap"),
         background: surface,
         borderRadius: t(
           n.presentation === "popover"
@@ -2935,42 +3084,47 @@ function Composer({
         ),
         borderWidth: t("metrics.border"),
         borderColor: t("colors.hairline"),
-        padding: t("metrics.gap"),
         marginLeft: t("metrics.text_padding"),
         marginRight: t("metrics.text_padding"),
         marginBottom: t("metrics.text_padding"),
       }}
     >
-      {s.attachments.length > 0 && (
+      {(s.attachments.length > 0 || dropTarget || (s.draft.citations?.length ?? 0) > 0) && (
         <div
           style={{
-            ...row,
-            alignItems: "start",
-            flexWrap: "wrap",
+            ...column,
             gap: t("metrics.gap"),
+            paddingTop: t("space.md"),
+            paddingLeft: t("space.md"),
+            paddingRight: t("space.md"),
           }}
         >
-          {s.attachments.map((a) => (
-            <AttachmentTile
-              key={a.id}
-              a={a}
-              armed={s.draft.armed === a.id}
-              send={send}
-            />
-          ))}
+          {s.attachments.length > 0 && (
+            <div
+              style={{
+                ...row,
+                alignItems: "start",
+                flexWrap: "wrap",
+                gap: t("metrics.gap"),
+              }}
+            >
+              {s.attachments.map((a) => (
+                <AttachmentTile
+                  key={a.id}
+                  a={a}
+                  armed={s.draft.armed === a.id}
+                  send={send}
+                />
+              ))}
+            </div>
+          )}
+          <CitationChips key={s.threadId} s={s} send={send} />
+          {dropTarget && (
+            <text style={{ ...quiet, color: t("colors.accent_text") }}>
+              Drop to attach
+            </text>
+          )}
         </div>
-      )}
-      <CitationChips key={s.threadId} s={s} send={send} />
-      {dropTarget && (
-        <text
-          style={{
-            ...quiet,
-            color: t("colors.accent_text"),
-            paddingLeft: t("metrics.text_padding"),
-          }}
-        >
-          Drop to attach
-        </text>
       )}
       <Field
         // Keep the same editor throughout a send. A thread change or a
@@ -3011,127 +3165,62 @@ function Composer({
           }
         }}
         style={{
-          ...reading,
+          fontSize: t("typography.composer"),
+          color: t("colors.text"),
           background: surface,
           minWidth: t("metrics.hit"),
         }}
       />
       <div
         id="agent-options"
-        // Every control carries its own padding: the row adds none, so a
-        // dock at its narrowest still shows each value whole.
+        // The row stands `space.xl` under the field (about 24 pt under the
+        // draft's last line). Send's circle, centred in its hit target,
+        // keeps 10 pt to the composer's trailing and bottom edges; "+"
+        // lines up under the draft.
         style={{
           ...row,
-          height: t("metrics.control"),
+          height: t("metrics.hit"),
+          marginTop: t("space.xl"),
+          marginBottom: t("space.md"),
+          paddingLeft: t("space.sm"),
+          paddingRight: t("space.md"),
+          gap: t("space.xs"),
         }}
       >
-        <UI.ToolbarItem
-          id="agent-attach"
-          label="Add attachments"
-          title={
-            s.attachments.length >= 6
-              ? "A message can carry six attachments"
-              : "Add images, video, audio or documents"
-          }
-          metadata={{ symbol: "plus" }}
-          disabled={disabled || s.attachments.length >= 6}
-          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
-          onClick={() => send({ type: "attach" })}
-        />
-        {/* v1's: drag a box anywhere over the editor; the agent gets
-            what was under it (the composition there, or the window). */}
-        <UI.ToolbarItem
-          id="agent-pick-region"
-          label="Select part of the screen"
-          title={
-            s.attachments.length >= 6
-              ? "A message can carry six attachments"
-              : "Select part of the screen for the agent"
-          }
-          metadata={{ symbol: "rectangle.dashed" }}
-          disabled={disabled || s.attachments.length >= 6}
-          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
-          onClick={() => send({ type: "pickRegion" })}
-        />
-        <Picker
-          id="agent-model"
-          flexible
-          title="Model"
-          label={`Model, ${modelName}`}
-          text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}
-          disabled={!menu || choicesLocked}
-          opened={openPicker === "model"}
-          open={openModels}
-        />
-        {efforts.length > 0 && (
-          <Picker
-            id="agent-effort"
-            title="Reasoning effort"
-            label={`Reasoning effort, ${effortName}`}
-            text={effortName}
-            quiet
-            disabled={!menu || choicesLocked}
-            opened={openPicker === "effort"}
-            open={(anchor) => {
-              awaiting.current = null;
-              const epoch = ++menuEpoch.current;
-              setOpenPicker("effort");
-              void menu?.({
-                anchor,
-                picker: "effort",
-                search: false,
-                placeholder: "",
-                options: efforts.map((value) => ({
-                  label: effortLabel(value),
-                  value,
-                  checked: value === s.settings.effort,
-                })),
-              }).then((choice) => {
-                if (menuEpoch.current !== epoch) return;
-                setOpenPicker(null);
-                if (typeof choice === "string" && choice !== s.settings.effort)
-                  send({
-                    type: "setModel",
-                    model: s.settings.model,
-                    effort: choice,
-                  });
-              });
-            }}
-          />
-        )}
-        <Picker
-          id="agent-access"
-          flexible
-          title="Approvals"
-          label={`Approvals, ${ACCESS[s.settings.access].label}`}
-          text={ACCESS[s.settings.access].label}
-          quiet
-          disabled={!menu || working || s.composerDisabled}
-          opened={openPicker === "access"}
-          open={(anchor) => {
-            awaiting.current = null;
-            const epoch = ++menuEpoch.current;
-            setOpenPicker("access");
-            void menu?.({
-              anchor,
-              picker: "access",
-              search: false,
-              placeholder: "",
-              options: (Object.keys(ACCESS) as Access[]).map((value) => ({
-                label: ACCESS[value].label,
-                detail: ACCESS[value].detail,
-                value,
-                checked: value === s.settings.access,
-              })),
-            }).then((choice) => {
-              if (menuEpoch.current !== epoch) return;
-              setOpenPicker(null);
-              if (typeof choice === "string" && choice !== s.settings.access)
-                send({ type: "setAccess", access: choice as Access });
-            });
+        <button
+          id="agent-add"
+          role="button"
+          tabIndex={0}
+          label="Add"
+          title="Add files or part of the screen, or choose approvals"
+          disabled={!menu || !(canAttach || canApprove)}
+          open={openPicker === "add"}
+          aria-haspopup="menu"
+          aria-expanded={openPicker === "add"}
+          metadata={{ menuAnchor: true, symbol: "composer.add" }}
+          preventDefault={{ keydown: ["Enter", " "] }}
+          onClick={(e) => openAdd(Number(e.currentTarget))}
+          onKeyDown={(e) => {
+            if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key === "Enter" || e.key === " ") openAdd(Number(e.currentTarget));
+          }}
+          style={{
+            ...hitBox,
+            ...(openPicker === "add" ? { background: t("colors.selected_fill") } : {}),
+            color: t("colors.secondary"),
+            symbolSize: t("metrics.composer_add_symbol"),
           }}
         />
-        <div style={{ flexGrow: 1 }} />
+        <ModelChooser
+          provider={s.settings.provider}
+          model={modelName}
+          effort={efforts.length > 0 ? effortName : null}
+          disabled={!menu || choicesLocked}
+          opened={openPicker}
+          openModels={openModels}
+          openEffort={openEffort}
+        />
+        <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
         {working && (
           <button
             id="agent-stop"
@@ -3140,21 +3229,11 @@ function Composer({
             title="Stop current run"
             tabIndex={0}
             disabled={s.stopping}
-            metadata={{ symbol: "stop.fill" }}
             onClick={stop}
-            style={{
-              ...target,
-              ...row,
-              justifyContent: "center",
-              flexShrink: 0,
-              width: t("metrics.control"),
-              height: t("metrics.control"),
-              borderRadius: t("metrics.inner_radius"),
-              background: t("colors.text"),
-              color: t("colors.floating"),
-              symbolSize: t("metrics.symbol_inline"),
-            }}
-          />
+            style={hitBox}
+          >
+            <div metadata={{ symbol: "composer.stop" }} style={circle(!hasDraft && !s.stopping)} />
+          </button>
         )}
         {(!working || hasDraft) && (
           <button
@@ -3164,7 +3243,6 @@ function Composer({
             title={sendLabel}
             tabIndex={0}
             disabled={disabled || submitting || !s.sendable}
-            metadata={{ symbol: "return" }}
             onClick={(event) => {
               const text = event.value;
               const composerEpoch = event.composerEpoch ?? s.draft.sent;
@@ -3175,28 +3253,10 @@ function Composer({
                   ...(composerEpoch === undefined ? {} : { composerEpoch }),
                 });
             }}
-            style={{
-              ...target,
-              ...row,
-              justifyContent: "center",
-              flexShrink: 0,
-              width: t("metrics.control"),
-              height: t("metrics.control"),
-              // Apart from Stop beside it during a run (the row has no gap).
-              ...(working ? { marginLeft: t("metrics.gap") } : {}),
-              borderRadius: t("metrics.inner_radius"),
-              symbolSize: t("metrics.symbol_panel"),
-              // A quiet square until there is something to send (v1's).
-              background: t(
-                !disabled && !submitting && s.sendable ? "colors.accent" : "colors.raised",
-              ),
-              color: t(
-                !disabled && !submitting && s.sendable
-                  ? "colors.selected_text"
-                  : "colors.muted",
-              ),
-            }}
-          />
+            style={hitBox}
+          >
+            <div metadata={{ symbol: "composer.send" }} style={circle(ready)} />
+          </button>
         )}
       </div>
     </div>

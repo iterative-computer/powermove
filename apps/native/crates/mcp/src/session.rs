@@ -1761,36 +1761,50 @@ impl McpSession {
             };
             assert_project(&session, &host, &id)?;
             host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
-            if self.agent_token.is_some() {
-                host.agent_turn(&id, self.writer, false)?;
-            }
-            if let Some(owner) = &session.owner
-                && let Some(receipt) = host.completion_receipt_mut(owner)
-            {
-                receipt.unsafe_undo |= session.external_actions || session.panel_actions;
-                receipt.changed |= session.external_actions || session.panel_actions;
-            }
-            let Some(tx) = session.transaction.as_ref() else {
-                return Ok(json!({"changed":session.committed}));
-            };
-            if commit {
-                let history = checkpoint(&mut session, &mut host, &id, self.agent_token.is_some())?;
-                return Ok(json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}));
-            }
-            if session.panel_actions {
-                let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
-                if changed {
-                    return Err(Error::invalid(
-                        "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
-                    ));
+            let (agent, writer) = (self.agent_token.is_some(), self.writer);
+            let rolled_back = &mut self.rolled_back;
+            let ended = (|| {
+                if let Some(owner) = &session.owner
+                    && let Some(receipt) = host.completion_receipt_mut(owner)
+                {
+                    receipt.unsafe_undo |= session.external_actions || session.panel_actions;
+                    receipt.changed |= session.external_actions || session.panel_actions;
                 }
-                return Ok(json!({"changed":session.committed || changed,"historyId":null}));
-            }
-            if tx.changed {
-                rollback(&mut session, &mut host, &id, self.writer)?;
-                self.rolled_back = true;
-            }
-            Ok(json!({"changed":session.committed,"historyId":null}))
+                let Some(tx) = session.transaction.as_ref() else {
+                    return Ok(json!({"changed":session.committed}));
+                };
+                if commit {
+                    let history = checkpoint(&mut session, &mut host, &id, agent)?;
+                    return Ok(
+                        json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}),
+                    );
+                }
+                if session.panel_actions {
+                    let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
+                    if changed {
+                        return Err(Error::invalid(
+                            "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
+                        ));
+                    }
+                    return Ok(json!({"changed":session.committed || changed,"historyId":null}));
+                }
+                if tx.changed {
+                    rollback(&mut session, &mut host, &id, writer)?;
+                    *rolled_back = true;
+                }
+                Ok(json!({"changed":session.committed,"historyId":null}))
+            })();
+            // The run's steps are one step before its turn is unfenced: a
+            // person's Undo in between takes back their own newest step, never
+            // one tool call of the run (PM-718).
+            let unfenced = if agent {
+                host.agent_turn(&id, writer, false)
+            } else {
+                Ok(())
+            };
+            let value = ended?;
+            unfenced?;
+            Ok(value)
         })();
         if let Some(root) = session.workspace {
             let cleanup = archive_workspace(&root, commit);

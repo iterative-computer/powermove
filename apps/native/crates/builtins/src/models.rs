@@ -2670,6 +2670,7 @@ fn profile_key(key: &str) -> bool {
             | "autoDownloadCloudMedia"
             | "restoreWindows"
             | "openProjectsIn"
+            | "shareUsageData"
     )
 }
 

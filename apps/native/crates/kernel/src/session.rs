@@ -830,6 +830,11 @@ impl Kernel {
                                 .map_err(failure)?;
                         }
                         self.library = Some(writer);
+                        // Telemetry waits for this: Settings' sharing value,
+                        // read from the library that just loaded.
+                        pm_telemetry::set_sharing(crate::kernel::share_usage(
+                            self.state.settings.get(crate::kernel::SHARE_USAGE),
+                        ));
                         Ok(ShellReply::Library(OpenDecision::Writable))
                     }
                     Err(decision) => Ok(ShellReply::Library(decision)),

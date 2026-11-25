@@ -162,6 +162,14 @@ impl Client {
                 }
             }
             "result" => {
+                // Telemetry counts: the turns and tokens this result reports.
+                crate::stats::turns(&self.run, v["num_turns"].as_u64().unwrap_or(1) as u32);
+                let usage = &v["usage"];
+                let input = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+                    .iter()
+                    .filter_map(|k| usage[*k].as_u64())
+                    .reduce(|a, b| a + b);
+                crate::stats::tokens(&self.run, input, usage["output_tokens"].as_u64());
                 let failed = v["is_error"] == true
                     || v["subtype"] == "error"
                     || v["subtype"]

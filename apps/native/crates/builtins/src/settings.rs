@@ -896,6 +896,13 @@ impl Backend {
                     .push(("command".into(), json!({"name": "checkForUpdates"})));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            // Settings › Privacy › What We Collect: the public list.
+            Some("row") if action["action"] == "privacy.what-we-collect" => {
+                self.native
+                    .platform
+                    .push(("command".into(), json!({"name": "openTelemetryDocs"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // The After Effects workspace comes over with the agent, in its panel.
             Some("row") if action["action"] == "workspace.import" => {
                 self.native
@@ -1196,7 +1203,7 @@ pub(crate) fn validate_profile(key: &str, value: &Value) -> Result<(), String> {
         "previewMemoryMiB" => value
             .as_f64()
             .is_some_and(|n| [0., 128., 256., 512., 1024., 2048.].contains(&n)),
-        "autoDownloadCloudMedia" | "restoreWindows" => value.is_boolean(),
+        "autoDownloadCloudMedia" | "restoreWindows" | "shareUsageData" => value.is_boolean(),
         _ => false,
     };
     if valid {

@@ -1022,12 +1022,7 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         use pm_shell::transient::ComposerPicker;
-        let picker = match request.input["picker"].as_str() {
-            Some("model") => Some(ComposerPicker::Model),
-            Some("effort") => Some(ComposerPicker::Effort),
-            Some("access") => Some(ComposerPicker::Access),
-            _ => None,
-        };
+        let picker = ComposerPicker::named(request.input["picker"].as_str());
         let search = picker.map(|kind| kind == ComposerPicker::Model && request.input["search"] == true);
         let options = request.input["options"]
             .as_array()

@@ -3110,6 +3110,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         }
                         exact
                     });
+                pm_telemetry::note_viewer_frame(
+                    f.spec.moment == Moment::Playing,
+                    f.spec.moment == Moment::Scrub,
+                    t.display.filter(|t| *t > 0.),
+                );
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.spec.time,
