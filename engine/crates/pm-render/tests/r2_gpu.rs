@@ -6,7 +6,7 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{PixelRect, Size};
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::{Value, json};
-use support::doc::{ch, layer, load, no_fill, project};
+use support::doc::{ch, layer, load, no_fill, project, solid_fill};
 use support::ticks;
 
 static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -17,7 +17,10 @@ fn renderer() -> Renderer {
 }
 
 fn document(w: u32, h: u32, linear: bool, layers: Vec<Value>) -> pm_model::Document {
-    let mut value = project(w, h, 2.0, no_fill(), layers);
+    load_project(project(w, h, 2.0, no_fill(), layers), linear)
+}
+
+fn load_project(mut value: Value, linear: bool) -> pm_model::Document {
     value["colorDepth"] = json!(16);
     value["color"] = json!({"mode":"standard","linearBlending":linear});
     let mut doc = load(&value);
@@ -206,12 +209,18 @@ fn a_padded_effect_keeps_the_same_bits_in_a_viewport_accumulator() {
     let mut front = layer(
         "front",
         "solid",
-        json!({"color":"#FF60B080","w":100,"h":67}),
-        117.25,
-        71.75,
+        json!({"color":"#FF60B080","w":145,"h":250}),
+        4.25,
+        51.75,
         2.0,
     );
     front["fx"] = json!([blur("soften", 8.0)]);
+    front["group"] = json!("inner");
+    let mut inner = layer("inner", "group", json!({}), 0., 0., 2.0);
+    inner["group"] = json!("outer");
+    inner["fx"] = json!([blur("inner-soften", 4.0)]);
+    let mut outer = layer("outer", "group", json!({}), 0., 0., 2.0);
+    outer["fx"] = json!([blur("outer-soften", 5.0)]);
     let back = layer(
         "back",
         "solid",
@@ -220,21 +229,64 @@ fn a_padded_effect_keeps_the_same_bits_in_a_viewport_accumulator() {
         86.25,
         2.0,
     );
-    let doc = document(w, h, true, vec![front, back]);
-    r.set_main_effects_for_document(&doc).unwrap();
-    let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
-    let crop = PixelRect {
-        x: 103,
-        y: 57,
-        width: 121,
-        height: 87,
-    };
-    request.region = Some(crop);
-    r.set_early_target_release(false);
-    let reference = render(&mut r, &doc, 0.5, &request);
-    r.set_early_target_release(true);
-    let candidate = render(&mut r, &doc, 0.5, &request);
-    assert_raw_equal(&reference, &candidate, crop.width, "padded effect viewport");
+    let crops = [
+        PixelRect {
+            x: 103,
+            y: 57,
+            width: 121,
+            height: 87,
+        },
+        PixelRect {
+            x: 0,
+            y: 57,
+            width: 121,
+            height: 87,
+        },
+        PixelRect {
+            x: 24,
+            y: h - 87,
+            width: 121,
+            height: 87,
+        },
+    ];
+    for checker in [false, true] {
+        let mut layers = vec![front.clone(), inner.clone(), outer.clone(), back.clone()];
+        if checker {
+            // A checker behind the nested effects makes a displaced raster
+            // origin visible even where the foreground is transparent.
+            let tile = 32;
+            for y in (0..h).step_by(tile as usize) {
+                for x in (0..w).step_by(tile as usize) {
+                    if (x / tile + y / tile) % 2 == 1 {
+                        layers.push(layer(
+                            &format!("tile-{x}-{y}"),
+                            "solid",
+                            json!({"color":"#94A0AC","w":tile,"h":tile}),
+                            f64::from(x),
+                            f64::from(y),
+                            2.0,
+                        ));
+                    }
+                }
+            }
+        }
+        let doc = load_project(project(w, h, 2.0, solid_fill("#343840"), layers), true);
+        r.set_main_effects_for_document(&doc).unwrap();
+        for crop in crops {
+            let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+            request.region = Some(crop);
+            r.set_early_target_release(false);
+            let reference = render(&mut r, &doc, 0.5, &request);
+            r.set_early_target_release(true);
+            let candidate = render(&mut r, &doc, 0.5, &request);
+            assert_raw_equal(
+                &reference,
+                &candidate,
+                crop.width,
+                &format!("nested viewport, checker={checker}, crop={crop:?}"),
+            );
+        }
+    }
 }
 
 /// A certification probe for the default-off wrapper elision. Run the
