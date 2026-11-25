@@ -2837,14 +2837,15 @@ function Composer({
       value: `model:${v}`,
       checked: v === s.settings.model,
       category: providerGroup(harness, v),
-      provider: harness,
+      // The menu heads each provider's models with the provider's name.
+      provider: providerGroup(harness, v).toLowerCase(),
     }));
     if (harness === "aero")
       rows.push({
-        label: "Aerolite",
-        detail: "Coming later",
+        label: "Aerolite · Coming later",
         value: "",
         category: "Powermove",
+        provider: "powermove",
         informational: true,
       });
     if (native.current.findingModels && !rows.some((r) => r.value.startsWith("model:")))

@@ -1099,7 +1099,17 @@ fn launch_request(
             )?
         },
         provider: settings.provider,
-        model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
+        // Codex and Claude Code run their own default when none is chosen;
+        // Powermove runs the model its picker shows as the default.
+        model: Some(if settings.provider == Provider::Aero {
+            state.panel.session(thread).map_or_else(
+                |_| settings.model.clone(),
+                |s| s.catalog.resolve(&settings.model).to_owned(),
+            )
+        } else {
+            settings.model.clone()
+        })
+        .filter(|m| !m.is_empty()),
         // The effort the picker shows is the one that runs: with none saved,
         // the model's default, sent by name (Claude Code names none of its own).
         effort: Some(

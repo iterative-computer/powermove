@@ -2059,11 +2059,11 @@ test("with the Powermove harness: a segmented harness control, then models group
   expect(rows.map((o) => [o.category, o.label, o.informational ?? false])).toEqual([
     ["OpenAI", "GPT-6 Sol", false],
     ["Anthropic", "Claude Opus 5.5", false],
-    ["Powermove", "Aerolite", true],
+    ["Powermove", "Aerolite · Coming later", true],
     ["Custom", "llama-4", false],
     [" ", "Add a provider…", false],
   ]);
-  expect(rows.find((o) => o.label === "Aerolite")!.detail).toBe("Coming later");
+  expect(rows.map((o) => o.provider)).toEqual(["openai", "anthropic", "powermove", "custom", undefined]);
   expect(actions).toEqual([
     { type: "setModel", model: "anthropic/claude-opus-5-5", effort: p.snapshot.settings.effort },
     { type: "openSettings" },

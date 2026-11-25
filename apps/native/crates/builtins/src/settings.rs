@@ -142,7 +142,12 @@ impl Backend {
                     None => ("Sign in with ChatGPT", [status.email.clone(), status.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")),
                 };
                 let label = if status.key.is_some() { "Remove" } else { "Sign Out" };
-                let mut r = action(row("openai", "OpenAI", method), "providers.openai.sign-out", label, format!("Signed in{}. {both}", if name.is_empty() { String::new() } else { format!(" as {name}") }));
+                let detail = match (&status.key, name.is_empty()) {
+                    (Some(_), _) => format!("{name}. {both}"),
+                    (None, true) => format!("Signed in. {both}"),
+                    (None, false) => format!("Signed in as {name}. {both}"),
+                };
+                let mut r = action(row("openai", "OpenAI", method), "providers.openai.sign-out", label, detail);
                 r["target"] = json!(name);
                 if let Some(detail) = &status.detail {
                     r["detail"] = json!(format!("{} {detail}", r["detail"].as_str().unwrap_or_default()));
@@ -195,7 +200,11 @@ impl Backend {
                     let detail = match (&key.detail, key.checking) {
                         (_, true) => format!("{masked} · checking its models. {used}"),
                         (Some(problem), _) => format!("{masked} · {problem}"),
-                        _ => format!("{masked} · {} models. {used}", key.models.len()),
+                        _ => format!(
+                            "{masked} · {} {}. {used}",
+                            key.models.len(),
+                            if key.models.len() == 1 { "model" } else { "models" }
+                        ),
                     };
                     let mut r = action(row("anthropic-key", "Anthropic", "API key"), "providers.anthropic.remove", "Remove", detail);
                     r["target"] = json!(masked);
