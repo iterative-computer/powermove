@@ -19,6 +19,31 @@ use std::{
 };
 pub(crate) const MAX_LINE: usize = 2 * 1024 * 1024;
 
+/// macOS `sun_path` holds 104 bytes, its terminator included.
+const SUN_PATH: usize = 104;
+static WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
+
+/// Binds or connects the socket at `path`. A path too long for `sun_path`
+/// (the eval runner's run folders are deep, and its sandbox allows sockets
+/// only inside them) is reached by its name from its own folder; the working
+/// directory changes only under a process-wide lock and is put back at once.
+fn at_socket<T>(path: &Path, op: impl FnOnce(&Path) -> std::io::Result<T>) -> std::io::Result<T> {
+    if path.as_os_str().len() < SUN_PATH {
+        return op(path);
+    }
+    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+        return op(path);
+    };
+    let _held = WORKING_DIRECTORY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::current_dir()?;
+    std::env::set_current_dir(folder)?;
+    let result = op(Path::new(name));
+    std::env::set_current_dir(previous)?;
+    result
+}
+
 enum Listener {
     Tcp(TcpListener),
     Unix(UnixListener),
@@ -477,7 +502,7 @@ impl LoopbackServer {
             if path.exists() {
                 return Err(Error::invalid("MCP socket path already exists"));
             }
-            let listener = UnixListener::bind(&path)?;
+            let listener = at_socket(&path, |path| UnixListener::bind(path))?;
             listener.set_nonblocking(true)?;
             descriptor["socket"] = json!(name);
             (Listener::Unix(listener), Some(path))
@@ -611,7 +636,9 @@ fn bridge_channel(profile: &Path, agent_run: Option<&str>) -> Result<(Stream, Bu
         if !valid {
             return Err(Error::invalid("Invalid MCP socket name"));
         }
-        Stream::Unix(UnixStream::connect(profile.join("mcp").join(socket))?)
+        Stream::Unix(at_socket(&profile.join("mcp").join(socket), |path| {
+            UnixStream::connect(path)
+        })?)
     } else {
         let port = descriptor["port"]
             .as_u64()

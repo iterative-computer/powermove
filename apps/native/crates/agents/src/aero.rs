@@ -12,10 +12,11 @@ use pm_aero_core::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     thread,
@@ -39,6 +40,8 @@ pub trait Session: Send {
     ) -> Result<ToolResult, String>;
     fn failures(&mut self) -> Vec<String>;
     fn finish(&mut self) -> Result<(), String>;
+    /// The flag Stop sets: the session starts no new mutation once it is set.
+    fn halt(&mut self, _flag: Arc<AtomicBool>) {}
 }
 
 pub struct ToolResult {
@@ -261,6 +264,8 @@ impl Host for Mailbox {
 /// other refusal drops the lease, and the wrapper's settler sends the
 /// fallback (a blocked call, an ended turn), so the core is never stranded.
 const ANSWER_TRIES: u32 = 200;
+/// How long Stop waits for an admitted tool call and the turn's stored end.
+const SETTLE: Duration = Duration::from_secs(15);
 
 fn retryable(error: pm_aero_core::Error) -> bool {
     matches!(
@@ -317,15 +322,23 @@ enum Work {
     Check,
 }
 
-/// Waits for the session `request` opened; true when a turn the last host
-/// left open can resume.
+/// What a session open found: a turn the last host left open, and the
+/// inputs queued behind it (message id, text), in order.
+#[derive(Default)]
+struct Opened {
+    open_turn: Option<String>,
+    follow_ups: Vec<(String, String)>,
+}
+
+/// Waits for the session `request` to open.
 fn wait_open(
     runtime: &mut Runtime,
     request: u64,
     (model, effort): (&str, &str),
     deadline: Instant,
-) -> Result<bool, String> {
+) -> Result<Opened, String> {
     let remote = runtime.remote();
+    let mut opened = Opened::default();
     while Instant::now() < deadline {
         // Opening looks the model up in the provider's catalog.
         if let Some(fetch) = runtime.fetches.take().map_err(|e| e.to_string())? {
@@ -336,11 +349,31 @@ fn wait_open(
         }
         for event in runtime.events.drain().map_err(|e| e.to_string())? {
             match event {
+                pm_aero_core::Event::Recovery {
+                    request: r,
+                    kind,
+                    text,
+                    text2,
+                    ..
+                } if r == request => match kind {
+                    pm_aero_core::sys::FX_RECOVERY_OPEN_TURN => {
+                        opened.open_turn = Some(text.into());
+                    }
+                    pm_aero_core::sys::FX_RECOVERY_FOLLOW_UP => {
+                        opened.follow_ups.push((text2.into(), text.into()));
+                    }
+                    _ => {}
+                },
                 pm_aero_core::Event::SessionOpened {
-                    request: opened,
+                    request: r,
                     resumable,
                     ..
-                } if opened == request => return Ok(resumable),
+                } if r == request => {
+                    if !resumable {
+                        opened.open_turn = None;
+                    }
+                    return Ok(opened);
+                }
                 pm_aero_core::Event::ImagesNeeded { .. } => {
                     return Err("Aero's saved session names images it no longer has.".into());
                 }
@@ -397,7 +430,19 @@ fn drive(
     let run = request.run;
     let deadline = Instant::now() + options.wall;
     let journal = journal::Journal::new(scope);
-    let folder = SessionFolder::open(scope).map_err(|error| match error {
+    // The thread's previous turn may still be letting go of the folder.
+    let opened_folder = {
+        let settle = Instant::now() + Duration::from_secs(2);
+        loop {
+            match SessionFolder::open(scope) {
+                Err(StoreError::Fenced) if Instant::now() < settle => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                other => break other,
+            }
+        }
+    };
+    let folder = opened_folder.map_err(|error| match error {
         StoreError::Fenced => "This Aero session is already running elsewhere.".to_owned(),
         StoreError::TooLarge => {
             "This Aero session's history is too large to reopen. Start a new thread.".to_owned()
@@ -410,6 +455,8 @@ fn drive(
     let writer = JournalWriter::start(folder).map_err(|e| e.to_string())?;
     let stored = SessionFolder::load(scope).map_err(|e| e.to_string())?;
     let mut session = open(scope)?;
+    let halt = Arc::new(AtomicBool::new(false));
+    session.halt(halt.clone());
     let context = session.context()?;
     let instructions = if options.skip_topics {
         INSTRUCTIONS
@@ -458,7 +505,13 @@ fn drive(
             image_store: false,
         })
         .map_err(err)?;
-    let resumable = wait_open(&mut runtime, opening, (model_name, effort), deadline)?;
+    let opened = wait_open(&mut runtime, opening, (model_name, effort), deadline)?;
+    // A turn the person stopped is never resumed, even when the host went
+    // away before the core stored its end.
+    let resumable = opened
+        .open_turn
+        .as_deref()
+        .is_some_and(|turn| journal.stopped().as_deref() != Some(turn));
     let emit = |event| {
         events
             .send(event)
@@ -483,6 +536,7 @@ fn drive(
     let skip_review = options.skip_review;
     let model = options.model.clone();
     let child_dir = scope.join("review");
+    let halted = halt.clone();
     let session_worker = thread::spawn(move || {
         use sha2::{Digest, Sha256};
         let mut captures = BTreeMap::new();
@@ -513,7 +567,10 @@ fn drive(
                     .is_ok()
                     && rx.recv().unwrap_or(false)
             };
-            let result = if name == "review" {
+            let result = if halted.load(Ordering::Acquire) {
+                // Stop came after the call was dispatched: it never starts.
+                Err("The turn was stopped before this tool ran.".into())
+            } else if name == "review" {
                 if skip_review {
                     Err("Independent review is disabled for this run.".into())
                 } else {
@@ -550,23 +607,45 @@ fn drive(
     // The same run launched again (a retry after a crash) is the open turn.
     let retried = journal.has_input(&id_prompt);
     journal.store_input(&id_prompt, &prompt)?;
-    // A turn the last host left open (a crash, a kill) finishes first; the
-    // core tells the model about a call that may have half-run.
-    let mut queued = None;
+    // Inputs waiting to run, oldest first: what the core recovered, then what
+    // this host kept (returned steers), then this run's prompt. Each runs
+    // from its stored copy; none is dropped.
+    let mut pending: VecDeque<(String, String)> = VecDeque::new();
+    for (message, text) in opened.follow_ups.into_iter().chain(journal.pending()?) {
+        if !pending.iter().any(|(id, _)| *id == message) {
+            let text = journal.input(&message).unwrap_or(text);
+            pending.push_back((message, text));
+        }
+    }
+    let mut current;
     let mut turn = if resumable {
+        // A turn the last host left open (a crash, a kill) finishes first;
+        // the core tells the model about a call that may have half-run.
         emit(Event::Progress {
             run: run.clone(),
             text: "Resuming the interrupted turn…".into(),
         })?;
         if !retried {
-            queued = Some((id_prompt, prompt));
+            pending.push_back((id_prompt, prompt));
         }
+        current = opened.open_turn.unwrap_or_default();
         runtime.resume().map_err(err)?
     } else {
-        runtime.prompt(&prompt, &id_prompt).map_err(err)?
+        pending.push_back((id_prompt, prompt));
+        let (message, text) = pending.pop_front().expect("this run's prompt");
+        let turn = runtime.prompt(&text, &message).map_err(err)?;
+        current = message;
+        turn
     };
+    journal.save_pending(&pending)?;
     let mut steer_count = 0u64;
-    let mut steers = BTreeMap::new();
+    // Accepted steers not yet settled, and the requests that answer them.
+    let mut steers: BTreeMap<String, String> = BTreeMap::new();
+    let mut steer_requests: HashMap<u64, String> = HashMap::new();
+    let mut in_flight = 0usize;
+    let mut cancel_sent = false;
+    let mut settle_by: Option<Instant> = None;
+    let settled;
     let mut text = String::new();
     let mut diagnostic = None;
     let mut approval: Option<Approval> = None;
@@ -579,7 +658,7 @@ fn drive(
     let mut fetch_workers = Vec::new();
     let remote = runtime.remote();
     let mut outcome = None;
-    while outcome.is_none() {
+    loop {
         loop {
             let mut disconnected = false;
             let action = match actions.try_recv() {
@@ -613,15 +692,18 @@ fn drive(
                     steer_count += 1;
                     let id = format!("{run}-steer-{steer_count}");
                     journal.store_input(&id, &prompt)?;
-                    if matches!(
-                        runtime.steer(turn, &prompt, &id).map_err(err)?,
-                        pm_aero_core::Steered::Accepted(_)
-                    ) {
-                        steers.insert(id, prompt);
-                        true
-                    } else {
-                        false
+                    match runtime.steer(turn, &prompt, &id).map_err(err)? {
+                        pm_aero_core::Steered::Accepted(request) => {
+                            steer_requests.insert(request, id.clone());
+                            steers.insert(id, prompt);
+                        }
+                        // Between turns: it runs as the next prompt.
+                        pm_aero_core::Steered::Stale => {
+                            pending.push_back((id, prompt));
+                            journal.save_pending(&pending)?;
+                        }
                     }
+                    true
                 }
                 Action::Answer {
                     run: target,
@@ -653,7 +735,17 @@ fn drive(
             stopped.get_or_insert("deadline");
         }
         if stopped.is_some() {
-            remote.cancel(turn).map_err(err)?;
+            if !cancel_sent {
+                // Nothing new starts; the stopped turn is never resumed.
+                halt.store(true, Ordering::Release);
+                journal.mark_stopped(&current)?;
+                match remote.cancel(turn) {
+                    Ok(pm_aero_core::Outcome::Busy) => {}
+                    Ok(_) => cancel_sent = true,
+                    Err(pm_aero_core::Error::OutOfMemory) => {}
+                    Err(error) => return Err(err(error)),
+                }
+            }
             if let Some(question) = approval.take() {
                 let _ = question.answer.try_send(false);
             }
@@ -664,6 +756,7 @@ fn drive(
                     tool_tx
                         .send(Work::Tool(tool))
                         .map_err(|_| "Aero's tool worker stopped.")?;
+                    in_flight += 1;
                 }
                 Callback::Tool(tool) => {
                     let _ = tool.answer("The turn was stopped.", true);
@@ -711,6 +804,7 @@ fn drive(
             }
         }
         for (call, result) in answers.try_iter() {
+            in_flight -= 1;
             let (result, failed) = match result {
                 Ok(value) => (value, false),
                 Err(error) => (ToolResult::text(error), true),
@@ -738,7 +832,7 @@ fn drive(
                 }));
             }
         }
-        let mut follow_up = None;
+        let pending_before = pending.len();
         for event in runtime.events.drain().map_err(err)? {
             match event {
                 Core::TextDelta { text: delta, .. } => {
@@ -772,10 +866,24 @@ fn drive(
                         "output":outputs.remove(&id)}))?;
                 }
                 Core::SteerReturned { message_id, .. } => {
-                    follow_up = steers.remove_entry(message_id);
+                    if let Some(entry) = steers.remove_entry(message_id) {
+                        pending.push_back(entry);
+                    }
                 }
                 Core::SteerJoined { message_id, .. } => {
                     steers.remove(message_id);
+                }
+                // A steer the turn never read (FX_STALE, or an error) comes
+                // back here; one that came back already answers FX_OK.
+                Core::RequestDone {
+                    request, outcome, ..
+                } => {
+                    if let Some(id) = steer_requests.remove(&request)
+                        && !matches!(outcome, Ok(pm_aero_core::Outcome::Applied))
+                        && let Some(entry) = steers.remove_entry(&id)
+                    {
+                        pending.push_back(entry);
+                    }
                 }
                 Core::TurnEnd { reason, usage, .. } => {
                     report(json!({"type":"usage","input":usage.input_tokens,
@@ -815,16 +923,16 @@ fn drive(
             && outcome
                 .as_ref()
                 .is_some_and(|(reason, _)| *reason == "completed");
-        // A returned steer, or the person's prompt after a resumed turn.
-        let next = if completed {
-            follow_up.or_else(|| queued.take())
-        } else {
-            None
-        };
-        if let Some((message, next)) = next {
+        // The next waiting input: a returned steer, a recovered follow-up,
+        // or the person's prompt after a resumed turn.
+        if completed && let Some((message, next)) = pending.pop_front() {
             text.clear();
             turn = runtime.prompt(&next, &message).map_err(err)?;
+            current = message;
             outcome = None;
+        }
+        if pending.len() != pending_before || completed {
+            journal.save_pending(&pending)?;
         }
         if let Ok(failures) = checks.try_recv() {
             let prompt = || {
@@ -835,7 +943,7 @@ fn drive(
             };
             let not_done = || format!("Not done: {}", failures.join(" "));
             if let Some(question) = stop_hook.take() {
-                if failures.is_empty() {
+                if failures.is_empty() || stopped.is_some() {
                     answer_hook(question, HookAnswer::Allow)?;
                 } else if question.continuations() < options.continuations {
                     report(json!({"type":"gate-continuation","failures":failures}));
@@ -854,27 +962,37 @@ fn drive(
             }
         }
         if let Some(reason) = stopped {
-            outcome = Some((
-                reason,
-                if reason == "cancelled" {
-                    "Stopped.".into()
-                } else {
-                    "Aero reached its wall-time limit.".into()
-                },
-            ));
+            // Stop counts once the core has stored the turn's end and every
+            // admitted tool call has settled; a stuck one is let go of.
+            let by = *settle_by.get_or_insert_with(|| Instant::now() + SETTLE);
+            let ended = outcome.is_some() && in_flight == 0;
+            if ended || Instant::now() >= by {
+                settled = ended;
+                outcome = Some((
+                    reason,
+                    if reason == "cancelled" {
+                        "Stopped.".into()
+                    } else {
+                        "Aero reached its wall-time limit.".into()
+                    },
+                ));
+                break;
+            }
+        } else if outcome.is_some() {
+            settled = true;
+            break;
         }
-        if outcome.is_none() {
-            wait_ready(&runtime);
-        }
+        wait_ready(&runtime);
     }
+    journal.save_pending(&pending)?;
     drop(tool_tx);
     drop(answers);
     drop(questions);
     drop(callbacks);
-    let outcome = outcome.unwrap();
-    if matches!(outcome.0, "cancelled" | "deadline") {
-        // Dropping forwards teardown to a worker, allowing an in-flight
-        // tool lease to retire without blocking the caller's cancel result.
+    let outcome = outcome.expect("the loop ends with an outcome");
+    if !settled {
+        // A tool that never settled: dropping forwards teardown to a worker,
+        // so its lease retires without blocking the caller's Stop.
         drop(runtime);
     } else {
         runtime.close();

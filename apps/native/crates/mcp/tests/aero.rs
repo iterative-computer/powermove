@@ -81,6 +81,17 @@ impl Fixture {
         model: Model,
         build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
     ) -> (Handle, mpsc::Receiver<Value>) {
+        self.start_prompt(run, scope, "Cut the flubbed take.", model, build)
+    }
+
+    fn start_prompt(
+        &self,
+        run: &str,
+        scope: std::path::PathBuf,
+        prompt: &str,
+        model: Model,
+        build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
+    ) -> (Handle, mpsc::Receiver<Value>) {
         let host = self.host.clone();
         let project = self.project.clone();
         let revision = self.revision;
@@ -88,7 +99,7 @@ impl Fixture {
         let handle = aero::start(
             Request {
                 run: run.into(),
-                prompt: "Cut the flubbed take.".into(),
+                prompt: prompt.into(),
                 provider: Provider::Aero,
                 model: None,
                 effort: None,
@@ -118,6 +129,20 @@ impl Fixture {
             },
         );
         (handle, notes)
+    }
+
+    fn tools_at(&self, scope: &std::path::Path, access: Access) -> Tools {
+        std::fs::create_dir_all(scope).unwrap();
+        Tools::open(self.host.clone(), &self.project, None, scope, access, None).unwrap()
+    }
+
+    /// Extension staging over a fake installed folder whose compiler refuses
+    /// any source containing "broken".
+    fn with_extensions(self) -> Self {
+        let root = self.profile.path().join("installed");
+        std::fs::create_dir_all(root.join("live")).unwrap();
+        self.host.lock().unwrap().extensions = Some(Arc::new(Extensions(root)));
+        self
     }
 
     fn tools(&self, access: Access) -> Tools {
@@ -323,8 +348,9 @@ fn stop_retires_a_turn_while_an_in_flight_tool_holds_its_lease() {
     );
     ready.recv_timeout(Duration::from_secs(10)).unwrap();
     turn.send(Action::Cancel("cut".into())).unwrap();
-    assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
+    // Stop settles the admitted call before it counts as complete.
     release.send(()).unwrap();
+    assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
 }
 
 /// A loopback replay server: each POST gets the next scripted SSE body. A
@@ -661,133 +687,6 @@ fn a_failed_edit_rolls_back_without_leaving_an_undo_entry() {
     assert_eq!(keeper_name(&fixture), "Keep");
 }
 
-#[test]
-fn stop_during_a_real_edit_leaves_one_atomic_undoable_change() {
-    struct Delayed {
-        tools: Tools,
-        started: mpsc::Sender<()>,
-        release: mpsc::Receiver<()>,
-        done: mpsc::Sender<()>,
-    }
-    impl aero::Session for Delayed {
-        fn context(&mut self) -> Result<Value, String> {
-            aero::Session::context(&mut self.tools)
-        }
-        fn call(
-            &mut self,
-            tool: &str,
-            input: &str,
-            approve: &mut dyn FnMut(&str) -> bool,
-        ) -> Result<aero::ToolResult, String> {
-            let _ = self.started.send(());
-            let _ = self.release.recv();
-            let result = aero::Session::call(&mut self.tools, tool, input, approve);
-            let _ = self.done.send(());
-            result
-        }
-        fn failures(&mut self) -> Vec<String> {
-            Vec::new()
-        }
-        fn finish(&mut self) -> Result<(), String> {
-            aero::Session::finish(&mut self.tools)
-        }
-    }
-    let fixture = Fixture::new();
-    let revision = fixture.revision;
-    let (started, ready) = mpsc::channel();
-    let (release, held) = mpsc::channel();
-    let (done, finished) = mpsc::channel();
-    let (turn, _) = fixture.start(
-        Model::fake(move |_| {
-            call(
-                "edit",
-                "commands",
-                Some(revision),
-                json!({"commands":[
-                    {"type":"set_layer","target":"keeper","patch":{"name":"Stopped edit"}},
-                    {"type":"delete_layers","targets":["flub"]}
-                ]}),
-            )
-        }),
-        move |tools| {
-            Box::new(Delayed {
-                tools,
-                started,
-                release: held,
-                done,
-            })
-        },
-    );
-    ready.recv_timeout(Duration::from_secs(10)).unwrap();
-    turn.send(Action::Cancel("cut".into())).unwrap();
-    assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
-    // The tool already holds its lease: it finishes as one transaction.
-    release.send(()).unwrap();
-    // The edit's lease commits when the call returns (reads may see its
-    // changes earlier, before its history entry exists).
-    finished.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(keeper_name(&fixture), "Stopped edit");
-    let layers = |fixture: &Fixture| {
-        fixture
-            .host
-            .lock()
-            .unwrap()
-            .read_document(&fixture.project)
-            .unwrap()["layers"]
-            .as_array()
-            .unwrap()
-            .len()
-    };
-    assert_eq!(layers(&fixture), 1);
-    drop(turn);
-    undo_once(&fixture);
-    assert_eq!(keeper_name(&fixture), "Keep");
-    assert_eq!(layers(&fixture), 2, "both commands undo as one step");
-}
-
-#[test]
-fn review_grades_in_a_fresh_session_that_never_sees_the_generator() {
-    let fixture = Fixture::new();
-    let evaluated = Arc::new(AtomicUsize::new(0));
-    let count = evaluated.clone();
-    let step = AtomicUsize::new(0);
-    let (turn, _) = fixture.start(
-        Model::fake(move |input| {
-            let text = String::from_utf8_lossy(input);
-            if text.contains("You are an independent evaluator") {
-                count.fetch_add(1, Ordering::Relaxed);
-                // Only the evidence reaches the evaluator: no generator
-                // instructions, prompt or tool history.
-                assert!(!text.contains("You are Aero"), "{text}");
-                assert!(!text.contains("Cut the flubbed take"), "{text}");
-                assert!(text.contains("Two layers remain"), "{text}");
-                return Reply::Text(
-                    json!({"evaluator":"fresh","rubric":"cut","scores":{"clean":{"score":4,"evidence":"Two layers remain"}}})
-                        .to_string(),
-                );
-            }
-            match step.fetch_add(1, Ordering::Relaxed) {
-                0 => call(
-                    "review",
-                    "evaluate",
-                    None,
-                    json!({"result":{"summary":"Two layers remain"},"rubric":{"id":"cut","criteria":["clean"]}}),
-                ),
-                _ => {
-                    assert!(text.contains(r#"\"evaluator\":\"fresh\""#), "{text}");
-                    Reply::Text("Reviewed.".into())
-                }
-            }
-        }),
-        |tools| Box::new(tools),
-    );
-    assert_eq!(
-        complete(&turn),
-        RunResult::success("Reviewed.".into(), Access::Project)
-    );
-    assert_eq!(evaluated.load(Ordering::Relaxed), 1);
-}
-
 const KILL_CHILD: &str = "PM_AERO_KILL_CHILD";
 
 /// Counts the calls that reach the project tools.
@@ -941,4 +840,673 @@ fn a_turn_resumes_after_its_host_is_killed_mid_edit_without_rerunning_it() {
     // runs after it.
     assert!(bodies[0].contains("delete_layers"), "{}", bodies[0]);
     assert!(bodies[1].contains("Cut the flubbed take."));
+}
+
+// ---- Sol's handback review, P1-1 to P1-6 -----------------------------------
+
+struct Extensions(std::path::PathBuf);
+impl pm_mcp::extensions::ExtensionHost for Extensions {
+    fn roots(&self) -> Vec<std::path::PathBuf> {
+        vec![self.0.join("live")]
+    }
+    fn history(&self) -> std::path::PathBuf {
+        self.0.join("history")
+    }
+    fn builtins(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn manifest(&self, raw: &Value) -> Result<Value, String> {
+        Ok(raw.clone())
+    }
+    fn check(&self, dir: &std::path::Path, _: &Value) -> Result<(), String> {
+        match std::fs::read_to_string(dir.join("index.ts")) {
+            Ok(source) if source.contains("broken") => Err("index.ts:1:1: broken source".into()),
+            _ => Ok(()),
+        }
+    }
+    fn reload(&self, _: &[String]) {}
+    fn health(&self) -> pm_mcp::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    fn api_pack(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+}
+
+fn args(op: &str, revision: Option<u64>, args: Value) -> String {
+    json!({"op":op,"revision":revision,"args":args}).to_string()
+}
+
+fn write_extension(tools: &mut Tools, id: &str, source: &str) {
+    for (path, text) in [
+        (
+            format!("{id}/manifest.json"),
+            json!({"id":id,"name":id,"version":"1.0.0"}).to_string(),
+        ),
+        (format!("{id}/index.ts"), source.to_owned()),
+    ] {
+        tools
+            .call(
+                "files",
+                &args("write", None, json!({"path":path,"text":text})),
+                &mut |_| true,
+            )
+            .unwrap();
+    }
+}
+
+fn read_staged(tools: &mut Tools, path: &str) -> pm_mcp::Result<Value> {
+    tools.call(
+        "files",
+        &args("read", None, json!({"path":path})),
+        &mut |_| true,
+    )
+}
+
+/// Every event until the run completes: (result, progress lines).
+fn complete_with_progress(handle: &Handle) -> (RunResult, Vec<String>) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut progress = Vec::new();
+    loop {
+        match handle.try_event() {
+            Ok(Event::Completed { result, .. }) => return (result, progress),
+            Ok(Event::Progress { text, .. }) => progress.push(text),
+            Ok(_) | Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(3))
+            }
+            other => panic!("Aero did not finish: {other:?}"),
+        }
+    }
+}
+
+/// Holds each project tool call until the test releases it.
+struct Gated {
+    tools: Tools,
+    started: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+impl aero::Session for Gated {
+    fn context(&mut self) -> Result<Value, String> {
+        aero::Session::context(&mut self.tools)
+    }
+    fn call(
+        &mut self,
+        tool: &str,
+        input: &str,
+        approve: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<aero::ToolResult, String> {
+        let _ = self.started.send(());
+        let _ = self.release.recv();
+        aero::Session::call(&mut self.tools, tool, input, approve)
+    }
+    fn failures(&mut self) -> Vec<String> {
+        aero::Session::failures(&mut self.tools)
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        aero::Session::finish(&mut self.tools)
+    }
+    fn halt(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        aero::Session::halt(&mut self.tools, flag);
+    }
+}
+
+/// P1-1: an edit dispatched to the tool worker when Stop lands never starts,
+/// and Stop does not count as complete until the dispatched call settled.
+#[test]
+fn stop_during_a_dispatched_edit_settles_first_and_never_edits() {
+    let fixture = Fixture::new();
+    let revision = fixture.revision;
+    let (started, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (turn, _) = fixture.start(
+        Model::fake(move |_| {
+            call(
+                "edit",
+                "commands",
+                Some(revision),
+                json!({"commands":[
+                    {"type":"set_layer","target":"keeper","patch":{"name":"Stopped edit"}},
+                    {"type":"delete_layers","targets":["flub"]}
+                ]}),
+            )
+        }),
+        move |tools| {
+            Box::new(Gated {
+                tools,
+                started,
+                release: held,
+            })
+        },
+    );
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    turn.send(Action::Cancel("cut".into())).unwrap();
+    // Still settling: the dispatched call has not answered.
+    let quiet = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < quiet {
+        if let Ok(Event::Completed { .. }) = turn.try_event() {
+            panic!("Stop completed before the dispatched edit settled");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    release.send(()).unwrap();
+    assert_eq!(complete(&turn), RunResult::failure("Stopped.", true));
+    assert_eq!(keeper_name(&fixture), "Keep", "an edit ran after Stop");
+    let layers = fixture
+        .host
+        .lock()
+        .unwrap()
+        .read_document(&fixture.project)
+        .unwrap()["layers"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(layers, 2);
+}
+
+/// P1-1: Send right after Stop runs the new prompt; the stopped turn is
+/// never resumed.
+#[test]
+fn stop_then_immediate_send_runs_the_new_prompt_and_never_resumes() {
+    let fixture = Fixture::new();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let (asked, waiting) = mpsc::channel();
+    let asked = Mutex::new(asked);
+    let (first, _) = fixture.start_at(
+        "first",
+        scope.clone(),
+        Model::fake(move |_| {
+            let _ = asked.lock().unwrap().send(());
+            Reply::Hold
+        }),
+        |tools| Box::new(tools),
+    );
+    waiting.recv_timeout(Duration::from_secs(10)).unwrap();
+    first.send(Action::Cancel("first".into())).unwrap();
+    assert_eq!(complete(&first), RunResult::failure("Stopped.", true));
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let (second, _) = fixture.start_at(
+        "second",
+        scope,
+        Model::fake(move |input| {
+            seen.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(input).into());
+            Reply::Text("Fresh start.".into())
+        }),
+        |tools| Box::new(tools),
+    );
+    let (result, progress) = complete_with_progress(&second);
+    assert_eq!(
+        result,
+        RunResult::success("Fresh start.".into(), Access::Project)
+    );
+    assert!(
+        !progress.iter().any(|line| line.contains("Resuming")),
+        "the stopped turn was resumed: {progress:?}"
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+}
+
+/// P1-1: Stop while a tool runs, then reopen the thread: the reopened run
+/// never resumes the stopped turn and never re-runs its tool.
+#[test]
+fn stop_then_reopen_never_resumes_the_stopped_turn() {
+    let fixture = Fixture::new();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let (started, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (first, _) = fixture.start_at(
+        "first",
+        scope.clone(),
+        Model::fake(|_| call("project", "summary", None, json!({}))),
+        move |tools| {
+            Box::new(Gated {
+                tools,
+                started,
+                release: held,
+            })
+        },
+    );
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    first.send(Action::Cancel("first".into())).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(complete(&first), RunResult::failure("Stopped.", true));
+    drop(first);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let (reopened, _) = fixture.start_at(
+        "reopened",
+        scope,
+        Model::fake(|_| Reply::Text("Reopened.".into())),
+        move |tools| {
+            Box::new(Counted {
+                tools,
+                calls: counted,
+                hold: false,
+            })
+        },
+    );
+    let (result, progress) = complete_with_progress(&reopened);
+    assert_eq!(
+        result,
+        RunResult::success("Reopened.".into(), Access::Project)
+    );
+    assert!(
+        !progress.iter().any(|line| line.contains("Resuming")),
+        "{progress:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// P1-2: a draft that failed to compile survives Stop and the next Send.
+#[test]
+fn a_draft_survives_stop_after_a_compile_error_and_the_next_send() {
+    let fixture = Fixture::new().with_extensions();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let step = AtomicUsize::new(0);
+    let (holding, held) = mpsc::channel();
+    let holding = Mutex::new(holding);
+    let (first, _) = fixture.start_at(
+        "first",
+        scope.clone(),
+        Model::fake(move |_| match step.fetch_add(1, Ordering::SeqCst) {
+            0 => call(
+                "files",
+                "write",
+                None,
+                json!({"path":"tint/manifest.json","text":"{\"id\":\"tint\",\"name\":\"tint\",\"version\":\"1.0.0\"}"}),
+            ),
+            1 => call(
+                "files",
+                "write",
+                None,
+                json!({"path":"tint/index.ts","text":"export const draft = 'broken until fixed';"}),
+            ),
+            2 => call("extension", "check", None, json!({"id":"tint"})),
+            _ => {
+                let _ = holding.lock().unwrap().send(());
+                Reply::Hold
+            }
+        }),
+        |tools| Box::new(tools),
+    );
+    held.recv_timeout(Duration::from_secs(10)).unwrap();
+    first.send(Action::Cancel("first".into())).unwrap();
+    assert_eq!(complete(&first), RunResult::failure("Stopped.", true));
+    let (second, _) = fixture.start_at(
+        "second",
+        scope,
+        Model::fake(|input| {
+            if String::from_utf8_lossy(input).contains("broken until fixed") {
+                Reply::Text("The draft is still there.".into())
+            } else {
+                call("files", "read", None, json!({"path":"tint/index.ts"}))
+            }
+        }),
+        |tools| Box::new(tools),
+    );
+    // The gate fails on the draft (unpublished staging), so the turn ends
+    // "not done"; what matters is that the model read the draft back.
+    let (result, _) = complete_with_progress(&second);
+    match result {
+        RunResult::Success { text, .. } => assert_eq!(text, "The draft is still there."),
+        RunResult::Failure { error, .. } => assert!(
+            error.contains("Unpublished staging changes in tint"),
+            "{error}"
+        ),
+    }
+}
+
+/// P1-2: a draft written before the host was killed is there on reopen.
+#[test]
+fn a_draft_survives_a_killed_host_and_reopen() {
+    let fixture = Fixture::new().with_extensions();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let mut tools = fixture.tools_at(&scope, Access::Project);
+    write_extension(&mut tools, "grain", "export const grain = 'kept';");
+    // A killed host runs no cleanup.
+    std::mem::forget(tools);
+    let mut reopened = fixture.tools_at(&scope, Access::Project);
+    let read = read_staged(&mut reopened, "grain/index.ts").expect("the draft survived");
+    assert!(read.to_string().contains("kept"), "{read}");
+}
+
+/// P1-2: a turn that ends with its gate exhausted by unpublished staging
+/// leaves the drafts for the next Send.
+#[test]
+fn a_draft_survives_an_exhausted_gate_and_the_next_send() {
+    let fixture = Fixture::new().with_extensions();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let step = AtomicUsize::new(0);
+    let (first, _) = fixture.start_at(
+        "first",
+        scope.clone(),
+        Model::fake(move |_| match step.fetch_add(1, Ordering::SeqCst) {
+            0 => call(
+                "files",
+                "write",
+                None,
+                json!({"path":"glow/index.ts","text":"export const glow = 'kept for later';"}),
+            ),
+            _ => Reply::Text("Done, I think.".into()),
+        }),
+        |tools| Box::new(tools),
+    );
+    let (result, _) = complete_with_progress(&first);
+    assert!(
+        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Not done")),
+        "{result:?}"
+    );
+    let mut reopened = fixture.tools_at(&scope, Access::Project);
+    let read = read_staged(&mut reopened, "glow/index.ts").expect("the draft survived");
+    assert!(read.to_string().contains("kept for later"), "{read}");
+}
+
+/// P1-2: undoing one publication keeps the session's other drafts.
+#[test]
+fn undoing_a_publication_keeps_unrelated_drafts() {
+    let fixture = Fixture::new().with_extensions();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let mut tools = fixture.tools_at(&scope, Access::Project);
+    write_extension(&mut tools, "one", "export const one = 1;");
+    let published = tools
+        .call(
+            "extension",
+            &args(
+                "publish",
+                None,
+                json!({"extensions":[{"id":"one","action":"created","summary":"One"}]}),
+            ),
+            &mut |_| true,
+        )
+        .unwrap();
+    let change_set = published["changeSetId"].as_str().unwrap().to_owned();
+    write_extension(&mut tools, "two", "export const two = 'draft';");
+    tools
+        .call(
+            "undo",
+            &args("extension", None, json!({"changeSetId":change_set})),
+            &mut |_| true,
+        )
+        .unwrap();
+    let read = read_staged(&mut tools, "two/index.ts").expect("the unrelated draft stays");
+    assert!(read.to_string().contains("draft"), "{read}");
+    assert!(
+        read_staged(&mut tools, "one/index.ts").is_err(),
+        "the undone extension left the stage with its installed tree"
+    );
+}
+
+/// P1-4: Sol's sequence: a good edit, a rejected batch, then session Undo.
+#[test]
+fn session_undo_works_after_a_rejected_batch() {
+    let fixture = Fixture::new();
+    let mut tools = fixture.tools(Access::Project);
+    let renamed = tools
+        .call(
+            "edit",
+            &args(
+                "commands",
+                Some(fixture.revision),
+                json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Renamed"}}]}),
+            ),
+            &mut |_| false,
+        )
+        .unwrap();
+    let revision = renamed["revision"].as_u64().unwrap();
+    assert!(
+        tools
+            .call(
+                "edit",
+                &args(
+                    "commands",
+                    Some(revision),
+                    json!({"commands":[{"type":"set_layer","target":"no-such-layer","patch":{"name":"x"}}]}),
+                ),
+                &mut |_| false,
+            )
+            .is_err()
+    );
+    tools
+        .call("undo", &args("session", None, json!({})), &mut |_| false)
+        .expect("session Undo stays available after a clean abort");
+    assert_eq!(keeper_name(&fixture), "Keep");
+}
+
+/// P1-4: session Undo restores authored data byte for byte, lone UTF-16
+/// surrogates included.
+#[test]
+fn session_undo_keeps_lone_surrogates_byte_for_byte() {
+    use pm_kernel::{Command as KernelCommand, MediaCommand, Origin};
+    let fixture = Fixture::new();
+    {
+        let mut host = fixture.host.lock().unwrap();
+        let revision = host.revision(&fixture.project).unwrap();
+        let asset = pm_model::json::parse(
+            r#"{"id":"a","name":"Take \ud800 one","kind":"video","dur":3,"w":640,"h":360,"persisted":true,"sourcePath":"/synthetic/take.mp4"}"#,
+        )
+        .unwrap();
+        let command: KernelCommand = MediaCommand::AddAsset {
+            asset_id: "a".into(),
+            asset,
+        }
+        .into();
+        host.apply_commands(
+            &fixture.project,
+            vec![command],
+            "Synthetic asset",
+            Origin::Mcp,
+            revision,
+            1,
+        )
+        .unwrap();
+    }
+    let native = |fixture: &Fixture| {
+        let host = fixture.host.lock().unwrap();
+        let view = host.view(&fixture.project).unwrap();
+        pm_model::json::to_canonical_string(&view.snapshot.document.to_value().unwrap())
+    };
+    let before = native(&fixture);
+    assert!(before.contains(r"\ud800"), "{before}");
+    let revision = fixture
+        .host
+        .lock()
+        .unwrap()
+        .revision(&fixture.project)
+        .unwrap();
+    let scope = fixture.profile.path().join("surrogates");
+    let mut tools = fixture.tools_at(&scope, Access::Project);
+    tools
+        .call(
+            "edit",
+            &args(
+                "commands",
+                Some(revision),
+                json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"Renamed"}}]}),
+            ),
+            &mut |_| false,
+        )
+        .unwrap();
+    tools
+        .call("undo", &args("session", None, json!({})), &mut |_| false)
+        .unwrap();
+    let after = native(&fixture);
+    assert!(
+        after.contains(r"\ud800"),
+        "the surrogate was rewritten: {after}"
+    );
+    assert!(after.contains("\"Keep\""));
+}
+
+/// P1-5: closing the project during a run gives the next edit a terminal
+/// conflict, never a panic.
+#[test]
+fn closing_the_project_during_a_run_gives_a_conflict_not_a_panic() {
+    let fixture = Fixture::new();
+    let mut tools = fixture.tools(Access::Project);
+    fixture.host.lock().unwrap().close_headless().unwrap();
+    let _ = tools.call("project", &args("summary", None, json!({})), &mut |_| false);
+    let error = tools
+        .call(
+            "edit",
+            &args(
+                "commands",
+                Some(fixture.revision),
+                json!({"commands":[{"type":"set_layer","target":"keeper","patch":{"name":"x"}}]}),
+            ),
+            &mut |_| false,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "revision_conflict", "{}", error.message);
+}
+
+/// Holds the completion check until the test releases it.
+struct HeldGate {
+    tools: Tools,
+    checking: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+    held: bool,
+}
+impl aero::Session for HeldGate {
+    fn context(&mut self) -> Result<Value, String> {
+        aero::Session::context(&mut self.tools)
+    }
+    fn call(
+        &mut self,
+        tool: &str,
+        input: &str,
+        approve: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<aero::ToolResult, String> {
+        aero::Session::call(&mut self.tools, tool, input, approve)
+    }
+    fn failures(&mut self) -> Vec<String> {
+        if !self.held {
+            self.held = true;
+            let _ = self.checking.send(());
+            let _ = self.release.recv();
+        }
+        Vec::new()
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        aero::Session::finish(&mut self.tools)
+    }
+}
+
+fn steer(handle: &Handle, run: &str, prompt: &str) {
+    let accepted = handle
+        .send_checked(Action::Steer {
+            run: run.into(),
+            prompt: prompt.into(),
+            images: Vec::new(),
+        })
+        .unwrap()
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
+    assert!(accepted, "{prompt} was refused");
+}
+
+/// The order in which the steers first reach the model.
+fn steer_order(bodies: &[String], steers: &[&str]) -> Vec<String> {
+    let all = bodies.join("\n");
+    let mut found: Vec<(usize, String)> = steers
+        .iter()
+        .filter_map(|steer| all.find(steer).map(|at| (at, (*steer).to_owned())))
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, steer)| steer).collect()
+}
+
+/// P1-6: steers accepted while the turn is finishing all come back and run,
+/// in order (none lost to a single slot or a stale request).
+#[test]
+fn steers_accepted_at_the_end_of_a_turn_all_run_in_order() {
+    let fixture = Fixture::new();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let (checking, at_gate) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (turn, _) = fixture.start(
+        Model::fake(move |input| {
+            let mut bodies = seen.lock().unwrap();
+            bodies.push(String::from_utf8_lossy(input).into());
+            Reply::Text(format!("Answer {}.", bodies.len()))
+        }),
+        move |tools| {
+            Box::new(HeldGate {
+                tools,
+                checking,
+                release: held,
+                held: false,
+            })
+        },
+    );
+    at_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+    let steers = [
+        "Steer alpha please",
+        "Steer bravo please",
+        "Steer charlie please",
+    ];
+    for text in steers {
+        steer(&turn, "cut", text);
+    }
+    release.send(()).unwrap();
+    let (result, _) = complete_with_progress(&turn);
+    assert!(matches!(result, RunResult::Success { .. }), "{result:?}");
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        steer_order(&bodies, &steers),
+        steers,
+        "{} requests",
+        bodies.len()
+    );
+}
+
+/// P1-6: steers accepted before Stop are kept and run first, in order, when
+/// the thread is sent to again.
+#[test]
+fn steers_kept_across_stop_run_in_order_on_the_next_send() {
+    let fixture = Fixture::new();
+    let scope = fixture.profile.path().join("aero/sessions/thread");
+    let (started, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let (first, _) = fixture.start_at(
+        "first",
+        scope.clone(),
+        Model::fake(|_| call("project", "summary", None, json!({}))),
+        move |tools| {
+            Box::new(Gated {
+                tools,
+                started,
+                release: held,
+            })
+        },
+    );
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let steers = ["Then make it blue", "Then make it red"];
+    for text in steers {
+        steer(&first, "first", text);
+    }
+    first.send(Action::Cancel("first".into())).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(complete(&first), RunResult::failure("Stopped.", true));
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let (second, _) = fixture.start_prompt(
+        "second",
+        scope,
+        "Now tidy the timeline.",
+        Model::fake(move |input| {
+            seen.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(input).into());
+            Reply::Text("Done.".into())
+        }),
+        |tools| Box::new(tools),
+    );
+    let (result, _) = complete_with_progress(&second);
+    assert!(matches!(result, RunResult::Success { .. }), "{result:?}");
+    let bodies = bodies.lock().unwrap();
+    let order = steer_order(&bodies, &[steers[0], steers[1], "Now tidy the timeline."]);
+    assert_eq!(order, [steers[0], steers[1], "Now tidy the timeline."]);
 }

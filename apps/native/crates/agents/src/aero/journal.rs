@@ -23,6 +23,43 @@ impl Journal {
         self.dir.join(format!("{id}.input")).is_file()
     }
 
+    /// The stored copy of an input, the durable one across a crash.
+    pub fn input(&self, id: &str) -> Option<String> {
+        if !crate::valid_id(id, 200) {
+            return None;
+        }
+        read::<String>(&self.dir, &format!("{id}.input"))
+            .ok()
+            .flatten()
+    }
+
+    /// Inputs this host keeps waiting to run (returned steers, the prompt
+    /// behind a resumed turn), oldest first, with their stored text.
+    pub fn pending(&self) -> Result<Vec<(String, String)>, String> {
+        let ids = read::<Vec<String>>(&self.dir, "pending.json")?.unwrap_or_default();
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| self.input(&id).map(|text| (id, text)))
+            .collect())
+    }
+
+    pub fn save_pending(
+        &self,
+        pending: &std::collections::VecDeque<(String, String)>,
+    ) -> Result<(), String> {
+        let ids: Vec<&str> = pending.iter().map(|(id, _)| id.as_str()).collect();
+        store(&self.dir, "pending.json", &ids)
+    }
+
+    /// The message id of the last turn the person stopped.
+    pub fn stopped(&self) -> Option<String> {
+        read::<String>(&self.dir, "stopped").ok().flatten()
+    }
+
+    pub fn mark_stopped(&self, message: &str) -> Result<(), String> {
+        store(&self.dir, "stopped", &message)
+    }
+
     pub fn store_input(&self, id: &str, input: &str) -> Result<(), String> {
         if !crate::valid_id(id, 200) {
             return Err("Invalid Aero message id.".into());

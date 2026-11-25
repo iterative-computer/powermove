@@ -400,6 +400,60 @@ pub fn prepare(
     })
 }
 
+/// Reopens a stage kept on disk (Aero's session stage) with the baseline it
+/// was made from, after the same publication recovery as [`prepare`]. Drafts
+/// stay as they are; a newer installed version shows as a conflict at
+/// publication, as it does for a stage made earlier in the same run.
+pub fn resume(
+    host: &dyn ExtensionHost,
+    staging: &Path,
+    project: &str,
+    run: &str,
+    baseline: BTreeMap<String, String>,
+) -> Result<Stage> {
+    let roots = host.roots();
+    let live = roots
+        .last()
+        .ok_or_else(|| invalid("No user extension folder."))?;
+    let history = history_for(host, project);
+    locked(|| {
+        recover_locked(&history, live)?;
+        if !staging.is_dir() {
+            return Err(invalid("The saved extension stage is missing."));
+        }
+        Ok(Stage {
+            baseline,
+            roots: roots.clone(),
+            staging: staging.to_owned(),
+            history: history.clone(),
+            project: project.into(),
+            run: run.into(),
+        })
+    })
+}
+
+/// After [`restore`]: the restored extensions' staged copies and baseline
+/// follow their installed trees again; every other draft stays.
+pub fn refresh(stage: &mut Stage, ids: &[String]) -> Result<()> {
+    let installed = folders(&stage.roots);
+    for id in ids.iter().filter(|id| extension_id(id)) {
+        let staged = stage.staging.join(id);
+        if staged.exists() {
+            fs::remove_dir_all(&staged)?;
+        }
+        match installed.get(id) {
+            Some(dir) => {
+                copy_tree(dir, &staged)?;
+                stage.baseline.insert(id.clone(), tree_hash(&staged)?);
+            }
+            None => {
+                stage.baseline.remove(id);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The published record of one change set, kept with its `before` trees.
 pub fn record_json(id: &str, project: &str, before: &str, after: &str, changes: &[Value]) -> Value {
     json!({"version":1,"id":id,"projectId":project,"createdAt":now_iso(),
