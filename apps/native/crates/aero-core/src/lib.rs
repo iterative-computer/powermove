@@ -20,6 +20,7 @@
 //! builds. Built without the pinned Zig, every call returns
 //! [`Error::Unavailable`] (see `build.rs`).
 
+pub mod journal;
 pub mod sys;
 
 use std::any::Any;
