@@ -838,22 +838,27 @@ fn scroll_position(ws: &Workspace, panel: &str, horizontal: bool) -> f64 {
 /// The bench's clock moves only when told (a fake clock), so without this
 /// those states lasted from one case into the next and the later cases
 /// measured whatever the earlier ones left (PM-710). Shorter than a tooltip's
-/// delay (500 ms), so none opens. The time passes on the wall clock too: the
-/// panels' springs (a hover wash) step on it and would still be moving, a
-/// draw a frame, into the next case (PM-732).
+/// delay (500 ms), so none opens. Then the display link runs for that long on
+/// the wall clock: the panels' springs (a hover wash the settle started) step
+/// a frame at a time on it and rest before the next case, and playing,
+/// Properties follows the playhead meanwhile (PM-732).
 const PAUSE: Duration = Duration::from_millis(200);
 
 fn pause(ws: &mut Workspace, playback: &mut Option<Playback>) {
-    std::thread::sleep(PAUSE);
     ws.vcx.executor().advance_clock(PAUSE);
     let mut probe = Probe::start();
     ws.settle(&mut probe, playback.as_mut());
     ws.drain(&mut probe);
     draw(&mut ws.vcx, &mut probe);
-    // The springs that the pause's draw stepped to rest ask for no frame.
-    draw(&mut ws.vcx, &mut probe);
-    if let Some(p) = playback.as_mut() {
-        p.pace(ws);
+    let until = Instant::now() + PAUSE;
+    while Instant::now() < until {
+        match playback.as_mut() {
+            Some(p) => p.pace(ws),
+            None => {
+                std::thread::sleep(VSYNC);
+                draw(&mut ws.vcx, &mut probe);
+            }
+        }
     }
 }
 
