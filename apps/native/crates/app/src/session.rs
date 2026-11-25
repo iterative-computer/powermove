@@ -888,6 +888,12 @@ fn composition_size(w: f64, h: f64) -> [f64; 2] {
 fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
     clock.or(asked).unwrap_or(0.)
 }
+/// Whether the kernel holds an edit open that Undo should seal first: any
+/// open edit but an agent's or extension's structural edit that is still
+/// applying (it ends by itself, and the kernel holds the Undo until then).
+pub(crate) fn entry_left_open(published: &Published) -> bool {
+    published.entry.as_ref().is_some_and(|e| !e.applying)
+}
 /// The history calls an Undo makes. An edit left open (its owner never
 /// ended it) would take the Undo into itself, so it is sealed first and is
 /// the step undone.
@@ -2007,9 +2013,10 @@ impl Controller {
         }
     }
     /// The kernel holds an edit open although nothing is being edited: no
-    /// pointer button is down (a drag, a scrub) and no text is being typed.
+    /// pointer button is down (a drag, a scrub), no text is being typed and
+    /// no agent's edit is applying (that one ends by itself; Undo waits).
     pub fn edit_left_open(&self, cx: &App) -> bool {
-        self.published.as_ref().is_some_and(|p| p.entry.is_some())
+        self.published.as_deref().is_some_and(entry_left_open)
             && objc2_app_kit::NSEvent::pressedMouseButtons() == 0
             && !self
                 .builtins
