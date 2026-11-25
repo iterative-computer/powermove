@@ -114,7 +114,10 @@ pub(crate) fn body_thumb(
     t: &pm_design::Tokens,
     cx: &App,
 ) -> Option<AnyElement> {
-    let shown = scrolled_at.is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
+    // On the executor's clock, which the hold's timer runs on (a test's
+    // fake clock included): the thumb goes when the timer redraws it.
+    let now = cx.background_executor().now();
+    let shown = scrolled_at.is_some_and(|at| now.saturating_duration_since(at) < SCROLL_THUMB_HOLD);
     (shown || !cx.should_auto_hide_scrollbars())
         .then(|| scroll_thumb(handle, width, height, t))
         .flatten()
@@ -1918,7 +1921,7 @@ impl Controller {
             cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
                 v.builtins
                     .scrolled_at
-                    .insert(panel.clone(), std::time::Instant::now());
+                    .insert(panel.clone(), cx.background_executor().now());
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;

@@ -173,7 +173,7 @@ impl pm_shell::integration::Integration for Dock {
                 .on_scroll_wheel(move |_, window, cx| {
                     scrolled_at
                         .borrow_mut()
-                        .insert(panel.clone(), Instant::now());
+                        .insert(panel.clone(), cx.background_executor().now());
                     window
                         .spawn(cx, async move |cx| {
                             cx.background_executor()

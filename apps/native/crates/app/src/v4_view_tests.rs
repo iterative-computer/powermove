@@ -3803,10 +3803,8 @@ fn a_panel_that_left_rows_out_builds_them_on_the_first_wheel_step(cx: &mut TestA
         view.update(&mut vcx, |_, cx| cx.notify());
         vcx.run_until_parked();
     }
-    assert!(
-        view.read_with(&vcx, |v, _| v.culls()),
-        "rows far below are left out"
-    );
+    let left_out = view.read_with(&vcx, |v, _| v.rows_left_out());
+    assert!(left_out > 0, "rows far below are left out");
     let renders = |vcx: &VisualTestContext| view.read_with(vcx, |v, _| v.renders);
     let rendered = renders(&vcx);
     let list = view.read_with(&vcx, |v, _| v.scroll_offsets());
@@ -3824,6 +3822,10 @@ fn a_panel_that_left_rows_out_builds_them_on_the_first_wheel_step(cx: &mut TestA
     assert!(
         renders(&vcx) > rendered,
         "the first step builds the rows past each edge"
+    );
+    assert!(
+        view.read_with(&vcx, |v, _| v.rows_left_out()) < left_out,
+        "rows it had left out are built again"
     );
 }
 

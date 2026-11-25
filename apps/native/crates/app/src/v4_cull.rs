@@ -438,6 +438,11 @@ impl SurfaceView {
     pub(crate) fn culls(&self) -> bool {
         !self.cull.culled.is_empty()
     }
+    /// How many rows the last frame left out.
+    #[cfg(test)]
+    pub(crate) fn rows_left_out(&self) -> usize {
+        self.cull.culled.len()
+    }
     /// Whether node `id` or one of its ancestors is left out this frame.
     pub(super) fn left_out(&self, mut id: Id) -> bool {
         loop {
