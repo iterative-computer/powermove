@@ -436,8 +436,14 @@ impl Controller {
             pm_mcp::catalog::names(),
             pm_mcp::catalog::composition_names(),
         );
-        if cfg!(debug_assertions) && (environment.vars.get("PM_AERO_DEV").is_some_and(|value| value == "1")
-            || self.mcp.profile.join("aero-dev").is_file()) {
+        if cfg!(feature = "aero-trial")
+            || (cfg!(debug_assertions)
+                && (environment
+                    .vars
+                    .get("PM_AERO_DEV")
+                    .is_some_and(|value| value == "1")
+                    || self.mcp.profile.join("aero-dev").is_file()))
+        {
             environment.aero = Some(crate::mcp::aero_launcher());
         }
         environment.compatible = Some(Arc::new(crate::providers::Chat {
