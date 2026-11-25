@@ -109,6 +109,8 @@ const CLAUDE: &[(&[&str], Thinking, &[&str])] = &[
 /// the top levels, above each budget below, within each model's own limit
 /// (64K on the 4.5 models).
 pub const CLAUDE_MAX_TOKENS: u32 = 64_000;
+// The largest thinking budget below (High) must stay under it.
+const _: () = assert!(32_768 < CLAUDE_MAX_TOKENS);
 fn claude(model: &str) -> Option<(Thinking, &'static [&'static str])> {
     CLAUDE.iter().find_map(|(families, thinking, levels)| {
         families
@@ -558,6 +560,5 @@ mod tests {
             Some(json!({"thinking":{"type":"enabled","budget_tokens":32768}}))
         );
         assert_eq!(claude_effort_fields("claude-opus-4-6", "xhigh"), None);
-        assert!(32_768 < CLAUDE_MAX_TOKENS);
     }
 }
