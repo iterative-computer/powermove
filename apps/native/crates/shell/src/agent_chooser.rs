@@ -1038,7 +1038,9 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
     let rail_content = 2. * tile_inset + (harnesses + if add.is_some() { 1. } else { 0. }) * step
         - shape.tile_gap
         + if add.is_some() { shape.gap } else { 0. };
-    let rail_h = rail_content.max(list_h);
+    // The rail and the list share one height: the taller of the list and
+    // the card (as in Capy); the card keeps its own.
+    let rail_h = rail_content.max(list_h).max(card_h);
     let rail_tile = |views: &mut Vec<Retained<NSView>>, i: usize, row: &Row, top: f64| {
         let frame = NSRect::new(
             NSPoint::new(rail_x + tile_inset, top),
@@ -1098,7 +1100,7 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         mtm,
     ));
     root.addSubview(&surface(
-        NSRect::new(NSPoint::new(list_x, pad), NSSize::new(shape.list, list_h)),
+        NSRect::new(NSPoint::new(list_x, pad), NSSize::new(shape.list, rail_h)),
         &t,
         &shape,
         mtm,
@@ -1508,6 +1510,16 @@ impl Host {
         state.borrow_mut().monitor = monitor;
         gpui_macos::child_window::attach(&window, &owner);
         gpui_macos::child_window::show(&window, true);
+        // The fades from the first layout, again once the panel is on
+        // screen (its layers are the window's now) and after that pass.
+        fades(&state);
+        let weak = Rc::downgrade(&state);
+        let later = block2::RcBlock::new(move || {
+            if let Some(state) = weak.upgrade() {
+                fades(&state);
+            }
+        });
+        unsafe { objc2_foundation::NSOperationQueue::mainQueue().addOperationWithBlock(&later) };
         if let Some(search) = state.borrow().search.clone() {
             window.makeFirstResponder(Some(&search));
         }
