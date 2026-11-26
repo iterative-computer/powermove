@@ -72,6 +72,28 @@ fn list_row_height() -> f64 {
 fn font(size: f32, weight: f32) -> Retained<NSFont> {
     pm_shell::settings_window::font(size, weight)
 }
+/// A trailing button (or a stack holding buttons) yields width before the
+/// row's title: its compression resistance drops below the title's and it
+/// truncates its words at the end.
+fn give_way(view: &NSView) {
+    if let Some(stack) = view.downcast_ref::<NSStackView>() {
+        for child in stack.arrangedSubviews().iter() {
+            give_way(&child);
+        }
+    }
+    // Buttons and pop-ups only: a switch or a field keeps its size.
+    let Some(button) = view.downcast_ref::<NSButton>() else {
+        return;
+    };
+    button.setContentCompressionResistancePriority_forOrientation(
+        NSLayoutPriorityDefaultLow + 1.,
+        NSLayoutConstraintOrientation::Horizontal,
+    );
+    if let Some(cell) = button.cell() {
+        cell.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        cell.setTruncatesLastVisibleLine(true);
+    }
+}
 /// A `Space` step in points.
 fn space() -> pm_design::Space {
     pm_shell::scale().space
@@ -834,6 +856,11 @@ impl Row {
             return;
         }
         views.push(self.space.clone());
+        // A row's controls give way before its title: a narrow column
+        // truncates a button's words, never the row's name.
+        for view in &trailing {
+            give_way(view);
+        }
         views.extend(trailing);
         self.line.set(&views);
         // The title is centred in its line, which leaves air above its text;
@@ -1586,13 +1613,13 @@ fn text_label(
     let field = if nowrap || row_title {
         let field = NSTextField::labelWithString(&title, mtm);
         field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        // An error keeps its words; a row's title gives way to its control
-        // (truncating) instead of running under it in a narrow column.
+        // An error keeps its words; a row's title holds against its
+        // controls, which give way first (`give_way`).
         field.setContentCompressionResistancePriority_forOrientation(
             if style == "error" {
                 NSLayoutPriorityDefaultHigh + 1.
             } else {
-                NSLayoutPriorityDefaultLow
+                NSLayoutPriorityDefaultHigh - 1.
             },
             NSLayoutConstraintOrientation::Horizontal,
         );
@@ -2098,8 +2125,10 @@ impl Render<'_, '_> {
         let stack = NSStackView::new(mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setAlignment(NSLayoutAttribute::Top);
-        // The options share the card's width evenly, `space.lg` apart.
-        stack.setDistribution(NSStackViewDistribution::FillEqually);
+        // Every picker is one left-aligned grid: options in columns of one
+        // width (`settings.picker_column`), `space.lg` apart, the room left
+        // over after the last.
+        stack.setDistribution(NSStackViewDistribution::Fill);
         stack.setSpacing(space().lg as f64);
         stack.setEdgeInsets(NSEdgeInsets {
             top: space().sm as f64,
@@ -2139,10 +2168,15 @@ impl Render<'_, '_> {
             button.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
             button.setAccessibilityLabel(Some(&NSString::from_str(&name)));
             stack.addArrangedSubview(&button);
+            button
+                .widthAnchor()
+                .constraintEqualToConstant(st().picker_column as f64)
+                .setActive(true);
             buttons.push(button);
             options.push(option.to_owned());
             names.push(name);
         }
+        stack.addArrangedSubview(&flexible_space(mtm));
         let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
             cx.spawn(async move |owner, cx| {

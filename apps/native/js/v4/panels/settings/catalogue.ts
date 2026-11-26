@@ -405,7 +405,7 @@ export function accountRows(): Row[] {
       ),
       section: "extensions",
       action: "account.bring-sign-ins",
-      actionLabel: "Bring Sign-Ins from the Original App…",
+      actionLabel: "Bring Sign-Ins…",
       disabled: false,
     },
     // No status until the subscription service publishes one: a default

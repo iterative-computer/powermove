@@ -117,6 +117,9 @@ pub struct Settings {
     pub picker_ring: f32,
     pub picker_radius: f32,
     pub picker_window_radius: f32,
+    /// A picker option's column (its tile and its label under it): every
+    /// picker is one left-aligned grid of these, `space.lg` apart.
+    pub picker_column: f32,
     /// Settings › Agents' app marks and the space after them.
     pub app_icon: f32,
     pub app_icon_gap: f32,
@@ -174,6 +177,7 @@ impl Settings {
             picker_ring: 2.,
             picker_radius: 9.,
             picker_window_radius: 4.,
+            picker_column: 120.,
             app_icon: 20.,
             app_icon_gap: 10.,
             dark_veil: 0.37,

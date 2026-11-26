@@ -54,6 +54,7 @@ const ROLES: &[(&str, &str)] = &[
     ("settings.picker_ring", "A picker selection ring's width"),
     ("settings.picker_radius", "A picker tile's corner"),
     ("settings.picker_window_radius", "A picker's mini window corner"),
+    ("settings.picker_column", "A picker option's column: every picker is one left-aligned grid"),
     ("settings.app_icon", "Settings › Agents app mark side"),
     ("settings.app_icon_gap", "Space after a Settings › Agents app mark"),
     ("settings.dark_veil", "Dark Settings sidebar veil over the system material"),

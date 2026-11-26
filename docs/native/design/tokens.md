@@ -353,6 +353,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `settings.picker.window_edge` | Picker art: mini window edge opacity | 0.12 | 0.16 | 0.12 | 0.16 |
 | `settings.picker.window_shadow` | Picker art: mini window shadow opacity | 0.3 | 0.45 | 0.3 | 0.45 |
 | `settings.picker.zoom` | Picker art: mini window zoom light | `#28C840` | `#28C840` | `#28C840` | `#28C840` |
+| `settings.picker_column` | A picker option's column: every picker is one left-aligned grid | 120 | 120 | 120 | 120 |
 | `settings.picker_height` | A visual picker tile's height | 64 | 64 | 64 | 64 |
 | `settings.picker_radius` | A picker tile's corner | 9 | 9 | 9 | 9 |
 | `settings.picker_ring` | A picker selection ring's width | 2 | 2 | 2 | 2 |
