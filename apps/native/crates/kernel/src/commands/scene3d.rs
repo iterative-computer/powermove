@@ -199,6 +199,68 @@ fn set_data(cx: &mut Cx<'_>, id: &str, data: Value) -> Result<(), CommandError> 
     .insert("data", pm_scene3d::to_model(&checked));
     cx.put_layer(&loc, l)
 }
+// The JSON planners need layer identities and ancestry for targeting and
+// live-source validation. Keep ordinary artwork payloads on the document.
+fn planning_composition(
+    comp: &pm_model::Node,
+    include_controls: bool,
+) -> Result<serde_json::Value, CommandError> {
+    use pm_scene3d::node_fields;
+    let mut fields = node_fields(comp, &["id", "w", "h", "fps", "dur", "studioQuality"]);
+    let layers = composition_layers(comp)?;
+    let layers = layers
+        .iter()
+        .map(|layer| {
+            let mut fields = node_fields(
+                layer,
+                &[
+                    "id", "name", "type", "parent", "group", "threeD", "lock", "on", "from", "dur",
+                ],
+            );
+            if let Some(d) = layer.get("d") {
+                let role = pm_scene3d::layer_role(layer);
+                let mut data = node_fields(d, &["definition"]);
+                if include_controls {
+                    if role.is_some() {
+                        if let Some(content) = d.get("data") {
+                            data.insert("data", content.to_value());
+                        }
+                        for (key, value) in node_fields(layer, &["p", "locked_intent"]) {
+                            fields.insert(key, value);
+                        }
+                    } else if let Some(content) = d.get("data") {
+                        // World/map validation also recognizes object data on older layers.
+                        let object = node_fields(content, &["object"]);
+                        if !object.is_empty() {
+                            data.insert("data", Value::Object(object));
+                        }
+                    }
+                    if d.get("extrusion").is_some()
+                        || matches!(
+                            layer.get("type").and_then(crate::model::str_of),
+                            Some("shape" | "text")
+                        )
+                    {
+                        for (key, value) in node_fields(d, &["extrusion", "color"]) {
+                            data.insert(key, value);
+                        }
+                    }
+                }
+                if !data.is_empty() {
+                    fields.insert("d", Value::Object(data));
+                }
+            }
+            Value::Object(fields)
+        })
+        .collect();
+    fields.insert("layers", Value::Array(layers));
+    pm_scene3d::from_model(&Value::Object(fields)).map_err(invalid)
+}
+
+fn composition_layers(comp: &pm_model::Node) -> Result<&[pm_model::Node], CommandError> {
+    pm_eval::node::array(comp.get("layers")).ok_or_else(|| invalid("No composition layers"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply(
     cx: &mut Cx<'_>,
@@ -213,7 +275,7 @@ fn apply(
         return Err(invalid("Invalid 3D time"));
     }
     let composition = cx.comp_node(comp)?;
-    let mut json = pm_scene3d::from_model(&composition.to_value()).map_err(invalid)?;
+    let mut json = planning_composition(composition, true)?;
     let mut args = pm_scene3d::from_model(args).map_err(invalid)?;
     if args["operation"] == "add_camera"
         && args.get("camera").is_none()
@@ -410,11 +472,27 @@ fn apply(
     }
     // Validate coupled camera values only after all channel edits. An authored
     // near+far pair may be temporarily invalid during the scratch sequence.
-    for l in cx.layers(comp) {
-        validate_layer(&l)?;
+    let current = cx.comp_node(comp)?;
+    for layer in crate::model::layers_of(current).filter(|layer| is_scene3d_layer(layer)) {
+        let keys: &[_] = if pm_scene3d::layer_role(layer).is_some() {
+            &["type", "p"]
+        } else {
+            &["type"]
+        };
+        let mut fields = pm_scene3d::node_fields(layer, keys);
+        if let Some(d) = layer.get("d") {
+            fields.insert(
+                "d",
+                Value::Object(pm_scene3d::node_fields(
+                    d,
+                    &["definition", "data", "extrusion"],
+                )),
+            );
+        }
+        validate_layer(&Value::Object(fields))?;
     }
-    let current = pm_scene3d::from_model(&cx.comp_node(comp)?.to_value()).map_err(invalid)?;
-    pm_scene3d::contract::validate_composition(&current).map_err(invalid)?;
+    pm_scene3d::contract::validate_composition(&planning_composition(current, true)?)
+        .map_err(invalid)?;
     Ok(())
 }
 fn fresh_keys(v: &mut Value, replace: bool) {
@@ -581,10 +659,15 @@ pub(crate) fn is_scene3d_layer(layer: &pm_model::Node) -> bool {
 }
 
 pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
-    if let Some(data)=layer.get("d").and_then(|d|d.get("extrusion")) {
-        let json=pm_scene3d::from_model(layer).map_err(invalid)?;
-        if !pm_scene3d::extrusion::eligible(&json){return Err(invalid("Only text and shape layers support extrusion"));}
-        pm_scene3d::extrusion::parse(&pm_scene3d::from_model(data).map_err(invalid)?).map_err(invalid)?;
+    if let Some(data) = layer.get("d").and_then(|d| d.get("extrusion")) {
+        if !matches!(
+            layer.get("type").and_then(Value::as_str),
+            Some("text" | "shape")
+        ) {
+            return Err(invalid("Only text and shape layers support extrusion"));
+        }
+        pm_scene3d::extrusion::parse(&pm_scene3d::from_model(data).map_err(invalid)?)
+            .map_err(invalid)?;
     }
     let definition = layer
         .get("d")
@@ -623,78 +706,155 @@ pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
 /// Load-time upgrade, preserving the entire original layer in the document.
 /// Unrecognized data stays present with a diagnostic; it is never replaced by
 /// blank geometry or a capability claim.
-pub(crate) fn upgrade_project(project: Value) -> Value {
-    let mut j = match pm_scene3d::from_model(&project) {
-        Ok(j) => j,
-        Err(error) => return retain_unrepresentable_3d(project, &error.to_string()),
+fn upgrade_project(document: &pm_model::Document) -> pm_model::Document {
+    fn projection(comp: &pm_model::Node) -> Option<pm_model::Map> {
+        let layers = pm_eval::node::array(comp.get("layers"))?;
+        if !layers.iter().any(old_3d_layer) {
+            return None;
+        }
+        let mut ids = std::collections::HashSet::new();
+        let keyed = layers.iter().all(|layer| {
+            layer
+                .get("id")
+                .and_then(crate::model::str_of)
+                .is_some_and(|id| ids.insert(id))
+        });
+        let layers = layers
+            .iter()
+            .map(|layer| {
+                // A malformed stack may need a whole-array patch. Keep its input
+                // intact so such a patch preserves the other layers.
+                if !keyed || old_3d_layer(layer) {
+                    layer.to_value()
+                } else {
+                    // The migration reads ordinary IDs to avoid collisions.
+                    Value::Object(pm_scene3d::node_fields(layer, &["id"]))
+                }
+            })
+            .collect();
+        let mut fields = pm_scene3d::node_fields(comp, &["fps", "dur", "w", "h"]);
+        fields.insert("layers", Value::Array(layers));
+        Some(fields)
+    }
+    let Some(root) = document.root() else {
+        return document.clone();
     };
-    let canonical = crate::model::to_canonical(project.clone());
-    let doc = pm_model::Document::new(Some(canonical), 1);
+    let mut fields = projection(root).unwrap_or_default();
+    if let Some(pm_model::NodeKind::Object(comps)) = root.get("comps").map(pm_model::Node::kind) {
+        let comps: pm_model::Map = comps
+            .iter()
+            .filter_map(|(id, comp)| Some((id.clone(), Value::Object(projection(comp)?))))
+            .collect();
+        if !comps.is_empty() {
+            fields.insert("comps", Value::Object(comps));
+        }
+    }
+    if fields.is_empty() {
+        return document.clone();
+    }
+    if has_unpaired_utf16(root) {
+        return retain_unrepresentable_3d(
+            document,
+            "Studio 3D cannot read unpaired UTF-16 surrogates",
+        );
+    }
+    let projected = Value::Object(fields);
+    let mut json = match pm_scene3d::from_model(&projected) {
+        Ok(json) => json,
+        Err(error) => return retain_unrepresentable_3d(document, &error.to_string()),
+    };
     let mut sampler = LegacySampler {
-        queries: crate::queries::QueryContext::new(&doc),
+        queries: crate::queries::QueryContext::new(document),
     };
-    if pm_scene3d::migration::upgrade_project_with(&mut j, &mut sampler).is_ok() {
-        pm_scene3d::to_model(&j)
-    } else {
-        project
+    if pm_scene3d::migration::upgrade_project_with(&mut json, &mut sampler).is_err() {
+        return document.clone();
+    }
+    let before = pm_model::Node::from_value(projected, 0);
+    let after = pm_model::Node::from_value(pm_scene3d::to_model(&json), 0);
+    let ops = pm_model::ops::diff_node_ops(Some(&before), Some(&after));
+    if ops.is_empty() {
+        return document.clone();
+    }
+    let mut upgraded = document.clone();
+    if upgraded.apply_ops(&ops).is_err() {
+        return document.clone();
+    }
+    pm_model::Document::reconciled_node(document, upgraded.root().cloned(), document.revision())
+}
+// Keep the load-time diagnostic for any string the migration's JSON bridge
+// cannot read. The scan borrows the existing strings and never copies paths.
+fn has_unpaired_utf16(node: &pm_model::Node) -> bool {
+    use pm_model::NodeKind;
+    match node.kind() {
+        NodeKind::String(s) => s.as_str().is_none(),
+        NodeKind::Array(items) => items.iter().any(has_unpaired_utf16),
+        NodeKind::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key.as_str().is_none() || has_unpaired_utf16(value)),
+        _ => false,
     }
 }
-// PM documents preserve lone UTF-16 surrogates, while the scene schema's
-// JSON bridge cannot represent them. Keep every original code unit and mark
-// only known 3D layers as failed, instead of accidentally leaving a legacy
-// renderer definition active. Never traverse archived source records.
-fn retain_unrepresentable_3d(mut project: Value, diagnostic: &str) -> Value {
-    fn comp(value: &mut Value, diagnostic: &str) {
-        let Some(map) = value.as_object_mut() else {
-            return;
-        };
-        if let Some(layers) = map.get_mut("layers").and_then(Value::as_array_mut) {
-            for layer in layers {
-                let known = layer
-                    .get("d")
-                    .and_then(|d| d.get("definition"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| {
-                        matches!(
-                            s,
-                            schema::SCENE
-                                | schema::OBJECT
-                                | schema::LIGHT
-                                | schema::CAMERA
-                                | "powermove.3d.obj-model"
-                        )
-                    });
-                if !known {
-                    continue;
-                }
-                let original = layer.clone();
-                let m = layer.as_object_mut().expect("known layer object");
-                if m.get("native3dArchive").is_none() {
-                    let mut archive = pm_model::Map::new();
-                    archive.insert("version", Value::Number(1.));
-                    archive.insert("source", original);
-                    m.insert("native3dArchive", Value::Object(archive));
-                }
-                m.get_mut("d")
-                    .and_then(Value::as_object_mut)
-                    .unwrap()
-                    .insert("definition", Value::from("powermove.3d.unupgraded"));
-                m.insert("native3dUpgradeDiagnostic", Value::from(diagnostic));
-                // DESIGN-TODO(opus): same unknown-reason placeholder as migration::mark_failed.
-                m.insert(
-                    "native3dUpgradeIssue",
-                    Value::from("This 3D layer couldn’t be upgraded."),
-                );
+
+fn retain_unrepresentable_3d(
+    document: &pm_model::Document,
+    diagnostic: &str,
+) -> pm_model::Document {
+    use pm_model::patch::{Patch, PathPart};
+
+    fn mark_layers(
+        comp: &pm_model::Node,
+        prefix: &[PathPart],
+        diagnostic: &str,
+        patches: &mut Vec<Patch>,
+    ) {
+        for (index, layer) in crate::model::layers_of(comp).enumerate() {
+            if !old_3d_layer(layer) {
+                continue;
             }
-        }
-        if let Some(comps) = map.get_mut("comps").and_then(Value::as_object_mut) {
-            for (_, value) in comps.iter_mut() {
-                comp(value, diagnostic);
+            let mut base = prefix.to_vec();
+            base.extend(["layers".into(), PathPart::Index(index as f64)]);
+            let set = |keys: &[&str], value| {
+                let mut path = base.clone();
+                path.extend(keys.iter().map(|&key| PathPart::from(key)));
+                Patch::set(path, value)
+            };
+            if layer.get("native3dArchive").is_none() {
+                let mut archive = pm_model::Map::new();
+                archive.insert("version", Value::Number(1.));
+                archive.insert("source", layer.to_value());
+                patches.push(set(&["native3dArchive"], Value::Object(archive)));
             }
+            patches.push(set(
+                &["d", "definition"],
+                Value::from("powermove.3d.unupgraded"),
+            ));
+            patches.push(set(&["native3dUpgradeDiagnostic"], Value::from(diagnostic)));
+            patches.push(set(
+                &["native3dUpgradeIssue"],
+                Value::from("This 3D layer couldn’t be upgraded."),
+            ));
         }
     }
-    comp(&mut project, diagnostic);
-    project
+
+    let Some(mut root) = document.root().cloned() else {
+        return document.clone();
+    };
+    let mut patches = Vec::new();
+    mark_layers(&root, &[], diagnostic, &mut patches);
+    if let Some(pm_model::NodeKind::Object(comps)) = root.get("comps").map(pm_model::Node::kind) {
+        for (id, comp) in comps.iter() {
+            mark_layers(
+                comp,
+                &["comps".into(), PathPart::Key(id.clone())],
+                diagnostic,
+                &mut patches,
+            );
+        }
+    }
+    if root.apply_patches(&patches, document.revision()).is_err() {
+        return document.clone();
+    }
+    pm_model::Document::reconciled_node(document, Some(root), document.revision())
 }
 struct LegacySampler {
     queries: crate::queries::QueryContext,
@@ -735,16 +895,6 @@ impl pm_scene3d::migration::LegacySampler for LegacySampler {
 /// Whether the document or its history holds old 3D objects, read in place
 /// (a large project is not copied out just to learn it has none).
 pub(crate) fn needs_upgrade(document: &pm_model::Document, history: &crate::History) -> bool {
-    fn node(n: &pm_model::doc::Node) -> bool {
-        use pm_model::doc::NodeKind;
-        match n.kind() {
-            NodeKind::Object(m) => m.get(b"definition".as_slice()).is_some_and(
-                |d| matches!(d.kind(), NodeKind::String(s) if s.as_str().is_some_and(is_old_3d)),
-            ) || m.iter().any(|(_, v)| node(v)),
-            NodeKind::Array(a) => a.iter().any(node),
-            _ => false,
-        }
-    }
     fn value(v: &Value) -> bool {
         match v {
             Value::Object(m) => {
@@ -757,13 +907,26 @@ pub(crate) fn needs_upgrade(document: &pm_model::Document, history: &crate::Hist
             _ => false,
         }
     }
-    document.root().is_some_and(node)
+    document.root().is_some_and(|root| {
+        let has_old_layers = |comp| crate::model::layers_of(comp).any(old_3d_layer);
+        has_old_layers(root)
+            || matches!(root.get("comps").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Object(comps)) if comps.iter().any(|(_, comp)| has_old_layers(comp)))
+    })
         || history
             .records()
             .iter()
             .filter(|r| r.forward.may_have_old_3d() || r.inverse.may_have_old_3d())
             .flat_map(|r| r.forward.iter().chain(r.inverse.iter()))
             .any(|op| matches!(op, pm_model::Op::Leaf(p) if p.value.as_ref().is_some_and(value)))
+}
+
+fn old_3d_layer(layer: &pm_model::Node) -> bool {
+    layer
+        .get("d")
+        .and_then(|d| d.get("definition"))
+        .and_then(crate::model::str_of)
+        .is_some_and(is_old_3d)
 }
 
 fn is_old_3d(definition: &str) -> bool {
@@ -783,28 +946,20 @@ pub(crate) fn upgrade_document_history(
     if !needs_upgrade(&document, &history) {
         return (document, history);
     }
-    let current = document.root().expect("checked").to_value();
-    let upgraded = upgrade_project(current.clone());
-    if current
-        .get("native3dHistoryVersion")
-        .and_then(Value::as_f64)
-        == Some(1.)
+    let upgraded = upgrade_project(&document);
+    if pm_eval::node::number(
+        document
+            .root()
+            .and_then(|root| root.get("native3dHistoryVersion")),
+    ) == Some(1.)
+        || history.is_empty()
     {
-        return (
-            pm_model::Document::new(Some(upgraded), document.revision()),
-            history,
-        );
-    }
-    if history.is_empty() {
-        return (
-            pm_model::Document::new(Some(upgraded), document.revision()),
-            history,
-        );
+        return (upgraded, history);
     }
     let mut original = document.clone();
     let cursor = history.applied();
     let mut revision = original.revision();
-    let mut needed = upgraded != current;
+    let mut needed = upgraded.root() != document.root();
     let run = (|| -> Result<crate::History, String> {
         for record in history.records()[..cursor].iter().rev() {
             revision += 1;
@@ -812,12 +967,11 @@ pub(crate) fn upgrade_document_history(
                 .apply_ops_at(&record.inverse.to_vec(), revision)
                 .map_err(|e| e.to_string())?;
         }
-        let prior = original
-            .root()
-            .ok_or("History removed the document")?
-            .to_value();
-        let mut before = upgrade_project(prior.clone());
-        needed |= before != prior;
+        if original.root().is_none() {
+            return Err("History removed the document".into());
+        }
+        let mut before = upgrade_project(&original);
+        needed |= before.root() != original.root();
         let mut next = crate::History::with_limits(history.len().max(1), usize::MAX);
         for record in history.records() {
             if !record.is_document() {
@@ -827,18 +981,18 @@ pub(crate) fn upgrade_document_history(
             original
                 .apply_ops_at(&record.forward.to_vec(), revision)
                 .map_err(|e| e.to_string())?;
-            let prior = original
-                .root()
-                .ok_or("History removed the document")?
-                .to_value();
-            let after = upgrade_project(prior.clone());
-            needed |= after != prior;
-            let (forward, inverse) = pm_model::patch::diff_patches(Some(&before), Some(&after));
+            if original.root().is_none() {
+                return Err("History removed the document".into());
+            }
+            let after = upgrade_project(&original);
+            needed |= after.root() != original.root();
+            let forward = pm_model::ops::diff_node_ops(before.root(), after.root());
+            let inverse = pm_model::ops::diff_node_ops(after.root(), before.root());
             next.push(
                 record.label.clone(),
                 record.origin,
-                forward.into_iter().map(pm_model::Op::Leaf).collect(),
-                inverse.into_iter().map(pm_model::Op::Leaf).collect(),
+                forward,
+                inverse,
                 None,
                 0,
             );
@@ -853,25 +1007,28 @@ pub(crate) fn upgrade_document_history(
     if run.is_ok() && !needed {
         return (document, history);
     }
-    let mut value = upgraded;
-    if let Some(m) = value.as_object_mut() {
-        m.insert("native3dHistoryVersion", Value::Number(1.));
-    }
-    match run {
-        Ok(next) => (
-            pm_model::Document::new(Some(value), document.revision()),
-            next,
-        ),
+    let mut root = upgraded.root().cloned().expect("checked");
+    let revision = upgraded.revision();
+    let mut patches = vec![pm_model::patch::Patch::set(
+        vec!["native3dHistoryVersion".into()],
+        Value::Number(1.),
+    )];
+    let history = match run {
+        Ok(next) => next,
         Err(reason) => {
-            if let Some(m) = value.as_object_mut() {
-                m.insert("native3dHistoryIssue", Value::from(reason));
-            }
-            (
-                pm_model::Document::new(Some(value), document.revision()),
-                crate::History::new(),
-            )
+            patches.push(pm_model::patch::Patch::set(
+                vec!["native3dHistoryIssue".into()],
+                Value::from(reason),
+            ));
+            crate::History::new()
         }
-    }
+    };
+    root.apply_patches(&patches, revision)
+        .expect("project metadata");
+    (
+        pm_model::Document::reconciled_node(&upgraded, Some(root), revision),
+        history,
+    )
 }
 
 /// Prepare geometry without blocking the actor or accessing JS. Asset providers
@@ -888,7 +1045,7 @@ pub fn prepare_geometry(
     let resolved_comp = comp.clone().or_else(|| snapshot.open_comp());
     let comp_node = crate::model::comp_node(root, resolved_comp.as_deref())
         .ok_or_else(|| invalid("No composition"))?;
-    let json = pm_scene3d::from_model(&comp_node.to_value()).map_err(invalid)?;
+    let json = planning_composition(comp_node, false)?;
     let args = pm_scene3d::from_model(args).map_err(invalid)?;
     let ids = pm_scene3d::geometry::required_ids(&json, &args, selection).map_err(invalid)?;
     let mut queries = crate::queries::QueryContext::new(&snapshot.document);
@@ -903,19 +1060,12 @@ pub fn prepare_geometry(
         });
     let mut bounds = serde_json::json!({});
     let mut parents = serde_json::json!({});
-    let records = pm_scene3d::from_model(
-        &root
-            .get("assets")
-            .map(pm_model::Node::to_value)
-            .unwrap_or(Value::Null),
-    )
-    .map_err(invalid)?;
+    let mut records = serde_json::json!({});
     for id in ids {
         let loc =
             crate::model::find_layer(root, &id).ok_or_else(|| invalid("3D layer not found"))?;
         let layer =
             crate::model::layer_at(root, &loc).ok_or_else(|| invalid("3D layer not found"))?;
-        let layer = pm_scene3d::from_model(&layer.to_value()).map_err(invalid)?;
         let request = |op: &str| {
             pm_scene3d::to_model(
                 &serde_json::json!({"op":op,"comp":comp_id,"open":comp_id,"layer":loc.index,"t":time}),
@@ -924,11 +1074,22 @@ pub fn prepare_geometry(
         if queries.query(&request("active")).map_err(invalid)? != Value::Bool(true) {
             continue;
         }
+        let source = layer
+            .get("d")
+            .and_then(|d| d.get("data")?.get("object")?.get("source"));
+        let source = pm_scene3d::from_model(&source.map_or(Value::Null, pm_model::Node::to_value))
+            .map_err(invalid)?;
+        if let Some(asset) = source["assetId"].as_str()
+            && records.get(asset).is_none()
+            && let Some(record) = root.get("assets").and_then(|assets| assets.get(asset))
+        {
+            records[asset] = pm_scene3d::from_model(&record.to_value()).map_err(invalid)?;
+        }
         let local = pm_scene3d::geometry::local_bounds(
-            &layer["d"]["data"]["object"]["source"],
+            &source,
             assets,
             &records,
-            time - layer["from"].as_f64().unwrap_or(0.),
+            time - pm_eval::node::number(layer.get("from")).unwrap_or(0.),
         )
         .map_err(invalid)?;
         let world = pm_scene3d::geometry::matrix(
@@ -967,12 +1128,10 @@ fn import(
     if cx.lookup(&["assets".into(), asset_id.into()]).is_some() {
         return Err(invalid("3D import asset ID already exists"));
     }
-    let empty = cx.layers(comp).iter().all(|l| {
+    let empty = crate::model::layers_of(cx.comp_node(comp)?).all(|l| {
         !matches!(
-            l.get("d")
-                .and_then(|d| d.get("definition"))
-                .and_then(Value::as_str),
-            Some(schema::LIGHT | schema::CAMERA)
+            pm_scene3d::layer_role(l),
+            Some(schema::Role::Light | schema::Role::Camera)
         )
     });
     let metadata = import_metadata(asset_id, receipt);
@@ -1310,13 +1469,29 @@ pub fn resolve_scene_with_camera(
     time: f64,
     camera: Option<&str>,
 ) -> Result<pm_scene3d::service::ResolvedScene, CommandError> {
-    struct Evaluator<'a> {
-        queries: crate::queries::QueryContext,
-        comp: String,
-        camera: Option<String>,
-        layer_indices: std::collections::HashMap<&'a str, usize>,
+    struct Evaluator<'a, 'scope, 'd> {
+        document: &'d pm_model::Document,
+        scope: Option<&'a mut pm_eval::Scope<'scope, 'd>>,
+        queries: Option<crate::queries::QueryContext>,
+        comp: &'a str,
+        camera: Option<&'a str>,
+        layer_indices: std::collections::HashMap<&'d str, usize>,
     }
-    impl Evaluator<'_> {
+    impl<'d> Evaluator<'_, '_, 'd> {
+        fn read<T>(
+            &mut self,
+            layer: &serde_json::Value,
+            read: impl FnOnce(
+                &mut pm_eval::Scope<'_, 'd>,
+                &'d pm_model::Node,
+            ) -> pm_eval::js_sem::JsResult<T>,
+        ) -> Option<pm_scene3d::Result<T>> {
+            let index = *self.layer_indices.get(layer["id"].as_str()?)?;
+            let scope = self.scope.as_deref_mut()?;
+            let node = scope.layers().get(index)?;
+            Some(read(scope, node).map_err(|e| pm_scene3d::Error(e.message)))
+        }
+
         fn query(
             &mut self,
             op: &str,
@@ -1335,12 +1510,13 @@ pub fn resolve_scene_with_camera(
             }
             let value = self
                 .queries
+                .get_or_insert_with(|| crate::queries::QueryContext::new(self.document))
                 .query(&pm_scene3d::to_model(&request))
                 .map_err(|e| pm_scene3d::Error(e.to_string()))?;
             pm_scene3d::from_model(&value)
         }
     }
-    impl pm_scene3d::service::Evaluator for Evaluator<'_> {
+    impl pm_scene3d::service::Evaluator for Evaluator<'_, '_, '_> {
         fn value(
             &mut self,
             l: &serde_json::Value,
@@ -1365,20 +1541,70 @@ pub fn resolve_scene_with_camera(
             if let Some(camera) = &self.camera
                 && pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera)
             {
-                return Ok(l["id"] == camera.as_str());
+                return Ok(l["id"] == *camera);
+            }
+            if let Some(result) = self.read(l, |scope, node| {
+                if node.get("on").and_then(crate::model::bool_of) == Some(false)
+                    || pm_eval::evaluator::outside_layer_span(node, t)
+                {
+                    return Ok(false);
+                }
+                scope.active(node, t)
+            }) {
+                return result;
             }
             self.query("active", l, t, serde_json::json!({}))
                 .map(|v| v == true)
         }
     }
-    impl pm_scene3d::service::WorldEvaluator for Evaluator<'_> {
+    // With no parent or group, no stack lookup is needed to evaluate the
+    // model's world transform. The local transform still uses the evaluator.
+    fn has_ancestor(layer: &pm_model::Node) -> bool {
+        pm_eval::node::truthy(layer.get("parent")) || pm_eval::node::truthy(layer.get("group"))
+    }
+
+    impl pm_scene3d::service::WorldEvaluator for Evaluator<'_, '_, '_> {
         fn world(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<[f64; 16]> {
+            if let Some(result) = self.read(l, |scope, node| {
+                use pm_eval::space3d::{IDENTITY4, multiply};
+                if has_ancestor(node) {
+                    scope.world3d(node, t, false)
+                } else {
+                    scope.local3d(node, t).map(|local| multiply(&IDENTITY4, &local))
+                }
+            }) {
+                return result;
+            }
             pm_scene3d::geometry::matrix(&self.query("world3D", l, t, serde_json::json!({}))?)
         }
         fn parent(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<[f64; 16]> {
+            if let Some(result) = self.read(l, |scope, node| {
+                if has_ancestor(node) {
+                    scope.parent3d(node, t, None)
+                } else {
+                    Ok(pm_eval::space3d::IDENTITY4)
+                }
+            }) {
+                return result;
+            }
             pm_scene3d::geometry::matrix(&self.query("parent3D", l, t, serde_json::json!({}))?)
         }
         fn opacity(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<f64> {
+            if let Some(result) = self.read(l, |scope, node| {
+                if pm_eval::node::truthy(node.get("group")) {
+                    scope.world_opacity(node, t)
+                } else {
+                    scope.num(node, "opacity", t).map(|n| (n / 100.).clamp(0., 1.))
+                }
+            }) {
+                return result.and_then(|opacity| {
+                    if opacity.is_finite() {
+                        Ok(opacity)
+                    } else {
+                        Err(pm_scene3d::Error("Invalid opacity".into()))
+                    }
+                });
+            }
             self.query("worldOpacity", l, t, serde_json::json!({}))?
                 .as_f64()
                 .ok_or_else(|| pm_scene3d::Error("Invalid opacity".into()))
@@ -1391,35 +1617,56 @@ pub fn resolve_scene_with_camera(
     // The resolver consumes Studio roles, 3D nulls, and extrusion settings.
     // Their evaluator still sees the full stack through the original indices,
     // including flat parents and groups that are absent from this projection.
-    let Some(pm_model::NodeKind::Array(source_layers)) = c.get("layers").map(pm_model::Node::kind)
-    else {
-        return Err(invalid("No layers"));
-    };
-    let layers: Vec<_> = source_layers
-        .iter()
-        .filter(|layer| {
-            is_scene3d_layer(layer)
-                || (layer.get("type").and_then(crate::model::str_of) == Some("null")
-                    && layer.get("threeD").and_then(crate::model::bool_of) == Some(true))
-        })
-        .map(|layer| match layer.kind() {
-            pm_model::NodeKind::Object(fields) => Value::Object(
-                fields
-                    .iter()
-                    .filter(|(key, _)| key.as_str() != Some("native3dArchive"))
-                    .map(|(key, value)| (key.clone(), value.to_value()))
-                    .collect(),
-            ),
-            _ => layer.to_value(),
-        })
-        .collect();
-    let mut evaluated = pm_model::Map::new();
-    evaluated.insert("layers", Value::Array(layers));
-    if let Some(quality) = c.get("studioQuality") {
-        evaluated.insert("studioQuality", quality.to_value());
+    let source_layers = composition_layers(c)?;
+    let mut pending_ids = std::collections::HashSet::new();
+    let mut layers = Vec::new();
+    for layer in source_layers {
+        let content = layer.get("d");
+        let studio = content.and_then(pm_scene3d::role_from_content).is_some();
+        let extrusion = content.and_then(|d| d.get("extrusion"));
+        let null = pm_eval::node::is_str(layer.get("type"), "null")
+            && layer.get("threeD").and_then(crate::model::bool_of) == Some(true);
+        if !studio && extrusion.is_none() && !null {
+            continue;
+        }
+        if let Some(id) = layer.get("id").and_then(crate::model::str_of) {
+            pending_ids.insert(id);
+        }
+        let mut fields = pm_scene3d::node_fields(layer, &["id", "type", "threeD", "name"]);
+        let mut data = pm_model::Map::new();
+        if studio {
+            for (key, value) in pm_scene3d::node_fields(layer, &["from", "dur", "p", "parent"]) {
+                fields.insert(key, value);
+            }
+            data = pm_scene3d::node_fields(
+                content.expect("Studio definition"),
+                &["definition", "data"],
+            );
+            // Resolve only mask visibility. The world evaluator still sees
+            // the original masks and their geometry.
+            if let Some(masks) = pm_eval::node::array(layer.get("masks")) {
+                fields.insert(
+                    "masks",
+                    Value::Array(
+                        masks
+                            .iter()
+                            .map(|mask| Value::Object(pm_scene3d::node_fields(mask, &["id", "on"])))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        if let Some(extrusion) = extrusion {
+            data.insert("extrusion", extrusion.to_value());
+        }
+        if !data.is_empty() {
+            fields.insert("d", Value::Object(data));
+        }
+        layers.push(Value::Object(fields));
     }
-    let evaluated = Value::Object(evaluated);
-    let c = pm_scene3d::from_model(&evaluated).map_err(invalid)?;
+    let mut evaluated = pm_scene3d::node_fields(c, &["studioQuality"]);
+    evaluated.insert("layers", Value::Array(layers));
+    let c = pm_scene3d::from_model(&Value::Object(evaluated)).map_err(invalid)?;
     let comp = comp.unwrap_or_else(|| {
         format!(
             "@root:{}",
@@ -1435,21 +1682,38 @@ pub fn resolve_scene_with_camera(
     {
         return Err(invalid("View camera layer is missing"));
     }
-    let mut layer_indices = std::collections::HashMap::new();
-    if !layers.is_empty() {
-        for (index, layer) in source_layers.iter().enumerate() {
-            if let Some(id) = layer.get("id").and_then(crate::model::str_of) {
-                layer_indices.entry(id).or_insert(index);
-            }
+    let mut layer_indices = std::collections::HashMap::with_capacity(pending_ids.len());
+    for (index, layer) in source_layers.iter().enumerate() {
+        if pending_ids.is_empty() {
+            break;
+        }
+        // Keep the first occurrence, even if an imported stack has duplicate
+        // IDs and the first layer for this ID had no Studio controls.
+        if let Some(id) = layer.get("id").and_then(crate::model::str_of)
+            && pending_ids.remove(id)
+        {
+            layer_indices.insert(id, index);
         }
     }
+    // Share one evaluator for activity, transforms and opacity. Animated
+    // detached properties can still use the raw query path when needed.
+    let address = pm_eval::Comp::resolve(&snapshot.document, &comp).ok();
+    let mut eval = pm_eval::Evaluator::new()
+        .with_expressions(std::sync::Arc::new(pm_wasm::expr::PmExpressions));
+    let mut scope = address.as_ref().map(|comp| {
+        let mut scope = pm_eval::Scope::open(&mut eval, comp);
+        scope.memoize_transforms();
+        scope
+    });
     pm_scene3d::service::resolve(
         &c,
         time,
         &mut Evaluator {
-            queries: crate::queries::QueryContext::new(&snapshot.document),
-            comp,
-            camera: camera.map(str::to_owned),
+            document: &snapshot.document,
+            scope: scope.as_mut(),
+            queries: None,
+            comp: &comp,
+            camera,
             layer_indices,
         },
     )

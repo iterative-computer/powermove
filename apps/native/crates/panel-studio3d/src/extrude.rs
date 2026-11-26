@@ -2,7 +2,10 @@
 //! sources. One click gives a layer depth, a rounded bevel that catches
 //! light and four surfaces that read as one object; every value after that
 //! is an ordinary keyframeable channel (`geo.*`, `ms.SURFACE.*`).
-use crate::{Result, invalid};
+use crate::{
+    Result, invalid,
+    view::{self, node_bool, node_str},
+};
 use pm_kernel::{Command, Published, Scene3dCommand};
 use pm_scene3d::{
     extrusion::{self, SURFACES},
@@ -31,15 +34,6 @@ pub const DETAIL: &[(&str, &str, &str)] = &[
     ("high", "High", "For close-ups."),
 ];
 
-fn composition(p: &Published) -> Result<Value> {
-    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
-    from_model(
-        &pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
-            .ok_or_else(|| invalid("No composition"))?
-            .to_value(),
-    )
-    .map_err(Into::into)
-}
 fn apply(p: &Published, time: f64, args: Value) -> Command {
     Scene3dCommand::Apply {
         comp: p.snapshot.open_comp(),
@@ -137,32 +131,38 @@ pub fn has_override(layer: &Value, surface: &str, key: &str) -> bool {
 /// Live map sources (AE 27 layers as materials): `layer:<id>` for a 2D
 /// layer or group in this composition, `comp:<id>` for a composition.
 pub fn sources(p: &Published, receiver: &str) -> Result<Vec<Value>> {
-    let comp = composition(p)?;
+    let comp = view::composition(p)?;
     let mut out = vec![];
-    for l in comp["layers"].as_array().into_iter().flatten() {
-        let id = l["id"].as_str().unwrap_or("");
-        let kind = l["type"].as_str().unwrap_or("");
+    for l in pm_kernel::model::layers_of(comp) {
+        let text = |key| l.get(key).and_then(node_str);
+        let id = text("id").unwrap_or("");
+        let kind = text("type").unwrap_or("");
+        let extruded = matches!(kind, "text" | "shape")
+            && l.get("threeD").and_then(node_bool) == Some(true)
+            && l.get("d")
+                .and_then(|d| d.get("extrusion")?.get("enabled"))
+                .and_then(node_bool)
+                == Some(true);
         if id == receiver
-            || schema::role(l).is_some()
+            || pm_scene3d::layer_role(l).is_some()
             || matches!(kind, "audio" | "camera" | "light" | "null" | "adjustment")
-            || extrusion::enabled(l)
+            || extruded
         {
             continue;
         }
         let detail = if kind == "group" { "Group" } else { "Layer" };
-        out.push(json!({"v":format!("layer:{id}"),"label":l["name"].as_str().unwrap_or(id),"detail":detail}));
+        out.push(
+            json!({"v":format!("layer:{id}"),"label":text("name").unwrap_or(id),"detail":detail}),
+        );
     }
-    let root = from_model(
-        &p.snapshot
-            .root()
-            .ok_or_else(|| invalid("No project"))?
-            .to_value(),
-    )?;
-    for (id, c) in root["comps"].as_object().into_iter().flatten() {
-        if p.snapshot.open_comp().as_deref() == Some(id) {
+    let open = p.snapshot.open_comp();
+    let comps = p.snapshot.root().and_then(|root| root.get("comps"));
+    for (id, c) in comps.into_iter().flat_map(view::named_compositions) {
+        if open.as_deref() == Some(id) {
             continue;
         }
-        out.push(json!({"v":format!("comp:{id}"),"label":c["name"].as_str().unwrap_or(id),"detail":"Composition"}));
+        let name = c.get("name").and_then(node_str).unwrap_or(id);
+        out.push(json!({"v":format!("comp:{id}"),"label":name,"detail":"Composition"}));
     }
     Ok(out)
 }
@@ -199,12 +199,20 @@ pub(crate) fn commands(
     if p.selection.layers().len() != 1 {
         return Err(invalid("Choose one text or shape layer"));
     }
-    let comp = composition(p)?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-    let layer = layers
-        .iter()
-        .find(|l| l["id"] == p.selection.layers()[0])
+    let comp = view::composition(p)?;
+    let (_, layer) = view::layer_by_id(comp, &p.selection.layers()[0])
         .ok_or_else(|| invalid("Layer disappeared"))?;
+    let mut fields = pm_scene3d::node_fields(layer, &["id", "type", "lock"]);
+    if let Some(d) = layer.get("d") {
+        fields.insert(
+            "d",
+            pm_model::Value::Object(pm_scene3d::node_fields(
+                d,
+                &["color", "fill", "size", "w", "h", "extrusion"],
+            )),
+        );
+    }
+    let layer = &from_model(&pm_model::Value::Object(fields))?;
     if !extrusion::eligible(layer) {
         return Err(invalid("Only text and shape layers can be extruded"));
     }
@@ -236,7 +244,7 @@ pub(crate) fn commands(
                 // An unlit composition gets a soft sky (lighting only, so the
                 // design's own background stays) and a key light.
                 let id = format!("x{}", p.revision());
-                for args in lit(&layers, &id) {
+                for args in lit(&view::setup_layers(comp)?, &id) {
                     out.push(apply(p, time, args));
                 }
             } else {

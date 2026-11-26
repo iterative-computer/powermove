@@ -8,6 +8,7 @@
 //! geometry loads, with a unit envelope only for older unmeasured imports.
 use crate::{Result, invalid};
 use pm_eval::{
+    evaluator::outside_layer_span,
     node,
     parenting::transform_aim,
     space3d::{
@@ -324,7 +325,7 @@ pub fn supports_navigation(p: &Published) -> bool {
 /// Whether the composition supports 3D navigation, read from its layer nodes.
 fn has_roles(comp: &pm_model::Node) -> bool {
     pm_kernel::model::layers_of(comp)
-        .any(|layer| pm_scene3d::layer_role(layer).is_some() || flag(layer.get("threeD")))
+        .any(|layer| flag(layer.get("threeD")) || pm_scene3d::layer_role(layer).is_some())
 }
 fn flag(node: Option<&pm_model::Node>) -> bool {
     matches!(
@@ -349,14 +350,10 @@ pub fn pick_part(
     let root = snapshot.root().ok_or_else(|| invalid("No project"))?;
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
         .ok_or_else(|| invalid("No composition"))?;
-    let comp = from_model(&comp.to_value())?;
-    let Some(l) = comp["layers"]
-        .as_array()
-        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
-    else {
+    let Some((_, node)) = crate::view::layer_by_id(comp, layer) else {
         return Ok(None);
     };
-    let Some(asset) = l["d"]["data"]["object"]["source"]["assetId"].as_str() else {
+    let Some(asset) = model_asset(node) else {
         return Ok(None);
     };
     let r = pm_kernel::commands::scene3d::resolve_scene(snapshot, comp_id.as_deref(), time)
@@ -364,22 +361,41 @@ pub fn pick_part(
     let Some(world) = r.model_worlds.get(layer) else {
         return Ok(None);
     };
-    let records = from_model(
-        &root
-            .get("assets")
-            .map(pm_model::Node::to_value)
-            .unwrap_or(pm_model::Value::Null),
-    )?;
+    pick_asset_part(root, node, asset, *world, time, ray, assets)
+}
+
+fn model_asset(layer: &pm_model::Node) -> Option<&str> {
+    crate::view::node_str(
+        layer
+            .get("d")?
+            .get("data")?
+            .get("object")?
+            .get("source")?
+            .get("assetId")?,
+    )
+}
+
+fn pick_asset_part(
+    root: &pm_model::Node,
+    layer: &pm_model::Node,
+    asset: &str,
+    world: [f64; 16],
+    time: f64,
+    ray: &Ray,
+    assets: &dyn AssetGeometry,
+) -> Result<Option<pm_scene3d::geometry::PartHit>> {
+    let record = root.get("assets").and_then(|assets| assets.get(asset));
+    let record = from_model(&record.map_or(pm_model::Value::Null, pm_model::Node::to_value))?;
     assets
         .part_at(
             asset,
-            &records[asset],
-            *world,
-            time - l["from"].as_f64().unwrap_or(0.),
+            &record,
+            world,
+            time - node::number(layer.get("from")).unwrap_or(0.),
             ray.origin,
             ray.dir,
         )
-        .map_err(|e| invalid(e.to_string()))
+        .map_err(Into::into)
 }
 /// The composition camera's eye (the shot), as `scene` sees it.
 /// Evaluate the same model sample for Properties selection and viewport picking.
@@ -481,22 +497,30 @@ pub fn pick_part_at(
     let root = snapshot.root().ok_or_else(|| invalid("No project"))?;
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
         .ok_or_else(|| invalid("No composition"))?;
-    let comp = from_model(&comp.to_value())?;
     let r = pm_kernel::commands::scene3d::resolve_scene(snapshot, comp_id.as_deref(), time)
         .map_err(|e| invalid(e.to_string()))?;
     let ray = eye_of(
         &r,
-        comp["w"].as_f64().unwrap_or(1920.),
-        comp["h"].as_f64().unwrap_or(1080.),
+        node::number(comp.get("w")).unwrap_or(1920.),
+        node::number(comp.get("h")).unwrap_or(1080.),
     )
     .ray(at);
     let mut best: Option<(String, pm_scene3d::geometry::PartHit)> = None;
-    for l in comp["layers"].as_array().into_iter().flatten() {
-        let id = l["id"].as_str().unwrap_or_default();
-        if l["on"] == false || !r.model_worlds.contains_key(id) {
+    for layer in pm_kernel::model::layers_of(comp) {
+        if layer.get("on").and_then(crate::view::node_bool) == Some(false) {
             continue;
         }
-        if let Some(hit) = pick_part(snapshot, time, id, &ray, assets)?
+        let id = layer
+            .get("id")
+            .and_then(crate::view::node_str)
+            .unwrap_or_default();
+        let Some(world) = r.model_worlds.get(id) else {
+            continue;
+        };
+        let Some(asset) = model_asset(layer) else {
+            continue;
+        };
+        if let Some(hit) = pick_asset_part(root, layer, asset, *world, time, &ray, assets)?
             && best.as_ref().is_none_or(|(_, b)| hit.distance < b.distance)
         {
             best = Some((id.to_owned(), hit));
@@ -531,7 +555,6 @@ fn build_scene(
     if !has_roles(comp) {
         return Err(invalid("No 3D layers"));
     }
-    let default_25d = uses_default_25d_camera(pm_kernel::model::layers_of(comp));
     let r = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp_id.as_deref(), time)
         .map_err(|e| invalid(e.to_string()))?;
     let Eye {
@@ -546,7 +569,8 @@ fn build_scene(
     );
     let n = |key: &str, default| r.scene["camera"]["p"][key]["v"].as_f64().unwrap_or(default);
     let default_camera = default_camera_25d(width, height);
-    let legacy_framing = default_25d && r.camera_id.is_none();
+    let legacy_framing =
+        r.camera_id.is_none() && uses_default_25d_camera(pm_kernel::model::layers_of(comp));
     let editor_lens = Lens::Perspective {
         fov: if legacy_framing {
             default_camera.fov
@@ -603,9 +627,12 @@ fn scene_items(
     const IDENTITY: [f64; 16] = [
         1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
     ];
-    let mut records = serde_json::json!({});
+    let mut records = serde_json::Value::Null;
     let mut items = vec![];
     for (index, layer) in pm_kernel::model::layers_of(comp).enumerate() {
+        if layer.get("on").and_then(crate::view::node_bool) == Some(false) {
+            continue;
+        }
         let kind = node::string(layer.get("type")).and_then(pm_model::JsString::as_str);
         let id = node::string(layer.get("id")).and_then(pm_model::JsString::as_str);
         let name = || {
@@ -614,13 +641,9 @@ fn scene_items(
                 .unwrap_or_default()
         };
         let own_lock = flag(layer.get("lock"));
-        let off = matches!(
-            layer.get("on").map(pm_model::Node::kind),
-            Some(pm_model::NodeKind::Bool(false))
-        );
         let three_d = flag(layer.get("threeD"));
         if kind == Some("null") && three_d {
-            if off {
+            if outside_layer_span(layer, time) {
                 continue;
             }
             let Some(id) = id else { continue };
@@ -628,6 +651,13 @@ fn scene_items(
             let Some((source_index, evaluated_layer)) = q.layer(id) else {
                 continue;
             };
+            if if studio_null {
+                !r.null_worlds.contains_key(id)
+            } else {
+                !q.active_plane(evaluated_layer)
+            } {
+                continue;
+            }
             let position = q.channels(
                 evaluated_layer,
                 ["position.x", "position.y", "position.z"],
@@ -698,9 +728,6 @@ fn scene_items(
             } else {
                 // Regular 3D null in composition pixel space: bridge into scene space
                 // so it appears, picks, and drags cleanly in 3D Free View too.
-                if !q.active_plane(evaluated_layer) {
-                    continue;
-                }
                 let Some((pixel_world, position_world)) = q.plane_worlds(evaluated_layer) else {
                     continue;
                 };
@@ -771,7 +798,13 @@ fn scene_items(
                         .and_then(|d| d.get("extrusion"))
                         .and_then(|e| e.get("enabled")),
                 );
-            if extrusion || matches!(kind, Some("group" | "audio" | "adjustment")) {
+            // Only authored 3D and group membership can make this artwork
+            // a 3D plane. The evaluator still owns inherited visibility.
+            if outside_layer_span(layer, time)
+                || (!node::truthy(layer.get("threeD")) && !node::truthy(layer.get("group")))
+                || extrusion
+                || matches!(kind, Some("group" | "audio" | "adjustment"))
+            {
                 continue;
             }
             let Some((source_index, evaluated_layer)) = q.layer(id) else {
@@ -843,7 +876,16 @@ fn scene_items(
             });
             continue;
         };
-        let id = id.unwrap_or_default().to_owned();
+        let id = id.unwrap_or_default();
+        let visible = match role {
+            Role::Object => r.model_worlds.contains_key(id),
+            Role::Light => r.light_worlds.contains_key(id),
+            Role::Camera => false,
+        };
+        if !visible {
+            continue;
+        }
+        let id = id.to_owned();
         let Some((_, evaluated_layer)) = q.layer(&id) else {
             continue;
         };
@@ -853,7 +895,7 @@ fn scene_items(
             Role::Object => {
                 // Environments (sky, fog, terrain, scatter) aren't picked in
                 // the viewer: clicking the ground shouldn't select the world.
-                let Some(world) = r.model_worlds.get(&id).filter(|_| !off) else {
+                let Some(world) = r.model_worlds.get(&id) else {
                     continue;
                 };
                 let data =
@@ -1030,6 +1072,94 @@ mod tests {
     #[allow(dead_code)]
     mod drag_fixture {
         include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn heavy_composition_hot_paths() {
+        use serde_json::json;
+        use std::time::Instant;
+
+        let contour = json!({"closed":true,"vertices":vec![[1234.5678, -9012.3456]; 1024]});
+        let paths = vec![contour; 11];
+        let mut layers: Vec<_> = (0..1999)
+            .map(|i| {
+                let mut layer = json!({
+                    "id":format!("art-{i}"), "type":"text", "on":i % 2 == 0,
+                    "threeD":i >= 1822, "from":2., "dur":3., "d":{"text":"Artwork"}
+                });
+                if i % 40 == 0 {
+                    layer["type"] = json!("shape");
+                    layer["d"] = json!({"paths":paths});
+                }
+                layer
+            })
+            .collect();
+        layers.push(json!({
+            "id":"studio", "name":"Studio Box", "type":"extension", "threeD":true, "on":true, "from":0., "dur":5.,
+            "p":{"opacity":schema::channel(json!(100.))},
+            "d":{"definition":schema::OBJECT,"data":schema::layer_data(
+                Role::Object, json!({"object":{"source":{"primitive":"box"}}})
+            ).unwrap()}
+        }));
+        let p = pm_kernel::detached_publication(
+            "heavy-viewport",
+            to_model(&json!({
+                "id":"heavy", "w":1920, "h":1080, "fps":30, "dur":5, "layers":layers
+            })),
+        );
+        let measure = |name: &str, budget_ms: f64, run: &mut dyn FnMut()| {
+            let mut samples = [0.; 5];
+            for sample in &mut samples {
+                let start = Instant::now();
+                run();
+                *sample = start.elapsed().as_secs_f64() * 1000.;
+            }
+            samples.sort_by(f64::total_cmp);
+            let median = samples[2];
+            eprintln!("{name}: {median:.3} ms median");
+            assert!(
+                median < budget_ms,
+                "{name} took {median:.3} ms, budget {budget_ms} ms"
+            );
+        };
+        measure("scene", 10., &mut || {
+            assert_eq!(scene(&p, 0.).unwrap().items.len(), 1)
+        });
+        measure("scene_with_bounds", 10., &mut || {
+            assert_eq!(
+                scene_with_bounds(&p, 0., |id| panic!(
+                    "inactive artwork requested bounds: {id}"
+                ))
+                .unwrap()
+                .items
+                .len(),
+                1
+            )
+        });
+        measure("scene_summary", 2., &mut || {
+            assert_eq!(
+                crate::view::scene_summary(&p).unwrap().unwrap()["models"],
+                1
+            )
+        });
+        measure("supports_navigation", 2., &mut || {
+            assert!(supports_navigation(&p))
+        });
+        measure("uses_default_25d_camera", 2., &mut || {
+            let comp = p.snapshot.root().unwrap();
+            assert!(!uses_default_25d_camera(pm_kernel::model::layers_of(comp)));
+        });
+        measure("resolve_scene", 8., &mut || {
+            let scene = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, None, 0.).unwrap();
+            assert!(scene.model_worlds.contains_key("studio"));
+        });
+        measure("pick_part_at", 8., &mut || {
+            assert!(
+                pick_part_at(&p.snapshot, 0., [960., 540.], &NoAssets)
+                    .unwrap()
+                    .is_none()
+            );
+        });
     }
 
     #[test]
