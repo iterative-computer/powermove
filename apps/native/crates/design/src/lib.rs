@@ -1122,8 +1122,16 @@ impl Tokens {
             ink: Ink::new(),
             welcome: Welcome::new(),
             translucency: {
-                // The translucent shell is a heavy tint of the window colour
-                // over a behind-window blur; Reduce Transparency makes it solid.
+                // Two surface tones per appearance. Chrome (the title bar
+                // band, the sidebar's glass and the ground around the
+                // content) is one heavy tint of the window colour over the
+                // behind-window blur, the same alpha on the blur and on the
+                // glass so they land on one tone; content (Home's sheet,
+                // panels, the viewer's surround) is the panel colour. Light
+                // content is solid paper, as a Mac's light content areas: a
+                // translucent light panel picked up the desktop, a second
+                // content tone beside Home's solid sheet. Reduce
+                // Transparency makes the chrome solid too.
                 let solid = accessibility.reduce_transparency;
                 match scheme {
                     Scheme::Dark => Translucency {
@@ -1145,8 +1153,8 @@ impl Tokens {
                     },
                     Scheme::Light => Translucency {
                         ground,
-                        window: if solid { 1. } else { 0.62 },
-                        panel: if solid { 1. } else { 0.7 },
+                        window: if solid { 1. } else { 0.9 },
+                        panel: 1.,
                         edge: 0.08,
                         line: 0.08,
                         tick_minor: 0.14,
@@ -1157,7 +1165,7 @@ impl Tokens {
                         selected: 0.07,
                         pressed: 0.1,
                         faint: 0.42,
-                        glass_tint: 0.6,
+                        glass_tint: 0.9,
                         glass_menu: 0.84,
                     },
                 }

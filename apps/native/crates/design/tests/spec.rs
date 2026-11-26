@@ -159,11 +159,11 @@ const ROLES: &[(&str, &str)] = &[
     ),
     (
         "colors.window",
-        "Window ground behind panels, toolbar band and status bar",
+        "Chrome tone: the window ground under the toolbar, sidebar and status bar, around the content",
     ),
     (
         "colors.panel",
-        "Panel material: every docked work surface and sheet content",
+        "Content tone: every docked work surface, Home's sheet and sheet content",
     ),
     (
         "colors.panel_secondary",
@@ -728,11 +728,11 @@ const ROLES: &[(&str, &str)] = &[
     ),
     (
         "translucency.window",
-        "Window tint over the behind-window blur (1 = solid, Reduce Transparency)",
+        "Chrome tint over the behind-window blur: title bar, sidebar and the ground around the content, one tone (1 = solid)",
     ),
     (
         "translucency.panel",
-        "Shared panel material over the window tint (1 = solid)",
+        "Content panel over the chrome (1 = solid: light content is solid paper)",
     ),
     (
         "translucency.ground",
