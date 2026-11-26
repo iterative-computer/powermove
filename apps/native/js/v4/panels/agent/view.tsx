@@ -850,16 +850,17 @@ export function harnessModel(s: Snapshot, n?: NativeFacts): string {
   const group = n?.modelGroups?.[s.settings.provider];
   return group?.find(([, , on]) => on)?.[0] ?? s.catalog.models[0]?.[0] ?? "";
 }
-/** The reasoning level the model runs at: the chosen one when the model
- * offers it, else the model's default. */
+/** The reasoning level the model runs at, always one of its own levels:
+ * the chosen one when the model offers it, else the model's default, else
+ * its first level ("" for a model with none). */
 export function currentEffort(s: Snapshot, efforts: string[]): string {
   const chosen = s.settings.effort;
   if (chosen && efforts.includes(chosen)) return chosen;
   const fallback = s.catalog.defaultEffort;
-  return fallback && efforts.includes(fallback) ? fallback : chosen;
+  return fallback && efforts.includes(fallback) ? fallback : (efforts[0] ?? "");
 }
-/** How long a picked model or level shows in the pill without the kernel
- * confirming it, before the pill reads the kernel's again. */
+/** How long a picked level shows in the pill without the kernel confirming
+ * it, before the pill reads the kernel's again. */
 const PICK_SETTLE_MS = 2000;
 /** The mark the chooser and the pill show for a harness's model: Claude
  * Code's own, Codex's OpenAI blossom, and the Powermove mark for Aero. */
@@ -2913,27 +2914,33 @@ function Composer({
       if (openModelMenu.current === open) openModelMenu.current = null;
     }
   };
-  // A model or level just picked shows in the pill at once, before the
-  // kernel's next publication carries it (nothing flickers back); a choice
-  // the kernel refused falls back when its answer comes, or after a beat.
-  const [picked, setPicked] = useState<{ model?: string; effort?: string } | null>(null);
-  useLayoutEffect(() => setPicked(null), [s.settings.provider, s.settings.model, s.settings.effort]);
-  useLayoutEffect(() => {
-    if (!picked) return;
-    const timer = setTimeout(() => setPicked(null), PICK_SETTLE_MS);
-    return () => clearTimeout(timer);
-  }, [picked]);
-  const now = picked ? { ...s, settings: { ...s.settings, ...picked } } : s;
   const modelName = named(
-    now.catalog.models,
-    now.settings.model,
-    named(now.catalog.providers, now.settings.provider),
+    s.catalog.models,
+    s.settings.model,
+    named(s.catalog.providers, s.settings.provider),
   );
-  const shownModel = harnessModel(now, n);
+  const shownModel = harnessModel(s, n);
   // The model's reasoning effort is its own menu beside the model's; a
   // model with no effort levels lists none, and the pill has no effort part.
   const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
-  const effortNow = currentEffort(now, efforts);
+  // A level just picked from this model's own list shows in the pill at
+  // once, before the kernel's next publication carries it (nothing flickers
+  // back). Only a level: a picked model's levels and default come with the
+  // kernel's publication, so the pill never pairs a model with a level it
+  // can't run. A pick the kernel refused falls back when it answers, or
+  // after a beat.
+  const [picked, setPicked] = useState<string | null>(null);
+  useLayoutEffect(
+    () => setPicked(null),
+    [s.settings.provider, s.settings.model, s.settings.effort, efforts.join(" ")],
+  );
+  useLayoutEffect(() => {
+    if (picked === null) return;
+    const timer = setTimeout(() => setPicked(null), PICK_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [picked]);
+  const effortNow =
+    picked !== null && efforts.includes(picked) ? picked : currentEffort(s, efforts);
   const effortName = effortNow ? effortLabel(effortNow) : "";
   const choicesLocked = working || s.composerDisabled;
   const [openPicker, setOpenPicker] = useState<string | null>(null);
@@ -3108,7 +3115,6 @@ function Composer({
       // takes it, else runs at its own default.
       else if (kind === "model") {
         setOpenPicker(null);
-        if (value !== now.settings.model) setPicked({ model: value });
         send({
           type: "setModel",
           model: value,
@@ -3259,7 +3265,7 @@ function Composer({
       if (menuEpoch.current !== epoch) return;
       setOpenPicker(null);
       if (typeof choice !== "string" || choice === effortNow) return;
-      setPicked((p) => ({ ...p, effort: choice }));
+      setPicked(choice);
       send({ type: "setModel", model: latest.current.settings.model, effort: choice });
     });
   };

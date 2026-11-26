@@ -2157,11 +2157,18 @@ test("with Aero the model part opens the picker: the rail (Aero, Claude Code, Co
     ["Plan", "Aerolite"],
     ["Resets", "Dec 25"],
   ]);
-  // The model closed the picker and the pill reads it at once, before the
-  // kernel's publication.
+  // The model closed the picker; the pill reads it with the kernel's
+  // publication, which brings the model's own levels (never the old
+  // model's level beside the new model).
   expect(actions).toEqual([{ type: "setModel", model: "pm/anthropic/claude-opus-5.5", effort: "high" }]);
-  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.5");
   expect(byId(root, "agent-model").props.open).toBe(false);
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6 Sol");
+  p.snapshot.settings.model = "pm/anthropic/claude-opus-5.5";
+  p.snapshot.settings.effort = "medium";
+  p.snapshot.catalog.efforts = ["low", "medium"];
+  await root.render(<AgentView publication={structuredClone(p)} menu={menu} send={(a) => actions.push(a)} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.5");
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Medium");
   // Providers… closes it for Settings › Providers.
   await root.drive(byId(root, "agent-model").id, "click");
   for (const _ of [0, 1, 2, 3]) await Promise.resolve();
@@ -2216,10 +2223,14 @@ test("the effort part opens the reasoning menu: the model's levels in order, ✓
   p.snapshot.settings.effort = "low";
   await render();
   expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
-  // A level the model does not offer reads as the model's default.
+  // A level the model does not offer reads as the model's default, and
+  // with no default listed, as its first level: always one it can run.
   p.snapshot.settings.effort = "minimal";
   await render();
   expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Medium");
+  p.snapshot.catalog.defaultEffort = undefined;
+  await render();
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
   root.dispose();
 });
 test("Aero's card shows no usage monitor until the backend has answered", async () => {
