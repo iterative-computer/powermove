@@ -57,6 +57,7 @@ impl History {
     pub fn current(&self) -> Option<String> {
         self.pages.get(self.at).cloned()
     }
+    #[cfg(test)]
     pub fn can(&self) -> (bool, bool) {
         (self.at > 0, self.at + 1 < self.pages.len())
     }
@@ -397,8 +398,6 @@ impl Controller {
             self.builtins.settings_history.visit(active);
             pm_shell::settings_window::remember_section(active);
         }
-        let (back, forward) = self.builtins.settings_history.can();
-        chrome.set_history(back, forward);
     }
     /// What the panel is asked to do for `event` (and the runtime to ask).
     pub(crate) fn settings_intent(

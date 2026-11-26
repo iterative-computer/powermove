@@ -163,6 +163,30 @@ fn main() {
     if report["glassAvailable"] == true {
         assert_eq!(report["sidebarInGlass"], true, "{report}");
     }
+    // The owner's bug (2026-11-25): the selected row's fill sat further from
+    // the tile at its sides than above and below. Its inset is now equal on
+    // every side of the tile.
+    let section = |id: &str, title: &str| pm_shell::settings_window::Section {
+        id: id.into(),
+        title: title.into(),
+        account_name: None,
+        dim: false,
+    };
+    chrome.show(
+        &[section("account", "Account"), section("general", "General"), section("agents", "Agents")],
+        "general",
+    );
+    if let Some(frame) = window.contentView().and_then(|c| unsafe { c.superview() }) {
+        frame.layoutSubtreeIfNeeded();
+    }
+    let report = chrome.report();
+    let insets: Vec<f64> = serde_json::from_value(report["selectionInsets"].clone())
+        .unwrap_or_else(|_| panic!("the selection has insets: {report}"));
+    assert!(
+        insets.iter().all(|i| (i - insets[0]).abs() < 0.5 && *i > 0.),
+        "equal insets around the selected tile (left, top, bottom): {insets:?}"
+    );
+    assert_eq!(report["header"], "General", "{report}");
     println!("settings_chrome report: {report}");
     drop(chrome);
     window.close();

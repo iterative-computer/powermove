@@ -2,12 +2,13 @@
 use objc2::runtime::Bool;
 use objc2::{AnyThread, MainThreadMarker, rc::Retained};
 use objc2_app_kit::{
-    NSAccessibility, NSBezierPath, NSColor, NSImage, NSImageNameActionTemplate, NSImageScaling,
-    NSImageView, NSView, NSWorkspace,
+    NSAccessibility, NSBezierPath, NSColor, NSImage, NSImageScaling, NSImageView, NSView,
+    NSWorkspace,
 };
 use objc2_foundation::{NSBundle, NSData, NSPoint, NSRect, NSSize, NSString};
 
-pub(super) const SIZE: f64 = 42.;
+/// Every mark sits in one 24 pt squircle (a row is 44 pt, as on every page).
+pub(super) const SIZE: f64 = 24.;
 const GAP: f64 = 12.;
 
 struct Mark {
@@ -71,17 +72,71 @@ fn bundle_icon(path: &NSString) -> Option<Retained<NSImage>> {
     // Avoid handing a missing bundle to iconForFile:, which returns a generic icon.
     NSBundle::bundleWithPath(path)?.bundleIdentifier()?;
     let icon = NSWorkspace::sharedWorkspace().iconForFile(path);
-    icon.isValid().then_some(icon)
+    icon.isValid().then(|| app_squircle(icon))
+}
+
+/// A macOS app icon drawn so its squircle (824 of its 1024-point canvas)
+/// fills the slot, the same size as the other marks' frames.
+fn app_squircle(icon: Retained<NSImage>) -> Retained<NSImage> {
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
+        let grow = 1024. / 824.;
+        let size = NSSize::new(rect.size.width * grow, rect.size.height * grow);
+        let origin = NSPoint::new(
+            rect.mid().x - size.width / 2.,
+            rect.mid().y - size.height / 2.,
+        );
+        icon.drawInRect(NSRect::new(origin, size));
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(SIZE, SIZE), false, &draw)
+}
+
+/// An app with no mark of its own: Settings' lit tile with a glyph standing
+/// for its kind, in the appearance it is drawn in.
+fn lit_tile(symbol: &str) -> Option<Retained<NSImage>> {
+    let glyph = match symbol {
+        "terminal" => "terminal",
+        "desktopcomputer" => "window",
+        _ => "extensions",
+    };
+    let light = pm_shell::settings_window::tile_image(glyph, false, SIZE)?;
+    let dark = pm_shell::settings_window::tile_image(glyph, true, SIZE)?;
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
+        let names = unsafe {
+            [
+                objc2_app_kit::NSAppearanceNameAqua,
+                objc2_app_kit::NSAppearanceNameDarkAqua,
+            ]
+        };
+        let dark_now = objc2_app_kit::NSAppearance::currentDrawingAppearance()
+            .bestMatchFromAppearancesWithNames(&objc2_foundation::NSArray::from_slice(&names))
+            .is_some_and(|name| &*name == names[1]);
+        let image = if dark_now { &dark } else { &light };
+        // The tile image carries room for its shadow around the tile.
+        let size = image.size();
+        let origin = NSPoint::new(
+            rect.mid().x - size.width / 2.,
+            rect.mid().y - size.height / 2.,
+        );
+        image.drawInRect(NSRect::new(origin, size));
+        Bool::YES
+    });
+    Some(NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(SIZE, SIZE),
+        false,
+        &draw,
+    ))
 }
 
 fn bundled_mark(mark: &Mark) -> Option<Retained<NSImage>> {
     let logo = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(mark.svg))?;
     let scale = mark.scale;
     let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
-        // A neutral light tile keeps both original marks legible in either appearance.
+        // A neutral light tile keeps both original marks legible in either
+        // appearance; its corner is the lit tiles' (6 of 22 points).
         NSColor::colorWithWhite_alpha(0.95, 1.).setFill();
         let tile_size = rect.size.width.min(rect.size.height);
-        let radius = tile_size * (5. / 24.);
+        let radius = tile_size * (6. / 22.);
         NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
         let size = tile_size * scale;
         let origin = NSPoint::new(rect.mid().x - size / 2., rect.mid().y - size / 2.);
@@ -96,47 +151,13 @@ fn bundled_mark(mark: &Mark) -> Option<Retained<NSImage>> {
 }
 
 fn image_view(mtm: MainThreadMarker, id: &str, app: AppIcon) -> Retained<NSImageView> {
-    let image = resolve(id, app, bundled_mark, |symbol| {
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str(symbol),
-            None,
-        )
-        .or_else(|| NSImage::imageNamed(unsafe { NSImageNameActionTemplate }))
-    });
+    let image = resolve(id, app, bundled_mark, lit_tile);
     let view = NSImageView::new(mtm);
     view.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(SIZE, SIZE)));
     view.setImage(image.as_deref());
-    view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-    view.setContentTintColor(Some(&NSColor::labelColor()));
+    view.setImageScaling(NSImageScaling::ScaleNone);
     view.setAccessibilityElement(false);
-    center_painted_icon(&view);
     view
-}
-
-fn center_painted_icon(view: &NSImageView) {
-    // Measure the icon as AppKit draws it, including transparent padding and
-    // symbol alignment insets. Keep the original image for onscreen drawing.
-    let bounds = view.bounds();
-    let Some(bitmap) = view.bitmapImageRepForCachingDisplayInRect(bounds) else {
-        return;
-    };
-    view.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
-    let width = bitmap.pixelsWide();
-    let height = bitmap.pixelsHigh();
-    let painted = |y| {
-        (0..width).any(|x| {
-            bitmap
-                .colorAtX_y(x, y)
-                .is_some_and(|color| color.alphaComponent() > 0.)
-        })
-    };
-    let Some(top) = (0..height).find(|&y| painted(y)) else {
-        return;
-    };
-    let bottom = (top..height).rev().find(|&y| painted(y)).unwrap_or(top);
-    // Bitmap rows count down from the top; the containing view's y axis points up.
-    let offset = (top + bottom + 1 - height) as f64 * SIZE / (2. * height as f64);
-    view.setFrameOrigin(NSPoint::new(0., offset));
 }
 
 pub(super) struct LeadingIcon {
