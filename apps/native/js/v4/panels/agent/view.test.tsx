@@ -2181,7 +2181,7 @@ test("Aero signed in without a plan says so honestly: coming soon, or the plan t
     p.snapshot.settings.provider = "aero";
     p.native.connection = "unavailable";
     p.native.reason = "Aero inference is coming soon.";
-    p.native.aero = { usage: [], offer };
+    p.native.aero = { usage: [], offer, comingSoon: true };
     const asked: Parameters<Menu>[0][] = [];
     await root.render(
       <AgentView
@@ -2193,6 +2193,8 @@ test("Aero signed in without a plan says so honestly: coming soon, or the plan t
         send={() => {}}
       />,
     );
+    // Quiet: no fault notice in the panel.
+    expect(root.inspect().nodes.some((node) => node.props.id === "agent-connect-error")).toBe(false);
     await root.drive(byId(root, "agent-model").id, "click");
     expect(asked[0]!.options.filter((o) => o.kind !== "harness").map((o) => [o.kind, o.label])).toEqual(rows);
     root.dispose();

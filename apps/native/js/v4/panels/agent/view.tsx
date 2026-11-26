@@ -904,6 +904,11 @@ export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
     (n.connection === "waiting" || (n.connection === "unavailable" && !!n.signedOut))
   );
 }
+/** Aero signed in without a plan, before the backend exists: honest and
+ * quiet (no fault, no Try Again). */
+export function aeroComingSoon(s: Snapshot, n: NativeFacts): boolean {
+  return s.settings.provider === "aero" && n.connection === "unavailable" && !n.signedOut && !!n.aero?.comingSoon;
+}
 /** The one quiet line under a signed-out composer: what the chosen harness
  * runs on, and where to sign in. One line at the narrowest dock. */
 export function signInCopy(harness: string): string {
@@ -2959,11 +2964,9 @@ function Composer({
     // line says where to sign in.
     // Aero signed in without a plan, before the backend exists: honest, one
     // quiet line (and the plan the backend offers, when it offers one).
-    if (harness === "aero" && !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null) {
-      options.push({ kind: "status", label: n.reason || "Aero inference is coming soon.", value: "" });
+    if (aeroComingSoon(s, n) && s.runId === null) {
+      options.push({ kind: "status", label: "Aero inference is coming soon.", value: "" });
       if (n.aero?.offer) options.push({ kind: "action", label: `${n.aero.offer.label}…`, value: "providers:" });
-      else if (n.reason !== "Aero inference is coming soon.")
-        options.push({ kind: "action", label: "Try Again", value: "retry:" });
       return { options };
     }
     const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
@@ -3749,7 +3752,8 @@ export function AgentView({
   // composer: signing in is the chooser's (Settings › Providers); only a
   // fault is reported here.
   const harness = harnessMode(s);
-  const fault = gate && harness && n.connection === "unavailable" && !n.signedOut;
+  const fault =
+    gate && harness && n.connection === "unavailable" && !n.signedOut && !aeroComingSoon(s, n);
   // Nothing to keep yet: the connection is the whole panel.
   const setup = gate && !harness && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";

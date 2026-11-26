@@ -629,7 +629,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         if review_cloud() {
             return Ok(Http::new(
                 origin,
-                Box::new(review::Memory::default()),
+                Box::new(review::Memory::seeded(origin)),
                 worker_profile,
             ));
         }
@@ -831,7 +831,8 @@ pub(crate) fn code_error(code: &str, verifying: bool) -> String {
     copy::auth_error(error, "", "")
 }
 /// Development builds: the account step against a review backend
-/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain.
+/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain; signed in from the
+/// start with `PM_NATIVE_REVIEW_SIGNED_IN=<email>`.
 #[cfg(debug_assertions)]
 fn review_cloud() -> bool {
     std::env::var_os("PM_NATIVE_REVIEW_CLOUD").is_some()
@@ -846,6 +847,21 @@ mod review {
     static EMAIL: Mutex<String> = Mutex::new(String::new());
     #[derive(Default)]
     pub struct Memory(Option<Vec<u8>>);
+    impl Memory {
+        /// Signed in from the start as `PM_NATIVE_REVIEW_SIGNED_IN` (an
+        /// email), when the review launch names one; else signed out.
+        pub fn seeded(origin: &str) -> Self {
+            let Ok(email) = std::env::var("PM_NATIVE_REVIEW_SIGNED_IN") else {
+                return Self::default();
+            };
+            *EMAIL.lock().unwrap() = email;
+            Self(Some(
+                json!({"origin":origin,"token":"review-session","expiresAt":"2099-01-01T00:00:00.000Z"})
+                    .to_string()
+                    .into_bytes(),
+            ))
+        }
+    }
     impl Vault for Memory {
         fn read(&self) -> Result<Option<Vec<u8>>, String> {
             Ok(self.0.clone())

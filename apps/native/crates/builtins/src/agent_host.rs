@@ -305,6 +305,12 @@ impl AgentLink {
     }
     /// The usage monitor's lines for Aero's picker card (nothing until the
     /// backend answers), and a plan the backend offers someone without one.
+    /// Signed in without a plan (before the backend exists): a quiet state,
+    /// never a fault.
+    pub fn aero_coming_soon(&self) -> bool {
+        self.accounts()
+            .is_some_and(|a| matches!(a.aero(), pm_agents::inference::Standing::NoPlan(_)))
+    }
     pub fn aero_usage(&self) -> (Vec<(String, String)>, Option<pm_agents::inference::Offer>) {
         use pm_agents::inference::Standing;
         match self.accounts().map(|a| a.aero()) {

@@ -860,7 +860,8 @@ impl Backend {
         // backend offers someone without one; nothing until it answers.
         let (usage, offer) = self.native.agent_link.aero_usage();
         let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
-            "offer": offer.map(|o| json!({"label": o.label, "url": o.url}))});
+            "offer": offer.map(|o| json!({"label": o.label, "url": o.url})),
+            "comingSoon": self.native.agent_link.aero_coming_soon()});
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.

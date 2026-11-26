@@ -116,7 +116,12 @@ export interface NativeFacts {
   /** Aero on the Powermove account: its usage monitor's lines (credits,
    * plan, reset day; none until the backend answers) and a plan the backend
    * offers someone without one. */
-  aero?: { usage: [label: string, value: string][]; offer: { label: string; url: string } | null };
+  aero?: {
+    usage: [label: string, value: string][];
+    offer: { label: string; url: string } | null;
+    /** Signed in, no plan yet: a quiet state, never a fault. */
+    comingSoon?: boolean;
+  };
   /** The configured compatible model's display name for its menu heading. */
   connectedModelName?: string | null;
   /** What to tell the user when `connection` isn't "connected". */
