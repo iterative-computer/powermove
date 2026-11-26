@@ -1,18 +1,21 @@
 //! Aero on Powermove inference, and nothing else: the Powermove account's
 //! session pays for every request, on the account's own API origin
-//! (`docs/native/aero-inference.md` is the contract). Three calls under
-//! `{origin}/v1/aero`: `GET /usage` (the plan and its credits), `GET /models`
-//! (the curated catalogue) and `POST /chat/completions` (OpenAI Chat
-//! Completions, streamed; the backend forwards it to the Vercel AI Gateway
-//! with its own key). The session stays here and in the app's Keychain; the
-//! core gets a provider description without it, and the fetch edge adds it
-//! for the Aero origin only.
+//! (`docs/native/aero-inference.md` is the contract). Three calls on the
+//! account's origin: `GET /v2/billing` (the plan, its credits this period
+//! and what can be bought), `GET /v2/aero/models` (the curated catalogue)
+//! and `POST /v2/aero/chat/completions` (OpenAI Chat Completions, streamed;
+//! the backend runs the providers through the AI SDK with its own keys). The
+//! session stays here and in the app's Keychain; the core gets a provider
+//! description without it, and the fetch edge adds it for the Aero origin
+//! only.
 //!
 //! Development builds with the development switch on may point Aero at a
-//! local stand-in (`PM_AERO_ENDPOINT=http://127.0.0.1:<port>/<path>`, emulate
-//! or the test fakes), which gets a development credential, never the
-//! person's session. Release builds never read it, and Aero never goes
-//! through the development fakes that reroute other providers.
+//! local stand-in (`PM_AERO_ENDPOINT=http://127.0.0.1:<port>/<path>`, the
+//! test fakes), which gets a development credential, never the person's
+//! session. An account on a local development origin (`PM_CLOUD_ORIGIN`,
+//! debug builds and the `dev-cloud-origin` feature only) runs on that origin
+//! with its own session. Release builds never read either, and Aero never
+//! goes through the development fakes that reroute other providers.
 //!
 //! Aero's model ids are namespaced (`pm/<gateway id>`): a thread saved
 //! before Aero ran only on Powermove names no such id, so it never runs
@@ -27,7 +30,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Where Aero's calls live on the account's API origin.
-pub const PATH: &str = "/v1/aero";
+pub const PATH: &str = "/v2/aero";
+/// The account's billing state on its API origin.
+pub const BILLING: &str = "/v2/billing";
 /// The development switch's stand-in for Aero's API (debug builds only).
 pub const TEST_ENDPOINT: &str = "PM_AERO_ENDPOINT";
 /// The development switch's demo model (`PM_AERO_FAKE_MODEL=1` lists it in a
@@ -38,7 +43,7 @@ pub const FAKE_MODEL: &str = "fake/model";
 pub const CATALOGUE: &str = "pm/";
 /// What the test endpoint is sent instead of the person's session.
 pub const DEVELOPMENT_CREDENTIAL: &str = "pm-aero-development";
-/// How long a usage or catalogue read may stay silent.
+/// How long a billing or catalogue read may stay silent.
 const READ_IDLE: Duration = Duration::from_secs(15);
 pub const SIGN_IN: &str = "Sign in to Powermove to use Aero.";
 const SIGN_IN_AGAIN: &str = "Your Powermove session ended. Sign in to Powermove again to use Aero.";
@@ -63,34 +68,54 @@ pub trait PowermoveAccount: Send + Sync + std::fmt::Debug {
     fn session(&self) -> Option<Session>;
 }
 
+/// A calendar day (UTC): year, month, day.
+pub type Day = (i32, u32, u32);
+/// The plan the account is on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub id: String,
     pub name: String,
+    pub price_cents: u64,
 }
-/// The plan's credits (Aerolite: 1,000 a month) and when they come back.
+/// A plan that can be bought (Settings › Account's Subscribe).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Usage {
-    pub plan: Plan,
-    pub remaining: u64,
+pub struct PlanOffer {
+    pub id: String,
+    pub name: String,
+    pub price_cents: u64,
+    pub credits: u64,
+}
+/// The subscription's state, as Stripe has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Active,
+    PastDue,
+    Canceled,
+}
+/// `GET /v2/billing`: the plan, its credits this period and what can be
+/// bought. Credits don't roll over: `included` is this period's grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Billing {
+    pub plan: Option<Plan>,
+    pub status: Option<Status>,
+    pub cancel_at_period_end: bool,
     pub included: u64,
-    /// `resetsAt`'s calendar day (UTC).
-    pub resets: (i32, u32, u32),
+    pub used: u64,
+    pub remaining: u64,
+    /// The billing period's first and last calendar days (`period.end` is
+    /// when the credits reset).
+    pub period: Option<(Day, Day)>,
+    /// Credits spent each day of the period so far, zero days included.
+    pub daily: Vec<(Day, u64)>,
+    pub plans: Vec<PlanOffer>,
 }
-/// A plan the backend offers someone who has none.
+/// What `GET /v2/billing` said.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Offer {
-    pub label: String,
-    pub url: String,
-}
-/// What `GET /usage` said.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UsageAnswer {
+pub enum BillingAnswer {
     SignedOut,
-    /// Signed in, no plan: `offer` when the backend has one to show, none
-    /// while the backend isn't there yet (404).
-    NoPlan(Option<Offer>),
-    Plan(Usage),
+    /// The route isn't there (a backend before billing shipped).
+    Missing,
+    Billing(Billing),
 }
 /// Where Aero stands for this person, as the picker shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -98,14 +123,17 @@ pub enum Standing {
     #[default]
     Checking,
     SignedOut,
-    NoPlan(Option<Offer>),
+    /// Signed in on Free (or a cancelled plan): Aero needs Aerolite or Aero.
+    Free(Billing),
     Ready {
-        usage: Usage,
+        billing: Billing,
         models: Vec<Model>,
     },
     /// Powermove couldn't be reached or answered something unreadable.
     Unreachable(String),
 }
+/// What the picker and the panel say on Free.
+pub const NEEDS_PLAN: &str = "Aero needs Aerolite or Aero.";
 
 /// The test endpoint, when `development` (a debug build with the switch on)
 /// and it names plain HTTP on 127.0.0.1 with a port, nothing else.
@@ -142,41 +170,63 @@ pub fn gateway_id(model: &str) -> Option<&str> {
         .filter(|id| crate::launch::is_valid_model_id(id))
 }
 
-/// Where Aero's calls go for `session`: the base, the network that reaches
-/// it and the bearer it is sent (the session, or the development credential
-/// for the test endpoint).
+/// Where Aero's calls go for `session`: the API origin (`/v2/...` follows
+/// it), the network that reaches it and the bearer it is sent (the session,
+/// or the development credential for the test endpoint).
 struct Route {
-    base: String,
+    origin: String,
     net: Arc<dyn Net>,
     bearer: String,
 }
+/// A build that may run on a local development origin: debug builds, and
+/// the Sandbox's `dev-cloud-origin` feature. Never a shipped release.
+pub const LOCAL_ORIGINS: bool = cfg!(debug_assertions) || cfg!(feature = "dev-cloud-origin");
+/// `origin` is a local development stack's (`http://127.0.0.1:8787`): plain
+/// HTTP on this Mac with a port, nothing else.
+pub fn local_origin(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
 fn route(env: &Environment, session: &Session, idle: Duration) -> Result<Route, String> {
     let development = cfg!(debug_assertions) && env.providers();
+    let local = |origin: String, bearer: String| Route {
+        origin,
+        net: Arc::new(Idle {
+            inner: Arc::new(Loopback),
+            after: idle,
+        }),
+        bearer,
+    };
     if let Some(base) = test_endpoint(&env.vars, development) {
-        return Ok(Route {
-            base,
-            net: Arc::new(Idle {
-                inner: Arc::new(Loopback),
-                after: idle,
-            }),
-            bearer: DEVELOPMENT_CREDENTIAL.into(),
-        });
+        return Ok(local(base, DEVELOPMENT_CREDENTIAL.into()));
     }
     let origin = session.origin.trim_end_matches('/');
+    // The account lives on a local development stack: its own session.
+    if LOCAL_ORIGINS && local_origin(origin) {
+        return Ok(local(origin.to_owned(), session.token.clone()));
+    }
     if !origin.starts_with("https://") {
         return Err("This development account has no Aero endpoint.".into());
     }
-    let base = format!("{origin}{PATH}");
     let net = env
         .net
         .clone()
         .ok_or("Powermove's network client is unavailable.")?;
     // The person's session never goes to a development fake.
-    if net.rerouted(&base) {
+    if net.rerouted(&format!("{origin}{PATH}")) || net.rerouted(&format!("{origin}{BILLING}")) {
         return Err("Aero never goes through the development fakes. Use PM_AERO_ENDPOINT.".into());
     }
     Ok(Route {
-        base,
+        origin: origin.to_owned(),
         net: Arc::new(Idle {
             inner: net,
             after: idle,
@@ -191,13 +241,17 @@ fn client(env: &Environment) -> (String, String) {
     )
 }
 
-/// Reads `GET /usage`, then (with a plan) `GET /models`. Blocks: call it on
-/// a worker.
+/// Reads `GET /v2/billing`, then (on a plan) `GET /v2/aero/models`.
+/// Blocks: call it on a worker.
 pub fn standing(env: &Environment) -> Standing {
     let Some(session) = env.powermove.as_ref().and_then(|a| a.session()) else {
         return Standing::SignedOut;
     };
-    let Route { base, net, bearer } = match route(env, &session, READ_IDLE) {
+    let Route {
+        origin,
+        net,
+        bearer,
+    } = match route(env, &session, READ_IDLE) {
         Ok(found) => found,
         Err(reason) => return Standing::Unreachable(reason),
     };
@@ -206,7 +260,7 @@ pub fn standing(env: &Environment) -> Standing {
         client(env),
     ];
     let get = |path: &str| {
-        let url = format!("{base}{path}");
+        let url = format!("{origin}{path}");
         fetch(
             net.as_ref(),
             &NetRequest {
@@ -218,18 +272,18 @@ pub fn standing(env: &Environment) -> Standing {
         )
     };
     let unreachable = || Standing::Unreachable("Aero couldn’t reach Powermove. Try again.".into());
-    let Ok((status, body)) = get("/usage") else {
+    let Ok((status, body)) = get(BILLING) else {
         return unreachable();
     };
-    match parse_usage(status, &body) {
-        Ok(UsageAnswer::SignedOut) => Standing::SignedOut,
-        // An offer that repeats the credential is never shown or opened.
-        Ok(UsageAnswer::NoPlan(offer)) => Standing::NoPlan(
-            offer.filter(|o| !o.url.contains(&bearer) && !o.label.contains(&bearer)),
-        ),
-        Ok(UsageAnswer::Plan(usage)) => match get("/models") {
+    match parse_billing(status, &body) {
+        Ok(BillingAnswer::SignedOut) => Standing::SignedOut,
+        Ok(BillingAnswer::Missing) => {
+            Standing::Unreachable("Aero isn’t available on Powermove yet.".into())
+        }
+        Ok(BillingAnswer::Billing(billing)) if !billing.subscribed() => Standing::Free(billing),
+        Ok(BillingAnswer::Billing(billing)) => match get(&format!("{PATH}/models")) {
             Ok((200, body)) => match parse_models(&body) {
-                Ok(models) => Standing::Ready { usage, models },
+                Ok(models) => Standing::Ready { billing, models },
                 Err(_) => {
                     Standing::Unreachable("Aero couldn’t read its models from Powermove.".into())
                 }
@@ -241,84 +295,133 @@ pub fn standing(env: &Environment) -> Standing {
     }
 }
 
-/// `GET /usage`'s answer (the contract's usage section).
-pub fn parse_usage(status: u16, body: &[u8]) -> Result<UsageAnswer, String> {
+/// `GET /v2/billing`'s answer (the contract's billing section). Every
+/// field is checked; an answer that leaves one out is refused, never
+/// filled with a default.
+pub fn parse_billing(status: u16, body: &[u8]) -> Result<BillingAnswer, String> {
     match status {
         200 => {}
-        401 | 403 => return Ok(UsageAnswer::SignedOut),
-        // The route isn't there: the backend hasn't shipped.
-        404 => return Ok(UsageAnswer::NoPlan(None)),
-        _ => return Err(format!("usage answered HTTP {status}")),
+        401 | 403 => return Ok(BillingAnswer::SignedOut),
+        404 => return Ok(BillingAnswer::Missing),
+        _ => return Err(format!("billing answered HTTP {status}")),
     }
-    let value: Value = serde_json::from_slice(body).map_err(|_| "usage is not JSON")?;
+    let value: Value = serde_json::from_slice(body).map_err(|_| "billing is not JSON")?;
     if !value.is_object() {
-        return Err("usage is not an object".into());
-    }
-    let plan = value.get("plan").ok_or("usage is missing plan")?;
-    if plan.is_null() {
-        return Ok(UsageAnswer::NoPlan(offer(&value["offer"])));
+        return Err("billing is not an object".into());
     }
     let text = |v: &Value, name: &str| {
         v.as_str()
             .map(str::trim)
-            .filter(|s| !s.is_empty() && s.chars().count() <= 64)
+            .filter(|s| {
+                !s.is_empty()
+                    && s.chars().count() <= 64
+                    && !s.chars().any(|c| {
+                        c.is_control()
+                            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                    })
+            })
             .map(str::to_owned)
-            .ok_or(format!("usage is missing {name}"))
+            .ok_or(format!("billing is missing {name}"))
     };
-    let count = |name: &str| {
-        value["credits"][name]
-            .as_u64()
-            .ok_or(format!("usage is missing credits.{name}"))
+    let id = |v: &Value, name: &str| {
+        v.as_str()
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 32
+                    && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+            })
+            .map(str::to_owned)
+            .ok_or(format!("billing is missing {name}"))
     };
-    let resets = value["resetsAt"]
-        .as_str()
-        .and_then(calendar_day)
-        .ok_or("usage is missing resetsAt")?;
-    Ok(UsageAnswer::Plan(Usage {
-        plan: Plan {
-            id: text(&plan["id"], "plan.id")?,
+    let count = |v: &Value, name: &str| v.as_u64().ok_or(format!("billing is missing {name}"));
+    let plan = match value.get("plan").ok_or("billing is missing plan")? {
+        Value::Null => None,
+        plan => Some(Plan {
+            id: id(&plan["id"], "plan.id")?,
             name: text(&plan["name"], "plan.name")?,
-        },
-        remaining: count("remaining")?,
-        included: count("included")?,
-        resets,
+            price_cents: count(&plan["priceCents"], "plan.priceCents")?,
+        }),
+    };
+    let status = match value.get("status").ok_or("billing is missing status")? {
+        Value::Null => None,
+        status => Some(match status.as_str() {
+            Some("active" | "trialing") => Status::Active,
+            Some("past_due" | "unpaid") => Status::PastDue,
+            Some("canceled") => Status::Canceled,
+            _ => return Err("billing has an unknown status".into()),
+        }),
+    };
+    let credits = &value["credits"];
+    let period = match &value["period"] {
+        Value::Null => None,
+        period => Some((
+            period["start"]
+                .as_str()
+                .and_then(calendar_day)
+                .ok_or("billing is missing period.start")?,
+            period["end"]
+                .as_str()
+                .and_then(calendar_day)
+                .ok_or("billing is missing period.end")?,
+        )),
+    };
+    let daily = match &value["daily"] {
+        Value::Null => vec![],
+        daily => daily
+            .as_array()
+            .ok_or("billing's daily is not a list")?
+            .iter()
+            .map(|d| {
+                Ok((
+                    d["date"]
+                        .as_str()
+                        .and_then(date)
+                        .ok_or("billing has a day without a date")?,
+                    count(&d["credits"], "daily.credits")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    };
+    let plans = value["plans"]
+        .as_array()
+        .ok_or("billing is missing plans")?
+        .iter()
+        .map(|p| {
+            Ok(PlanOffer {
+                id: id(&p["id"], "plans.id")?,
+                name: text(&p["name"], "plans.name")?,
+                price_cents: count(&p["priceCents"], "plans.priceCents")?,
+                credits: count(&p["credits"], "plans.credits")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(BillingAnswer::Billing(Billing {
+        plan,
+        status,
+        cancel_at_period_end: value["cancelAtPeriodEnd"] == true,
+        included: count(&credits["included"], "credits.included")?,
+        used: count(&credits["used"], "credits.used")?,
+        remaining: count(&credits["remaining"], "credits.remaining")?,
+        period,
+        daily,
+        plans,
     }))
 }
-/// An offer to show, when it is a short plain label and a Powermove https
-/// page: no userinfo, no other port; kept as its canonical form, which is
-/// all that is ever opened.
-fn offer(value: &Value) -> Option<Offer> {
-    let label = value["label"].as_str()?.trim();
-    let parsed = url::Url::parse(value["url"].as_str()?).ok()?;
-    let host = parsed.host_str()?;
-    let ours = host == "trypowermove.com" || host.ends_with(".trypowermove.com");
-    let plain = |s: &str| {
-        !s.chars().any(|c| {
-            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
-    };
-    (parsed.scheme() == "https"
-        && ours
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.port().is_none()
-        && !label.is_empty()
-        && label.chars().count() <= 40
-        && plain(label))
-    .then(|| Offer {
-        label: label.to_owned(),
-        url: parsed.as_str().to_owned(),
-    })
-}
-/// `YYYY-MM-DD` at the start of an RFC 3339 time.
-fn calendar_day(iso: &str) -> Option<(i32, u32, u32)> {
-    let date = iso.get(..10)?;
-    let mut parts = date.split('-');
+/// `YYYY-MM-DD`.
+fn date(s: &str) -> Option<Day> {
+    if s.len() != 10 {
+        return None;
+    }
+    let mut parts = s.split('-');
     let year = parts.next()?.parse::<i32>().ok()?;
     let month = parts.next()?.parse::<u32>().ok()?;
     let day = parts.next()?.parse::<u32>().ok()?;
-    ((1..=12).contains(&month) && (1..=31).contains(&day) && iso.get(10..11) == Some("T"))
-        .then_some((year, month, day))
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((year, month, day))
+}
+/// `YYYY-MM-DD` at the start of an RFC 3339 time.
+fn calendar_day(iso: &str) -> Option<Day> {
+    (iso.get(10..11) == Some("T")).then_some(())?;
+    date(iso.get(..10)?)
 }
 
 /// `GET /models`'s answer: an OpenAI-shaped list (`data[].id`), each entry
@@ -378,32 +481,53 @@ pub fn parse_models(body: &[u8]) -> Result<Vec<Model>, String> {
     Ok(models)
 }
 
-impl Usage {
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+/// `Dec 25`.
+pub fn short_day((_, month, day): Day) -> String {
+    format!("{} {day}", MONTHS[month as usize - 1])
+}
+impl Billing {
+    /// On a plan that runs Aero: bought and not cancelled (a plan whose
+    /// payment failed still runs on the credits it has).
+    pub fn subscribed(&self) -> bool {
+        self.plan.is_some() && self.status != Some(Status::Canceled)
+    }
+    /// When this period's credits are replaced by the next grant.
+    pub fn resets(&self) -> Option<Day> {
+        self.period.map(|(_, end)| end)
+    }
+    /// `812 of 1,000 left`.
+    pub fn credits_left(&self) -> String {
+        format!(
+            "{} of {} left",
+            grouped(self.remaining),
+            grouped(self.included)
+        )
+    }
     /// The usage monitor's lines, as the picker card shows them.
     pub fn facts(&self) -> Vec<(String, String)> {
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let (_, month, day) = self.resets;
-        vec![
-            (
-                "Credits".into(),
-                format!(
-                    "{} of {} left",
-                    grouped(self.remaining),
-                    grouped(self.included)
-                ),
-            ),
-            ("Plan".into(), self.plan.name.clone()),
-            (
-                "Resets".into(),
-                format!("{} {day}", MONTHS[month as usize - 1]),
-            ),
-        ]
+        let mut facts = vec![("Credits".to_owned(), self.credits_left())];
+        if let Some(plan) = &self.plan {
+            facts.push(("Plan".into(), plan.name.clone()));
+        }
+        if let Some(day) = self.resets() {
+            facts.push(("Resets".into(), short_day(day)));
+        }
+        facts
+    }
+    /// A bigger plan to move to (Aerolite → Aero), when there is one.
+    pub fn upgrade(&self) -> Option<&PlanOffer> {
+        let included = self.included;
+        self.plans
+            .iter()
+            .filter(|p| p.credits > included && Some(&p.id) != self.plan.as_ref().map(|p| &p.id))
+            .max_by_key(|p| p.credits)
     }
 }
 /// `1000` → `1,000`.
-fn grouped(n: u64) -> String {
+pub fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -421,7 +545,12 @@ pub fn live(env: &Environment, model: &str, effort: &str) -> Result<Live, String
     let model = gateway_id(model).ok_or(CHOOSE)?;
     let account = env.powermove.clone().ok_or(SIGN_IN)?;
     let session = account.session().ok_or(SIGN_IN)?;
-    let Route { base, net, bearer } = route(env, &session, STREAM_IDLE)?;
+    let Route {
+        origin: api,
+        net,
+        bearer,
+    } = route(env, &session, STREAM_IDLE)?;
+    let base = format!("{api}{PATH}");
     let origin = pm_aero_core::origin_of(&base).ok_or("Aero's address is invalid.")?;
     let started = token_id(&session.token);
     let client = client(env);
@@ -492,17 +621,35 @@ mod tests {
         BTreeMap::from([(TEST_ENDPOINT.to_owned(), endpoint.to_owned())])
     }
 
+    const AEROLITE: &str = r#"{"plan":{"id":"aerolite","name":"Aerolite","priceCents":999,"interval":"month"},
+        "status":"active","cancelAtPeriodEnd":false,
+        "credits":{"included":1000,"used":188,"remaining":812},
+        "period":{"start":"2026-11-25T00:00:00Z","end":"2026-12-25T00:00:00Z"},
+        "daily":[{"date":"2026-11-25","credits":40},{"date":"2026-11-26","credits":0},{"date":"2026-11-27","credits":148}],
+        "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
+                 {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}]}"#;
+    fn billing(body: &str) -> Billing {
+        match parse_billing(200, body.as_bytes()) {
+            Ok(BillingAnswer::Billing(b)) => b,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn the_usage_contract_reads_a_plan_with_its_credits_and_reset_day() {
-        let body = br#"{"plan":{"id":"aerolite","name":"Aerolite"},
-            "credits":{"remaining":812,"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#;
-        let Ok(UsageAnswer::Plan(usage)) = parse_usage(200, body) else {
-            panic!("a plan")
-        };
-        assert_eq!(usage.plan.name, "Aerolite");
-        assert_eq!((usage.remaining, usage.included), (812, 1000));
+    fn the_billing_contract_reads_a_plan_its_credits_days_and_reset() {
+        let b = billing(AEROLITE);
+        assert_eq!(b.plan.as_ref().unwrap().name, "Aerolite");
+        assert_eq!(b.plan.as_ref().unwrap().price_cents, 999);
+        assert_eq!(b.status, Some(Status::Active));
+        assert!(b.subscribed());
+        assert_eq!((b.included, b.used, b.remaining), (1000, 188, 812));
+        assert_eq!(b.period, Some(((2026, 11, 25), (2026, 12, 25))));
+        assert_eq!(b.daily.len(), 3);
+        assert_eq!(b.daily[2], ((2026, 11, 27), 148));
+        assert_eq!(b.plans[1].credits, 2500);
+        assert_eq!(b.upgrade().map(|p| p.id.as_str()), Some("aero"));
         assert_eq!(
-            usage.facts(),
+            b.facts(),
             [
                 ("Credits".to_owned(), "812 of 1,000 left".to_owned()),
                 ("Plan".to_owned(), "Aerolite".to_owned()),
@@ -512,94 +659,110 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_contract_refuses_an_answer_missing_a_field() {
-        for (body, missing) in [
+    fn free_has_no_credits_period_or_days_and_a_cancelled_plan_is_free() {
+        let free = billing(
+            r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,
+            "credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#,
+        );
+        assert!(!free.subscribed());
+        assert_eq!(free.resets(), None);
+        assert!(free.daily.is_empty());
+        assert_eq!(
+            free.facts(),
+            [("Credits".to_owned(), "0 of 0 left".to_owned())]
+        );
+        let cancelled =
+            billing(&AEROLITE.replace(r#""status":"active""#, r#""status":"canceled""#));
+        assert!(!cancelled.subscribed());
+        let past_due = billing(&AEROLITE.replace(r#""status":"active""#, r#""status":"past_due""#));
+        assert_eq!(past_due.status, Some(Status::PastDue));
+        assert!(
+            past_due.subscribed(),
+            "a failed payment still runs on its credits"
+        );
+        let aero = billing(
+            &AEROLITE
+                .replace(
+                    r#""id":"aerolite","name":"Aerolite","priceCents":999,"interval""#,
+                    r#""id":"aero","name":"Aero","priceCents":1999,"interval""#,
+                )
+                .replace(r#""included":1000"#, r#""included":2500"#),
+        );
+        assert_eq!(aero.upgrade(), None, "Aero is the biggest plan");
+    }
+
+    #[test]
+    fn the_billing_contract_refuses_an_answer_missing_a_field() {
+        for (from, to, missing) in [
+            (r#""remaining":812"#, r#""left":812"#, "credits.remaining"),
             (
-                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#,
-                "credits.remaining",
-            ),
-            (
-                r#"{"plan":{"id":"aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#,
+                r#""name":"Aerolite","priceCents":999,"interval""#,
+                r#""priceCents":999,"interval""#,
                 "plan.name",
             ),
             (
-                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000}}"#,
-                "resetsAt",
+                r#""priceCents":999,"interval""#,
+                r#""interval""#,
+                "plan.priceCents",
             ),
             (
-                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"soon"}"#,
-                "resetsAt",
+                r#""end":"2026-12-25T00:00:00Z""#,
+                r#""end":"soon""#,
+                "period.end",
+            ),
+            (r#""status":"active""#, r#""status":"weird""#, "status"),
+            (r#""status":"active","#, "", "status"),
+            (
+                r#"{"date":"2026-11-25","credits":40}"#,
+                r#"{"date":"25/11","credits":40}"#,
+                "date",
+            ),
+            (
+                r#""credits":2500}"#,
+                r#""credits":"lots"}"#,
+                "plans.credits",
+            ),
+            (
+                r#""name":"Aero","#,
+                "\"name\":\"Aero\u{202e}\",",
+                "plans.name",
             ),
         ] {
-            let error = parse_usage(200, body.as_bytes()).unwrap_err();
-            assert!(error.contains(missing), "{body}: {error}");
+            let body = AEROLITE.replace(from, to);
+            assert_ne!(body, AEROLITE, "{from}");
+            let error = parse_billing(200, body.as_bytes()).unwrap_err();
+            assert!(error.contains(missing), "{from}: {error}");
         }
-        assert!(parse_usage(200, b"not json").is_err());
-        assert!(parse_usage(200, b"[]").is_err());
+        assert!(parse_billing(200, b"not json").is_err());
+        assert!(parse_billing(200, b"[]").is_err());
         // No plan is said explicitly (`plan: null`), never by leaving it out.
-        assert!(parse_usage(200, b"{}").unwrap_err().contains("plan"));
+        assert!(parse_billing(200, b"{}").unwrap_err().contains("plan"));
     }
 
     #[test]
-    fn the_usage_contract_reads_backend_errors_and_the_states_before_a_plan() {
-        assert!(parse_usage(500, br#"{"error":"internal"}"#).is_err());
-        assert!(parse_usage(429, b"").is_err());
-        assert_eq!(parse_usage(401, b""), Ok(UsageAnswer::SignedOut));
-        // Before the backend ships its route: no plan, nothing offered.
-        assert_eq!(parse_usage(404, b"<html>"), Ok(UsageAnswer::NoPlan(None)));
-        assert_eq!(
-            parse_usage(200, br#"{"plan":null,"offer":{"label":"Get Aerolite","url":"https://trypowermove.com/aero"}}"#),
-            Ok(UsageAnswer::NoPlan(Some(Offer {
-                label: "Get Aerolite".into(),
-                url: "https://trypowermove.com/aero".into()
-            })))
-        );
-        // An offer anywhere but a Powermove https page is not shown.
-        for url in [
-            "http://trypowermove.com/aero",
-            "https://trypowermove.com.example/aero",
-        ] {
-            let body = json!({"plan":null,"offer":{"label":"Get Aerolite","url":url}}).to_string();
-            assert_eq!(
-                parse_usage(200, body.as_bytes()),
-                Ok(UsageAnswer::NoPlan(None)),
-                "{url}"
-            );
-        }
+    fn the_billing_contract_reads_backend_errors_and_signed_out() {
+        assert!(parse_billing(500, br#"{"error":"internal"}"#).is_err());
+        assert!(parse_billing(429, b"").is_err());
+        assert_eq!(parse_billing(401, b""), Ok(BillingAnswer::SignedOut));
+        assert_eq!(parse_billing(404, b"<html>"), Ok(BillingAnswer::Missing));
     }
 
-    /// P1 (Sol, PM-750): an offer opens only as a canonical Powermove https
-    /// page: no userinfo (a deceptive authority), no other port, no control
-    /// or bidi characters in its label.
     #[test]
-    fn an_offer_with_userinfo_or_a_deceptive_authority_is_never_shown() {
-        let offer = |url: &str, label: &str| {
-            let body = json!({"plan":null,"offer":{"label":label,"url":url}}).to_string();
-            match parse_usage(200, body.as_bytes()) {
-                Ok(UsageAnswer::NoPlan(offer)) => offer,
-                other => panic!("{other:?}"),
-            }
-        };
-        for url in [
-            "https://user:pw@trypowermove.com/aero",
-            "https://token@trypowermove.com/aero",
-            "https://trypowermove.com@evil.example/aero",
-            "https://evil.example/aero?u=https://trypowermove.com",
-            "https://trypowermove.com:8443/aero",
-            "https://xtrypowermove.com/aero",
+    fn only_a_local_stack_on_this_mac_is_a_local_origin() {
+        assert!(local_origin("http://127.0.0.1:8787"));
+        assert!(local_origin("http://localhost:8787/"));
+        for elsewhere in [
+            "https://127.0.0.1:8787",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8787/v2",
+            "http://evil.example:8787",
+            "http://user@127.0.0.1:8787",
+            "http://127.0.0.1:8787/?x=1",
+            "https://cloud.trypowermove.com",
         ] {
-            assert_eq!(offer(url, "Get Aerolite"), None, "{url}");
+            assert!(!local_origin(elsewhere), "{elsewhere}");
         }
-        assert_eq!(
-            offer("https://trypowermove.com/aero", "Get\u{202e}Aerolite"),
-            None
-        );
-        // Exact host and subdomains, kept canonical.
-        assert_eq!(
-            offer("https://TryPowermove.com/aero", "Get Aerolite").map(|o| o.url),
-            Some("https://trypowermove.com/aero".into())
-        );
-        assert!(offer("https://plans.trypowermove.com/aero", "Get Aerolite").is_some());
     }
 
     /// P1 (Sol, PM-750): a release build never lists or runs the fake model.
@@ -719,11 +882,11 @@ mod tests {
     /// The test endpoint is a development build's only, loopback only.
     #[test]
     fn a_release_build_has_no_test_endpoint() {
-        let local = vars("http://127.0.0.1:4014/v1/aero");
+        let local = vars("http://127.0.0.1:4014/aero");
         assert_eq!(test_endpoint(&local, false), None, "release config");
         assert_eq!(
             test_endpoint(&local, true).as_deref(),
-            Some("http://127.0.0.1:4014/v1/aero")
+            Some("http://127.0.0.1:4014/aero")
         );
         for elsewhere in [
             "https://127.0.0.1:4014/v1",
@@ -754,7 +917,7 @@ mod tests {
             }
         }
         let env = Environment {
-            vars: vars("http://127.0.0.1:4014/v1/aero"),
+            vars: vars("http://127.0.0.1:4014/aero"),
             net: Some(Arc::new(Never)),
             aero: Some(crate::aero::Launcher(Arc::new(|_, _, _| {
                 Err("unused".into())
@@ -766,14 +929,23 @@ mod tests {
             token: "t".into(),
         };
         let route = route(&env, &session, READ_IDLE).unwrap();
-        assert_eq!(route.base, "https://cloud.trypowermove.com/v1/aero");
+        assert_eq!(route.origin, "https://cloud.trypowermove.com");
         assert_eq!(route.bearer, "t");
+        // A session on a local stack never runs in a shipped build.
+        let local = Session {
+            origin: "http://127.0.0.1:8787".into(),
+            token: "t".into(),
+        };
+        assert_eq!(LOCAL_ORIGINS, cfg!(feature = "dev-cloud-origin"));
+        if !LOCAL_ORIGINS {
+            assert!(route(&env, &local, READ_IDLE).is_err());
+        }
     }
 
     #[test]
     fn each_picker_level_is_sent_as_reasoning_effort_and_none_sends_none() {
         let with: Value = serde_json::from_str(&configured(
-            "https://a.example/v1/aero",
+            "https://a.example/v2/aero",
             "openai/gpt-6-sol",
             "xhigh",
         ))
@@ -784,7 +956,7 @@ mod tests {
         );
         assert_eq!(with["aero"]["protocol"], "openai-chat-completions");
         let without: Value =
-            serde_json::from_str(&configured("https://a.example/v1/aero", "m", "")).unwrap();
+            serde_json::from_str(&configured("https://a.example/v2/aero", "m", "")).unwrap();
         assert!(
             without["aero"]["model_metadata"]["m"]
                 .get("reasoning_efforts")

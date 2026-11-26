@@ -266,7 +266,7 @@ impl Accounts {
             this.bump();
         });
     }
-    /// Where Aero stands: signed out, no plan yet, or its models and credits.
+    /// Where Aero stands: signed out, on Free, or its models and credits.
     pub fn aero(&self) -> crate::inference::Standing {
         self.aero.lock().unwrap().0.clone()
     }
@@ -292,14 +292,6 @@ impl Accounts {
                 this.bump();
             }
         });
-    }
-    /// Opens the plan the backend offers (a Powermove https page; the
-    /// contract's `offer`) in the browser.
-    pub fn open_aero_offer(&self) -> Result<(), String> {
-        match self.aero() {
-            crate::inference::Standing::NoPlan(Some(offer)) => (self.open)(&offer.url),
-            _ => Err("No Aero plan is offered right now.".into()),
-        }
     }
     /// Sign-out wins over a login still waiting on the browser.
     pub fn disconnect(self: &Arc<Self>, provider: Provider) {

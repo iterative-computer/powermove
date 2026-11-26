@@ -2094,7 +2094,6 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
       ["Plan", "Aerolite"],
       ["Resets", "Dec 25"],
     ],
-    offer: null,
   };
   const asked: Parameters<Menu>[0][] = [];
   const picks = ["model:pm/anthropic/claude-opus-5.5", "effort:low", "providers:"];
@@ -2164,14 +2163,51 @@ test("Aero's card shows no usage monitor until the backend has answered", async 
   expect(asked[0]!.chooser).toEqual({ title: "GPT-6 Sol", icon: "provider.chatgpt", facts: [] });
   root.dispose();
 });
-test("Aero signed in without a plan says so honestly: coming soon, or the plan the backend offers", async () => {
-  for (const [offer, rows] of [
-    [null, [["status", "Aero inference is coming soon."]]],
+test("Aero out of credits says until when in the chooser, and offers the bigger plan on Aerolite", async () => {
+  for (const [upgrade, rows] of [
     [
-      { label: "Get Aerolite" },
+      "Aero",
       [
-        ["status", "Aero inference is coming soon."],
-        ["action", "Get Aerolite…"],
+        ["status", "Out of credits until Dec 25."],
+        ["action", "Upgrade to Aero…"],
+      ],
+    ],
+    [null, [["status", "Out of credits until Dec 25."]]],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]], ["low"]);
+    p.snapshot.settings.provider = "aero";
+    p.snapshot.settings.model = "pm/openai/gpt-6-sol";
+    p.native.aero = {
+      usage: [["Credits", "0 of 1,000 left"]],
+      outOfCredits: { resets: "Dec 25", upgrade },
+    };
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return null;
+        }}
+        send={() => {}}
+      />,
+    );
+    await root.drive(byId(root, "agent-model").id, "click");
+    expect(
+      asked[0]!.options.filter((o) => o.kind === "status" || o.kind === "action").map((o) => [o.kind, o.label]),
+    ).toEqual(rows);
+    root.dispose();
+  }
+});
+test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings › Account", async () => {
+  for (const [needsPlan, rows] of [
+    [
+      true,
+      [
+        ["status", "Aero needs Aerolite or Aero."],
+        ["action", "Subscribe…"],
       ],
     ],
   ] as const) {
@@ -2180,8 +2216,8 @@ test("Aero signed in without a plan says so honestly: coming soon, or the plan t
     p.snapshot.catalog = harnessCatalog([]);
     p.snapshot.settings.provider = "aero";
     p.native.connection = "unavailable";
-    p.native.reason = "Aero inference is coming soon.";
-    p.native.aero = { usage: [], offer, comingSoon: true };
+    p.native.reason = "Aero needs Aerolite or Aero.";
+    p.native.aero = { usage: [], needsPlan };
     const asked: Parameters<Menu>[0][] = [];
     await root.render(
       <AgentView

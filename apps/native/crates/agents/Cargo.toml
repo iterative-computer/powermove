@@ -9,6 +9,9 @@ publish = false
 [features]
 # Passes pm-aero-core's require-core through (pm-native-app's aero-trial).
 require-core = ["pm-aero-core/require-core"]
+# A build that may run on a local development stack (PM_CLOUD_ORIGIN): debug
+# builds always; the Sandbox through pm-native-app's dev-cloud-origin. Never shipped.
+dev-cloud-origin = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -121,7 +121,7 @@ fn fakes(ttl: u64) -> Fakes {
         // Aero's base: the fakes' Powermove inference (development builds).
         (
             pm_agents::inference::TEST_ENDPOINT.to_owned(),
-            format!("{base}/aero/v1/aero"),
+            format!("{base}/aero"),
         ),
         (
             "PM_AGENT_FAKES".to_owned(),
@@ -403,8 +403,8 @@ fn an_openai_key_is_codexs_and_an_anthropic_key_lists_claude_codes_models() {
     accounts.close();
 }
 
-/// Aero on the Powermove account: its standing follows the backend's usage
-/// answer (a plan with its catalogue, none, an offer, no route yet), and a
+/// Aero on the Powermove account: its standing follows the account's
+/// billing (a plan with its catalogue, Free, no route yet), and a
 /// turn runs on the session only, never on Codex's OpenAI key, Claude Code's
 /// Anthropic key or the saved custom endpoint, which are all there.
 #[test]
@@ -425,11 +425,12 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
         !accounts.anthropic().models.is_empty()
     });
 
-    let Standing::Ready { usage, models } = pm_agents::inference::standing(env) else {
+    let Standing::Ready { billing, models } = pm_agents::inference::standing(env) else {
         panic!("a plan: {:?}", pm_agents::inference::standing(env));
     };
-    assert_eq!(usage.plan.name, "Aerolite");
-    assert_eq!(usage.facts()[0].1, "812 of 1,000 left");
+    assert_eq!(billing.plan.as_ref().unwrap().name, "Aerolite");
+    assert_eq!(billing.facts()[0].1, "812 of 1,000 left");
+    assert_eq!(billing.daily.len(), 14);
     assert_eq!(models[0].id, "pm/anthropic/claude-opus-5.5");
     assert_eq!(models[0].default_effort.as_deref(), Some("high"));
     accounts.refresh_aero();
@@ -454,7 +455,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     assert!(!turns.is_empty());
     for request in &turns {
         assert_eq!(
-            request["path"], "/aero/v1/aero/chat/completions",
+            request["path"], "/aero/v2/aero/chat/completions",
             "{request}"
         );
         assert_eq!(request["authorization"], "Bearer pm-aero-d", "{request}");
@@ -474,16 +475,24 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
         }
     }
 
-    // No plan, an offer, no route yet: honest, no models; signed out: none.
-    control(&f.base, serde_json::json!({"aero": "none"}));
-    assert_eq!(pm_agents::inference::standing(env), Standing::NoPlan(None));
-    control(&f.base, serde_json::json!({"aero": "offer"}));
+    // Free (and a cancelled plan), no route yet: honest, no models; signed out: none.
+    control(&f.base, serde_json::json!({"aero": "free"}));
     assert!(matches!(
         pm_agents::inference::standing(env),
-        Standing::NoPlan(Some(offer)) if offer.label == "Get Aerolite"
+        Standing::Free(b) if b.plans.len() == 2 && b.daily.is_empty()
     ));
     control(&f.base, serde_json::json!({"aero": "missing"}));
-    assert_eq!(pm_agents::inference::standing(env), Standing::NoPlan(None));
+    assert!(matches!(
+        pm_agents::inference::standing(env),
+        Standing::Unreachable(_)
+    ));
+    for state in ["cancelling", "past_due", "aero"] {
+        control(&f.base, serde_json::json!({ "aero": state }));
+        assert!(
+            matches!(pm_agents::inference::standing(env), Standing::Ready { .. }),
+            "{state}"
+        );
+    }
     // Out of credits: the turn ends in Aero's words.
     control(&f.base, serde_json::json!({"aero": "out"}));
     let model = aero::Model::live(
@@ -1054,7 +1063,7 @@ fn signing_out_mid_turn_stops_the_held_stream_and_runs_none_of_its_reply() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|r| r["path"] == "/aero/v1/aero/chat/completions")
+            .any(|r| r["path"] == "/aero/v2/aero/chat/completions")
     });
     account.set(None);
     let result = turn.join().unwrap();

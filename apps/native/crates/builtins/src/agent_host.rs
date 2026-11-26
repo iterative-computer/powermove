@@ -223,7 +223,7 @@ impl AgentLink {
         match self.accounts().map(|a| a.aero()) {
             None | Some(Standing::Checking) => ("checking", String::new()),
             Some(Standing::SignedOut) => ("unavailable", pm_agents::inference::SIGN_IN.into()),
-            Some(Standing::NoPlan(_)) => ("unavailable", "Aero inference is coming soon.".into()),
+            Some(Standing::Free(_)) => ("unavailable", pm_agents::inference::NEEDS_PLAN.into()),
             Some(Standing::Ready { .. }) => ("connected", String::new()),
             Some(Standing::Unreachable(why)) => ("unavailable", why),
         }
@@ -314,19 +314,19 @@ impl AgentLink {
             None => false,
         }
     }
-    /// The usage monitor's lines for Aero's picker card (nothing until the
-    /// backend answers), and a plan the backend offers someone without one.
-    /// Signed in without a plan (before the backend exists): a quiet state,
+    /// Signed in on Free: Aero needs a plan, a quiet state with Subscribe,
     /// never a fault.
-    pub fn aero_coming_soon(&self) -> bool {
+    pub fn aero_needs_plan(&self) -> bool {
         self.accounts()
-            .is_some_and(|a| matches!(a.aero(), pm_agents::inference::Standing::NoPlan(_)))
+            .is_some_and(|a| matches!(a.aero(), pm_agents::inference::Standing::Free(_)))
     }
-    pub fn aero_usage(&self) -> (Vec<(String, String)>, Option<pm_agents::inference::Offer>) {
+    /// The usage monitor's lines for Aero's picker card (nothing until the
+    /// backend answers), and the reset day and bigger plan for an
+    /// out-of-credits turn.
+    pub fn aero_usage(&self) -> (Vec<(String, String)>, Option<pm_agents::inference::Billing>) {
         use pm_agents::inference::Standing;
         match self.accounts().map(|a| a.aero()) {
-            Some(Standing::Ready { usage, .. }) => (usage.facts(), None),
-            Some(Standing::NoPlan(offer)) => (vec![], offer),
+            Some(Standing::Ready { billing, .. }) => (billing.facts(), Some(billing)),
             _ => (vec![], None),
         }
     }

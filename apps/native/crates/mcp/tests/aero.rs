@@ -368,7 +368,7 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
         ) -> Result<(), String> {
             assert_eq!(
                 request.url,
-                "https://cloud.trypowermove.com/v1/aero/chat/completions"
+                "https://cloud.trypowermove.com/v2/aero/chat/completions"
             );
             on(Chunk::Status(200))?;
             let mut sse = String::new();
@@ -2887,7 +2887,7 @@ mod routes {
         let Some(r) = routes(hello()) else { return };
         for level in ["low", "medium", "high", "xhigh", "max", ""] {
             for request in r.turn("pm/openai/gpt-6-sol", level) {
-                assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"));
+                assert_eq!(request.url, format!("{ORIGIN}/v2/aero/chat/completions"));
                 assert_eq!(request.body["model"], "openai/gpt-6-sol");
                 if level.is_empty() {
                     assert!(request.body.get("reasoning_effort").is_none());
@@ -2942,7 +2942,7 @@ mod routes {
             for request in r.turn(id, "high") {
                 assert_eq!(
                     request.url,
-                    format!("{ORIGIN}/v1/aero/chat/completions"),
+                    format!("{ORIGIN}/v2/aero/chat/completions"),
                     "{id}"
                 );
                 assert_eq!(
@@ -2978,7 +2978,7 @@ mod routes {
         let mut env = r.env.clone();
         env.vars.insert(
             pm_agents::inference::TEST_ENDPOINT.into(),
-            format!("{}/v1/aero", r.emulate.base),
+            r.emulate.base.clone(),
         );
         // Switch off: the endpoint is not read.
         assert!(!r.turn_in(&env, "pm/openai/gpt-6-sol", "low").is_empty());
