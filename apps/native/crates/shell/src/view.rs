@@ -3012,6 +3012,69 @@ fn native_body(panel: Rect, edge: f32, header: f32) -> Rect {
         h: (panel.h - header - edge).max(0.),
     }
 }
+/// A panel's split/join/dock grip in `corner`, as the original app drew it
+/// (a wedge across the corner, 30% of a 7 pt square, 34% under the pointer)
+/// but inside the panel's own rounded corner: its outer edge is that corner
+/// inset `space.hair` (`Radii::nested`), so the panel keeps its round corner
+/// when hovered. The wedge runs that far past the corner's diagonal.
+fn area_grip(
+    panel: Rect,
+    corner: crate::area::Corner,
+    active: bool,
+    ink: Rgba,
+    clip: Option<Rect>,
+    t: &Tokens,
+) -> impl Fn(&mut Window) + 'static {
+    let inset = t.space.hair;
+    let radius = t.radius.nested(t.metrics.panel_radius, inset);
+    let smoothing = t.radius.smoothing;
+    let square = crate::area::HIT - 2. * inset;
+    let leg = square * 2. * if active { 0.34 } else { 0.30 };
+    // A continuous corner meets its diagonal as a circle of the same radius
+    // does, (1 - 1/√2)·r in along each side; the grip square is the corner's
+    // whole reach so the quad's own corner is the panel's, concentric.
+    let apex = 2. * (1. - std::f32::consts::FRAC_1_SQRT_2) * radius;
+    let side = (radius * (1. + smoothing)).ceil();
+    // A point `u + v` in from the square's corner sits at this gradient ratio
+    // (the renderer measures a square's diagonal gradient along its side).
+    let ratio = |along: f32| 0.5 + (along - side) / (std::f32::consts::SQRT_2 * side);
+    let x = if corner.left() { panel.x + inset } else { panel.x + panel.w - inset - side };
+    let y = if corner.top() { panel.y + inset } else { panel.y + panel.h - inset - side };
+    let round = |left: bool, top: bool| {
+        if corner.left() == left && corner.top() == top { px(radius) } else { Pixels::ZERO }
+    };
+    let radii = Corners {
+        top_left: round(true, true),
+        top_right: round(false, true),
+        bottom_right: round(false, false),
+        bottom_left: round(true, false),
+    };
+    let angle = match (corner.left(), corner.top()) {
+        (true, true) => 135.,
+        (false, true) => 225.,
+        (true, false) => 45.,
+        (false, false) => 315.,
+    };
+    let fill = linear_gradient(
+        angle,
+        linear_color_stop(ink, ratio(apex + leg - 1.)),
+        linear_color_stop(ink.opacity(0.), ratio(apex + leg)),
+    );
+    let quad = PaintQuad::new(Bounds::new(point(px(x), px(y)), size(px(side), px(side))))
+        .corner_radii(radii)
+        .corner_smoothing(smoothing)
+        .background(fill);
+    move |window: &mut Window| match clip {
+        Some(c) => window.with_content_mask(
+            Some(ContentMask {
+                bounds: Bounds::new(point(px(c.x), px(c.y)), size(px(c.w), px(c.h))),
+                ..Default::default()
+            }),
+            |window| window.paint_quad(quad.clone()),
+        ),
+        None => window.paint_quad(quad.clone()),
+    }
+}
 fn positioned(r: Rect) -> Div {
     div()
         .absolute()
@@ -4797,38 +4860,22 @@ impl Editor {
                         tint(c.text, 0.34 * opacity)
                     };
                     let id_down = id.clone();
+                    let grip = area_grip(
+                        p.rect,
+                        corner,
+                        active,
+                        ink,
+                        self.geometry.side_docks.get(&p.dock).copied(),
+                        &t,
+                    );
                     root = root.child(
                         positioned(corner_rect)
                             .id(format!("area-{id}-{i}"))
                             .tooltip(tooltip(&t, "Drag to split, join or dock"))
                             .cursor(CursorStyle::Crosshair)
                             .child(
-                                canvas(
-                                    move |_, _, _| (),
-                                    move |b, _, window, _| {
-                                        let x = f32::from(b.origin.x) + 2.;
-                                        let y = f32::from(b.origin.y) + 2.;
-                                        // CSS 7px square with a diagonal 30% (34% on hover) stop.
-                                        let leg = 7. * 2. * if active { 0.34 } else { 0.30 };
-                                        let x = if corner.left() { x } else { x + 7. };
-                                        let y = if corner.top() { y } else { y + 7. };
-                                        let mut path = PathBuilder::fill();
-                                        path.move_to(point(px(x), px(y)));
-                                        path.line_to(point(
-                                            px(x + if corner.left() { leg } else { -leg }),
-                                            px(y),
-                                        ));
-                                        path.line_to(point(
-                                            px(x),
-                                            px(y + if corner.top() { leg } else { -leg }),
-                                        ));
-                                        path.close();
-                                        if let Ok(path) = path.build() {
-                                            window.paint_path(path, ink);
-                                        }
-                                    },
-                                )
-                                .size_full(),
+                                canvas(move |_, _, _| (), move |_, _, window, _| grip(window))
+                                    .size_full(),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -5203,6 +5250,98 @@ mod keyboard_tests {
             view.update(cx, |v, cx| v.cancel_gesture(cx));
             cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
             view.read_with(cx, |v, _| assert_eq!(v.layout, original));
+        }
+    }
+    /// The owner: hovering any panel squared its corners (the area grip was
+    /// painted over the panel's round corner). Hovered, every panel's corner
+    /// outside its rounded shape is pixel for pixel what it is at rest, and
+    /// the grip still shows inside it; in both schemes.
+    #[::core::prelude::v1::test]
+    fn hovered_panels_keep_their_round_corners() {
+        for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
+            objc2::rc::autoreleasepool(|_| {
+                let mut cx = HeadlessAppContext::with_platform(
+                    Arc::new(gpui_parley::ParleyTextSystem::new(
+                        gpui_parley::SystemFonts::Load,
+                    )),
+                    Arc::new(()),
+                    || {
+                        Some(Box::new(
+                            gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                        ))
+                    },
+                );
+                let w = cx
+                    .open_window(size(px(1440.), px(900.)), |_, cx| {
+                        cx.new(|cx| Editor::new(Tokens::new(scheme, Default::default()), None, cx))
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let panels: Vec<(String, Rect)> = w
+                    .update(&mut cx, |v, _, _| {
+                        v.geometry
+                            .panels
+                            .iter()
+                            .map(|p| (v.layout.placed(p).unwrap().active().to_string(), p.rect))
+                            .collect()
+                    })
+                    .unwrap();
+                assert!(panels.len() >= 4, "{panels:?}");
+                let capture = |cx: &mut HeadlessAppContext, hover| {
+                    w.update(cx, |v, _, cx| {
+                        v.area_hover = hover;
+                        cx.notify();
+                    })
+                    .unwrap();
+                    cx.run_until_parked();
+                    // Settle the grip's fade before the frame.
+                    std::thread::sleep(Duration::from_millis(150));
+                    w.update(cx, |_, _, cx| cx.notify()).unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(w.into()).unwrap()
+                };
+                let rest = capture(&mut cx, None);
+                let scale = rest.width() as f32 / 1440.;
+                let pixel = |image: &image::RgbaImage, x: f32, y: f32| {
+                    *image.get_pixel((x * scale) as u32, (y * scale) as u32)
+                };
+                let differs = |a: image::Rgba<u8>, b: image::Rgba<u8>| {
+                    a.0.iter().zip(b.0).map(|(a, b)| a.abs_diff(b)).max().unwrap()
+                };
+                for (id, r) in &panels {
+                    for active in [None, Some(crate::area::Corner::ALL[0])] {
+                        let hovered = capture(&mut cx, Some((id.clone(), active)));
+                        for corner in crate::area::Corner::ALL {
+                            // `(u, v)` in from the panel's corner.
+                            let at = |u: f32, v: f32| {
+                                let x = if corner.left() { r.x + u } else { r.x + r.w - u };
+                                let y = if corner.top() { r.y + v } else { r.y + r.h - v };
+                                (x, y)
+                            };
+                            // Outside a 12 pt continuous corner, inside the old wedge.
+                            for (u, v) in [(1., 1.), (2.5, 2.5), (3., 2.), (2., 3.)] {
+                                let (x, y) = at(u, v);
+                                let diff = differs(pixel(&rest, x, y), pixel(&hovered, x, y));
+                                assert!(
+                                    diff <= 2,
+                                    "{scheme:?} {id} {corner:?} at ({u}, {v}): the hovered corner \
+                                     paints outside the panel's round corner (off by {diff})"
+                                );
+                            }
+                            // The grip itself, past the corner's diagonal.
+                            let shown = (0..4)
+                                .flat_map(|du| (0..4).map(move |dv| (du, dv)))
+                                .map(|(du, dv)| {
+                                    let (x, y) = at(5.5 + du as f32 * 0.5, 5.5 + dv as f32 * 0.5);
+                                    differs(pixel(&rest, x, y), pixel(&hovered, x, y))
+                                })
+                                .max()
+                                .unwrap();
+                            assert!(shown > 6, "{scheme:?} {id} {corner:?}: no grip ({shown})");
+                        }
+                    }
+                }
+            });
         }
     }
     #[::core::prelude::v1::test]
