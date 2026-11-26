@@ -349,6 +349,9 @@ pub struct Host {
     slots: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
+    /// Mirrors `TimelineSurface::has_expanded_properties` so `follow_playback`
+    /// never re-entrantly borrows `TimelineSurface` during ruler scrubs.
+    timeline_expanded_properties: Option<Rc<std::cell::Cell<bool>>>,
     /// Where the shell last placed the timeline panel, and its header height;
     /// `None` while it isn't drawn. The native playhead and timecode follow it.
     pub timeline_place: Option<(pm_shell::layout::Rect, f32)>,
@@ -527,6 +530,8 @@ impl Controller {
                 .views
                 .borrow_mut()
                 .insert("timeline".into(), surface.clone().into());
+            self.builtins.timeline_expanded_properties =
+                Some(surface.read(cx).expanded_properties_flag());
             self.builtins.timeline = Some(surface);
             let host = Rc::new(ControllerDelegate(cx.entity().downgrade()));
             let (kernel, tokens) = (self.kernel.clone(), self.host.borrow().tokens.clone());
@@ -1090,9 +1095,9 @@ impl Controller {
             && self.builtins.ready.contains("timeline")
             && self
                 .builtins
-                .timeline
+                .timeline_expanded_properties
                 .as_ref()
-                .is_some_and(|t| t.read(cx).has_expanded_properties())
+                .is_some_and(|flag| flag.get())
         {
             panels.push("timeline");
         }

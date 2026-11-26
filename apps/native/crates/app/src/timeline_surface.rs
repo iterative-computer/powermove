@@ -513,6 +513,10 @@ pub struct TimelineSurface {
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
     focused: bool,
+    /// Shared flag mirrored from `self.model` so `Controller::follow_playback`
+    /// can check whether expanded property rows are visible without re-entrantly
+    /// borrowing `TimelineSurface` during ruler/playhead pointer callbacks.
+    expanded_properties: Rc<std::cell::Cell<bool>>,
     focused_layer: Option<(u64, Option<String>, String)>,
     last_pointer_activity: std::time::Instant,
     pointer_timeout: Option<Task<()>>,
@@ -691,6 +695,7 @@ impl TimelineSurface {
             reading: Default::default(),
             audio: Default::default(),
             model: Default::default(),
+            expanded_properties: Rc::new(std::cell::Cell::new(false)),
             scene: None,
             pending_scene: None,
             pending_scene_fallback: None,
@@ -1991,6 +1996,8 @@ impl TimelineSurface {
         let model = built.model.clone();
         if built.selection_only {
             self.model = model.clone();
+            self.expanded_properties
+                .set(self.has_expanded_properties());
             self.scene = Some(self.with_focus(built.scene));
             self.outline.set_scene(self.scene.clone());
             self.install_graph(built.graph);
@@ -2202,6 +2209,8 @@ impl TimelineSurface {
             self.seen_reveal_serial = built.model.reveal_serial;
         }
         self.model = built.model;
+        self.expanded_properties
+            .set(self.has_expanded_properties());
         let delegate = self.delegate.clone();
         let view = self.model.clone();
         cx.defer(move |cx| delegate.tracks_view(view, cx));
@@ -5646,6 +5655,12 @@ impl TimelineSurface {
             .rows()
             .iter()
             .any(|row| matches!(row.id, pm_panel_timeline::RowId::Property { .. }))
+    }
+    /// Shared flag kept in sync with [`Self::has_expanded_properties`] so
+    /// re-entrant callers (such as ruler scrub seeks) can read it without
+    /// borrowing this entity.
+    pub fn expanded_properties_flag(&self) -> Rc<std::cell::Cell<bool>> {
+        self.expanded_properties.clone()
     }
 }
 /// The graph to show after a rebuild. A key or handle drag maps the pointer
