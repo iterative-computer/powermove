@@ -1798,7 +1798,7 @@ impl Render for ProjectLibrary {
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle.fill", "Sign in".into()),
+                        ("person.crop.circle.fill", "Sign In".into()),
                         None,
                         false,
                     )
