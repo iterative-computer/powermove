@@ -15,7 +15,11 @@ telemetry = ["pm-telemetry/telemetry"]
 aero-trial = ["pm-agents/require-core"]
 # The Sandbox against a local cloud stack (PM_V2_FEATURES=dev-cloud-origin): PM_CLOUD_ORIGIN
 # may point the account, billing and Aero at http://127.0.0.1:<port>. Never in a shipped release.
-dev-cloud-origin = ["pm-agents/dev-cloud-origin", "pm-compat-runner/dev-cloud-origin"]
+dev-cloud-origin = [
+    "pm-agents/dev-cloud-origin",
+    "pm-compat-runner/dev-cloud-origin",
+    "pm-services/dev-cloud-origin",
+]
 
 [dependencies]
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
