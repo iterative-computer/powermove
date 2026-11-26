@@ -1,7 +1,7 @@
 # Powermove Cloud
 
 The hosted backend for the desktop app: a Hono Worker on Cloudflare that runs
-identity and the extension Store. Postgres on Neon through Drizzle, R2 for
+identity, the extension Store, billing (Stripe) and Aero inference. Postgres on Neon through Drizzle, R2 for
 git objects, release tarballs and icons, Better Auth for accounts.
 
 The contract with the desktop lives in `packages/registry` (`wire/` schemas,
@@ -17,7 +17,17 @@ them on the desktop.
   for the desktop and for the admin panel's `/v1/auth/web`), `auth-email`,
   `auth-signout`, `me`, `objects`, `publish`, `repo-management` (yank, patch,
   tombstone, reports, icons), `admin` (everything under `/v1/admin`), `store`
-  (public reads, versions batch), `installs`, `health`.
+  (public reads, versions batch), `installs`, `health`; v2: `billing`
+  (`/v2/billing`, checkout, portal, the return page), `stripe-webhook`
+  (`/v2/stripe/webhook`), `aero` (`/v2/aero/models`, `/v2/aero/chat/completions`).
+  v2 errors are `{"error": {"code": "…"}}` and never carry the backend's text.
+- `src/billing/` plans (`plans.ts`, matching the website), the credit ledger and
+  billing state (`ledger.ts`), the Stripe client (`stripe.ts`) and the webhook's
+  event handling (`webhook.ts`, idempotent by event id via `stripe_events`).
+- `src/aero/` the model catalogue and credit prices (`catalogue.ts`; 1 credit =
+  $0.005 of list price), Chat Completions in to AI SDK `streamText` out
+  (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
+  back to Chat Completions SSE in the subset fx parses (`sse.ts`).
 - `src/lifecycle.ts` is the state table (visibility × moderation × tombstone
   × yank). Every read decides through it.
 - `src/objects/` presence, references (the one reachability predicate shared
@@ -25,7 +35,10 @@ them on the desktop.
 - `src/db/` Drizzle schema (`schema.ts`, `auth-schema.ts`) and `client.ts`
   (the `Data` type: HTTP reads plus a WebSocket pool for transactions).
 - `drizzle/` generated migrations, applied in order. Never hand-edit.
-- `test/` bun:test suites on PGlite plus an in-memory R2 fake.
+- `test/` bun:test suites on PGlite plus an in-memory R2 fake; the billing and
+  Aero suites run the fake Stripe and the AI simulator in process.
+- `scripts/fake-stripe.ts`, `scripts/ai-simulator.ts` the local Stripe and the
+  local OpenAI Responses / Anthropic Messages stand-ins (below).
 
 ## Local commands
 
@@ -54,8 +67,68 @@ optional PGlite dialect never enters the Worker.
 
 ## Local stack
 
-Requires Bun and OrbStack or Docker Desktop with Docker Compose running. From
-the repository root, run these commands in order:
+Requires Bun and OrbStack or Docker Desktop with Docker Compose running.
+
+### Billing and Aero (one command)
+
+```sh
+cd apps/cloud
+bun run local:billing
+```
+
+This starts Postgres (Compose), the fake Stripe, the AI simulator, runs
+`stripe:setup` against the fake, starts the Worker (`wrangler dev`) and seeds
+Jude on Free and Mara on Aerolite with four days of usage. It prints both
+session tokens. Ctrl-C stops the Worker and the fakes; `bun run local:down`
+removes Postgres. Nothing leaves the machine and no real key is read.
+
+To run a second stack beside the usual one (another lane or checkout), give it
+a name and a port base: Postgres on base+0, the Worker on base+1, its inspector
+on base+2, the fake Stripe on base+3, the AI simulator on base+4. The same two
+variables go in front of `local:down`.
+
+```sh
+PM_CLOUD_STACK=w113 PM_CLOUD_PORT_BASE=54410 bun run local:billing
+PM_CLOUD_STACK=w113 PM_CLOUD_PORT_BASE=54410 bun run local:down
+```
+
+Walk the flow with curl (default ports; `$T` is Jude's printed token):
+
+```sh
+W=http://localhost:8787; H="Authorization: Bearer $T"
+curl -s $W/v2/billing -H "$H"                                   # Free: plan null, 0 credits
+URL=$(curl -s -X POST $W/v2/billing/checkout -H "$H" -H 'content-type: application/json' \
+  -d '{"plan":"aerolite"}' | jq -r .url)                        # the fake Checkout page
+curl -s -X POST "$URL/pay" -o /dev/null -w '%{redirect_url}\n'  # Pay: signed webhooks to the Worker
+curl -s $W/v2/billing -H "$H"                                   # active, 1,000 credits
+curl -sN $W/v2/aero/chat/completions -H "$H" -H 'content-type: application/json' \
+  -d '{"model":"openai/gpt-6.2-sol","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+curl -s $W/v2/billing -H "$H" | jq .credits                     # credits dropped
+```
+
+The fake Stripe also serves the Customer Portal page (cancel at period end,
+resume, switch plan) and development controls:
+`POST http://localhost:12111/_fake/subscriptions/<sub_id>/renew` (a new period
+starts now and its invoice is paid), `/fail-renewal` (past due), `/end` (a
+subscription set to cancel ends). A user message containing `[slow]` makes the
+AI simulator stream slowly, for trying a client abort.
+
+The pieces run on their own too: `bun run dev:stripe` (fake Stripe on :12111,
+webhooks to :8787), `bun run dev:ai` (simulator on :4010) and `bun run
+dev:local`; `.dev.vars.example` has the matching values. `bun run
+stripe:setup` creates the two products ("Powermove Aerolite", "Powermove
+Aero") and monthly prices by lookup key, once, against whatever
+`STRIPE_SECRET_KEY` (and `STRIPE_API_BASE`, loopback only) name; it refuses a
+live key without `--live`.
+
+Billing secrets in production are Worker secrets: `STRIPE_SECRET_KEY`,
+`STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`; the prices are
+found by lookup key, or set `STRIPE_PRICE_AEROLITE` / `STRIPE_PRICE_AERO`.
+`STRIPE_API_BASE` and `AERO_*_BASE_URL` are honoured only on loopback hosts.
+
+### The Store
+
+Run these commands in order:
 
 ```sh
 cd apps/cloud
