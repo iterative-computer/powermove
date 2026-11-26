@@ -8,6 +8,7 @@
 //! reaches the network.
 use pm_agents::account::{Accounts, State};
 use pm_agents::edge::{FakeKeychain, Loopback, NetRequest, Reroute, fetch};
+use pm_agents::inference::{PowermoveAccount, Session, Standing};
 use pm_agents::launch::Environment;
 use pm_agents::{Provider, aero, codex_auth, keys};
 use serde_json::Value;
