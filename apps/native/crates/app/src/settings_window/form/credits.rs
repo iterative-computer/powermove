@@ -163,7 +163,7 @@ define_class!(
                     (height * *credits as f64 / most as f64).max(bar.min(height))
                 };
                 let rect = NSRect::new(
-                    NSPoint::new(i as f64 * slot, top + height - h),
+                    NSPoint::new(i as f64 * slot + (slot - bar) / 2., top + height - h),
                     NSSize::new(bar, h),
                 );
                 let ink = match (hovered == Some(i), *credits == 0) {
@@ -183,7 +183,7 @@ define_class!(
                 ));
                 let attrs = caption_attributes(&colour(c.text, 1.));
                 let size = unsafe { text.sizeWithAttributes(Some(&attrs)) };
-                let centre = hovered.unwrap_or(0) as f64 * slot + bar / 2.;
+                let centre = (hovered.unwrap_or(0) as f64 + 0.5) * slot;
                 let x = (centre - size.width / 2.).clamp(0., (width - size.width).max(0.));
                 unsafe {
                     text.drawAtPoint_withAttributes(
@@ -256,12 +256,14 @@ impl Chart {
             .height
             .ceil()
     }
-    /// A slot's pitch and its bar's width.
+    /// A slot's pitch and its bar's width: thin bars, one per day of the
+    /// period, centred in their slots.
     fn geometry(&self) -> (f64, f64) {
         let slots = self.ivars().slots.get().max(1) as f64;
-        let gap = st().credits_bar_gap as f64;
+        let s = st();
+        let gap = s.credits_bar_gap as f64;
         let slot = (self.bounds().size.width + gap) / slots;
-        (slot, (slot - gap).max(1.))
+        (slot, (slot - gap).min(s.credits_bar as f64).max(1.))
     }
     /// The day under the pointer, if it is one that has passed.
     fn slot_at(&self, x: f64) -> Option<usize> {

@@ -53,30 +53,13 @@ const ROLES: &[(&str, &str)] = &[
     ("settings.picker_ring_gap", "Gap between a picker tile and its selection ring"),
     ("settings.picker_ring", "A picker selection ring's width"),
     ("settings.picker_radius", "A picker tile's corner"),
-    (
-        "settings.picker_window_radius",
-        "A picker's mini window corner",
-    ),
-    (
-        "settings.picker_column",
-        "A picker option's column: every picker is one left-aligned grid",
-    ),
-    (
-        "settings.credits_meter",
-        "Settings › Account credits meter thickness",
-    ),
-    (
-        "settings.credits_chart",
-        "Settings › Account daily credits chart height",
-    ),
-    (
-        "settings.credits_bar_gap",
-        "Space between the daily credits chart's bars",
-    ),
-    (
-        "settings.credits_air",
-        "Air above the credits meter and the daily chart",
-    ),
+    ("settings.picker_window_radius", "A picker's mini window corner"),
+    ("settings.picker_column", "A picker option's column: every picker is one left-aligned grid"),
+    ("settings.credits_meter", "Settings › Account credits meter thickness"),
+    ("settings.credits_chart", "Settings › Account daily credits chart height"),
+    ("settings.credits_bar", "A day's bar width in the daily credits chart, at most"),
+    ("settings.credits_bar_gap", "Least space between the daily credits chart's bars"),
+    ("settings.credits_air", "Air above the credits meter and the daily chart"),
     ("settings.app_icon", "Settings › Agents app mark side"),
     ("settings.app_icon_gap", "Space after a Settings › Agents app mark"),
     ("settings.dark_veil", "Dark Settings sidebar veil over the system material"),

@@ -121,9 +121,11 @@ pub struct Settings {
     /// picker is one left-aligned grid of these, `space.lg` apart.
     pub picker_column: f32,
     /// Settings › Account's credits: the meter's thickness, the daily
-    /// chart's height, the room between its bars and the air above each.
+    /// chart's height, a day's bar width (at most), the least room between
+    /// bars and the air above each.
     pub credits_meter: f32,
     pub credits_chart: f32,
+    pub credits_bar: f32,
     pub credits_bar_gap: f32,
     pub credits_air: f32,
     /// Settings › Agents' app marks and the space after them.
@@ -186,6 +188,7 @@ impl Settings {
             picker_column: 120.,
             credits_meter: 6.,
             credits_chart: 44.,
+            credits_bar: 6.,
             credits_bar_gap: 2.,
             credits_air: 8.,
             app_icon: 20.,

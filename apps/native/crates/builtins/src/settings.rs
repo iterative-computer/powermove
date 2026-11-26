@@ -1518,8 +1518,11 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
         "{} used",
         pm_agents::inference::grouped(count("used"))
     ));
-    daily["days"] = billing["daily"].clone();
-    daily["slots"] = billing["periodDays"].clone();
+    // Bars once anything is spent: a new period's empty days draw nothing.
+    if count("used") > 0 {
+        daily["days"] = billing["daily"].clone();
+        daily["slots"] = billing["periodDays"].clone();
+    }
     rows.push(daily);
     if count("remaining") == 0
         && let Some(upgrade) = billing["upgrade"].as_object()
@@ -1918,6 +1921,15 @@ mod cloud_tests {
             &ready(json!({"upgrade":null,"credits":{"included":2500,"used":2500,"remaining":0}})),
             false,
         );
+        // A new period with nothing spent: no bars.
+        let fresh = billing_rows(
+            &ready(
+                json!({"credits":{"included":1000,"used":0,"remaining":1000},
+                "daily":[["Nov 25",0]]}),
+            ),
+            false,
+        );
+        assert!(fresh[2].get("days").is_none());
         assert_eq!(
             ids(&top),
             ["account.plan", "account.credits", "account.daily"]
