@@ -153,9 +153,11 @@ pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> Strin
         )
     } else {
         format!(
-            r#"<rect x="0.25" y="0.25" width="{rw}" height="{rh}" rx="{RADIUS}" fill="none" stroke="{ink}" stroke-opacity="0.14" stroke-width="0.5"/>"#,
-            rw = w - 0.5,
-            rh = h - 0.5,
+            // A 1 pt edge at 10 % ink, so a light picture holds its shape on
+            // a light card.
+            r#"<rect x="0.5" y="0.5" width="{rw}" height="{rh}" rx="{RADIUS}" fill="none" stroke="{ink}" stroke-opacity="0.1" stroke-width="1"/>"#,
+            rw = w - 1.,
+            rh = h - 1.,
             ink = hex(ours.text),
         )
     };

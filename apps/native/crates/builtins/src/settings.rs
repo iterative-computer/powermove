@@ -233,7 +233,7 @@ impl Backend {
             let claude = accounts.status(Provider::Claude);
             let terms = "Used by Claude Code.";
             let who = [claude.email.clone(), claude.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-            let mut r = match claude.state {
+            let r = match claude.state {
                 State::Connected => {
                     let mut r = action(
                         row("claude", ANTHROPIC, "Sign in with Claude"),
@@ -256,12 +256,20 @@ impl Backend {
                     "Sign In…",
                     format!("Signed out. {terms}"),
                 ),
-                State::Checking | State::Unavailable => {
+                State::Checking => {
                     let mut r = row("claude", ANTHROPIC, "Sign in with Claude");
-                    r["value"] = json!(if claude.state == State::Checking { "Checking…".to_owned() } else { claude.detail.clone().unwrap_or_default() });
+                    r["value"] = json!("Checking…");
                     r["detail"] = json!(terms);
                     r
                 }
+                // What went wrong reads under the title, and signing in
+                // again is at hand.
+                State::Unavailable => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-in",
+                    "Sign In…",
+                    format!("{} {terms}", claude.detail.clone().unwrap_or_default()).trim().to_owned(),
+                ),
             };
             rows.push(r);
             let key = accounts.anthropic();
@@ -549,9 +557,10 @@ impl Backend {
                 "Composition",
                 "Background",
                 "colour",
+                // No `bg` renders black (the engine's `normalize_fill`).
                 comp.get("bg")
                     .map(|n| wire(&n.to_value()))
-                    .unwrap_or(Value::Null),
+                    .unwrap_or(json!("#000000")),
                 "Colour shown behind every layer of the composition.",
             ),
         ] {

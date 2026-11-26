@@ -2042,7 +2042,9 @@ impl Render<'_, '_> {
         let stack = NSStackView::new(mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setAlignment(NSLayoutAttribute::Top);
-        stack.setSpacing(10.);
+        // The options share the card's width evenly, 12 pt apart.
+        stack.setDistribution(NSStackViewDistribution::FillEqually);
+        stack.setSpacing(12.);
         stack.setEdgeInsets(NSEdgeInsets {
             top: 6.,
             left: 0.,

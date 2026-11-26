@@ -95,8 +95,6 @@ function colourName(hex: string) {
 }
 /** The row Settings › Project's header card holds. */
 const HEADER_ROW = "project.name";
-/** Rows the design gives a stepper beside the field. */
-const STEPPED = new Set(["project.fps"]);
 /** Short exclusive choices the design shows as a segmented control. */
 const SEGMENTED = new Set([
   "project.colorDepth",
@@ -218,12 +216,14 @@ function RowControl({
   if (row.control === "status")
     // An empty trailing text can stretch across the row and hide its title.
     return typeof row.value === "string" && row.value !== "" ? (
-      <Copy nowrap={nowrapStatus}>{row.value}</Copy>
+      <Copy nowrap={nowrapStatus} secondary={row.section === "storage"}>
+        {row.value}
+      </Copy>
     ) : null;
   // An unknown authored value stays in the service; never coerce it into a default.
   if (!row.binding) return null;
-  // The design's controls: AppKit's bordered fields (a stepper on Frame
-  // Rate), and a segmented control for a short exclusive choice.
+  // The design's controls: AppKit's bordered fields, and a segmented
+  // control for a short exclusive choice.
   if (row.control === "number" && typeof row.value === "number")
     return (
       <UI.NumberField
@@ -233,7 +233,7 @@ function RowControl({
         max={row.max}
         unit={row.unit}
         precision={row.precision}
-        metadata={{ form: true, stepper: STEPPED.has(row.id) }}
+        metadata={{ form: true }}
       />
     );
   if (row.control === "text" && typeof row.value === "string")
@@ -342,6 +342,13 @@ function SettingRow({
   model: SettingsModel;
   key?: string;
 }) {
+  // Storage names a place and its size in one title ("Media Cache · 1 MB"):
+  // the size reads as the row's value, beside its button.
+  const sized = row.section === "storage" && !row.value && row.label.includes(" · ");
+  if (sized) {
+    const at = row.label.indexOf(" · ");
+    row = { ...row, label: row.label.slice(0, at), value: row.label.slice(at + 3) };
+  }
   const agentApp = row.section === "agents" && row.id.startsWith("agents.")
     ? row.id.slice("agents.".length)
     : undefined;
@@ -676,6 +683,29 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
     );
   const counts = model.extensionCounts;
   const state = model.publication.extensionsState;
+  const openStore = (
+    <Button
+      label="Open Store"
+      disabled={!model.services}
+      onClick={() => {
+        void model.perform({ type: "store.open" });
+      }}
+    />
+  );
+  // Nothing installed: one card, not a search, filters and counts of zero.
+  if (state === "ready" && counts.all === 0)
+    return (
+      <Group title="Extensions" untitled>
+        <div
+          role="group"
+          label="No extensions yet"
+          metadata={{ settingsLayout: "row" }}
+        >
+          <RowCopy title="No extensions yet" />
+          <div metadata={{ settingsLayout: "line" }}>{openStore}</div>
+        </div>
+      </Group>
+    );
   return (
     <>
       {/* The page header names the page; a search's results name it here. */}
@@ -765,18 +795,8 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           label="Powermove Store"
           metadata={{ settingsLayout: "row" }}
         >
-          <RowCopy
-            title="Powermove Store"
-          />
-          <div metadata={{ settingsLayout: "line" }}>
-            <Button
-              label="Open Store"
-              disabled={!model.services}
-              onClick={() => {
-                void model.perform({ type: "store.open" });
-              }}
-            />
-          </div>
+          <RowCopy title="Powermove Store" />
+          <div metadata={{ settingsLayout: "line" }}>{openStore}</div>
         </div>
       </Group>
     </>

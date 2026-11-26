@@ -213,6 +213,7 @@ struct Hover {
 /// quiet-md's hover springs: in quickly, out slowly (unit mass).
 const HOVER_IN: (f64, f64) = (1100., 66.);
 const HOVER_OUT: (f64, f64) = (300., 35.);
+const HOVER_SWITCH: (f64, f64) = (2500., 100.);
 /// The hover wash's opacity over the selection's colour.
 const HOVER_OPACITY: f32 = 0.5;
 
@@ -220,6 +221,11 @@ impl Sidebar {
     /// The pointer is on `row`: the wash goes under it, unless the row is
     /// the selected one or no section's.
     fn hover(&self, row: NSInteger) {
+        self.hover_with(row, false);
+    }
+    /// `arriving`: the selection is gliding onto the hovered row, whose wash
+    /// leaves at once (in about 80 ms) so the two never read as one band.
+    fn hover_with(&self, row: NSInteger, arriving: bool) {
         use objc2_quartz_core::{CAMediaTiming, CATransaction};
         let section = row >= 0 && row < self.numberOfRows() && {
             let delegate: *mut AnyObject = unsafe { msg_send![self, delegate] };
@@ -262,7 +268,13 @@ impl Sidebar {
             from = 0.;
         }
         layer.setOpacity(to);
-        let (stiffness, damping) = if target >= 0 { HOVER_IN } else { HOVER_OUT };
+        let (stiffness, damping) = if target >= 0 {
+            HOVER_IN
+        } else if arriving {
+            HOVER_SWITCH
+        } else {
+            HOVER_OUT
+        };
         let spring = objc2_quartz_core::CASpringAnimation::animationWithKeyPath(Some(
             &NSString::from_str("opacity"),
         ));
@@ -305,6 +317,10 @@ pub struct State {
     dark: Cell<bool>,
     /// Set while the host changes the selection, so it is not sent back.
     quiet: Cell<bool>,
+    /// The row the person just chose, until the page shows it: the panel
+    /// may still say the old page once, and the selection must not glide
+    /// back to it and out again.
+    chosen: RefCell<Option<(String, std::time::Instant)>>,
 }
 
 define_class!(
@@ -359,13 +375,14 @@ define_class!(
             if let Some(list) = table.downcast_ref::<Sidebar>() {
                 // The row just chosen loses its hover wash to the selection.
                 let row = list.ivars().row.replace(-2);
-                list.hover(row);
+                list.hover_with(row, true);
             }
             let row = table.selectedRow();
             if row < 0 { return; }
             let id = self.ivars().rows.borrow().get(row as usize)
                 .and_then(|r| r.section().map(|s| s.id.clone()));
             if let Some(id) = id {
+                *self.ivars().chosen.borrow_mut() = Some((id.clone(), std::time::Instant::now()));
                 let _ = self.ivars().sender.try_send(Event::Select(id));
             }
         }
@@ -666,6 +683,7 @@ impl SettingsChrome {
                 glide: Cell::new(None),
                 dark: Cell::new(true),
                 quiet: Cell::new(false),
+                chosen: RefCell::new(None),
             });
             unsafe { msg_send![super(this), init] }
         };
@@ -773,10 +791,31 @@ impl SettingsChrome {
         scroll.setAutohidesScrollers(true);
         scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+        // The system's sidebar material under the search and the list: on
+        // its own the floating glass shows whatever is behind the window,
+        // sharp, in light mode (a seam where another window ends).
+        let material = NSVisualEffectView::new(mtm);
+        material.setMaterial(NSVisualEffectMaterial::Sidebar);
+        material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        material.setState(NSVisualEffectState::FollowsWindowActiveState);
+        material.setTranslatesAutoresizingMaskIntoConstraints(false);
+        sidebar.addSubview(&material);
         sidebar.addSubview(&search);
         sidebar.addSubview(&scroll);
         let guide = sidebar.safeAreaLayoutGuide();
         activate(&[
+            material
+                .topAnchor()
+                .constraintEqualToAnchor(&sidebar.topAnchor()),
+            material
+                .bottomAnchor()
+                .constraintEqualToAnchor(&sidebar.bottomAnchor()),
+            material
+                .leadingAnchor()
+                .constraintEqualToAnchor(&sidebar.leadingAnchor()),
+            material
+                .trailingAnchor()
+                .constraintEqualToAnchor(&sidebar.trailingAnchor()),
             search
                 .topAnchor()
                 .constraintEqualToAnchor(&guide.topAnchor()),
@@ -969,11 +1008,25 @@ impl SettingsChrome {
             state.quiet.set(false);
             self.chrome.place_selection(false);
         }
+        // A page the person did not choose, said while their choice is on its
+        // way, leaves the selection where they put it.
+        let stale = {
+            let mut chosen = state.chosen.borrow_mut();
+            match chosen.as_ref() {
+                Some((id, _)) if id == active => {
+                    *chosen = None;
+                    false
+                }
+                Some((_, at)) => at.elapsed() < std::time::Duration::from_secs(1),
+                None => false,
+            }
+        };
         let row = state
             .rows
             .borrow()
             .iter()
-            .position(|r| r.section().is_some_and(|s| s.id == active));
+            .position(|r| r.section().is_some_and(|s| s.id == active))
+            .filter(|_| !stale);
         if let Some(row) = row
             && table.selectedRow() != row as NSInteger
         {
@@ -1304,27 +1357,33 @@ macro_rules! drawn {
     };
 }
 
-/// A section's glyph: Pierre's (filled where it has one), or ours drawn in
-/// its grammar where it has none (film, photos, keyboard).
+/// A section's glyph, all in one filled style: Pierre's filled glyphs, or
+/// ours drawn in its grammar where it has none or only an outline (film,
+/// photo, keyboard, drive, blocks, prompt, window).
 fn glyph(id: &str) -> Option<&'static str> {
     Some(match id {
         "general" => pierre!("GearFill"),
         "project" => drawn!("film"),
-        "media" => drawn!("photo-stack"),
+        "media" => drawn!("photo"),
         "shortcuts" => drawn!("keyboard"),
         "transcription" => pierre!("Microphone"),
-        "storage" => pierre!("Server"),
+        "storage" => drawn!("drive"),
         "providers" => pierre!("KeyFill"),
         "agents" => pierre!("Sparkles"),
-        "extensions" => pierre!("Extensions"),
+        "extensions" => drawn!("blocks"),
         "privacy" => pierre!("ShieldFill"),
         "about" => pierre!("InfoFill"),
         "account" => drawn!("account"),
+        // Settings › Agents' apps with no mark of their own.
+        "terminal" => drawn!("prompt"),
+        "window" => drawn!("window"),
         _ => return None,
     })
 }
 
-/// The inside of a 16-unit glyph file, painted with `paint`.
+/// The inside of a 16-unit glyph file, painted with `paint`. A mask's own
+/// black and white stay as they are (painting them would fill the glyph's
+/// knock-outs).
 fn glyph_body(svg: &str, paint: &str) -> String {
     let start = svg
         .find("<svg")
@@ -1334,9 +1393,21 @@ fn glyph_body(svg: &str, paint: &str) -> String {
         (Some(start), Some(end)) if start < end => &svg[start..end],
         _ => "",
     };
-    inner
-        .replace("fill=\"black\"", &format!("fill=\"{paint}\""))
-        .replace("stroke=\"black\"", &format!("stroke=\"{paint}\""))
+    let recolour = |part: &str| {
+        part.replace("fill=\"black\"", &format!("fill=\"{paint}\""))
+            .replace("stroke=\"black\"", &format!("stroke=\"{paint}\""))
+    };
+    let mut out = String::new();
+    let mut rest = inner;
+    while let Some(at) = rest.find("<mask") {
+        out += &recolour(&rest[..at]);
+        let close = rest[at..]
+            .find("</mask>")
+            .map_or(rest.len(), |c| at + c + "</mask>".len());
+        out += &rest[at..close];
+        rest = &rest[close..];
+    }
+    out + &recolour(rest)
 }
 
 /// A continuous-corner square (a superellipse) of side `s` at the origin,
