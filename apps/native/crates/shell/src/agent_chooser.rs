@@ -55,6 +55,17 @@ pub struct Row {
     pub stays: bool,
 }
 
+/// `[[label, value], …]` as the panel sends a card's facts.
+fn pairs(list: &serde_json::Value) -> Vec<(String, String)> {
+    list.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|f| Some((f[0].as_str()?.to_owned(), f[1].as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// The chooser's rows and its card, from the panel's request.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Spec {
@@ -64,6 +75,9 @@ pub struct Spec {
     pub title: Option<(String, Option<String>)>,
     /// The card's facts as (label, value), only those the provider reports.
     pub facts: Vec<(String, String)>,
+    /// The usage monitor at the card's foot (Aero's credits, plan and reset
+    /// day), as (label, value); none until the backend reports them.
+    pub usage: Vec<(String, String)>,
     /// A quiet line on the card (where to sign in).
     pub note: String,
     pub placeholder: String,
@@ -95,17 +109,8 @@ impl Spec {
             title: card["title"]
                 .as_str()
                 .map(|t| (t.to_owned(), card["icon"].as_str().map(str::to_owned))),
-            facts: card["facts"]
-                .as_array()
-                .map(|facts| {
-                    facts
-                        .iter()
-                        .filter_map(|f| {
-                            Some((f[0].as_str()?.to_owned(), f[1].as_str()?.to_owned()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            facts: pairs(&card["facts"]),
+            usage: pairs(&card["usage"]),
             note: text(&card["note"]),
             placeholder: text(&input["placeholder"]),
         }
@@ -1026,6 +1031,26 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
             push(&mut views, &slider);
             y += h;
         }
+        // The usage monitor (Aero's credits), below a hairline at its foot.
+        if !spec.usage.is_empty() {
+            y += shape.pad;
+            push(
+                &mut views,
+                &rule(
+                    NSRect::new(
+                        NSPoint::new(card_x, pad + y),
+                        NSSize::new(shape.card, shape.line),
+                    ),
+                    &t,
+                    mtm,
+                ),
+            );
+            y += shape.pad;
+            for (key, value) in &spec.usage {
+                row(&mut views, y, key, value, None);
+                y += shape.fact;
+            }
+        }
         // It ends at its content, as Capy's does (top edges aligned).
         card_h = y + shape.inset;
     }
@@ -1604,7 +1629,7 @@ mod tests {
     fn the_list_heads_only_matching_rows_and_numbers_the_first_nine_models() {
         let mut spec = Spec {
             rows: vec![
-                row(Part::Harness, "Powermove"),
+                row(Part::Harness, "Aero"),
                 row(Part::Heading, "ChatGPT"),
                 row(Part::Model, "GPT Sol"),
                 row(Part::Model, "GPT Luna"),
@@ -1631,7 +1656,7 @@ mod tests {
     #[test]
     fn a_choice_in_the_same_harness_keeps_the_list_place_and_a_harness_switch_does_not() {
         let spec = |harness: &str, model: usize| Spec {
-            rows: ["Powermove", "Codex"]
+            rows: ["Aero", "Codex"]
                 .iter()
                 .map(|h| Row {
                     checked: *h == harness,
@@ -1646,8 +1671,8 @@ mod tests {
         };
         // Twenty 28 pt rows overflow the 360 pt list; choosing the 18th
         // (below the fold) keeps the place, switching harness starts over.
-        assert!(spec("Powermove", 0).keeps_place(&spec("Powermove", 17)));
-        assert!(!spec("Powermove", 0).keeps_place(&spec("Codex", 0)));
+        assert!(spec("Aero", 0).keeps_place(&spec("Aero", 17)));
+        assert!(!spec("Aero", 0).keeps_place(&spec("Codex", 0)));
         assert!(!Spec::default().keeps_place(&Spec::default()));
         let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
         let shape = Shape::new(&t);
@@ -1706,7 +1731,8 @@ mod tests {
     fn a_request_becomes_rows_and_the_panel_title() {
         let spec = Spec::from_request(&serde_json::json!({
             "placeholder": "Search models…",
-            "chooser": {"title": "GPT Sol", "icon": "provider.chatgpt", "facts": [["Context", "272K"]], "note": ""},
+            "chooser": {"title": "GPT Sol", "icon": "provider.chatgpt", "facts": [["Context", "272K"]],
+                "usage": [["Credits", "812 of 1,000 left"], ["Plan", "Aerolite"]], "note": ""},
             "options": [
                 {"kind": "harness", "label": "Codex", "icon": "provider.chatgpt", "checked": true, "stays": true},
                 {"kind": "model", "label": "GPT Sol", "checked": true, "stays": true},
@@ -1720,6 +1746,13 @@ mod tests {
             Some(("GPT Sol".into(), Some("provider.chatgpt".into())))
         );
         assert_eq!(spec.facts, vec![("Context".to_owned(), "272K".to_owned())]);
+        assert_eq!(
+            spec.usage,
+            vec![
+                ("Credits".to_owned(), "812 of 1,000 left".to_owned()),
+                ("Plan".to_owned(), "Aerolite".to_owned())
+            ]
+        );
         assert_eq!(spec.rows[0].part, Some(Part::Harness));
         assert!(spec.rows[0].checked && spec.rows[0].stays);
         assert!(spec.rows[2].default);

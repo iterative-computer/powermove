@@ -2,7 +2,9 @@
 """Local stand-ins for Settings › Providers, on 127.0.0.1 only (never the
 network): the ChatGPT OAuth issuer Codex signs in with (/auth), the Codex
 backend (/chatgpt/backend-api/codex/responses), OpenAI (/openai/v1), Anthropic
-(/anthropic/v1) and an OpenAI-compatible custom endpoint (/custom/v1).
+(/anthropic/v1), an OpenAI-compatible custom endpoint (/custom/v1) and Aero's
+Powermove inference (/aero/v1/aero: usage, models, chat completions; the
+session must be AERO_SESSION).
 
 Usage: fake_backends.py PORT [ACCESS_TTL_SECONDS]. GET /stats answers what it
 saw. The model is a fake: asked with a Powermove project in its prompt, it
@@ -10,7 +12,8 @@ renames the first layer through the `edit` tool, then says so.
 Refresh tokens rotate; a reused one answers `refresh_token_reused`.
 POST /control merges test knobs: refresh_barrier (hold refreshes until that many
 arrived, 3 s at most), refresh_delay (seconds before a refresh answers),
-hold_seconds (before a Codex reply), account (the account a sign-in gets).
+hold_seconds (before a Codex reply), account (the account a sign-in gets),
+aero (Aero's usage answer: plan, none, offer, missing (404), out (402 on chat)).
 Every request's headers and body are kept in /stats "raw" for leak checks."""
 import base64, hashlib, json, os, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,10 +30,19 @@ RICH_ANTHROPIC = [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"},
                   {"id": "claude-opus-5-5-1m", "display_name": "Claude Opus 5.5 (1M context)"},
                   {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"}]
 ACCOUNT = "acct-fake-1"
+AERO_SESSION = "pm-session-fake"
+AERO_MODELS = [{"id": "anthropic/claude-opus-5.5", "name": "Claude Opus 5.5", "efforts": ["low", "medium", "high", "xhigh", "max"],
+                "defaultEffort": "high", "default": True},
+               {"id": "openai/gpt-6-sol", "name": "GPT-6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh"]},
+               {"id": "google/gemini-3-pro", "name": "Gemini 3 Pro", "efforts": ["low", "high"]}]
+AERO_RICH = AERO_MODELS + [{"id": "anthropic/claude-sonnet-5.5", "name": "Claude Sonnet 5.5", "efforts": ["low", "medium", "high"]},
+                           {"id": "openai/gpt-6-luna", "name": "GPT-6 Luna", "efforts": ["low", "medium", "high"]},
+                           {"id": "google/gemini-3-flash", "name": "Gemini 3 Flash"},
+                           {"id": "xai/grok-5", "name": "Grok 5"}]
 lock = threading.Lock()
 codes, refresh, used, access = {}, {}, set(), {}
 stats = {"refreshes": 0, "reused": 0, "logins": 0, "requests": [], "raw": []}
-control = {"refresh_barrier": 0, "refresh_delay": 0, "hold_seconds": 0, "account": ACCOUNT}
+control = {"refresh_barrier": 0, "refresh_delay": 0, "hold_seconds": 0, "account": ACCOUNT, "aero": "plan"}
 arrivals = threading.Condition()
 arrived = [0]
 counter = [0]
@@ -198,6 +210,21 @@ class Handler(BaseHTTPRequestHandler):
             if RICH:
                 return self.reply(200, {"data": RICH_ANTHROPIC, "has_more": False})
             return self.reply(200, {"data": [{"id": "claude-fake-opus", "display_name": "Claude Fake Opus"}], "has_more": False})
+        if url.path.startswith("/aero/v1/aero/"):
+            if self.bearer() != AERO_SESSION:
+                return self.reply(401, {"error": "unauthorized"})
+            state = control["aero"]
+            if url.path.endswith("/usage"):
+                if state == "missing":
+                    return self.reply(404, {"error": "not found"})
+                if state == "none":
+                    return self.reply(200, {"plan": None})
+                if state == "offer":
+                    return self.reply(200, {"plan": None, "offer": {"label": "Get Aerolite", "url": "https://trypowermove.com/aero"}})
+                return self.reply(200, {"plan": {"id": "aerolite", "name": "Aerolite"},
+                                        "credits": {"remaining": 812, "included": 1000}, "resetsAt": "2026-12-25T00:00:00Z"})
+            if url.path.endswith("/models") and state in ("plan", "out"):
+                return self.reply(200, {"data": AERO_RICH if RICH else AERO_MODELS})
         if url.path == "/custom/v1/models":
             return self.reply(200, {"object": "list", "data": [{"id": "custom-fake-model"}]})
         self.reply(404, {"error": "not found"})
@@ -254,6 +281,19 @@ class Handler(BaseHTTPRequestHandler):
                     or not self.headers.get("anthropic-version")):
                 return self.reply(401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}})
             return self.reply(200, messages_sse(demo(body), body), "text/event-stream")
+        if path == "/aero/v1/aero/chat/completions":
+            if self.bearer().startswith("pm-session-echo-"):
+                # A careless backend that repeats the request's credential in its error.
+                return self.reply(400, {"error": {"message": f"bad request with {self.headers.get('Authorization')}",
+                                                  "code": "invalid_request"}})
+            if self.bearer() != AERO_SESSION:
+                return self.reply(401, {"error": {"code": "unauthorized"}})
+            if control["aero"] == "out":
+                return self.reply(402, {"error": {"code": "credits_exhausted"}})
+            if control["aero"] not in ("plan", "out"):
+                return self.reply(403, {"error": {"code": "no_plan"}})
+            time.sleep(control["hold_seconds"])
+            return self.reply(200, chat_sse(demo(body), body), "text/event-stream")
         keys = {"/openai/v1/chat/completions": lambda: self.bearer().startswith(OPENAI_KEY_PREFIX),
                 "/custom/v1/chat/completions": lambda: self.bearer() == CUSTOM_KEY}
         if path == "/custom/v1/chat/completions" and self.bearer().startswith("custom-echo-"):

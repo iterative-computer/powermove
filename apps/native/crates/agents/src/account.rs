@@ -274,6 +274,14 @@ impl Accounts {
             }
         });
     }
+    /// Opens the plan the backend offers (a Powermove https page; the
+    /// contract's `offer`) in the browser.
+    pub fn open_aero_offer(&self) -> Result<(), String> {
+        match self.aero() {
+            crate::inference::Standing::NoPlan(Some(offer)) => (self.open)(&offer.url),
+            _ => Err("No Aero plan is offered right now.".into()),
+        }
+    }
     /// Sign-out wins over a login still waiting on the browser.
     pub fn disconnect(self: &Arc<Self>, provider: Provider) {
         if let Some(slot) = self.slots.lock().unwrap().get(provider.name()) {

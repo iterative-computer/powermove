@@ -1,15 +1,16 @@
 //! Settings › Providers against local fakes (tests/fakes): Codex's ChatGPT
-//! sign-in fills the one Keychain item Codex and Powermove read; Codex alone
-//! refreshes, concurrent asks never spend a refresh token twice; Powermove's
-//! core runs on ChatGPT, an OpenAI key, an Anthropic key and a custom
-//! endpoint with credentials added at its fetch edge; signing out takes the
-//! credential from both harnesses. Every Keychain item lives in the run's
-//! fake Keychain file (no real keychain, no `security`, no dialog), deleted
-//! at the end. Nothing here reaches the network.
+//! sign-in or API key fills Codex's own Keychain item, Codex alone refreshes
+//! and two Codex processes never spend a refresh token twice; Claude Code's
+//! Anthropic key lists its models; Aero runs only on the Powermove account's
+//! session (Powermove inference), never on those keys or a custom endpoint.
+//! Every Keychain item lives in the run's fake Keychain file (no real
+//! keychain, no `security`, no dialog), deleted at the end. Nothing here
+//! reaches the network.
 use pm_agents::account::{Accounts, State};
 use pm_agents::edge::{FakeKeychain, Loopback, NetRequest, Reroute, fetch};
 use pm_agents::launch::Environment;
-use pm_agents::{Provider, aero, codex_auth, sources};
+use pm_agents::inference::{PowermoveAccount, Session, Standing};
+use pm_agents::{Provider, aero, codex_auth, keys};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -117,6 +118,11 @@ fn fakes(ttl: u64) -> Fakes {
             "PM_AGENT_FAKE_KEYCHAIN".to_owned(),
             keychain.display().to_string(),
         ),
+        // Aero's base: the fakes' Powermove inference (development builds).
+        (
+            pm_agents::inference::TEST_ENDPOINT.to_owned(),
+            format!("{base}/aero/v1/aero"),
+        ),
         (
             "PM_AGENT_FAKES".to_owned(),
             format!(
@@ -136,6 +142,7 @@ fn fakes(ttl: u64) -> Fakes {
         ))),
         // The development switch: Providers, and Codex's login in the Keychain.
         aero: Some(aero::Launcher(Arc::new(|_, _, _| Err("unused".into())))),
+        powermove: Some(Arc::new(Signed::new(AERO_SESSION))),
         ..Environment::default()
     };
     env.net = Some(Reroute::from_env(&vars, Arc::new(Loopback)));
@@ -272,9 +279,31 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
-/// One Powermove core turn on `model` (no tools: the evaluator path).
+/// The fakes' Powermove session (`fake_backends.py` AERO_SESSION).
+const AERO_SESSION: &str = "pm-session-fake";
+/// The Powermove account: signed in with a session, which a test may
+/// replace (another account) or take away (a sign-out).
+#[derive(Debug)]
+struct Signed(std::sync::Mutex<Option<String>>);
+impl Signed {
+    fn new(token: &str) -> Self {
+        Self(std::sync::Mutex::new(Some(token.into())))
+    }
+    fn set(&self, token: Option<&str>) {
+        *self.0.lock().unwrap() = token.map(str::to_owned);
+    }
+}
+impl PowermoveAccount for Signed {
+    fn session(&self) -> Option<Session> {
+        Some(Session {
+            origin: "https://cloud.trypowermove.com".into(),
+            token: self.0.lock().unwrap().clone()?,
+        })
+    }
+}
+/// One Aero core turn on `model` (no tools: the evaluator path).
 fn powermove_says(env: &Environment, model: &str, effort: &str) -> Result<String, String> {
-    let live = sources::live(env, model, effort)?;
+    let live = pm_agents::inference::live(env, model, effort)?;
     let scope = env
         .profile
         .join(format!("turn-{}", model.replace('/', "-")));
@@ -283,7 +312,7 @@ fn powermove_says(env: &Environment, model: &str, effort: &str) -> Result<String
 }
 
 #[test]
-fn chatgpt_sign_in_is_shared_refreshed_by_codex_alone_and_signed_out_for_both() {
+fn chatgpt_sign_in_is_codexs_own_item_and_signed_out_from_it() {
     let _serial = serial();
     if !pm_aero_core::available() {
         return;
@@ -303,7 +332,7 @@ fn chatgpt_sign_in_is_shared_refreshed_by_codex_alone_and_signed_out_for_both() 
     until("Codex's models", || {
         !accounts.models(Provider::Chatgpt).is_empty()
     });
-    // 2. One Keychain item: Codex wrote it, Powermove reads the same one; no auth.json.
+    // 2. One Keychain item: Codex wrote it, Settings reads the same one; no auth.json.
     let auth = codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
         .unwrap()
         .expect("the shared item");
@@ -318,62 +347,7 @@ fn chatgpt_sign_in_is_shared_refreshed_by_codex_alone_and_signed_out_for_both() 
         "{config}"
     );
 
-    // 3–4. Powermove runs on it: the bearer and account id only at chatgpt.com's edge.
-    codex_auth::current(f.env.secrets.as_deref().unwrap(), env, None)
-        .unwrap_or_else(|e| panic!("{e}; the fakes saw {}", stats(&f.base)["requests"]));
-    let text = powermove_says(env, "chatgpt/gpt-fake-sol", "medium")
-        .unwrap_or_else(|e| panic!("{e}; the fakes saw {}", stats(&f.base)["requests"]));
-    assert!(text.contains("Hello from the fake provider"), "{text}");
-    let seen = stats(&f.base);
-    let codex_calls: Vec<_> = seen["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|r| r["path"] == "/chatgpt/backend-api/codex/responses")
-        .collect();
-    assert!(!codex_calls.is_empty());
-    assert!(codex_calls.iter().all(
-        |r| r["authorization"].as_str().unwrap().starts_with("Bearer ")
-            && r["account"] == "acct-fake-1"
-    ));
-
-    // Refresh ownership: the token is inside Codex's five-minute window, so
-    // every ask refreshes; eight at once go one by one through Codex, each on
-    // the newest refresh token, and none is ever spent twice.
-    let before = stats(&f.base)["refreshes"].as_u64().unwrap();
-    let asks: Vec<_> = (0..8)
-        .map(|_| {
-            let env = env.clone();
-            std::thread::spawn(move || {
-                codex_auth::current(env.secrets.as_deref().unwrap(), &env, None)
-                    .map(|a| a.chatgpt.unwrap().0)
-            })
-        })
-        .collect();
-    let tokens: Vec<String> = asks
-        .into_iter()
-        .map(|t| t.join().unwrap().unwrap())
-        .collect();
-    let seen = stats(&f.base);
-    assert_eq!(seen["reused"], 0, "a refresh token was spent twice: {seen}");
-    assert!(seen["refreshes"].as_u64().unwrap() > before);
-    let latest = codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
-        .unwrap()
-        .unwrap()
-        .chatgpt
-        .unwrap()
-        .0;
-    assert!(tokens.contains(&latest));
-    // A backend refusing the bearer asks once more; the item moves on.
-    let again = codex_auth::current(f.env.secrets.as_deref().unwrap(), env, Some(&latest))
-        .unwrap()
-        .chatgpt
-        .unwrap()
-        .0;
-    assert_ne!(again, latest);
-    assert_eq!(stats(&f.base)["reused"], 0);
-
-    // 5. Sign out: the item is gone for Codex and for Powermove.
+    // 3. Sign out: the item is gone.
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
     assert!(
@@ -382,47 +356,23 @@ fn chatgpt_sign_in_is_shared_refreshed_by_codex_alone_and_signed_out_for_both() 
             .is_none()
     );
     assert!(accounts.models(Provider::Chatgpt).is_empty());
-    // Powermove has no credential left: the edge refuses before any request,
-    // and a turn ends without reaching the backend.
-    let gone = codex_auth::current(f.env.secrets.as_deref().unwrap(), env, None).unwrap_err();
-    assert!(gone.contains("Settings › Providers"), "{gone}");
-    let backend = |seen: &Value| {
-        seen["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| r["path"] == "/chatgpt/backend-api/codex/responses")
-            .count()
-    };
-    let before = backend(&stats(&f.base));
-    assert!(powermove_says(env, "chatgpt/gpt-fake-sol", "").is_err());
-    assert_eq!(backend(&stats(&f.base)), before);
     accounts.close();
 }
 
 #[test]
-fn an_openai_key_an_anthropic_key_and_a_custom_endpoint_each_run_powermove() {
+fn an_openai_key_is_codexs_and_an_anthropic_key_lists_claude_codes_models() {
     let _serial = serial();
-    if !pm_aero_core::available() {
-        return;
-    }
     let f = fakes(3600);
     let env = &f.env;
     let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
 
-    // OpenAI API key: Codex saves it in the shared item; Powermove lists the key's chat models.
+    // OpenAI API key: Codex saves it in its item; Settings shows it masked.
     accounts.connect_openai_key("sk-fake-openai-123456".into());
     wait(&accounts, Provider::Chatgpt, State::Connected);
     assert_eq!(
         accounts.status(Provider::Chatgpt).key.as_deref(),
         Some("sk-…3456")
     );
-    let ids: Vec<_> = accounts
-        .openai_key_models()
-        .into_iter()
-        .map(|m| m.id)
-        .collect();
-    assert_eq!(ids, ["gpt-fake-key"]);
     assert_eq!(
         codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
             .unwrap()
@@ -431,13 +381,10 @@ fn an_openai_key_an_anthropic_key_and_a_custom_endpoint_each_run_powermove() {
             .as_deref(),
         Some("sk-fake-openai-123456")
     );
-    let text = powermove_says(env, "openai/gpt-fake-key", "").unwrap();
-    assert!(text.contains("Hello from the fake provider"), "{text}");
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
-    assert!(accounts.openai_key_models().is_empty());
 
-    // Anthropic API key: the Keychain, its model list, Powermove on Anthropic Messages.
+    // Anthropic API key: the Keychain and its model list, for Claude Code.
     assert!(accounts.set_anthropic_key("not a key".into()).is_err());
     accounts
         .set_anthropic_key("sk-ant-fake-abcdef12".into())
@@ -446,34 +393,88 @@ fn an_openai_key_an_anthropic_key_and_a_custom_endpoint_each_run_powermove() {
         !accounts.anthropic().models.is_empty()
     });
     assert_eq!(accounts.anthropic().masked.as_deref(), Some("sk-…ef12"));
-    let text = powermove_says(env, "anthropic/claude-fake-opus", "").unwrap();
-    assert!(text.contains("Hello from the fake provider"), "{text}");
-    let anthropic_calls: Vec<_> = stats(&f.base)["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|r| r["path"] == "/anthropic/v1/messages")
-        .cloned()
-        .collect();
-    assert!(
-        !anthropic_calls.is_empty()
-            && anthropic_calls
-                .iter()
-                .all(|r| r["x-api-key"] == true && r["authorization"] == "")
-    );
     accounts.remove_anthropic_key().unwrap();
     until("the key's removal", || {
         accounts.anthropic().masked.is_none()
     });
-    assert!(
-        powermove_says(env, "anthropic/claude-fake-opus", "")
-            .unwrap_err()
-            .contains("Anthropic API key")
-    );
+    accounts.close();
+}
 
-    // Custom: the saved OpenAI-compatible endpoint, Powermove only.
-    let text = powermove_says(env, "custom/custom-fake-model", "").unwrap();
-    assert!(text.contains("Hello from the fake provider"), "{text}");
+/// Aero on the Powermove account: its standing follows the backend's usage
+/// answer (a plan with its catalogue, none, an offer, no route yet), and a
+/// turn runs on the session only, never on Codex's OpenAI key, Claude Code's
+/// Anthropic key or the saved custom endpoint, which are all there.
+#[test]
+fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
+    let _serial = serial();
+    if !pm_aero_core::available() {
+        return;
+    }
+    let f = fakes(3600);
+    let env = &f.env;
+    let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
+    accounts.connect_openai_key("sk-fake-openai-123456".into());
+    wait(&accounts, Provider::Chatgpt, State::Connected);
+    accounts
+        .set_anthropic_key("sk-ant-fake-abcdef12".into())
+        .unwrap();
+    until("the Anthropic models", || {
+        !accounts.anthropic().models.is_empty()
+    });
+
+    let Standing::Ready { usage, models } = pm_agents::inference::standing(env) else {
+        panic!("a plan: {:?}", pm_agents::inference::standing(env));
+    };
+    assert_eq!(usage.plan.name, "Aerolite");
+    assert_eq!(usage.facts()[0].1, "812 of 1,000 left");
+    assert_eq!(models[0].id, "anthropic/claude-opus-5.5");
+    assert_eq!(models[0].default_effort.as_deref(), Some("high"));
+    accounts.refresh_aero();
+    until("Aero's standing", || matches!(accounts.aero(), Standing::Ready { .. }));
+
+    let before = stats(&f.base)["requests"].as_array().unwrap().len();
+    for model in ["anthropic/claude-opus-5.5", "openai/gpt-fake-key", "custom/custom-fake-model"] {
+        let text = powermove_says(env, model, "high").unwrap_or_else(|e| panic!("{model}: {e}"));
+        assert!(text.contains("Hello from the fake provider"), "{text}");
+    }
+    let seen = stats(&f.base);
+    let turns = &seen["requests"].as_array().unwrap()[before..];
+    assert!(!turns.is_empty());
+    for request in turns {
+        assert_eq!(request["path"], "/aero/v1/aero/chat/completions", "{request}");
+        assert_eq!(request["authorization"], "Bearer pm-sessio", "{request}");
+        assert_eq!(request["x-api-key"], false, "{request}");
+    }
+    for sent in seen["raw"].as_array().unwrap() {
+        let sent = sent.as_str().unwrap();
+        if sent.starts_with("POST /aero/") {
+            for key in ["sk-fake-openai-123456", "sk-ant-fake-abcdef12", "custom-fake-key"] {
+                assert!(!sent.contains(key), "{key} reached Aero's request");
+            }
+        }
+    }
+
+    // No plan, an offer, no route yet: honest, no models; signed out: none.
+    control(&f.base, serde_json::json!({"aero": "none"}));
+    assert_eq!(pm_agents::inference::standing(env), Standing::NoPlan(None));
+    control(&f.base, serde_json::json!({"aero": "offer"}));
+    assert!(matches!(
+        pm_agents::inference::standing(env),
+        Standing::NoPlan(Some(offer)) if offer.label == "Get Aerolite"
+    ));
+    control(&f.base, serde_json::json!({"aero": "missing"}));
+    assert_eq!(pm_agents::inference::standing(env), Standing::NoPlan(None));
+    // Out of credits: the turn ends in Aero's words.
+    control(&f.base, serde_json::json!({"aero": "out"}));
+    let spent = powermove_says(env, "anthropic/claude-opus-5.5", "").unwrap_err();
+    assert!(spent.contains("out of Aero credits"), "{spent}");
+    control(&f.base, serde_json::json!({"aero": "plan"}));
+    let signed_out = Environment {
+        powermove: None,
+        ..env.clone()
+    };
+    assert_eq!(pm_agents::inference::standing(&signed_out), Standing::SignedOut);
+    assert!(powermove_says(&signed_out, "anthropic/claude-opus-5.5", "").is_err());
     accounts.close();
 }
 
@@ -506,7 +507,7 @@ fn every_file(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 /// Item 1 (the Chief's sentinel test): with the switch on, the person's own
 /// `~/.codex/auth.json` is never opened and its tokens are never used,
-/// across launch, sign-in, a turn, a refresh and sign-out.
+/// across launch, sign-in, a Codex refresh and sign-out.
 #[test]
 fn with_the_switch_on_the_owners_codex_login_is_never_opened_or_used() {
     let _serial = serial();
@@ -536,13 +537,15 @@ fn with_the_switch_on_the_owners_codex_login_is_never_opened_or_used() {
     std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o000)).unwrap();
     let before = std::fs::metadata(&owner).unwrap();
 
-    // Launch, sign-in, a turn, a refresh, sign-out.
+    // Launch, sign-in, a Codex run's refresh, sign-out.
     env.codex_vars()
         .expect("launch never opens the owner's login");
     let accounts = signed_in(&f);
-    let text = powermove_says(env, "chatgpt/gpt-fake-sol", "medium").unwrap();
-    assert!(text.contains("Hello from the fake provider"), "{text}");
-    codex_auth::current(env.secrets.as_deref().unwrap(), env, None).unwrap();
+    let (mut run, replies) = codex_run_refreshing(env);
+    until("the Codex run's refresh", || {
+        replies.try_iter().any(|line| line.contains(r#""id": 2"#))
+    });
+    let _ = run.kill();
     assert!(stats(&f.base)["refreshes"].as_u64().unwrap() >= 1);
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
@@ -687,34 +690,28 @@ fn a_file_login_written_while_the_switch_is_on_is_the_one_that_comes_back() {
 /// moment (both read the same refresh token; the fake issuer holds the first
 /// exchange until a second arrives): the token is spent once.
 #[test]
-fn a_codex_run_and_a_powermove_refresh_never_spend_the_same_refresh_token() {
+fn two_codex_runs_never_spend_the_same_refresh_token() {
     let _serial = serial();
-    if !pm_aero_core::available() {
-        return;
-    }
     let f = fakes(120);
     let accounts = signed_in(&f);
     control(&f.base, serde_json::json!({"refresh_barrier": 2}));
     let before = stats(&f.base)["refreshes"].as_u64().unwrap();
-    let (mut run, replies) = codex_run_refreshing(&f.env);
-    let env = f.env.clone();
-    let ask = std::thread::spawn(move || {
-        codex_auth::current(env.secrets.as_deref().unwrap(), &env, None)
-    });
-    let refreshed = ask.join().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !replies.try_iter().any(|line| line.contains(r#""id": 2"#)) {
-        assert!(
-            Instant::now() < deadline,
-            "the Codex run's refresh never answered"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = run.kill();
+    let (mut one, first) = codex_run_refreshing(&f.env);
+    let (mut two, second) = codex_run_refreshing(&f.env);
+    let answered = |replies: &std::sync::mpsc::Receiver<String>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !replies.try_iter().any(|line| line.contains(r#""id": 2"#)) {
+            assert!(Instant::now() < deadline, "a Codex run's refresh never answered");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    answered(&first);
+    answered(&second);
+    let _ = one.kill();
+    let _ = two.kill();
     let seen = stats(&f.base);
     assert_eq!(seen["reused"], 0, "a refresh token was spent twice: {seen}");
     assert_eq!(seen["refreshes"].as_u64().unwrap(), before + 1, "{seen}");
-    refreshed.expect("Powermove's ask got the one refresh");
     control(&f.base, serde_json::json!({"refresh_barrier": 0}));
     accounts.close();
 }
@@ -736,98 +733,44 @@ fn an_uncertain_refresh_is_answered_once_never_spent_twice() {
     std::thread::sleep(Duration::from_millis(800));
     let _ = run.kill();
     let _ = run.wait();
-    let auth = codex_auth::current(f.env.secrets.as_deref().unwrap(), &f.env, None);
+    let (mut again, replies) = codex_run_refreshing(&f.env);
+    until("the second run's refresh", || {
+        replies.try_iter().any(|line| line.contains(r#""id": 2"#))
+    });
+    let _ = again.kill();
     let seen = stats(&f.base);
     assert_eq!(seen["reused"], 0, "a refresh token was spent twice: {seen}");
     assert_eq!(seen["refreshes"].as_u64().unwrap(), before + 1, "{seen}");
-    auth.expect("the second ask got the first exchange's answer");
     control(&f.base, serde_json::json!({"refresh_delay": 0}));
     accounts.close();
 }
 
-/// Item 5: a sign-out while a Powermove turn waits on the provider ends that
-/// turn, well before the provider would have answered.
+/// A turn carries on only on the Powermove session it started on: another
+/// account, a sign-out or a session the backend refused is never sent on.
 #[test]
-fn sign_out_during_a_held_powermove_turn_ends_it() {
+fn an_aero_turn_never_continues_on_another_powermove_session() {
     let _serial = serial();
-    if !pm_aero_core::available() {
-        return;
-    }
-    let f = fakes(3600);
-    let accounts = signed_in(&f);
-    control(&f.base, serde_json::json!({"hold_seconds": 8}));
-    let env = f.env.clone();
-    let started = Instant::now();
-    let turn = std::thread::spawn(move || powermove_says(&env, "chatgpt/gpt-fake-sol", ""));
-    until("the held request", || {
-        stats(&f.base)["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["path"] == "/chatgpt/backend-api/codex/responses")
-    });
-    accounts.disconnect(Provider::Chatgpt);
-    wait(&accounts, Provider::Chatgpt, State::Disconnected);
-    let result = turn.join().unwrap();
+    let mut f = fakes(3600);
+    let account = Arc::new(Signed::new(AERO_SESSION));
+    f.env.powermove = Some(account.clone());
+    let live = pm_agents::inference::live(&f.env, "anthropic/claude-opus-5.5", "").unwrap();
+    let (origin, first) = (live.credentials)(None).unwrap();
+    assert_eq!(origin, f.base);
+    assert!(first.contains(&("authorization".into(), format!("Bearer {AERO_SESSION}"))));
     assert!(
-        result.is_err(),
-        "the turn carried on after sign-out: {result:?}"
+        (live.credentials)(Some(AERO_SESSION)).is_err(),
+        "a refused session is sent again"
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(8),
-        "it waited for the held answer"
-    );
-    control(&f.base, serde_json::json!({"hold_seconds": 0}));
-    accounts.close();
-}
-
-/// Item 5: another account signs in between a 401 and its retry; the turn
-/// never resends its request under that account.
-#[test]
-fn a_relogin_between_a_401_and_its_retry_never_resends_under_the_new_account() {
-    let _serial = serial();
-    let f = fakes(3600);
-    let accounts = signed_in(&f);
-    let live = sources::live(&f.env, "chatgpt/gpt-fake-sol", "").unwrap();
-    let (_, first) = (live.credentials)(None).unwrap();
-    let bearer = first
-        .iter()
-        .find(|(k, _)| k == "authorization")
-        .unwrap()
-        .1
-        .clone();
-    control(&f.base, serde_json::json!({"account": "acct-fake-2"}));
-    accounts.disconnect(Provider::Chatgpt);
-    wait(&accounts, Provider::Chatgpt, State::Disconnected);
-    accounts.connect(Provider::Chatgpt);
-    wait(&accounts, Provider::Chatgpt, State::Connected);
-    let retry = (live.credentials)(Some(bearer.trim_start_matches("Bearer ")));
-    assert!(
-        retry.is_err(),
-        "the retry would go out under acct-fake-2: {:?}",
-        retry.map(|r| r.1)
-    );
-    control(&f.base, serde_json::json!({"account": "acct-fake-1"}));
-    accounts.close();
-}
-
-/// Item 5: a running turn on an OpenAI key stops using it once it is removed.
-#[test]
-fn a_removed_openai_key_is_not_used_by_a_running_turn() {
-    let _serial = serial();
-    let f = fakes(3600);
-    let accounts = Accounts::new(f.env.clone(), browser(), Arc::new(|| {}));
-    accounts.connect_openai_key("sk-fake-openai-123456".into());
-    wait(&accounts, Provider::Chatgpt, State::Connected);
-    let live = sources::live(&f.env, "openai/gpt-fake-key", "").unwrap();
-    assert!((live.credentials)(None).is_ok());
-    accounts.disconnect(Provider::Chatgpt);
-    wait(&accounts, Provider::Chatgpt, State::Disconnected);
+    account.set(Some("pm-session-other"));
     assert!(
         (live.credentials)(None).is_err(),
-        "the removed key is still used"
+        "the turn went on under another account"
     );
-    accounts.close();
+    account.set(None);
+    assert_eq!(
+        (live.credentials)(None).err().as_deref(),
+        Some(pm_agents::inference::SIGN_IN)
+    );
 }
 
 /// Item 5: Sign Out succeeds only once the shared item is gone (here Codex
@@ -888,7 +831,7 @@ fn switch_off_reads_no_provider_credentials_and_keeps_todays_codex_store() {
     use pm_agents::edge::Secrets as _;
     store
         .write(
-            &sources::anthropic_service(&f.env),
+            &keys::anthropic_service(&f.env),
             "api-key",
             b"sk-ant-fake-abcdef12",
         )
@@ -956,10 +899,10 @@ impl aero::Session for Quiet {
     }
 }
 
-/// Item 7: a provider error that repeats the request's key never reaches the
-/// core. A whole Powermove turn runs against a Custom endpoint that echoes
-/// the key in its error: the key appears in none of the run's events, its
-/// result, or the core's saved session (the journal it writes).
+/// Item 7: a backend error that repeats the request's credential never
+/// reaches the core. A whole Aero turn runs on a session the fake echoes in
+/// its error: it appears in none of the run's events, its result, or the
+/// core's saved session (the journal it writes).
 #[test]
 fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
     if !pm_aero_core::available() {
@@ -967,12 +910,8 @@ fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
     }
     let _serial = serial();
     let mut f = fakes(3600);
-    let secret = "custom-echo-SENTINEL-77c3";
-    f.env.compatible = Some(Arc::new(Custom(
-        format!("{}/custom/v1", f.base),
-        secret.into(),
-    )));
-    let live = sources::live(&f.env, "custom/custom-fake-model", "").unwrap();
+    f.env.powermove = Some(Arc::new(Signed::new("pm-session-echo-SENTINEL-77c3")));
+    let live = pm_agents::inference::live(&f.env, "anthropic/claude-opus-5.5", "").unwrap();
     let scope = f.env.profile.join("aero-session");
     std::fs::create_dir_all(&scope).unwrap();
     let handle = aero::start(
@@ -980,7 +919,7 @@ fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
             run: "echo-run".into(),
             prompt: "Say hello.".into(),
             provider: Provider::Aero,
-            model: Some("custom/custom-fake-model".into()),
+            model: Some("anthropic/claude-opus-5.5".into()),
             effort: None,
             access: pm_agents::Access::Project,
             approval: Default::default(),

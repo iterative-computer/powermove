@@ -181,11 +181,11 @@ pub fn open(
     let (title, line) = match kind {
         Kind::OpenAi => (
             "Add an OpenAI API Key",
-            "Codex saves it in your Keychain. Used by Codex and Powermove.",
+            "Codex saves it in your Keychain. Used by Codex.",
         ),
         Kind::Anthropic => (
             "Add an Anthropic API Key",
-            "Saved in your Keychain. Used by Claude Code and Powermove.",
+            "Saved in your Keychain. Claude Code runs on it while signed out of Claude.",
         ),
     };
     let mut key = Field::new(

@@ -320,11 +320,9 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
             "base_url":"http://127.0.0.1:9/v1","auth":{"type":"none"},"tool_choice_mode":"send",
             "model_metadata":{"m":{"supports_tool_use":true}}}});
         let live = aero::Live {
-            identity: None,
             provider: "custom".into(),
             configured: configured.to_string(),
             model: "m".into(),
-            catalog: None,
             net: Arc::new(Idle {
                 inner: Arc::new(broken),
                 after: Duration::from_millis(300),

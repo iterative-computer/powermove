@@ -822,21 +822,19 @@ function ProseBlock({
 
 // ── Menus and the thread bar ────────────────────────────────────────────
 
-/** The Powermove harness is offered: the picker is harness, then model. */
+/** Aero is offered: the picker is harness, then model. */
 export function harnessMode(s: Snapshot): boolean {
   return s.catalog.providers.some(([id]) => id === "aero");
 }
-/** The provider (Settings › Providers) a harness's model runs on. */
+/** The provider (Settings › Providers) a harness's model runs on: Aero's
+ * every model is Powermove inference. */
 export function providerGroup(harness: string, model: string): string {
   if (harness === "chatgpt") return "OpenAI";
   if (harness === "claude") return "Anthropic";
-  const source = model.split("/")[0];
-  return (
-    ({ chatgpt: "OpenAI", openai: "OpenAI", anthropic: "Anthropic", custom: "Custom" } as Record<string, string>)[
-      source
-    ] ?? "Development"
-  );
+  return model === FAKE_MODEL ? "Development" : "Powermove";
 }
+/** The development switch's demo model. */
+const FAKE_MODEL = "fake/model";
 /** The model the chooser shows: the chosen one, else the one that runs
  * when none is chosen (the provider's default, else the first listed). */
 export function harnessModel(s: Snapshot, n?: NativeFacts): string {
@@ -845,12 +843,12 @@ export function harnessModel(s: Snapshot, n?: NativeFacts): string {
   const group = n?.modelGroups?.[s.settings.provider];
   return group?.find(([, , on]) => on)?.[0] ?? s.catalog.models[0]?.[0] ?? "";
 }
-/** The mark the chooser shows for a harness's model: Claude Code's own
- * under Claude Code, else its provider group's (OpenAI's blossom, a neutral
- * sparkle for Anthropic keys and the rest). */
+/** The mark the chooser and the pill show for a harness's model: Claude
+ * Code's own, Codex's OpenAI blossom, and the Powermove mark for Aero. */
 function providerMark(harness: string, group: string): string {
   if (harness === "claude") return "claude";
-  return group === "OpenAI" ? "chatgpt" : group === "Anthropic" ? "anthropic" : "compatible";
+  if (harness === "chatgpt") return "chatgpt";
+  return group === "Powermove" ? "powermove" : "compatible";
 }
 /** A model label's context note ("Opus 5.5 (1M context)" → "1M"), when it
  * names one. */
@@ -874,19 +872,13 @@ export function chooserName(models: [string, string][], id: string, label: strin
 export function accountHeading(harness: string, model: string, n?: NativeFacts): string {
   if (harness === "chatgpt") return n?.accounts?.chatgpt ?? "ChatGPT";
   if (harness === "claude") return n?.accounts?.claude ?? "Claude";
-  const source = model.split("/")[0] ?? "";
-  return (
-    ({ chatgpt: "ChatGPT", openai: "OpenAI API key", anthropic: "Anthropic API key", custom: "Custom" } as Record<
-      string,
-      string
-    >)[source] ?? "Development"
-  );
+  return model === FAKE_MODEL ? "Development" : "Powermove";
 }
 /** A chooser heading's small mark: its provider's. */
 function headingIcon(heading: string): string {
   if (heading === "ChatGPT" || heading === "OpenAI API key") return "provider.chatgpt";
   if (heading === "Claude" || heading === "Anthropic API key") return "provider.claude";
-  return "provider.compatible";
+  return heading === "Powermove" ? "provider.powermove" : "provider.compatible";
 }
 /** The chooser's card: the chosen model (or, signed out, the harness). */
 export interface ChooserCard {
@@ -894,6 +886,8 @@ export interface ChooserCard {
   icon: string;
   /** Facts the provider reports, as [label, value]. */
   facts?: [string, string][];
+  /** The usage monitor at the card's foot (Aero's credits, plan, reset day). */
+  usage?: [string, string][];
   /** A quiet line (where to sign in). */
   note?: string;
 }
@@ -901,7 +895,7 @@ export interface ChooserCard {
 function harnessMark(harness: string): string {
   return harness === "aero" ? "powermove" : harness === "chatgpt" ? "chatgpt" : "claude";
 }
-/** The Powermove harness has no account for the chosen harness yet: the
+/** The chosen harness has no account yet (Aero: the Powermove account): the
  * chooser leads to Settings › Providers. */
 export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
   return (
@@ -915,7 +909,7 @@ export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
 export function signInCopy(harness: string): string {
   if (harness === "chatgpt") return "Sign in to ChatGPT in Settings › Providers";
   if (harness === "claude") return "Sign in to Claude in Settings › Providers";
-  return "Add a provider in Settings › Providers";
+  return "Sign in to Powermove in Settings › Providers";
 }
 /** One row of the window's field menu (the kit's searchable menu). */
 export interface MenuOption {
@@ -1127,7 +1121,7 @@ function ModelChooser({
     <div id="agent-chooser" style={{ ...row, ...shrink }}>
       {part(
         "agent-model",
-        signedOut ? "Connect a provider" : `Model, ${model}${single && effort ? `, ${effort}` : ""}`,
+        signedOut ? model : `Model, ${model}${single && effort ? `, ${effort}` : ""}`,
         signedOut ? "Harness and providers" : single ? "Harness, model and reasoning" : "Model",
         openModels,
         true,
@@ -2963,6 +2957,15 @@ function Composer({
     // Nothing to choose: one compact pane with its one action (Try Again
     // for a harness that couldn't start), and no card. The composer's own
     // line says where to sign in.
+    // Aero signed in without a plan, before the backend exists: honest, one
+    // quiet line (and the plan the backend offers, when it offers one).
+    if (harness === "aero" && !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null) {
+      options.push({ kind: "status", label: n.reason || "Aero inference is coming soon.", value: "" });
+      if (n.aero?.offer) options.push({ kind: "action", label: `${n.aero.offer.label}…`, value: "providers:" });
+      else if (n.reason !== "Aero inference is coming soon.")
+        options.push({ kind: "action", label: "Try Again", value: "retry:" });
+      return { options };
+    }
     const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
     if (harnessSignedOut(s, n) || !listed.length || fault) {
       // The compact card says it once: what's wrong, then its one button.
@@ -2975,7 +2978,9 @@ function Composer({
       options.push(
         fault
           ? { kind: "action", label: "Try Again", value: "retry:" }
-          : { kind: "action", label: "Connect a provider…", value: "providers:" },
+          : harness === "aero"
+            ? { kind: "action", label: "Sign In to Powermove…", value: "providers:" }
+            : { kind: "action", label: "Connect a provider…", value: "providers:" },
       );
       return { options };
     }
@@ -2994,19 +2999,10 @@ function Composer({
       });
       groups.set(heading, rows);
     }
-    const order = ["ChatGPT", "OpenAI API key", "Claude", "Anthropic API key", "Custom", "Development"];
+    const order = ["Powermove", "ChatGPT", "OpenAI API key", "Claude", "Anthropic API key", "Development"];
     const rank = (heading: string) => order.indexOf(heading) >>> 0;
     for (const heading of [...groups.keys()].sort((a, b) => rank(a) - rank(b)))
       options.push({ kind: "heading", label: heading, value: "", icon: headingIcon(heading) }, ...groups.get(heading)!);
-    if (harness === "aero")
-      options.push({
-        kind: "heading",
-        label: "Aerolite",
-        detail: "Coming later",
-        value: "",
-        icon: "provider.powermove",
-        disabled: true,
-      });
     const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
     options.push(
       ...efforts.map((value) => ({
@@ -3018,20 +3014,23 @@ function Composer({
         stays: true,
       })),
     );
-    options.push({ kind: "add", label: "Add a provider…", value: "providers:" });
+    options.push({ kind: "add", label: "Providers…", value: "providers:" });
     const label = named(s.catalog.models, shown, harnessName);
     const context = modelContext(label);
-    // What the provider reports about this model and its account; nothing
-    // else (no usage or speed: none is reported or wired).
+    // What the provider reports about this model and its account. Aero's
+    // card ends with its usage monitor (credits, plan, reset day) once the
+    // backend has answered; Claude Code and Codex report none.
     const facts: [string, string][] = [];
     if (context) facts.push(["Context", context]);
-    facts.push(["Account", accountHeading(harness, shown, n)]);
+    if (harness !== "aero") facts.push(["Account", accountHeading(harness, shown, n)]);
+    const usage = harness === "aero" && n.aero?.usage.length ? n.aero.usage : undefined;
     return {
       options,
       chooser: {
         title: modelBase(label),
         icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
         facts,
+        ...(usage ? { usage } : {}),
       },
     };
   };
@@ -3461,14 +3460,18 @@ function Composer({
         <ModelChooser
           mark={
             signedOut
-              ? null
+              ? s.settings.provider === "aero"
+                ? "powermove"
+                : null
               : harness
                 ? providerMark(s.settings.provider, providerGroup(s.settings.provider, shownModel))
                 : s.settings.provider
           }
           model={
             signedOut
-              ? "Connect a provider"
+              ? s.settings.provider === "aero"
+                ? "Sign in to Powermove"
+                : "Connect a provider"
               : harness
                 ? chooserName(
                     s.catalog.models,

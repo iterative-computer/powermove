@@ -113,6 +113,10 @@ export interface NativeFacts {
   /** The account each agent harness runs on, as the chooser heads its
    * models ("ChatGPT", "OpenAI API key", …). */
   accounts?: Record<string, string>;
+  /** Aero on the Powermove account: its usage monitor's lines (credits,
+   * plan, reset day; none until the backend answers) and a plan the backend
+   * offers someone without one. */
+  aero?: { usage: [label: string, value: string][]; offer: { label: string; url: string } | null };
   /** The configured compatible model's display name for its menu heading. */
   connectedModelName?: string | null;
   /** What to tell the user when `connection` isn't "connected". */

@@ -7,6 +7,14 @@ type Task<T> = Box<dyn FnOnce(&mut Result<T>) + Send>;
 pub struct ServiceWorker<T> {
     sender: mpsc::SyncSender<Task<T>>,
 }
+/// Another handle on the same worker (its queue and its one thread).
+impl<T> Clone for ServiceWorker<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
 pub struct Pending<T> {
     receiver: mpsc::Receiver<Result<T>>,
 }

@@ -856,6 +856,11 @@ impl Backend {
             .get(pm_agents::Provider::Compatible.name())
             .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
             .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
+        // Aero's usage monitor (credits, plan, reset day) and the plan the
+        // backend offers someone without one; nothing until it answers.
+        let (usage, offer) = self.native.agent_link.aero_usage();
+        let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
+            "offer": offer.map(|o| json!({"label": o.label, "url": o.url}))});
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -865,7 +870,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"accounts":accounts,"connectedModelName":connected_model_name,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"accounts":accounts,"connectedModelName":connected_model_name,"aero":aero,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

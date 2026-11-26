@@ -447,6 +447,22 @@ impl Http {
     pub fn signed_in(&self) -> bool {
         stored_token(self.vault.as_ref(), self.origin).is_some()
     }
+    /// The session Aero runs on, with the origin it belongs to. A
+    /// development review account has no inference origin ("review").
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let token = stored_token(self.vault.as_ref(), self.origin)?;
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return Some(pm_agents::inference::Session {
+                origin: "review".into(),
+                token: token.expose().to_owned(),
+            });
+        }
+        Some(pm_agents::inference::Session {
+            origin: self.origin.into(),
+            token: token.expose().to_owned(),
+        })
+    }
     /// `DELETE /v1/me`, then the session is forgotten.
     pub fn delete_account(&mut self) -> pm_services::Result<()> {
         self.call("DELETE", "/v1/me", None, true)?;
@@ -679,6 +695,36 @@ async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) ->
             .timer(std::time::Duration::from_millis(16))
             .await;
     }
+}
+/// The Powermove account as Aero reads it: the session, asked of the
+/// account's own worker each time (never cached), so a sign-out or another
+/// account is seen by the next request. Called on workers, never on main.
+#[derive(Clone)]
+pub struct AeroAccount(ServiceWorker<Http>);
+impl std::fmt::Debug for AeroAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AeroAccount")
+    }
+}
+impl pm_agents::inference::PowermoveAccount for AeroAccount {
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let pending = self.0.submit(|host| Ok(host.session())).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match pending.try_take() {
+                Ok(Some(session)) => return session,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+/// The account Aero runs on, once the account service has started.
+pub fn aero_account(cx: &App) -> Option<std::sync::Arc<dyn pm_agents::inference::PowermoveAccount>> {
+    let cloud = cx.try_global::<Cloud>()?;
+    Some(std::sync::Arc::new(AeroAccount(cloud.worker.clone())))
 }
 /// Settings › Account reads this through the built-in facts.
 pub fn fact(cx: &App) -> Value {

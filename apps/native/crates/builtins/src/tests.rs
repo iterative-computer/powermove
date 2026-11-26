@@ -4689,6 +4689,52 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     assert!(row(&p, "ms.front.roughness").is_none());
 }
 
+/// Settings › Providers with the development switch on: three providers,
+/// each for its harness (Powermove Account for Aero, OpenAI for Codex,
+/// Anthropic for Claude Code); no Custom endpoint and no Aerolite row.
+#[test]
+fn providers_are_the_powermove_account_for_aero_openai_for_codex_and_anthropic_for_claude_code() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"cloud":{"revision":1,"signedIn":true,"identity":"@maker",
+        "email":"person@example.com","rememberInstalls":false},
+        "provider":{"revision":1,"connected":true,"url":"http://a.invalid/v1","model":"m"}});
+    backend.native.agent_link.set_environment(
+        pm_agents::launch::Environment {
+            aero: Some(pm_agents::aero::Launcher(std::sync::Arc::new(|_, _, _| {
+                Err("unused".into())
+            }))),
+            ..Default::default()
+        },
+        std::sync::Arc::new(|_| Ok(())),
+    );
+    let rows = backend.account_rows();
+    let providers: Vec<_> = rows.iter().filter(|r| r["section"] == "providers").collect();
+    let groups: Vec<&str> = providers.iter().filter_map(|r| r["group"].as_str()).collect();
+    let mut seen = groups.clone();
+    seen.dedup();
+    assert_eq!(
+        seen,
+        ["Powermove Account (Aero)", "OpenAI (Codex)", "Anthropic (Claude Code)"]
+    );
+    let aero = providers.iter().find(|r| r["id"] == "providers.powermove").unwrap();
+    assert_eq!(aero["action"], "account.sign-out");
+    assert!(aero["detail"].as_str().unwrap().starts_with("Signed in as @maker."));
+    for gone in ["providers.custom", "providers.custom-remove", "providers.aerolite"] {
+        assert!(providers.iter().all(|r| r["id"] != gone), "{gone}");
+    }
+    for row in &providers {
+        let detail = row["detail"].as_str().unwrap_or_default();
+        assert!(!detail.contains("Powermove only") && !detail.contains("and Powermove"), "{row}");
+    }
+    backend.native.agent_link.close();
+}
+
 #[test]
 fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
     let actor = actor();
