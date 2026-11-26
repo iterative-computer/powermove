@@ -726,19 +726,37 @@ fn bumps_snapshot() -> serde_json::Value {
 /// The last scrub time asked of each view, and repeats of it (diagnostics).
 static LAST_SCRUB: Mutex<BTreeMap<u64, (i64, u64)>> = Mutex::new(BTreeMap::new());
 
-fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool) -> bool {
+fn only_moved(
+    v: &View,
+    stamp: Stamp,
+    moves: u64,
+    moment: Moment,
+    camera_motion: bool,
+    capture: bool,
+) -> bool {
     // 1: only playhead moves since the frame's stamp. 2: the same content
     // (generation, document, revision); a drag picture may carry the
     // previous overlay or quality for one frame, never another document.
     // While an edit is dragged every step is a new revision: its picture of
     // an earlier step is shown, the newest drawn next (else a drag faster
     // than a frame renders showed nothing until release).
+    // Likewise during continuous 3D camera motion (Fly WASD, mouse-look,
+    // orbit/pan), each finished camera frame presents even when newer 60 Hz
+    // poses arrived while it rendered, as long as no edit or capture landed.
     let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
+    if capture || !matches!(mode, Some(1 | 2)) {
+        return false;
+    }
+    if v.stamp.generation != stamp.generation || v.stamp.doc_id != stamp.doc_id {
+        return false;
+    }
+    if camera_motion {
+        return !v.capture
+            && v.camera_rest_at.is_some()
+            && v.stamp.revision == stamp.revision
+            && v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves);
+    }
     moment == Moment::Scrub
-        && !capture
-        && matches!(mode, Some(1 | 2))
-        && v.stamp.generation == stamp.generation
-        && v.stamp.doc_id == stamp.doc_id
         && (((v.editing || v.recent_edit || v.last_edit_at.is_some())
             && stamp.revision <= v.stamp.revision)
             || (v.stamp.revision == stamp.revision
@@ -1231,17 +1249,30 @@ impl Viewer {
         camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
             if v.studio_view != camera {
-                self.interrupt_frame(v);
-                v.camera_rest_at = matches!(
+                let interactive = matches!(
                     camera,
                     studio::ViewCamera::Custom { .. } | studio::ViewCamera::Orthographic { .. },
-                )
-                .then(|| trace::now() + policy::SETTLE_IDLE_SECONDS);
+                );
+                let continuing = interactive && v.camera_rest_at.is_some();
+                // Entering or leaving camera motion interrupts any slow resting
+                // frame in flight. Continuing interactive ticks (e.g. 60 Hz Fly
+                // WASD / mouse-look) must not supersede an in-flight interactive
+                // camera frame, or scenes slower than 16 ms stall until key up.
+                if !continuing {
+                    self.interrupt_frame(v);
+                } else {
+                    v.retry_now = true;
+                }
+                v.camera_rest_at =
+                    interactive.then(|| trace::now() + policy::SETTLE_IDLE_SECONDS);
                 v.studio_view = camera;
                 v.stamp.sequence += 1;
+                if interactive {
+                    v.moves += 1;
+                }
                 v.dirty = true;
                 if let Some(input) = input {
-                    let origin=v.pending_input.take().unwrap_or(input);
+                    let origin = v.pending_input.take().unwrap_or(input);
                     v.input.get_or_insert(origin);
                     v.pipeline = trace::Pipeline {
                         request: trace::now(),
@@ -2341,6 +2372,7 @@ struct Flight {
     stamp: Stamp,
     moves: u64,
     spec: FrameSpec,
+    camera_motion: bool,
     /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
     settled: bool,
     submission: render::Submission,
@@ -3185,7 +3217,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             Some("viewer diagnostic trace overflow/disconnected".into());
                     }
                 }
-                if v.stamp != f.stamp && !only_moved(v, f.stamp, f.moves, f.spec.moment, captured) {
+                if v.stamp != f.stamp
+                    && !only_moved(
+                        v,
+                        f.stamp,
+                        f.moves,
+                        f.spec.moment,
+                        f.camera_motion,
+                        captured,
+                    )
+                {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= captured;
@@ -4441,7 +4482,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 );
                 if abandoned
                     || interrupted()
-                    || (v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture))
+                    || (v.stamp != stamp
+                        && !only_moved(v, stamp, moves, spec.moment, camera_motion, capture))
                 {
                     if let Some(recorder) = &recorder {
                         recorder.record(serde_json::json!({
@@ -4588,6 +4630,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             stamp,
                             moves,
                             spec,
+                            camera_motion,
                             settled: spec.final_picture(&scene),
                             submission: s,
                             gpu_done: false,
@@ -8287,8 +8330,69 @@ mod worker_tests {
                 revision: base.revision + 1,
                 ..view.stamp
             };
-            assert!(only_moved(view, earlier, view.moves, Moment::Scrub, false));
+            assert!(only_moved(view, earlier, view.moves, Moment::Scrub, false, false));
         }
+        v.retire();
+    }
+
+    #[test]
+    fn continuous_fly_camera_updates_present_frames_while_moving() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("fly-continuous-present").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let mut camera = studio::FreeView {
+            ortho: false,
+            roll: 0.,
+            eye: [0., 0., 5.],
+            target: [0.; 3],
+            zoom: 1.,
+        };
+        let t0 = trace::now();
+        v.studio_view_at(Some(camera), t0).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before_ticks = service
+            .shared
+            .superseded
+            .load(std::sync::atomic::Ordering::Acquire);
+        let before_presented = v.status().presented;
+        // Simulate 60 Hz WASD Fly ticks arriving while the in-flight interactive
+        // camera frame is still rendering.
+        for step in 1..=5 {
+            camera.eye[2] = 5. - 0.1 * f64::from(step);
+            v.studio_view_at(Some(camera), t0 + 0.016 * f64::from(step))
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .shared
+                .superseded
+                .load(std::sync::atomic::Ordering::Acquire),
+            before_ticks,
+            "continuing Fly camera ticks must not abort in-flight camera frames"
+        );
+        let final_stamp = v.stamp();
+        release.send(()).unwrap();
+        let status = wait_for(&v, "latest fly camera frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && Some(f.stamp) == final_stamp)
+        });
+        // Both the in-flight frame AND the latest frame must have presented
+        // (zero stale rejections while flying!).
+        assert!(
+            status.presented >= before_presented + 2,
+            "expected in-flight and final fly frames to present: before={before_presented}, after={}",
+            status.presented
+        );
+        assert_eq!(status.stale_rejections, 0);
         v.retire();
     }
 
