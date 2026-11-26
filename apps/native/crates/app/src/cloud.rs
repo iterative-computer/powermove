@@ -7,6 +7,7 @@
 //! Keychain, AppKit sheets for the steps, and Settings › Account rows through
 //! the built-in facts. Every request runs on one service worker, so an
 //! exchange, its save and the refresh never interleave.
+use crate::cloud_human::{self, HumanGate};
 use gpui::{App, AsyncApp, Global};
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
@@ -312,6 +313,13 @@ pub struct Http {
     origin: &'static str,
     vault: Box<dyn Vault>,
     profile: PathBuf,
+    /// The browser check a protected route may ask for (`cloud_human`).
+    human: std::sync::Arc<HumanGate>,
+    /// Opens the check's page (the system browser; a lane build logs it).
+    opener: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// How often the check's result is asked for, and for how long.
+    poll: std::time::Duration,
+    patience: std::time::Duration,
 }
 impl Http {
     pub fn new(origin: &'static str, vault: Box<dyn Vault>, profile: PathBuf) -> Self {
@@ -319,7 +327,29 @@ impl Http {
             origin,
             vault,
             profile,
+            human: Default::default(),
+            opener: std::sync::Arc::new(crate::platform::open_url),
+            poll: std::time::Duration::from_millis(1500),
+            patience: std::time::Duration::from_secs(180),
         }
+    }
+    /// The gate the sign-in sheet watches and cancels.
+    pub(crate) fn with_gate(mut self, gate: std::sync::Arc<HumanGate>) -> Self {
+        self.human = gate;
+        self
+    }
+    /// Tests: the browser stand-in and a quick poll.
+    #[cfg(test)]
+    pub(crate) fn with_browser(
+        mut self,
+        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
+        poll: std::time::Duration,
+        patience: std::time::Duration,
+    ) -> Self {
+        self.opener = std::sync::Arc::new(opener);
+        self.poll = poll;
+        self.patience = patience;
+        self
     }
     /// One request; a failure names only the registry's error code
     /// (`api:handle_taken`) or the transport, never a body or a token.
@@ -367,28 +397,36 @@ impl Http {
         if review_cloud() {
             return review::answer(method, path, &body);
         }
-        let mut headers = vec![(
-            "X-Powermove-Client".to_owned(),
-            format!("desktop/{}", env!("CARGO_PKG_VERSION")),
-        )];
-        if let Some(kind) = kind {
-            headers.push(("Content-Type".into(), kind));
-        }
-        if let Some(token) = bearer {
-            headers.push(("Authorization".into(), format!("Bearer {}", token.expose())));
-        }
-        let response = pm_compat_runner::net::send(
-            pm_runtime_v8::FetchRequest {
-                url: format!("{}{}", self.origin.trim_end_matches('/'), path),
-                method: method.into(),
-                headers,
-                body,
-                max_response_bytes: 1024 * 1024,
-                deadline: std::time::Instant::now() + deadline,
-            },
-            pm_compat_runner::net::Reach::Origin(self.origin),
-        )
-        .map_err(|_| ServiceError::message(ServiceErrorCode::Offline, "network"))?;
+        let response = self.fetch(method, path, &body, &kind, bearer.as_ref(), None, deadline)?;
+        // A protected route asks for a human: the browser check once, then
+        // the request once more with its clearance (never a loop).
+        let response = match cloud_human::challenge(response.status, &response.body) {
+            Some(challenge) => {
+                let store = cloud_human::Clearances::new(&self.profile);
+                let clearance = match store.get(self.origin, &challenge.scope, now_ms()) {
+                    Some(clearance) => clearance,
+                    None => {
+                        let clearance = self.verify_human(&challenge.ticket)?;
+                        store.put(self.origin, &challenge.scope, &clearance, now_ms());
+                        clearance
+                    }
+                };
+                let retried = self.fetch(
+                    method,
+                    path,
+                    &body,
+                    &kind,
+                    bearer.as_ref(),
+                    Some(&clearance),
+                    deadline,
+                )?;
+                if retried.status == 403 {
+                    store.forget(self.origin, &challenge.scope);
+                }
+                retried
+            }
+            None => response,
+        };
         let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
         if (200..300).contains(&response.status) {
             return Ok(value);
@@ -406,6 +444,109 @@ impl Http {
             _ => ServiceErrorCode::Unavailable,
         };
         Err(ServiceError::message(kind, format!("api:{code}")))
+    }
+    /// One request to the registry's own origin (the only place a bearer or
+    /// a human clearance is ever sent).
+    #[allow(clippy::too_many_arguments)]
+    fn fetch(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        kind: &Option<String>,
+        bearer: Option<&Secret>,
+        human: Option<&str>,
+        deadline: std::time::Duration,
+    ) -> pm_services::Result<pm_runtime_v8::FetchResponse> {
+        let mut headers = vec![(
+            "X-Powermove-Client".to_owned(),
+            format!("desktop/{}", env!("CARGO_PKG_VERSION")),
+        )];
+        if let Some(kind) = kind {
+            headers.push(("Content-Type".into(), kind.clone()));
+        }
+        if let Some(token) = bearer {
+            headers.push(("Authorization".into(), format!("Bearer {}", token.expose())));
+        }
+        if let Some(clearance) = human {
+            headers.push(("X-Powermove-Human".into(), clearance.to_owned()));
+        }
+        pm_compat_runner::net::send(
+            pm_runtime_v8::FetchRequest {
+                url: format!("{}{}", self.origin.trim_end_matches('/'), path),
+                method: method.into(),
+                headers,
+                body: body.to_vec(),
+                max_response_bytes: 1024 * 1024,
+                deadline: std::time::Instant::now() + deadline,
+            },
+            pm_compat_runner::net::Reach::Origin(self.origin),
+        )
+        .map_err(|_| ServiceError::message(ServiceErrorCode::Offline, "network"))
+    }
+    /// The browser check: its page opens with the ticket only, and its result
+    /// is asked for until it passes, fails, the sheet cancels it or three
+    /// minutes go by.
+    fn verify_human(&mut self, ticket: &str) -> pm_services::Result<String> {
+        let unverified =
+            || ServiceError::message(ServiceErrorCode::PermissionDenied, "api:human_unverified");
+        let page = url::Url::parse_with_params(
+            &format!("{}/v1/human", self.origin.trim_end_matches('/')),
+            [("ticket", ticket)],
+        )
+        .map_err(|_| unverified())?;
+        let gate = self.human.clone();
+        gate.start();
+        struct End<'a>(&'a HumanGate);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                self.0.end();
+            }
+        }
+        let _end = End(&gate);
+        if !(self.opener)(page.as_str()) {
+            return Err(unverified());
+        }
+        let ask = json!({ "ticket": ticket }).to_string().into_bytes();
+        let kind = Some("application/json".to_owned());
+        let until = std::time::Instant::now() + self.patience;
+        while std::time::Instant::now() < until {
+            // Wait, a slice at a time, so Cancel stops it at once.
+            let next = std::time::Instant::now() + self.poll;
+            while std::time::Instant::now() < next {
+                if gate.cancelled() {
+                    return Err(ServiceError::message(
+                        ServiceErrorCode::PermissionDenied,
+                        "api:human_cancelled",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50).min(self.poll));
+            }
+            let Ok(result) = self.fetch(
+                "POST",
+                "/v1/human/result",
+                &ask,
+                &kind,
+                None,
+                None,
+                std::time::Duration::from_secs(10),
+            ) else {
+                continue;
+            };
+            match result.status {
+                204 => continue,
+                200..=299 => {
+                    let value: Value = serde_json::from_slice(&result.body).unwrap_or_default();
+                    return value["clearance"]
+                        .as_str()
+                        .filter(|c| !c.is_empty() && c.len() <= 2048)
+                        .map(str::to_owned)
+                        .ok_or_else(unverified);
+                }
+                _ => break,
+            }
+        }
+        Err(unverified())
     }
     /// `POST` of git loose objects as `multipart/form-data`, one part per
     /// object named by its id (the registry's upload route).
@@ -643,6 +784,8 @@ struct Cloud {
     google: Option<Google>,
     busy: bool,
     billing: Billed,
+    /// The browser check the worker may be waiting on.
+    human: std::sync::Arc<HumanGate>,
 }
 impl Global for Cloud {}
 /// The account's billing, as Settings › Account shows it.
@@ -699,7 +842,9 @@ pub(crate) fn init_with(
     if cx.has_global::<Cloud>() {
         return;
     }
-    let Ok(worker) = ServiceWorker::start(move || Ok(host())) else {
+    let human = std::sync::Arc::new(HumanGate::default());
+    let gate = human.clone();
+    let Ok(worker) = ServiceWorker::start(move || Ok(host().with_gate(gate))) else {
         return;
     };
     cx.set_global(Cloud {
@@ -713,6 +858,7 @@ pub(crate) fn init_with(
         google: None,
         busy: false,
         billing: Billed::default(),
+        human,
     });
     follow_activation(cx);
     // Whether a session is stored, and who it is, off the main thread.
@@ -950,7 +1096,21 @@ fn run_code(
 }
 /// The sign-in sheet's sentence for a failed send (`verifying: false`) or
 /// check of a code, for the first run's account step.
+/// The account worker is waiting for the browser check.
+pub(crate) fn verifying_human(cx: &App) -> bool {
+    cx.try_global::<Cloud>()
+        .is_some_and(|c| c.human.verifying())
+}
+/// The sign-in sheet's Cancel while the browser check is open.
+pub(crate) fn cancel_human(cx: &App) {
+    if let Some(cloud) = cx.try_global::<Cloud>() {
+        cloud.human.cancel();
+    }
+}
 pub(crate) fn code_error(code: &str, verifying: bool) -> String {
+    if matches!(code, "api:human_unverified" | "api:human_cancelled") {
+        return "Verification wasn’t completed. Try again.".into();
+    }
     let error = match (verifying, code) {
         (_, "api:rate_limited") => AuthError::RateLimited,
         (_, "api:client_too_old") => AuthError::OldClient,

@@ -24,6 +24,7 @@ mod tabs;
 #[cfg(test)]
 mod builtins_tests;
 mod cloud;
+mod cloud_human;
 mod cloud_media;
 #[cfg(test)]
 mod cloud_tests;

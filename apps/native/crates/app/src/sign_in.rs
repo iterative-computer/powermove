@@ -65,6 +65,8 @@ pub(crate) struct SignInFlow {
     pub(crate) error: Option<(String, Option<Retry>)>,
     /// Signed in already, and asked for another account (the first run).
     pub(crate) switching: bool,
+    /// The registry asked for the browser check, and the sheet waits on it.
+    pub(crate) verifying: bool,
 }
 
 /// Could be an address: something, an @, and a domain with a dot in it.
@@ -277,6 +279,19 @@ thread_local! {
 
 /// The sheet's words and actions for the flow as it stands.
 fn sheet_frame(flow: &SignInFlow) -> Frame {
+    // The registry's browser check is open: a quiet wait with Cancel.
+    if flow.verifying {
+        return Frame {
+            surface: "sign-in".into(),
+            title: "Verify in your browser…".into(),
+            line: "Complete the quick check in your browser, then come back here.".into(),
+            busy: true,
+            buttons: vec![Button::new("cancel_verify", "Cancel")],
+            default: None,
+            sign_in: Some(flow.frame()),
+            ..Frame::default()
+        };
+    }
     let (title, line) = match flow.stage {
         SignInStage::Email => (
             "Sign in to Powermove".to_owned(),
@@ -425,6 +440,7 @@ fn refresh(sheet: &Rc<RefCell<Sheet>>, cx: &mut App) {
 /// Closes the sheet; a Google sign-in still out is let go.
 fn close(sheet: &Rc<RefCell<Sheet>>, cx: &mut App) {
     crate::cloud::cancel_google(cx);
+    crate::cloud::cancel_human(cx);
     let window = sheet.borrow_mut().window.take();
     OPEN.with(|open| *open.borrow_mut() = None);
     if let Some(window) = window {
@@ -435,6 +451,10 @@ fn close(sheet: &Rc<RefCell<Sheet>>, cx: &mut App) {
 /// One of the sheet's actions, or its fields' typing and keys.
 fn act(sheet: &Rc<RefCell<Sheet>>, id: &str, cx: &mut App) {
     let stage = sheet.borrow().flow.stage;
+    if id == "cancel_verify" || (id == "escape" && sheet.borrow().flow.verifying) {
+        // The worker stops waiting; the request fails and the step says so.
+        return crate::cloud::cancel_human(cx);
+    }
     match (stage, id) {
         (SignInStage::Email, "cancel" | "escape") | (_, "cancel") => return close(sheet, cx),
         (SignInStage::Done, "done" | "signed_in" | "escape") => return close(sheet, cx),
@@ -462,10 +482,42 @@ fn act(sheet: &Rc<RefCell<Sheet>>, id: &str, cx: &mut App) {
     refresh(sheet, cx);
 }
 
+/// While a code is on its way or being checked, the sheet follows the
+/// registry's browser check: "Verify in your browser…" while the worker
+/// waits on it, the step again once it is done.
+fn watch_human(sheet: &Rc<RefCell<Sheet>>, cx: &mut App) {
+    let sheet = sheet.clone();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+            let done = cx.update(|cx| {
+                let verifying = crate::cloud::verifying_human(cx);
+                let (changed, waiting) = {
+                    let mut s = sheet.borrow_mut();
+                    let changed = s.flow.verifying != verifying;
+                    s.flow.verifying = verifying;
+                    (changed, s.flow.busy || s.flow.resending)
+                };
+                if changed {
+                    refresh(&sheet, cx);
+                }
+                !waiting && !verifying
+            });
+            if done {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
 fn apply(sheet: &Rc<RefCell<Sheet>>, effects: Vec<Effect>, cx: &mut App) {
     for effect in effects {
         match effect {
             Effect::SendCode(email) => {
+                watch_human(sheet, cx);
                 let sheet = sheet.clone();
                 crate::cloud::send_code(email, cx, move |result, cx| {
                     let effects = sheet.borrow_mut().flow.code_sent(result);
@@ -474,6 +526,7 @@ fn apply(sheet: &Rc<RefCell<Sheet>>, effects: Vec<Effect>, cx: &mut App) {
                 });
             }
             Effect::VerifyCode { email, code } => {
+                watch_human(sheet, cx);
                 let sheet = sheet.clone();
                 crate::cloud::verify_code(email, code, cx, move |result, cx| {
                     let effects = sheet.borrow_mut().flow.verified(result);
