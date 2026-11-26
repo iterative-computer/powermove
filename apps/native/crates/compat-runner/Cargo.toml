@@ -7,6 +7,8 @@ publish = false
 
 [features]
 macos-sandbox = ["pm-runtime-v8/macos-sandbox"]
+# The account origin may be a local development stack (PM_CLOUD_ORIGIN); see pm-native-app.
+dev-cloud-origin = []
 
 [dependencies]
 semver = "1"

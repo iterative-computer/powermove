@@ -489,3 +489,26 @@ mod tests {
         assert_eq!(h.back(), None);
     }
 }
+
+/// Settings comes forward on `page` (the billing return link brings
+/// Settings › Account): in the editor hosting it, else the first one.
+pub(crate) fn show_page(page: &'static str, cx: &mut App) {
+    let editors = crate::entry::editor_windows(cx);
+    let host = HOST.with(|h| h.borrow().clone()).and_then(|w| w.upgrade());
+    let Some((editor, window)) = editors
+        .iter()
+        .find(|(e, _)| host.as_ref().is_some_and(|h| h == e))
+        .or(editors.first())
+        .cloned()
+    else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            editor.update(cx, |v, cx| {
+                v.builtins.settings_page = Some(page.into());
+                v.show_builtin("settings", window, cx);
+            })
+        });
+    });
+}

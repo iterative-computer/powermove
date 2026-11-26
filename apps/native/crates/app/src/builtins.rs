@@ -2930,7 +2930,23 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.settings" => {
-                    if self.builtins.providers {
+                    // Aero on Free or out of credits: its plans are on
+                    // Settings › Account (Subscribe…, Upgrade…).
+                    let plans = self
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .and_then(|r| r.agent_accounts())
+                        .is_some_and(|a| match a.aero() {
+                            pm_agents::inference::Standing::Free(_) => true,
+                            pm_agents::inference::Standing::Ready { billing, .. } => {
+                                billing.remaining == 0
+                            }
+                            _ => false,
+                        });
+                    if plans {
+                        self.builtins.settings_page = Some("account".into());
+                    } else if self.builtins.providers {
                         self.builtins.settings_page = Some("providers".into());
                     }
                     self.show_builtin("settings", window, cx);

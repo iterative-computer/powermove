@@ -105,6 +105,26 @@ fn window(s: &Settings, x: f64, y: f64, w: f64, h: f64, scheme: Scheme, tabs: us
     out
 }
 
+/// Aerolite's monthly credits against Aero's (1,000 of 2,500, as
+/// `apps/www`'s Pricing and the billing contract have them).
+const LITE_SHARE: f64 = 1000. / 2500.;
+
+/// A plan's picture: its monthly credits as a ring on the wallpaper, full
+/// for the bigger plan, drawn clockwise from the top like a gauge.
+fn credits_ring(w: f64, h: f64, share: f64, c: &Colors) -> String {
+    let r = h * 0.28;
+    let stroke = h * 0.09;
+    let (cx, cy) = (w / 2., h / 2.);
+    let ink = css(c.white);
+    let track = pm_design::Ink::new().tint;
+    let circumference = std::f64::consts::TAU * r;
+    format!(
+        r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{ink}" stroke-opacity="{track}" stroke-width="{stroke}"/>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{ink}" stroke-width="{stroke}" stroke-linecap="round" stroke-dasharray="{on} {circumference}" transform="rotate(-90 {cx} {cy})" filter="url(#shadow)"/>"#,
+        on = circumference * share,
+    )
+}
+
 /// The wallpaper: a dusk sky, a dark fold across it and a warm glow low down.
 fn wallpaper(s: &Settings, w: f64, h: f64) -> String {
     let p = s.picker;
@@ -170,6 +190,7 @@ pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> Strin
             dark = window(&s, wx, wy, ww, wh, Scheme::Dark, 0),
             light = window(&s, wx, wy, ww, wh, Scheme::Light, 0),
         ),
+        ("plans", plan) => credits_ring(w, h, if plan == "aero" { 1. } else { LITE_SHARE }, &ours),
         ("projects", "tabs") => window(&s, wx, wy, ww, wh, here, 2),
         // Separate windows: one behind another.
         ("projects", _) => {
@@ -264,6 +285,8 @@ mod tests {
             ("appearance", "dark"),
             ("projects", "tabs"),
             ("projects", "windows"),
+            ("plans", "aerolite"),
+            ("plans", "aero"),
         ] {
             for dark in [true, false] {
                 for selected in [true, false] {

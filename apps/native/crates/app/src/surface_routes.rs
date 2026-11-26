@@ -193,6 +193,13 @@ impl Controller {
                 crate::cloud::open_sign_in(window, cx)
             }
             "cloudSignOut" => crate::cloud::sign_out(cx),
+            "cloudPortal" => crate::cloud::manage_billing(cx),
+            "cloudCheckoutCancel" => crate::cloud::cancel_checkout(cx),
+            "cloudBilling" => crate::cloud::refresh_billing(cx),
+            command if command.starts_with("cloudCheckout.") => {
+                let plan = command.trim_start_matches("cloudCheckout.").to_owned();
+                crate::cloud::subscribe(plan, cx)
+            }
             "providerSetUp" => {
                 let window = self.account_window(cx);
                 crate::providers::open(window, cx)

@@ -105,16 +105,6 @@ impl Backend {
             .agent_link
             .environment()
             .is_some_and(|env| env.aero.is_some());
-        // The account's plan and its credits, once Powermove has said them
-        // (PM-750's usage).
-        if self.native.facts["cloud"]["signedIn"] == true
-            && let Some(pm_agents::inference::Standing::Ready { usage, .. }) =
-                self.native.agent_link.accounts().map(|a| a.aero())
-        {
-            let credits = &usage.facts()[0].1;
-            rows.push(json!({"id":"account.plan","section":"account","group":"Powermove Account",
-                "label":"Plan","control":"status","value":format!("{} · {credits}", usage.plan.name)}));
-        }
         if powermove {
             // Settings › Providers replaces the agent account rows.
             rows.extend(self.providers_rows());
@@ -329,11 +319,11 @@ impl Backend {
         }
         let standing = self.native.agent_link.accounts().map(|a| a.aero());
         let aero = match &standing {
-            Some(Standing::Ready { usage, .. }) => {
-                let credits = &usage.facts()[0].1;
-                format!("Aero runs on {}: {credits}.", usage.plan.name)
+            Some(Standing::Ready { billing, .. }) => {
+                let plan = billing.plan.as_ref().map_or("", |p| p.name.as_str());
+                format!("Aero runs on {plan}: {}.", billing.credits_left())
             }
-            Some(Standing::NoPlan(_)) => "Aero inference is coming soon.".into(),
+            Some(Standing::Free(_)) => pm_agents::inference::NEEDS_PLAN.into(),
             Some(Standing::Unreachable(why)) => why.clone(),
             _ => "Aero runs on Powermove inference.".into(),
         };
@@ -370,15 +360,13 @@ impl Backend {
         };
         r["disabled"] = json!(cloud["busy"] == true);
         let mut rows = vec![r];
-        // The plan the backend offers someone signed in without one.
-        if cloud["signedIn"] == true
-            && let Some(Standing::NoPlan(Some(offer))) = &standing
-        {
+        // On Free: the plans are on Settings › Account.
+        if cloud["signedIn"] == true && matches!(standing, Some(Standing::Free(_))) {
             rows.push(action(
-                row("aero-offer", GROUP, "Aero"),
-                "providers.aero.offer",
-                &format!("{}…", offer.label),
-                "Aero inference on your Powermove account.".into(),
+                row("aero-plan", GROUP, "Aero"),
+                "settings.show-account",
+                "Choose a Plan…",
+                "Aerolite or Aero, on your Powermove account.".into(),
             ));
         }
         rows
@@ -1143,17 +1131,40 @@ impl Backend {
                 ));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
-            // The Powermove account's sheets, Keychain and registry calls are the app's.
+            // The Powermove account's sheets, Keychain, registry and billing
+            // calls are the app's.
             Some("row")
                 if matches!(
                     action["action"].as_str(),
-                    Some("account.sign-in" | "account.sign-out" | "account.delete")
+                    Some(
+                        "account.sign-in"
+                            | "account.sign-out"
+                            | "account.delete"
+                            | "account.subscribe"
+                            | "account.portal"
+                            | "account.checkout-cancel"
+                            | "account.billing-refresh"
+                    )
                 ) =>
             {
                 let name = match action["action"].as_str() {
-                    Some("account.sign-in") => "cloudSignIn",
-                    Some("account.sign-out") => "cloudSignOut",
-                    _ => "cloudDeleteAccount",
+                    Some("account.sign-in") => "cloudSignIn".to_owned(),
+                    Some("account.sign-out") => "cloudSignOut".to_owned(),
+                    Some("account.portal") => "cloudPortal".to_owned(),
+                    Some("account.checkout-cancel") => "cloudCheckoutCancel".to_owned(),
+                    Some("account.billing-refresh") => "cloudBilling".to_owned(),
+                    // Only a plan the account's billing offers is checked out.
+                    Some("account.subscribe") => {
+                        let plan = action["plan"].as_str().unwrap_or_default();
+                        let offered = self.native.facts["cloud"]["billing"]["plans"]
+                            .as_array()
+                            .is_some_and(|p| p.iter().any(|o| o["id"] == plan));
+                        if !offered {
+                            return Err("That plan isn’t offered.".into());
+                        }
+                        format!("cloudCheckout.{plan}")
+                    }
+                    _ => "cloudDeleteAccount".to_owned(),
                 };
                 self.native
                     .platform
@@ -1212,7 +1223,6 @@ impl Backend {
                     "providers.claude.sign-in" => accounts.connect(Provider::Claude),
                     "providers.claude.sign-out" => accounts.disconnect(Provider::Claude),
                     "providers.anthropic.remove" => accounts.remove_anthropic_key()?,
-                    "providers.aero.offer" => accounts.open_aero_offer()?,
                     // The secure field is the app's native sheet.
                     kind @ ("providers.openai.key" | "providers.anthropic.key") => {
                         let which = if kind == "providers.openai.key" { "openai" } else { "anthropic" };
@@ -1369,7 +1379,163 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     delete["action"] = json!("account.delete");
     delete["actionLabel"] = json!("Delete Account…");
     delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
-    vec![account, remember, delete]
+    // Deleting the account is the page's last card, after the plan.
+    delete["group"] = json!("Delete Account");
+    let mut rows = vec![account, remember];
+    rows.extend(billing_rows(&cloud["billing"], busy));
+    rows.push(delete);
+    rows
+}
+/// Settings › Account's plan card and this month's credits, from the
+/// account's billing (`GET /v2/billing`, the app's `cloud.billing` fact).
+/// Nothing before it is read, or when the backend has no billing.
+pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
+    const PLAN: &str = "Plan";
+    const CREDITS: &str = "Credits This Month";
+    let row = |id: &str, group: &str, label: &str, control: &str| {
+        json!({"id":format!("account.{id}"),"section":"account","group":group,
+            "label":label,"control":control,"disabled":busy})
+    };
+    let action = |mut r: Value, action: &str, label: &str| {
+        r["action"] = json!(action);
+        r["actionLabel"] = json!(label);
+        r
+    };
+    match billing["state"].as_str() {
+        Some("ready") => {}
+        Some("error") => {
+            let mut r = action(
+                row("plan", PLAN, "Plan", "action"),
+                "account.billing-refresh",
+                "Try Again",
+            );
+            r["value"] = json!("Couldn’t load your plan.");
+            return vec![r];
+        }
+        _ => return vec![],
+    }
+    let dollars = |cents: u64| {
+        if cents % 100 == 0 {
+            format!("${}", cents / 100)
+        } else {
+            format!("${}.{:02}", cents / 100, cents % 100)
+        }
+    };
+    let resets = billing["resets"].as_str().unwrap_or_default();
+    let subscribed = billing["subscribed"] == true;
+    let mut rows = vec![];
+    if !subscribed {
+        let mut free = row("plan", PLAN, "Free", "status");
+        free["value"] = json!(pm_agents::inference::NEEDS_PLAN);
+        rows.push(free);
+        if billing["waiting"] == "checkout" {
+            rows.push(action(
+                row(
+                    "waiting",
+                    PLAN,
+                    "Waiting for checkout in your browser…",
+                    "action",
+                ),
+                "account.checkout-cancel",
+                "Cancel",
+            ));
+        } else {
+            let plans = billing["plans"].as_array().cloned().unwrap_or_default();
+            let mut choose = action(
+                row("choose", PLAN, "Choose a Plan", "plans"),
+                "account.subscribe",
+                "Continue…",
+            );
+            let name = |p: &Value| p["name"].as_str().unwrap_or_default().to_owned();
+            choose["options"] = plans
+                .iter()
+                .map(|p| {
+                    let price = dollars(p["priceCents"].as_u64().unwrap_or(0));
+                    json!({"v": p["id"], "label": format!("{} · {price}", name(p))})
+                })
+                .collect();
+            // What each plan holds, then the rules: monthly, no roll-over.
+            let holds: Vec<String> = plans
+                .iter()
+                .map(|p| {
+                    let credits = pm_agents::inference::grouped(p["credits"].as_u64().unwrap_or(0));
+                    format!("{} has {credits} credits a month", name(p))
+                })
+                .collect();
+            choose["detail"] = json!(format!(
+                "{}. Credits reset each month and don’t roll over.",
+                holds.join(", ")
+            ));
+            if let Some(error) = billing["error"].as_str() {
+                choose["error"] = json!(error);
+            }
+            rows.push(choose);
+        }
+        return rows;
+    }
+    let plan = &billing["plan"];
+    let name = plan["name"].as_str().unwrap_or_default();
+    let mut card = action(
+        row("plan", PLAN, name, "action"),
+        "account.portal",
+        "Manage Billing…",
+    );
+    card["value"] = json!(match () {
+        _ if billing["status"] == "past_due" => "Payment failed".to_owned(),
+        _ if billing["cancelAtPeriodEnd"] == true => format!("Cancels {resets}"),
+        _ => format!(
+            "{} a month",
+            dollars(plan["priceCents"].as_u64().unwrap_or(0))
+        ),
+    });
+    if billing["status"] == "past_due" {
+        card["error"] = json!("Update your payment method to keep Aero running.");
+    }
+    if let Some(error) = billing["error"].as_str() {
+        card["error"] = json!(error);
+    }
+    rows.push(card);
+    let credits = &billing["credits"];
+    let count = |k: &str| credits[k].as_u64().unwrap_or(0);
+    let mut left = row(
+        "credits",
+        CREDITS,
+        &format!(
+            "{} of {} left",
+            pm_agents::inference::grouped(count("remaining")),
+            pm_agents::inference::grouped(count("included"))
+        ),
+        "status",
+    );
+    left["value"] = json!(format!("Resets {resets}"));
+    left["meter"] = json!({"used": count("used"), "included": count("included")});
+    if count("remaining") == 0 {
+        left["error"] = json!(format!("You’re out of credits until {resets}."));
+    }
+    rows.push(left);
+    let mut daily = row("daily", CREDITS, "Daily Use", "status");
+    daily["value"] = json!(format!(
+        "{} used",
+        pm_agents::inference::grouped(count("used"))
+    ));
+    daily["days"] = billing["daily"].clone();
+    daily["slots"] = billing["periodDays"].clone();
+    rows.push(daily);
+    if count("remaining") == 0
+        && let Some(upgrade) = billing["upgrade"].as_object()
+    {
+        let label = format!(
+            "{} · {} credits a month",
+            upgrade["name"].as_str().unwrap_or_default(),
+            pm_agents::inference::grouped(upgrade["credits"].as_u64().unwrap_or(0))
+        );
+        rows.push(action(
+            row("upgrade", CREDITS, &label, "action"),
+            "account.portal",
+            "Upgrade…",
+        ));
+    }
+    rows
 }
 /// Settings › Agents › API or Local Model, from the app's `provider` fact:
 /// what is connected (never the key), then Set Up… / Change… and Disconnect.
