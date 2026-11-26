@@ -103,9 +103,13 @@ pub fn efforts(model: &str) -> Vec<String> {
 /// The effort sent for `requested` (v1's `modelEffort`): the nearest supported
 /// one at or below it, or none when the model takes none.
 pub fn effort(model: &str, requested: Option<&str>) -> Option<String> {
+    nearest(&efforts(model), requested)
+}
+/// The level of `supported` sent for `requested`: itself, else the nearest
+/// one below it, else the lowest; none when there are no levels.
+pub fn nearest(supported: &[String], requested: Option<&str>) -> Option<String> {
     const ALL: [&str; 7] = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
     let requested = requested?;
-    let supported = efforts(model);
     if supported.is_empty() {
         return None;
     }
@@ -319,6 +323,7 @@ impl Loop {
                     "name":t["name"],"description":t["description"],"parameters":t["inputSchema"]}})).collect::<Vec<_>>());
             }
             let message = self.complete(&url, key.as_deref(), &body)?;
+            crate::stats::turn(&self.run.id);
             messages.push(message.assistant());
             if message.calls.is_empty() {
                 let pending = self.directions.lock().unwrap().drain(true);
@@ -448,6 +453,9 @@ impl Loop {
         if !(200..300).contains(&status) {
             return Err(http_error(status));
         }
+        if let Some((input, output)) = stream.usage {
+            crate::stats::tokens(&self.run.id, input, output);
+        }
         stream.finish()
     }
 }
@@ -515,6 +523,8 @@ impl Message {
 /// split across `data:` records, `[DONE]` or a finish reason, bounded size.
 #[derive(Default)]
 pub struct Stream {
+    /// The usage a provider reported (prompt, completion tokens).
+    usage: Option<(Option<u64>, Option<u64>)>,
     buffer: Vec<u8>,
     pending: String,
     bytes: usize,
@@ -616,6 +626,11 @@ impl Stream {
                 "The provider interrupted the response. Your conversation is kept; try again."
                     .into(),
             );
+        }
+        // Telemetry counts: providers that report usage put it on a record.
+        let usage = &event["usage"];
+        if usage.is_object() {
+            self.usage = Some((usage["prompt_tokens"].as_u64(), usage["completion_tokens"].as_u64()));
         }
         let choice = &event["choices"][0];
         if choice["finish_reason"] == "length" {

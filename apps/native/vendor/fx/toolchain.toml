@@ -1,0 +1,13 @@
+# Powermove: the Zig toolchain this vendored core is built with. build.rs reads
+# this file and uses exactly this Zig, found under $PM_ZIG_HOME (default
+# ~/.cache/powermove/zig) as zig-<target>-<version>/zig; it never downloads.
+# install-zig.sh downloads the tarball below, checks its sha256 and unpacks it
+# there. Values are from ziglang.org's download index
+# (https://ziglang.org/download/index.json).
+[zig]
+version = "0.17.1"
+
+[zig.aarch64-macos]
+tarball = "https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz"
+sha256 = "75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d"
+size = 54001240

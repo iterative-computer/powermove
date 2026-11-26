@@ -1,0 +1,5159 @@
+const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
+const builtin = @import("builtin");
+const command_admission = @import("../../core/permissions/command_admission.zig");
+const command_contract = @import("../../core/execution/command_contract.zig");
+const command_environment = @import("../../core/execution/command_environment.zig");
+const debug_trace = @import("../../core/shared/debug_trace.zig");
+const managed_execution = @import("../../core/execution/managed_execution.zig");
+const managed_contract = @import("../../core/execution/managed_execution_contract.zig");
+const mcp_call_bridge = @import("../../core/mcp_host/mcp_call_bridge.zig");
+const mcp_call_capability = @import("../../core/tooling/mcp_call_capability.zig");
+const io_mod = @import("../../core/shared/io.zig");
+const mem_utils = @import("../../core/shared/mem_utils.zig");
+const pathing = @import("../../core/workspace/pathing.zig");
+const terminal_identity = @import("../../core/terminal/identity.zig");
+const terminal_action_executor = @import("../../core/terminal/action_executor.zig");
+const terminal_managed_observer = @import("../../core/terminal/managed_observer.zig");
+const terminal_operation = @import("../../core/terminal/operation.zig");
+const terminal_store = @import("../../core/terminal/store.zig");
+const shell_resolver = @import("../../core/terminal/shell_resolver.zig");
+const shell_snapshot = @import("../../core/terminal/shell_snapshot.zig");
+const sort_utils = @import("../../core/shared/sort_utils.zig");
+const terminal_contracts = @import("../../core/terminal/contracts.zig");
+const tool_args = @import("../../core/tooling/tool_args.zig");
+const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
+const tool_result_limits = @import("../../core/tooling/tool_result_limits.zig");
+const tool_result_errors = @import("../../core/tooling/tool_result_errors.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
+const result_commit = @import("../../core/tooling/result_commit.zig");
+const result_store = @import("../../core/session/result_store.zig");
+const session_child_store = @import("../../core/session/session_child_store.zig");
+const types = @import("../../core/shared/types.zig");
+const workspace_access = @import("../../core/workspace/workspace_access.zig");
+
+const Allocator = std.mem.Allocator;
+
+pub const Action = enum {
+    run,
+    interact,
+    stop,
+};
+
+const ShellKind = enum { executable };
+
+pub const ShellInput = struct {
+    kind: ShellKind,
+    path: []const u8,
+    clean_start: bool = false,
+};
+
+pub const Input = struct {
+    action: Action,
+    command: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
+    profile: ?command_environment.Profile = null,
+    shell: ?ShellInput = null,
+    tty: bool = false,
+    yield_time_ms: u32 = managed_contract.default_yield_time_ms,
+    timeout_ms: ?u64 = null,
+    reload: bool = false,
+    session_id: ?[]const u8 = null,
+    chars: ?[]const u8 = null,
+    force: bool = false,
+};
+
+pub const public_field_names = blk: {
+    const field_names = @typeInfo(Input).@"struct".field_names;
+    var names: [field_names.len][]const u8 = undefined;
+    for (field_names, 0..) |field_name, index| names[index] = field_name;
+    break :blk names;
+};
+
+pub const ActionFieldContract = struct {
+    allowed: []const []const u8,
+    required: []const []const u8,
+    conflicts: []const tool_result_errors.TerminalActionFieldConflict = &.{},
+};
+
+pub fn actionFieldContract(action: Action) ActionFieldContract {
+    return switch (action) {
+        .run => .{
+            .allowed = &.{ "action", "command", "cwd", "profile", "shell", "tty", "yield_time_ms", "timeout_ms", "reload" },
+            .required = &.{ "action", "command" },
+            .conflicts = &.{.{ "profile", "shell" }},
+        },
+        .interact => .{
+            .allowed = &.{ "action", "session_id", "chars", "yield_time_ms" },
+            .required = &.{ "action", "session_id" },
+        },
+        .stop => .{
+            .allowed = &.{ "action", "session_id", "force" },
+            .required = &.{ "action", "session_id" },
+        },
+    };
+}
+
+/// Names the action of a call that omits `action` when exactly one action
+/// takes every field it sends and gets every field it requires. Fields that
+/// decode treats as absent, null or the text "null", are ignored. When no
+/// action fits, a second pass also ignores known fields set to an empty
+/// value that the action does not take, which decode drops for that action;
+/// a call that fits today keeps its action. A bare session_id fits both
+/// interact and stop, so it names neither. The orchestrator adds the result
+/// before the call is stored or admitted, so permission admission and decode
+/// read the same arguments
+/// (`tests/tla/shell_command/ShellContract.tla` AdmissionConsistency).
+pub fn inferAction(object: std.json.ObjectMap) ?[]const u8 {
+    if (object.get("action") != null) return null;
+    return switch (fittingAction(object, .counted)) {
+        .one => |action| @tagName(action),
+        .several => null,
+        .none => switch (fittingAction(object, .ignored_outside_action)) {
+            .one => |action| @tagName(action),
+            .several, .none => null,
+        },
+    };
+}
+
+const Fit = union(enum) { none, one: Action, several };
+
+/// Whether an empty field the action does not take stops the action from
+/// fitting (`counted`) or is skipped as decode would drop it.
+const EmptyFields = enum { counted, ignored_outside_action };
+
+fn fittingAction(object: std.json.ObjectMap, empty_fields: EmptyFields) Fit {
+    var found: ?Action = null;
+    for (std.enums.values(Action)) |action| {
+        if (!fieldsFitAction(object, actionFieldContract(action), empty_fields)) continue;
+        if (found != null) return .several;
+        found = action;
+    }
+    return if (found) |action| .{ .one = action } else .none;
+}
+
+fn fieldsFitAction(object: std.json.ObjectMap, contract: ActionFieldContract, empty_fields: EmptyFields) bool {
+    var fields = object.iterator();
+    while (fields.next()) |entry| {
+        if (isAbsentValue(entry.value_ptr.*)) continue;
+        if (containsFieldName(contract.allowed, entry.key_ptr.*)) continue;
+        if (empty_fields == .ignored_outside_action and isDroppableOutsideAction(entry.key_ptr.*, entry.value_ptr.*)) continue;
+        return false;
+    }
+    for (contract.required) |name| {
+        if (std.mem.eql(u8, name, "action")) continue;
+        const value = object.get(name) orelse return false;
+        if (isAbsentValue(value)) return false;
+    }
+    return true;
+}
+
+fn isAbsentValue(value: std.json.Value) bool {
+    return value == .null or
+        (value == .string and tool_args.isNullPlaceholderText(value.string));
+}
+
+/// A known shell field with an empty value (`tool_args.isEmptyArgumentValue`)
+/// means the same as leaving it out for an action that does not take it.
+/// Unknown names still reach the field check, since they can carry intent
+/// that dropping would lose.
+fn isDroppableOutsideAction(name: []const u8, value: std.json.Value) bool {
+    return containsFieldName(public_field_names[1..], name) and tool_args.isEmptyArgumentValue(value);
+}
+
+/// A run without a terminal uses the login shell and `profile`, which is
+/// also what permission admission checks, and `shell` applies only with
+/// tty=true. Some models send a `shell` that names the login shell anyway,
+/// often beside `profile`; that `shell` changes nothing, so it is dropped
+/// rather than rejected or reported as a conflict. It stays when it names
+/// another shell, or when its clean_start asks for a clean start that
+/// `profile` does not, since running then would not do what was asked.
+fn elideLoginShellOnPlainRun(object: *std.json.ObjectMap, action: Action, login_shell: ?[]const u8) void {
+    if (action != .run) return;
+    const login = login_shell orelse return;
+    if (object.get("tty")) |tty| if (tty != .bool or tty.bool) return;
+    const profile: ?[]const u8 = if (object.get("profile")) |value| switch (value) {
+        .string => |text| text,
+        else => return,
+    } else null;
+    const shell = object.get("shell") orelse return;
+    if (shell != .object) return;
+    const kind = shell.object.get("kind") orelse return;
+    const path = shell.object.get("path") orelse return;
+    if (kind != .string or !std.mem.eql(u8, kind.string, "executable")) return;
+    if (path != .string or !std.mem.eql(u8, path.string, login)) return;
+    for (shell.object.keys()) |member| {
+        if (!std.mem.eql(u8, member, "kind") and !std.mem.eql(u8, member, "path") and !std.mem.eql(u8, member, "clean_start")) return;
+    }
+    if (shell.object.get("clean_start")) |clean_start| {
+        if (clean_start != .bool) return;
+        if (clean_start.bool and !std.mem.eql(u8, profile orelse "user", "clean")) return;
+    }
+    debug_trace.logf(
+        "shell",
+        "run without tty ignored shell field: it names the login shell path=\"{f}\"",
+        .{std.zig.fmtString(login)},
+    );
+    _ = object.orderedRemove("shell");
+}
+
+/// Drops the empty fields `isDroppableOutsideAction` describes for `action`.
+fn elideEmptyFieldsOutsideAction(object: *std.json.ObjectMap, action: Action) void {
+    const allowed = actionFieldContract(action).allowed;
+    for (public_field_names[1..]) |field_name| {
+        if (containsFieldName(allowed, field_name)) continue;
+        const value = object.get(field_name) orelse continue;
+        if (isDroppableOutsideAction(field_name, value)) _ = object.orderedRemove(field_name);
+    }
+}
+
+fn containsFieldName(names: []const []const u8, name: []const u8) bool {
+    for (names) |candidate| {
+        if (std.mem.eql(u8, candidate, name)) return true;
+    }
+    return false;
+}
+
+test "inferAction names the one action a call's fields fit" {
+    const cases = [_]struct { args: []const u8, action: ?[]const u8 }{
+        .{ .args = "{\"command\":\"git status\"}", .action = "run" },
+        .{ .args = "{\"command\":\"make\",\"cwd\":\"src\",\"yield_time_ms\":30000,\"timeout_ms\":600000}", .action = "run" },
+        .{ .args = "{\"command\":\"python3\",\"tty\":true,\"session_id\":null,\"chars\":\"null\"}", .action = "run" },
+        .{ .args = "{\"session_id\":\"shell-1\",\"chars\":\"y\\n\"}", .action = "interact" },
+        .{ .args = "{\"session_id\":\"shell-1\",\"yield_time_ms\":5000}", .action = "interact" },
+        .{ .args = "{\"session_id\":\"shell-1\",\"force\":true}", .action = "stop" },
+        // Empty fields that only another action takes ask for nothing.
+        .{ .args = "{\"command\":\"ls\",\"chars\":\"\",\"session_id\":\"\",\"force\":false,\"reload\":false}", .action = "run" },
+        // A call that fits under the strict pass keeps that action.
+        .{ .args = "{\"session_id\":\"shell-1\",\"chars\":\"\"}", .action = "interact" },
+        .{ .args = "{\"session_id\":\"shell-1\",\"force\":false}", .action = "stop" },
+        // Ignoring an empty command still leaves session_id fitting two actions.
+        .{ .args = "{\"session_id\":\"shell-1\",\"command\":\"\"}", .action = null },
+        // Unknown names and set values are never dropped.
+        .{ .args = "{\"command\":\"ls\",\"note\":\"\"}", .action = null },
+        .{ .args = "{\"command\":\"ls\",\"chars\":\"y\"}", .action = null },
+        // A bare session_id could observe or stop the session.
+        .{ .args = "{\"session_id\":\"shell-1\"}", .action = null },
+        // A command beside a session could start one or write to one.
+        .{ .args = "{\"command\":\"ls\",\"session_id\":\"shell-1\"}", .action = null },
+        .{ .args = "{\"command\":\"ls\",\"force\":true}", .action = null },
+        .{ .args = "{\"command\":\"ls\",\"note\":\"why\"}", .action = null },
+        .{ .args = "{\"command\":null}", .action = null },
+        .{ .args = "{}", .action = null },
+        .{ .args = "{\"action\":\"run\",\"command\":\"ls\"}", .action = null },
+        .{ .args = "{\"action\":null,\"command\":\"ls\"}", .action = null },
+    };
+    for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, case.args, .{});
+        defer parsed.deinit();
+        const inferred = inferAction(parsed.value.object);
+        if (case.action) |expected| {
+            try std.testing.expectEqualStrings(expected, inferred orelse return error.TestExpectedEqual);
+        } else if (inferred) |unexpected| {
+            std.debug.print("{s} inferred {s}\n", .{ case.args, unexpected });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+const OwnedInput = struct {
+    arena_state: std.heap.ArenaAllocator.State,
+    value: Input,
+
+    fn deinit(self: *OwnedInput, alloc: Allocator) void {
+        self.arena_state.promote(alloc).deinit();
+        self.* = undefined;
+    }
+};
+
+/// Decodes one shell call's arguments. How each argument shape is decoded,
+/// admitted, and shown in history is modeled in
+/// `tests/tla/shell_command/ShellContract.tla`.
+pub fn decode(
+    ctx: tool_dispatch.DispatchContext,
+    args_json: []const u8,
+) tool_dispatch.DispatchError!tool_dispatch.DecodeResult {
+    if (try decode_input(ctx, args_json)) |input| return .{ .input = input };
+    return .{ .failure = try request_correction(ctx.allocator, args_json, ctx.session_child_capability != null) };
+}
+
+fn decode_input(
+    ctx: tool_dispatch.DispatchContext,
+    args_json: []const u8,
+) tool_dispatch.DispatchError!?tool_dispatch.ToolInput {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer mem_utils.deinit_arena(arena_state);
+    const arena = arena_state.allocator();
+    var raw = std.json.parseFromSliceLeaky(
+        std.json.Value,
+        arena,
+        args_json,
+        .{ .allocate = .alloc_always },
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    if (raw != .object) return null;
+    const raw_action = raw.object.get("action") orelse return null;
+    if (raw_action != .string) return null;
+    const action = std.meta.stringToEnum(Action, raw_action.string) orelse
+        return null;
+    elideKnownNullFields(&raw.object);
+    elideEmptyFieldsOutsideAction(&raw.object, action);
+    var login_shell_buffer: [4096]u8 = undefined;
+    elideLoginShellOnPlainRun(&raw.object, action, shell_resolver.configuredLoginShellInto(&login_shell_buffer));
+
+    var correction_scratch: ActionFieldCorrectionScratch = .{};
+    defer correction_scratch.deinit(ctx.allocator);
+    if (try actionFieldCorrection(
+        ctx.allocator,
+        action,
+        raw.object,
+        &correction_scratch,
+    ) != null) return null;
+    normalizeCompositeArgument(arena, &raw, "shell") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    var input = std.json.parseFromValueLeaky(Input, arena, raw, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    input.yield_time_ms = if (raw.object.get("yield_time_ms") == null)
+        defaultYieldTime(action)
+    else
+        boundedYieldTime(action, input.yield_time_ms);
+    if (argument_problem(input) != null) return null;
+    const owned = try ctx.allocator.create(OwnedInput);
+    owned.* = .{
+        .arena_state = arena_state.state,
+        .value = input,
+    };
+    arena_state.state = .init;
+    return .{
+        .ptr = owned,
+        .deinit_fn = inputDeinit,
+    };
+}
+
+fn defaultYieldTime(action: Action) u32 {
+    return switch (action) {
+        .run => managed_contract.default_yield_time_ms,
+        .interact => managed_contract.default_wait_ceiling_ms,
+        .stop => 0,
+    };
+}
+
+/// A wait longer than the action allows is shortened to its limit rather
+/// than refused: the call still runs, and a command that is still going
+/// returns its session_id for the next interact.
+fn boundedYieldTime(action: Action, requested_ms: u32) u32 {
+    return switch (action) {
+        .run => @min(requested_ms, managed_contract.max_wait_ceiling_ms),
+        .interact => @min(requested_ms, managed_contract.max_wait_ceiling_ms),
+        .stop => requested_ms,
+    };
+}
+
+fn effective_interact_yield_time(has_input: bool, requested_ms: u32) u32 {
+    if (!has_input) {
+        return @min(
+            @max(requested_ms, managed_contract.default_wait_ceiling_ms),
+            managed_contract.max_wait_ceiling_ms,
+        );
+    }
+    return @min(requested_ms, managed_contract.max_yield_time_ms);
+}
+
+// Advisory only: none of these values enters the executable decode path.
+fn request_correction(alloc: Allocator, args_json: []const u8, supports_tty: bool) Allocator.Error![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer mem_utils.deinit_arena(arena_state);
+    const arena = arena_state.allocator();
+    if (args_json.len > 16 * 1024) {
+        return correction_json(alloc, &.{"Arguments are too large to suggest a repair; submit the intended action with only its required fields."}, null);
+    }
+    const raw = std.json.parseFromSliceLeaky(std.json.Value, arena, args_json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return correction_json(alloc, &.{"Shell arguments must be a JSON object."}, null),
+    };
+    if (raw != .object or raw.object.count() > 32) {
+        return correction_json(alloc, &.{"Shell arguments must be one bounded object."}, null);
+    }
+
+    var problems: std.ArrayList([]const u8) = .empty;
+    var repairable = true;
+    var object = raw.object;
+    // Outside a required vision step the orchestrator unwraps an exact
+    // {"request":{...}} before decode, so a wrapper here usually has extra
+    // top-level fields or a string body. Either way, suggest the flat call.
+    if (raw.object.get("request")) |wrapper| {
+        try problems.append(arena, "Put the action fields at the top level; shell takes no request wrapper.");
+        var request = wrapper;
+        // A wrapper written as JSON text is read like intake reads it, with
+        // the same depth limit.
+        tool_args.normalizeCompositeObjectValue(arena, &request) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return correction_json(alloc, problems.items, null),
+        };
+        if (request != .object or request.object.count() > 32) {
+            return correction_json(alloc, problems.items, null);
+        }
+        object = request.object;
+        var outer = raw.object.iterator();
+        while (outer.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (std.mem.eql(u8, name, "request")) continue;
+            if (object.contains(name)) {
+                repairable = false;
+            } else {
+                try object.put(arena, name, entry.value_ptr.*);
+            }
+        }
+    }
+    elideKnownNullFields(&object);
+    const action_value = object.get("action");
+    const action: Action = if (action_value) |value| blk: {
+        if (value == .string) {
+            if (std.meta.stringToEnum(Action, value.string)) |action| break :blk action;
+        }
+        try problems.append(arena, "action must be run, interact, or stop; put the shell command in command.");
+        return correction_json(alloc, problems.items, null);
+    } else blk: {
+        try problems.append(arena, "action is required.");
+        const command = object.get("command") orelse return correction_json(alloc, problems.items, null);
+        if (command != .string or object.contains("session_id") or object.contains("chars") or object.contains("force")) {
+            return correction_json(alloc, problems.items, null);
+        }
+        try object.put(arena, "action", .{ .string = "run" });
+        break :blk .run;
+    };
+    elideEmptyFieldsOutsideAction(&object, action);
+    var login_shell_buffer: [4096]u8 = undefined;
+    elideLoginShellOnPlainRun(&object, action, shell_resolver.configuredLoginShellInto(&login_shell_buffer));
+
+    var scratch: ActionFieldCorrectionScratch = .{};
+    if (try actionFieldCorrection(arena, action, object, &scratch)) |correction| {
+        for (correction.invalid_fields) |name| {
+            try problems.append(arena, try arena.print(
+                "{s} is not accepted for {s}.",
+                .{ text_utils.utf8PrefixByBytes(name, 64), @tagName(action) },
+            ));
+            // A non-null unknown field can express intent that cannot be reconstructed.
+            if (object.get(name).? != .null) repairable = false;
+            _ = object.orderedRemove(name);
+        }
+        for (correction.missing_fields) |name| {
+            try problems.append(arena, try arena.print("{s} is required for {s}.", .{ name, @tagName(action) }));
+            repairable = false;
+        }
+        for (correction.conflicts) |conflict| {
+            try problems.append(arena, try arena.print("Choose either {s} or {s}.", .{ conflict[0], conflict[1] }));
+            repairable = false;
+        }
+    }
+
+    var canonical: std.json.ObjectMap = .empty;
+    const input_info = @typeInfo(Input).@"struct";
+    inline for (input_info.field_names, input_info.field_types) |field_name, field_type| {
+        if (object.get(field_name)) |original| {
+            var value = original;
+            const T = if (@typeInfo(field_type) == .optional) @typeInfo(field_type).optional.child else field_type;
+            const expected = comptime switch (@typeInfo(T)) {
+                .int => "an integer",
+                .bool => "a boolean",
+                .pointer => "a string",
+                .@"enum" => "an advertised value",
+                else => "an object matching its schema",
+            };
+            var type_reported = false;
+            if (comptime @typeInfo(T) == .int) {
+                if (value == .string) {
+                    try problems.append(arena, field_name ++ " must be an integer.");
+                    type_reported = true;
+                    if (std.fmt.parseInt(T, value.string, 10)) |number| {
+                        value = if (std.math.cast(i64, number)) |integer|
+                            .{ .integer = integer }
+                        else
+                            .{ .number_string = try arena.print("{d}", .{number}) };
+                    } else |_| {
+                        repairable = false;
+                    }
+                }
+            }
+            if (std.json.parseFromValueLeaky(field_type, arena, value, .{})) |_| {
+                if (comptime T == ShellInput) {
+                    var shell: std.json.ObjectMap = .empty;
+                    inline for (@typeInfo(ShellInput).@"struct".field_names) |member_name| {
+                        if (value.object.get(member_name)) |supplied| {
+                            try shell.put(arena, member_name, supplied);
+                        }
+                    }
+                    value = .{ .object = shell };
+                }
+            } else |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                if (!type_reported) try problems.append(arena, field_name ++ " must be " ++ expected ++ ".");
+                repairable = false;
+            }
+            try canonical.put(arena, field_name, value);
+        }
+    }
+    var candidate = std.json.parseFromValueLeaky(Input, arena, .{ .object = canonical }, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return correction_json(alloc, problems.items, null),
+    };
+    candidate.yield_time_ms = boundedYieldTime(candidate.action, candidate.yield_time_ms);
+    if (argument_problem(candidate)) |problem| {
+        try problems.append(arena, problem);
+        repairable = false;
+    }
+    if (!supports_tty and (canonical.contains("tty") or canonical.contains("shell") or canonical.contains("chars"))) {
+        try problems.append(arena, "Interactive Shell fields require a saved session.");
+        repairable = false;
+    }
+    if (problems.items.len == 0) {
+        try problems.append(arena, "Submit one Shell action.");
+    }
+    return correction_json(alloc, problems.items, if (repairable) canonical else null);
+}
+
+fn correction_json(
+    alloc: Allocator,
+    problems: []const []const u8,
+    candidate: ?std.json.ObjectMap,
+) Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    std.json.Stringify.value(.{ .@"error" = .{
+        .code = "invalid_shell_request",
+        .executed = false,
+        .problems = problems,
+        .instruction = if (candidate != null) @as(?[]const u8, "Call shell once using retry_with exactly.") else null,
+        .retry_with = if (candidate) |object| @as(?std.json.Value, .{ .object = object }) else null,
+    } }, .{ .emit_null_optional_fields = false }, &out.writer) catch return error.OutOfMemory;
+    return try out.toOwnedSlice();
+}
+
+fn argument_problem(input: Input) ?[]const u8 {
+    switch (input.action) {
+        .run => {
+            const command = input.command orelse return "command is required for run.";
+            if (command.len == 0 or command.len > terminal_contracts.max_command_bytes) return "command must contain 1-65536 bytes.";
+            if (input.timeout_ms == 0) return "timeout_ms must be at least 1; choose the intended deadline.";
+            if (input.profile != null and input.shell != null) return "Choose either profile or shell.";
+            if (!input.tty and input.shell != null) return "shell applies only with tty=true; remove shell for an ordinary command, or set tty=true for an interactive terminal.";
+        },
+        .interact => {
+            if (input.chars) |chars| {
+                if (chars.len > terminal_contracts.max_write_bytes) return "chars exceed 65536 bytes.";
+            }
+        },
+        .stop => {},
+    }
+    return null;
+}
+
+fn normalizeCompositeArgument(
+    alloc: Allocator,
+    root: *std.json.Value,
+    field_name: []const u8,
+) !void {
+    const value = root.object.getPtr(field_name) orelse return;
+    try tool_args.normalizeCompositeObjectValue(alloc, value);
+}
+
+fn inputDeinit(ptr: *anyopaque, alloc: Allocator) void {
+    const input: *OwnedInput = @ptrCast(@alignCast(ptr));
+    input.deinit(alloc);
+    alloc.destroy(input);
+}
+
+fn elideKnownNullFields(object: *std.json.ObjectMap) void {
+    for (public_field_names[1..]) |field_name| {
+        const value = object.get(field_name) orelse continue;
+        if (value == .null or
+            (value == .string and tool_args.isNullPlaceholderText(value.string)))
+        {
+            _ = object.orderedRemove(field_name);
+        }
+    }
+}
+
+const ActionFieldCorrectionScratch = struct {
+    invalid_fields: std.ArrayList([]const u8) = .empty,
+    missing_fields: [public_field_names.len][]const u8 = undefined,
+    conflicts: [public_field_names.len]tool_result_errors.TerminalActionFieldConflict = undefined,
+
+    fn deinit(self: *ActionFieldCorrectionScratch, alloc: Allocator) void {
+        self.invalid_fields.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+fn actionFieldCorrection(
+    alloc: Allocator,
+    action: Action,
+    object: std.json.ObjectMap,
+    scratch: *ActionFieldCorrectionScratch,
+) Allocator.Error!?tool_result_errors.TerminalActionFieldCorrection {
+    const field_contract = actionFieldContract(action);
+    try scratch.invalid_fields.ensureTotalCapacity(alloc, object.count());
+    var fields = object.iterator();
+    while (fields.next()) |entry| {
+        var allowed = false;
+        for (field_contract.allowed) |name| {
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) scratch.invalid_fields.appendAssumeCapacity(entry.key_ptr.*);
+    }
+    sort_utils.sort(
+        []const u8,
+        scratch.invalid_fields.items,
+        {},
+        struct {
+            fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+                return std.mem.order(u8, left, right) == .lt;
+            }
+        }.lessThan,
+    );
+    var missing_count: usize = 0;
+    for (field_contract.required) |name| {
+        if (object.get(name) != null) continue;
+        scratch.missing_fields[missing_count] = name;
+        missing_count += 1;
+    }
+    var conflict_count: usize = 0;
+    for (field_contract.conflicts) |conflict| {
+        if (object.get(conflict[0]) == null or object.get(conflict[1]) == null) continue;
+        scratch.conflicts[conflict_count] = conflict;
+        conflict_count += 1;
+    }
+    if (scratch.invalid_fields.items.len == 0 and
+        missing_count == 0 and
+        conflict_count == 0)
+    {
+        return null;
+    }
+    return .{
+        .action = @tagName(action),
+        .invalid_fields = scratch.invalid_fields.items,
+        .missing_fields = scratch.missing_fields[0..missing_count],
+        .allowed_fields = field_contract.allowed,
+        .conflicts = scratch.conflicts[0..conflict_count],
+    };
+}
+
+pub fn validate(
+    ctx: tool_dispatch.DispatchContext,
+    erased: tool_dispatch.ToolInput,
+) tool_dispatch.DispatchError!?[]u8 {
+    const input = erased.as(OwnedInput).value;
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer mem_utils.deinit_arena(arena_state);
+    const arena = arena_state.allocator();
+    return switch (input.action) {
+        .run => validateRun(ctx, arena, input),
+        .interact => validateInteract(ctx, input),
+        .stop => null,
+    };
+}
+
+fn validateInteract(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!?[]u8 {
+    if (argument_problem(input)) |problem| return try ctx.allocator.dupe(u8, problem);
+    return null;
+}
+
+fn validateRun(
+    ctx: tool_dispatch.DispatchContext,
+    arena: Allocator,
+    input: Input,
+) tool_dispatch.DispatchError!?[]u8 {
+    if (argument_problem(input)) |problem| return try ctx.allocator.dupe(u8, problem);
+    _ = resolveCwd(arena, ctx, input.cwd) catch |err| {
+        return try ctx.allocator.print(
+            "shell run cwd is invalid: {s}",
+            .{@errorName(err)},
+        );
+    };
+    if (!input.tty) {
+        _ = commandEnvironment(arena, ctx, input.profile) catch |err| {
+            return try ctx.allocator.print(
+                "shell run profile is invalid: {s}",
+                .{@errorName(err)},
+            );
+        };
+    }
+    return null;
+}
+
+pub fn call(
+    ctx: tool_dispatch.DispatchContext,
+    erased: tool_dispatch.ToolInput,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const input = erased.as(OwnedInput).value;
+    return switch (input.action) {
+        .run => callRun(ctx, runInputFor(ctx, input)),
+        .interact => callInteract(ctx, input),
+        .stop => callStop(ctx, input),
+    };
+}
+
+fn callRun(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    if (input.tty) {
+        return callTtyRun(ctx, input);
+    }
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const execution_authority = ctx.execution_authority orelse return unavailable(ctx);
+    const authority = switch (execution_authority) {
+        .run_command => |value| value,
+        else => return unavailable(ctx),
+    };
+    const command = input.command orelse return unavailable(ctx);
+    // Admission never lets a remembered grant authorize a reload, so the
+    // command runs under the startup files its approval was given for.
+    if (input.reload) shell_snapshot.processOwner().markDirty(.agent_reload);
+    var request_arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer mem_utils.deinit_arena(request_arena_state);
+    const request_arena = request_arena_state.allocator();
+    const cwd = resolveCwd(request_arena, ctx, input.cwd) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .failure = try ctx.allocator.print(
+            "shell run cwd is invalid: {s}",
+            .{@errorName(err)},
+        ) };
+    };
+    const environment = commandEnvironment(
+        request_arena,
+        ctx,
+        input.profile,
+    ) catch |err| {
+        return .{ .failure = try ctx.allocator.print(
+            "shell run profile is invalid: {s}",
+            .{@errorName(err)},
+        ) };
+    };
+    var execution_id_buffer: [64]u8 = undefined;
+    const execution_id = runtime.generatedId(&execution_id_buffer) catch |err|
+        return runtimeFailure(ctx, err);
+    // While this call runs, its command can reach the session's MCP tools
+    // with `fx mcp call`, as this agent (`mcp_call_bridge.zig`).
+    const bridge_registration: ?*mcp_call_bridge.Registration = if (comptime mcp_call_bridge.supported) registration: {
+        const capability = ctx.mcp_call_capability orelse break :registration null;
+        break :registration mcp_call_bridge.register(capability) catch |err| {
+            debug_trace.logf("mcp-call", "shell call not registered with the bridge err={s}", .{@errorName(err)});
+            break :registration null;
+        };
+    } else null;
+    defer if (comptime mcp_call_bridge.supported) if (bridge_registration) |registration| mcp_call_bridge.unregister(registration);
+    var prepared = runtime.startCaptured(ctx.allocator, .{
+        .execution_id = execution_id,
+        .command = command,
+        .cwd = cwd,
+        .environment = environment,
+        .authority = authority,
+        .extra_environment = if (bridge_registration) |registration| registration.environment() else &.{},
+        .yield_hold = if (bridge_registration) |registration| &registration.hold else null,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .timeout_ms = if (input.timeout_ms) |value|
+            std.math.cast(usize, value) orelse return unavailable(ctx)
+        else
+            ctx.command_timeout_ms,
+        .command_artifact_dir = ctx.command_artifact_dir,
+        .replay_capability = ctx.session_child_capability,
+        .output_chunk_lifecycle_id = ctx.output_chunk_lifecycle_id,
+        .output_chunk_ctx = ctx.output_chunk_ctx,
+        .on_output_chunk = ctx.on_output_chunk,
+        .yield_time_ms = input.yield_time_ms,
+        .cancel_flag = ctx.cancel_flag,
+        .tool_yield_flag = ctx.tool_yield_flag,
+    }) catch |err| {
+        if (err == error.Cancelled and
+            ctx.cancel_flag != null and
+            ctx.cancel_flag.?.load(.seq_cst))
+        {
+            return error.Cancelled;
+        }
+        return runtimeFailure(ctx, err);
+    };
+    defer prepared.deinit(ctx.allocator);
+    const result = try finishPrepared(withoutSteeringYield(ctx, input.yield_time_ms), runtime, &prepared, .run);
+    const noticed = attachSnapshotNotice(ctx.allocator, result) catch |err| {
+        result.deinit(ctx.allocator);
+        return err;
+    };
+    if (!mcpCallNoticeDue(prepared.snapshot.state, commandCalledBridge(bridge_registration))) return noticed;
+    return attachResultField(ctx.allocator, noticed, "mcp_call_notice", mcp_call_notice) catch |err| {
+        noticed.deinit(ctx.allocator);
+        return err;
+    };
+}
+
+/// Adds the pending shell snapshot fallback notice to a JSON run result, so
+/// the model and ACP clients learn once that startup files run per command.
+fn attachSnapshotNotice(
+    alloc: Allocator,
+    result: tool_dispatch.ToolResult,
+) Allocator.Error!tool_dispatch.ToolResult {
+    if (!resultTakesField(result)) return result;
+    const notice = (try shell_snapshot.processOwner().takeResultNotice(alloc)) orelse return result;
+    defer alloc.free(notice);
+    return attachResultField(alloc, result, "notice", notice);
+}
+
+/// Whether a result is a JSON object body that `attachResultField` can extend.
+fn resultTakesField(result: tool_dispatch.ToolResult) bool {
+    const body = switch (result) {
+        .success, .failure => |bytes| bytes,
+        .rich => return false,
+    };
+    return body.len > 0 and body[body.len - 1] == '}';
+}
+
+/// Adds the string field `name` to a JSON result and frees the old body only when it adds the field.
+fn attachResultField(
+    alloc: Allocator,
+    result: tool_dispatch.ToolResult,
+    comptime name: []const u8,
+    value: []const u8,
+) Allocator.Error!tool_dispatch.ToolResult {
+    const body = switch (result) {
+        .success, .failure => |bytes| bytes,
+        .rich => return result,
+    };
+    const updated = (try withJsonStringField(alloc, body, name, value)) orelse return result;
+    alloc.free(body);
+    return switch (result) {
+        .success => .{ .success = updated },
+        .failure => .{ .failure = updated },
+        .rich => unreachable,
+    };
+}
+
+fn commandCalledBridge(registration: ?*mcp_call_bridge.Registration) bool {
+    if (comptime !mcp_call_bridge.supported) return false;
+    const live = registration orelse return false;
+    return mcp_call_bridge.commandCalled(live);
+}
+
+fn mcpCallNoticeDue(state: managed_execution.SnapshotState, command_called: bool) bool {
+    return state == .running and command_called;
+}
+
+/// Returns a copy of the JSON object `body` with the string field `name`,
+/// a plain key, set to `value` at its end, or null when `body` does not end
+/// in `}`. The caller owns the copy; `body` is left as it is.
+fn withJsonStringField(
+    alloc: Allocator,
+    body: []const u8,
+    comptime name: []const u8,
+    value: []const u8,
+) Allocator.Error!?[]u8 {
+    if (body.len == 0 or body[body.len - 1] != '}') return null;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    out.writer.writeAll(body[0 .. body.len - 1]) catch return error.OutOfMemory;
+    out.writer.writeAll(",\"" ++ name ++ "\":") catch return error.OutOfMemory;
+    std.json.Stringify.value(value, .{}, &out.writer) catch return error.OutOfMemory;
+    out.writer.writeByte('}') catch return error.OutOfMemory;
+    return try out.toOwnedSlice();
+}
+
+const steering_notice = "New steering arrived, so this call returned while the command keeps running. " ++
+    "Read the steering first. The session stays yours: use interact with this session_id to follow it, or stop to end it.";
+
+const mcp_call_notice = "This command used fx mcp call, and this call returned while it still runs, so its later fx mcp call commands exit 3. If it still needs them, stop it. " ++
+    mcp_call_capability.short_checks_advice;
+
+fn steerYieldRequested(ctx: tool_dispatch.DispatchContext) bool {
+    const flag = ctx.tool_yield_flag orelse return false;
+    return flag.load(.seq_cst);
+}
+
+/// Adds `steering_notice` to a JSON result of a command that returned
+/// running for steering. Frees `body` only when it returns the new one.
+fn attachSteeringNotice(alloc: Allocator, body: []u8) Allocator.Error![]u8 {
+    const updated = (try withJsonStringField(alloc, body, "steering_notice", steering_notice)) orelse return body;
+    alloc.free(body);
+    return updated;
+}
+
+/// `attachSteeringNotice` for a result of `prepared` when its command still
+/// runs and steering asked it to yield. When `started_here` is set, the
+/// call started the command, so steering moved a command of this turn to
+/// the background: it is marked as detached by steering in this call's
+/// turn, and an explicit cancel of that turn stops it
+/// (`stopSteeringDetached`). An `interact` poll passes false, so a command
+/// the model left in the background itself, or one from an earlier turn,
+/// keeps running. On failure it gives up the result's delivery, and the
+/// caller still owns `body`.
+fn noteSteeringYield(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    prepared: *managed_execution.PreparedSnapshot,
+    body: []u8,
+    started_here: bool,
+) Allocator.Error![]u8 {
+    if (prepared.snapshot.state != .running or !steerYieldRequested(ctx)) return body;
+    const updated = attachSteeringNotice(ctx.allocator, body) catch |err| {
+        runtime.cancelDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        ) catch {};
+        return err;
+    };
+    if (!started_here) return updated;
+    if (ctx.output_chunk_lifecycle_id) |lifecycle_id| {
+        runtime.markSteeringDetached(prepared.snapshot.execution_id, lifecycle_id.turn_id);
+    }
+    return updated;
+}
+
+/// A call that asked to return at once (`yield_time_ms` 0) never waited, so
+/// steering did not move its command to the background: its result gets no
+/// steering notice, and a cancel of the turn leaves the command running.
+fn withoutSteeringYield(ctx: tool_dispatch.DispatchContext, yield_time_ms: u32) tool_dispatch.DispatchContext {
+    var result = ctx;
+    if (yield_time_ms == 0) result.tool_yield_flag = null;
+    return result;
+}
+
+/// The wait a `run` gets on this host. ACP steering does not end a running
+/// command's wait (it never raises `tool_yield_flag`), so on `fx acp` a
+/// run keeps the 30 s cap that bounds how long a steer waits behind it.
+/// The terminal ends the wait when the user steers, and `fx ask` has no
+/// steering, so both keep the longer wait.
+fn runYieldTimeFor(role: terminal_contracts.TransportRole, requested_ms: u32) u32 {
+    return switch (role) {
+        .acp => @min(requested_ms, managed_contract.max_yield_time_ms),
+        .interactive, .headless => requested_ms,
+    };
+}
+
+fn runInputFor(ctx: tool_dispatch.DispatchContext, input: Input) Input {
+    var result = input;
+    result.yield_time_ms = runYieldTimeFor(ctx.terminal_transport_role, input.yield_time_ms);
+    return result;
+}
+
+/// Stops every command that steering moved to the background during turn
+/// `turn_id`, after an explicit cancel of that turn, the way the `stop`
+/// action does: gracefully first, then by force if the command still runs.
+/// Commands the model left in the background itself and those of other
+/// turns keep running. `ctx` must not carry the cancelled turn's cancel
+/// flag, or the stop itself would be cancelled.
+///
+/// The stops run in the background, as tasks of the command runtime's
+/// background group (`managed_execution.Runtime.startBackground`), so the
+/// call returns at once and the agent takes its next prompt while they run.
+/// The last task to finish writes the "stops done" trace line. Shutdown of
+/// the runtime awaits the tasks, so an agent or instance close still stops
+/// every command. Process exit also cancels them, since it closes every
+/// terminal next, and each stop it cuts short is logged as dropped. When a
+/// close already began, or no thread can take a task, the stops run on the
+/// caller, up to `max_parallel_detached_stops` at once, before it returns.
+///
+/// Up to `max_parallel_detached_stops` stops run at once, so the 2 s waits
+/// of stubborn tty commands overlap. Their graceful closes do not: the
+/// terminal client runs every write, resize, signal and close in one
+/// admission order, so each tty command that ignores SIGTERM still adds its
+/// 800 ms close, and each further group of `max_parallel_detached_stops`
+/// adds another 2 s wait. A stop the busy terminal client refuses runs
+/// again (`max_busy_terminal_attempts`), which can add up to about 3.1 s
+/// for each command; process exit ends those waits at once.
+pub fn stopSteeringDetached(
+    ctx: tool_dispatch.DispatchContext,
+    turn_id: u64,
+) Allocator.Error!void {
+    const runtime = ctx.managed_executions orelse return;
+    const job = try DetachedStopJob.create(ctx, runtime, turn_id);
+    if (job.ids.len == 0) {
+        job.finish();
+        return;
+    }
+    const tasks = @min(job.ids.len, max_parallel_detached_stops);
+    job.tasks.store(tasks, .release);
+    var started: usize = 0;
+    const refused = while (started < tasks) : (started += 1) {
+        runtime.startBackground(DetachedStopJob.run, .{job}) catch |err| break err;
+    } else return;
+    // The tasks that started take every command left in the queue; the
+    // ones that did not start never run, so they give up their share.
+    debug_trace.logf(
+        "shell",
+        "steering-detached command stops started turn_id={d} tasks={d} of={d} err={s}",
+        .{ turn_id, started, tasks, @errorName(refused) },
+    );
+    if (started > 0) {
+        if (job.tasks.fetchSub(tasks - started, .acq_rel) == tasks - started) job.finish();
+        return;
+    }
+    // No task started. Only process exit, which closes the terminals
+    // itself, drops the commands.
+    if (runtime.backgroundCancelled()) {
+        job.tasks.store(1, .release);
+        job.dropAll();
+        return;
+    }
+    // After an agent or instance close began, or when no thread can take a
+    // task, the stops still run, on the caller: the close does not end the
+    // commands. Up to `max_parallel_detached_stops` run at once, as tasks of
+    // a group this call awaits, so the close takes no longer than the stops
+    // of one group. The last task frees the job.
+    const io = io_mod.getIo();
+    var group: std.Io.Group = .init;
+    for (0..tasks) |_| group.async(io, DetachedStopJob.run, .{job});
+    group.await(io) catch |err| debug_trace.logf(
+        "shell",
+        "steering-detached command stops awaited on the caller turn_id={d} err={s}",
+        .{ turn_id, @errorName(err) },
+    );
+}
+
+/// Each running stop holds one terminal client request at a time. The
+/// client runs at most 32 requests at once for all agents and refuses the
+/// rest, so one cancel uses at most this many and leaves room for the others.
+const max_parallel_detached_stops = 8;
+
+/// The commands of one `stopSteeringDetached` and what their stops need
+/// after the call that took them returns. The call's context borrows the
+/// turn's state, so the job keeps its own copies: of the strings, and of
+/// the session's side-file capability. The command runtime and the terminal
+/// client outlive it, since the runtime's shutdown awaits its tasks before
+/// either is torn down. Its tasks take the commands one by one, in list
+/// order, and the last task to finish frees it.
+const DetachedStopJob = struct {
+    alloc: Allocator,
+    runtime: *managed_execution.Runtime,
+    /// The context of each stop, with `allocator` replaced per stop.
+    ctx: tool_dispatch.DispatchContext,
+    capability: ?session_child_store.SessionChildCapability,
+    ids: [][]u8,
+    turn_id: u64,
+    next: std.atomic.Value(usize) = .init(0),
+    /// Tasks that still run.
+    tasks: std.atomic.Value(usize) = .init(0),
+
+    fn create(
+        source: tool_dispatch.DispatchContext,
+        runtime: *managed_execution.Runtime,
+        turn_id: u64,
+    ) Allocator.Error!*DetachedStopJob {
+        // Thread-safe, unlike the caller's allocator, which may be an arena
+        // that only its own thread may use.
+        const alloc = source.lifecycle_allocator;
+        const job = try alloc.create(DetachedStopJob);
+        errdefer alloc.destroy(job);
+        job.* = .{
+            .alloc = alloc,
+            .runtime = runtime,
+            .ctx = .{
+                .allocator = alloc,
+                .lifecycle_allocator = alloc,
+                .scratch_allocator = source.scratch_allocator,
+                .managed_executions = runtime,
+                .ephemeral_command_replay = runtime.replayStore(),
+                .terminal_client = source.terminal_client,
+                .terminal_transport_role = source.terminal_transport_role,
+                .max_command_output_bytes = source.max_command_output_bytes,
+                .max_tool_result_bytes = source.max_tool_result_bytes,
+                // Process exit sets it, which ends the stops' terminal
+                // requests.
+                .cancel_flag = runtime.backgroundCancelFlag(),
+            },
+            .capability = null,
+            .ids = &.{},
+            .turn_id = turn_id,
+        };
+        errdefer job.freeCopies();
+        job.ctx.workspace_root = try alloc.dupe(u8, source.workspace_root);
+        if (source.terminal_owner_session_id) |id| job.ctx.terminal_owner_session_id = try alloc.dupe(u8, id);
+        if (source.session_child_capability) |capability| {
+            job.capability = capability.duplicate(alloc) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Without it, a tty stop is refused and logged.
+                else => blk: {
+                    debug_trace.logf(
+                        "shell",
+                        "steering-detached command stops lost the session capability turn_id={d} err={s}",
+                        .{ turn_id, @errorName(err) },
+                    );
+                    break :blk null;
+                },
+            };
+            if (job.capability) |*owned| job.ctx.session_child_capability = owned;
+        }
+        job.ids = try runtime.takeSteeringDetached(alloc, turn_id);
+        return job;
+    }
+
+    fn freeCopies(self: *DetachedStopJob) void {
+        for (self.ids) |id| self.alloc.free(id);
+        self.alloc.free(self.ids);
+        if (self.capability) |*capability| capability.deinit();
+        if (self.ctx.terminal_owner_session_id) |id| self.alloc.free(@constCast(id));
+        self.alloc.free(@constCast(self.ctx.workspace_root));
+    }
+
+    /// Writes the done trace line and frees the job.
+    fn finish(self: *DetachedStopJob) void {
+        debug_trace.logf(
+            "shell",
+            "steering-detached command stops done turn_id={d} count={d}",
+            .{ self.turn_id, self.ids.len },
+        );
+        self.freeCopies();
+        self.alloc.destroy(self);
+    }
+
+    /// Stops the next commands until none is left, then leaves the job,
+    /// which the last task frees. Each stop gets its own arena. After
+    /// process exit begins, each command left is logged as dropped: exit
+    /// closes its terminal itself.
+    fn run(self: *DetachedStopJob) void {
+        while (true) {
+            const index = self.next.fetchAdd(1, .monotonic);
+            if (index >= self.ids.len) break;
+            const session_id = self.ids[index];
+            if (self.runtime.backgroundCancelled()) {
+                logDroppedStop(session_id, self.turn_id, "runtime_stopping");
+                continue;
+            }
+            var arena = std.heap.ArenaAllocator.init(self.alloc);
+            defer arena.deinit();
+            var ctx = self.ctx;
+            ctx.allocator = arena.allocator();
+            stopOneSteeringDetached(ctx, session_id, self.turn_id) catch |err| {
+                logDroppedStop(session_id, self.turn_id, @errorName(err));
+            };
+        }
+        if (self.tasks.fetchSub(1, .acq_rel) == 1) self.finish();
+    }
+
+    /// Logs every command as dropped and frees the job, for a process exit
+    /// that began before any task started.
+    fn dropAll(self: *DetachedStopJob) void {
+        for (self.ids) |session_id| logDroppedStop(session_id, self.turn_id, "runtime_stopping");
+        self.finish();
+    }
+};
+
+/// The trace line for a steered command that fx leaves running: its forced
+/// stop gave up, or process exit cut its stop short or came before it ran.
+/// The cancel's own failure in `finalization.zig` is the only other writer
+/// of `dropped=background_command_stop`.
+fn logDroppedStop(session_id: []const u8, turn_id: u64, reason: []const u8) void {
+    debug_trace.logf(
+        "shell",
+        "steering-detached command stop failed session_id={s} turn_id={d} err={s} dropped=background_command_stop",
+        .{ session_id, turn_id, reason },
+    );
+}
+
+/// Stops `session_id`, a command steering moved to the background in turn
+/// `turn_id`: gracefully, then by force if it still runs.
+fn stopOneSteeringDetached(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    turn_id: u64,
+) Allocator.Error!void {
+    debug_trace.logf(
+        "shell",
+        "stopping steering-detached command session_id={s} turn_id={d} reason=turn_cancelled",
+        .{ session_id, turn_id },
+    );
+    var cause: DetachedStopCause = .{};
+    switch (try stopDetachedOnce(ctx, session_id, false, &cause)) {
+        .ended => return,
+        .not_ended => debug_trace.logf(
+            "shell",
+            "graceful stop did not end steering-detached command session_id={s} turn_id={d} failure={s} next=force",
+            .{ session_id, turn_id, cause.text() },
+        ),
+        .refused => debug_trace.logf(
+            "shell",
+            "graceful stop of steering-detached command never ran session_id={s} turn_id={d} reason={s} next=force",
+            .{ session_id, turn_id, cause.text() },
+        ),
+    }
+    cause = .{};
+    // Process exit cancels the stop's terminal requests and its retry
+    // waits, and then closes the terminal itself.
+    switch (try stopDetachedOnce(ctx, session_id, true, &cause)) {
+        .ended => {},
+        .not_ended => if (exitBegan(ctx)) logDroppedStop(session_id, turn_id, "runtime_stopping") else debug_trace.logf(
+            "shell",
+            "steering-detached command stop failed session_id={s} turn_id={d} failure={s}",
+            .{ session_id, turn_id, cause.text() },
+        ),
+        // The busy client kept refusing the forced stop, or exit cut it short.
+        .refused => logDroppedStop(session_id, turn_id, cause.text()),
+    }
+}
+
+/// What one `stopDetachedOnce` did: the command ended, the stop ran and
+/// left it running or failed, or the busy terminal client refused every run.
+const DetachedStopOutcome = enum { ended, not_ended, refused };
+
+/// Why a stop did not end its command: the failure code or error name, or
+/// `none` when the stop gave no reason.
+const DetachedStopCause = struct {
+    buffer: [64]u8 = undefined,
+    len: usize = 0,
+
+    fn set(self: *DetachedStopCause, reason: []const u8) void {
+        self.len = @min(reason.len, self.buffer.len);
+        @memcpy(self.buffer[0..self.len], reason[0..self.len]);
+    }
+
+    fn text(self: *const DetachedStopCause) []const u8 {
+        return if (self.len == 0) "none" else self.buffer[0..self.len];
+    }
+};
+
+/// How many times a terminal request at a turn's end, such as a
+/// steering-detached stop or a lease release, runs while the terminal
+/// client refuses it as busy, and the first wait between two runs, which
+/// doubles each time: 50, 100, 200, 400 and 800 ms, about 1.5 s for one
+/// request. A command whose graceful and forced stops are both refused
+/// every time takes about 3.1 s.
+const max_busy_terminal_attempts = 6;
+const busy_terminal_first_backoff_ms = 50;
+
+/// Whether process exit began for the command runtime of `ctx`. Exit
+/// closes every terminal itself, so work for one is dropped then.
+fn exitBegan(ctx: tool_dispatch.DispatchContext) bool {
+    const runtime = ctx.managed_executions orelse return false;
+    return runtime.backgroundCancelled();
+}
+
+/// How often a retry wait checks whether process exit began.
+const busy_wait_exit_check_ms = 10;
+
+/// The wait before run `attempt` + 1 of a request the busy client refused
+/// on run `attempt`, or null when that was the last run.
+fn busyRetryDelayMs(attempt: usize) ?u64 {
+    if (attempt >= max_busy_terminal_attempts) return null;
+    return @as(u64, busy_terminal_first_backoff_ms) << @intCast(attempt - 1);
+}
+
+/// Waits `delay_ms` before a refused request runs again. Returns false, at
+/// once, when process exit begins before or during the wait, so exit never
+/// waits out a retry.
+fn waitBusyBackoff(ctx: tool_dispatch.DispatchContext, delay_ms: u64) bool {
+    const deadline_ms = io_mod.milliTimestamp() + @as(i64, @intCast(delay_ms));
+    while (true) {
+        if (exitBegan(ctx)) return false;
+        const left_ms = deadline_ms - io_mod.milliTimestamp();
+        if (left_ms <= 0) return true;
+        io_mod.sleep(@as(u64, @intCast(@min(left_ms, busy_wait_exit_check_ms))) * std.time.ns_per_ms);
+    }
+}
+
+/// Why `retryWhileBusy` stopped running a request.
+const BusyGiveUp = enum { terminal_busy, runtime_stopping };
+
+/// How a request that `retryWhileBusy` runs shows in its trace lines.
+const BusyRequest = struct {
+    /// What the request does, such as "terminal lease release".
+    what: []const u8,
+    session_id: []const u8,
+    /// Shown as `force=` for a stop.
+    force: ?bool = null,
+    /// The `dropped=` tag of the give-up line, when giving up drops the work.
+    dropped: ?[]const u8 = null,
+
+    fn forceText(self: BusyRequest) []const u8 {
+        const force = self.force orelse return "";
+        return if (force) " force=true" else " force=false";
+    }
+
+    fn droppedText(self: BusyRequest, buffer: *[64]u8) []const u8 {
+        const tag = self.dropped orelse return "";
+        return std.mem.print(buffer, " dropped={s}", .{tag}) catch "";
+    }
+};
+
+/// Runs `runner.attempt()` until it returns a result, and again after each
+/// busy refusal (null) with the waits of `busyRetryDelayMs`. Returns the
+/// result, or why it gave up: the client stayed busy for every run, or
+/// process exit began during a wait. Writes the refused and give-up trace
+/// lines; `runner` writes its own.
+fn retryWhileBusy(
+    comptime Result: type,
+    ctx: tool_dispatch.DispatchContext,
+    request: BusyRequest,
+    runner: anytype,
+) !union(enum) { done: Result, gave_up: BusyGiveUp } {
+    var attempt: usize = 1;
+    while (true) : (attempt += 1) {
+        if (try runner.attempt()) |result| return .{ .done = result };
+        const give_up: BusyGiveUp = give_up: {
+            const delay_ms = busyRetryDelayMs(attempt) orelse break :give_up .terminal_busy;
+            debug_trace.logf(
+                "shell",
+                "{s} refused session_id={s}{s} attempt={d} reason=terminal_busy retry_in_ms={d}",
+                .{ request.what, request.session_id, request.forceText(), attempt, delay_ms },
+            );
+            if (waitBusyBackoff(ctx, delay_ms)) continue;
+            break :give_up .runtime_stopping;
+        };
+        var dropped_buffer: [64]u8 = undefined;
+        debug_trace.logf(
+            "shell",
+            "{s} gave up session_id={s}{s} attempts={d} reason={s}{s}",
+            .{ request.what, request.session_id, request.forceText(), attempt, @tagName(give_up), request.droppedText(&dropped_buffer) },
+        );
+        return .{ .gave_up = give_up };
+    }
+}
+
+/// Runs the `stop` action on `session_id` and reports what it did. The
+/// terminal client runs at most 32 requests for all agents and refuses the
+/// rest with a retryable failure; such a stop runs again after a short
+/// wait, up to `max_busy_terminal_attempts` times, so a busy client does
+/// not leave the command running after the cancel. When the command does
+/// not end, `cause` says why.
+fn stopDetachedOnce(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    force: bool,
+    cause: *DetachedStopCause,
+) Allocator.Error!DetachedStopOutcome {
+    var runner: DetachedStopRun = .{ .ctx = ctx, .session_id = session_id, .force = force, .cause = cause };
+    const request: BusyRequest = .{ .what = "steering-detached command stop", .session_id = session_id, .force = force };
+    return switch (try retryWhileBusy(DetachedStopOutcome, ctx, request, &runner)) {
+        .done => |outcome| outcome,
+        .gave_up => |give_up| refused: {
+            cause.set(@tagName(give_up));
+            break :refused .refused;
+        },
+    };
+}
+
+/// One run of a steered command's `stop` for `stopDetachedOnce`.
+const DetachedStopRun = struct {
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    force: bool,
+    cause: *DetachedStopCause,
+
+    /// What the stop did, or null when the busy client refused it.
+    fn attempt(self: *DetachedStopRun) Allocator.Error!?DetachedStopOutcome {
+        const force_name = if (self.force) "true" else "false";
+        const result = callStop(self.ctx, .{
+            .action = .stop,
+            .session_id = self.session_id,
+            .force = self.force,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                debug_trace.logf(
+                    "shell",
+                    "steering-detached command stop errored session_id={s} force={s} err={s}",
+                    .{ self.session_id, force_name, @errorName(err) },
+                );
+                self.cause.set(@errorName(err));
+                return .not_ended;
+            },
+        };
+        defer result.deinit(self.ctx.allocator);
+        if (result == .success) {
+            debug_trace.logf(
+                "shell",
+                "stopped steering-detached command session_id={s} force={s} ended=true",
+                .{ self.session_id, force_name },
+            );
+            return .ended;
+        }
+        var code_buffer: [64]u8 = undefined;
+        const failure = stopFailure(self.ctx.allocator, result, &code_buffer);
+        if (failure.busy) return null;
+        debug_trace.logf(
+            "shell",
+            "stopped steering-detached command session_id={s} force={s} ended=false failure={s}",
+            .{ self.session_id, force_name, failure.code },
+        );
+        self.cause.set(failure.code);
+        return .not_ended;
+    }
+};
+
+/// What a failed stop says about itself: its error code, or "none", and
+/// whether the terminal client refused it because it was busy, which is the
+/// only failure a stop runs again for. A cloned terminal failure
+/// (`{"failure":{...}}`) is busy when `StructuredError.isBusyRefusal` says
+/// so. A shell failure (`{"error":{...}}`) is busy when it is the
+/// retryable `TerminalCapacityExceeded`, which the tty observer gives only
+/// for such a refusal.
+const StopFailure = struct { busy: bool, code: []const u8 };
+
+/// `code_buffer` holds the returned code.
+fn stopFailure(alloc: Allocator, result: tool_dispatch.ToolResult, code_buffer: *[64]u8) StopFailure {
+    const none: StopFailure = .{ .busy = false, .code = "none" };
+    const body = switch (result) {
+        .failure => |body| body,
+        .success, .rich => return none,
+    };
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch return none;
+    defer parsed.deinit();
+    if (parsed.value != .object) return none;
+    for ([_][]const u8{ "failure", "error" }) |key| {
+        const inner = parsed.value.object.get(key) orelse continue;
+        if (inner != .object) continue;
+        const code_value = inner.object.get("code") orelse continue;
+        if (code_value != .string or code_value.string.len > code_buffer.len) continue;
+        const code = code_buffer[0..code_value.string.len];
+        @memcpy(code, code_value.string);
+        const retryable = if (inner.object.get("retryable")) |value| value == .bool and value.bool else false;
+        const busy = if (std.mem.eql(u8, key, "failure")) busy: {
+            const terminal_code = std.meta.stringToEnum(terminal_contracts.StructuredErrorCode, code) orelse break :busy false;
+            const action_value = inner.object.get("action") orelse break :busy false;
+            if (action_value != .string) break :busy false;
+            const action = std.meta.stringToEnum(terminal_contracts.Action, action_value.string) orelse break :busy false;
+            const failure: terminal_contracts.StructuredError = .{ .action = action, .code = terminal_code, .retryable = retryable };
+            break :busy failure.isBusyRefusal();
+        } else retryable and std.mem.eql(u8, code, @errorName(error.TerminalCapacityExceeded));
+        return .{ .busy = busy, .code = code };
+    }
+    return none;
+}
+
+fn callInteract(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const session_id = input.session_id orelse return unavailable(ctx);
+    switch (ensureOwnedTtyIndexed(ctx, runtime, session_id) catch |err|
+        return runtimeFailure(ctx, err)) {
+        .indexed => {},
+        .ended_with_owner => return terminalEndedWithOwner(ctx, session_id),
+    }
+    const chars = input.chars orelse "";
+    const yield_time_ms = effective_interact_yield_time(chars.len != 0, input.yield_time_ms);
+    if (runtime.isTombstone(session_id)) {
+        if (chars.len != 0) return runtimeFailure(ctx, error.ExecutionTerminal);
+        if (runtime.retainedTerminalSnapshot(ctx.allocator, session_id) catch |err|
+            return runtimeFailure(ctx, err)) |retained|
+        {
+            var prepared = retained;
+            defer prepared.deinit(ctx.allocator);
+            return finishPrepared(ctx, runtime, &prepared, .command);
+        }
+    }
+    if (runtime.backendFor(session_id) == .tty) {
+        return callTtyInteract(ctx, input, yield_time_ms);
+    }
+    if (chars.len != 0) return runtimeFailure(ctx, error.InvalidBackend);
+    var prepared = runtime.waitOrYield(
+        ctx.allocator,
+        session_id,
+        yield_time_ms,
+        ctx.cancel_flag,
+        ctx.tool_yield_flag,
+    ) catch |err| return runtimeFailure(ctx, err);
+    defer prepared.deinit(ctx.allocator);
+    return finishPrepared(withoutSteeringYield(ctx, yield_time_ms), runtime, &prepared, .command);
+}
+
+fn callStop(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const session_id = input.session_id orelse return unavailable(ctx);
+    switch (ensureOwnedTtyIndexed(ctx, runtime, session_id) catch |err|
+        return runtimeFailure(ctx, err)) {
+        .indexed => {},
+        .ended_with_owner => return terminalEndedWithOwner(ctx, session_id),
+    }
+    if (runtime.isTombstone(session_id)) {
+        if (runtime.retainedTerminalSnapshot(ctx.allocator, session_id) catch |err|
+            return runtimeFailure(ctx, err)) |retained|
+        {
+            var prepared = retained;
+            defer prepared.deinit(ctx.allocator);
+            return finishPrepared(ctx, runtime, &prepared, .stop);
+        }
+    }
+    if (runtime.backendFor(session_id) == .tty) {
+        if (runtime.stateFor(session_id)) |state| {
+            if (state != .running) {
+                return finishTerminalTtyStop(ctx, runtime, session_id, state);
+            }
+        }
+        refreshTtyExecution(ctx, runtime, session_id, "") catch |err|
+            return runtimeFailure(ctx, err);
+        if (runtime.stateFor(session_id)) |state| {
+            if (state != .running) {
+                return finishTerminalTtyStop(ctx, runtime, session_id, state);
+            }
+        }
+        return callTtyStop(ctx, input);
+    }
+    var prepared = runtime.stop(
+        ctx.allocator,
+        session_id,
+        input.force,
+    ) catch |err| return runtimeFailure(ctx, err);
+    defer prepared.deinit(ctx.allocator);
+    return finishPrepared(ctx, runtime, &prepared, .stop);
+}
+
+const ParsedTerminalExecution = struct {
+    result: terminal_contracts.OwnedResult,
+
+    fn deinit(self: *ParsedTerminalExecution, alloc: Allocator) void {
+        self.result.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+fn callTtyRun(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const owner = ctx.session_child_capability orelse return unavailable(ctx);
+    const durable_session_id = ctx.terminal_owner_session_id orelse return unavailable(ctx);
+    const command = input.command orelse return unavailable(ctx);
+    const cwd = resolveCwd(ctx.allocator, ctx, input.cwd) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return runtimeFailure(ctx, err);
+    };
+    defer ctx.allocator.free(@constCast(cwd));
+    var shell_arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer mem_utils.deinit_arena(shell_arena_state);
+    var login_shell_buffer: [4096]u8 = undefined;
+    const configured = shell_resolver.configuredLoginShellInto(&login_shell_buffer);
+    const shell = ttyShell(shell_arena_state.allocator(), input, configured) catch |err|
+        return runtimeFailure(ctx, err);
+    const environment = shell_resolver.environmentForShellSpec(
+        shell_arena_state.allocator(),
+        configured,
+        shell,
+    ) catch |err| return runtimeFailure(ctx, err);
+    requireTtyShellAuthority(ctx, .{
+        .command = command,
+        .resolved_cwd = cwd,
+        .target_os = builtin.target.os.tag,
+        .environment = environment,
+        .execution_mode = .tty,
+    }) catch |err| return runtimeFailure(ctx, err);
+    runtime.reserveTtyCapacity() catch |err| return runtimeFailure(ctx, err);
+    var capacity_reserved = true;
+    defer if (capacity_reserved) runtime.releaseTtyCapacity();
+    var profile_user_buffer: [64]u8 = undefined;
+    const profile_user = terminal_identity.profileUser(&profile_user_buffer) orelse
+        return unavailable(ctx);
+    var persistence = terminal_operation.prepareStartPersistence(ctx.allocator, .{
+        .profile_user = profile_user,
+        .durable_session_id = durable_session_id,
+        .workspace_root = ctx.workspace_root,
+        .cwd = cwd,
+        .transport_role = ctx.terminal_transport_role,
+        .backend = .native,
+        .actor = .agent,
+        .controls = .full(),
+        .lifetime = .session,
+    }) catch |err| return runtimeFailure(ctx, err);
+    defer persistence.deinit();
+    // With a steering yield flag, the start returns once the command runs
+    // and a separate wait, which steering can end, waits for its exit.
+    // Cancelling the start itself would end the command.
+    const split_wait = ctx.tool_yield_flag != null and input.yield_time_ms != 0;
+    const request = terminal_contracts.ActionRequest{ .start = .{
+        .cwd = cwd,
+        .command = command,
+        .shell = shell,
+        .backend = .native,
+        .return_when = if (input.yield_time_ms == 0 or split_wait) .started else .exit,
+        .wait_ceiling_ms = @max(@as(u64, 1), input.yield_time_ms),
+        .timeout_ms = input.timeout_ms,
+        .persistence = persistence.view(),
+    } };
+    var executed = executeTerminal(ctx, request) catch |err|
+        return runtimeFailure(ctx, err);
+    defer executed.deinit(ctx.allocator);
+    const started = switch (executed.result.view()) {
+        .failure => return cloneTerminalFailure(ctx, executed.result.view()),
+        .success => |success| switch (success) {
+            .start => |value| value,
+            else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+        },
+    };
+    var session_owned = true;
+    defer if (session_owned) closeTtyBestEffort(ctx, started.session.session_id);
+    var initial_state = terminal_managed_observer.snapshotState(started.session, started.outcome);
+    if (split_wait and initial_state == .running) {
+        switch (try waitTtyExitOrYield(ctx, started.session.session_id, input.yield_time_ms)) {
+            .state => |state| initial_state = state,
+            .failure => |failure| return failure,
+        }
+    }
+    var observed = terminal_managed_observer.observe(
+        ttyObserverContext(ctx, runtime) orelse return unavailable(ctx),
+        started.session.session_id,
+        initial_state,
+        null,
+    ) catch |err| return runtimeFailure(ctx, err);
+    defer observed.deinit(ctx.allocator);
+    finalizeCompletedTty(ctx, started.session.session_id, observed.state) catch |err|
+        return runtimeFailure(ctx, err);
+    var prepared = runtime.registerTty(ctx.allocator, .{
+        .execution_id = started.session.session_id,
+        .command = command,
+        .cwd = cwd,
+        .state = observed.state,
+        .output = observed.output,
+        .replay_output = observed.replay_output,
+        .next_cursor = observed.next_cursor,
+        .output_incomplete = observed.output_incomplete,
+        .error_name = if (observed.timed_out) "TimeoutExpired" else null,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .published_running = observed.state == .running,
+        .capacity_reserved = true,
+        .replay_capability = ctx.session_child_capability,
+    }) catch |err| return runtimeFailure(ctx, err);
+    capacity_reserved = false;
+    session_owned = false;
+    defer prepared.deinit(ctx.allocator);
+    _ = owner;
+    return finishPrepared(withoutSteeringYield(ctx, input.yield_time_ms), runtime, &prepared, .run);
+}
+
+fn callTtyInteract(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+    yield_time_ms: u32,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const session_id = input.session_id orelse return unavailable(ctx);
+    if (runtime.isTombstone(session_id)) {
+        return runtimeFailure(ctx, error.ExecutionTerminal);
+    }
+    var state: managed_execution.SnapshotState = .running;
+    var accepted_bytes: ?u32 = null;
+    const chars = input.chars orelse "";
+    if (chars.len != 0) {
+        if (runtime.backendFor(session_id) != .tty) {
+            return runtimeFailure(ctx, error.InvalidBackend);
+        }
+        var ready = executeAuthorizedTerminal(ctx, session_id, .{ .wait = .{
+            .session_id = session_id,
+            .return_when = .started,
+            .safety_ceiling_ms = 20_000,
+            .authority = null,
+        } }) catch |err| return runtimeFailure(ctx, err);
+        defer ready.deinit(ctx.allocator);
+        const ready_result = switch (ready.result.view()) {
+            .failure => return cloneTerminalFailure(ctx, ready.result.view()),
+            .success => |success| switch (success) {
+                .wait => |value| value,
+                else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+            },
+        };
+        if (ready_result.session.lifecycle != .running) {
+            return runtimeFailure(ctx, error.TerminalNotReady);
+        }
+
+        var acquired = executeAuthorizedTerminal(ctx, session_id, .{ .write = .{
+            .session_id = session_id,
+            .lease = .acquire,
+            .authority = null,
+        } }) catch |err| return runtimeFailure(ctx, err);
+        defer acquired.deinit(ctx.allocator);
+        switch (acquired.result.view()) {
+            .failure => return cloneTerminalFailure(ctx, acquired.result.view()),
+            .success => |success| switch (success) {
+                .write => {},
+                else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+            },
+        }
+        var release_needed = true;
+        defer if (release_needed) releaseTtyLease(ctx, session_id);
+
+        var used = executeAuthorizedTerminal(ctx, session_id, .{ .write = .{
+            .session_id = session_id,
+            .payload = .{ .text = chars },
+            .lease = .use,
+            .authority = null,
+        } }) catch |err| return runtimeFailure(ctx, err);
+        defer used.deinit(ctx.allocator);
+        accepted_bytes = switch (used.result.view()) {
+            .failure => return cloneTerminalFailure(ctx, used.result.view()),
+            .success => |success| switch (success) {
+                .write => |value| value.accepted_bytes,
+                else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+            },
+        };
+
+        var released = executeAuthorizedTerminal(ctx, session_id, .{ .write = .{
+            .session_id = session_id,
+            .lease = .release,
+            .authority = null,
+        } }) catch |err| return runtimeFailure(ctx, err);
+        defer released.deinit(ctx.allocator);
+        const facts = switch (released.result.view()) {
+            .failure => return cloneTerminalFailure(ctx, released.result.view()),
+            .success => |success| switch (success) {
+                .write => |value| value.session,
+                else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+            },
+        };
+        release_needed = false;
+        state = terminal_managed_observer.snapshotState(facts, null);
+    }
+    const waiter_id = runtime.reserveExternalWait(session_id) catch |err|
+        return runtimeFailure(ctx, err);
+    defer runtime.releaseExternalWait(session_id, waiter_id);
+    if (state == .running and yield_time_ms != 0) {
+        switch (try waitTtyExitOrYield(ctx, session_id, yield_time_ms)) {
+            .state => |waited_state| state = waited_state,
+            .failure => |failure| return failure,
+        }
+    }
+    if (accepted_bytes != null and yield_time_ms == 0) {
+        io_mod.sleep(100 * std.time.ns_per_ms);
+    }
+    var observed = terminal_managed_observer.observe(
+        ttyObserverContext(ctx, runtime) orelse return unavailable(ctx),
+        session_id,
+        state,
+        runtime.ttyCursorFor(session_id),
+    ) catch |err|
+        return runtimeFailure(ctx, err);
+    defer observed.deinit(ctx.allocator);
+    if (runtime.externalWaitPreempted(session_id, waiter_id)) {
+        return runtimeFailure(ctx, error.WaitPreempted);
+    }
+    finalizeCompletedTty(ctx, session_id, observed.state) catch |err|
+        return runtimeFailure(ctx, err);
+    var prepared = runtime.updateTty(ctx.allocator, .{
+        .execution_id = session_id,
+        .command = "",
+        .state = observed.state,
+        .output = observed.output,
+        .replay_output = observed.replay_output,
+        .next_cursor = observed.next_cursor,
+        .output_incomplete = observed.output_incomplete,
+        .error_name = if (observed.timed_out) "TimeoutExpired" else null,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .published_running = true,
+    }) catch |err| return runtimeFailure(ctx, err);
+    defer prepared.deinit(ctx.allocator);
+    const finish_ctx = withoutSteeringYield(ctx, yield_time_ms);
+    return if (accepted_bytes) |count|
+        finishPreparedWithAccepted(finish_ctx, runtime, &prepared, count)
+    else
+        finishPrepared(finish_ctx, runtime, &prepared, .command);
+}
+
+fn callTtyStop(
+    ctx: tool_dispatch.DispatchContext,
+    input: Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const runtime = ctx.managed_executions orelse return unavailable(ctx);
+    const session_id = input.session_id orelse return unavailable(ctx);
+    runtime.preemptWait(session_id);
+    var signaled = executeAuthorizedTerminal(ctx, session_id, .{ .signal = .{
+        .session_id = session_id,
+        .signal = if (input.force) .kill else .terminate,
+        .authority = null,
+    } }) catch |err| return runtimeFailure(ctx, err);
+    defer signaled.deinit(ctx.allocator);
+    switch (signaled.result.view()) {
+        .failure => return cloneTerminalFailure(ctx, signaled.result.view()),
+        .success => |success| switch (success) {
+            .signal => {},
+            else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+        },
+    }
+
+    var stopped_status: ?command_contract.CommandStatus = null;
+    var waited = executeAuthorizedTerminal(ctx, session_id, .{ .wait = .{
+        .session_id = session_id,
+        .return_when = .exit,
+        .safety_ceiling_ms = 2_000,
+        .authority = null,
+    } }) catch |err| return runtimeFailure(ctx, err);
+    defer waited.deinit(ctx.allocator);
+    const wait_result = switch (waited.result.view()) {
+        .failure => return cloneTerminalFailure(ctx, waited.result.view()),
+        .success => |success| switch (success) {
+            .wait => |value| value,
+            else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+        },
+    };
+    stopped_status = statusFromOutcome(wait_result.outcome);
+    var observed = terminal_managed_observer.observe(
+        ttyObserverContext(ctx, runtime) orelse return unavailable(ctx),
+        session_id,
+        terminal_managed_observer.snapshotState(wait_result.session, wait_result.outcome),
+        runtime.ttyCursorFor(session_id),
+    ) catch |err| return runtimeFailure(ctx, err);
+    defer observed.deinit(ctx.allocator);
+
+    var closed = executeAuthorizedTerminal(ctx, session_id, .{ .close = .{
+        .session_id = session_id,
+        .policy = if (input.force) .force else .graceful,
+        .authority = null,
+    } }) catch |err| return runtimeFailure(ctx, err);
+    defer closed.deinit(ctx.allocator);
+    switch (closed.result.view()) {
+        .failure => return cloneTerminalFailure(ctx, closed.result.view()),
+        .success => |success| switch (success) {
+            .close => {},
+            else => return runtimeFailure(ctx, error.InvalidTerminalResult),
+        },
+    }
+    var prepared = runtime.updateTty(ctx.allocator, .{
+        .execution_id = session_id,
+        .command = "",
+        .state = .{ .stopped = stopped_status },
+        .output = observed.output,
+        .replay_output = observed.replay_output,
+        .next_cursor = observed.next_cursor,
+        .output_incomplete = observed.output_incomplete,
+        .error_name = if (observed.timed_out) "TimeoutExpired" else null,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .published_running = true,
+    }) catch |err| return runtimeFailure(ctx, err);
+    defer prepared.deinit(ctx.allocator);
+    return finishPrepared(ctx, runtime, &prepared, .stop);
+}
+
+fn ttyShell(
+    alloc: Allocator,
+    input: Input,
+    configured_login_shell: ?[]const u8,
+) !terminal_contracts.ShellSpec {
+    if (input.shell) |shell| return .{ .executable = .{
+        .path = shell.path,
+        .clean_start = shell.clean_start,
+    } };
+    return shell_resolver.profileShell(
+        alloc,
+        configured_login_shell,
+        input.profile orelse .user,
+    );
+}
+
+fn requireTtyShellAuthority(
+    ctx: tool_dispatch.DispatchContext,
+    command_ctx: command_admission.CommandContext,
+) !void {
+    const execution_authority = ctx.execution_authority orelse
+        return error.CommandAuthorityContextMismatch;
+    const command_authority = switch (execution_authority) {
+        .run_command => |value| value,
+        .ordinary, .file_mutation, .vision_paths => return error.CommandAuthorityContextMismatch,
+    };
+    const shell_allowed = switch (command_authority) {
+        .shell_allowed => |value| value,
+        .direct_only => return error.CommandAdmissionChanged,
+    };
+    if (!shell_allowed.fingerprint.matches(command_ctx)) {
+        return error.CommandAuthorityContextMismatch;
+    }
+}
+
+fn executeTerminal(
+    ctx: tool_dispatch.DispatchContext,
+    request: terminal_contracts.ActionRequest,
+) !ParsedTerminalExecution {
+    return .{ .result = try terminal_action_executor.execute(.{
+        .alloc = ctx.allocator,
+        .lifecycle_allocator = ctx.lifecycle_allocator,
+        .runtime = ctx.terminal_client orelse return error.TerminalUnavailable,
+        .cancel_flag = ctx.cancel_flag,
+    }, request) };
+}
+
+fn executeAuthorizedTerminal(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    request: terminal_contracts.ActionRequest,
+) !ParsedTerminalExecution {
+    var authority = try reloadTerminalAuthority(ctx, session_id);
+    defer authority.deinit();
+    const authorized: terminal_contracts.ActionRequest = switch (request) {
+        .read => |value| .{ .read = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .write => |value| .{ .write = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .wait => |value| .{ .wait = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .signal => |value| .{ .signal = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .close => |value| .{ .close = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .screen => |value| .{ .screen = blk: {
+            var owned = value;
+            owned.authority = authority.view();
+            break :blk owned;
+        } },
+        .start, .inspect, .list, .resize => return error.InvalidTerminalRequest,
+    };
+    return executeTerminal(ctx, authorized);
+}
+
+const TtyWaitOutcome = union(enum) {
+    state: managed_execution.SnapshotState,
+    failure: tool_dispatch.ToolResult,
+};
+
+/// Waits up to `ceiling_ms` for tty session `session_id` to exit. Steering
+/// (`ctx.tool_yield_flag`) ends the wait early with the session still
+/// running; only the wait is cancelled, never the session.
+fn waitTtyExitOrYield(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    ceiling_ms: u32,
+) tool_dispatch.DispatchError!TtyWaitOutcome {
+    var authority = reloadTerminalAuthority(ctx, session_id) catch |err|
+        return .{ .failure = try runtimeFailure(ctx, err) };
+    defer authority.deinit();
+    var waited: ParsedTerminalExecution = .{ .result = terminal_action_executor.execute(.{
+        .alloc = ctx.allocator,
+        .lifecycle_allocator = ctx.lifecycle_allocator,
+        .runtime = ctx.terminal_client orelse return .{ .failure = try unavailable(ctx) },
+        .cancel_flag = ctx.cancel_flag,
+        .yield_flag = ctx.tool_yield_flag,
+        .yield_grace_ms = managed_execution.steerYieldGraceMs(),
+    }, .{ .wait = .{
+        .session_id = session_id,
+        .return_when = .exit,
+        .safety_ceiling_ms = ceiling_ms,
+        .authority = authority.view(),
+    } }) catch |err| return .{ .failure = try runtimeFailure(ctx, err) } };
+    defer waited.deinit(ctx.allocator);
+    switch (waited.result.view()) {
+        .failure => |failure| {
+            const user_cancelled = if (ctx.cancel_flag) |flag| flag.load(.seq_cst) else false;
+            if (failure.code == .cancelled and !user_cancelled and steerYieldRequested(ctx)) {
+                debug_trace.logf("shell", "tty wait yielded for steering session={s}", .{session_id});
+                return .{ .state = .running };
+            }
+            return .{ .failure = try cloneTerminalFailure(ctx, waited.result.view()) };
+        },
+        .success => |success| switch (success) {
+            .wait => |value| return .{ .state = terminal_managed_observer.snapshotState(value.session, value.outcome) },
+            else => return .{ .failure = try runtimeFailure(ctx, error.InvalidTerminalResult) },
+        },
+    }
+}
+
+fn reloadTerminalAuthority(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) !terminal_operation.OwnedAuthorityClaim {
+    const owner = ctx.session_child_capability orelse return error.TerminalAuthorityUnavailable;
+    const durable_session_id = ctx.terminal_owner_session_id orelse
+        return error.TerminalAuthorityUnavailable;
+    var profile_user_buffer: [64]u8 = undefined;
+    const profile_user = terminal_identity.profileUser(&profile_user_buffer) orelse
+        return error.TerminalAuthorityUnavailable;
+    return terminal_store.reloadOwnerAuthorityClaim(ctx.allocator, owner, .{
+        .terminal_session_id = session_id,
+        .profile_user = profile_user,
+        .durable_session_id = durable_session_id,
+        .workspace_root = ctx.workspace_root,
+        .transport_role = ctx.terminal_transport_role,
+        .actor = .agent,
+    });
+}
+
+fn cloneTerminalFailure(
+    ctx: tool_dispatch.DispatchContext,
+    result: terminal_contracts.Result,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    if (result == .success) return runtimeFailure(ctx, error.InvalidTerminalResult);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer out.deinit();
+    std.json.Stringify.value(result, .{}, &out.writer) catch
+        return error.OutOfMemory;
+    return .{ .failure = try out.toOwnedSlice() };
+}
+
+fn statusFromOutcome(
+    outcome: terminal_contracts.ReturnOutcome,
+) ?command_contract.CommandStatus {
+    return switch (outcome) {
+        .exited => |code| .{ .exit_code = code },
+        .signal => |signal| .{ .signal = signal },
+        .started, .condition_met, .safety_ceiling, .cancelled => null,
+    };
+}
+
+fn releaseTtyLease(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) void {
+    var released = executeAuthorizedTerminal(ctx, session_id, .{ .write = .{
+        .session_id = session_id,
+        .lease = .release,
+        .authority = null,
+    } }) catch |err| {
+        debug_trace.logf(
+            "shell",
+            "TTY write lease release failed session_id={s} err={s}",
+            .{ session_id, @errorName(err) },
+        );
+        return;
+    };
+    released.deinit(ctx.allocator);
+}
+
+/// Releases the agent's write lease on `session_id` at a turn's end. A
+/// release the busy terminal client refuses runs again after a short wait,
+/// up to `max_busy_terminal_attempts` times, as a steered stop does.
+pub fn releaseAgentWriteLease(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) !void {
+    var runner: LeaseReleaseRun = .{ .ctx = ctx, .session_id = session_id };
+    const request: BusyRequest = .{ .what = "terminal lease release", .session_id = session_id, .dropped = "agent_write_lease_release" };
+    switch (try retryWhileBusy(void, ctx, request, &runner)) {
+        .done => {},
+        .gave_up => return error.TerminalLeaseCleanupFailed,
+    }
+}
+
+/// One run of `releaseAgentWriteLease`.
+const LeaseReleaseRun = struct {
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+
+    /// Done, or null when the busy client refused the release.
+    fn attempt(self: *LeaseReleaseRun) !?void {
+        var released = try executeAuthorizedTerminal(self.ctx, self.session_id, .{ .write = .{
+            .session_id = self.session_id,
+            .lease = .release,
+            .authority = null,
+        } });
+        defer released.deinit(self.ctx.allocator);
+        switch (released.result.view()) {
+            .success => |success| switch (success) {
+                .write => return {},
+                else => return error.InvalidTerminalLeaseCleanupResult,
+            },
+            .failure => |failure| switch (failure.code) {
+                .session_not_found, .lease_conflict => return {},
+                // Only a busy refusal goes away when the release runs again.
+                else => return if (failure.isBusyRefusal()) null else error.TerminalLeaseCleanupFailed,
+            },
+        }
+    }
+};
+
+fn finalizeCompletedTty(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+    state: managed_execution.SnapshotState,
+) !void {
+    switch (state) {
+        .completed => {},
+        .running, .stopped, .lost => return,
+    }
+    var closed = try executeAuthorizedTerminal(ctx, session_id, .{ .close = .{
+        .session_id = session_id,
+        .policy = .graceful,
+        .authority = null,
+    } });
+    defer closed.deinit(ctx.allocator);
+    switch (closed.result.view()) {
+        .failure => return error.TerminalCloseFailed,
+        .success => |success| switch (success) {
+            .close => {},
+            else => return error.InvalidTerminalResult,
+        },
+    }
+}
+
+fn closeTtyBestEffort(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) void {
+    // The close ignores `cancel_flag`. A user cancel is when this cleanup
+    // matters most, and with the flag set the executor would cancel the
+    // close too and leave the command running.
+    var close_ctx = ctx;
+    close_ctx.cancel_flag = null;
+    var runner: UnpublishedCloseRun = .{ .ctx = close_ctx, .session_id = session_id };
+    const request: BusyRequest = .{ .what = "unpublished TTY cleanup", .session_id = session_id, .dropped = "unpublished_tty_close" };
+    // Each run logs its own failure, and the give-up line names the drop.
+    _ = retryWhileBusy(void, ctx, request, &runner) catch |err| switch (err) {};
+}
+
+/// One run of `closeTtyBestEffort`. It never fails: it logs a failed close
+/// itself.
+const UnpublishedCloseRun = struct {
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+
+    /// Done, or null when the busy client refused the close.
+    fn attempt(self: *UnpublishedCloseRun) error{}!?void {
+        var closed = executeAuthorizedTerminal(self.ctx, self.session_id, .{ .close = .{
+            .session_id = self.session_id,
+            .policy = .force,
+            .authority = null,
+        } }) catch |err| {
+            debug_trace.logf(
+                "shell",
+                "unpublished TTY cleanup failed session_id={s} err={s} dropped=unpublished_tty_close",
+                .{ self.session_id, @errorName(err) },
+            );
+            return {};
+        };
+        defer closed.deinit(self.ctx.allocator);
+        const failure = switch (closed.result.view()) {
+            .success => return {},
+            .failure => |failure| failure,
+        };
+        // The terminal is already gone, so nothing is left to close.
+        if (failure.code == .session_not_found) return {};
+        if (failure.isBusyRefusal()) return null;
+        debug_trace.logf(
+            "shell",
+            "unpublished TTY cleanup failed session_id={s} code={s} dropped=unpublished_tty_close",
+            .{ self.session_id, @tagName(failure.code) },
+        );
+        return {};
+    }
+};
+
+fn finishPreparedWithAccepted(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    prepared: *managed_execution.PreparedSnapshot,
+    accepted_bytes: u32,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    var body = formatSnapshotWithLimit(
+        ctx.allocator,
+        prepared.snapshot,
+        accepted_bytes,
+        ctx.max_tool_result_bytes,
+    ) catch |err| {
+        runtime.cancelDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        ) catch {};
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return runtimeFailure(ctx, err);
+    };
+    errdefer ctx.allocator.free(body);
+    body = try noteSteeringYield(ctx, runtime, prepared, body, false);
+    publishSnapshotMetadata(ctx, prepared.snapshot) catch |err| {
+        runtime.cancelDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        ) catch {};
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return runtimeFailure(ctx, err);
+    };
+    handoffPreparedDelivery(ctx, runtime, prepared.reservation_id) catch
+        return runtimeFailure(ctx, error.ResultCommitFailed);
+    return .{ .success = body };
+}
+
+fn ensureOwnedTtyIndexed(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    session_id: []const u8,
+) !terminal_managed_observer.SyncOutcome {
+    if (runtime.stateFor(session_id) != null) return .indexed;
+    const observer = ttyObserverContext(ctx, runtime) orelse return .indexed;
+    return terminal_managed_observer.syncOwned(observer, session_id);
+}
+
+/// Terminals end with the fx process that starts them and are never
+/// reattached, so the agent is told to start a new one.
+fn terminalEndedWithOwner(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer out.deinit();
+    std.json.Stringify.value(.{ .@"error" = .{
+        .tool = "shell",
+        .code = tool_result_errors.terminal_ended_error_code,
+        .session_id = session_id,
+        .message = "This terminal ended when the fx process that started it exited. It cannot be resumed. Start a new terminal with shell action run and tty true.",
+        .retryable = false,
+    } }, .{}, &out.writer) catch return error.OutOfMemory;
+    return .{ .failure = try out.toOwnedSlice() };
+}
+
+fn refreshTtyExecution(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    session_id: []const u8,
+    command: []const u8,
+) !void {
+    return terminal_managed_observer.refresh(
+        ttyObserverContext(ctx, runtime) orelse
+            return error.TerminalAuthorityUnavailable,
+        session_id,
+        command,
+    );
+}
+
+fn ttyObserverContext(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+) ?terminal_managed_observer.Context {
+    return .{
+        .alloc = ctx.allocator,
+        .lifecycle_allocator = ctx.lifecycle_allocator,
+        .terminal_client = ctx.terminal_client orelse return null,
+        .managed_runtime = runtime,
+        .owner = ctx.session_child_capability orelse return null,
+        .durable_session_id = ctx.terminal_owner_session_id orelse return null,
+        .workspace_root = ctx.workspace_root,
+        .transport_role = ctx.terminal_transport_role,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .cancel_flag = ctx.cancel_flag,
+    };
+}
+
+fn finishTerminalTtyStop(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    session_id: []const u8,
+    state: managed_execution.SnapshotState,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    finalizeCompletedTty(ctx, session_id, state) catch |err|
+        return runtimeFailure(ctx, err);
+    var prepared = runtime.updateTty(ctx.allocator, .{
+        .execution_id = session_id,
+        .command = "",
+        .state = state,
+        .max_output_bytes = ctx.max_command_output_bytes,
+        .published_running = true,
+    }) catch |err| return runtimeFailure(ctx, err);
+    defer prepared.deinit(ctx.allocator);
+    return finishPrepared(ctx, runtime, &prepared, .stop);
+}
+
+fn finishPrepared(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    prepared: *managed_execution.PreparedSnapshot,
+    /// `run` is the result of the call that started the command, `command`
+    /// a later observation of it, and `stop` the result of a stop.
+    action: enum { run, command, stop },
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    var body = formatSnapshotWithLimit(
+        ctx.allocator,
+        prepared.snapshot,
+        null,
+        ctx.max_tool_result_bytes,
+    ) catch |err| {
+        runtime.cancelDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        ) catch {};
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .failure = try ctx.allocator.dupe(u8, "shell result is unavailable") };
+    };
+    errdefer ctx.allocator.free(body);
+    switch (action) {
+        .run, .command => body = try noteSteeringYield(ctx, runtime, prepared, body, action == .run),
+        .stop => {},
+    }
+    publishSnapshotMetadata(ctx, prepared.snapshot) catch |err| {
+        runtime.cancelDelivery(
+            prepared.snapshot.execution_id,
+            prepared.reservation_id,
+        ) catch {};
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return runtimeFailure(ctx, err);
+    };
+    handoffPreparedDelivery(ctx, runtime, prepared.reservation_id) catch {
+        return .{ .failure = try ctx.allocator.dupe(u8, "shell result commit failed") };
+    };
+    const failed = switch (action) {
+        .run, .command => snapshotFailed(prepared.snapshot),
+        .stop => stop_result_failed(prepared.snapshot.state),
+    };
+    return if (failed)
+        .{ .failure = body }
+    else
+        .{ .success = body };
+}
+
+fn publishSnapshotMetadata(
+    ctx: tool_dispatch.DispatchContext,
+    snapshot: managed_execution.Snapshot,
+) !void {
+    if (ctx.command_result_json_sink == null and
+        ctx.tool_result_memory_sink == null) return;
+    const status: ?command_contract.CommandStatus = switch (snapshot.state) {
+        .completed => |value| value,
+        .stopped => |value| value,
+        .lost => .indeterminate,
+        .running => return publishQuietCrossing(ctx, snapshot),
+    };
+    const projection: command_contract.StatusProjection = if (status) |value|
+        command_contract.projectStatus(value)
+    else
+        .{
+            .exit_code = null,
+            .signal = null,
+            .termination_indeterminate = false,
+        };
+    const timed_out = if (snapshot.error_name) |name|
+        std.mem.eql(u8, name, "TimeoutExpired")
+    else
+        false;
+    var memory = types.ToolResultMemory{
+        .output_bytes = snapshot.stdout_bytes +| snapshot.stderr_bytes,
+        .stored_output_bytes = snapshot.stdout_bytes +| snapshot.stderr_bytes,
+        .truncated = snapshot.output_truncated,
+    };
+    if (ctx.tool_result_memory_sink != null) {
+        if (snapshot.output_file) |handle| {
+            memory.command_output_replay = .{ .available = .{
+                .handle = try ctx.allocator.dupe(u8, handle),
+                .framed_bytes = snapshot.output_framed_bytes,
+            } };
+        }
+    }
+    errdefer if (memory.command_output_replay) |replay| switch (replay) {
+        .available => |descriptor| ctx.allocator.free(@constCast(descriptor.handle)),
+        .unavailable => {},
+    };
+    const completed = switch (snapshot.state) {
+        .completed => true,
+        .running, .stopped, .lost => false,
+    };
+    if (timed_out) {
+        memory.command_process_presentation = .timed_out;
+    } else if (completed) {
+        if (projection.signal) |signal| {
+            memory.command_process_presentation = .{ .signal = signal };
+        } else if (projection.exit_code) |exit_code| {
+            if (exit_code != 0) {
+                memory.command_process_presentation = .{ .exit_code = exit_code };
+            }
+        }
+    }
+    if (ctx.command_result_json_sink != null) {
+        const command_result = command_contract.CommandResult{
+            .command = snapshot.command,
+            .cwd = snapshot.cwd,
+            .exit_code = projection.exit_code,
+            .signal = projection.signal,
+            .timed_out = timed_out,
+            .termination_indeterminate = projection.termination_indeterminate,
+            .output_incomplete = snapshot.output_incomplete,
+            .duration_ms = snapshot.duration_ms,
+            .stdout_bytes = snapshot.stdout_bytes,
+            .stderr_bytes = snapshot.stderr_bytes,
+            .truncated = snapshot.output_truncated,
+            .output_file = snapshot.output_file,
+        };
+        const command_result_json = try command_result.toJson(ctx.allocator);
+        tool_dispatch.reportCommandResultJson(ctx, command_result_json);
+    }
+    if (ctx.tool_result_memory_sink != null) {
+        tool_dispatch.reportToolResultMemory(ctx, memory);
+    }
+}
+
+/// A running result carries metadata only when its wait ended at the quiet
+/// crossing: the command and its quiet time, for the note fx relays to a
+/// subagent's parent (`noteChildQuiet` in `src/core/subagent/tool_host.zig`).
+fn publishQuietCrossing(
+    ctx: tool_dispatch.DispatchContext,
+    snapshot: managed_execution.Snapshot,
+) !void {
+    if (!snapshot.quiet_crossed or ctx.tool_result_memory_sink == null) return;
+    const command = try ctx.allocator.dupe(u8, snapshot.command);
+    debug_trace.eventf("shell", "quiet_crossing", .{}, "session={s} quiet_ms={d}", .{ snapshot.execution_id, snapshot.quiet_ms orelse 0 });
+    tool_dispatch.reportToolResultMemory(ctx, .{ .quiet_crossing = .{
+        .command = command,
+        .quiet_ms = snapshot.quiet_ms orelse 0,
+    } });
+}
+
+fn handoffPreparedDelivery(
+    ctx: tool_dispatch.DispatchContext,
+    runtime: *managed_execution.Runtime,
+    reservation_id: u64,
+) !void {
+    if (ctx.result_commit_sink == null) {
+        return runtime.commitReservation(reservation_id);
+    }
+    tool_dispatch.reportResultCommit(ctx, result_commit.Token{
+        .context = runtime,
+        .identity = reservation_id,
+        .commit_fn = commitManagedDelivery,
+        .cancel_fn = cancelManagedDelivery,
+    });
+}
+
+fn commitManagedDelivery(raw: *anyopaque, reservation_id: u64) !void {
+    const runtime: *managed_execution.Runtime = @ptrCast(@alignCast(raw));
+    return runtime.commitReservation(reservation_id);
+}
+
+fn cancelManagedDelivery(raw: *anyopaque, reservation_id: u64) void {
+    const runtime: *managed_execution.Runtime = @ptrCast(@alignCast(raw));
+    runtime.cancelReservation(reservation_id) catch |err| {
+        debug_trace.logf(
+            "shell",
+            "managed delivery cancellation failed reservation={d} err={s}",
+            .{ reservation_id, @errorName(err) },
+        );
+    };
+}
+
+fn formatSnapshot(
+    alloc: Allocator,
+    snapshot: managed_execution.Snapshot,
+    accepted_bytes: ?u32,
+) ![]u8 {
+    return formatSnapshotWithLimit(
+        alloc,
+        snapshot,
+        accepted_bytes,
+        tool_result_limits.default_max_tool_result_bytes,
+    );
+}
+
+fn formatSnapshotWithLimit(
+    alloc: Allocator,
+    snapshot: managed_execution.Snapshot,
+    accepted_bytes: ?u32,
+    max_bytes: usize,
+) ![]u8 {
+    const inline_max_bytes = @min(
+        max_bytes,
+        result_store.large_result_threshold_bytes,
+    );
+    if (try formatModelSafeSnapshotRaw(
+        alloc,
+        snapshot,
+        accepted_bytes,
+        snapshot.output_delta,
+        snapshot.output_truncated,
+        inline_max_bytes,
+    )) |full| {
+        if (full.len <= inline_max_bytes) return full;
+        alloc.free(full);
+    }
+
+    var minimum: usize = 0;
+    var maximum: usize = @min(snapshot.output_delta.len, inline_max_bytes);
+    var best: ?[]u8 = null;
+    errdefer if (best) |value| alloc.free(value);
+    while (minimum <= maximum) {
+        const content_budget = minimum + (maximum - minimum) / 2;
+        const marker = "\n... bytes omitted; use full_output_handle for exact output ...\n";
+        var projected_writer: std.Io.Writer.Allocating = .init(alloc);
+        defer projected_writer.deinit();
+        try text_utils.writeHeadTailBounded(
+            &projected_writer.writer,
+            snapshot.output_delta,
+            content_budget,
+            marker,
+            .up,
+        );
+        const projected = try projected_writer.toOwnedSlice();
+        defer alloc.free(projected);
+        const candidate = (try formatModelSafeSnapshotRaw(
+            alloc,
+            snapshot,
+            accepted_bytes,
+            projected,
+            true,
+            inline_max_bytes,
+        )) orelse {
+            if (content_budget == 0) break;
+            maximum = content_budget - 1;
+            continue;
+        };
+        if (candidate.len <= inline_max_bytes) {
+            if (best) |value| alloc.free(value);
+            best = candidate;
+            minimum = content_budget + 1;
+        } else {
+            alloc.free(candidate);
+            if (content_budget == 0) break;
+            maximum = content_budget - 1;
+        }
+    }
+    if (best) |value| return value;
+    return formatSnapshotRaw(
+        alloc,
+        snapshot,
+        accepted_bytes,
+        "",
+        true,
+        false,
+    );
+}
+
+fn formatModelSafeSnapshotRaw(
+    alloc: Allocator,
+    snapshot: managed_execution.Snapshot,
+    accepted_bytes: ?u32,
+    output_delta: []const u8,
+    output_truncated: bool,
+    max_encoded_bytes: usize,
+) !?[]u8 {
+    if (text_utils.isModelSafeText(output_delta)) {
+        return try formatSnapshotRaw(
+            alloc,
+            snapshot,
+            accepted_bytes,
+            output_delta,
+            output_truncated,
+            false,
+        );
+    }
+    var encoded = try text_utils.encodeTerminalSafe(
+        alloc,
+        output_delta,
+        max_encoded_bytes,
+    );
+    defer encoded.deinit(alloc);
+    if (encoded.truncated) return null;
+    return try formatSnapshotRaw(
+        alloc,
+        snapshot,
+        accepted_bytes,
+        encoded.bytes,
+        output_truncated,
+        true,
+    );
+}
+
+// zsh parses a whole command before it runs any of it. bash, sh, and dash
+// parse and run a command one line at a time, so other lines may have run.
+const zsh_parse_retry_guidance = "The shell could not parse this command (unmatched quote or syntax error), so nothing executed. Rewrite the command with corrected quoting or escaping and submit the full corrected command instead of rerunning the same text.";
+const line_shell_parse_retry_guidance = "The shell could not parse this command (unmatched quote or syntax error). This shell runs a command line by line, so other lines may already have run. Check the output, then submit a corrected command instead of rerunning the same text, without repeating side effects that already happened.";
+const usage_error_retry_guidance = "The command exited with a usage error (missing or invalid arguments). Rebuild the command with the required arguments explicitly set, then submit the corrected command instead of rerunning it unchanged.";
+
+// `whole_output` is true when `output` holds everything the command printed:
+// no earlier observation delivered part of it and none was cut off.
+fn failureRetryGuidance(exit_code: ?i64, output: []const u8, whole_output: bool) ?[]const u8 {
+    const code = exit_code orelse return null;
+    if (code == 0) return null;
+    if (shellParseRetryGuidance(output, whole_output)) |guidance| return guidance;
+    if (hasUsageBannerOutput(output)) return usage_error_retry_guidance;
+    return null;
+}
+
+const ShellFamily = enum { zsh, line_by_line };
+
+fn shellParseRetryGuidance(output: []const u8, whole_output: bool) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const family = shellErrorFamily(trimmed) orelse continue;
+        // zsh's `[` and `test` builtins report a bad expression at run time as
+        // `parse error: condition expected`, and the command keeps running.
+        // zsh prints the same text for a `[[` test missing an operand, which
+        // fails to parse, so that error gets no guidance either.
+        if (text_utils.containsIgnoreCase(trimmed, "condition expected")) continue;
+        // bash 5.2 reports an unclosed quote with only this line; older
+        // versions follow it with `syntax error: unexpected end of file`.
+        if (!(text_utils.containsIgnoreCase(trimmed, "unmatched") or
+            text_utils.containsIgnoreCase(trimmed, "unexpected EOF while looking for matching") or
+            text_utils.containsIgnoreCase(trimmed, "syntax error") or
+            text_utils.containsIgnoreCase(trimmed, "parse error") or
+            text_utils.containsIgnoreCase(trimmed, "unterminated quoted string"))) continue;
+        switch (family) {
+            // zsh checks a whole command before running any of it, so a parse
+            // error in the command itself is its only output. Any other output
+            // means something ran, such as part of the command, a startup file,
+            // or an exit hook, and the error may have come from an `eval` there.
+            // Output delivered by an earlier observation counts too. Give no
+            // guidance then rather than claim that nothing executed.
+            .zsh => if (whole_output and std.mem.eql(u8, std.mem.trim(u8, output, " \t\r\n"), trimmed)) return zsh_parse_retry_guidance,
+            .line_by_line => return line_shell_parse_retry_guidance,
+        }
+    }
+    return null;
+}
+
+// Shell error prefixes may carry an absolute argv[0] path (fx spawns the
+// resolved login shell as /bin/bash, /bin/zsh, ...), so match the basename
+// of the token before the first colon rather than a raw line prefix.
+// Snapshot and terminal runs pass the command to `eval`, so zsh names the
+// source `(eval)`, as it does for an `eval` inside the command. Under the
+// snapshot, bash names the script it sources from `/dev/fd/0`
+// (`snapshotScript` in shell_resolver.zig), followed by `eval:`. Anchoring
+// bash to that path keeps the `eval` errors of a script the command runs out.
+// bash 3.2 evaluates the snapshot script instead of sourcing it
+// (`snapshotInvocation`), so it names the shell, which the basename match
+// covers.
+fn shellErrorFamily(line: []const u8) ?ShellFamily {
+    const colon = std.mem.findScalar(u8, line, ':') orelse return null;
+    const token = line[0..colon];
+    if (token.len == 0 or std.mem.findScalar(u8, token, ' ') != null) return null;
+    if (std.mem.eql(u8, token, "(eval)")) return .zsh;
+    if (std.mem.eql(u8, token, "/dev/fd/0") and std.mem.startsWith(u8, line[colon + 1 ..], " eval:")) return .line_by_line;
+    const base = if (std.mem.findLast(u8, token, "/")) |slash| token[slash + 1 ..] else token;
+    if (std.mem.eql(u8, base, "zsh")) return .zsh;
+    const line_shells = [_][]const u8{ "bash", "sh", "dash" };
+    for (line_shells) |name| {
+        if (std.mem.eql(u8, base, name)) return .line_by_line;
+    }
+    return null;
+}
+
+fn hasUsageBannerOutput(output: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    var scanned: usize = 0;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        if (scanned >= 4) return false;
+        scanned += 1;
+        if (std.ascii.startsWithIgnoreCase(trimmed, "usage:")) return true;
+    }
+    return false;
+}
+
+/// The shell result the model reads, which every later request of the
+/// session sends again. It holds only the fields that say something: one that
+/// is null or false is left out, so a command that printed nothing reads
+/// `{"state":"completed","exit_code":0,"duration_ms":12,"output_delta":""}`.
+/// `backend` and `persistence` come with the `session_id` of a session the
+/// model can still use, and otherwise only when they are not the default
+/// `captured` and `process`, such as a command that ran on a terminal.
+/// `output_terminal_safe` marks output whose unsafe bytes were written as
+/// escapes (`escaped`). `full_output_handle` comes only when `output_delta`
+/// is not the exact output: cut off, incomplete, or escaped. A running
+/// captured command also says how long it has run (`running_ms`) and printed
+/// nothing (`quiet_ms`), and once that quiet time reaches the limit,
+/// `quiet_notice` asks the model to check it
+/// (`src/core/execution/quiet_notice.zig`).
+fn formatSnapshotRaw(
+    alloc: Allocator,
+    snapshot: managed_execution.Snapshot,
+    accepted_bytes: ?u32,
+    output_delta: []const u8,
+    output_truncated: bool,
+    escaped: bool,
+) ![]u8 {
+    const status = switch (snapshot.state) {
+        .completed => |value| value,
+        .stopped => |value| value,
+        .lost => .indeterminate,
+        .running => null,
+    };
+    const projection: command_contract.StatusProjection = if (status) |value|
+        command_contract.projectStatus(value)
+    else
+        .{
+            .exit_code = null,
+            .signal = null,
+            .termination_indeterminate = false,
+        };
+    const retry_guidance: ?[]const u8 = if (snapshot.output_incomplete)
+        "Command output is incomplete. Inspect external state and available output before retrying; do not blindly rerun a command that may have changed state."
+    else switch (snapshot.state) {
+        .lost => "Execution status is indeterminate. Inspect external state before retrying; do not blindly rerun a command that may have changed state.",
+        .completed => failureRetryGuidance(
+            projection.exit_code,
+            snapshot.output_delta,
+            snapshot.stdout_bytes +| snapshot.stderr_bytes == snapshot.output_delta.len,
+        ),
+        .running, .stopped => null,
+    };
+    var notice_buffer: [quiet_notice_max_bytes]u8 = undefined;
+    const notice: ?[]const u8 = if (snapshot.quiet_notice)
+        quietNoticeText(&notice_buffer, snapshot.quiet_ms orelse 0)
+    else
+        null;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    const retained = snapshot.retained;
+    const output_exact = !(output_truncated or snapshot.output_incomplete or escaped);
+    try std.json.Stringify.value(.{
+        .session_id = if (retained) snapshot.execution_id else null,
+        .state = snapshotStateName(snapshot.state),
+        .backend = if (retained or snapshot.backend != .captured) @tagName(snapshot.backend) else null,
+        .persistence = if (retained or snapshot.persistence != .process) @tagName(snapshot.persistence) else null,
+        .output_truncated = presentFlag(output_truncated),
+        .output_incomplete = presentFlag(snapshot.output_incomplete),
+        .output_terminal_safe = presentFlag(escaped),
+        .full_output_handle = if (output_exact) null else snapshot.output_file,
+        .exit_code = projection.exit_code,
+        .signal = projection.signal,
+        .termination_indeterminate = presentFlag(projection.termination_indeterminate),
+        .duration_ms = snapshot.duration_ms,
+        .running_ms = snapshot.running_ms,
+        .quiet_ms = snapshot.quiet_ms,
+        .quiet_notice = notice,
+        .accepted_bytes = accepted_bytes,
+        .@"error" = snapshot.error_name,
+        .retry_guidance = retry_guidance,
+        .output_delta = output_delta,
+    }, .{ .emit_null_optional_fields = false }, &out.writer);
+    return try out.toOwnedSlice();
+}
+
+const quiet_notice_max_bytes = 192;
+
+comptime {
+    // The longest notice, for the largest quiet time, fits the buffer.
+    std.debug.assert(quiet_notice_max_bytes >= "No output for 18446744073709551615 min. ".len + quiet_notice_check.len);
+}
+
+/// The check a running command's result asks for once it has printed nothing
+/// for the quiet limit. fx never stops the command: it may have hung, or it
+/// may be a server or watcher at rest.
+fn quietNoticeText(buffer: *[quiet_notice_max_bytes]u8, quiet_ms: u64) []const u8 {
+    const minutes = quiet_ms / std.time.ms_per_min;
+    const text = if (minutes > 0)
+        std.mem.print(buffer, "No output for {d} min. " ++ quiet_notice_check, .{minutes})
+    else
+        std.mem.print(buffer, "No output for {d} s. " ++ quiet_notice_check, .{quiet_ms / std.time.ms_per_s});
+    // The buffer fits every notice (see the comptime check above); the check
+    // alone stands in if it ever does not.
+    return text catch quiet_notice_check;
+}
+
+const quiet_notice_check = "Check whether this command is still working or has hung; a server or watcher can stay quiet while it works.";
+
+/// A flag the result writes only when it is set.
+fn presentFlag(value: bool) ?bool {
+    return if (value) true else null;
+}
+
+fn snapshotStateName(state: managed_execution.SnapshotState) []const u8 {
+    return switch (state) {
+        .running => "running",
+        .completed => "completed",
+        .stopped => "stopped",
+        .lost => "lost",
+    };
+}
+
+fn snapshotFailed(snapshot: managed_execution.Snapshot) bool {
+    if (snapshot.output_incomplete) return true;
+    return switch (snapshot.state) {
+        .running => false,
+        .completed => |status| switch (status) {
+            .exit_code => |code| code != 0,
+            .signal, .indeterminate => true,
+            .finished => false,
+        },
+        .stopped, .lost => true,
+    };
+}
+
+fn stop_result_failed(state: managed_execution.SnapshotState) bool {
+    return switch (state) {
+        .lost => true,
+        .stopped => |status| if (status) |value| switch (value) {
+            .indeterminate => true,
+            .exit_code, .signal, .finished => false,
+        } else false,
+        .running, .completed => false,
+    };
+}
+
+test "shell stop fails closed only for lost or indeterminate outcomes" {
+    try std.testing.expect(stop_result_failed(.lost));
+    try std.testing.expect(stop_result_failed(.{ .stopped = .indeterminate }));
+    try std.testing.expect(!stop_result_failed(.{ .stopped = .{ .signal = 9 } }));
+    try std.testing.expect(!stop_result_failed(.{ .completed = .{ .exit_code = 0 } }));
+}
+
+fn runtimeFailure(
+    ctx: tool_dispatch.DispatchContext,
+    err: anyerror,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    // A busy terminal client refuses a request without running it, so the
+    // same request can run again later.
+    const retryable = err == error.TerminalCapacityExceeded;
+    return .{ .failure = try ctx.allocator.print(
+        "{{\"error\":{{\"tool\":\"shell\",\"code\":\"{s}\",\"retryable\":{s}}}}}",
+        .{ @errorName(err), if (retryable) "true" else "false" },
+    ) };
+}
+
+fn unavailable(
+    ctx: tool_dispatch.DispatchContext,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    return .{ .failure = try ctx.allocator.dupe(
+        u8,
+        "{\"error\":{\"tool\":\"shell\",\"code\":\"unavailable\",\"retryable\":false}}",
+    ) };
+}
+
+fn resolveCwd(
+    arena: Allocator,
+    ctx: tool_dispatch.DispatchContext,
+    requested: ?[]const u8,
+) ![]const u8 {
+    const primary = workspace_access.AccessScope.primaryDirectoryOf(ctx.access_scope, ctx.workspace_root);
+    const value = requested orelse return arena.dupe(u8, primary);
+    if (std.mem.eql(u8, value, ".")) {
+        return arena.dupe(u8, primary);
+    }
+    return pathing.resolveWorkspaceOrExternalPath(
+        arena,
+        primary,
+        value,
+    );
+}
+
+fn commandEnvironment(
+    alloc: Allocator,
+    ctx: tool_dispatch.DispatchContext,
+    profile: ?command_environment.Profile,
+) !command_environment.Environment {
+    if (ctx.captured_command_host == .workspace_clean) {
+        if (profile != null) return error.InvalidWorkspaceInput;
+        return .workspace_clean;
+    }
+    var login_shell_buffer: [4096]u8 = undefined;
+    const configured = shell_resolver.configuredLoginShellInto(&login_shell_buffer);
+    return shell_resolver.environment(alloc, configured, profile);
+}
+
+pub fn isCapturedCommand(erased: tool_dispatch.ToolInput) bool {
+    const input = erased.as(OwnedInput).value;
+    return input.action == .run and !input.tty;
+}
+
+pub fn isProcessLocal(erased: tool_dispatch.ToolInput) bool {
+    const input = erased.as(OwnedInput).value;
+    return switch (input.action) {
+        .run => !input.tty,
+        .interact => input.chars == null or input.chars.?.len == 0,
+        .stop => true,
+    };
+}
+
+pub fn readsOnly(erased: tool_dispatch.ToolInput) bool {
+    const input = erased.as(OwnedInput).value;
+    return switch (input.action) {
+        .interact => input.chars == null or input.chars.?.len == 0,
+        .run, .stop => false,
+    };
+}
+
+pub fn presentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const action = std.meta.stringToEnum(
+        Action,
+        tool_args.optionalStringArg(args, "action") orelse return null,
+    ) orelse return null;
+    return switch (action) {
+        .run => .{
+            .activity_kind = .command,
+            .action_label = "Running",
+            .completed_action_label = "Ran",
+            .label_arg_kind = .command,
+            .label_arg_default = "command",
+        },
+        .interact => if (tool_args.optionalStringArg(args, "chars")) |chars|
+            if (chars.len == 0)
+                sessionPresentation("Waiting for", "Observed")
+            else
+                sessionPresentation("Sending input to", "Sent input to")
+        else
+            sessionPresentation("Waiting for", "Observed"),
+        .stop => sessionPresentation("Stopping", "Stopped"),
+    };
+}
+
+fn sessionPresentation(
+    action_label: []const u8,
+    completed_action_label: []const u8,
+) tool_dispatch.CallPresentation {
+    return .{
+        .activity_kind = .command,
+        .action_label = action_label,
+        .completed_action_label = completed_action_label,
+        .label_arg_kind = .session_id,
+        .label_arg_default = "shell execution",
+    };
+}
+
+pub fn isIrreversible(_: tool_dispatch.ToolInput) bool {
+    return false;
+}
+
+test "shell action fields are closed and command authority covers every run" {
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "action", "command", "cwd", "profile", "shell", "tty", "yield_time_ms", "timeout_ms", "reload" },
+        actionFieldContract(.run).allowed,
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "action", "session_id", "chars", "yield_time_ms" },
+        actionFieldContract(.interact).allowed,
+    );
+}
+
+test "shell timeout minimum is enforced before correction and execution" {
+    const alloc = std.testing.allocator;
+    const zero = try decode(.{ .allocator = alloc }, "{\"action\":\"run\",\"command\":\"true\",\"timeout_ms\":0}");
+    switch (zero) {
+        .input => |input| {
+            input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+        .failure => |failure| {
+            defer alloc.free(failure);
+            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, failure, .{});
+            defer parsed.deinit();
+            const detail = parsed.value.object.get("error").?.object;
+            try std.testing.expectEqualStrings("invalid_shell_request", detail.get("code").?.string);
+            try std.testing.expect(!detail.get("executed").?.bool);
+            try std.testing.expect(detail.get("retry_with") == null);
+        },
+    }
+    for ([_][]const u8{
+        "{\"action\":\"run\",\"command\":\"true\"}",
+        "{\"action\":\"run\",\"command\":\"true\",\"timeout_ms\":1}",
+    }) |args| {
+        const decoded = try decode(.{ .allocator = alloc }, args);
+        switch (decoded) {
+            .input => |input| input.deinit(alloc),
+            .failure => |failure| {
+                alloc.free(failure);
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
+}
+
+test "shell request correction suggests only unambiguous repairs without executing" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { input: []const u8, retry: ?[]const u8 }{
+        .{ .input = "{\"command\":\"sleep 30\",\"timeout_ms\":\"40000\",\"yield_time_ms\":\"30000\"}", .retry = "{\"action\":\"run\",\"command\":\"sleep 30\",\"yield_time_ms\":30000,\"timeout_ms\":40000}" },
+        .{ .input = "{\"request\":{\"command\":\"sleep 30\"},\"yield_time_ms\":\"30000\"}", .retry = "{\"action\":\"run\",\"command\":\"sleep 30\",\"yield_time_ms\":30000}" },
+        .{ .input = "{\"action\":\"run\",\"command\":\"true\",\"background\":null}", .retry = "{\"action\":\"run\",\"command\":\"true\"}" },
+        .{ .input = "{\"request\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"true\\\"}\"}", .retry = "{\"action\":\"run\",\"command\":\"true\"}" },
+        .{ .input = "{\"request\":{\"action\":\"run\",\"command\":\"true\"}}", .retry = "{\"action\":\"run\",\"command\":\"true\"}" },
+        .{ .input = "{\"action\":\"interact\",\"session_id\":\"shell-3\",\"yield_time_ms\":\"1000\",\"unused\":null}", .retry = "{\"action\":\"interact\",\"yield_time_ms\":1000,\"session_id\":\"shell-3\"}" },
+        .{ .input = "{\"command\":\"true\",\"tty\":true}", .retry = null },
+        .{ .input = "{}", .retry = null },
+        .{ .input = "{\"action\":null,\"command\":\"true\"}", .retry = null },
+        .{ .input = "{\"session_id\":\"shell-3\"}", .retry = null },
+        .{ .input = "{\"command\":\"true\",\"session_id\":\"shell-3\"}", .retry = null },
+        .{ .input = "{\"action\":\"run\",\"command\":\"true\",\"background\":true}", .retry = null },
+        // A shell that is no host's login shell: the decoder drops a `shell`
+        // naming the login shell on a run without a terminal, so a common path
+        // such as /bin/bash would make this case depend on the host.
+        .{ .input = "{\"action\":\"run\",\"command\":\"true\",\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/opt/example/bin/bash\"}}", .retry = null },
+        .{ .input = "{\"request\":{\"action\":\"run\",\"command\":\"true\",\"yield_time_ms\":\"1000\",\"timeout_ms\":0}}", .retry = null },
+        .{ .input = "{\"action\":\"run\",\"command\":\"true\",\"yield_time_ms\":4294967296}", .retry = null },
+        .{ .input = "{\"action\":\"stop\",\"session_id\":\"shell-3\",\"force\":\"true\"}", .retry = null },
+        .{ .input = "{\"request\":{\"action\":\"run\",\"command\":\"true\"},\"command\":\"false\"}", .retry = null },
+        // Text nested deeper than tool input may be, and an object encoded
+        // twice, are refused without a suggestion.
+        .{ .input = "{\"request\":\"" ++ text_utils.repeat("{\\\"a\\\":", 300) ++ "1" ++ text_utils.repeat("}", 300) ++ "\",\"yield_time_ms\":1}", .retry = null },
+        .{ .input = "{\"request\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"true\\\",\\\"x\\\":" ++ text_utils.repeat("{\\\"a\\\":", 300) ++ "1" ++ text_utils.repeat("}", 300) ++ "}\",\"yield_time_ms\":1}", .retry = null },
+        .{ .input = "{\"request\":\"\\\"{\\\\\\\"action\\\\\\\":\\\\\\\"run\\\\\\\",\\\\\\\"command\\\\\\\":\\\\\\\"true\\\\\\\"}\\\"\"}", .retry = null },
+        .{ .input = "{", .retry = null },
+        .{ .input = "[]", .retry = null },
+    };
+    for (cases) |case| {
+        const result = try decode(.{ .allocator = alloc }, case.input);
+        const failure = switch (result) {
+            .failure => |failure| failure,
+            .input => |input| {
+                input.deinit(alloc);
+                return error.TestUnexpectedResult;
+            },
+        };
+        defer alloc.free(failure);
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, failure, .{});
+        defer parsed.deinit();
+        const detail = parsed.value.object.get("error").?.object;
+        try std.testing.expectEqualStrings("invalid_shell_request", detail.get("code").?.string);
+        try std.testing.expect(!detail.get("executed").?.bool);
+        try std.testing.expect(detail.get("problems").?.array.items.len > 0);
+        try std.testing.expect((try tool_result_errors.inspectTerminalActionFieldCorrection(alloc, failure)) != null);
+        if (case.retry) |expected| {
+            const json = try std.json.Stringify.valueAlloc(alloc, detail.get("retry_with").?, .{});
+            defer alloc.free(json);
+            try std.testing.expectEqualStrings(expected, json);
+            const decoded = try decode(.{ .allocator = alloc }, json);
+            switch (decoded) {
+                .input => |input| input.deinit(alloc),
+                .failure => |reason| {
+                    alloc.free(reason);
+                    return error.TestUnexpectedResult;
+                },
+            }
+        } else {
+            try std.testing.expect(detail.get("retry_with") == null);
+        }
+    }
+}
+
+test "shell request correction does not read a text wrapper nested deeper than tool input may be" {
+    const alloc = std.testing.allocator;
+    const deep = text_utils.repeat("{\\\"a\\\":", 300) ++ "1" ++ text_utils.repeat("}", 300);
+    const input = "{\"request\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"true\\\",\\\"x\\\":" ++ deep ++ "}\",\"yield_time_ms\":1}";
+    const failure = switch (try decode(.{ .allocator = alloc }, input)) {
+        .failure => |failure| failure,
+        .input => |decoded| {
+            decoded.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer alloc.free(failure);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, failure, .{});
+    defer parsed.deinit();
+    const detail = parsed.value.object.get("error").?.object;
+    // Only the wrapper is named: nothing inside the text was read.
+    const problems = detail.get("problems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), problems.len);
+    try std.testing.expectEqualStrings("Put the action fields at the top level; shell takes no request wrapper.", problems[0].string);
+    try std.testing.expect(detail.get("retry_with") == null);
+}
+
+fn check_request_correction_allocations(alloc: Allocator, args_json: []const u8) !void {
+    const result = try decode(.{ .allocator = alloc }, args_json);
+    switch (result) {
+        .failure => |failure| alloc.free(failure),
+        .input => |input| {
+            input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "shell request correction releases partial allocations" {
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, check_request_correction_allocations, .{
+        "{\"request\":{\"command\":\"true\"},\"yield_time_ms\":\"30000\"}",
+    });
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, check_request_correction_allocations, .{
+        "{\"command\":\"true\",\"tty\":true,\"shell\":{\"path\":\"/bin/bash\",\"kind\":\"executable\"}}",
+    });
+}
+
+test "shell request correction canonicalizes nested shell members" {
+    const alloc = std.testing.allocator;
+    const first = try request_correction(alloc,
+        \\{"command":"true","tty":true,"shell":{"kind":"executable","path":"/bin/bash","clean_start":false}}
+    , true);
+    defer alloc.free(first);
+    const reordered = try request_correction(alloc,
+        \\{"shell":{"clean_start":false,"path":"/bin/bash","kind":"executable"},"tty":true,"command":"true"}
+    , true);
+    defer alloc.free(reordered);
+    try std.testing.expectEqualStrings(first, reordered);
+    const omitted = try request_correction(alloc,
+        \\{"command":"true","tty":true,"shell":{"path":"/bin/bash","kind":"executable"}}
+    , true);
+    defer alloc.free(omitted);
+    try std.testing.expect(std.mem.find(u8, omitted, "clean_start") == null);
+}
+
+test "shell request correction bounds feedback and preserves input bytes" {
+    const alloc = std.testing.allocator;
+    const command = "printf '\u{1f308}\\n'; echo \"$VALUE\"";
+    const key = text_utils.repeat("x", 63) ++ "\u{1f308}";
+    const source = try std.json.Stringify.valueAlloc(alloc, .{
+        .command = command,
+        .x = null,
+    }, .{});
+    defer alloc.free(source);
+    const correction = try request_correction(alloc, source, true);
+    defer alloc.free(correction);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, correction, .{});
+    defer parsed.deinit();
+    const retry = parsed.value.object.get("error").?.object.get("retry_with").?.object;
+    try std.testing.expectEqualStrings(command, retry.get("command").?.string);
+
+    const long_key = try alloc.print("{{\"command\":\"true\",\"{s}\":null}}", .{key});
+    defer alloc.free(long_key);
+    const bounded = try request_correction(alloc, long_key, true);
+    defer alloc.free(bounded);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(bounded));
+    const too_large = try alloc.alloc(u8, 16 * 1024 + 1);
+    defer alloc.free(too_large);
+    @memset(too_large, ' ');
+    const failure = try request_correction(alloc, too_large, true);
+    defer alloc.free(failure);
+    try std.testing.expect(failure.len < 512);
+    try std.testing.expect(std.mem.find(u8, failure, "retry_with") == null);
+
+    const tty = try request_correction(alloc, "{\"command\":\"true\",\"tty\":true}", true);
+    defer alloc.free(tty);
+    try std.testing.expect(std.mem.find(u8, tty, "retry_with") != null);
+}
+
+test "shell interact classification follows optional input" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const cases = [_]struct {
+        json: []const u8,
+        reads_only: bool,
+        process_local: bool,
+    }{
+        .{
+            .json = "{\"action\":\"interact\",\"session_id\":\"shell-1\"}",
+            .reads_only = true,
+            .process_local = true,
+        },
+        .{
+            .json = "{\"action\":\"interact\",\"session_id\":\"shell-1\",\"chars\":\"\"}",
+            .reads_only = true,
+            .process_local = true,
+        },
+        .{
+            .json = "{\"action\":\"interact\",\"session_id\":\"shell-1\",\"chars\":\"hello\\n\"}",
+            .reads_only = false,
+            .process_local = false,
+        },
+    };
+    for (cases) |case| {
+        const decoded = try decode(ctx, case.json);
+        switch (decoded) {
+            .failure => |failure| {
+                defer alloc.free(failure);
+                return error.TestUnexpectedResult;
+            },
+            .input => |input| {
+                defer input.deinit(alloc);
+                try std.testing.expectEqual(case.reads_only, readsOnly(input));
+                try std.testing.expectEqual(case.process_local, isProcessLocal(input));
+            },
+        }
+    }
+
+    const oversized = try alloc.alloc(u8, terminal_contracts.max_write_bytes + 1);
+    defer alloc.free(oversized);
+    const failure = try validateInteract(ctx, .{
+        .action = .interact,
+        .session_id = "shell-1",
+        .chars = oversized,
+    }) orelse return error.TestUnexpectedResult;
+    defer alloc.free(failure);
+    try std.testing.expect(std.mem.find(u8, failure, "exceed") != null);
+}
+
+test "TTY execution requires matching shell authority" {
+    const command_ctx = command_admission.CommandContext{
+        .command = "pwd",
+        .resolved_cwd = "/workspace",
+        .target_os = builtin.target.os.tag,
+        .environment = .{ .clean = "/bin/bash" },
+        .execution_mode = .tty,
+    };
+    try std.testing.expectError(
+        error.CommandAdmissionChanged,
+        requireTtyShellAuthority(.{
+            .allocator = std.testing.allocator,
+            .execution_authority = .{ .run_command = .{
+                .direct_only = .init(command_ctx),
+            } },
+        }, command_ctx),
+    );
+
+    try requireTtyShellAuthority(.{
+        .allocator = std.testing.allocator,
+        .execution_authority = .{ .run_command = .{ .shell_allowed = .{
+            .fingerprint = .init(command_ctx),
+            .source = .auto_classifier,
+        } } },
+    }, command_ctx);
+
+    var changed = command_ctx;
+    changed.environment = .{ .user = "/bin/bash" };
+    try std.testing.expectError(
+        error.CommandAuthorityContextMismatch,
+        requireTtyShellAuthority(.{
+            .allocator = std.testing.allocator,
+            .execution_authority = .{ .run_command = .{ .shell_allowed = .{
+                .fingerprint = .init(command_ctx),
+                .source = .auto_classifier,
+            } } },
+        }, changed),
+    );
+}
+
+test "shell decoder preserves null omission and rejects cross action fields" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const decoded = try decode(
+        ctx,
+        "{\"action\":\"run\",\"command\":\"true\",\"cwd\":null,\"profile\":null,\"tty\":false,\"yield_time_ms\":0,\"timeout_ms\":null}",
+    );
+    switch (decoded) {
+        .failure => |failure| {
+            defer alloc.free(failure);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            try std.testing.expect(isCapturedCommand(input));
+        },
+    }
+    const invalid = try decode(
+        ctx,
+        "{\"action\":\"interact\",\"session_id\":\"shell-session\",\"command\":\"true\"}",
+    );
+    switch (invalid) {
+        .input => |input| {
+            defer input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+        .failure => |failure| {
+            defer alloc.free(failure);
+            try std.testing.expect(std.mem.find(u8, failure, "invalid_shell_request") != null);
+        },
+    }
+}
+
+/// Decodes arguments a test expects to decode, printing the failure text
+/// when they do not.
+fn decodeOrFail(ctx: tool_dispatch.DispatchContext, args_json: []const u8) !tool_dispatch.ToolInput {
+    return switch (try decode(ctx, args_json)) {
+        .input => |input| input,
+        .failure => |failure| {
+            defer ctx.allocator.free(failure);
+            std.debug.print("{s}\n", .{failure});
+            return error.TestUnexpectedResult;
+        },
+    };
+}
+
+test "shell decoder drops empty fields the action does not take" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    // Every advertised field filled in, the unused ones empty.
+    {
+        const input = try decodeOrFail(
+            ctx,
+            "{\"action\":\"run\",\"command\":\"true\",\"chars\":\"\",\"session_id\":\"\",\"force\":false,\"reload\":false,\"tty\":false}",
+        );
+        defer input.deinit(alloc);
+        const value = input.as(OwnedInput).value;
+        try std.testing.expect(isCapturedCommand(input));
+        try std.testing.expect(value.chars == null and value.session_id == null and !value.force);
+    }
+    {
+        const stop = try decodeOrFail(ctx, "{\"action\":\"stop\",\"session_id\":\"shell-1\",\"command\":\"\",\"tty\":false}");
+        defer stop.deinit(alloc);
+        try std.testing.expectEqual(Action.stop, stop.as(OwnedInput).value.action);
+    }
+    // Text to type, a true flag, or an unknown name still does not belong to run.
+    for ([_][]const u8{
+        "{\"action\":\"run\",\"command\":\"true\",\"chars\":\"y\"}",
+        "{\"action\":\"run\",\"command\":\"true\",\"force\":true}",
+        "{\"action\":\"run\",\"command\":\"true\",\"note\":\"\"}",
+    }) |args| {
+        switch (try decode(ctx, args)) {
+            .input => |input| {
+                defer input.deinit(alloc);
+                return error.TestUnexpectedResult;
+            },
+            .failure => |failure| {
+                defer alloc.free(failure);
+                try std.testing.expect(std.mem.find(u8, failure, "invalid_shell_request") != null);
+            },
+        }
+    }
+}
+
+test "a login shell on a run without a terminal is dropped" {
+    const alloc = std.testing.allocator;
+    const Case = struct { args: []const u8, dropped: bool };
+    const cases = [_]Case{
+        .{ .args = "{\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\"},\"tty\":false}", .dropped = true },
+        .{ .args = "{\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\",\"clean_start\":true}}", .dropped = true },
+        .{ .args = "{\"profile\":\"user\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\"}}", .dropped = true },
+        // A clean start that profile does not ask for would be lost.
+        .{ .args = "{\"profile\":\"user\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\",\"clean_start\":true}}", .dropped = false },
+        // Without profile, the login shell with a default start changes nothing.
+        .{ .args = "{\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\"}}", .dropped = true },
+        .{ .args = "{\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\",\"clean_start\":false},\"tty\":false}", .dropped = true },
+        .{ .args = "{\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\",\"clean_start\":true}}", .dropped = false },
+        // Another shell or a terminal keeps shell and its checks.
+        .{ .args = "{\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/bash\"}}", .dropped = false },
+        .{ .args = "{\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/bash\"}}", .dropped = false },
+        .{ .args = "{\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\"},\"tty\":true}", .dropped = false },
+        .{ .args = "{\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"/bin/zsh\",\"extra\":1}}", .dropped = false },
+    };
+    for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, case.args, .{});
+        defer parsed.deinit();
+        elideLoginShellOnPlainRun(&parsed.value.object, .run, "/bin/zsh");
+        try std.testing.expectEqual(!case.dropped, parsed.value.object.contains("shell"));
+    }
+    // Only run takes the change, and no login shell means nothing to compare.
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, cases[0].args, .{});
+    defer parsed.deinit();
+    elideLoginShellOnPlainRun(&parsed.value.object, .interact, "/bin/zsh");
+    elideLoginShellOnPlainRun(&parsed.value.object, .run, null);
+    try std.testing.expect(parsed.value.object.contains("shell"));
+}
+
+test "shell decoder runs a call that names the login shell" {
+    const alloc = std.testing.allocator;
+    var login_shell_buffer: [4096]u8 = undefined;
+    const login = shell_resolver.configuredLoginShellInto(&login_shell_buffer) orelse return error.SkipZigTest;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const args = try std.mem.concat(alloc, u8, &.{ "{\"action\":\"run\",\"command\":\"true\",\"profile\":\"clean\",\"shell\":{\"kind\":\"executable\",\"path\":\"", login, "\"},\"tty\":false}" });
+    defer alloc.free(args);
+    const input = try decodeOrFail(ctx, args);
+    defer input.deinit(alloc);
+    const value = input.as(OwnedInput).value;
+    try std.testing.expect(value.shell == null);
+    try std.testing.expectEqual(command_environment.Profile.clean, value.profile.?);
+}
+
+test "shell decoder applies action specific observation defaults" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const run_decoded = try decode(ctx, "{\"action\":\"run\",\"command\":\"true\"}");
+    switch (run_decoded) {
+        .failure => |failure| {
+            defer alloc.free(failure);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            try std.testing.expectEqual(
+                @as(u32, 30_000),
+                input.as(OwnedInput).value.yield_time_ms,
+            );
+        },
+    }
+    const interact_decoded = try decode(
+        ctx,
+        "{\"action\":\"interact\",\"session_id\":\"shell-session\"}",
+    );
+    switch (interact_decoded) {
+        .failure => |failure| {
+            defer alloc.free(failure);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            try std.testing.expectEqual(
+                @as(u32, 5_000),
+                input.as(OwnedInput).value.yield_time_ms,
+            );
+        },
+    }
+}
+
+test "a command returned for steering tells the model it still runs" {
+    const alloc = std.testing.allocator;
+    const body = try alloc.dupe(u8, "{\"state\":\"running\",\"session_id\":\"shell-1\"}");
+    const updated = try attachSteeringNotice(alloc, body);
+    defer alloc.free(updated);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, updated, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("shell-1", parsed.value.object.get("session_id").?.string);
+    try std.testing.expectEqualStrings(steering_notice, parsed.value.object.get("steering_notice").?.string);
+
+    var flag = std.atomic.Value(bool).init(false);
+    try std.testing.expect(!steerYieldRequested(.{ .allocator = alloc }));
+    try std.testing.expect(!steerYieldRequested(.{ .allocator = alloc, .tool_yield_flag = &flag }));
+    flag.store(true, .seq_cst);
+    try std.testing.expect(steerYieldRequested(.{ .allocator = alloc, .tool_yield_flag = &flag }));
+}
+
+test "a run result tells the model a running command's fx mcp calls stop" {
+    const alloc = std.testing.allocator;
+    const body = try alloc.dupe(u8, "{\"state\":\"running\",\"session_id\":\"shell-2\"}");
+    const updated = try attachResultField(alloc, .{ .success = body }, "mcp_call_notice", mcp_call_notice);
+    defer updated.deinit(alloc);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, updated.success, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("shell-2", parsed.value.object.get("session_id").?.string);
+    try std.testing.expectEqualStrings(mcp_call_notice, parsed.value.object.get("mcp_call_notice").?.string);
+}
+
+test "only a running command that used fx mcp call gets the notice" {
+    const State = managed_execution.SnapshotState;
+    try std.testing.expect(mcpCallNoticeDue(.running, true));
+    try std.testing.expect(!mcpCallNoticeDue(.running, false));
+    var others: usize = 0;
+    for (std.enums.values(std.meta.Tag(State))) |tag| {
+        const state: State = switch (tag) {
+            .running => .running,
+            .completed => .{ .completed = .finished },
+            .stopped => .{ .stopped = null },
+            .lost => .lost,
+        };
+        if (tag == .running) continue;
+        others += 1;
+        try std.testing.expect(!mcpCallNoticeDue(state, true));
+    }
+    try std.testing.expect(others > 0);
+}
+
+test "shell interaction wait bounds empty observations without delaying writes" {
+    const cases = [_]struct {
+        has_input: bool,
+        requested_ms: u32,
+        expected_ms: u32,
+    }{
+        .{ .has_input = false, .requested_ms = 0, .expected_ms = 5_000 },
+        .{ .has_input = false, .requested_ms = 1_000, .expected_ms = 5_000 },
+        .{ .has_input = false, .requested_ms = 5_000, .expected_ms = 5_000 },
+        .{ .has_input = false, .requested_ms = 45_000, .expected_ms = 45_000 },
+        .{ .has_input = false, .requested_ms = 300_000, .expected_ms = 300_000 },
+        .{ .has_input = true, .requested_ms = 0, .expected_ms = 0 },
+        .{ .has_input = true, .requested_ms = 1_000, .expected_ms = 1_000 },
+        .{ .has_input = true, .requested_ms = 30_000, .expected_ms = 30_000 },
+        .{ .has_input = true, .requested_ms = 300_000, .expected_ms = 30_000 },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(
+            case.expected_ms,
+            effective_interact_yield_time(case.has_input, case.requested_ms),
+        );
+    }
+
+    const overflow = try decode(
+        .{ .allocator = std.testing.allocator },
+        "{\"action\":\"interact\",\"session_id\":\"shell-1\",\"yield_time_ms\":4294967296}",
+    );
+    switch (overflow) {
+        .input => |input| {
+            defer input.deinit(std.testing.allocator);
+            return error.TestUnexpectedResult;
+        },
+        .failure => |message| std.testing.allocator.free(message),
+    }
+}
+
+test "shell caps a wait over the action limit instead of refusing the call" {
+    // Models often ask run to wait minutes for a slow command. The call runs
+    // with the longest wait the action allows; a command still going after
+    // it returns its session_id for interact.
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const cases = [_]struct { args: []const u8, expected_ms: u32 }{
+        .{ .args = "{\"action\":\"run\",\"command\":\"true\",\"yield_time_ms\":120000}", .expected_ms = 120_000 },
+        .{ .args = "{\"action\":\"run\",\"command\":\"true\",\"yield_time_ms\":300001}", .expected_ms = managed_contract.max_wait_ceiling_ms },
+        .{ .args = "{\"action\":\"run\",\"command\":\"true\",\"yield_time_ms\":1000}", .expected_ms = 1_000 },
+        .{ .args = "{\"action\":\"interact\",\"session_id\":\"shell-1\",\"yield_time_ms\":300001}", .expected_ms = managed_contract.max_wait_ceiling_ms },
+        .{ .args = "{\"action\":\"interact\",\"session_id\":\"shell-1\",\"yield_time_ms\":45000}", .expected_ms = 45_000 },
+    };
+    for (cases) |case| {
+        switch (try decode(ctx, case.args)) {
+            .failure => |failure| {
+                defer alloc.free(failure);
+                return error.TestUnexpectedResult;
+            },
+            .input => |input| {
+                defer input.deinit(alloc);
+                try std.testing.expectEqual(case.expected_ms, input.as(OwnedInput).value.yield_time_ms);
+            },
+        }
+    }
+}
+
+test "a run keeps the 30 s wait on fx acp and the longer wait elsewhere" {
+    try std.testing.expectEqual(@as(u32, 30_000), runYieldTimeFor(.acp, 120_000));
+    try std.testing.expectEqual(@as(u32, 20_000), runYieldTimeFor(.acp, 20_000));
+    try std.testing.expectEqual(@as(u32, 0), runYieldTimeFor(.acp, 0));
+    try std.testing.expectEqual(@as(u32, 120_000), runYieldTimeFor(.headless, 120_000));
+    try std.testing.expectEqual(@as(u32, 300_000), runYieldTimeFor(.interactive, 300_000));
+}
+
+test "shell decoder rejects removed handoff and legacy actions" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{ .allocator = alloc };
+    const run_decoded = try decode(
+        ctx,
+        "{\"action\":\"run\",\"command\":\"sleep 30\",\"yield_time_ms\":0,\"handoff\":\"next_turn\"}",
+    );
+    switch (run_decoded) {
+        .failure => |failure| alloc.free(failure),
+        .input => |input| {
+            defer input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+    }
+
+    const wait_decoded = try decode(
+        ctx,
+        "{\"action\":\"wait\",\"session_id\":\"shell-session\"}",
+    );
+    switch (wait_decoded) {
+        .input => |input| {
+            defer input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+        .failure => |failure| {
+            defer alloc.free(failure);
+        },
+    }
+}
+
+test "stopped execution is a successful shell observation without command failure metadata" {
+    const alloc = std.testing.allocator;
+    const statuses = [_]command_contract.CommandStatus{
+        .{ .signal = 15 },
+        .{ .exit_code = 143 },
+    };
+    for (statuses) |status| {
+        var memory: ?types.ToolResultMemory = null;
+        try publishSnapshotMetadata(.{
+            .allocator = alloc,
+            .tool_result_memory_sink = &memory,
+        }, .{
+            .execution_id = @constCast("shell-stopped"),
+            .command = @constCast("sleep 60"),
+            .cwd = @constCast("/tmp"),
+            .retained = true,
+            .state = .{ .stopped = status },
+            .output_delta = @constCast(""),
+            .output_truncated = false,
+        });
+        try std.testing.expect(memory != null);
+        try std.testing.expect(memory.?.command_process_presentation == null);
+    }
+}
+
+test "only a running result that ended its wait at the quiet crossing carries the crossing" {
+    const alloc = std.testing.allocator;
+    for ([_]bool{ true, false }) |crossed| {
+        var memory: ?types.ToolResultMemory = null;
+        try publishSnapshotMetadata(.{
+            .allocator = alloc,
+            .tool_result_memory_sink = &memory,
+        }, .{
+            .execution_id = @constCast("shell-quiet"),
+            .command = @constCast("node verify.mjs --mock"),
+            .cwd = @constCast("/tmp"),
+            .retained = true,
+            .state = .running,
+            .output_delta = @constCast(""),
+            .output_truncated = false,
+            .running_ms = 130_000,
+            .quiet_ms = 125_000,
+            .quiet_notice = true,
+            // A later wait in the same spell gets the notice without crossing.
+            .quiet_crossed = crossed,
+        });
+        if (!crossed) {
+            try std.testing.expect(memory == null);
+            continue;
+        }
+        defer types.freeToolResultMemory(alloc, memory.?);
+        const crossing = memory.?.quiet_crossing.?;
+        try std.testing.expectEqualStrings("node verify.mjs --mock", crossing.command);
+        try std.testing.expectEqual(@as(u64, 125_000), crossing.quiet_ms);
+        try std.testing.expect(memory.?.command_process_presentation == null);
+    }
+}
+
+test "lost shell snapshot preserves indeterminate execution guidance" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-lost"),
+        .command = @constCast("mutating-command"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .lost,
+        .output_delta = @constCast(""),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expect(object.get("termination_indeterminate").?.bool);
+    try std.testing.expect(std.mem.find(
+        u8,
+        object.get("retry_guidance").?.string,
+        "do not blindly rerun",
+    ) != null);
+}
+
+test "a finished command that printed nothing reads as its status alone" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-quiet"),
+        .command = @constCast("true"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output_delta = @constCast(""),
+        .output_truncated = false,
+        .duration_ms = 12,
+    }, null);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"state\":\"completed\",\"exit_code\":0,\"duration_ms\":12,\"output_delta\":\"\"}",
+        body,
+    );
+}
+
+test "a finished terminal run still names its backend" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-tty"),
+        .command = @constCast("tty"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 7 } },
+        .backend = .tty,
+        .output_delta = @constCast("/dev/ttys001\n"),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"state\":\"completed\",\"backend\":\"tty\",\"exit_code\":7,\"output_delta\":\"/dev/ttys001\\n\"}",
+        body,
+    );
+}
+
+test "a command still running names its session with the backend and persistence" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-live"),
+        .command = @constCast("sleep 30"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .running,
+        .output_delta = @constCast("partial\n"),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"session_id\":\"shell-live\",\"state\":\"running\",\"backend\":\"captured\",\"persistence\":\"process\",\"output_delta\":\"partial\\n\"}",
+        body,
+    );
+}
+
+test "a running command says how long it has run and been quiet, and asks for a check at the limit" {
+    const alloc = std.testing.allocator;
+    const under = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-live"),
+        .command = @constCast("sleep 30"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .running,
+        .output_delta = @constCast(""),
+        .output_truncated = false,
+        .running_ms = 4_000,
+        .quiet_ms = 3_000,
+    }, null);
+    defer alloc.free(under);
+    try std.testing.expectEqualStrings(
+        "{\"session_id\":\"shell-live\",\"state\":\"running\",\"backend\":\"captured\",\"persistence\":\"process\",\"running_ms\":4000,\"quiet_ms\":3000,\"output_delta\":\"\"}",
+        under,
+    );
+    const quiet = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-live"),
+        .command = @constCast("sleep 300"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .running,
+        .output_delta = @constCast(""),
+        .output_truncated = false,
+        .running_ms = 185_000,
+        .quiet_ms = 150_000,
+        .quiet_notice = true,
+    }, null);
+    defer alloc.free(quiet);
+    try std.testing.expectEqualStrings(
+        "{\"session_id\":\"shell-live\",\"state\":\"running\",\"backend\":\"captured\",\"persistence\":\"process\",\"running_ms\":185000,\"quiet_ms\":150000,\"quiet_notice\":\"No output for 2 min. Check whether this command is still working or has hung; a server or watcher can stay quiet while it works.\",\"output_delta\":\"\"}",
+        quiet,
+    );
+}
+
+test "the quiet notice names seconds under a minute and fits its buffer for any quiet time" {
+    var buffer: [quiet_notice_max_bytes]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, quietNoticeText(&buffer, 1_500), "No output for 1 s. "));
+    try std.testing.expect(std.mem.startsWith(u8, quietNoticeText(&buffer, 59_999), "No output for 59 s. "));
+    try std.testing.expect(std.mem.startsWith(u8, quietNoticeText(&buffer, 60_000), "No output for 1 min. "));
+    try std.testing.expect(std.mem.endsWith(u8, quietNoticeText(&buffer, std.math.maxInt(u64)), quiet_notice_check));
+}
+
+test "completed shell snapshot reports incomplete output without losing status" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-incomplete"),
+        .command = @constCast("mutating-command"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output_delta = @constCast("partial output"),
+        .output_truncated = false,
+        .output_incomplete = true,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("completed", object.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 0), object.get("exit_code").?.integer);
+    try std.testing.expect(object.get("output_incomplete").?.bool);
+    try std.testing.expect(std.mem.find(
+        u8,
+        object.get("retry_guidance").?.string,
+        "do not blindly rerun",
+    ) != null);
+}
+
+test "completed shell snapshot with shell parse error carries rewrite guidance" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-parse-error"),
+        .command = @constCast("grep -rn '"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 1 } },
+        .output_delta = @constCast("zsh:1: unmatched '\n"),
+        .output_truncated = false,
+        .stderr_bytes = "zsh:1: unmatched '\n".len,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("completed", object.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 1), object.get("exit_code").?.integer);
+    try std.testing.expectEqualStrings(
+        zsh_parse_retry_guidance,
+        object.get("retry_guidance").?.string,
+    );
+}
+
+test "completed zsh parse error after earlier delivered output carries no guidance" {
+    // An earlier `running` observation already delivered `built\n`, so the
+    // command ran before an `eval` inside it failed to parse.
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-parse-error-later"),
+        .command = @constCast("echo built; sleep 2; eval 'echo \"'"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 1 } },
+        .output_delta = @constCast("(eval):1: unmatched \"\n"),
+        .output_truncated = false,
+        .stdout_bytes = "built\n".len,
+        .stderr_bytes = "(eval):1: unmatched \"\n".len,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("retry_guidance") == null);
+}
+
+test "completed shell snapshot with usage error carries argument guidance" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-usage-error"),
+        .command = @constCast("grep -n"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 2 } },
+        .output_delta = @constCast("usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz] [-A num] [-B num]\n\t[-e pattern] [-f file] [--binary-files=value]\n"),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 2), object.get("exit_code").?.integer);
+    try std.testing.expectEqualStrings(
+        usage_error_retry_guidance,
+        object.get("retry_guidance").?.string,
+    );
+}
+
+test "completed shell snapshot with ordinary failure has no retry guidance" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-ordinary-failure"),
+        .command = @constCast("grep needle /nonexistent"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 2 } },
+        .output_delta = @constCast("grep: /nonexistent: No such file or directory\n"),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("retry_guidance") == null);
+}
+
+test "failure guidance detects signatures in raw output when emitted text is encoded" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-usage-encoded"),
+        .command = @constCast("grep -n"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 2 } },
+        .output_delta = @constCast("usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz]\npartial \x00 binary\n"),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings(
+        usage_error_retry_guidance,
+        object.get("retry_guidance").?.string,
+    );
+}
+
+test "incomplete output guidance takes precedence over failure guidance" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-incomplete-usage"),
+        .command = @constCast("grep -n"),
+        .cwd = @constCast("/tmp"),
+        .retained = false,
+        .state = .{ .completed = .{ .exit_code = 2 } },
+        .output_delta = @constCast("usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz]\n"),
+        .output_truncated = false,
+        .output_incomplete = true,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(std.mem.find(
+        u8,
+        parsed.value.object.get("retry_guidance").?.string,
+        "do not blindly rerun",
+    ) != null);
+}
+
+test "failure guidance detectors match only their signatures" {
+    try std.testing.expectEqual(
+        zsh_parse_retry_guidance,
+        failureRetryGuidance(1, "zsh:1: unmatched '\n", true),
+    );
+    // fx spawns the resolved login shell with an absolute argv[0], so bash
+    // errors carry a /bin/bash prefix; bare-basename forms also occur when a
+    // command spawns a shell subprocess itself.
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(2, "/bin/bash: -c: line 1: syntax error: unexpected end of file\n", true),
+    );
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(2, "bash: -c: line 1: syntax error near unexpected token `)'\n", true),
+    );
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(2, "/bin/dash: 1: Syntax error: Unterminated quoted string\n", true),
+    );
+    try std.testing.expectEqual(
+        zsh_parse_retry_guidance,
+        failureRetryGuidance(1, "zsh: parse error near '\\n'\n", true),
+    );
+    // Snapshot and terminal runs evaluate the command, so zsh reports `(eval)`
+    // and bash reports the sourced snapshot script followed by `eval:`.
+    try std.testing.expectEqual(
+        zsh_parse_retry_guidance,
+        failureRetryGuidance(1, "(eval):1: unmatched \"\n", true),
+    );
+    try std.testing.expectEqual(
+        zsh_parse_retry_guidance,
+        failureRetryGuidance(1, "(eval):1: parse error near `)'\r\n", true),
+    );
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(1, "/dev/fd/0: eval: line 2: unexpected EOF while looking for matching `\"'\n/dev/fd/0: eval: line 3: syntax error: unexpected end of file\n", true),
+    );
+    // bash 5.2 prints only the unexpected EOF line for an unclosed quote.
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(1, "/dev/fd/0: eval: line 40: unexpected EOF while looking for matching `\"'\n", true),
+    );
+    // bash 3.2 evaluates the snapshot script, so it names the shell instead.
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(1, "/bin/bash: eval: line 11: unexpected EOF while looking for matching `\"'\n/bin/bash: eval: line 12: syntax error: unexpected end of file\n", true),
+    );
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(2, "/bin/bash: -c: line 1: unexpected EOF while looking for matching `\"'\n", true),
+    );
+    try std.testing.expectEqual(
+        usage_error_retry_guidance,
+        failureRetryGuidance(2, "usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz]\n", true),
+    );
+    try std.testing.expectEqual(
+        usage_error_retry_guidance,
+        failureRetryGuidance(64, "Usage: ls [-ABCFGHabcdfghiklmnopqrstuvwx1] [file ...]\n", true),
+    );
+    try std.testing.expectEqual(
+        usage_error_retry_guidance,
+        failureRetryGuidance(2, "grep: unknown option\nusage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz]\n", true),
+    );
+
+    // Exit zero never carries failure guidance.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(0, "usage: grep\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(null, "zsh:1: unmatched '\n", true));
+    // A compiler-style syntax error without a shell prefix is not a shell parse error.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "main.c:4:5: error: expected ';' after expression (syntax error)\n", true));
+    // A non-shell token before the colon is not a shell prefix even when a shell name appears later.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "error: bash: syntax error\n", true));
+    // An eval source alone is not enough; the line must still name a parse error.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "(eval):1: no such file or directory: missing\n", true));
+    // A bash run-time error under the snapshot names `/dev/fd/0` without `eval:`.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "/dev/fd/0: line 3: 1 +  : syntax error: operand expected (error token is \" \")\n", true));
+    // zsh's `[` builtin reports a bad expression at run time, after the command
+    // parsed. A `[[` test missing an operand prints the same text and is dropped too.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "(eval):3: parse error: condition expected: =\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "zsh:2: parse error: condition expected: $a\n", true));
+    // Other output beside a zsh parse error means something ran, so the error
+    // may have come from an `eval` in a startup file or in the command.
+    // Captured runs can also place later stdout before stderr, so the order
+    // of that output proves nothing.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "(eval):1: unmatched \"\r\nls: /missing: No such file or directory\r\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "BEFORE\nzsh:1: unmatched '\nAFTER\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "RAN\n(eval):1: unmatched \"\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "zsh:1: unmatched \"\nbye\n", true));
+    // Output an earlier observation delivered counts as other output for zsh.
+    // bash guidance already allows for lines that ran.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "(eval):1: unmatched \"\n", false));
+    try std.testing.expectEqual(
+        line_shell_parse_retry_guidance,
+        failureRetryGuidance(1, "/dev/fd/0: eval: line 2: unexpected EOF while looking for matching `\"'\n", false),
+    );
+    // The `eval` of a bash script the command runs is not the snapshot's.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(3, "./build.sh: eval: line 4: unexpected EOF while looking for matching `\"'\n", true));
+    // Ordinary failures keep null guidance.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(2, "grep: /nonexistent: No such file or directory\n", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "", true));
+    // A usage-looking line deep in output is not an argument rejection banner.
+    try std.testing.expectEqual(@as(?[]const u8, null), failureRetryGuidance(1, "line one\nline two\nline three\nline four\nusage: not a banner\n", true));
+}
+
+test "shell snapshot keeps bounded head tail and control metadata" {
+    const alloc = std.testing.allocator;
+    const output = "HEAD_SENTINEL\n" ++ text_utils.repeat("x", 70 * 1024) ++ "\nTAIL_SENTINEL";
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-large"),
+        .command = @constCast("large-output"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output_delta = @constCast(output),
+        .output_truncated = false,
+        .output_file = @constCast("fx-command-replay-large.bin"),
+    }, null);
+    defer alloc.free(body);
+
+    try std.testing.expect(body.len <= 16 * 1024);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings(
+        "fx-command-replay-large.bin",
+        object.get("full_output_handle").?.string,
+    );
+    try std.testing.expect(object.get("output_truncated").?.bool);
+    const projected = object.get("output_delta").?.string;
+    try std.testing.expect(std.mem.find(u8, projected, "HEAD_SENTINEL") != null);
+    try std.testing.expect(std.mem.find(u8, projected, "TAIL_SENTINEL") != null);
+    try std.testing.expect(std.mem.find(u8, projected, "bytes omitted") != null);
+}
+
+test "shell snapshot projects hostile bytes as readable terminal-safe text" {
+    const alloc = std.testing.allocator;
+    const raw = "\x1b[31mRED\x1b[0m\rREWRITE\t\x00\xff\nCONTROL_TAIL\n";
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-hostile"),
+        .command = @constCast("hostile-output"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output_delta = @constCast(raw),
+        .output_truncated = false,
+        .output_file = @constCast("fx-command-replay-hostile.bin"),
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const output_value = parsed.value.object.get("output_delta") orelse
+        return error.TestExpectedEqual;
+    if (output_value != .string) return error.TestUnexpectedResult;
+    const terminal_safe = parsed.value.object.get("output_terminal_safe") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(terminal_safe.bool);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "\\x1b") != null);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "\\x00") != null);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "\\xff") != null);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "CONTROL_TAIL") != null);
+    try std.testing.expectEqualStrings(
+        "fx-command-replay-hostile.bin",
+        parsed.value.object.get("full_output_handle").?.string,
+    );
+}
+
+test "shell snapshot keeps a hostile output tail within the result limit" {
+    const alloc = std.testing.allocator;
+    const raw = text_utils.repeat("\xff", 70 * 1024) ++ "\nCONTROL_TAIL";
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-hostile-large"),
+        .command = @constCast("hostile-large-output"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .{ .completed = .{ .exit_code = 0 } },
+        .output_delta = @constCast(raw),
+        .output_truncated = false,
+        .output_file = @constCast("fx-command-replay-hostile-large.bin"),
+    }, null);
+    defer alloc.free(body);
+
+    try std.testing.expect(body.len <= 16 * 1024);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const output_value = parsed.value.object.get("output_delta") orelse
+        return error.TestExpectedEqual;
+    if (output_value != .string) return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.find(u8, output_value.string, "\\xff") != null);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "bytes omitted") != null);
+    try std.testing.expect(std.mem.find(u8, output_value.string, "CONTROL_TAIL") != null);
+    try std.testing.expect(parsed.value.object.get("output_truncated").?.bool);
+}
+
+const test_replay_handle = "fx-command-replay-test.bin";
+
+fn testReplaySnapshot(
+    state: managed_execution.SnapshotState,
+    output: []const u8,
+    output_truncated: bool,
+    output_incomplete: bool,
+    output_file: ?[]const u8,
+) managed_execution.Snapshot {
+    return .{
+        .execution_id = @constCast("shell-replay"),
+        .command = @constCast("replay-fixture"),
+        .cwd = @constCast("/tmp"),
+        .retained = state == .running,
+        .state = state,
+        .output_delta = @constCast(output),
+        .output_truncated = output_truncated,
+        .output_incomplete = output_incomplete,
+        .output_file = if (output_file) |handle| @constCast(handle) else null,
+    };
+}
+
+fn expectReplayHandle(snapshot: managed_execution.Snapshot, expected: ?[]const u8) !void {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, snapshot, null);
+    defer alloc.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const handle = parsed.value.object.get("full_output_handle");
+    if (expected) |value| {
+        try std.testing.expectEqualStrings(value, handle.?.string);
+    } else {
+        try std.testing.expect(handle == null);
+    }
+}
+
+test "a complete printable shell result leaves out its replay handle" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, testReplaySnapshot(
+        .{ .completed = .{ .exit_code = 0 } },
+        "hi\n\x1b[1mbold\x1b[0m\n",
+        false,
+        false,
+        test_replay_handle,
+    ), null);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"state\":\"completed\",\"exit_code\":0,\"output_delta\":\"hi\\n\\u001b[1mbold\\u001b[0m\\n\"}",
+        body,
+    );
+}
+
+test "a shell result without exact output, or without a saved copy, says so through its handle" {
+    const completed: managed_execution.SnapshotState = .{ .completed = .{ .exit_code = 0 } };
+    // Nothing printed, or nothing saved: there is nothing to read back.
+    try expectReplayHandle(testReplaySnapshot(completed, "", false, false, null), null);
+    try expectReplayHandle(testReplaySnapshot(completed, "ok\n", false, false, null), null);
+    try expectReplayHandle(testReplaySnapshot(completed, "\xff\n", false, false, null), null);
+    // Capture dropped bytes, or the output is partial: the handle reads the rest.
+    try expectReplayHandle(testReplaySnapshot(completed, "tail\n", true, false, test_replay_handle), test_replay_handle);
+    try expectReplayHandle(testReplaySnapshot(completed, "partial", false, true, test_replay_handle), test_replay_handle);
+    // NUL and invalid UTF-8 are written as escapes, so the text is not the bytes.
+    try expectReplayHandle(testReplaySnapshot(completed, "a\x00b\n", false, false, test_replay_handle), test_replay_handle);
+    try expectReplayHandle(testReplaySnapshot(completed, "a\xffb\n", false, false, test_replay_handle), test_replay_handle);
+}
+
+test "each observation of a running command carries a handle only when its own delta is not exact" {
+    const running: managed_execution.SnapshotState = .running;
+    const completed: managed_execution.SnapshotState = .{ .completed = .{ .exit_code = 0 } };
+    try expectReplayHandle(testReplaySnapshot(running, "first\n", false, false, test_replay_handle), null);
+    try expectReplayHandle(testReplaySnapshot(completed, "second\n", false, false, test_replay_handle), null);
+    try expectReplayHandle(testReplaySnapshot(running, "first\xff\n", false, false, test_replay_handle), test_replay_handle);
+    try expectReplayHandle(testReplaySnapshot(completed, "second\n", true, false, test_replay_handle), test_replay_handle);
+}
+
+test "a shell result clipped only by the result limit keeps its handle" {
+    const alloc = std.testing.allocator;
+    const output = "HEAD\n" ++ text_utils.repeat("y", 4 * 1024) ++ "\nTAIL";
+    const snapshot = testReplaySnapshot(
+        .{ .completed = .{ .exit_code = 0 } },
+        output,
+        false,
+        false,
+        test_replay_handle,
+    );
+    const body = try formatSnapshotWithLimit(alloc, snapshot, null, 1024);
+    defer alloc.free(body);
+    try std.testing.expect(body.len <= 1024);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expect(object.get("output_truncated").?.bool);
+    try std.testing.expectEqualStrings(test_replay_handle, object.get("full_output_handle").?.string);
+    try std.testing.expect(std.mem.find(u8, object.get("output_delta").?.string, "use full_output_handle") != null);
+}
+
+test "running shell snapshot leaves continuation intent to the caller" {
+    const alloc = std.testing.allocator;
+    const body = try formatSnapshot(alloc, .{
+        .execution_id = @constCast("shell-running"),
+        .command = @constCast("long-command"),
+        .cwd = @constCast("/tmp"),
+        .retained = true,
+        .state = .running,
+        .output_delta = @constCast(""),
+        .output_truncated = false,
+    }, null);
+    defer alloc.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("next_action") == null);
+    try std.testing.expectEqualStrings(
+        "shell-running",
+        parsed.value.object.get("session_id").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "running",
+        parsed.value.object.get("state").?.string,
+    );
+}
+
+test "registered shell empty observation waits through one managed execution" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = managed_execution.Runtime.init(alloc);
+    defer runtime.deinit();
+    var streamed_bytes = std.atomic.Value(usize).init(0);
+    const StreamCapture = struct {
+        fn append(
+            raw: *anyopaque,
+            _: ?types.ToolLifecycleId,
+            _: command_contract.CommandOutputStream,
+            chunk: []const u8,
+        ) !void {
+            const count: *std.atomic.Value(usize) = @ptrCast(@alignCast(raw));
+            _ = count.fetchAdd(chunk.len, .seq_cst);
+        }
+    };
+    const spec = tool_dispatch.Tool{
+        .name = "shell",
+        .description = "shell",
+        .model_schema = .{ .name = "shell", .description = "shell" },
+        .executor_kind = .terminal,
+        .activity_kind = .command,
+        .requires_approval = true,
+        .decode = decode,
+        .validate = validate,
+        .call = call,
+        .captured_command_action = "run",
+        .captured_command_fn = isCapturedCommand,
+        .process_local_fn = isProcessLocal,
+        .reads_only_fn = readsOnly,
+        .irreversible_fn = isIrreversible,
+    };
+    const registry = tool_dispatch.Registry{ .tools = &.{spec} };
+    var environment_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer environment_arena_state.deinit();
+    const environment = try commandEnvironment(
+        environment_arena_state.allocator(),
+        .{ .allocator = alloc, .workspace_root = "/tmp" },
+        .clean,
+    );
+    const command_ctx = command_admission.CommandContext{
+        .command = "sleep 2; printf done",
+        .resolved_cwd = "/tmp",
+        .target_os = @import("builtin").target.os.tag,
+        .environment = environment,
+    };
+    const authority = command_admission.CommandExecutionAuthority{
+        .shell_allowed = .{
+            .fingerprint = .init(command_ctx),
+            .source = .yolo,
+        },
+    };
+    const started = try tool_dispatch.dispatchAuthorizedToolCall(
+        .{
+            .allocator = alloc,
+            .workspace_root = "/tmp",
+            .tool_call_id = "shell-integration",
+            .managed_executions = &runtime,
+            .execution_authority = .{ .run_command = authority },
+            .max_command_output_bytes = 4096,
+            .output_chunk_lifecycle_id = .{
+                .turn_id = 1,
+                .call_id = "shell-integration",
+            },
+            .output_chunk_ctx = &streamed_bytes,
+            .on_output_chunk = StreamCapture.append,
+        },
+        registry,
+        .{
+            .id = "shell-integration",
+            .name = "shell",
+            .arguments_json = "{\"action\":\"run\",\"command\":\"sleep 2; printf done\",\"cwd\":\"/tmp\",\"profile\":\"clean\",\"yield_time_ms\":0}",
+        },
+    );
+    defer started.deinit(alloc);
+    try std.testing.expectEqual(tool_dispatch.DispatchResult.Status.success, started.status);
+    try std.testing.expect(std.mem.find(u8, started.body, "\"state\":\"running\"") != null);
+    var started_json = try std.json.parseFromSlice(std.json.Value, alloc, started.body, .{});
+    defer started_json.deinit();
+    const execution_id = started_json.value.object.get("session_id") orelse
+        return error.TestExpectedEqual;
+    const interact_arguments = try alloc.print(
+        "{{\"action\":\"interact\",\"session_id\":\"{s}\",\"yield_time_ms\":1000}}",
+        .{execution_id.string},
+    );
+    defer alloc.free(interact_arguments);
+
+    var command_result_json: ?[]const u8 = null;
+    defer if (command_result_json) |json| alloc.free(@constCast(json));
+    var tool_result_memory: ?types.ToolResultMemory = null;
+    defer if (tool_result_memory) |memory| {
+        if (memory.command_output_replay) |replay| switch (replay) {
+            .available => |descriptor| alloc.free(@constCast(descriptor.handle)),
+            .unavailable => {},
+        };
+    };
+    const waited = try tool_dispatch.dispatchAuthorizedToolCall(
+        .{
+            .allocator = alloc,
+            .workspace_root = "/tmp",
+            .tool_call_id = "shell-wait",
+            .managed_executions = &runtime,
+            .max_command_output_bytes = 4096,
+            .command_result_json_sink = &command_result_json,
+            .tool_result_memory_sink = &tool_result_memory,
+        },
+        registry,
+        .{
+            .id = "shell-wait",
+            .name = "shell",
+            .arguments_json = interact_arguments,
+        },
+    );
+    defer waited.deinit(alloc);
+    try std.testing.expectEqual(tool_dispatch.DispatchResult.Status.success, waited.status);
+    try std.testing.expect(std.mem.find(u8, waited.body, "\"state\":\"completed\"") != null);
+    try std.testing.expect(std.mem.find(u8, waited.body, "done") != null);
+    try std.testing.expectEqual(@as(usize, "done".len), streamed_bytes.load(.seq_cst));
+    try std.testing.expect(std.mem.find(
+        u8,
+        command_result_json orelse return error.TestExpectedEqual,
+        "\"kind\":\"command\"",
+    ) != null);
+    const replay = tool_result_memory.?.command_output_replay orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(replay == .available);
+}
+
+/// The setup the steering cancel tests share: the managed runtime, the
+/// shell tool, a clean command environment, and a steering wait that never
+/// ends, as when the user types while a command runs.
+const SteeringCancelTest = struct {
+    alloc: Allocator,
+    runtime: managed_execution.Runtime,
+    environment_arena: std.heap.ArenaAllocator,
+    environment: command_environment.Environment,
+    yield_flag: std.atomic.Value(bool),
+
+    const Started = struct { id: []u8, notice: bool };
+
+    const registry = tool_dispatch.Registry{ .tools = &.{tool_dispatch.Tool{
+        .name = "shell",
+        .description = "shell",
+        .model_schema = .{ .name = "shell", .description = "shell" },
+        .executor_kind = .terminal,
+        .activity_kind = .command,
+        .requires_approval = true,
+        .decode = decode,
+        .validate = validate,
+        .call = call,
+        .captured_command_action = "run",
+        .captured_command_fn = isCapturedCommand,
+        .process_local_fn = isProcessLocal,
+        .reads_only_fn = readsOnly,
+        .irreversible_fn = isIrreversible,
+    }} };
+
+    fn init(self: *SteeringCancelTest, alloc: Allocator) !void {
+        self.* = .{
+            .alloc = alloc,
+            .runtime = managed_execution.Runtime.init(alloc),
+            .environment_arena = std.heap.ArenaAllocator.init(alloc),
+            .environment = undefined,
+            .yield_flag = .init(true),
+        };
+        errdefer self.deinit();
+        self.environment = try commandEnvironment(
+            self.environment_arena.allocator(),
+            .{ .allocator = alloc, .workspace_root = "/tmp" },
+            .clean,
+        );
+    }
+
+    fn deinit(self: *SteeringCancelTest) void {
+        self.environment_arena.deinit();
+        self.runtime.deinit();
+    }
+
+    /// Dispatches one shell call with `arguments` in turn `turn_id` while
+    /// steering waits. Its result must show the command running. Returns
+    /// the command's session id, which the caller frees, and whether the
+    /// result got the steering notice.
+    fn dispatch(
+        self: *SteeringCancelTest,
+        command: []const u8,
+        arguments: []const u8,
+        turn_id: u64,
+    ) !Started {
+        const authority = command_admission.CommandExecutionAuthority{ .shell_allowed = .{
+            .fingerprint = .init(.{
+                .command = command,
+                .resolved_cwd = "/tmp",
+                .target_os = @import("builtin").target.os.tag,
+                .environment = self.environment,
+            }),
+            .source = .yolo,
+        } };
+        const result = try tool_dispatch.dispatchAuthorizedToolCall(.{
+            .allocator = self.alloc,
+            .workspace_root = "/tmp",
+            .tool_call_id = "steered-call",
+            .managed_executions = &self.runtime,
+            .execution_authority = .{ .run_command = authority },
+            .max_command_output_bytes = 4096,
+            .tool_yield_flag = &self.yield_flag,
+            .output_chunk_lifecycle_id = .{ .turn_id = turn_id, .call_id = "steered-call" },
+        }, registry, .{ .id = "steered-call", .name = "shell", .arguments_json = arguments });
+        defer result.deinit(self.alloc);
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.alloc, result.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("running", parsed.value.object.get("state").?.string);
+        return .{
+            .id = try self.alloc.dupe(u8, parsed.value.object.get("session_id").?.string),
+            .notice = parsed.value.object.get("steering_notice") != null,
+        };
+    }
+
+    /// Starts `command` in turn `turn_id` with a `run` that waits up to
+    /// `yield_time_ms`.
+    fn run(self: *SteeringCancelTest, command: []const u8, yield_time_ms: u32, turn_id: u64) !Started {
+        const arguments = try self.alloc.print(
+            "{{\"action\":\"run\",\"command\":\"{s}\",\"cwd\":\"/tmp\",\"profile\":\"clean\",\"yield_time_ms\":{d}}}",
+            .{ command, yield_time_ms },
+        );
+        defer self.alloc.free(arguments);
+        return self.dispatch(command, arguments, turn_id);
+    }
+
+    /// Waits on the output of `started`, which runs `command`, with an
+    /// `interact` poll in turn `turn_id`.
+    fn poll(self: *SteeringCancelTest, command: []const u8, started: Started, turn_id: u64) !Started {
+        const arguments = try self.alloc.print(
+            "{{\"action\":\"interact\",\"session_id\":\"{s}\",\"yield_time_ms\":30000}}",
+            .{started.id},
+        );
+        defer self.alloc.free(arguments);
+        return self.dispatch(command, arguments, turn_id);
+    }
+
+    /// What an explicit cancel of turn `turn_id` does. Its stops may still
+    /// run when it returns. Their job uses the testing allocator, so a job
+    /// the runtime's shutdown does not free fails the test.
+    fn cancelTurn(self: *SteeringCancelTest, turn_id: u64) !void {
+        try stopSteeringDetached(.{
+            .allocator = self.alloc,
+            .lifecycle_allocator = self.alloc,
+            .managed_executions = &self.runtime,
+        }, turn_id);
+    }
+
+    fn state(self: *SteeringCancelTest, started: Started) ?managed_execution.SnapshotState {
+        return self.runtime.stateFor(started.id);
+    }
+};
+
+test "a turn cancel stops the command steering detached and keeps a background one" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    var t: SteeringCancelTest = undefined;
+    try t.init(std.testing.allocator);
+    defer t.deinit();
+
+    // Two commands steering moved, which stop on threads of their own.
+    const steered = [_]SteeringCancelTest.Started{
+        try t.run("sleep 30", 30_000, 5),
+        try t.run("sleep 32", 30_000, 5),
+    };
+    defer for (steered) |started| t.alloc.free(started.id);
+    for (steered) |started| try std.testing.expect(started.notice);
+    // A call that asked to return at once was not moved by steering.
+    const background = try t.run("sleep 31", 0, 5);
+    defer t.alloc.free(background.id);
+    try std.testing.expect(!background.notice);
+
+    // A cancel of another turn stops nothing.
+    try t.cancelTurn(6);
+    for (steered) |started| try std.testing.expectEqual(managed_execution.SnapshotState.running, t.state(started).?);
+
+    try t.cancelTurn(5);
+    const deadline_ms = io_mod.milliTimestamp() + 10_000;
+    for (steered) |started| while (t.state(started)) |state| {
+        if (state != .running) break;
+        if (io_mod.milliTimestamp() > deadline_ms) return error.TestUnexpectedResult;
+        io_mod.sleep(20 * std.time.ns_per_ms);
+    };
+    try std.testing.expectEqual(managed_execution.SnapshotState.running, t.state(background).?);
+}
+
+test "a turn cancel stops more steered commands than run at once, also when no task can start" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    for ([_]bool{ false, true }) |no_task| {
+        var t: SteeringCancelTest = undefined;
+        try t.init(std.testing.allocator);
+        defer t.deinit();
+
+        var steered: [max_parallel_detached_stops + 2]SteeringCancelTest.Started = undefined;
+        var started: usize = 0;
+        defer for (steered[0..started]) |command| t.alloc.free(command.id);
+        for (&steered) |*command| {
+            command.* = try t.run("sleep 30", 30_000, 5);
+            started += 1;
+            try std.testing.expect(command.notice);
+        }
+
+        if (no_task) {
+            // No background task can start, as in a single-threaded build,
+            // so the stops run on the caller before the cancel returns. The
+            // limit holds only for the cancel: the commands' own waits
+            // start tasks too.
+            const previous_limit = std.testing.io_instance.concurrent_limit;
+            std.testing.io_instance.concurrent_limit = .nothing;
+            defer std.testing.io_instance.concurrent_limit = previous_limit;
+            try t.cancelTurn(5);
+            for (steered) |command| try std.testing.expect(t.state(command).? != .running);
+            continue;
+        }
+        try t.cancelTurn(5);
+        const deadline_ms = io_mod.milliTimestamp() + 10_000;
+        for (steered) |command| while (t.state(command)) |state| {
+            if (state != .running) break;
+            if (io_mod.milliTimestamp() > deadline_ms) return error.TestUnexpectedResult;
+            io_mod.sleep(20 * std.time.ns_per_ms);
+        };
+    }
+}
+
+test "shutdown while a turn cancel's stops run ends every command and frees the stops" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    // An agent or instance close lets the stops finish; process exit cuts
+    // them short and ends the commands itself.
+    for ([_]bool{ false, true }) |process_exit| {
+        var t: SteeringCancelTest = undefined;
+        try t.init(std.testing.allocator);
+        defer t.deinit();
+
+        // Commands that ignore SIGTERM, so each graceful stop waits.
+        const stubborn = "trap '' TERM; while :; do sleep 1; done";
+        var steered: [3]SteeringCancelTest.Started = undefined;
+        var started: usize = 0;
+        defer for (steered[0..started]) |command| t.alloc.free(command.id);
+        for (&steered) |*command| {
+            command.* = try t.run(stubborn, 30_000, 5);
+            started += 1;
+            try std.testing.expect(command.notice);
+        }
+
+        // The cancel returns while its stops still run, and shutdown awaits
+        // them. The job uses the testing allocator, so one left behind
+        // fails.
+        try t.cancelTurn(5);
+        if (process_exit) t.runtime.terminateForProcessExit() else t.runtime.shutdown();
+        try std.testing.expectEqual(process_exit, t.runtime.backgroundCancelled());
+        for (steered) |command| try std.testing.expect(t.state(command).? != .running);
+    }
+}
+
+test "a turn cancel keeps a command that steering cut short only in an interact poll" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    var t: SteeringCancelTest = undefined;
+    try t.init(std.testing.allocator);
+    defer t.deinit();
+
+    // The model starts a server in the background itself, then polls it
+    // while steering waits. The poll returns for steering, but the cancel
+    // of its turn keeps the server.
+    const background = try t.run("sleep 30", 0, 5);
+    defer t.alloc.free(background.id);
+    try std.testing.expect(!background.notice);
+    const polled = try t.poll("sleep 30", background, 5);
+    defer t.alloc.free(polled.id);
+    try std.testing.expect(polled.notice);
+    try t.cancelTurn(5);
+    try std.testing.expectEqual(managed_execution.SnapshotState.running, t.state(background).?);
+
+    // A command steering cut short in turn 7 and polled in turn 8 stays
+    // with turn 7: the cancel of turn 8 keeps it.
+    const steered = try t.run("sleep 31", 30_000, 7);
+    defer t.alloc.free(steered.id);
+    try std.testing.expect(steered.notice);
+    const later_poll = try t.poll("sleep 31", steered, 8);
+    defer t.alloc.free(later_poll.id);
+    try std.testing.expect(later_poll.notice);
+    try t.cancelTurn(8);
+    try std.testing.expectEqual(managed_execution.SnapshotState.running, t.state(steered).?);
+    try std.testing.expectEqual(managed_execution.SnapshotState.running, t.state(background).?);
+}
+
+/// The steering cancel setup with a real terminal: the shell tool runs tty
+/// commands through an in-process terminal client in a private profile.
+const TtySteeringCancelTest = struct {
+    const owner_session_id = "steered-stop-owner";
+    const shell_path = "/bin/bash";
+    const terminal_client = @import("../../core/terminal/client.zig");
+
+    alloc: Allocator,
+    tmp: std.testing.TmpDir,
+    home: []u8,
+    capability: session_child_store.SessionChildCapability,
+    client: terminal_client.Runtime,
+    runtime: managed_execution.Runtime,
+    yield_flag: std.atomic.Value(bool),
+
+    fn init(self: *TtySteeringCancelTest) !void {
+        const host = @import("../../core/hosts/host.zig");
+        if (comptime !host.terminalSupportForOs(builtin.target.os.tag).isSupported()) {
+            return error.SkipZigTest;
+        }
+        const alloc = std.testing.allocator;
+        self.alloc = alloc;
+        self.yield_flag = .init(true);
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        self.home = try io_mod.dirRealpathAlloc(alloc, self.tmp.dir, ".");
+        errdefer alloc.free(self.home);
+        var root = io_mod.VerifiedDir{ .dir = try self.tmp.dir.openDir(
+            std.testing.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) };
+        defer root.close();
+        var fx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&root, ".fx");
+        defer fx_dir.close();
+        var sessions = try io_mod.openOrCreateVerifiedPrivateDir(&fx_dir, "sessions");
+        defer sessions.close();
+        var owner = try io_mod.openOrCreateVerifiedPrivateDir(&sessions, owner_session_id);
+        defer owner.close();
+        const session_path = try std.Io.Dir.path.join(alloc, &.{ self.home, ".fx", "sessions", owner_session_id });
+        defer alloc.free(session_path);
+        self.capability = try session_child_store.SessionChildCapability.initForTesting(
+            alloc,
+            owner.dir,
+            session_path,
+            .writable,
+            .{},
+        );
+        errdefer self.capability.deinit();
+        self.client = terminal_client.Runtime.init(@import("process_provider.zig").provider);
+        self.client.profile_home = self.home;
+        self.runtime = managed_execution.Runtime.init(alloc);
+    }
+
+    fn deinit(self: *TtySteeringCancelTest) void {
+        self.client.closeOwnedTerminals();
+        self.client.joinExitDrainForTest(10_000);
+        self.client.deinit();
+        self.runtime.deinit();
+        self.capability.deinit();
+        self.alloc.free(self.home);
+        self.tmp.cleanup();
+    }
+
+    /// Starts writing the shell's trace lines to a file in the profile and
+    /// returns its path, which the caller frees. The caller resets the trace.
+    fn startTrace(self: *TtySteeringCancelTest) ![]u8 {
+        const trace_path = try std.Io.Dir.path.join(self.alloc, &.{ self.home, "trace.log" });
+        errdefer self.alloc.free(trace_path);
+        debug_trace.resetForTest();
+        try debug_trace.configureForTestWithScopes(self.alloc, trace_path, "shell");
+        return trace_path;
+    }
+
+    /// The context of a call outside any turn, as the cancel uses.
+    fn context(self: *TtySteeringCancelTest) tool_dispatch.DispatchContext {
+        return .{
+            .allocator = self.alloc,
+            .lifecycle_allocator = self.alloc,
+            .workspace_root = self.home,
+            .managed_executions = &self.runtime,
+            .terminal_client = &self.client,
+            .session_child_capability = &self.capability,
+            .terminal_owner_session_id = owner_session_id,
+            .max_command_output_bytes = 4096,
+        };
+    }
+
+    /// Runs `command` in a tty in turn `turn_id` while steering waits, and
+    /// returns its session id, which the caller frees.
+    fn run(self: *TtySteeringCancelTest, command: []const u8, turn_id: u64) ![]u8 {
+        var arena_state = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var login_shell_buffer: [4096]u8 = undefined;
+        const environment = try shell_resolver.environmentForShellSpec(
+            arena,
+            shell_resolver.configuredLoginShellInto(&login_shell_buffer),
+            .{ .executable = .{ .path = shell_path, .clean_start = true } },
+        );
+        const authority = command_admission.CommandExecutionAuthority{ .shell_allowed = .{
+            .fingerprint = .init(.{
+                .command = command,
+                .resolved_cwd = self.home,
+                .target_os = builtin.target.os.tag,
+                .environment = environment,
+                .execution_mode = .tty,
+            }),
+            .source = .yolo,
+        } };
+        const arguments = try arena.print(
+            "{{\"action\":\"run\",\"tty\":true,\"command\":\"{s}\",\"shell\":{{\"kind\":\"executable\",\"path\":\"{s}\",\"clean_start\":true}},\"yield_time_ms\":30000}}",
+            .{ command, shell_path },
+        );
+        var ctx = self.context();
+        ctx.tool_call_id = "steered-tty-call";
+        ctx.execution_authority = .{ .run_command = authority };
+        ctx.tool_yield_flag = &self.yield_flag;
+        ctx.output_chunk_lifecycle_id = .{ .turn_id = turn_id, .call_id = "steered-tty-call" };
+        const result = try tool_dispatch.dispatchAuthorizedToolCall(
+            ctx,
+            SteeringCancelTest.registry,
+            .{ .id = "steered-tty-call", .name = "shell", .arguments_json = arguments },
+        );
+        defer result.deinit(self.alloc);
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.alloc, result.body, .{});
+        defer parsed.deinit();
+        std.testing.expectEqualStrings("running", parsed.value.object.get("state").?.string) catch |err| {
+            std.debug.print("tty run result: {s}\n", .{result.body});
+            return err;
+        };
+        try std.testing.expect(parsed.value.object.get("steering_notice") != null);
+        return self.alloc.dupe(u8, parsed.value.object.get("session_id").?.string);
+    }
+
+    /// Admits waits for the exit of `session_id` until the client has
+    /// refused them for 200 ms, so every request slot is taken and not only
+    /// the intake queue. Returns how many it admitted.
+    fn fill(self: *TtySteeringCancelTest, session_id: []const u8, out: []terminal_contracts.CorrelationId) !usize {
+        var authority = try reloadTerminalAuthority(self.context(), session_id);
+        defer authority.deinit();
+        var count: usize = 0;
+        var refused_since_ms: ?i64 = null;
+        while (count < out.len) {
+            const correlation_id = self.client.nextCorrelationId();
+            self.client.admit(self.alloc, correlation_id, .{ .wait = .{
+                .session_id = session_id,
+                .return_when = .exit,
+                .safety_ceiling_ms = 30_000,
+                .authority = authority.view(),
+            } }) catch |err| switch (err) {
+                error.QueueFull => {
+                    const now_ms = io_mod.milliTimestamp();
+                    const since_ms = refused_since_ms orelse now_ms;
+                    if (now_ms - since_ms >= 200) return count;
+                    refused_since_ms = since_ms;
+                    io_mod.sleep(10 * std.time.ns_per_ms);
+                    continue;
+                },
+                else => return err,
+            };
+            refused_since_ms = null;
+            out[count] = correlation_id;
+            count += 1;
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    /// Waits `delay_ms`, then cancels the waits `fill` admitted and takes
+    /// their completions, which frees their slots.
+    fn release(self: *TtySteeringCancelTest, ids: []const terminal_contracts.CorrelationId, delay_ms: u64) void {
+        io_mod.sleep(delay_ms * std.time.ns_per_ms);
+        for (ids) |id| _ = self.client.cancel(id);
+        const deadline_ms = io_mod.milliTimestamp() + 10_000;
+        for (ids) |id| while (io_mod.milliTimestamp() < deadline_ms) {
+            if (self.client.takeCompletionFor(id)) |completion_value| {
+                var completion = completion_value;
+                completion.deinit();
+                break;
+            }
+            io_mod.sleep(5 * std.time.ns_per_ms);
+        };
+    }
+};
+
+test "a stop failure counts as busy only for a retryable capacity refusal" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { body: []const u8, busy: bool, code: []const u8 }{
+        // A cloned terminal failure, as the client's admission refusal gives.
+        .{ .body = "{\"failure\":{\"action\":\"signal\",\"code\":\"capacity_exceeded\",\"retryable\":true}}", .busy = true, .code = "capacity_exceeded" },
+        // The host's own limit, which a retry does not lift.
+        .{ .body = "{\"failure\":{\"action\":\"wait\",\"code\":\"capacity_exceeded\",\"retryable\":false}}", .busy = false, .code = "capacity_exceeded" },
+        // A lost host session is retryable for a wait, but not busy.
+        .{ .body = "{\"failure\":{\"action\":\"wait\",\"code\":\"session_lost\",\"retryable\":true}}", .busy = false, .code = "session_lost" },
+        // A shell failure.
+        .{ .body = "{\"error\":{\"tool\":\"shell\",\"code\":\"TerminalCapacityExceeded\",\"retryable\":true}}", .busy = true, .code = "TerminalCapacityExceeded" },
+        .{ .body = "{\"error\":{\"tool\":\"shell\",\"code\":\"TerminalObservationFailed\",\"retryable\":false}}", .busy = false, .code = "TerminalObservationFailed" },
+        .{ .body = "{\"error\":{\"tool\":\"shell\",\"code\":\"TerminalCapacityExceeded\",\"retryable\":\"true\"}}", .busy = false, .code = "TerminalCapacityExceeded" },
+        // Bodies that are not a failure object.
+        .{ .body = "not json", .busy = false, .code = "none" },
+        .{ .body = "[true]", .busy = false, .code = "none" },
+        .{ .body = "{\"retryable\":true}", .busy = false, .code = "none" },
+        .{ .body = "{\"error\":{\"retryable\":true}}", .busy = false, .code = "none" },
+    };
+    for (cases) |case| {
+        const body = try alloc.dupe(u8, case.body);
+        const result: tool_dispatch.ToolResult = .{ .failure = body };
+        defer result.deinit(alloc);
+        var code_buffer: [64]u8 = undefined;
+        const failure = stopFailure(alloc, result, &code_buffer);
+        std.testing.expectEqual(case.busy, failure.busy) catch |err| {
+            std.debug.print("body: {s}\n", .{case.body});
+            return err;
+        };
+        try std.testing.expectEqualStrings(case.code, failure.code);
+    }
+    const success: tool_dispatch.ToolResult = .{ .success = try alloc.dupe(u8, "{\"retryable\":true}") };
+    defer success.deinit(alloc);
+    var code_buffer: [64]u8 = undefined;
+    try std.testing.expect(!stopFailure(alloc, success, &code_buffer).busy);
+}
+
+test "a turn cancel stops a steered tty command while the terminal client is full" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const steered = try t.run("sleep 30", 5);
+    defer t.alloc.free(steered);
+
+    // Other agents hold every request slot of the terminal client.
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(steered, &fillers);
+    try std.testing.expect(filled > 0);
+    {
+        var authority = try reloadTerminalAuthority(t.context(), steered);
+        defer authority.deinit();
+        var refused = try terminal_action_executor.execute(.{
+            .alloc = t.alloc,
+            .lifecycle_allocator = t.alloc,
+            .runtime = &t.client,
+        }, .{ .screen = .{ .session_id = steered, .authority = authority.view() } });
+        defer refused.deinit(t.alloc);
+        switch (refused.view()) {
+            .failure => |failure| try std.testing.expect(failure.retryable),
+            .success => return error.TestUnexpectedResult,
+        }
+    }
+
+    // The slots free up while the cancel runs, after its first stop was
+    // refused. The stop runs again and ends the command.
+    const io = io_mod.getIo();
+    var releaser: std.Io.Group = .init;
+    releaser.concurrent(io, TtySteeringCancelTest.release, .{ &t, fillers[0..filled], 300 }) catch {
+        t.release(fillers[0..filled], 0);
+        return error.SkipZigTest;
+    };
+    try stopSteeringDetached(t.context(), 5);
+    // The stops run in the background; a close's shutdown awaits them.
+    t.runtime.shutdown();
+    releaser.await(io) catch {};
+    // A stopped command is either marked stopped or already gone.
+    if (t.runtime.stateFor(steered)) |state| try std.testing.expect(state != .running);
+}
+
+test "shell delivery advances only after result commit" {
+    if (comptime @import("builtin").target.os.tag == .wasi) return;
+    const alloc = std.testing.allocator;
+    var runtime = managed_execution.Runtime.init(alloc);
+    defer runtime.deinit();
+    const command_ctx = command_admission.CommandContext{
+        .command = "printf commit-token",
+        .resolved_cwd = "/tmp",
+        .target_os = @import("builtin").target.os.tag,
+        .environment = .legacy,
+    };
+    var prepared = try runtime.startCaptured(alloc, .{
+        .execution_id = "delivery-commit",
+        .command = command_ctx.command,
+        .cwd = command_ctx.resolved_cwd,
+        .environment = command_ctx.environment,
+        .authority = .{ .shell_allowed = .{
+            .fingerprint = .init(command_ctx),
+            .source = .yolo,
+        } },
+        .max_output_bytes = 4096,
+        .timeout_ms = 2000,
+        .command_artifact_dir = null,
+        .yield_time_ms = 0,
+    });
+    defer prepared.deinit(alloc);
+    var commit_token: ?result_commit.Token = null;
+    var result = try finishPrepared(
+        .{
+            .allocator = alloc,
+            .result_commit_sink = &commit_token,
+        },
+        &runtime,
+        &prepared,
+        .command,
+    );
+    defer result.deinit(alloc);
+    try std.testing.expect(commit_token != null);
+    try std.testing.expectError(
+        error.ExecutionBusy,
+        runtime.wait(alloc, "delivery-commit", 0, null),
+    );
+    commit_token.?.cancel();
+    var replayed = try runtime.wait(alloc, "delivery-commit", 2000, null);
+    defer replayed.deinit(alloc);
+    try std.testing.expect(std.mem.find(
+        u8,
+        replayed.snapshot.output_delta,
+        "commit-token",
+    ) != null);
+    try runtime.commitDelivery(
+        replayed.snapshot.execution_id,
+        replayed.reservation_id,
+    );
+}
+
+fn timedOutSnapshotCapture(_: shell_snapshot.CaptureRequest) shell_snapshot.CaptureOutcome {
+    return .{ .failed = .timed_out };
+}
+
+test "shell run result carries a snapshot fallback notice once" {
+    const alloc = std.testing.allocator;
+    shell_snapshot.resetProcessOwnerForTest(timedOutSnapshotCapture);
+    defer shell_snapshot.resetProcessOwnerForTest(shell_snapshot.real_capture_fn);
+    try std.testing.expect((try shell_snapshot.processOwner().acquire("/bin/zsh", "/tmp", .{})) == .full_startup);
+
+    const plain = try attachSnapshotNotice(alloc, .{ .failure = try alloc.dupe(u8, "shell result is unavailable") });
+    defer plain.deinit(alloc);
+    try std.testing.expectEqualStrings("shell result is unavailable", plain.failure);
+
+    const first = try attachSnapshotNotice(alloc, .{ .success = try alloc.dupe(u8, "{\"state\":\"completed\"}") });
+    defer first.deinit(alloc);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, first.success, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("completed", parsed.value.object.get("state").?.string);
+    const notice = parsed.value.object.get("notice").?.string;
+    try std.testing.expect(std.mem.find(u8, notice, "did not finish within 10 s") != null);
+
+    const second = try attachSnapshotNotice(alloc, .{ .success = try alloc.dupe(u8, "{\"state\":\"completed\"}") });
+    defer second.deinit(alloc);
+    try std.testing.expectEqualStrings("{\"state\":\"completed\"}", second.success);
+}
+
+test "a turn cancel gives up a steered tty stop the full terminal client keeps refusing" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const trace_path = try t.startTrace();
+    defer t.alloc.free(trace_path);
+    defer debug_trace.resetForTest();
+
+    const steered = try t.run("sleep 30", 5);
+    defer t.alloc.free(steered);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(steered, &fillers);
+    defer t.release(fillers[0..filled], 0);
+
+    // The client stays full, so the graceful and the forced stop each run
+    // `max_busy_terminal_attempts` times and give up, and the command still
+    // runs. The waits between the runs add up to about 3.1 s.
+    const started_ms = io_mod.milliTimestamp();
+    try stopSteeringDetached(t.context(), 5);
+    // The stops run in the background; a close's shutdown awaits them, and
+    // does not cut the retries short.
+    t.runtime.shutdown();
+    const took_ms = io_mod.milliTimestamp() - started_ms;
+    try std.testing.expect(took_ms >= 2 * 1_550);
+    try std.testing.expectEqual(managed_execution.SnapshotState.running, t.runtime.stateFor(steered).?);
+
+    // The graceful stop's give-up drops nothing, since the forced stop runs
+    // next. Only the forced stop's give-up leaves the command running.
+    const trace = try readTraceForTest(t.alloc, trace_path);
+    defer t.alloc.free(trace);
+    const graceful = try traceLineWith(trace, "steering-detached command stop gave up session_id=", " force=false attempts=6 reason=terminal_busy");
+    try std.testing.expect(std.mem.find(u8, graceful, "dropped=") == null);
+    const forced = try traceLineWith(trace, "steering-detached command stop gave up session_id=", " force=true attempts=6 reason=terminal_busy");
+    try std.testing.expect(std.mem.find(u8, forced, "dropped=") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "dropped=background_command_stop"));
+    _ = try traceLineWith(trace, "steering-detached command stop failed session_id=", " err=terminal_busy dropped=background_command_stop");
+}
+
+test "a turn-end lease release runs again while the terminal client is full" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const steered = try t.run("sleep 30", 5);
+    defer t.alloc.free(steered);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(steered, &fillers);
+
+    // The slots free up 300 ms into the release, after its first run was
+    // refused, and it runs again.
+    const io = io_mod.getIo();
+    var releaser: std.Io.Group = .init;
+    releaser.concurrent(io, TtySteeringCancelTest.release, .{ &t, fillers[0..filled], 300 }) catch {
+        t.release(fillers[0..filled], 0);
+        return error.SkipZigTest;
+    };
+    const result = releaseAgentWriteLease(t.context(), steered);
+    releaser.await(io) catch {};
+    try result;
+
+    // With the client still full at the end, the release gives up.
+    const refilled = try t.fill(steered, &fillers);
+    defer t.release(fillers[0..refilled], 0);
+    try std.testing.expectError(error.TerminalLeaseCleanupFailed, releaseAgentWriteLease(t.context(), steered));
+}
+
+test "an unpublished tty close runs again while the terminal client is full" {
+    if (comptime builtin.target.os.tag == .wasi) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const command = try t.run("sleep 30", 5);
+    defer t.alloc.free(command);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(command, &fillers);
+
+    // The slots free up 300 ms into the close, after its first run was
+    // refused, and it runs again and ends the terminal.
+    const io = io_mod.getIo();
+    var releaser: std.Io.Group = .init;
+    releaser.concurrent(io, TtySteeringCancelTest.release, .{ &t, fillers[0..filled], 300 }) catch {
+        t.release(fillers[0..filled], 0);
+        return error.SkipZigTest;
+    };
+    closeTtyBestEffort(t.context(), command);
+    releaser.await(io) catch {};
+
+    // A closed terminal's authority is revoked; a running one still loads.
+    var authority = reloadTerminalAuthority(t.context(), command) catch |err| {
+        try std.testing.expectEqual(error.AuthorityRevoked, err);
+        return;
+    };
+    defer authority.deinit();
+    var inspected = try terminal_action_executor.execute(.{
+        .alloc = t.alloc,
+        .lifecycle_allocator = t.alloc,
+        .runtime = &t.client,
+    }, .{ .inspect = .{ .session_id = command, .authority = authority.view() } });
+    defer inspected.deinit(t.alloc);
+    switch (inspected.view()) {
+        .failure => |failure| try std.testing.expectEqual(terminal_contracts.StructuredErrorCode.session_not_found, failure.code),
+        .success => |success| switch (success) {
+            .inspect => |value| try std.testing.expect(value.session.lifecycle != .running),
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
+test "process exit during a busy-client retry ends the steered stop at once and logs it dropped" {
+    if (comptime builtin.target.os.tag == .wasi or builtin.single_threaded) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const trace_path = try t.startTrace();
+    defer t.alloc.free(trace_path);
+    defer debug_trace.resetForTest();
+
+    const steered = try t.run("sleep 30", 5);
+    defer t.alloc.free(steered);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(steered, &fillers);
+    defer t.release(fillers[0..filled], 0);
+
+    // The stop runs in the background and waits between refused runs while
+    // the client stays full; left alone it gives up after about 3.1 s. Its
+    // first run is refused at once, so it waits by now.
+    try stopSteeringDetached(t.context(), 5);
+    io_mod.sleep(300 * std.time.ns_per_ms);
+
+    // Exit ends the waits at once, and the stop logs what it dropped.
+    const started_ms = io_mod.milliTimestamp();
+    t.runtime.terminateForProcessExit();
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms < 1_000);
+    const trace = try readTraceForTest(t.alloc, trace_path);
+    defer t.alloc.free(trace);
+    _ = try traceLineWith(trace, "steering-detached command stop refused session_id=", " reason=terminal_busy");
+    _ = try traceLineWith(trace, "steering-detached command stop gave up session_id=", " reason=runtime_stopping");
+    _ = try traceLineWith(trace, "steering-detached command stop failed session_id=", " err=runtime_stopping dropped=background_command_stop");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "dropped=background_command_stop"));
+}
+
+/// Flushes the trace and returns the file at `trace_path`, which the caller
+/// frees.
+fn readTraceForTest(alloc: Allocator, trace_path: []const u8) ![]u8 {
+    debug_trace.shutdown();
+    var trace_file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), trace_path, .{});
+    defer trace_file.close(io_mod.getIo());
+    return io_mod.readFileToEnd(alloc, &trace_file, 1 << 20);
+}
+
+/// The first line of `trace` that holds `start` and, after it, `rest`.
+fn traceLineWith(trace: []const u8, start: []const u8, rest: []const u8) ![]const u8 {
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, start) orelse continue;
+        if (std.mem.find(u8, line[at..], rest) != null) return line;
+    }
+    std.debug.print("no trace line with {s}...{s} in:\n{s}\n", .{ start, rest, trace });
+    return error.TestUnexpectedResult;
+}
+
+test "a request the busy client refuses runs at most six times with doubling waits" {
+    const expected = [_]?u64{ 50, 100, 200, 400, 800, null };
+    for (expected, 1..) |delay_ms, attempt| {
+        try std.testing.expectEqual(delay_ms, busyRetryDelayMs(attempt));
+    }
+}
+
+/// Runs `releaseAgentWriteLease` and keeps its result, for a test task.
+fn releaseLeaseForTest(ctx: tool_dispatch.DispatchContext, session_id: []const u8, result: *anyerror!void) void {
+    result.* = releaseAgentWriteLease(ctx, session_id);
+}
+
+test "process exit during a busy-client retry of the lease release ends it at once and logs it dropped" {
+    if (comptime builtin.target.os.tag == .wasi or builtin.single_threaded) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const trace_path = try t.startTrace();
+    defer t.alloc.free(trace_path);
+    defer debug_trace.resetForTest();
+
+    const command = try t.run("sleep 30", 5);
+    defer t.alloc.free(command);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(command, &fillers);
+    defer t.release(fillers[0..filled], 0);
+
+    // The release waits between refused runs while the client stays full;
+    // its first run is refused at once, so it waits by now.
+    const io = io_mod.getIo();
+    var task: std.Io.Group = .init;
+    var result: anyerror!void = {};
+    task.concurrent(io, releaseLeaseForTest, .{ t.context(), command, &result }) catch return error.SkipZigTest;
+    io_mod.sleep(300 * std.time.ns_per_ms);
+
+    const started_ms = io_mod.milliTimestamp();
+    t.runtime.terminateForProcessExit();
+    task.await(io) catch {};
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms < 1_000);
+    try std.testing.expectError(error.TerminalLeaseCleanupFailed, result);
+    const trace = try readTraceForTest(t.alloc, trace_path);
+    defer t.alloc.free(trace);
+    _ = try traceLineWith(trace, "terminal lease release refused session_id=", " reason=terminal_busy");
+    _ = try traceLineWith(trace, "terminal lease release gave up session_id=", " reason=runtime_stopping dropped=agent_write_lease_release");
+}
+
+test "process exit during a busy-client retry of the unpublished tty close ends it at once and logs it dropped" {
+    if (comptime builtin.target.os.tag == .wasi or builtin.single_threaded) return;
+    var t: TtySteeringCancelTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const trace_path = try t.startTrace();
+    defer t.alloc.free(trace_path);
+    defer debug_trace.resetForTest();
+
+    const command = try t.run("sleep 30", 5);
+    defer t.alloc.free(command);
+    var fillers: [64]terminal_contracts.CorrelationId = undefined;
+    const filled = try t.fill(command, &fillers);
+    defer t.release(fillers[0..filled], 0);
+
+    // The close waits between refused runs while the client stays full; its
+    // first run is refused at once, so it waits by now.
+    const io = io_mod.getIo();
+    var task: std.Io.Group = .init;
+    task.concurrent(io, closeTtyBestEffort, .{ t.context(), command }) catch return error.SkipZigTest;
+    io_mod.sleep(300 * std.time.ns_per_ms);
+
+    const started_ms = io_mod.milliTimestamp();
+    t.runtime.terminateForProcessExit();
+    task.await(io) catch {};
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms < 1_000);
+    const trace = try readTraceForTest(t.alloc, trace_path);
+    defer t.alloc.free(trace);
+    _ = try traceLineWith(trace, "unpublished TTY cleanup refused session_id=", " reason=terminal_busy");
+    _ = try traceLineWith(trace, "unpublished TTY cleanup gave up session_id=", " reason=runtime_stopping dropped=unpublished_tty_close");
+}

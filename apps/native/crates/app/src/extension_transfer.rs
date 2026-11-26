@@ -21,7 +21,9 @@ pub fn frame(model: &Model) -> Frame {
     Frame {
         surface: view.surface.into(),
         top: true,
-        eyebrow: Some("Extensions From the Original App".into()),
+        eyebrow: Some("Extensions from the original app".into()),
+        // The Effects browser, where extensions' effects show up.
+        preview: Some("effects".into()),
         title: view.title,
         line: view.line,
         stats: model

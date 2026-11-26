@@ -1,4 +1,6 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "agent_chooser.rs"]
+pub mod agent_chooser;
 #[path = "coedit_presence.rs"]
 mod coedit_presence;
 #[path = "flowchart.rs"]
@@ -311,6 +313,34 @@ fn field_can(name: &str) -> bool {
             })
         })
 }
+/// Undo or Redo in the Agent composer with nothing of its own to take back
+/// (its prompt was sent and its typing undo cleared): the command goes on to
+/// the project's undo, the agent's change set among it (PM-749).
+pub fn composer_passes(responder: &NSResponder, name: &str) -> bool {
+    let redo = match name {
+        "contextUndo" => false,
+        "contextRedo" => true,
+        _ => return false,
+    };
+    if !responder
+        .class()
+        .name()
+        .to_string_lossy()
+        .contains("PMComposerTextView")
+    {
+        return false;
+    }
+    // SAFETY: NSResponder's undoManager, and NSUndoManager's canUndo or
+    // canRedo, read on the main thread.
+    let manager: Option<Retained<AnyObject>> = unsafe { msg_send![responder, undoManager] };
+    !manager.is_some_and(|m| unsafe {
+        if redo {
+            msg_send![&*m, canRedo]
+        } else {
+            msg_send![&*m, canUndo]
+        }
+    })
+}
 /// Whether a text field in the key window is being edited (a sheet's name
 /// field): its own Undo, Cut, Copy and Paste then have something to act on.
 fn key_field_editing() -> bool {
@@ -331,7 +361,33 @@ fn active_send(command: Command) {
                 let _ = tx.try_send(command);
             }
         });
+    } else {
+        // No editor yet (the first run's Welcome window): the Edit commands
+        // still reach the field being typed in, as the editor's host sends them.
+        field_edit(&command.name);
     }
+}
+/// Undo, Cut, Copy, Paste and Select All for the key window's field editor,
+/// if a field is being edited.
+fn field_edit(name: &str) -> bool {
+    let selector = match name {
+        "contextUndo" => sel!(undo:),
+        "contextRedo" => sel!(redo:),
+        "contextCut" => sel!(cut:),
+        "contextCopy" => sel!(copy:),
+        "contextPaste" => sel!(paste:),
+        "contextSelectAll" => sel!(selectAll:),
+        _ => return false,
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let editing = app
+        .keyWindow()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| unsafe { msg_send![&*r, isKindOfClass: NSTextView::class()] });
+    editing && unsafe { app.sendAction_to_from(selector, None, None) }
 }
 /// A press or its gesture's other events (not a move or a scroll).
 fn is_pointer(e: &NSEvent) -> bool {
@@ -800,6 +856,7 @@ define_class!(
                 3 => "agent.stop",
                 _ => "agent.steer",
             };
+            crate::telemetry::command(name, pm_telemetry::Via::Toolbar);
             self.send(Command { name: name.into(), args: vec![], token: None });
         }
         #[unsafe(method(act:))]
@@ -822,6 +879,12 @@ define_class!(
                     w.performClose(None);
                     return;
                 }
+                // A key equivalent the menu bar matched, or a click in it.
+                let via = match app.currentEvent().map(|e| e.r#type()) {
+                    Some(NSEventType::KeyDown) => pm_telemetry::Via::Shortcut,
+                    _ => pm_telemetry::Via::Menu,
+                };
+                crate::telemetry::command(name, via);
                 self.send(Command { name: name.clone(), args: args.clone(), token: None });
             }
         }
@@ -832,6 +895,20 @@ define_class!(
                 sender.representedObject().map(|o| Retained::cast_unchecked(o))
             };
             if let Some(name) = name {
+                // A row of the menu bar, or of a context menu (whose top
+                // menu is not the main menu).
+                // SAFETY: plain reads of the item's menu and its parents.
+                let mut top = unsafe { sender.menu() };
+                while let Some(up) = top.as_ref().and_then(|m| unsafe { m.supermenu() }) {
+                    top = Some(up);
+                }
+                let main = NSApplication::sharedApplication(self.mtm()).mainMenu();
+                let via = if top.is_some() && top == main {
+                    pm_telemetry::Via::Menu
+                } else {
+                    pm_telemetry::Via::ContextMenu
+                };
+                crate::telemetry::command(&name.to_string(), via);
                 self.send(Command { name: name.to_string(), args: vec![], token: None });
             }
         }
@@ -1110,6 +1187,7 @@ define_class!(
             };
             if let (Some(variant), Some(tx)) = (variant, &self.ivars().sender) {
                 let args = vec![serde_json::Value::from(variant.to_string())];
+                crate::telemetry::command("toolShape", pm_telemetry::Via::Toolbar);
                 let _ = tx.try_send(Command { name: "toolShape".into(), args, token: None });
             }
         }
@@ -1123,6 +1201,7 @@ define_class!(
                             && event.clickCount() == 2
                     });
                 let command = toolbar_click_command(command, double_click);
+                crate::telemetry::command(command, pm_telemetry::Via::Toolbar);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
         }
@@ -2907,15 +2986,18 @@ pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) 
         return None;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
-    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    // Black at the glyph's coverage, premultiplied: a template takes its
+    // shape. A mark with its own colour is drawn in it and never tinted.
+    let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+    let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
     for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
-        p.copy_from_slice(&[0, 0, 0, a]);
+        p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
     }
     let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
-    image.setTemplate(true);
+    image.setTemplate(glyph.color.is_none());
     image.setAccessibilityDescription(Some(&NSString::from_str(label)));
     Some(image)
 }
@@ -4156,6 +4238,8 @@ pub struct Host {
     pub canvas_focus: Cell<bool>,
     pub studio_flying: Rc<Cell<bool>>,
     flowchart: Option<flowchart::Popover>,
+    /// The Agent composer's chooser while it is open (PM-727).
+    chooser: Option<agent_chooser::Chooser>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
     viewer_raster: Option<(SlotGeometry, f64, [f64; 2])>,
@@ -4396,6 +4480,7 @@ impl Host {
             canvas_focus: Cell::new(false),
             studio_flying: Rc::new(Cell::new(false)),
             flowchart: None,
+            chooser: None,
             layer,
             viewer_transform: None,
             viewer_raster: None,
@@ -4658,6 +4743,17 @@ impl Host {
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
                         let mut h = host.borrow_mut();
+                        // The chooser keeps its keys (⌘1…⌘9, the arrows,
+                        // Return, Escape) from the editor's keymap; typing
+                        // goes on to its search field.
+                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.owns_event(e)) {
+                            let chooser_key = key.starts_with("cmd+")
+                                || matches!(key.as_str(), "escape" | "up" | "down" | "enter");
+                            if chooser_key && chooser.key(&key) {
+                                return std::ptr::null_mut();
+                            }
+                            return event.as_ptr();
+                        }
                         if h.flowchart.as_ref().is_some_and(|p| {
                             p.owns_event(e)
                                 || (h.flowchart_open() && e.windowNumber() == window.windowNumber())
@@ -5121,6 +5217,7 @@ impl Host {
                     args,
                     class,
                 } => {
+                    crate::telemetry::command(&command, pm_telemetry::Via::Shortcut);
                     let _ = self.sender.try_send(Command {
                         name: command,
                         args,
@@ -7633,6 +7730,9 @@ impl Host {
                 }) {
                     return false;
                 }
+                if responder.as_ref().is_some_and(|r| composer_passes(r, name)) {
+                    return false;
+                }
                 let selector = match name {
                     "contextUndo" => sel!(undo:),
                     "contextRedo" => sel!(redo:),
@@ -9057,6 +9157,11 @@ impl Popup {
                 m.gap,
             )
             .h
+        } else if self.composer == Some(ComposerPicker::Add) {
+            // "+" lists its attachment rows above Approvals' described rows:
+            // all of it shows, up to the window's room, never scrolled past
+            // its first row to reach the checked one.
+            interior.h
         } else if self.composer.is_some() {
             m.field_menu_height.min(interior.h)
         } else {
@@ -10107,8 +10212,17 @@ impl PopupLayout<'_> {
             } else {
                 c.detail.as_str()
             };
-            let description = (!detail.is_empty() && self.composer == Some(ComposerPicker::Access))
-                .then(|| popup_description(detail, caption, t.colors.secondary, (width - edge - lead).max(1.), mtm));
+            let description = (!detail.is_empty()
+                && self.composer.is_some_and(ComposerPicker::describes))
+            .then(|| {
+                popup_description(
+                    detail,
+                    caption,
+                    t.colors.secondary,
+                    (width - edge - lead).max(1.),
+                    mtm,
+                )
+            });
             let item_h = row_h
                 + if detail.is_empty() {
                     0.
@@ -10746,13 +10860,7 @@ pub fn capture_agent_picker(
 ) -> Option<(Vec<u8>, crate::layout::Rect, Vec<String>)> {
     use crate::layout::Rect;
     let mtm = MainThreadMarker::new()?;
-    let kind = match input["picker"].as_str() {
-        Some("model") => Some(ComposerPicker::Model),
-        Some("effort") => Some(ComposerPicker::Effort),
-        Some("access") => Some(ComposerPicker::Access),
-        Some("threads") => Some(ComposerPicker::Threads),
-        _ => None,
-    };
+    let kind = ComposerPicker::named(input["picker"].as_str());
     let searchable = kind.is_none() || input["search"] == true;
     let surface = Surface::Menu;
     let available = if kind.is_some() { composer_picker_interior(owner) } else { owner };
@@ -10982,6 +11090,7 @@ impl Popup {
             save_palette_recent(&mut self.model.recents, name);
         }
         let (command, args) = menu::split_palette_command(name);
+        crate::telemetry::command(command, pm_telemetry::Via::Palette);
         let _ = self.sender.try_send(Command {
             name: command.to_owned(),
             args,

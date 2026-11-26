@@ -156,6 +156,10 @@ impl ExtensionHost for AppExtensions {
     fn reload(&self, _: &[String]) {
         pm_compat_runner::host::rescan_all();
     }
+    fn health(&self) -> pm_mcp::Result<Vec<Value>> {
+        pm_compat_runner::host::extension_health(&self.roots, ACTIVATION)
+            .map_err(|error| pm_mcp::Error::invalid(error.to_string()))
+    }
     fn api_pack(&self) -> Vec<(String, String)> {
         PACK.iter()
             .map(|(n, t)| ((*n).into(), (*t).into()))

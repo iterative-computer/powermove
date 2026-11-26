@@ -402,6 +402,9 @@ pub struct Host {
     agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
+    /// The development switch's Powermove harness is on: the Agent panel's
+    /// way to an account is Settings › Providers.
+    pub providers: bool,
     /// The Settings window's AppKit chrome while this editor hosts it, and
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
@@ -616,10 +619,30 @@ impl Controller {
             pm_mcp::catalog::names(),
             pm_mcp::catalog::composition_names(),
         );
+        if cfg!(feature = "aero-trial")
+            || (cfg!(debug_assertions)
+                && (environment
+                    .vars
+                    .get("PM_AERO_DEV")
+                    .is_some_and(|value| value == "1")
+                    || self.mcp.profile.join("aero-dev").is_file()))
+        {
+            environment.aero = Some(crate::mcp::aero_launcher());
+            // Aero runs only on Powermove inference: the Powermove account.
+            environment.powermove = crate::cloud::aero_account(cx);
+        }
+        self.builtins.providers = environment.aero.is_some();
         environment.compatible = Some(Arc::new(crate::providers::Chat {
             profile: self.mcp.profile.clone(),
         }));
-        runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
+        // Settings › Providers' Keychain and network only with the switch on:
+        // with it off, nothing new is read or fetched (P1-5).
+        let open = if environment.aero.is_some() {
+            crate::provider_keys::attach(&mut environment)
+        } else {
+            Arc::new(pm_agents::account::open_in_browser)
+        };
+        runtime.set_agent_environment(environment, open);
         let observation_kernel = self.kernel.clone();
         runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {
             let matches = || {
@@ -1333,13 +1356,7 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         use pm_shell::transient::ComposerPicker;
-        let picker = match request.input["picker"].as_str() {
-            Some("model") => Some(ComposerPicker::Model),
-            Some("effort") => Some(ComposerPicker::Effort),
-            Some("access") => Some(ComposerPicker::Access),
-            Some("threads") => Some(ComposerPicker::Threads),
-            _ => None,
-        };
+        let picker = ComposerPicker::named(request.input["picker"].as_str());
         let search = picker.map(|kind| {
             matches!(kind, ComposerPicker::Model | ComposerPicker::Threads)
                 && request.input["search"] == true
@@ -1359,6 +1376,44 @@ impl Controller {
             })
         });
         let owner = self.agent_popover_window(cx);
+        // The composer pill's two menus (the model picker and the reasoning
+        // menu) are their own popovers (PM-727), answered as the menus are:
+        // the chosen row's value.
+        if request.input["picker"] == "chooser" {
+            let spec = pm_shell::ChooserSpec::from_request(&request.input);
+            let values: Vec<(Value, Option<Value>)> =
+                options.iter().map(|o| (o["value"].clone(), None)).collect();
+            let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
+            if request.input["refresh"] == true {
+                if let Some((owner, _, current, None)) = &mut self.builtins.agent_pick
+                    && Arc::ptr_eq(owner, runtime)
+                    && self.host.borrow_mut().update_chooser(spec, None)
+                {
+                    *current = values;
+                }
+                runtime.platform_reply(request.id, Ok(Value::Null));
+                return;
+            }
+            if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+                previous.platform_reply(id, Ok(Value::Null));
+            }
+            let mut host = self.host.borrow_mut();
+            let shown = if request.input["update"] == true {
+                host.update_chooser(spec, dismiss)
+            } else if let Some(anchor) = anchor {
+                host.open_chooser(owner, anchor, spec, dismiss);
+                true
+            } else {
+                false
+            };
+            drop(host);
+            if shown {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, None));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
         let choices = options
             .iter()
             .enumerate()
@@ -2348,7 +2403,6 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
-        let surface = view.clone();
         view.update(cx, |v, _| v.scrolls_in(&handle));
         let on_wheel = {
             let panel = panel.clone();
@@ -2356,13 +2410,6 @@ impl Controller {
                 v.builtins
                     .scrolled_at
                     .insert(panel.clone(), std::time::Instant::now());
-                // A panel that leaves rows out draws again as its body
-                // scrolls, so they come back before they show (`v4_cull`).
-                if surface.read(cx).culls() {
-                    surface.update(cx, |_, cx| cx.notify());
-                }
-                // Its AppKit controls show as pictures until it rests.
-                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -2372,48 +2419,22 @@ impl Controller {
                 cx.notify();
             })
         };
-        // Only the Project panel's body is a view of its own, a scroll layer
-        // (PM-311). Every other body scrolls inside the window's own frame, as
-        // before: a cached body there drew its AppKit controls a row off their
-        // labels for a frame now and then while scrolling (PM-389).
-        if id != pm_builtins::PROJECT_PANEL {
-            let top_slots = if id == "inspector" {
-                self.slot_elements("inspector.top", &t, window, cx)
-            } else {
-                vec![]
-            };
-            let bottom_slots = if id == "inspector" {
-                self.slot_elements("inspector.bottom", &t, window, cx)
-            } else {
-                vec![]
-            };
-            return Some(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(body))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("panel-body-{id}")))
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&handle)
-                            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
-                            .on_scroll_wheel(on_wheel)
-                            .children(top_slots)
-                            // As tall as its content, at least its slot.
-                            .child({
-                                let content = view.read(cx).in_body(body);
-                                view.clone().cached(content)
-                            })
-                            .children(bottom_slots)
-                            .child(keep),
-                    )
-                    .children(thumb)
-                    .into_any_element(),
-            );
-        }
-        let assets_slots = self.slot_elements("assets.toolbar", &t, window, cx);
+        // Every panel body is a view of its own and a scroll layer (PM-311):
+        // a wheel step inside what it recorded replays it shifted, with no
+        // render or layout of the panel; its AppKit controls sit in the
+        // body's slot region and move with it (P-SLOT-REGION, PM-696).
+        let assets_slots = if id == pm_builtins::PROJECT_PANEL {
+            self.slot_elements("assets.toolbar", &t, window, cx)
+        } else if id == "inspector" {
+            self.slot_elements("inspector.top", &t, window, cx)
+        } else {
+            vec![]
+        };
+        let bottom_slots = if id == "inspector" {
+            self.slot_elements("inspector.bottom", &t, window, cx)
+        } else {
+            vec![]
+        };
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self
@@ -2454,6 +2475,7 @@ impl Controller {
                         .w_full()
                         .child(panel_body.cached(StyleRefinement::default().size_full())),
                 )
+                .children(bottom_slots)
                 .child(keep)
                 .children(thumb)
                 .into_any_element(),
@@ -2770,8 +2792,8 @@ impl Controller {
                 WindowKind::PopUp,
             ),
             "settings" => (
-                pm_shell::settings_window::DEFAULT_SIZE.0 as f32,
-                pm_shell::settings_window::DEFAULT_SIZE.1 as f32,
+                pm_shell::settings_window::default_size().0 as f32,
+                pm_shell::settings_window::default_size().1 as f32,
                 WindowKind::Normal,
             ),
             _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),
@@ -3521,6 +3543,25 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.settings" => {
+                    // Aero on Free or out of credits: its plans are on
+                    // Settings › Account (Subscribe…, Upgrade…).
+                    let plans = self
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .and_then(|r| r.agent_accounts())
+                        .is_some_and(|a| match a.aero() {
+                            pm_agents::inference::Standing::Free(_) => true,
+                            pm_agents::inference::Standing::Ready { billing, .. } => {
+                                billing.remaining == 0
+                            }
+                            _ => false,
+                        });
+                    if plans {
+                        self.builtins.settings_page = Some("account".into());
+                    } else if self.builtins.providers {
+                        self.builtins.settings_page = Some("providers".into());
+                    }
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }
@@ -5594,7 +5635,7 @@ fn follows_view(panel: &str, selected: bool) -> bool {
 /// for nothing; with native controls hosted that held each present behind a
 /// control transaction (Fable 5.5 at 36 s: 24 fps with Properties open, 29.5
 /// closed).
-fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
+pub(crate) fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
     published.is_some_and(|p| !p.selection.layers().is_empty())
 }
 
@@ -5609,7 +5650,7 @@ const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// `FOLLOW_EVERY`, except a jump (a seek or a loop wrap) of more than half a
 /// second, which shows at once. Pause, stop and selection changes publish
 /// through `update_builtins`, not here, so they are never held back.
-fn follow_due(
+pub(crate) fn follow_due(
     last_frame: Option<i64>,
     last_at: Option<std::time::Instant>,
     frame: i64,

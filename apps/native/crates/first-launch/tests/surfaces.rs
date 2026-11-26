@@ -87,7 +87,7 @@ fn n002_defaults_skip_and_denial_match_spec_without_secret_counts() {
             .any(|b| b.label == "Continue Without Them")
     );
     model.outcome(&Outcome::NeedsSecretConsent { interrupted: true });
-    assert_eq!(model.view().title, "The Keychain Request Didn’t Finish");
+    assert_eq!(model.view().title, "The Keychain request didn’t finish");
 }
 #[test]
 fn n003_summary_omits_zero_rows_and_report_promises_no_way_back() {
@@ -173,7 +173,7 @@ fn n001_folder_access_is_explained_before_macos_asks_and_waiting_can_be_skipped(
         folders: vec![("Downloads".into(), 2), ("Desktop".into(), 1)],
     });
     let view = model.view();
-    assert_eq!(view.title, "Allow Access to Your Media");
+    assert_eq!(view.title, "Allow access to your media");
     assert!(
         view.line
             .contains("in Downloads and Desktop, which macOS protects")
@@ -208,7 +208,7 @@ fn n001_folder_access_is_explained_before_macos_asks_and_waiting_can_be_skipped(
     assert!(view.buttons.iter().any(|b| b.id == "skip_folder"));
     assert!(model.rows().is_empty());
     model.waiting_folder = None;
-    assert_eq!(model.view().title, "Copying Your Library");
+    assert_eq!(model.view().title, "Copying your library");
 }
 #[test]
 fn n003_media_not_reached_is_reported_and_stays_recoverable() {

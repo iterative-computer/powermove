@@ -1661,42 +1661,44 @@ where
     let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
-        let audio_rx = mixer.map(|(mut mixer, rate, last)| {
-            let (tx, rx) = std::sync::mpsc::sync_channel(3);
-            scope.spawn(move || {
-                crate::par::apply_qos(qos);
-                let _refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
-                for n in 0..frames {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    gate.sync_worker_qos();
-                    let (first, end) = timeline.samples(n, rate);
-                    let first = first.min(last);
-                    let end = if n + 1 == frames { last } else { end.min(last) };
-                    let mut block = Vec::new();
-                    let result =
-                        pm_audio::offline::render(&mut mixer, first, end, 8192, |_, inter| {
-                            block.extend_from_slice(inter);
-                            Ok(())
-                        })
-                        .map_err(|e| JobError::Audio(e.to_string()))
-                        .and_then(|summary| {
-                            match summary.errors.first() {
-                                Some((voice, why)) => {
-                                    Err(JobError::Audio(format!("{voice}: {why}")))
+        let (audio_rx, audio_worker) = mixer
+            .map(|(mut mixer, rate, last)| {
+                let (tx, rx) = std::sync::mpsc::sync_channel(3);
+                let worker = scope.spawn(move || {
+                    crate::par::apply_qos(qos);
+                    let _refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+                    for n in 0..frames {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        gate.sync_worker_qos();
+                        let (first, end) = timeline.samples(n, rate);
+                        let first = first.min(last);
+                        let end = if n + 1 == frames { last } else { end.min(last) };
+                        let mut block = Vec::new();
+                        let result =
+                            pm_audio::offline::render(&mut mixer, first, end, 8192, |_, inter| {
+                                block.extend_from_slice(inter);
+                                Ok(())
+                            })
+                            .map_err(|e| JobError::Audio(e.to_string()))
+                            .and_then(|summary| {
+                                match summary.errors.first() {
+                                    Some((voice, why)) => {
+                                        Err(JobError::Audio(format!("{voice}: {why}")))
+                                    }
+                                    None => Ok(block),
                                 }
-                                None => Ok(block),
-                            }
-                        });
-                    let failed = result.is_err();
-                    if tx.send(result).is_err() || failed {
-                        break;
+                            });
+                        let failed = result.is_err();
+                        if tx.send(result).is_err() || failed {
+                            break;
+                        }
                     }
-                }
-            });
-            rx
-        });
+                });
+                (rx, worker)
+            })
+            .unzip();
         let encoder_gate = gate;
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
             crate::par::apply_qos(qos);
@@ -2045,9 +2047,21 @@ where
             let _ = tx.send(Rendered::Failed(e));
         }
         drop(tx);
-        encoder
+        let encoded = encoder
             .join()
-            .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())))
+            .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())));
+        // The encoder has dropped its audio receiver, so a mixer blocked
+        // sending wakes. Joined here, a panic in the mixer is the job's
+        // error rather than the scope's panic; an error of the render or
+        // encoder's own stands (the encoder's audio error only says the
+        // mixer stopped).
+        let mixed = audio_worker.map(|worker| worker.join());
+        match (encoded, mixed) {
+            (Ok(_) | Err(JobError::Audio(_)), Some(Err(_))) => {
+                Err(JobError::Audio("the offline mixer panicked".into()))
+            }
+            (encoded, _) => encoded,
+        }
     })
 }
 

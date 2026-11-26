@@ -43,6 +43,8 @@ pub(crate) struct AgentLink {
     /// The window's notification policy (S114), told on the delivery worker.
     notices: Mutex<Option<Arc<NoticeSink>>>,
     pub completion: Mutex<Option<Arc<crate::agent_completion::Service>>>,
+    /// The Powermove account's revision Aero last read its standing for.
+    account_revision: AtomicU64,
 }
 pub type NoticeSink = dyn Fn(pm_panel_agentpanel::runtime::Notice) + Send + Sync;
 impl Default for AgentLink {
@@ -58,6 +60,7 @@ impl Default for AgentLink {
             typed: Mutex::default(),
             notices: Mutex::default(),
             completion: Mutex::default(),
+            account_revision: AtomicU64::new(0),
         }
     }
 }
@@ -86,6 +89,8 @@ impl AgentLink {
         *self.accounts.shared() = Some(accounts.clone());
         accounts.refresh(Provider::Chatgpt);
         accounts.refresh(Provider::Claude);
+        accounts.refresh_anthropic();
+        accounts.refresh_aero();
     }
     pub fn set_notices(&self, sink: Arc<NoticeSink>) {
         *self.notices.shared() = Some(sink);
@@ -93,6 +98,13 @@ impl AgentLink {
     fn tell(&self, notices: Vec<pm_panel_agentpanel::runtime::Notice>) {
         if notices.is_empty() {
             return;
+        }
+        // A finished turn may have spent Aero credits: the monitor reads them again.
+        if notices
+            .iter()
+            .any(|n| matches!(n, pm_panel_agentpanel::runtime::Notice::Finished { .. }))
+        {
+            self.refresh_aero();
         }
         if let Some(sink) = self.notices.shared().clone() {
             for notice in notices {
@@ -156,6 +168,7 @@ impl AgentLink {
     /// The panel's connection state and what to tell the user about it.
     pub fn connection(&self, provider: Provider) -> (&'static str, String) {
         let name = match provider {
+            Provider::Aero => return self.aero_connection(),
             Provider::Chatgpt => "ChatGPT",
             Provider::Claude => "Claude",
             Provider::Compatible => {
@@ -174,6 +187,13 @@ impl AgentLink {
             return ("unavailable", reason);
         };
         let status = accounts.status(provider);
+        // Claude Code also runs on the Anthropic key from Settings › Providers.
+        if provider == Provider::Claude
+            && pm_agents::account::claude_key_fallback(&Ok(status.clone()))
+            && accounts.anthropic().masked.is_some()
+        {
+            return ("connected", String::new());
+        }
         let signed_out = || format!("Sign in to {name} in Settings.");
         match status.state {
             State::Checking => ("checking", String::new()),
@@ -183,11 +203,33 @@ impl AgentLink {
             State::Unavailable => ("unavailable", status.detail.unwrap_or_else(signed_out)),
         }
     }
+    /// Aero on the Powermove account: signed out, no plan yet (honest before
+    /// the backend exists), or ready with its catalogue. The development
+    /// switch's fake model runs without an account.
+    fn aero_connection(&self) -> (&'static str, String) {
+        use pm_agents::inference::Standing;
+        let Some(env) = self.environment().filter(|env| env.aero.is_some()) else {
+            return ("unavailable", "Aero's development switch is off.".into());
+        };
+        if fake_model(&env) {
+            return ("connected", String::new());
+        }
+        match self.accounts().map(|a| a.aero()) {
+            None | Some(Standing::Checking) => ("checking", String::new()),
+            Some(Standing::SignedOut) => ("unavailable", pm_agents::inference::SIGN_IN.into()),
+            Some(Standing::Free(_)) => ("unavailable", pm_agents::inference::NEEDS_PLAN.into()),
+            Some(Standing::Ready { .. }) => ("connected", String::new()),
+            Some(Standing::Unreachable(why)) => ("unavailable", why),
+        }
+    }
     /// Nobody is signed in (or no API/local model is saved): the panel offers
     /// to connect, rather than reporting a fault.
     pub fn signed_out(&self, provider: Provider) -> bool {
         match provider {
             Provider::Compatible => self.compatible().is_none(),
+            Provider::Aero => self
+                .accounts()
+                .is_some_and(|a| a.aero() == pm_agents::inference::Standing::SignedOut),
             _ => self
                 .accounts()
                 .is_some_and(|a| matches!(a.status(provider).state, State::Disconnected)),
@@ -220,9 +262,80 @@ impl AgentLink {
     pub fn model_choices(&self, provider: Provider) -> Vec<pm_agents::account::Model> {
         if provider == Provider::Compatible {
             self.compatible_models()
+        } else if provider == Provider::Aero && self.available(provider) {
+            self.powermove_models()
         } else {
-            self.accounts()
-                .map_or_else(Vec::new, |accounts| accounts.models(provider))
+            self.accounts().map_or_else(Vec::new, |accounts| {
+                let models = accounts.models(provider);
+                if provider == Provider::Claude
+                    && models.is_empty()
+                    && pm_agents::account::claude_key_fallback(&Ok(accounts.status(provider)))
+                {
+                    accounts.anthropic().models
+                } else {
+                    models
+                }
+            })
+        }
+    }
+    /// Aero's models: the Powermove catalogue while the account has a plan,
+    /// and the development switch's fake model when it lists one.
+    pub fn powermove_models(&self) -> Vec<pm_agents::account::Model> {
+        let mut out = match self.accounts().map(|a| a.aero()) {
+            Some(pm_agents::inference::Standing::Ready { models, .. }) => models,
+            _ => vec![],
+        };
+        if self.environment().is_some_and(|env| fake_model(&env)) {
+            out.push(pm_agents::account::Model {
+                id: pm_agents::inference::FAKE_MODEL.into(),
+                label: "Fake model".into(),
+                default: out.is_empty(),
+                efforts: vec![],
+                aliases: vec![],
+                default_effort: None,
+            });
+        }
+        out
+    }
+    /// Aero may send on `model`: one of the catalogue's now (a thread saved
+    /// before Aero ran only on Powermove names none, and waits for a choice).
+    pub fn aero_choice_ok(&self, model: Option<&str>) -> bool {
+        let models = self.powermove_models();
+        match model {
+            // No choice: the catalogue's default runs.
+            Some("" | "default") => !models.is_empty(),
+            Some(model) => models.iter().any(|m| m.id == model),
+            None => false,
+        }
+    }
+    /// Signed in on Free: Aero needs a plan, a quiet state with Subscribe,
+    /// never a fault.
+    pub fn aero_needs_plan(&self) -> bool {
+        self.accounts()
+            .is_some_and(|a| matches!(a.aero(), pm_agents::inference::Standing::Free(_)))
+    }
+    /// The usage monitor's lines for Aero's picker card (nothing until the
+    /// backend answers), and the reset day and bigger plan for an
+    /// out-of-credits turn.
+    pub fn aero_usage(&self) -> (Vec<(String, String)>, Option<pm_agents::inference::Billing>) {
+        use pm_agents::inference::Standing;
+        match self.accounts().map(|a| a.aero()) {
+            Some(Standing::Ready { billing, .. }) => (billing.facts(), Some(billing)),
+            _ => (vec![], None),
+        }
+    }
+    /// The Powermove account's revision as Settings last published it: a
+    /// new one (a sign-in, a sign-out) reads Aero's standing again.
+    pub fn follow_account(&self, revision: u64) {
+        if self.account_revision.swap(revision, Ordering::AcqRel) != revision {
+            self.refresh_aero();
+        }
+    }
+    /// The account changed (signed in or out) or a turn spent credits:
+    /// Aero's standing is read again.
+    pub fn refresh_aero(&self) {
+        if let Some(accounts) = self.accounts() {
+            accounts.refresh_aero();
         }
     }
     /// Providers this install can run, and the choices of the given one.
@@ -230,6 +343,7 @@ impl AgentLink {
         let environment = self.environment.shared();
         let has_accounts = self.accounts().is_some();
         let mut providers = vec![];
+        let aero = environment.as_ref().is_some_and(|env| env.aero.is_some());
         for (candidate, label) in [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")] {
             let runtime = match candidate {
                 Provider::Claude => Runtime::Claude,
@@ -241,24 +355,15 @@ impl AgentLink {
             }
         }
         drop(environment);
-        if let Some(saved) = self.compatible() {
-            use pm_services::surfaces::providers::preset_for;
-            let label = match preset_for(&saved.base_url).id {
-                "ollama" => "Ollama",
-                "lmstudio" => "LM Studio",
-                "llamacpp" => "llama.cpp",
-                "jan" => "Jan",
-                "openrouter" => "OpenRouter",
-                "openai" => "OpenAI API",
-                "anthropic" => "Anthropic API",
-                "gemini" => "Gemini",
-                "groq" => "Groq",
-                "deepseek" => "DeepSeek",
-                "xai" => "xAI",
-                "mistral" => "Mistral",
-                _ => "OpenAI-compatible",
-            };
-            providers.push(("compatible".into(), label.into()));
+        if aero {
+            // The harnesses: Aero (Powermove inference), Claude Code, Codex.
+            providers = vec![
+                ("aero".into(), "Aero".into()),
+                ("claude".into(), "Claude Code".into()),
+                ("chatgpt".into(), "Codex".into()),
+            ];
+        } else if let Some(saved) = self.compatible() {
+            providers.push(("compatible".into(), saved.model));
         }
         let listed = self.model_choices(provider);
         // Only real models: no choice reads as the provider's default model.
@@ -304,6 +409,10 @@ impl AgentLink {
             let _ = realm.notify_latest(StateChannel::Publication, "__pmBuiltin.publish()");
         }
     }
+}
+/// The development switch's fake model is listed: a debug build only.
+fn fake_model(env: &Environment) -> bool {
+    pm_agents::inference::fake_model_listed(&env.vars, cfg!(debug_assertions))
 }
 /// The application Agent panel's live runs, kept while a project is open. A run
 /// that opens or creates a project keeps going, and the application panel shows
@@ -638,6 +747,7 @@ pub fn run_effect(
                 .and_then(|staged| {
                     launch_request(state, environment, effect, text, settings, staged)
                 })
+                .and_then(|launched| aero_checked(link, launched))
                 .and_then(|(environment, mut request)| {
                     request.prompt =
                         pm_agents::context::with_observation(&request.prompt, &observation.0, text);
@@ -659,12 +769,14 @@ pub fn run_effect(
                         *text = expand_attached_request(text, attachments).into_owned();
                     }
                     state.runs.completion_gate();
-                    state.completion.begin(
-                        link,
-                        &effect.target.project,
-                        &effect.target.thread,
-                        &kept,
-                    );
+                    if kept.provider != Provider::Aero {
+                        state.completion.begin(
+                            link,
+                            &effect.target.project,
+                            &effect.target.thread,
+                            &kept,
+                        );
+                    }
                     let recovery = state
                         .panel
                         .recovery_launch(&effect.target.thread, &request.run)?
@@ -734,13 +846,16 @@ pub fn run_effect(
             run.and_then(|run| state.runs.continued_request(run, text))
                 .and_then(|continued| {
                     let continued_effect = state.runs.continuation_effect(effect)?;
-                    let (environment, mut request) = launch_request(
-                        state,
-                        environment,
-                        &continued_effect,
-                        &continued,
-                        settings,
-                        None,
+                    let (environment, mut request) = aero_checked(
+                        link,
+                        launch_request(
+                            state,
+                            environment,
+                            &continued_effect,
+                            &continued,
+                            settings,
+                            None,
+                        )?,
                     )?;
                     // Stage the current direction separately: original attachments belong
                     // to the restart request, not another live user message.
@@ -947,6 +1062,24 @@ fn stage_request_files(environment: &Environment, effect: &Effect) -> Result<Sta
     })
 }
 
+/// A thread's queued messages go out on their own only while its harness
+/// is available and, for Aero, its model is one of the catalogue's.
+fn aero_queued_ok(link: &AgentLink, settings: &pm_panel_agentpanel::model::Settings) -> bool {
+    link.available(settings.provider)
+        && (settings.provider != Provider::Aero || link.aero_choice_ok(Some(&settings.model)))
+}
+/// An Aero request goes out only on a model from Powermove's catalogue: a
+/// thread saved before Aero ran only on Powermove (its old OpenAI, Anthropic
+/// or Custom model), resumed or queued, sends nothing until one is chosen.
+fn aero_checked(
+    link: &AgentLink,
+    (environment, request): (Environment, Request),
+) -> Result<(Environment, Request), Error> {
+    if request.provider == Provider::Aero && !link.aero_choice_ok(request.model.as_deref()) {
+        return Err(Error::Host(pm_agents::inference::CHOOSE.into()));
+    }
+    Ok((environment, request))
+}
 fn launch_request(
     state: &AgentState,
     environment: Option<Environment>,
@@ -1019,14 +1152,28 @@ fn launch_request(
     };
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: prompt(
-            &state.panel,
-            thread,
-            &expand_attached_request(text, attached),
-            effect.message_id(),
-        )?,
+        prompt: if settings.provider == Provider::Aero {
+            expand_attached_request(text, attached).into_owned()
+        } else {
+            prompt(
+                &state.panel,
+                thread,
+                &expand_attached_request(text, attached),
+                effect.message_id(),
+            )?
+        },
         provider: settings.provider,
-        model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
+        // Codex and Claude Code run their own default when none is chosen;
+        // Powermove runs the model its picker shows as the default.
+        model: Some(if settings.provider == Provider::Aero {
+            state.panel.session(thread).map_or_else(
+                |_| settings.model.clone(),
+                |s| s.catalog.resolve(&settings.model).to_owned(),
+            )
+        } else {
+            settings.model.clone()
+        })
+        .filter(|m| !m.is_empty()),
         // The effort the picker shows is the one that runs: with none saved,
         // the model's default, sent by name (Claude Code names none of its own).
         effort: Some(
@@ -1161,7 +1308,7 @@ pub(crate) fn ensure_worker(
         && state.tasks.idle()
         && state
             .panel
-            .queued_thread(|provider| link.available(provider))
+            .queued_thread_with(|settings| aero_queued_ok(link, settings))
             .is_none()
     {
         return;
@@ -1223,7 +1370,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
                 } else if state.runs.active() < 8
                     && let Some(thread) = state
                         .panel
-                        .queued_thread(|provider| link.available(provider))
+                        .queued_thread_with(|settings| aero_queued_ok(&link, settings))
                 {
                     let at = now();
                     match state.panel.submit_queued(
@@ -1248,7 +1395,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
                 && (closed.is_some()
                     || state
                         .panel
-                        .queued_thread(|provider| link.available(provider))
+                        .queued_thread_with(|settings| aero_queued_ok(&link, settings))
                         .is_none());
             if done {
                 state.worker = None;
@@ -1281,6 +1428,71 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    /// P1 (Sol, PM-750): a thread saved on an old Aero route (an OpenAI or
+    /// Anthropic key's model, a Custom endpoint's) sends nothing, queued or
+    /// directly, until a model from Powermove's catalogue is chosen.
+    #[test]
+    fn a_thread_saved_on_an_old_aero_route_sends_nothing_until_a_catalogue_model_is_chosen() {
+        let link = std::sync::Arc::new(AgentLink::default());
+        link.set_environment(
+            Environment {
+                aero: Some(pm_agents::aero::Launcher(std::sync::Arc::new(|_, _, _| {
+                    Err("unused".into())
+                }))),
+                // The development catalogue: the fake model alone.
+                vars: [("PM_AERO_FAKE_MODEL".to_owned(), "1".to_owned())].into(),
+                ..Default::default()
+            },
+            std::sync::Arc::new(|_| Ok(())),
+        );
+        let settings = |model: &str| pm_panel_agentpanel::model::Settings {
+            provider: Provider::Aero,
+            model: model.into(),
+            effort: String::new(),
+            access: pm_agents::Access::Project,
+            approval: Default::default(),
+            scope: String::new(),
+            auto_apply_panels: false,
+        };
+        let request = |model: &str| Request {
+            run: "r".into(),
+            prompt: "Continue the queued work.".into(),
+            provider: Provider::Aero,
+            model: Some(model.into()),
+            effort: None,
+            access: pm_agents::Access::Project,
+            approval: Default::default(),
+            computer_consent: false,
+            workspace: std::env::temp_dir(),
+            images: vec![],
+            role: None,
+            files: vec![],
+            project: None,
+        };
+        for saved in [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
+            "custom/llama-4",
+            "chatgpt/gpt-6-sol",
+        ] {
+            assert!(
+                !aero_queued_ok(&link, &settings(saved)),
+                "{saved} was queued to send"
+            );
+            assert!(
+                aero_checked(&link, (Environment::default(), request(saved))).is_err(),
+                "{saved} was sent"
+            );
+        }
+        // A model from the catalogue (here the development one) sends.
+        let listed = pm_agents::inference::FAKE_MODEL;
+        assert_eq!(
+            aero_queued_ok(&link, &settings(listed)),
+            link.available(Provider::Aero)
+        );
+        assert!(aero_checked(&link, (Environment::default(), request(listed))).is_ok());
+        link.close();
+    }
     #[test]
     fn binary_attachments_and_pick_notes_reach_the_run_without_losing_bytes() {
         let dir = tempfile::tempdir().unwrap();

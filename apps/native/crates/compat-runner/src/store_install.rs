@@ -20,11 +20,64 @@ const MAX_ARCHIVE: usize = 64 * 1024 * 1024;
 /// releases; extension or catalog input can never add to this list.
 const PINNED_KEYS: &[(&str, &str, [u8; 32])] = &[];
 
-/// The Store this build reads. Development builds started with
-/// `--dev-store-origin http://127.0.0.1:<port>/` read a fixture Store on this
-/// Mac instead; release builds always read [`ORIGIN`].
+/// Where Powermove Cloud is for a build that must never reach it: a
+/// loopback port nothing listens on (every request fails as offline).
+pub const OFFLINE_ORIGIN: &str = "http://127.0.0.1:9";
+
+/// The Powermove Cloud this build talks to (the Store, the account, its
+/// sessions and Aero's usage all use it). Development builds started with
+/// `--dev-store-origin http://127.0.0.1:<port>/` read a fixture on this Mac.
+/// Otherwise only a release build that is not a lane's reaches [`ORIGIN`]:
+/// a development build and any lane-launched bundle (`PM_NATIVE_NO_ORIGINAL`,
+/// which every lane launch sets) get [`OFFLINE_ORIGIN`], so testing never
+/// touches the real cloud (owner, 2026-11-25). A build that may use a local
+/// development stack (debug, or the Sandbox's `dev-cloud-origin` feature)
+/// started with `PM_CLOUD_ORIGIN=http://127.0.0.1:<port>` runs its account,
+/// billing and Aero there; a shipped release never reads it.
 pub fn origin() -> &'static str {
-    dev().map_or(ORIGIN, |dev| dev.origin)
+    choose_origin(
+        dev().map(|dev| dev.origin).or_else(local_cloud),
+        cfg!(debug_assertions),
+        lane_launch(),
+    )
+}
+/// Whether this build may run on a local development cloud.
+pub const LOCAL_CLOUD: bool = cfg!(debug_assertions) || cfg!(feature = "dev-cloud-origin");
+/// The local development cloud `PM_CLOUD_ORIGIN` names, when this build may
+/// use one and it is plain HTTP on this Mac with a port, nothing else.
+fn local_cloud() -> Option<&'static str> {
+    static LOCAL: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *LOCAL.get_or_init(|| {
+        local_cloud_from(
+            LOCAL_CLOUD,
+            std::env::var("PM_CLOUD_ORIGIN").ok().as_deref(),
+        )
+        .map(|origin| &*Box::leak(origin.into_boxed_str()))
+    })
+}
+fn local_cloud_from(allowed: bool, raw: Option<&str>) -> Option<String> {
+    let url = url::Url::parse(raw.filter(|_| allowed)?).ok()?;
+    (url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then(|| url.as_str().trim_end_matches('/').to_owned())
+}
+/// Launched by a lane (`pm-gui` and the lane launchers set this on every
+/// lane app), whatever the build.
+pub fn lane_launch() -> bool {
+    std::env::var_os("PM_NATIVE_NO_ORIGINAL").is_some()
+}
+fn choose_origin(dev: Option<&'static str>, debug: bool, lane: bool) -> &'static str {
+    match dev {
+        Some(origin) => origin,
+        None if debug || lane => OFFLINE_ORIGIN,
+        None => ORIGIN,
+    }
 }
 /// Whether this development build reads a fixture Store (`--dev-store-origin`).
 pub fn is_dev() -> bool {
@@ -467,6 +520,39 @@ fn install_registered(
 
 #[cfg(test)]
 mod tests {
+    /// A development or lane build never resolves the production cloud: no
+    /// fixture means the offline loopback; only a plain release build of the
+    /// product reaches it.
+    #[test]
+    fn a_lane_or_development_build_never_resolves_the_production_origin() {
+        use super::{ORIGIN, OFFLINE_ORIGIN, choose_origin};
+        assert_eq!(choose_origin(None, true, false), OFFLINE_ORIGIN);
+        // PM_CLOUD_ORIGIN: a local stack on this Mac, in a build that may use one.
+        use super::local_cloud_from;
+        assert_eq!(
+            local_cloud_from(true, Some("http://127.0.0.1:8787")).as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+        assert_eq!(local_cloud_from(false, Some("http://127.0.0.1:8787")), None);
+        for elsewhere in [
+            "https://cloud.trypowermove.com",
+            "http://evil.example:8787",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8787/v2",
+            "http://u@127.0.0.1:8787",
+        ] {
+            assert_eq!(local_cloud_from(true, Some(elsewhere)), None, "{elsewhere}");
+        }
+        assert_eq!(choose_origin(None, false, true), OFFLINE_ORIGIN);
+        assert_eq!(choose_origin(None, true, true), OFFLINE_ORIGIN);
+        assert_eq!(choose_origin(Some("http://127.0.0.1:4100/"), true, true), "http://127.0.0.1:4100/");
+        assert_eq!(choose_origin(None, false, false), ORIGIN);
+        // This test binary is a development build.
+        assert_ne!(super::origin(), ORIGIN);
+        let host = url::Url::parse(super::origin()).unwrap();
+        assert_eq!(host.host_str(), Some("127.0.0.1"));
+    }
+
     use super::*;
     #[test]
     fn a_build_without_keys_installs_by_the_registry_hashes() {
@@ -780,5 +866,19 @@ mod tests {
         assert!(archived[0].path().join("manifest.json").is_file());
         assert!(super::archive(&kernel, &profile, "my-glow").is_err());
         assert!(super::archive(&kernel, &profile, "../escape").is_err());
+    }
+}
+
+/// Run in a release test build (`cargo test --release`): a shipped release
+/// never runs on a local development cloud, whatever `PM_CLOUD_ORIGIN` says.
+#[cfg(all(test, not(debug_assertions), not(feature = "dev-cloud-origin")))]
+mod shipped {
+    #[test]
+    fn a_shipped_release_never_uses_a_local_cloud() {
+        assert!(!super::LOCAL_CLOUD);
+        assert_eq!(
+            super::local_cloud_from(super::LOCAL_CLOUD, Some("http://127.0.0.1:8787")),
+            None
+        );
     }
 }

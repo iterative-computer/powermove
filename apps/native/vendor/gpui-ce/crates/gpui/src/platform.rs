@@ -953,6 +953,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// platform that places hosted views from what a paint staged leaves
     /// them where they are.
     fn painted(&self) {}
+    /// Powermove P-SLOT-REGION: the scrolling regions the draw just made, for
+    /// hosted views placed in them (sent before `painted`).
+    fn set_slot_regions(&self, _regions: &[crate::SlotRegionGeometry]) {}
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
@@ -1125,6 +1128,20 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image not implemented for this platform")
     }
+
+    /// Pictures `region` of the scene into a GPU texture without reading it
+    /// back or waiting (snapshot transitions).
+    #[cfg(all(
+        target_os = "macos",
+        any(test, feature = "headless-support", feature = "frame-capture")
+    ))]
+    fn render_region_to_texture(
+        &self,
+        _scene: &Scene,
+        _region: Bounds<DevicePixels>,
+    ) -> Result<crate::GpuSnapshot> {
+        anyhow::bail!("render_region_to_texture not implemented for this platform")
+    }
 }
 
 /// A renderer for headless windows that can produce real rendered output.
@@ -1145,6 +1162,18 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// Pictures `region` of a scene drawn at `size` into a GPU texture,
+    /// without reading it back or waiting (snapshot transitions).
+    #[cfg(target_os = "macos")]
+    fn render_scene_region_to_texture(
+        &mut self,
+        _scene: &Scene,
+        _size: Size<DevicePixels>,
+        _region: Bounds<DevicePixels>,
+    ) -> Result<crate::GpuSnapshot> {
+        anyhow::bail!("render_scene_region_to_texture not implemented for this renderer")
+    }
 }
 
 /// Type alias for runnables with metadata.

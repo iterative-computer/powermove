@@ -363,7 +363,8 @@ impl Render for BodyFadeProbe {
                     canvas(
                         |_, _, _| (),
                         move |_, _, w, _| {
-                            fade.set(crate::layer_stage::vertical_fade(w.content_mask()))
+                            let mask = w.content_mask().fade_out;
+                            fade.set([mask.top, mask.bottom].map(|v| f64::from(f32::from(v))))
                         },
                     )
                     .absolute()

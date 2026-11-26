@@ -50,6 +50,12 @@ mod figma_paste;
 mod file_coordination;
 mod first_run;
 mod fork_auto_rebase;
+mod sign_in;
+mod first_run_stage;
+// Development builds only (it draws with `pm_shell::capture_app`); the
+// stage tests run in them.
+#[cfg(debug_assertions)]
+mod stage_capture;
 mod generated_panel;
 mod gizmo;
 mod gizmo_layer;
@@ -113,6 +119,7 @@ mod playhead;
 mod pro_edit_tests;
 mod pro_media;
 mod project_library;
+mod provider_keys;
 mod providers;
 mod publish;
 mod quit_limit;
@@ -143,6 +150,7 @@ mod surfaces;
 mod takes_notes_tests;
 mod takes_panel;
 mod tasks_window;
+mod telemetry;
 mod text_host;
 mod ticket;
 mod timeline_surface;
@@ -362,11 +370,11 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     // First, before anything is opened: a development build never starts
     // without a profile of its own (`profile_refusal`).
+    let info_plist = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
+        .and_then(|plist| std::fs::read_to_string(plist).ok());
     {
-        let info_plist = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
-            .and_then(|plist| std::fs::read_to_string(plist).ok());
         if let Some(refusal) = profile_refusal(
             &args,
             info_plist.as_deref(),
@@ -394,13 +402,30 @@ fn main() -> Result<()> {
     }
     diag::mark_start();
     gpui_macos::launch::mark("main");
+    // Development builds: the first-run stage drawn offscreen (stills, a
+    // recording and frame costs) into a folder; no window opens.
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--stage-capture") {
+        let out = args
+            .get(1)
+            .context("Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing|window]")?;
+        return match args.get(2).and_then(|a| a.to_str()) {
+            Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
+            Some("window") => stage_capture::native_stills(
+                PathBuf::from(out),
+                metal::Device::system_default().context("no Metal device")?,
+            ),
+            Some("reduced") => stage_capture::run(PathBuf::from(out), true, true),
+            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills"), false),
+        };
+    }
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
         return pro_media::cold_playback_bench();
     }
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
-        || args.iter().any(|a| a == "--powermove-mcp")
+        || args.iter().any(|a| a == "--powermove-mcp" || a == "--listen")
         || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
     if !headless {
         platform::route_sigterm();
@@ -421,14 +446,19 @@ fn main() -> Result<()> {
         return smoke::run(PathBuf::from(manifest));
     }
     let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
+    let eval_host = args.iter().any(|a| a == "--listen");
+    let mut eval_exports = None;
     let mut launch = None;
     let mut agent_run = None;
     let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
     let mut lane_flags: Vec<&'static str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--powermove-mcp" {
+        if args[i] == "--powermove-mcp" || args[i] == "--listen" {
             // Same app executable and newline-delimited stdio contract.
+        } else if args[i] == "--exports" && eval_host {
+            i += 1;
+            eval_exports = Some(PathBuf::from(args.get(i).context("--exports needs a directory")?));
         } else if args[i] == "--agent-run" && mcp_mode {
             // The provider run this tool server belongs to (orchestration).
             i += 1;
@@ -457,6 +487,20 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
+    if eval_host {
+        anyhow::ensure!(!mcp_mode, "Choose one MCP host mode");
+        let profile = profile.context("Supply --profile with an isolated eval profile")?;
+        let exports = eval_exports.context("Supply --exports with an isolated eval output folder")?;
+        anyhow::ensure!(profile.is_absolute() && exports.is_absolute(), "Use absolute eval paths");
+        let checked = first_run::Plan::resolve(Some(profile.clone()), None, std::env::var_os("HOME"))
+            .context("Use an isolated native eval profile")?;
+        anyhow::ensure!(checked.launch != pm_first_launch::Launch::Migrate, "Eval never migrates a profile");
+        return mcp_services::headless(profile, exports, launch, true);
+    }
+    // A person's app is never started with a profile or a lane flag.
+    let development = args.iter().any(|a| a == "--profile")
+        || std::env::var_os("PM_NATIVE_PROFILE").is_some()
+        || !lane_flags.is_empty();
     // The lane launcher's development flag (never the environment): sheets
     // wait while the app is inactive, and with `--open` stand for captures.
     #[cfg(debug_assertions)]
@@ -499,7 +543,7 @@ fn main() -> Result<()> {
             plan.launch != pm_first_launch::Launch::Migrate,
             "Open Powermove once to finish copying your library"
         );
-        return mcp_services::headless(profile, exports, launch);
+        return mcp_services::headless(profile, exports, launch, false);
     }
     std::fs::create_dir_all(&profile)?;
     transcription::install(&profile);
@@ -581,6 +625,8 @@ fn main() -> Result<()> {
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
     let device = engine.metal_device();
+    let telemetry_mode = telemetry::init(&profile, info_plist.as_deref(), development, &device);
+    diag::line(serde_json::json!({"telemetry": format!("{telemetry_mode:?}")}));
     let service = Rc::new(RefCell::new(
         FontService::new().map_err(anyhow::Error::msg)?,
     ));
@@ -601,7 +647,14 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::line(serde_json::json!({"startup":"window"}));
+                    // Development builds: the first-run intro again, over the
+                    // app (`--replay-onboarding 1`), as Help › Replay Intro.
+                    #[cfg(debug_assertions)]
+                    if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
+                        cx.defer(first_run_stage::replay);
+                    }
                     diag::install_probe(cx);
+                    telemetry::install(window, cx);
                     error_log::persist(&profile, cx);
                     storage::install_cleanup(profile.clone(), cx);
                     notifications::install(cx);
@@ -753,6 +806,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         // Onboarding on an isolated profile (it runs only on the default one).
         "--review-onboarding" => Some("PM_NATIVE_REVIEW_ONBOARDING"),
+        // The first-run intro again, over the app (Help).
+        "--replay-onboarding" => Some("PM_NATIVE_REPLAY_ONBOARDING"),
         // Presses the extension step's buttons by id (extension_transfer::review).
         "--review-welcome" => Some("PM_NATIVE_REVIEW_WELCOME"),
         _ => None,
@@ -806,6 +861,7 @@ mod review_override_tests {
             "--cloud-fixture",
             "--electron-profile",
             "--review-onboarding",
+            "--replay-onboarding",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
@@ -831,3 +887,6 @@ mod utility_capture_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod transition_capture_tests;
+
+#[cfg(all(test, target_os = "macos", debug_assertions))]
+mod stage_tests;

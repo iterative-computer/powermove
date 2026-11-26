@@ -317,8 +317,10 @@ pub enum HistoryCall {
     /// Drops the pending entry, keeps the edits.
     Cancel,
     /// Closes the open entry as one undo step whoever still holds it (a
-    /// close or quit that cannot wait for an edit whose owner never ends
-    /// it). `false` when nothing was open or nothing changed.
+    /// save, close or quit that cannot wait for an edit whose owner never
+    /// ends it). An agent's or extension's structural edit that is applying
+    /// is waited for, at most [`UNDO_WAIT_LIMIT`]. `false` when nothing was
+    /// open or nothing changed.
     Seal,
     /// `history.do`'s throw path (the realm-run callback threw): reverts the
     /// entry owner's operations (selectively) and closes the entry.
@@ -331,6 +333,17 @@ pub enum HistoryCall {
     },
     Undo,
     Redo,
+    /// The editor's Undo command. `seal_left_open`: the person is neither
+    /// dragging nor typing, so an edit still open is one its owner left
+    /// open; it is sealed first and is the step undone. Decided here, when
+    /// the call runs, not from a publication the editor read earlier.
+    EditorUndo {
+        seal_left_open: bool,
+    },
+    /// The kernel's own: history calls waiting longer than their limit end
+    /// the edit they wait for (see [`Project::wait_deadline`]).
+    #[doc(hidden)]
+    Lapse,
     /// `PM.hist.undoIfTop(id)`.
     UndoIfTop {
         entry: u64,
@@ -727,14 +740,52 @@ pub struct Project {
     mutation_serial: u64,
     mutations: VecDeque<(u64, Writer)>,
     record_writers: HashMap<u64, Writer>,
-    agent_turns: HashSet<Writer>,
+    /// Every writer that ran an agent turn (each turn has its own). Undo and
+    /// Redo by anyone else step over a run of one turn's steps as one step.
+    turn_writers: HashSet<Writer>,
     /// History-only finalization waits for the person's current entry to end.
     pending_squashes: HashMap<Writer, (ActorHistoryMark, String)>,
+    /// Undo, Redo and Seal calls that arrived while another writer's edit
+    /// was applying (PM-718), in arrival order; they run when it has ended,
+    /// or when they have waited `wait_limit` and it was ended for them.
+    waiting: VecDeque<Waiting>,
+    wait_limit: std::time::Duration,
+    /// Writers whose edit was ended for a waiting call: their writes are
+    /// refused until they finish, abort or begin an edit again.
+    lapsed: HashSet<Writer>,
+    /// The ticket a waiting call already answers to, reused by the deferred
+    /// step it runs (an external undo in another realm).
+    reuse_ticket: Option<u64>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
     notices: Vec<Notice>,
     extensions: crate::extensions::Extensions,
+}
+
+/// How long Undo, Redo and Seal wait for another writer's structural edit
+/// before it is ended for them (aborted: its writes reverted whole, or kept
+/// whole as a step when they can't be). Below the editor's 3 s wait before
+/// a save, so a save always finishes.
+pub const UNDO_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A history call held until another writer's edit has finished applying.
+#[derive(Clone, Debug)]
+struct Waiting {
+    ticket: u64,
+    caller: Caller,
+    txid: Option<u64>,
+    call: HistoryCall,
+    since: std::time::Instant,
+}
+
+/// The same press again: collapsed into the one already waiting.
+fn same_press(a: &HistoryCall, b: &HistoryCall) -> bool {
+    match (a, b) {
+        (HistoryCall::UndoIfTop { entry: x }, HistoryCall::UndoIfTop { entry: y }) => x == y,
+        (HistoryCall::EditorUndo { .. }, HistoryCall::EditorUndo { .. }) => true,
+        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -762,8 +813,12 @@ impl Project {
             mutation_serial: 0,
             mutations: VecDeque::new(),
             record_writers: HashMap::new(),
-            agent_turns: HashSet::new(),
+            turn_writers: HashSet::new(),
             pending_squashes: HashMap::new(),
+            waiting: VecDeque::new(),
+            wait_limit: UNDO_WAIT_LIMIT,
+            lapsed: HashSet::new(),
+            reuse_ticket: None,
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -875,6 +930,70 @@ impl Project {
                 None,
                 Reply::Throw(KernelError::StaleGeneration),
             ));
+        }
+        if let Call::History(
+            history @ (HistoryCall::Undo
+            | HistoryCall::Redo
+            | HistoryCall::UndoIfTop { .. }
+            | HistoryCall::EditorUndo { .. }
+            | HistoryCall::Seal),
+        ) = &call
+            && (self.held_back(caller.writer)
+                || self
+                    .waiting
+                    .iter()
+                    .any(|w| w.caller.writer == caller.writer))
+        {
+            // Never inside another writer's edit that is still applying: it
+            // is not yet a step, and the step below it is not the one meant.
+            // The call runs, after this writer's earlier ones, once that edit
+            // has ended. The same press again while one waits adds nothing.
+            if self
+                .waiting
+                .iter()
+                .rev()
+                .find(|w| w.caller.writer == caller.writer)
+                .is_some_and(|w| same_press(&w.call, history))
+            {
+                return Handled::reply(self.ack(txid, None, None, Reply::Bool(false)));
+            }
+            let ticket = self.next();
+            self.waiting.push_back(Waiting {
+                ticket,
+                caller,
+                txid: txid.map(|t| t.txid),
+                call: history.clone(),
+                since: std::time::Instant::now(),
+            });
+            return Handled {
+                reply: None,
+                deferred: Some(ticket),
+                resolved: Vec::new(),
+            };
+        }
+        if self.lapsed.contains(&caller.writer) {
+            match &call {
+                Call::Edit(
+                    EditCall::MutateBegin { .. }
+                    | EditCall::MutateFinish { .. }
+                    | EditCall::MutateAbort { .. },
+                ) => {
+                    self.lapsed.remove(&caller.writer);
+                }
+                Call::Transact { .. }
+                | Call::TransactWithSelection { .. }
+                | Call::DirectWrite { .. } => {
+                    return Handled::reply(self.ack(
+                        txid,
+                        None,
+                        None,
+                        Reply::Throw(KernelError::Guard(
+                            "This edit was ended because Undo waited too long for it; nothing more of it was applied".into(),
+                        )),
+                    ));
+                }
+                _ => {}
+            }
         }
         let tracks_mutation = !matches!(
             &call,
@@ -1058,6 +1177,8 @@ impl Project {
                 self.squash_turn(&mark, &label);
             }
         }
+        let mut handled = handled;
+        self.run_waiting(&mut handled);
         self.collect_retired();
         if let (Some(key), Some(ack)) = (txid, &handled.reply) {
             self.remember(key, ack.clone());
@@ -1071,6 +1192,115 @@ impl Project {
             self.notices.push(notice);
         }
         handled
+    }
+
+    /// Whether `writer`'s history calls wait: another writer's structural
+    /// edit (an agent's or extension's mutation lease) is applying, and
+    /// `writer` is not inside one of its own (an extension's `undoIfTop`
+    /// within its own `mutate` goes through, as today).
+    fn held_back(&self, writer: Writer) -> bool {
+        self.entry.as_ref().is_some_and(|e| {
+            let live = |l: &&Lease| l.kind == LeaseKind::Mutation;
+            e.leases.iter().filter(live).any(|l| l.owner != writer)
+                && !e.leases.iter().filter(live).any(|l| l.owner == writer)
+        })
+    }
+
+    /// Whether a history command waits for another writer's edit (the
+    /// editor says Undo is waiting).
+    pub fn history_waiting(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    /// Tests and hosts: how long a history call waits before the edit it
+    /// waits for is ended ([`UNDO_WAIT_LIMIT`] by default).
+    pub fn set_wait_limit(&mut self, limit: std::time::Duration) {
+        self.wait_limit = limit;
+    }
+
+    /// When the oldest waiting history call has waited its limit: the host
+    /// then sends [`HistoryCall::Lapse`].
+    pub fn wait_deadline(&self) -> Option<std::time::Instant> {
+        let since = self.waiting.iter().map(|w| w.since).min()?;
+        Some(since + self.wait_limit)
+    }
+
+    /// The oldest waiting call has waited its limit: the edits holding it
+    /// back are aborted, newest first. Each is reverted whole or, when its
+    /// writes can't be (another writer built on them), kept whole as a step
+    /// with a notice; never half. Their writers' later writes are refused.
+    fn lapse(&mut self) {
+        if self
+            .wait_deadline()
+            .is_none_or(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        let writer = self
+            .waiting
+            .iter()
+            .min_by_key(|w| w.since)
+            .expect("waiting")
+            .caller
+            .writer;
+        let leases: Vec<(u64, Writer)> = self
+            .entry
+            .iter()
+            .flat_map(|e| e.leases.iter())
+            .filter(|l| l.kind == LeaseKind::Mutation && l.owner != writer)
+            .map(|l| (l.id, l.owner))
+            .collect();
+        for (id, owner) in leases.into_iter().rev() {
+            if let Some(notice) = self.cancel_scope(Scope::Lease(id)) {
+                self.notices.push(notice);
+            }
+            self.lapsed.insert(owner);
+        }
+        // Nothing left to end (only this writer's own order holds the rest):
+        // the limit starts again rather than firing on every turn.
+        let now = std::time::Instant::now();
+        for w in &mut self.waiting {
+            w.since = now;
+        }
+    }
+
+    /// Runs each waiting history call that nothing holds back any more, in
+    /// arrival order, as its own call (a writer's calls stay in their
+    /// order); their answers resolve the tickets they waited on.
+    fn run_waiting(&mut self, handled: &mut Handled) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let mut kept: VecDeque<Waiting> = VecDeque::new();
+        for waiting in std::mem::take(&mut self.waiting) {
+            let writer = waiting.caller.writer;
+            if self.held_back(writer) || kept.iter().any(|k| k.caller.writer == writer) {
+                kept.push_back(waiting);
+                continue;
+            }
+            let Waiting {
+                ticket,
+                caller,
+                txid,
+                call,
+                ..
+            } = waiting;
+            let mut request = Request::new(caller, call);
+            if let Some(txid) = txid {
+                request = request.with_txid(txid);
+            }
+            self.reuse_ticket = Some(ticket);
+            let ran = self.handle(request);
+            self.reuse_ticket = None;
+            handled.resolved.extend(ran.resolved);
+            if let Some(ack) = ran.reply {
+                handled.resolved.push((ticket, ack));
+            }
+        }
+        // Undo, Redo and Seal never open an edit, so none waits anew while
+        // these run.
+        debug_assert!(self.waiting.is_empty());
+        self.waiting = kept;
     }
 
     fn squash_turn(&mut self, mark: &ActorHistoryMark, label: &str) -> Option<u64> {
@@ -1579,9 +1809,7 @@ impl Project {
             ),
             HistoryCall::AgentTurn { active } => {
                 if active {
-                    self.agent_turns.insert(writer);
-                } else {
-                    self.agent_turns.remove(&writer);
+                    self.turn_writers.insert(writer);
                 }
                 Reply::Unit
             }
@@ -1712,50 +1940,16 @@ impl Project {
                     bytes,
                 )))
             }
-            HistoryCall::Undo if !self.agent_turns.is_empty() => {
-                let record = self.store.history().records()[..self.store.history().applied()]
-                    .iter()
-                    .rev()
-                    .find(|r| {
-                        r.origin == Origin::Interface
-                            && !r.label.starts_with("Undo ")
-                            && self.record_writers.contains_key(&r.id)
-                    });
-                if let Some(record) = record {
-                    let id = record.id;
-                    let label = format!("Undo {}", record.label);
-                    let owner = self
-                        .record_writers
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(caller.writer);
-                    self.undo_writers(caller, &[owner], false, &label, Some(id))
-                } else {
-                    Reply::Bool(false)
-                }
-            }
             HistoryCall::Undo => return self.step(caller, txid, Direction::Undo),
-            HistoryCall::Redo if !self.agent_turns.is_empty() => {
-                let record = self.store.history().records()[..self.store.history().applied()]
-                    .iter()
-                    .rev()
-                    .find(|r| {
-                        r.origin == Origin::Interface
-                            && r.label.starts_with("Undo ")
-                            && self.record_writers.contains_key(&r.id)
-                    });
-                if let Some(record) = record {
-                    let id = record.id;
-                    let label = format!("Redo {}", record.label.trim_start_matches("Undo "));
-                    let owner = self
-                        .record_writers
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(caller.writer);
-                    self.undo_writers(caller, &[owner], false, &label, Some(id))
-                } else {
-                    Reply::Bool(false)
+            HistoryCall::EditorUndo { seal_left_open } => {
+                if seal_left_open {
+                    self.close_entry(None);
                 }
+                return self.history(caller, txid, HistoryCall::Undo);
+            }
+            HistoryCall::Lapse => {
+                self.lapse();
+                Reply::Unit
             }
             HistoryCall::Redo => return self.step(caller, txid, Direction::Redo),
             HistoryCall::UndoIfTop { entry } => {
@@ -1864,11 +2058,6 @@ impl Project {
             return Reply::Throw(KernelError::Guard(error));
         }
         if conflicts > 0 && !keep_mine {
-            if only_entry.is_some() {
-                return Reply::Throw(KernelError::Guard(format!(
-                    "Can't {label} — the agent changed this value since. Stop the agent first."
-                )));
-            }
             return Reply::Workspace(Value::Object(
                 [
                     ("status".into(), Value::from("confirmation_required")),
@@ -1913,7 +2102,59 @@ impl Project {
         self.close_entry(label)
     }
 
+    /// How many records the next Undo or Redo by `caller` takes: the run of
+    /// one agent turn's steps next to the cursor, whole (PM-718). An agent's
+    /// in-progress turn is many steps until its end squashes them into one;
+    /// the person's Undo takes back what the turn did so far, never one tool
+    /// call of it, and never steps around it. The turn's own Undo stays one
+    /// step at a time.
+    fn turn_run(&self, caller: Writer, direction: Direction) -> usize {
+        let history = self.store.history();
+        let records = history.records();
+        let at = history.applied();
+        let owner = |i: usize| {
+            let record = &records[i];
+            self.record_writers
+                .get(&record.id)
+                .filter(|w| **w != caller && self.turn_writers.contains(w) && record.is_document())
+                .copied()
+        };
+        let (first, rest): (Option<usize>, Box<dyn Iterator<Item = usize>>) = match direction {
+            Direction::Undo => (at.checked_sub(1), Box::new((0..at.saturating_sub(1)).rev())),
+            Direction::Redo => (
+                (at < records.len()).then_some(at),
+                Box::new(at + 1..records.len()),
+            ),
+        };
+        let Some(writer) = first.and_then(owner) else {
+            return 1;
+        };
+        1 + rest.take_while(|&i| owner(i) == Some(writer)).count()
+    }
+
     fn step(&mut self, caller: Caller, txid: Option<TxId>, direction: Direction) -> Handled {
+        for _ in 1..self.turn_run(caller.writer, direction) {
+            let earlier = match direction {
+                Direction::Undo => self.store.kernel_undo(),
+                Direction::Redo => self.store.kernel_redo(),
+            };
+            if let (
+                Ok(Step::Document {
+                    ops,
+                    reverse,
+                    label,
+                }),
+                true,
+            ) = (earlier, self.entry.is_some())
+            {
+                let applied = Applied {
+                    scopes: ops.iter().map(|o| o.path().to_vec()).collect(),
+                    forward: ops.to_vec(),
+                    inverse: reverse.to_vec(),
+                };
+                self.fold(caller.writer, caller.origin, &label, applied, true);
+            }
+        }
         let result = match direction {
             Direction::Undo => self.store.kernel_undo(),
             Direction::Redo => self.store.kernel_redo(),
@@ -1956,7 +2197,7 @@ impl Project {
                         Reply::Bool(false),
                     ));
                 }
-                let ticket = self.next();
+                let ticket = self.reuse_ticket.take().unwrap_or_else(|| self.next());
                 let continuation = Continuation {
                     ticket,
                     handle: external.handle,

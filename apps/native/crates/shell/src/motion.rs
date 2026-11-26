@@ -50,6 +50,10 @@ impl<K: Copy + Eq + Hash> Hovers<K> {
             }
         }
     }
+    /// The control the pointer is over, if it washes.
+    pub fn current(&self) -> Option<K> {
+        self.current
+    }
     /// Wash amount, 0–1.
     pub fn amount(&self, key: K) -> f32 {
         self.washes.get(&key).map_or(0., |w| w.get().clamp(0., 1.))

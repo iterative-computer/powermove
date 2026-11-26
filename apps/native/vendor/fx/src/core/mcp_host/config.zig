@@ -1,0 +1,591 @@
+//! fx's MCP servers as the engine runs them. Each config from `builtins/mcp.zig`
+//! `loadNativeConfigs` (profile first, then the project's) becomes an
+//! `mcp.engine.Config`, or is held back with the reason, which fx shows.
+
+const std = @import("std");
+const credentials = @import("credentials.zig");
+const mcp = @import("../../mcp/mcp.zig");
+const mcp_contract = @import("../mcp/mcp_contract.zig");
+const slack = @import("slack.zig");
+
+const Allocator = std.mem.Allocator;
+const McpServerConfig = mcp_contract.McpServerConfig;
+
+/// Why a configured server is not given to the engine.
+pub const Held = enum {
+    /// `"enabled": false`.
+    disabled,
+    /// A project server nobody approved yet.
+    waiting_for_approval,
+    /// A project server the user rejected.
+    rejected,
+    /// `"type": "sse"`: HTTP+SSE is deprecated and the engine doesn't speak it.
+    /// `"type": "acp"` from an editor: a draft that ACP v1 doesn't define.
+    unsupported,
+    /// A header, token, or client secret names an environment variable that isn't set.
+    missing_env,
+    /// A header or token names an environment variable whose value a header
+    /// can't carry: a line break or another control character.
+    invalid_env,
+};
+
+pub const Server = struct {
+    name: []const u8,
+    source: mcp_contract.ConfigSource,
+    scope: mcp_contract.ConfigScope,
+    transport: mcp_contract.McpTransport,
+    /// An HTTP server's URL, which also keys its credential; null for stdio.
+    url: ?[]const u8,
+    /// What a stdio server runs, to show what is trusted.
+    command: ?[]const u8,
+    callback_port: ?u16,
+    /// Signs in as fx's Slack app, whose redirect says `localhost`.
+    slack_app: bool = false,
+    held: ?Held = null,
+    /// An editor's server whose tools go to the model every turn (ACP
+    /// `_meta.fx.alwaysLoaded`).
+    always_loaded: bool = false,
+    /// The variable a `missing_env` or `invalid_env` server names.
+    missing: ?[]const u8 = null,
+    /// The workspace a `.mcp.json` server comes from: its saved login is that
+    /// workspace's own. Null for every other server.
+    workspace: ?[]const u8 = null,
+    /// Its launch config matches other sessions' often enough to run one copy
+    /// for all of them (`isShared`); the runtime routes it to the owner once
+    /// that lands (`src/core/mcp_host/share_key.zig`).
+    shared: bool = false,
+
+    /// What an HTTP server's login is saved under.
+    pub fn credentialKey(s: Server) credentials.Key {
+        return .{ .name = s.name, .url = s.url.?, .workspace = s.workspace };
+    }
+};
+
+/// `configs` copied into `arena`. The engine copies what it keeps, and the
+/// runtime keeps these too: a shared server registers its config with the
+/// owner, and one that cannot share runs from it here instead.
+pub fn keepEngineConfigs(arena: Allocator, configs: []const mcp.engine.Config) Allocator.Error![]mcp.engine.Config {
+    const out = try arena.alloc(mcp.engine.Config, configs.len);
+    for (configs, out) |c, *copy| {
+        copy.* = .{ .name = try arena.dupe(u8, c.name), .transport = undefined, .auth = c.auth, .timeouts = c.timeouts };
+        inline for (.{ "client_id", "client_secret", "client_metadata_url", "resource", "scopes" }) |field| {
+            if (@field(c.auth, field)) |value| @field(copy.auth, field) = try arena.dupe(u8, value);
+        }
+        copy.auth.client_name = try arena.dupe(u8, c.auth.client_name);
+        copy.transport = switch (c.transport) {
+            .stdio => |p| .{ .stdio = .{
+                .argv = blk: {
+                    const argv = try arena.alloc([]const u8, p.argv.len);
+                    for (p.argv, argv) |arg, *a| a.* = try arena.dupe(u8, arg);
+                    break :blk argv;
+                },
+                .environ_map = if (p.environ_map) |m| blk: {
+                    const map = try arena.create(std.process.Environ.Map);
+                    map.* = .init(arena);
+                    var it = m.iterator();
+                    while (it.next()) |entry| try map.put(entry.key_ptr.*, entry.value_ptr.*);
+                    break :blk map;
+                } else null,
+                .cwd = if (p.cwd) |dir| try arena.dupe(u8, dir) else null,
+            } },
+            .http => |h| blk: {
+                const headers = try arena.alloc(std.http.Header, h.headers.len);
+                for (h.headers, headers) |from, *to| to.* = .{ .name = try arena.dupe(u8, from.name), .value = try arena.dupe(u8, from.value) };
+                break :blk .{ .http = .{ .url = try arena.dupe(u8, h.url), .headers = headers } };
+            },
+        };
+    }
+    return out;
+}
+
+pub const Resolved = struct {
+    servers: []Server,
+    /// Per server: whether it is shared (see `isShared`). The runtime shares
+    /// its copy of the server once it routes by this.
+    shared: []bool,
+    /// What the engine runs, in order: `engine[i]` is `servers[engine_server[i]]`.
+    engine: []mcp.engine.Config,
+    engine_server: []usize,
+};
+
+/// The command and its arguments as one line, quoting what a shell would split.
+fn commandLine(arena: Allocator, command: []const u8, args: []const []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..args.len + 1) |k| {
+        const word = if (k == 0) command else args[k - 1];
+        if (k > 0) try out.append(arena, ' ');
+        const plain = word.len > 0 and std.mem.findAny(u8, word, " \t\n'\"$`\\") == null;
+        if (plain) {
+            try out.appendSlice(arena, word);
+            continue;
+        }
+        try out.append(arena, '\'');
+        for (word) |b| if (b == '\'') try out.appendSlice(arena, "'\\''") else try out.append(arena, b);
+        try out.append(arena, '\'');
+    }
+    return out.items;
+}
+
+/// Allocates everything with `arena`; the engine copies what it keeps. Saved
+/// sign-in credentials are not read here: the runtime hands them to the
+/// engine from its own thread.
+pub fn resolve(
+    arena: Allocator,
+    configs: []const McpServerConfig,
+    inherited: *const std.process.Environ.Map,
+    /// The workspace whose `.mcp.json` servers these are.
+    workspace_root: []const u8,
+    /// The person's home directory, where a shared global server with no
+    /// `cwd` starts, so it never runs in one repo's directory.
+    user_home: ?[]const u8,
+) Allocator.Error!Resolved {
+    const servers = try arena.alloc(Server, configs.len);
+    const shared = try arena.alloc(bool, configs.len);
+    var engine: std.ArrayList(mcp.engine.Config) = .empty;
+    var engine_server: std.ArrayList(usize) = .empty;
+    for (configs, servers, shared, 0..) |*c, *s, *is_shared, i| {
+        s.* = .{
+            .name = try arena.dupe(u8, c.name),
+            .source = c.source,
+            .scope = c.scope,
+            .transport = c.transport,
+            .url = if (c.url) |u| try arena.dupe(u8, u) else null,
+            .command = if (c.command) |command| try commandLine(arena, command, c.args) else null,
+            .callback_port = if (c.auth) |a| a.callback_port else null,
+            .always_loaded = c.always_loaded,
+            .workspace = if (c.source == .workspace) try arena.dupe(u8, workspace_root) else null,
+        };
+        s.held = heldFor(c);
+        is_shared.* = isShared(c, s.held);
+        s.shared = is_shared.*;
+        if (s.held != null) continue;
+        // A shared server starts where a person expects: its own directory,
+        // else the project an editor or the repo named, else the user's home.
+        const start_dir: ?[]const u8 = if (!s.shared)
+            c.cwd
+        else
+            c.cwd orelse switch (c.scope) {
+                .workspace, .acp_session => workspace_root,
+                .profile => user_home,
+            };
+        const transport = (try transportFor(arena, c, inherited, s, start_dir)) orelse continue;
+        var auth: @FieldType(mcp.engine.Config, "auth") = .{};
+        if (c.auth) |a| {
+            auth.client_id = a.client_id;
+            auth.client_metadata_url = a.client_metadata_url;
+            auth.resource = a.resource;
+            // `oauth.scopes` stand in for the server's own list; a challenge's still win.
+            if (a.scopes.len > 0) auth.scopes = try std.mem.join(arena, " ", a.scopes);
+            if (a.client_secret_env) |variable| {
+                auth.client_secret = inherited.get(variable) orelse {
+                    s.held = .missing_env;
+                    s.missing = try arena.dupe(u8, variable);
+                    continue;
+                };
+            }
+        }
+        // Slack registers no clients: without an app of the user's own, fx's
+        // Slack app signs in.
+        if (auth.client_id == null and slack.isSlack(s.url)) auth.client_id = slack.client_id;
+        // Only Slack's own server signs in as fx's app, with the redirect
+        // and scopes the app has: another server that names fx's app signs
+        // in on its own, with a redirect Slack refuses.
+        const fx_slack_app = if (auth.client_id) |id| std.mem.eql(u8, id, slack.client_id) else false;
+        s.slack_app = fx_slack_app and slack.appServer(s.url);
+        if (s.slack_app) {
+            if (s.callback_port == null) s.callback_port = slack.callback_port;
+            if (auth.scopes == null) auth.scopes = slack.scopes;
+            // Slack's tokens are for its origin with a trailing slash; the engine
+            // takes it only if it is the server's own.
+            if (auth.resource == null) if (s.url) |url| {
+                auth.resource = try arena.print("{s}/", .{origin(url)});
+            };
+        }
+        // Where fx keeps logins, it decides each refresh.
+        if (s.url != null) auth.refresh_via_host = true;
+        // The server's own limits: how long its start may take, and how long a
+        // request may go without an answer.
+        var timeouts: @FieldType(mcp.engine.Options, "timeouts") = .{};
+        timeouts.start_ms = c.startup_timeout_ms;
+        timeouts.idle_ms = c.operation_timeout_ms;
+        timeouts.hard_ms = @max(timeouts.hard_ms, c.operation_timeout_ms);
+        try engine.append(arena, .{ .name = s.name, .transport = transport, .auth = auth, .timeouts = timeouts });
+        try engine_server.append(arena, i);
+    }
+    return .{ .servers = servers, .shared = shared, .engine = engine.items, .engine_server = engine_server.items };
+}
+
+/// `servers` copied into `arena`, which outlives them: a server's strings
+/// that equal the ones its namesake in `prior` has are shared, so taking a
+/// config that changed little again costs little more than the list.
+pub fn keepServers(arena: Allocator, servers: []const Server, prior: []const Server) Allocator.Error![]Server {
+    const out = try arena.alloc(Server, servers.len);
+    for (servers, out) |s, *o| {
+        const old: ?Server = for (prior) |p| {
+            if (std.mem.eql(u8, p.name, s.name)) break p;
+        } else null;
+        o.* = s;
+        o.name = if (old) |p| p.name else try arena.dupe(u8, s.name);
+        inline for (.{ "url", "command", "missing", "workspace" }) |field| {
+            @field(o, field) = try reuse(arena, @field(s, field), if (old) |p| @field(p, field) else null);
+        }
+    }
+    return out;
+}
+
+fn reuse(arena: Allocator, value: ?[]const u8, old: ?[]const u8) Allocator.Error!?[]const u8 {
+    const v = value orelse return null;
+    if (old) |o| if (std.mem.eql(u8, o, v)) return o;
+    return try arena.dupe(u8, v);
+}
+
+/// `url`'s scheme and authority, such as `https://mcp.slack.com`.
+fn origin(url: []const u8) []const u8 {
+    const authority = (std.mem.find(u8, url, "://") orelse return url) + 3;
+    return url[0 .. std.mem.findScalarPos(u8, url, authority, '/') orelse url.len];
+}
+
+fn heldFor(c: *const McpServerConfig) ?Held {
+    if (!c.enabled) return .disabled;
+    if (c.source == .workspace) if (c.workspace_admission) |admission| switch (admission) {
+        .pending => return .waiting_for_approval,
+        .rejected => return .rejected,
+        .approved => {},
+    };
+    if (c.transport == .sse or c.acp_server_id != null) return .unsupported;
+    return null;
+}
+
+/// A server is shared when it runs a process locally, nothing withholds it,
+/// and it does not opt out: one copy for every session whose launch config
+/// matches (`src/core/mcp_host/share_key.zig`).
+fn isShared(c: *const McpServerConfig, held: ?Held) bool {
+    return c.transport == .stdio and c.enabled and held == null and c.acp_server_id == null and c.shared;
+}
+
+/// What a stdio server gets of fx's environment, as the MCP SDKs give it:
+/// these, then its config's `env`. Never fx's credentials or the rest.
+const inherited_names = [_][]const u8{ "HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER" };
+
+/// The engine's transport, or null when the server must be held back (and
+/// `s` says why).
+fn transportFor(
+    arena: Allocator,
+    c: *const McpServerConfig,
+    inherited: *const std.process.Environ.Map,
+    s: *Server,
+    /// Where a stdio server starts: the config's `cwd`, or the directory a
+    /// shared server is pinned to (`resolve`); null starts it in fx's own.
+    start_dir: ?[]const u8,
+) Allocator.Error!?mcp.engine.Transport {
+    switch (c.transport) {
+        .stdio => {
+            const argv = try arena.alloc([]const u8, 1 + c.args.len);
+            argv[0] = c.command orelse return null;
+            @memcpy(argv[1..], c.args);
+            const cwd = if (start_dir) |dir| try arena.dupe(u8, dir) else null;
+            const map = try arena.create(std.process.Environ.Map);
+            map.* = .init(arena);
+            for (inherited_names) |name| if (inherited.get(name)) |value| {
+                // An exported shell function isn't passed on.
+                if (!std.mem.startsWith(u8, value, "()")) try map.put(name, value);
+            };
+            for (c.env) |e| try map.put(e.key, e.value);
+            return .{ .stdio = .{ .argv = argv, .environ_map = map, .cwd = cwd } };
+        },
+        .http => {
+            var headers: std.ArrayList(std.http.Header) = .empty;
+            for (c.headers) |h| try headers.append(arena, .{ .name = h.name, .value = h.value });
+            for (c.header_env) |h| {
+                const value = inherited.get(h.env) orelse return hold(arena, s, .missing_env, h.env);
+                try headers.append(arena, .{ .name = h.name, .value = value });
+                if (!mcp.http_headers.sendable(headers.items[headers.items.len - 1 ..])) return hold(arena, s, .invalid_env, h.env);
+            }
+            if (c.bearer_token_env) |variable| {
+                const token = inherited.get(variable) orelse return hold(arena, s, .missing_env, variable);
+                try headers.append(arena, .{ .name = "Authorization", .value = try arena.print("Bearer {s}", .{token}) });
+                if (!mcp.http_headers.sendable(headers.items[headers.items.len - 1 ..])) return hold(arena, s, .invalid_env, variable);
+            }
+            return .{ .http = .{ .url = s.url orelse return null, .headers = headers.items } };
+        },
+        .sse => return null,
+    }
+}
+
+fn hold(arena: Allocator, s: *Server, why: Held, variable: []const u8) Allocator.Error!?mcp.engine.Transport {
+    s.held = why;
+    s.missing = try arena.dupe(u8, variable);
+    return null;
+}
+
+const testing = std.testing;
+
+fn envVar(comptime key: []const u8, comptime value: []const u8) mcp_contract.McpEnvVar {
+    return .{ .key = @constCast(key), .value = @constCast(value) };
+}
+
+test "an approved .mcp.json server keeps its login under its own workspace, never the profile's" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    const configs = [_]McpServerConfig{
+        .{ .name = "linear", .transport = .http, .url = "https://mcp.linear.app/mcp" },
+        .{ .name = "team", .transport = .http, .url = "https://mcp.linear.app/mcp", .source = .workspace, .scope = .workspace, .workspace_admission = .approved },
+    };
+    const r = try resolve(arena, &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqual(@as(?[]const u8, null), r.servers[0].workspace);
+    try testing.expectEqual(@as(?[]const u8, null), r.servers[0].credentialKey().workspace);
+    try testing.expectEqualStrings("/Users/example/repo", r.servers[1].workspace.?);
+    try testing.expectEqualStrings("/Users/example/repo", r.servers[1].credentialKey().workspace.?);
+}
+
+test "a server's startup and operation timeouts become its engine limits" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    const configs = [_]McpServerConfig{
+        .{ .name = "plain", .command = "x" },
+        .{ .name = "tuned", .transport = .http, .url = "https://t.example/mcp", .startup_timeout_ms = 5_000, .operation_timeout_ms = 900_000 },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqual(@as(u32, 30_000), r.engine[0].timeouts.?.start_ms);
+    try testing.expectEqual(@as(u32, 300_000), r.engine[0].timeouts.?.idle_ms);
+    try testing.expectEqual(@as(u32, 600_000), r.engine[0].timeouts.?.hard_ms);
+    try testing.expectEqual(@as(u32, 5_000), r.engine[1].timeouts.?.start_ms);
+    try testing.expectEqual(@as(u32, 900_000), r.engine[1].timeouts.?.idle_ms);
+    // A request may go 15 minutes without an answer, so the 10-minute cap rises.
+    try testing.expectEqual(@as(u32, 900_000), r.engine[1].timeouts.?.hard_ms);
+}
+
+test "stdio and HTTP servers become engine configs; the rest are held back with the reason" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    try inherited.put("PATH", "/usr/bin");
+    try inherited.put("TEAM_TOKEN", "t1");
+    try inherited.put("CLIENT_SECRET", "s1");
+
+    var env = [_]mcp_contract.McpEnvVar{envVar("HOME", "/Users/me")};
+    var header_env = [_]mcp_contract.McpHttpHeaderEnv{.{ .name = @constCast("X-Team"), .env = @constCast("TEAM_TOKEN") }};
+    var missing_header = [_]mcp_contract.McpHttpHeaderEnv{.{ .name = @constCast("X-Key"), .env = @constCast("NOT_SET") }};
+    const configs = [_]McpServerConfig{
+        .{ .name = "ctx", .command = "node", .args = &.{"ctx.js"} },
+        .{ .name = "kit", .command = "kit", .env = &env },
+        .{ .name = "linear", .transport = .http, .url = "https://mcp.linear.app/mcp", .header_env = &header_env, .auth = .{ .client_id = @constCast("c1"), .client_secret_env = @constCast("CLIENT_SECRET"), .callback_port = 33418 } },
+        .{ .name = "off", .command = "x", .enabled = false },
+        .{ .name = "pending", .command = "x", .source = .workspace, .workspace_admission = .pending },
+        .{ .name = "no", .command = "x", .source = .workspace, .workspace_admission = .rejected },
+        .{ .name = "old", .transport = .sse, .url = "https://old.example/sse" },
+        .{ .name = "keyless", .transport = .http, .url = "https://k.example/mcp", .header_env = &missing_header },
+        .{ .name = "carried", .transport = .http, .url = "http://acp.invalid/x", .source = .acp, .acp_server_id = @constCast("x") },
+    };
+    const r = try resolve(arena, &configs, &inherited, "/Users/example/repo", "/Users/example");
+
+    try testing.expectEqual(@as(usize, 3), r.engine.len);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, r.engine_server);
+    try testing.expectEqualStrings("ctx.js", r.engine[0].transport.stdio.argv[1]);
+    const ctx_env = r.engine[0].transport.stdio.environ_map.?;
+    try testing.expectEqual(@as(usize, 1), ctx_env.count());
+    try testing.expectEqualStrings("/usr/bin", ctx_env.get("PATH").?);
+    const kit_env = r.engine[1].transport.stdio.environ_map.?;
+    try testing.expectEqual(@as(usize, 2), kit_env.count());
+    try testing.expectEqualStrings("/Users/me", kit_env.get("HOME").?);
+    try testing.expectEqualStrings("/usr/bin", kit_env.get("PATH").?);
+
+    const linear = r.engine[2];
+    try testing.expectEqualStrings("https://mcp.linear.app/mcp", linear.transport.http.url);
+    try testing.expectEqualStrings("X-Team", linear.transport.http.headers[0].name);
+    try testing.expectEqualStrings("t1", linear.transport.http.headers[0].value);
+    try testing.expectEqualStrings("c1", linear.auth.client_id.?);
+    try testing.expectEqualStrings("s1", linear.auth.client_secret.?);
+    // The runtime's thread hands over saved credentials later.
+    try testing.expect(linear.auth.saved == null);
+    // fx keeps the logins, so it decides each refresh.
+    try testing.expect(linear.auth.refresh_via_host);
+    try testing.expectEqual(@as(?u16, 33418), r.servers[2].callback_port);
+
+    try testing.expectEqual(@as(?Held, .disabled), r.servers[3].held);
+    try testing.expectEqual(@as(?Held, .waiting_for_approval), r.servers[4].held);
+    try testing.expectEqual(@as(?Held, .rejected), r.servers[5].held);
+    try testing.expectEqual(@as(?Held, .unsupported), r.servers[6].held);
+    try testing.expectEqual(@as(?Held, .missing_env), r.servers[7].held);
+    try testing.expectEqual(@as(?Held, .unsupported), r.servers[8].held);
+    try testing.expectEqualStrings("NOT_SET", r.servers[7].missing.?);
+}
+
+test "Slack signs in as fx's Slack app on port 3118 with the app's scopes, unless the config names its own app or port; no other server does" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    const configs = [_]McpServerConfig{
+        .{ .name = "slack", .transport = .http, .url = "https://mcp.slack.com/mcp" },
+        .{ .name = "mine", .transport = .http, .url = "https://mcp.slack.com/mcp", .auth = .{ .client_id = @constCast("my-app") } },
+        .{ .name = "linear", .transport = .http, .url = "https://mcp.linear.app/mcp" },
+        .{ .name = "posing", .transport = .http, .url = "https://mcp.example.com/mcp", .auth = .{ .client_id = @constCast(slack.client_id) } },
+        .{ .name = "ported", .transport = .http, .url = "https://mcp.slack.com/mcp", .auth = .{ .callback_port = 4242 } },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqualStrings(slack.client_id, r.engine[0].auth.client_id.?);
+    try testing.expect(r.servers[0].slack_app);
+    try testing.expectEqual(@as(?u16, 3118), r.servers[0].callback_port);
+    try testing.expectEqualStrings(slack.scopes, r.engine[0].auth.scopes.?);
+    try testing.expectEqualStrings("https://mcp.slack.com/", r.engine[0].auth.resource.?);
+    try testing.expectEqualStrings("my-app", r.engine[1].auth.client_id.?);
+    try testing.expect(!r.servers[1].slack_app);
+    try testing.expect(r.servers[1].callback_port == null);
+    try testing.expect(r.engine[1].auth.scopes == null);
+    try testing.expect(r.engine[1].auth.resource == null);
+    try testing.expect(r.engine[2].auth.client_id == null);
+    try testing.expect(!r.servers[2].slack_app);
+    // Naming fx's Slack app doesn't make a server Slack: it signs in on its own.
+    try testing.expectEqualStrings(slack.client_id, r.engine[3].auth.client_id.?);
+    try testing.expect(!r.servers[3].slack_app);
+    try testing.expect(r.servers[3].callback_port == null);
+    try testing.expect(r.engine[3].auth.scopes == null);
+    try testing.expect(r.engine[3].auth.resource == null);
+    // A port the config names wins.
+    try testing.expect(r.servers[4].slack_app);
+    try testing.expectEqual(@as(?u16, 4242), r.servers[4].callback_port);
+}
+
+test "a stdio server gets only the MCP SDKs' few variables of fx's, then its own env" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    for ([_][2][]const u8{
+        .{ "HOME", "/Users/me" },       .{ "LOGNAME", "me" },          .{ "PATH", "/usr/bin" },
+        .{ "SHELL", "() { :; }" },      .{ "TERM", "xterm" },          .{ "USER", "me" },
+        .{ "AI_GATEWAY_API_KEY", "k" }, .{ "VERCEL_OIDC_TOKEN", "t" }, .{ "HTTPS_PROXY", "http://p" },
+    }) |pair| try inherited.put(pair[0], pair[1]);
+    var env = [_]mcp_contract.McpEnvVar{ envVar("GITHUB_TOKEN", "g"), envVar("TERM", "dumb") };
+    const configs = [_]McpServerConfig{.{ .name = "gh", .command = "gh-mcp", .env = &env }};
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    const got = r.engine[0].transport.stdio.environ_map.?;
+    // SHELL held a function, so it isn't passed; the config's TERM wins.
+    try testing.expectEqual(@as(usize, 6), got.count());
+    for ([_][2][]const u8{ .{ "HOME", "/Users/me" }, .{ "LOGNAME", "me" }, .{ "PATH", "/usr/bin" }, .{ "USER", "me" }, .{ "TERM", "dumb" }, .{ "GITHUB_TOKEN", "g" } }) |pair| {
+        try testing.expectEqualStrings(pair[1], got.get(pair[0]).?);
+    }
+    try testing.expect(got.get("AI_GATEWAY_API_KEY") == null);
+    try testing.expect(got.get("VERCEL_OIDC_TOKEN") == null);
+    try testing.expect(got.get("HTTPS_PROXY") == null);
+}
+
+test "a shared stdio server starts in the directory its config names, its repo root, or the user's home" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    const configs = [_]McpServerConfig{
+        .{ .name = "named", .command = "node", .args = &.{"s.js"}, .cwd = @constCast("/work/app") },
+        .{ .name = "global", .command = "node", .args = &.{"s.js"} },
+        .{ .name = "project", .command = "node", .args = &.{"s.js"}, .source = .workspace, .scope = .workspace, .workspace_admission = .approved },
+        .{ .name = "editor", .command = "node", .args = &.{"s.js"}, .source = .acp, .scope = .acp_session },
+        .{ .name = "own", .command = "node", .args = &.{"s.js"}, .shared = false },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    // A config's own directory wins, for a shared server too.
+    try testing.expectEqualStrings("/work/app", r.engine[0].transport.stdio.cwd.?);
+    // A global server never runs in one repo's directory.
+    try testing.expectEqualStrings("/Users/example", r.engine[1].transport.stdio.cwd.?);
+    try testing.expectEqualStrings("/Users/example/repo", r.engine[2].transport.stdio.cwd.?);
+    // An editor's server starts in the project it was given for.
+    try testing.expectEqualStrings("/Users/example/repo", r.engine[3].transport.stdio.cwd.?);
+    // One that keeps its own copy keeps today's behavior.
+    try testing.expect(r.engine[4].transport.stdio.cwd == null);
+}
+
+test "a server is shared only when it is a local stdio server nothing withholds and it didn't opt out" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    const configs = [_]McpServerConfig{
+        .{ .name = "local", .command = "node" },
+        .{ .name = "opted-out", .command = "node", .shared = false },
+        .{ .name = "off", .command = "node", .enabled = false },
+        .{ .name = "remote", .transport = .http, .url = "https://r.example/mcp" },
+        .{ .name = "hosted", .transport = .http, .url = "acp:x", .acp_server_id = @constCast("x") },
+        .{ .name = "pending", .command = "node", .source = .workspace, .workspace_admission = .pending },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqualSlices(bool, &.{ true, false, false, false, false, false }, r.shared);
+    try testing.expectEqualSlices(bool, &.{ true, false, false, false, false, false }, &.{
+        r.servers[0].shared, r.servers[1].shared, r.servers[2].shared,
+        r.servers[3].shared, r.servers[4].shared, r.servers[5].shared,
+    });
+    // Until the runtime routes by it, a shared server still runs in this process's engine.
+    try testing.expectEqual(@as(usize, 3), r.engine.len);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 3 }, r.engine_server);
+}
+
+test "a token from the environment becomes the Authorization header" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    try inherited.put("PLAIN_KEY", "k1");
+    const configs = [_]McpServerConfig{
+        .{ .name = "plain", .transport = .http, .url = "https://mcp.plain.com/mcp", .bearer_token_env = @constCast("PLAIN_KEY") },
+        .{ .name = "unset", .transport = .http, .url = "https://u.example/mcp", .bearer_token_env = @constCast("UNSET_KEY") },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqual(@as(usize, 1), r.engine.len);
+    try testing.expectEqualStrings("Authorization", r.engine[0].transport.http.headers[0].name);
+    try testing.expectEqualStrings("Bearer k1", r.engine[0].transport.http.headers[0].value);
+    try testing.expectEqual(@as(?Held, .missing_env), r.servers[1].held);
+    try testing.expectEqualStrings("UNSET_KEY", r.servers[1].missing.?);
+}
+
+test "oauth.scopes reach the sign-in space-separated, and without them the server's own are asked for" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    var scopes = [_][]u8{ @constCast("custom.scope"), @constCast("other.scope") };
+    const configs = [_]McpServerConfig{
+        .{ .name = "scoped", .transport = .http, .url = "https://s.example/mcp", .auth = .{ .scopes = &scopes } },
+        .{ .name = "plain", .transport = .http, .url = "https://p.example/mcp", .auth = .{} },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqualStrings("custom.scope other.scope", r.engine[0].auth.scopes.?);
+    try testing.expectEqual(@as(?[]const u8, null), r.engine[1].auth.scopes);
+}
+
+test "a variable a header can't carry holds its server back, named, and never reaches a request" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var inherited: std.process.Environ.Map = .init(testing.allocator);
+    defer inherited.deinit();
+    try inherited.put("CRLF_KEY", "a\r\nb");
+    try inherited.put("LF_TEAM", "x\nInjected: yes");
+    try inherited.put("GOOD_TEAM", "a b\tc");
+    var lf_team = [_]mcp_contract.McpHttpHeaderEnv{.{ .name = @constCast("X-Team"), .env = @constCast("LF_TEAM") }};
+    var good_team = [_]mcp_contract.McpHttpHeaderEnv{.{ .name = @constCast("X-Team"), .env = @constCast("GOOD_TEAM") }};
+    const configs = [_]McpServerConfig{
+        .{ .name = "token", .transport = .http, .url = "https://t.example/mcp", .bearer_token_env = @constCast("CRLF_KEY") },
+        .{ .name = "header", .transport = .http, .url = "https://h.example/mcp", .header_env = &lf_team },
+        .{ .name = "good", .transport = .http, .url = "https://g.example/mcp", .header_env = &good_team },
+    };
+    const r = try resolve(arena_state.allocator(), &configs, &inherited, "/Users/example/repo", "/Users/example");
+    try testing.expectEqual(@as(usize, 1), r.engine.len);
+    try testing.expectEqualStrings("a b\tc", r.engine[0].transport.http.headers[0].value);
+    try testing.expectEqual(@as(?Held, .invalid_env), r.servers[0].held);
+    try testing.expectEqualStrings("CRLF_KEY", r.servers[0].missing.?);
+    try testing.expectEqual(@as(?Held, .invalid_env), r.servers[1].held);
+    try testing.expectEqualStrings("LF_TEAM", r.servers[1].missing.?);
+}
+
+test "a stdio server's command line quotes what a shell would split" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("node server.js --port 3", try commandLine(arena.allocator(), "node", &.{ "server.js", "--port", "3" }));
+    try std.testing.expectEqualStrings("npx '' 'a b' 'it'\\''s' '$HOME'", try commandLine(arena.allocator(), "npx", &.{ "", "a b", "it's", "$HOME" }));
+}

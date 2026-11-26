@@ -889,6 +889,9 @@ fn finish_quit(cx: &mut App) {
                     crate::diag::line(serde_json::json!({"quit":"end_sheets"}));
                     crate::platform::end_all_sheets();
                 }
+                // The session's last events (a moment at most; what does not
+                // leave in time goes at the next launch).
+                pm_telemetry::quit(true);
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
                 // Everything is written and released: what is left is the
@@ -2482,14 +2485,101 @@ mod tests {
         )
         .unwrap();
         edit(&k);
-        for call in crate::session::undo_calls(true) {
-            k.call_blocking("test", Request::new(Caller::native(), call))
-                .unwrap();
-        }
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        )
+        .unwrap();
         let p = k.published("test").unwrap();
         assert!(p.entry.is_none(), "no edit is left open");
         assert!(!p.history.can_undo, "the move was undone");
         assert!(p.history.can_redo, "and can be redone");
+        actor.shutdown();
+    }
+    /// PM-718: the editor's Undo while an agent's edit is applying (an MCP
+    /// mutation lease, open across the agent's writes), sent as the editor
+    /// sends it when no button is down. The edit is not sealed half-way; the
+    /// Undo waits for it (the publication says so) and takes it back whole,
+    /// and the person's step below it stays.
+    #[test]
+    fn undo_while_an_agent_edit_applies_takes_it_back_whole_once_it_lands() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        edit(&k);
+        let agent = Caller::realm(41, 1, Origin::Mcp);
+        let name = |name: &str| Call::Transact {
+            label: Some("Agent rename".into()),
+            body: WriteBody::Commands(vec![
+                CompCommand::Set {
+                    patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                        name: Some(name.into()),
+                        ..Default::default()
+                    }),
+                }
+                .into(),
+            ]),
+            expected_revision: None,
+        };
+        let Reply::Mutation(lease) = k
+            .call_blocking(
+                "test",
+                Request::new(
+                    agent,
+                    EditCall::MutateBegin {
+                        label: "Agent edit".into(),
+                    },
+                ),
+            )
+            .unwrap()
+            .reply
+        else {
+            panic!("no lease")
+        };
+        k.call_blocking("test", Request::new(agent, name("Agent half")))
+            .unwrap();
+        let undo = k.call(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        );
+        k.call_blocking("test", Request::new(agent, name("Agent whole")))
+            .unwrap();
+        assert!(k.published("test").unwrap().history.waiting);
+        assert!(
+            undo.try_take().is_none(),
+            "Undo ran inside the agent's edit"
+        );
+        let finished = k
+            .call_blocking(
+                "test",
+                Request::new(
+                    agent,
+                    EditCall::MutateFinish {
+                        lease,
+                        ops: Vec::new(),
+                        label: None,
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(matches!(&finished.reply, Reply::Edit(r) if r.ok));
+        assert!(matches!(
+            undo.wait().unwrap().unwrap().reply,
+            Reply::Bool(true)
+        ));
+        let p = k.published("test").unwrap();
+        assert!(!p.history.waiting);
+        assert_eq!(p.history.undo_label.as_deref(), Some("Rename"));
+        assert_eq!(p.history.redo_label.as_deref(), Some("Agent edit"));
         actor.shutdown();
     }
 }

@@ -165,6 +165,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         dim: !!query && !model.matches.sections.has(id),
       })),
       accountName: model.publication.accountName,
+      accountEmail: model.publication.accountEmail,
       active: model.active,
       query: model.query,
     };

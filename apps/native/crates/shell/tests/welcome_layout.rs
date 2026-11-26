@@ -8,7 +8,7 @@
 use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
-    welcome::{Button, Frame, Names, Row, Severity, Stat},
+    welcome::{Button, Choice, Frame, Names, Progress, Row, Severity, Stat, StepRow},
     welcome_view::WelcomeView,
 };
 use std::{rc::Rc, sync::Arc};
@@ -55,14 +55,14 @@ fn summary(overflow: bool) -> Frame {
     Frame {
         surface: "N006".into(),
         top: true,
-        eyebrow: Some("Extensions From the Original App".into()),
-        title: "Your Extensions Are In".into(),
+        eyebrow: Some("Extensions from the original app".into()),
+        title: "Your extensions are in".into(),
         line: "One couldn’t load. The reason is below. Your original app stays unchanged.".into(),
         stats: vec![stat("45", "Brought in"), stat("1", "Skipped")],
-        rows_title: Some("Not Brought In".into()),
+        rows_title: Some("Not brought in".into()),
         rows,
         names: Some(Names {
-            title: "Brought In".into(),
+            title: "Brought in".into(),
             names: (1..=45).map(|i| format!("Extension Number {i}")).collect(),
             preview: 6,
         }),
@@ -187,13 +187,13 @@ fn keychain_failure_and_retry_surfaces_render_headlessly() {
         for (name, title, line, retry) in [
             (
                 "keychain-missing",
-                "Keychain Access Wasn’t Allowed",
+                "Keychain access wasn’t allowed",
                 "The original app’s sign-in key wasn’t found in your Keychain. Open the original app and sign in, then try again. Your sign-ins and extension values stay in the original app. You can continue and sign in here.",
                 true,
             ),
             (
                 "keychain-consent",
-                "Keep Your Sign-Ins",
+                "Keep your sign-ins",
                 "Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.",
                 false,
             ),
@@ -262,6 +262,121 @@ fn keychain_failure_and_retry_surfaces_render_headlessly() {
             };
             let button = cx.debug_bounds(window.into(), button_id).unwrap().unwrap();
             assert!(button.bottom() <= px(m.welcome_height));
+        }
+    });
+}
+
+/// Every first-launch frame keeps its actions in one place: the primary
+/// button's frame is the same on all of them, short or long, and a list
+/// taller than the room scrolls above it instead of pushing it.
+#[test]
+fn the_primary_button_never_moves_between_frames() {
+    let continuing = |title: &str, choices: Vec<Choice>| Frame {
+        title: title.into(),
+        line: "Work the way you already do. Switch anytime.".into(),
+        choices,
+        buttons: vec![Button::new("continue", "Continue")],
+        default: Some("continue".into()),
+        back: Some("Back".into()),
+        ..Frame::default()
+    };
+    let row = |id: &str| Choice {
+        id: id.into(),
+        label: format!("Choice {id}"),
+        detail: Some("A short line under it.".into()),
+        ..Choice::default()
+    };
+    let steps = (0..5)
+        .map(|i| StepRow {
+            title: format!("Step {i}"),
+            value: "Done".into(),
+            progress: (i == 4).then_some(Progress::Indeterminate),
+        })
+        .collect();
+    let frames = vec![
+        Frame {
+            title: "Welcome to Powermove".into(),
+            line: "A few quick steps, then your editor.".into(),
+            buttons: vec![Button::new("begin", "Begin")],
+            default: Some("begin".into()),
+            ..Frame::default()
+        },
+        continuing("Choose your timeline", vec![row("a"), row("b")]),
+        continuing("Choose your agent", vec![row("a"), row("b"), row("c")]),
+        Frame {
+            title: "Sign in to Powermove".into(),
+            line: "Your account remembers the extensions you install on each Mac.".into(),
+            buttons: vec![
+                Button::new("create_account", "Create Account"),
+                Button::new("log_in", "Log In"),
+                Button::new("not_now", "Not Now"),
+            ],
+            default: Some("create_account".into()),
+            ..Frame::default()
+        },
+        Frame {
+            title: "Quit the original app to continue".into(),
+            line: "Powermove copies your library while the original app is closed. Save your work there and quit it.".into(),
+            steps,
+            buttons: vec![Button::new("pause", "Pause"), Button::new("quit", "Quit Powermove").leading()],
+            default: Some("pause".into()),
+            ..Frame::default()
+        },
+        summary(false),
+        summary(true),
+    ];
+    objc2::rc::autoreleasepool(|_| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let m = tokens.metrics;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(
+                gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                    .with_automatic_optical_sizing(),
+            ),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window_size = size(px(m.welcome_width), px(m.welcome_height));
+        let mut first = None;
+        for (i, frame) in frames.into_iter().enumerate() {
+            let title = frame.title.clone();
+            let window = cx
+                .open_window(window_size, |_, cx| {
+                    cx.new(|cx| {
+                        let mut view =
+                            WelcomeView::new(tokens.clone(), frame, Rc::new(|_, _| {}), cx);
+                        view.stage = true;
+                        view.ground = true;
+                        view.clock = Some(1.);
+                        view
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            if let Ok(dir) = std::env::var("PM_WELCOME_CAPTURE") {
+                std::fs::create_dir_all(&dir).unwrap();
+                image.save(format!("{dir}/actions-{i}.png")).unwrap();
+            }
+            let primary = cx
+                .debug_bounds(window.into(), "welcome-primary")
+                .unwrap()
+                .unwrap_or_else(|| panic!("{title}: no primary"));
+            match first {
+                None => first = Some(primary),
+                Some(first) => assert_eq!(primary, first, "{title}: the primary moved"),
+            }
+            assert!(primary.bottom() <= window_size.height, "{title}");
+            if let Some(content) = cx.debug_bounds(window.into(), "welcome-content").unwrap() {
+                assert!(
+                    content.bottom() <= primary.top(),
+                    "{title}: {content:?} runs into the actions {primary:?}"
+                );
+            }
         }
     });
 }

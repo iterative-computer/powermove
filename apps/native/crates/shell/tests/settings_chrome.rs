@@ -94,7 +94,7 @@ fn main() {
             .page()
             .convertRect_toView(chrome.page().bounds(), None);
         assert!(
-            page.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+            page.origin.x >= pm_shell::settings_window::sidebar_width() - 1.,
             "the page starts beside the sidebar, at {}",
             page.origin.x
         );
@@ -132,7 +132,7 @@ fn main() {
     let at = ground.convertRect_toView(ground.bounds(), None);
     let top = window.contentView().map_or(0., |c| c.bounds().size.height);
     assert!(
-        at.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+        at.origin.x >= pm_shell::settings_window::sidebar_width() - 1.,
         "the ground starts beside the sidebar, at {}",
         at.origin.x
     );
@@ -159,10 +159,35 @@ fn main() {
     assert_eq!(report["opaque"], false, "{report}");
     assert!(report["backgroundAlpha"].as_f64().unwrap() < 0.01, "{report}");
     assert_eq!(report["detailPainted"], false, "{report}");
-    assert!(report["groundX"].as_f64().unwrap() >= pm_shell::settings_window::SIDEBAR_WIDTH - 1., "{report}");
+    assert!(report["groundX"].as_f64().unwrap() >= pm_shell::settings_window::sidebar_width() - 1., "{report}");
     if report["glassAvailable"] == true {
         assert_eq!(report["sidebarInGlass"], true, "{report}");
     }
+    // The owner's bug (2026-11-25): the selected row's fill sat further from
+    // the tile at its sides than above and below. Its inset is now equal on
+    // every side of the tile.
+    let section = |id: &str, title: &str| pm_shell::settings_window::Section {
+        id: id.into(),
+        title: title.into(),
+        account_name: None,
+        account_email: None,
+        dim: false,
+    };
+    chrome.show(
+        &[section("account", "Account"), section("general", "General"), section("agents", "Agents")],
+        "general",
+    );
+    if let Some(frame) = window.contentView().and_then(|c| unsafe { c.superview() }) {
+        frame.layoutSubtreeIfNeeded();
+    }
+    let report = chrome.report();
+    let insets: Vec<f64> = serde_json::from_value(report["selectionInsets"].clone())
+        .unwrap_or_else(|_| panic!("the selection has insets: {report}"));
+    assert!(
+        insets.iter().all(|i| (i - insets[0]).abs() < 0.5 && *i > 0.),
+        "equal insets around the selected tile (left, top, bottom): {insets:?}"
+    );
+    assert_eq!(report["header"], "General", "{report}");
     println!("settings_chrome report: {report}");
     drop(chrome);
     window.close();

@@ -6,7 +6,9 @@ use objc2::{
     runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
 };
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSNotification, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSNotification, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager,
+};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -119,14 +121,19 @@ struct State {
     /// view it finds (Powermove: Space then typed instead of playing).
     armed: Cell<bool>,
     original: RefCell<String>,
+    /// A composer's own undo (PM-749): its typing undo names ranges of the
+    /// text typed, so a text the host sets (the field emptied after a send)
+    /// clears it. ⌘Z then never reaches text the field no longer holds.
+    undo: Option<Retained<NSUndoManager>>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
-    /// What a paint staged, with that paint's number and stage order: placed
-    /// by the present that follows that paint, and by no later one.
-    geometry: Cell<Option<(u64, u64, NSRect, NSRect)>>,
+    /// What a paint staged, with that paint's number: placed by the present
+    /// that follows that paint, and by no later one.
+    /// In a scrolling region's container when `region` is set (P-SLOT-REGION).
+    geometry: Cell<Option<(u64, crate::slot_region::Placement)>>,
     scroll_fade: crate::scroll_fade::ScrollFade,
-    staged: Cell<Option<(NSRect, NSRect)>>,
+    staged: Cell<Option<crate::slot_region::Placement>>,
     build_alpha: Cell<Option<(u64, f64)>>,
     kept_alpha: Cell<f64>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
@@ -158,6 +165,7 @@ impl State {
         // Validate only the committed value. Intermediate IME/number strings stay untouched.
         if cancel || (self.kind.number() && !valid_number(&value)) {
             self.editor.set(&self.original.borrow());
+            self.forget_typing();
             self.emit(TextEvent::Cancelled);
         } else {
             *self.original.borrow_mut() = value.clone();
@@ -170,6 +178,13 @@ impl State {
     }
 }
 impl State {
+    /// A text set from outside: a composer's typing undo goes with the text
+    /// it named (PM-749).
+    fn forget_typing(&self) {
+        if let Some(undo) = &self.undo {
+            undo.removeAllActions();
+        }
+    }
     /// The selected UTF-16 range, start before end.
     fn selection(&self) -> (usize, usize) {
         match &self.editor {
@@ -304,6 +319,14 @@ define_class!(
             });
             if !claimed { unsafe { let _: () = msg_send![super(self), paste: sender]; } }
         }
+        /// Its own undo, never the window's (`State::undo`).
+        #[unsafe(method(undoManager))]
+        fn undo_manager(&self) -> *mut NSUndoManager {
+            match self.ivars().borrow().upgrade().and_then(|s| s.undo.clone()) {
+                Some(undo) => Retained::autorelease_return(undo),
+                None => unsafe { msg_send![super(self), undoManager] },
+            }
+        }
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
             if self.wanted() {
@@ -383,6 +406,10 @@ define_class!(
 /// prompt reads at 1.5), centred in that height: the gap past the font's own
 /// line goes between lines and half of it above the first.
 pub const COMPOSER_LEADING: f64 = 1.5;
+/// A composer's text container inset (width, height): its first line box
+/// starts `COMPOSER_INSET.1` down and, with AppKit's 5 pt line fragment
+/// padding, its text 7 pt in (8 pt inside the composer's 1 pt edge).
+pub const COMPOSER_INSET: (f64, f64) = (2., 7.);
 fn composer_leading(v: &NSTextView, points: f64) {
     use objc2_app_kit::{NSLayoutManager, NSMutableParagraphStyle, NSParagraphStyleAttributeName};
     let font = NSFont::systemFontOfSize(points);
@@ -399,7 +426,7 @@ fn composer_leading(v: &NSTextView, points: f64) {
         typing = Retained::cast_unchecked(mutable);
         v.setTypingAttributes(&typing);
     }
-    v.setTextContainerInset(NSSize::new(4., 3. + gap / 2.));
+    v.setTextContainerInset(NSSize::new(COMPOSER_INSET.0, COMPOSER_INSET.1 + gap / 2.));
 }
 pub fn valid_number(value: &str) -> bool {
     value.trim().parse::<f64>().is_ok_and(f64::is_finite)
@@ -858,6 +885,7 @@ impl NativeTextSlot {
             selection_pending: Cell::new(None),
             armed: Cell::new(false),
             original: RefCell::new(initial.into()),
+            undo: (kind == TextKind::Composer).then(|| NSUndoManager::new(mtm)),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
             paste: RefCell::new(None),
@@ -1004,9 +1032,17 @@ impl NativeTextSlot {
         self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
     }
     pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
-        self.state.stage(Some((bounds, clip)));
-        self.state.staged.set(Some((bounds, clip)));
+        let placement = crate::slot_region::Placement { bounds, clip, region: None };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
         self.state.scroll_fade.stage(fade);
+    }
+    /// P-SLOT-REGION: staged in scrolling region `region`'s container, with
+    /// bounds and clip in its content coordinates.
+    pub fn stage_in_region(&self, region: usize, bounds: NSRect, clip: NSRect) {
+        let placement = crate::slot_region::Placement { bounds, clip, region: Some(region) };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
     }
     pub fn stage_build_alpha(&self, alpha: f64) {
         let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
@@ -1019,22 +1055,8 @@ impl NativeTextSlot {
         self.state.stage(self.state.staged.get());
         self.stage_build_alpha(self.state.kept_alpha.get());
     }
-    /// P-SLOT-PICTURE: the editor as AppKit draws it now (its text, scroll
-    /// and appearance), `size` points, for a scroll to move instead of the
-    /// view. `None` for a field drawn by GPUI at rest (dense) or one being
-    /// edited: those are never pictured.
-    pub fn picture(&self, size: NSSize) -> Option<crate::native_control::SlotPicture> {
-        let state = &self.state;
-        if state.kind.dense() || state.kind == TextKind::Canvas || state.editing.get() {
-            return None;
-        }
-        match &state.scroll {
-            Some(scroll) => crate::native_control::picture_of(scroll, size),
-            None => crate::native_control::picture_of(state.editor.view(), size),
-        }
-    }
-    /// Stages nothing: the next present hides the editor (its picture stands
-    /// in the scene); [`Self::keep`] keeps it hidden.
+    /// Stages nothing: the next present hides the editor; [`Self::keep`]
+    /// keeps it hidden.
     pub fn hide(&self) {
         self.state.stage(None);
         self.state.staged.set(None);
@@ -1074,6 +1096,7 @@ impl NativeTextSlot {
     pub fn set_value(&self, value: &str) {
         if !self.is_editing() {
             self.state.editor.set(value);
+            self.state.forget_typing();
             *self.state.original.borrow_mut() = value.into();
         }
     }
@@ -1132,6 +1155,7 @@ impl NativeTextSlot {
         }
         let (start, end) = self.selection();
         self.state.editor.set(value);
+        self.state.forget_typing();
         *self.state.original.borrow_mut() = value.into();
         if self.state.kind == TextKind::Canvas {
             self.set_selection(start, end);
@@ -1288,12 +1312,10 @@ impl Drop for NativeTextSlot {
     }
 }
 impl State {
-    fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
-        let key = Retained::as_ptr(&self.gpui) as usize;
-        let paint = crate::composition::open_paint(key);
-        let order = crate::composition::next_stage_order(key);
+    fn stage(&self, geometry: Option<crate::slot_region::Placement>) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.gpui) as usize);
         self.geometry
-            .set(geometry.map(|(bounds, clip)| (paint, order, bounds, clip)));
+            .set(geometry.map(|placement| (paint, placement)));
     }
 }
 /// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
@@ -1317,18 +1339,28 @@ fn place(key: usize, apply: bool) -> bool {
         let geometry = state
             .geometry
             .get()
-            .filter(|(paint, ..)| Some(*paint) == last)
-            .map(|(_, order, bounds, clip)| (order, bounds, clip))
+            .filter(|(paint, _)| Some(*paint) == last)
+            .map(|(_, placement)| placement)
             .or_else(|| {
                 (state.kind == TextKind::Canvas)
                     .then(|| state.staged.get())
                     .flatten()
-                    .map(|(bounds, clip)| (0, bounds, clip))
             });
         if apply {
             state.geometry.set(None);
         }
-        let Some((order, bounds, clip)) = geometry else {
+        // A region's slot goes in its container's content view; a region the
+        // last draw did not make hides it.
+        let parent = geometry.and_then(|p| p.region).map(|region| {
+            crate::slot_region::content_view(&state.gpui, region, apply)
+        });
+        if !apply && matches!(parent, Some(None)) {
+            moved = true;
+            continue;
+        }
+        let geometry = geometry.filter(|_| !matches!(parent, Some(None)));
+        let parent = parent.flatten();
+        let Some(crate::slot_region::Placement { bounds, clip, region }) = geometry else {
             if !state.wrapper.isHidden() {
                 moved = true;
                 if apply {
@@ -1362,26 +1394,46 @@ fn place(key: usize, apply: bool) -> bool {
         }
         // From GPUI's frame in its parent (P-EMBED).
         let visible = intersection(bounds, clip);
-        let occluded = state.kind != TextKind::Canvas
-            && crate::composition::is_occluded(key, order, visible);
-        let hidden = visible.size.width <= 0.
+        // In a region, hidden while its region's view shows none of it: no
+        // keys, not read out (PM-696 review).
+        let outside = region.is_some_and(|r| !crate::slot_region::shows(&state.gpui, r, visible));
+        let hidden = outside
+            || visible.size.width <= 0.
             || visible.size.height <= 0.
-            || (state.kind.dense() && !state.editing.get())
-            || occluded;
+            || (state.kind.dense() && !state.editing.get());
         // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
         // field at rest, a field scrolled out) still follows its row, but
         // nothing on screen moved, so the frame needs no synchronous
         // present: a panel of number fields made every frame of its scroll
         // one.
         let unseen = hidden && state.wrapper.isHidden();
-        let frame = crate::composition::hosted_rect(&state.gpui, &state.wrapper, visible);
+        // Top-down content coordinates in a region.
+        let mut frame = match region {
+            Some(_) => visible,
+            None => crate::composition::hosted_rect(&state.gpui, visible),
+        };
+        if apply {
+            let (adopted, placed) =
+                crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame, !hidden);
+            frame = placed;
+            if adopted {
+                moved = true;
+                // In a region its container's clip fades, not its own mask.
+                if parent.is_some() {
+                    state.scroll_fade.clear(&state.wrapper);
+                }
+            }
+        } else {
+            moved |= crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+                || (parent.is_some() && unsafe { state.wrapper.superview() }.is_none());
+        }
         if state.wrapper.frame() != frame {
             moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
         }
-        if !hidden {
+        if !hidden && region.is_none() {
             moved |= state.scroll_fade.place(&state.wrapper, visible, clip, apply);
         }
         let local = NSRect::new(
@@ -1441,7 +1493,7 @@ fn place(key: usize, apply: bool) -> bool {
             match state.caret_staged.get().filter(|_| focused) {
                 Some((rect, clip)) => {
                     let shown = intersection(rect, clip);
-                    let frame = crate::composition::hosted_rect(&state.gpui, host, rect);
+                    let frame = crate::composition::hosted_rect(&state.gpui, rect);
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
                     if host.frame() != frame {
                         moved = true;

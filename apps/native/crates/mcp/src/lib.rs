@@ -4,6 +4,7 @@
 //! already own a kernel actor use `ActorAutomation` (async, no second writer).
 //! Missing actor operations are explicit integration requirements; see mcp.md.
 pub mod app_host;
+pub mod aero_rpc;
 pub mod automation;
 pub mod catalog;
 pub mod commands;

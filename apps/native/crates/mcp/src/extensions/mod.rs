@@ -42,6 +42,10 @@ pub trait ExtensionHost: Send + Sync {
     fn check(&self, dir: &Path, manifest: &Value) -> std::result::Result<(), String>;
     /// Published: every open window reloads these extensions now.
     fn reload(&self, ids: &[String]);
+    /// Activation records for installed extensions in each settled owner.
+    fn health(&self) -> Result<Vec<Value>> {
+        Err(Error::unavailable("per-window extension activation records"))
+    }
     /// The authoring pack written into each agent workspace (`api/`).
     fn api_pack(&self) -> Vec<(String, String)>;
 }
@@ -249,7 +253,7 @@ fn folders(roots: &[PathBuf]) -> BTreeMap<String, PathBuf> {
     }
     out
 }
-fn hashes(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+pub(crate) fn hashes(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     folders(roots)
         .into_iter()
         .map(|(id, dir)| Ok((id, tree_hash(&dir)?)))
@@ -394,6 +398,60 @@ pub fn prepare(
             run: run.into(),
         })
     })
+}
+
+/// Reopens a stage kept on disk (Aero's session stage) with the baseline it
+/// was made from, after the same publication recovery as [`prepare`]. Drafts
+/// stay as they are; a newer installed version shows as a conflict at
+/// publication, as it does for a stage made earlier in the same run.
+pub fn resume(
+    host: &dyn ExtensionHost,
+    staging: &Path,
+    project: &str,
+    run: &str,
+    baseline: BTreeMap<String, String>,
+) -> Result<Stage> {
+    let roots = host.roots();
+    let live = roots
+        .last()
+        .ok_or_else(|| invalid("No user extension folder."))?;
+    let history = history_for(host, project);
+    locked(|| {
+        recover_locked(&history, live)?;
+        if !staging.is_dir() {
+            return Err(invalid("The saved extension stage is missing."));
+        }
+        Ok(Stage {
+            baseline,
+            roots: roots.clone(),
+            staging: staging.to_owned(),
+            history: history.clone(),
+            project: project.into(),
+            run: run.into(),
+        })
+    })
+}
+
+/// After [`restore`]: the restored extensions' staged copies and baseline
+/// follow their installed trees again; every other draft stays.
+pub fn refresh(stage: &mut Stage, ids: &[String]) -> Result<()> {
+    let installed = folders(&stage.roots);
+    for id in ids.iter().filter(|id| extension_id(id)) {
+        let staged = stage.staging.join(id);
+        if staged.exists() {
+            fs::remove_dir_all(&staged)?;
+        }
+        match installed.get(id) {
+            Some(dir) => {
+                copy_tree(dir, &staged)?;
+                stage.baseline.insert(id.clone(), tree_hash(&staged)?);
+            }
+            None => {
+                stage.baseline.remove(id);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The published record of one change set, kept with its `before` trees.

@@ -7,10 +7,12 @@ export const sections = [
   "project",
   "media",
   "shortcuts",
-  "transcription",
   "storage",
+  "providers",
   "agents",
+  "transcription",
   "extensions",
+  "privacy",
   "about",
 ] as const;
 export type Section = (typeof sections)[number];
@@ -47,7 +49,18 @@ export const sectionCopy: Record<
     description: "",
     symbol: "person.crop.circle",
   },
+  providers: {
+    title: "Providers",
+    description:
+      "Sign in once; every agent that can use a provider does. Keys stay in your Keychain.",
+    symbol: "key",
+  },
   agents: { title: "Agents", description: "", symbol: "sparkles" },
+  privacy: {
+    title: "Privacy",
+    description: "What Powermove shares to get better.",
+    symbol: "hand.raised",
+  },
   about: { title: "About", description: "", symbol: "info.circle" },
   transcription: {
     title: "Transcription",
@@ -69,7 +82,9 @@ export type Control =
   | "secure"
   | "colour"
   | "action"
-  | "status";
+  | "status"
+  /** Settings › Account's plan picker (Free): the plans, then Continue…. */
+  | "plans";
 export interface Row {
   id: string;
   section: Section;
@@ -92,6 +107,12 @@ export interface Row {
   profileKey?: string;
   // Native Bindings leases are supplied by the host, never invented by a panel.
   binding?: string;
+  /** This month's credits as a meter (Settings › Account). */
+  meter?: { used: number; included: number };
+  /** Credits spent each day of the period so far: [day, credits]. */
+  days?: [string, number][];
+  /** The period's length in days (the chart's slots). */
+  slots?: number;
 }
 const choices = (values: (string | [Json, string])[]): Option[] =>
   values.map((v) =>
@@ -152,6 +173,27 @@ export function generalRows(multiWindow: boolean): Row[] {
       value: false,
       profileKey: "autoDownloadCloudMedia",
       detail: "Download offloaded files when opening a project.",
+    },
+    {
+      id: "share-usage-data",
+      section: "privacy",
+      group: "Usage Data",
+      label: "Share Anonymous Usage and Crash Reports",
+      control: "switch",
+      value: true,
+      profileKey: "shareUsageData",
+      detail:
+        "Which commands and panels you use, crashes, hangs and speed. Never your projects, files, names or prompts.",
+    },
+    {
+      id: "what-we-collect",
+      section: "privacy",
+      group: "Usage Data",
+      label: "What We Collect",
+      control: "action",
+      action: "privacy.what-we-collect",
+      actionLabel: "Read More",
+      detail: "Every event and property Powermove sends, in one list.",
     },
     {
       id: "open-projects-in",
@@ -371,7 +413,7 @@ export function accountRows(): Row[] {
       ),
       section: "extensions",
       action: "account.bring-sign-ins",
-      actionLabel: "Bring Sign-Ins from the Original App…",
+      actionLabel: "Bring Sign-Ins…",
       disabled: false,
     },
     // No status until the subscription service publishes one: a default

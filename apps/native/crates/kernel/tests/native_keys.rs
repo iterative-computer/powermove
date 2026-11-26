@@ -1,5 +1,6 @@
 //! Profile keys only the native app writes (Settings › Shortcuts' keymap,
-//! Settings › General › Open Projects In): accepted as settings, kept in the
+//! Settings › General › Open Projects In, Settings › Privacy's sharing
+//! switch): accepted as settings, kept in the
 //! store, read back on the next launch.
 mod common;
 use pm_kernel::library::{NATIVE_KEYS, StoreKey, parse_key};
@@ -9,7 +10,8 @@ use pm_model::json::parse;
 
 #[test]
 fn the_keymap_is_a_setting_that_is_stored_and_read_back() {
-    assert_eq!(NATIVE_KEYS, ["keymap", "openProjectsIn"]);
+    assert_eq!(NATIVE_KEYS, ["keymap", "openProjectsIn", "shareUsageData"]);
+    assert!(is_setting("shareUsageData"));
     assert!(is_setting("keymap"));
     assert_eq!(parse_key("keymap"), Some(StoreKey::Static("keymap".into())));
     let keymap = parse(

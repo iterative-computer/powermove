@@ -59,7 +59,7 @@ fn n004_leads_with_the_count_shows_skips_in_full_and_lists_the_rest_by_name() {
     let model = Model::offer(scan(), Place::Startup).named(names());
     let view = model.view();
     assert_eq!(view.surface, "N004");
-    assert_eq!(view.title, "Bring In Your Extensions");
+    assert_eq!(view.title, "Bring in your extensions");
     assert!(
         view.line
             .starts_with("The original app has 45 extensions that aren’t in Powermove yet."),
@@ -80,10 +80,10 @@ fn n004_leads_with_the_count_shows_skips_in_full_and_lists_the_rest_by_name() {
     );
     assert!(items[0].reason.starts_with("Its folder is empty"));
     assert_eq!(items[0].tone, Tone::Note);
-    assert_eq!(model.items_title(), Some("Not Brought In"));
+    assert_eq!(model.items_title(), Some("Not brought in"));
     // The rest by display name only, sorted as read; no reason repeated.
     let (title, listed) = model.listed().unwrap();
-    assert_eq!(title, "To Bring In");
+    assert_eq!(title, "To bring in");
     assert_eq!(listed.len(), 45);
     assert_eq!(listed[0], "Extension 00");
     assert!(listed.iter().all(|n| !n.contains("New in")));
@@ -177,7 +177,7 @@ fn n006_leads_with_the_outcome_exceptions_first_and_successes_by_name() {
     }));
     let view = model.view();
     assert_eq!(view.surface, "N006");
-    assert_eq!(view.title, "Your Extensions Are In");
+    assert_eq!(view.title, "Your extensions are in");
     assert_eq!(
         view.line,
         "One couldn’t load. The reason is below. Your original app stays unchanged."
@@ -192,7 +192,7 @@ fn n006_leads_with_the_outcome_exceptions_first_and_successes_by_name() {
         ]
     );
     assert_eq!(ids(&model), ["open_native"]);
-    assert_eq!(model.items_title(), Some("Needs a Look"));
+    assert_eq!(model.items_title(), Some("Needs a look"));
     let order: Vec<_> = model.items().into_iter().map(|i| (i.id, i.tone)).collect();
     assert_eq!(
         order,
@@ -203,7 +203,7 @@ fn n006_leads_with_the_outcome_exceptions_first_and_successes_by_name() {
         ]
     );
     let (title, listed) = model.listed().unwrap();
-    assert_eq!(title, "Brought In");
+    assert_eq!(title, "Brought in");
     assert_eq!(listed.len(), 43);
     assert!(!listed.iter().any(|n| n.contains("It loads")));
     // From Settings the summary ends where it started.
@@ -219,7 +219,7 @@ fn n006_a_stopped_transfer_says_nothing_changed_and_still_opens_the_library() {
     ));
     let view = model.view();
     assert_eq!(model.gate, Gate::Failed);
-    assert_eq!(view.title, "Your Extensions Couldn’t Be Brought In");
+    assert_eq!(view.title, "Your extensions couldn’t be brought in");
     assert!(view.line.starts_with("Nothing in your library changed."));
     assert_eq!(ids(&model), ["try_again", "open_native"]);
     assert_eq!(view.default, Some("open_native"));
@@ -254,7 +254,7 @@ fn nothing_new_reads_as_such_and_singular_counts_read_right() {
         already_present: 46,
         ..TransferResult::default()
     }));
-    assert_eq!(model.view().title, "Nothing New to Bring In");
+    assert_eq!(model.view().title, "Nothing new to bring in");
     assert_eq!(
         model.view().line,
         "They were already in Powermove. Your original app stays unchanged."

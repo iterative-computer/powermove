@@ -1,0 +1,403 @@
+const std = @import("std");
+const display_width = @import("../../core/shared/display_width.zig");
+const assistant_wrap = @import("assistant_wrap.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
+
+pub const WalkResult = struct {
+    end_row: u32,
+    end_col: u16,
+};
+
+/// Walks visual rows without capping the result to the viewport. Under
+/// DECAWM-OFF, glyphs wrap only when they exceed the right margin.
+pub fn walkText(start_row: u32, start_col: u16, bytes: []const u8, cols: u16) WalkResult {
+    if (bytes.len == 0 or cols == 0) return .{ .end_row = start_row, .end_col = start_col };
+
+    var row: u32 = start_row;
+    var col: u16 = start_col;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const ch = bytes[i];
+
+        // A run of printable ASCII is one cell per byte: advance it a row at
+        // a time with the wrap rule below.
+        if (ch >= 0x20 and ch <= 0x7e) {
+            const end = asciiRunEnd(bytes, i);
+            if (end > i) {
+                advanceCells(&row, &col, end - i, cols);
+                i = end;
+                continue;
+            }
+        }
+
+        if (ch == 0x1b) {
+            i = display_width.ansiSequenceEnd(bytes, i);
+            continue;
+        }
+
+        switch (ch) {
+            '\r' => {
+                col = 1;
+                i += 1;
+                continue;
+            },
+            '\n' => {
+                col = 1;
+                row += 1;
+                i += 1;
+                continue;
+            },
+            else => {},
+        }
+
+        if (ch == '\t') {
+            col = display_width.nextTabStopColumn(col, cols);
+            i += 1;
+            continue;
+        }
+
+        if (ch < 32) {
+            i += 1;
+            continue;
+        }
+
+        const unit = display_width.displayUnitAt(bytes, i);
+        const w_usize = unit.cell_width;
+        if (w_usize == 0) {
+            i += unit.byte_len;
+            continue;
+        }
+
+        const w: u16 = @intCast(w_usize);
+        if (display_width.shouldWrapAt(col, w, cols)) {
+            col = 1;
+            row += 1;
+        }
+        col += w;
+        i += unit.byte_len;
+    }
+    return .{ .end_row = row, .end_col = col };
+}
+
+/// The end of the run of printable ASCII that starts at `start`. A rune after
+/// the run may join its last byte into one cluster, so that byte is left out
+/// and goes the slow way.
+fn asciiRunEnd(bytes: []const u8, start: usize) usize {
+    var end = start + 1;
+    while (end < bytes.len and bytes[end] >= 0x20 and bytes[end] <= 0x7e) end += 1;
+    if (end < bytes.len and bytes[end] >= 0x80) end -= 1;
+    return end;
+}
+
+/// Advances the cursor over `cells` one-cell glyphs, a row at a time, with
+/// `walkText`'s wrap rule.
+fn advanceCells(row: *u32, col: *u16, cells: usize, cols: u16) void {
+    var remaining = cells;
+    while (remaining > 0) {
+        if (display_width.shouldWrapAt(col.*, 1, cols)) {
+            col.* = 1;
+            row.* += 1;
+        }
+        const room: usize = @as(usize, cols) + 1 - col.*;
+        const take = @min(remaining, room);
+        col.* += @intCast(take);
+        remaining -= take;
+    }
+}
+
+// Transcript rows can carry SGR + OSC-8 + other escape sequences (image
+// badges, the user-message bar). ANSI-aware walking skips escape bytes so
+// terminal position tracking stays correct whether a row is plain text or styled.
+pub fn nextCursorColForLine(line: []const u8, cols: u16) u16 {
+    if (cols == 0) return 1;
+    return @min(cols, walkText(1, 1, line, cols).end_col);
+}
+
+/// Returns the byte offset of visual row `skip_rows + 1` using the same
+/// ANSI-aware wrapping rules as `visualRowsForLine`.
+pub fn skipVisualRowsInLine(text: []const u8, cols: u16, skip_rows: u16) usize {
+    if (skip_rows == 0 or cols == 0 or text.len == 0) return 0;
+
+    var col: u16 = 1;
+    var rows_skipped: u16 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == 0x1b) {
+            i = display_width.ansiSequenceEnd(text, i);
+            continue;
+        }
+        if (ch == '\r') {
+            col = 1;
+            i += 1;
+            continue;
+        }
+        if (ch == '\n') {
+            col = 1;
+            rows_skipped += 1;
+            i += 1;
+            if (rows_skipped >= skip_rows) return i;
+            continue;
+        }
+        if (ch == '\t') {
+            col = display_width.nextTabStopColumn(col, cols);
+            i += 1;
+            continue;
+        }
+        if (ch < 32) {
+            i += 1;
+            continue;
+        }
+
+        const unit = display_width.displayUnitAt(text, i);
+        const w_usize = unit.cell_width;
+        if (w_usize == 0) {
+            i += unit.byte_len;
+            continue;
+        }
+        const w: u16 = @intCast(w_usize);
+
+        if (display_width.shouldWrapAt(col, w, cols)) {
+            col = 1;
+            rows_skipped += 1;
+            if (rows_skipped >= skip_rows) return i;
+        }
+        col += w;
+        i += unit.byte_len;
+    }
+    return text.len;
+}
+
+pub fn visualRowsForLine(text: []const u8, cols: u16) u16 {
+    if (cols == 0) return 1;
+    if (text.len == 0) return 1;
+
+    var col: u16 = 1;
+    var rows: u16 = 1;
+    var rows_with_content: u16 = 0;
+    var wrote_on_current_row = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == 0x1b) {
+            i = display_width.ansiSequenceEnd(text, i);
+            continue;
+        }
+        switch (ch) {
+            '\r' => {
+                col = 1;
+                i += 1;
+                continue;
+            },
+            '\n' => {
+                if (wrote_on_current_row) rows_with_content = rows;
+                col = 1;
+                rows += 1;
+                wrote_on_current_row = false;
+                i += 1;
+                continue;
+            },
+            else => {},
+        }
+        if (ch == '\t') {
+            col = display_width.nextTabStopColumn(col, cols);
+            i += 1;
+            continue;
+        }
+        if (ch < 32) {
+            i += 1;
+            continue;
+        }
+
+        const unit = display_width.displayUnitAt(text, i);
+        i += unit.byte_len;
+        const w_usize = unit.cell_width;
+        if (w_usize == 0) continue;
+        const w: u16 = @intCast(w_usize);
+
+        if (display_width.shouldWrapAt(col, w, cols)) {
+            col = 1;
+            rows += 1;
+            wrote_on_current_row = false;
+        }
+        col += w;
+        wrote_on_current_row = true;
+    }
+
+    if (wrote_on_current_row) rows_with_content = rows;
+    return if (rows_with_content == 0) 1 else rows_with_content;
+}
+
+test "skipVisualRowsInLine skips hard newlines" {
+    const offset = skipVisualRowsInLine("a\nb\nc\nd", 80, 2);
+    try std.testing.expectEqual(@as(usize, 4), offset);
+}
+
+test "skipVisualRowsInLine skips soft-wrap boundaries" {
+    const offset = skipVisualRowsInLine("abcdef", 3, 1);
+    try std.testing.expectEqual(@as(usize, 3), offset);
+}
+
+test "skipVisualRowsInLine with zero skip returns zero" {
+    const offset = skipVisualRowsInLine("anything", 40, 0);
+    try std.testing.expectEqual(@as(usize, 0), offset);
+}
+
+test "skipVisualRowsInLine beyond actual rows returns text length" {
+    const offset = skipVisualRowsInLine("abc", 10, 5);
+    try std.testing.expectEqual(@as(usize, 3), offset);
+}
+
+test "positional tab changes following wrap geometry" {
+    const text = "1234567\tXYZ";
+    const walked = walkText(1, 1, text, 10);
+    try std.testing.expectEqual(@as(u32, 2), walked.end_row);
+    try std.testing.expectEqual(@as(u16, 2), walked.end_col);
+    try std.testing.expectEqual(@as(u16, 2), visualRowsForLine(text, 10));
+    try std.testing.expectEqual(@as(usize, 10), skipVisualRowsInLine(text, 10, 1));
+}
+
+test "nextCursorColForLine follows the final wrapped row" {
+    const record = text_utils.repeat("a", 249);
+    try std.testing.expectEqual(@as(u16, 10), nextCursorColForLine(record, 120));
+    try std.testing.expectEqual(@as(u16, 120), nextCursorColForLine(record[0..120], 120));
+}
+
+test "walkText, wrapAssistantText, and visualRowsForLine agree" {
+    const Case = struct { s: []const u8, min_cols: u16 };
+    const corpus = [_]Case{
+        .{ .s = "", .min_cols = 1 },
+        .{ .s = "a", .min_cols = 1 },
+        .{ .s = "abc", .min_cols = 1 },
+        .{ .s = "abc\ndef", .min_cols = 1 },
+        .{ .s = "漢字", .min_cols = 2 },
+        .{ .s = "a漢", .min_cols = 2 },
+        .{ .s = "a\u{0301}b", .min_cols = 1 },
+        .{ .s = "a\u{2600}\u{FE0E}b", .min_cols = 1 },
+        .{ .s = "a\u{1F44D}\u{1F3FD}b", .min_cols = 2 },
+        .{ .s = "a\u{1F1FA}\u{1F1F8}b", .min_cols = 2 },
+        .{ .s = "a#\u{FE0F}\u{20E3}b", .min_cols = 2 },
+        .{ .s = "a\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}b", .min_cols = 2 },
+        .{ .s = "a\u{1F469}\u{200D}\u{1F4BB}b", .min_cols = 2 },
+        .{ .s = "\r", .min_cols = 1 },
+        .{ .s = "a\rb", .min_cols = 1 },
+        .{ .s = "\x1b[1;31mabc\x1b[0m", .min_cols = 1 },
+        .{ .s = "\x1b]8;;http://x\x07link\x1b]8;;\x07", .min_cols = 1 },
+        .{ .s = "\t", .min_cols = 1 },
+    };
+    const widths = [_]u16{ 1, 2, 4, 8, 10, 40, 80 };
+    for (corpus) |case| {
+        for (widths) |c| {
+            if (c < case.min_cols) continue;
+            const wrapped = try assistant_wrap.wrapAssistantText(std.testing.allocator, case.s, c);
+            defer std.testing.allocator.free(wrapped);
+            try std.testing.expectEqual(
+                walkText(1, 1, case.s, c).end_row,
+                walkText(1, 1, wrapped, c).end_row,
+            );
+            if (std.mem.findScalar(u8, case.s, '\n') == null) {
+                try std.testing.expectEqual(
+                    @as(u32, visualRowsForLine(case.s, c)),
+                    walkText(1, 1, case.s, c).end_row,
+                );
+            }
+
+            const total = visualRowsForLine(case.s, c);
+            try std.testing.expectEqual(case.s.len, skipVisualRowsInLine(case.s, c, total));
+
+            var prev: usize = 0;
+            var skip: u16 = 1;
+            while (skip <= total) : (skip += 1) {
+                const offset = skipVisualRowsInLine(case.s, c, skip);
+                try std.testing.expect(offset >= prev);
+                prev = offset;
+            }
+        }
+    }
+}
+
+test "walkText cols=0 is a noop on row/col" {
+    const r = walkText(5, 3, "abc\ndef", 0);
+    try std.testing.expectEqual(@as(u32, 5), r.end_row);
+    try std.testing.expectEqual(@as(u16, 3), r.end_col);
+}
+
+/// The walk before ASCII runs were batched, kept as the oracle for `walkText`.
+fn walkTextByteWise(start_row: u32, start_col: u16, bytes: []const u8, cols: u16) WalkResult {
+    if (bytes.len == 0 or cols == 0) return .{ .end_row = start_row, .end_col = start_col };
+    var row: u32 = start_row;
+    var col: u16 = start_col;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const ch = bytes[i];
+        if (ch == 0x1b) {
+            i = display_width.ansiSequenceEnd(bytes, i);
+            continue;
+        }
+        switch (ch) {
+            '\r' => {
+                col = 1;
+                i += 1;
+                continue;
+            },
+            '\n' => {
+                col = 1;
+                row += 1;
+                i += 1;
+                continue;
+            },
+            else => {},
+        }
+        if (ch == '\t') {
+            col = display_width.nextTabStopColumn(col, cols);
+            i += 1;
+            continue;
+        }
+        if (ch < 32) {
+            i += 1;
+            continue;
+        }
+        const unit = display_width.displayUnitAt(bytes, i);
+        if (unit.cell_width == 0) {
+            i += unit.byte_len;
+            continue;
+        }
+        const w: u16 = @intCast(unit.cell_width);
+        if (display_width.shouldWrapAt(col, w, cols)) {
+            col = 1;
+            row += 1;
+        }
+        col += w;
+        i += unit.byte_len;
+    }
+    return .{ .end_row = row, .end_col = col };
+}
+
+test "walkText batches ASCII runs exactly like the byte-wise walk" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7c1d);
+    const random = prng.random();
+    // ASCII runs, controls, complete and unterminated escapes, and runes
+    // that join a preceding ASCII byte into one cluster.
+    const pieces = [_][]const u8{
+        "a",                                "abc ",                      "0123456789",     " ",                         "\t",
+        "\n",                               "\r",                        "\r\n",           "\x1b[1m",                   "\x1b[38;5;81m",
+        "\x1b[0m",                          "\x1b]8;;https://e.x\x1b\\", "\x1b]8;;\x07",   "\x1b[",                     "\x1b]0;title",
+        "\x1b",                             "\xc3\xa9",                  "e\xcc\x81",      "\xe7\x95\x8c",              "\xf0\x9f\x91\x8d",
+        "\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd", "\xe2\x9d\xa4\xef\xb8\x8f",  "a\xe2\x80\x8db", "\x7f",                      "\x01",
+        "\xff",                             "\x80",                      "~",
+        // An ASCII base that a following rune turns into a wide cluster.
+                     "1\xef\xb8\x8f\xe2\x83\xa3", "#\xef\xb8\x8f",
+        "*\xe2\x83\xa3",                    "9\xef\xb8\x8f",
+    };
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(alloc);
+    for (0..4000) |_| {
+        text.clearRetainingCapacity();
+        for (0..random.uintLessThan(usize, 40)) |_| try text.appendSlice(alloc, pieces[random.uintLessThan(usize, pieces.len)]);
+        const cols: u16 = 1 + random.uintLessThan(u16, 30);
+        const start_col: u16 = 1 + random.uintLessThan(u16, cols + 1);
+        const start_row = random.uintLessThan(u32, 5);
+        try std.testing.expectEqual(walkTextByteWise(start_row, start_col, text.items, cols), walkText(start_row, start_col, text.items, cols));
+    }
+}

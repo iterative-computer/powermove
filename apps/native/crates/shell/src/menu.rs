@@ -625,7 +625,13 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::role("Bring All to Front", "arrangeInFront:", ""),
             ],
         ),
-        ("Help", vec![Item::command("Powermove Help", "help", "")]),
+        (
+            "Help",
+            vec![
+                Item::command("Powermove Help", "help", ""),
+                Item::command("Replay Intro", "welcomeIntro", ""),
+            ],
+        ),
     ]
 }
 /// Commands with no row in these menus (the viewer's part of the View menu

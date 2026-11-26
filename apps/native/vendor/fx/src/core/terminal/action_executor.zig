@@ -1,0 +1,127 @@
+const std = @import("std");
+const client = @import("client.zig");
+const contracts = @import("contracts.zig");
+const operation = @import("operation.zig");
+const io_mod = @import("../shared/io.zig");
+const managed_execution = @import("../execution/managed_execution.zig");
+
+const Allocator = std.mem.Allocator;
+
+pub const Context = struct {
+    alloc: Allocator,
+    lifecycle_allocator: Allocator,
+    runtime: *client.Runtime,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    /// When set, a request still pending `yield_grace_ms` after it starts is
+    /// cancelled and ends `.cancelled`, as `cancel_flag` would end it. Only
+    /// read-only waits pass it: cancelling one leaves the session running.
+    yield_flag: ?*const std.atomic.Value(bool) = null,
+    yield_grace_ms: i64 = 0,
+};
+
+pub fn execute(
+    ctx: Context,
+    request: contracts.ActionRequest,
+) !contracts.OwnedResult {
+    operation.validate(request) catch {
+        return contracts.OwnedResult.init(ctx.alloc, .{ .failure = .{
+            .action = request.action(),
+            .code = .invalid_request,
+            .session_id = operation.authoritySessionId(request),
+        } });
+    };
+    const correlation_id = ctx.runtime.nextCorrelationId();
+    ctx.runtime.admit(
+        ctx.lifecycle_allocator,
+        correlation_id,
+        request,
+    ) catch |err| {
+        return contracts.OwnedResult.init(ctx.alloc, .{ .failure = .{
+            .action = request.action(),
+            .code = mapAdmissionError(err),
+            .session_id = operation.authoritySessionId(request),
+            .retryable = err == error.QueueFull,
+        } });
+    };
+    var cancellation_sent = false;
+    const started_ms = io_mod.milliTimestamp();
+    while (true) {
+        if (ctx.runtime.takeCompletionFor(correlation_id)) |completion_value| {
+            var completion = completion_value;
+            defer completion.deinit();
+            if (completion.response) |*response| {
+                return contracts.OwnedResult.init(ctx.alloc, response.value.view());
+            }
+            return failure(
+                ctx,
+                request,
+                switch (completion.kind) {
+                    .cancelled => .cancelled,
+                    .unavailable => .unsupported_host,
+                    .disconnected => .session_lost,
+                    .response => .invalid_request,
+                },
+                completion.kind == .disconnected and
+                    disconnectedActionIsRetryable(request.action()),
+            );
+        }
+        if (!cancellation_sent) {
+            if (ctx.cancel_flag) |cancel_flag| {
+                if (cancel_flag.load(.acquire)) {
+                    _ = ctx.runtime.cancel(correlation_id);
+                    cancellation_sent = true;
+                }
+            }
+        }
+        if (!cancellation_sent and managed_execution.steerYieldDue(
+            ctx.yield_flag,
+            started_ms,
+            io_mod.milliTimestamp(),
+            ctx.yield_grace_ms,
+        )) {
+            _ = ctx.runtime.cancel(correlation_id);
+            cancellation_sent = true;
+        }
+        io_mod.sleep(2 * std.time.ns_per_ms);
+    }
+}
+
+fn disconnectedActionIsRetryable(action: contracts.Action) bool {
+    return switch (action) {
+        .read, .screen, .wait, .inspect, .list => true,
+        .start, .write, .resize, .signal, .close => false,
+    };
+}
+
+fn failure(
+    ctx: Context,
+    request: contracts.ActionRequest,
+    code: contracts.StructuredErrorCode,
+    retryable: bool,
+) !contracts.OwnedResult {
+    return contracts.OwnedResult.init(ctx.alloc, .{ .failure = .{
+        .action = request.action(),
+        .code = code,
+        .session_id = operation.authoritySessionId(request),
+        .retryable = retryable,
+    } });
+}
+
+fn mapAdmissionError(err: client.AdmissionError) contracts.StructuredErrorCode {
+    return switch (err) {
+        error.QueueFull => .capacity_exceeded,
+        error.TerminalUnavailable => .unsupported_host,
+        // The owning fx process is exiting and has ended its terminals.
+        error.RuntimeStopping => .cancelled,
+        else => .invalid_request,
+    };
+}
+
+test "disconnect retryability excludes actions that may already have effects" {
+    try std.testing.expect(!disconnectedActionIsRetryable(.start));
+    try std.testing.expect(!disconnectedActionIsRetryable(.write));
+    try std.testing.expect(!disconnectedActionIsRetryable(.signal));
+    try std.testing.expect(!disconnectedActionIsRetryable(.close));
+    try std.testing.expect(disconnectedActionIsRetryable(.list));
+    try std.testing.expect(disconnectedActionIsRetryable(.wait));
+}

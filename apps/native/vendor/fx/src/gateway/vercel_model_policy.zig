@@ -1,0 +1,212 @@
+const std = @import("std");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
+const ascii_case = @import("../core/shared/ascii_case.zig");
+
+pub fn capabilitiesForModel(model: []const u8) model_capabilities.Capabilities {
+    var capabilities = model_capabilities.capabilitiesForModel(model);
+    if (std.mem.startsWith(u8, model, "xai/")) {
+        capabilities.parallel_tool_calls = true;
+    }
+    capabilities.context_window = contextWindowSize(model);
+    return capabilities;
+}
+
+/// The cache markers fx sends for `model`. AI Gateway's automatic caching
+/// covers most families; fx adds markers only where the provider honors them:
+/// Anthropic models, OpenAI GPT-5.6 and later through explicit breakpoints,
+/// and Amazon Nova through Bedrock cache points, which the Gateway never adds.
+pub fn cacheMarkers(model: []const u8) model_capabilities.CacheMarkers {
+    if (std.mem.startsWith(u8, model, "anthropic/")) return .anthropic;
+    if (takesPromptCacheOptions(model)) return .openai;
+    if (takesBedrockCachePoints(model)) return .bedrock;
+    return .none;
+}
+
+/// Whether `model` is an Amazon Nova chat model that reads its prompt cache
+/// from a Bedrock cache point. Without one, Nova reports no cache reads.
+/// A model joins the list once the Gateway prices its cache reads.
+fn takesBedrockCachePoints(model: []const u8) bool {
+    for ([_][]const u8{ "amazon/nova-micro", "amazon/nova-lite", "amazon/nova-pro", "amazon/nova-2-lite" }) |candidate| {
+        if (std.mem.eql(u8, model, candidate)) return true;
+    }
+    return false;
+}
+
+/// Whether `model` takes only one system message, at the start. Qwen's chat
+/// template rejects a second one once a tool call is in the history ("System
+/// message must be at the beginning").
+pub fn singleSystemMessage(model: []const u8) bool {
+    return std.mem.startsWith(u8, model, "alibaba/");
+}
+
+pub const ProviderCompaction = model_capabilities.ProviderCompaction;
+
+/// The provider whose own on-demand compaction writes `model`'s compaction
+/// block. Its block keeps the reasoning of the turns sent after it, which
+/// fx's own summary cannot: the provider binds that reasoning to everything
+/// sent before it. Claude 4.6 and later answer Anthropic's on-demand
+/// compaction (Claude 4.5 rejects it), and GPT-6 and later answer OpenAI's.
+pub fn providerCompaction(model: []const u8) ?ProviderCompaction {
+    if (claudeVersion(model)) |version| {
+        if (version.atLeast(first_claude_compaction)) return .anthropic;
+    }
+    if (gptVersion(model)) |version| {
+        if (version.atLeast(first_gpt_compaction)) return .openai;
+    }
+    return null;
+}
+
+const first_claude_compaction: ModelVersion = .{ .major = 4, .minor = 6 };
+const first_gpt_compaction: ModelVersion = .{ .major = 6, .minor = 0 };
+
+const ModelVersion = struct {
+    major: u32,
+    minor: u32,
+
+    fn atLeast(self: ModelVersion, first: ModelVersion) bool {
+        return self.major > first.major or (self.major == first.major and self.minor >= first.minor);
+    }
+};
+
+/// "anthropic/claude-opus-4.6" reads 4.6: the version follows the family name.
+fn claudeVersion(model: []const u8) ?ModelVersion {
+    const prefix = "anthropic/claude-";
+    if (!std.mem.startsWith(u8, model, prefix)) return null;
+    const rest = model[prefix.len..];
+    const dash = std.mem.findScalar(u8, rest, '-') orelse return null;
+    return leadingVersion(rest[dash + 1 ..]);
+}
+
+/// "openai/gpt-6.1-sol" reads 6.1.
+fn gptVersion(model: []const u8) ?ModelVersion {
+    const prefix = "openai/gpt-";
+    if (!std.mem.startsWith(u8, model, prefix)) return null;
+    return leadingVersion(model[prefix.len..]);
+}
+
+/// The `major[.minor]` that `rest` starts with; no minor part reads as .0.
+fn leadingVersion(rest: []const u8) ?ModelVersion {
+    var end: usize = 0;
+    while (end < rest.len and std.ascii.isDigit(rest[end])) end += 1;
+    const major = std.fmt.parseUnsigned(u32, rest[0..end], 10) catch return null;
+    if (end >= rest.len or rest[end] != '.') return .{ .major = major, .minor = 0 };
+    var minor_end = end + 1;
+    while (minor_end < rest.len and std.ascii.isDigit(rest[minor_end])) minor_end += 1;
+    const minor = std.fmt.parseUnsigned(u32, rest[end + 1 .. minor_end], 10) catch return null;
+    return .{ .major = major, .minor = minor };
+}
+
+test "Claude 4.6 and later and GPT-6 and later compact through their provider" {
+    for ([_][]const u8{ "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.8-fast", "anthropic/claude-haiku-5.5", "anthropic/claude-fable-5", "anthropic/claude-fable-5.2", "anthropic/claude-opus-5.5-batch" }) |model| {
+        try std.testing.expectEqual(@as(?ProviderCompaction, .anthropic), providerCompaction(model));
+    }
+    for ([_][]const u8{ "openai/gpt-6-sol", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra-fast", "openai/gpt-7" }) |model| {
+        try std.testing.expectEqual(@as(?ProviderCompaction, .openai), providerCompaction(model));
+    }
+    for ([_][]const u8{ "anthropic/claude-haiku-4.5", "anthropic/claude-opus-4.5", "anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet", "anthropic/claude-", "openai/gpt-5.6-sol", "openai/gpt-5", "openai/gpt-oss-120b", "openai/gpt-", "zai/glm-5.3", "google/gemini-4-argon", "fixture/compaction" }) |model| {
+        try std.testing.expectEqual(@as(?ProviderCompaction, null), providerCompaction(model));
+    }
+}
+
+/// Whether `model` takes OpenAI's `promptCacheOptions`: GPT-5.6 and later.
+pub fn takesPromptCacheOptions(model: []const u8) bool {
+    const prefix = "openai/gpt-";
+    if (!std.mem.startsWith(u8, model, prefix)) return false;
+    const version = model[prefix.len..];
+    var end: usize = 0;
+    while (end < version.len and std.ascii.isDigit(version[end])) end += 1;
+    const major = std.fmt.parseUnsigned(u32, version[0..end], 10) catch return false;
+    if (major != 5) return major > 5;
+    if (end >= version.len or version[end] != '.') return false;
+    var minor_end = end + 1;
+    while (minor_end < version.len and std.ascii.isDigit(version[minor_end])) minor_end += 1;
+    const minor = std.fmt.parseUnsigned(u32, version[end + 1 .. minor_end], 10) catch return false;
+    return minor >= 6;
+}
+
+test "only GPT-5.6 and later take OpenAI prompt cache options" {
+    for ([_][]const u8{ "openai/gpt-5.6-luna", "openai/gpt-5.6-sol", "openai/gpt-6-sol", "openai/gpt-6.1-sol", "openai/gpt-5.10" }) |model| {
+        try std.testing.expect(takesPromptCacheOptions(model));
+    }
+    for ([_][]const u8{ "openai/gpt-5", "openai/gpt-5.5-pro", "openai/gpt-4o", "openai/gpt-oss-120b", "anthropic/claude-sonnet-5.5", "openai/gpt-", "openai/gpt-5." }) |model| {
+        try std.testing.expect(!takesPromptCacheOptions(model));
+    }
+}
+
+test "only Qwen models take their instructions as one system message" {
+    try std.testing.expect(singleSystemMessage("alibaba/qwen3.8-max"));
+    try std.testing.expect(singleSystemMessage("alibaba/qwen3.7-plus"));
+    for ([_][]const u8{ "anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol", "spacexai/grok-4.7", "zai/glm-5.3", "moonshotai/kimi-k3", "google/gemini-4-argon", "deepseek/deepseek-v4.1-flash", "minimax/minimax-m3" }) |model| {
+        try std.testing.expect(!singleSystemMessage(model));
+    }
+}
+
+test "cache markers follow the model family" {
+    try std.testing.expectEqual(.anthropic, cacheMarkers("anthropic/claude-sonnet-5.5"));
+    try std.testing.expectEqual(.openai, cacheMarkers("openai/gpt-6.1-sol"));
+    try std.testing.expectEqual(.openai, cacheMarkers("openai/gpt-5.6-luna"));
+    for ([_][]const u8{ "amazon/nova-micro", "amazon/nova-lite", "amazon/nova-pro", "amazon/nova-2-lite" }) |model| {
+        try std.testing.expectEqual(.bedrock, cacheMarkers(model));
+    }
+    for ([_][]const u8{ "openai/gpt-5", "openai/gpt-5.5-pro", "bedrock/anthropic.claude", "anthropic", "google/gemini-3-flash", "amazon/titan-embed-text-v2", "amazon/nova", "nova-pro" }) |model| {
+        try std.testing.expectEqual(.none, cacheMarkers(model));
+    }
+}
+
+pub fn contextWindowSize(model: []const u8) ?u32 {
+    if (std.mem.startsWith(u8, model, "anthropic/")) {
+        const million_context_models = [_][]const u8{
+            "anthropic/claude-fable-5",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-opus-4-6",
+            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4-7",
+            "anthropic/claude-opus-4.8",
+            "anthropic/claude-opus-4-8",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-sonnet-4-6",
+        };
+        for (million_context_models) |candidate| {
+            if (std.mem.eql(u8, model, candidate)) return 1_000_000;
+        }
+        return 200_000;
+    }
+    if (std.mem.startsWith(u8, model, "openai/")) {
+        if (ascii_case.hasMajorVersionAtLeast(model, "gpt-", 5)) return 256_000;
+        if (containsIgnoreCase(model, "o3") or
+            containsIgnoreCase(model, "o4") or
+            containsIgnoreCase(model, "o1")) return 200_000;
+        return 128_000;
+    }
+    if (std.mem.startsWith(u8, model, "xai/")) return 131_072;
+    if (std.mem.startsWith(u8, model, "google/")) return 1_000_000;
+    return null;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    const last_start = haystack.len - needle.len;
+    var index: usize = 0;
+    while (index <= last_start) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+test "Vercel fallback policy owns vendor model heuristics" {
+    try std.testing.expect(!capabilitiesForModel("moonshotai/kimi-k3").intrinsic_fast);
+    try std.testing.expect(capabilitiesForModel("moonshotai/kimi-k3-fast").intrinsic_fast);
+    try std.testing.expect(capabilitiesForModel("anthropic/claude-opus-4.8-fast").intrinsic_fast);
+    try std.testing.expect(!capabilitiesForModel("moonshotai/kimi-k3-fast").supports_fast_mode);
+    try std.testing.expectEqual(@as(?u32, 1_000_000), contextWindowSize("anthropic/claude-opus-4.8"));
+    try std.testing.expectEqual(@as(?bool, true), capabilitiesForModel("xai/grok-4").parallel_tool_calls);
+}
+
+test "fallback context window covers every GPT major from 5" {
+    for ([_][]const u8{ "openai/gpt-5.4", "openai/gpt-6-sol", "openai/gpt-6.1-sol" }) |model| {
+        try std.testing.expectEqual(@as(?u32, 256_000), contextWindowSize(model));
+    }
+    try std.testing.expectEqual(@as(?u32, 128_000), contextWindowSize("openai/gpt-4o"));
+}

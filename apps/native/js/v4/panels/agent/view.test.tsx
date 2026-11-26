@@ -132,7 +132,7 @@ test("the user message keeps a fill and radius without a border while working an
   root.dispose();
 });
 
-test("focus order follows the thread bar, conversation and composer as the original panel's", async () => {
+test("focus order follows the thread bar, conversation and the composer's one row, left to right", async () => {
   const { root, commits } = mount();
   const p = states.selected();
   p.snapshot.sendable = true;
@@ -146,24 +146,23 @@ test("focus order follows the thread bar, conversation and composer as the origi
     .filter(Boolean);
   expect(ids).toEqual([
     "agent-threads",
+    "agent-new",
     "agent-presentation",
     "agent-conversation",
     "quote-source-history:message-0",
     "quote-source-live:text-1",
     "agent-composer-text",
-    "agent-attach",
-    "agent-pick-region",
-    "agent-send",
+    "agent-add",
     "agent-model",
     "agent-effort",
-    "agent-access",
+    "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
     "Agent conversation",
   );
   root.dispose();
 });
-test("only the model gives up space in the docked composer", async () => {
+test("the model's name gives way in the docked composer's one row; effort keeps its width", async () => {
   const { root } = mount();
   const p = states.selected();
   p.native.presentation = "docked";
@@ -171,20 +170,53 @@ test("only the model gives up space in the docked composer", async () => {
   p.snapshot.settings.effort = "high";
   await root.render(<AgentView publication={p} send={() => {}} />);
   const nodes = root.inspect().nodes;
+  const label = (picker: ReturnType<typeof byId>) =>
+    nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
   const model = byId(root, "agent-model");
   expect(model.props.style).toMatchObject({ flexShrink: 1, minWidth: { token: "metrics.hit" } });
-  for (const id of ["agent-effort", "agent-access"]) {
-    const picker = byId(root, id);
-    expect(picker.props.style).toMatchObject({ flexShrink: 0 });
-    const label = nodes.find((n) => picker.children.includes(n.id) && n.type === "text");
-    expect(label?.props.style).toMatchObject({ flexShrink: 0 });
-    expect(label?.props.metadata).toBeUndefined();
+  expect(label(model)?.props.style).toMatchObject({ flexShrink: 1, textOverflow: "ellipsis" });
+  const effort = byId(root, "agent-effort");
+  expect(effort.props.style).toMatchObject({ flexShrink: 0 });
+  expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
+  expect(label(effort)?.props.metadata).toBeUndefined();
+  // Every control sits in the composer's one row, on its one surface: "+",
+  // then the model chooser (the model and its effort, one control).
+  const options = byId(root, "agent-options");
+  for (const id of ["agent-add", "agent-chooser"])
+    expect(options.children).toContain(byId(root, id).id);
+  for (const id of ["agent-model", "agent-effort"])
+    expect(byId(root, "agent-chooser").children).toContain(byId(root, id).id);
+  expect(byId(root, "agent-composer").children).toContain(options.id);
+  expect(byId(root, "agent-threads")).toBeDefined();
+  expect(byId(root, "agent-new")).toBeDefined();
+  root.dispose();
+});
+
+test("the composer is one surface: the draft sits on it with no inset field, its corner concentric with the panel or popover", async () => {
+  const { root } = mount();
+  for (const presentation of ["docked", "popover"] as const) {
+    const p = fixture();
+    p.native.presentation = presentation;
+    await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+    const composer = byId(root, "agent-composer");
+    expect(composer.props.style).toMatchObject({
+      borderRadius: {
+        token: presentation === "popover" ? "metrics.composer_popover_radius" : "metrics.composer_radius",
+      },
+      borderWidth: { token: "metrics.border" },
+      borderColor: { token: "colors.hairline" },
+      background: { token: presentation === "popover" ? "colors.raised" : "colors.floating" },
+    });
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-field")).toBe(false);
+    // The draft is written on the surface: its field takes the surface's own
+    // fill (never the kit's well).
+    const text = byId(root, "agent-composer-text");
+    expect(composer.children).toContain(text.id);
+    expect(text.props.style.background).toEqual(composer.props.style.background);
+    // Pickers are quiet on the surface until their menu is open.
+    for (const id of ["agent-model", "agent-effort", "agent-add"])
+      expect(byId(root, id).props.style).not.toHaveProperty("background");
   }
-  const header = byId(root, "agent-header");
-  const headerChildren = header.children.map((id) => nodes.find((n) => n.id === id));
-  expect(headerChildren[0]?.props.style).toMatchObject({ flexGrow: 1 });
-  expect(headerChildren[1]?.props.id).toBe("agent-threads");
-  expect(nodes.some((n) => n.props.id === "agent-new")).toBe(false);
   root.dispose();
 });
 
@@ -195,16 +227,9 @@ test("new thread, send and stop use the model's commands; Send hides while worki
   p.snapshot.draft.text = "A new request";
   p.snapshot.sendable = true;
   const render = () =>
-    root.render(
-      <AgentView
-        publication={p}
-        menu={async () => "new"}
-        send={(a) => actions.push(a)}
-      />,
-    );
+    root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
   await render();
-  await root.drive(byId(root, "agent-threads").id, "click");
-  await Promise.resolve();
+  await root.drive(byId(root, "agent-new").id, "click");
   await root.drive(byId(root, "agent-send").id, "click");
   p.snapshot.runId = "run";
   p.snapshot.draft.text = "";
@@ -302,27 +327,11 @@ test("the thread picker lists threads with their state, switches, and offers New
   ).toContain("Ask which title to add");
   await root.drive(picker.id, "click");
   await Promise.resolve();
-  expect(asked[0]!.picker).toBe("threads");
-  expect(asked[0]!.search).toBe(true);
-  expect(asked[0]!.options).toEqual([
-    {
-      label: "New Thread",
-      value: "new",
-      icon: "plus",
-      separatorAfter: true,
-    },
-    {
-      label: "Ask which title to add",
-      value: "thread:thread",
-      checked: true,
-      deleteValue: "delete:thread",
-    },
-    {
-      label: "Make the headline · Working…",
-      value: "thread:older",
-      checked: false,
-      deleteValue: "delete:older",
-    },
+  expect(asked[0]!.options.map((o) => o.label)).toEqual([
+    "New Thread",
+    "Ask which title to add",
+    "Make the headline · Working…",
+    "Delete Thread…",
   ]);
   pick = "delete:thread";
   await root.drive(picker.id, "click");
@@ -334,7 +343,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   assertWire(commits);
   root.dispose();
 });
-test("provider and model share one menu; effort and access have their own; picks reach the model", async () => {
+test("provider and model share one menu; effort has its own; approvals are in +; picks reach the model", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -351,7 +360,7 @@ test("provider and model share one menu; effort and access have their own; picks
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks = ["model:gpt-6-mini", null, "low", "auto"];
+  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -366,7 +375,7 @@ test("provider and model share one menu; effort and access have their own; picks
     "agent-model",
     "agent-model",
     "agent-effort",
-    "agent-access",
+    "agent-add",
   ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
@@ -380,7 +389,17 @@ test("provider and model share one menu; effort and access have their own; picks
     ["Low", false],
     ["High", true],
   ]);
+  // "+": the attachments, then Approvals as a section of their own.
+  expect(asked[3]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
+    ["", "Add Files…", false],
+    ["", "Select Part of the Screen", false],
+    ["Approvals", "Composition only", true],
+    ["Approvals", "Supervised", false],
+    ["Approvals", "Auto", false],
+    ["Approvals", "Full access", false],
+  ]);
   expect(actions).toEqual([
+    { type: "setProvider", provider: "claude" },
     { type: "setModel", model: "gpt-6-mini", effort: "high" },
     { type: "setModel", model: "gpt-6", effort: "low" },
     { type: "setAccess", access: "auto" },
@@ -450,7 +469,7 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6.1-Sol");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  const models = asked[0]!.filter((o) => o.category === "ChatGPT" && !o.stays);
+  const models = asked[0]!.filter((o) => o.category === "ChatGPT");
   expect(models.map((o) => [o.label, o.checked])).toEqual([
     ["GPT-6.1-Sol", true],
     ["GPT-6-Astra", false],
@@ -463,30 +482,64 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, ChatGPT");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  expect(asked[1]!).toEqual([
-    { label: "ChatGPT", category: "ChatGPT", provider: "chatgpt", value: "", stays: true, checked: true, detail: "No models available" },
-  ]);
+  expect(asked[1]!.filter((o) => o.category === "ChatGPT")).toEqual([]);
   expect(asked.flat().some((o) => /^Default/.test(o.label))).toBe(false);
   root.dispose();
 });
-test("an empty inactive provider offers switching inside its section", async () => {
+test("a provider pick keeps the model menu open and lists that provider's models in it", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
-  p.snapshot.catalog.providers.push(["claude", "Claude"]);
-  const requests: Parameters<Menu>[0][] = [];
-  const menu: Menu = async (request) => {
-    requests.push(request);
-    return "provider:claude";
+  p.snapshot.catalog = {
+    models: [["gpt-6", "GPT-6"]],
+    providers: [
+      ["chatgpt", "ChatGPT"],
+      ["claude", "Claude"],
+    ],
+    efforts: [],
   };
-  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
+  p.snapshot.settings.model = "gpt-6";
+  const requests: Parameters<Menu>[0][] = [];
+  const answers = ["provider:claude", "model:sonnet"];
+  const menu: Menu = async (r) => {
+    requests.push(r);
+    return answers.shift() ?? null;
+  };
+  const send = (a: Action) => actions.push(a);
+  await root.render(<AgentView publication={p} menu={menu} send={send} />);
   await root.drive(byId(root, "agent-model").id, "click");
-  expect(requests).toHaveLength(1);
-  expect(requests[0]!.options.filter((option) => option.provider === "claude")).toEqual([
-    { label: "Claude", category: "Claude", provider: "claude", value: "", stays: true, checked: false, detail: "No models available" },
-    { label: "Switch to Claude", category: "Claude", provider: "claude", value: "provider:claude" },
-  ]);
+  await Promise.resolve();
+  // Provider rows keep the menu up; model rows close it.
+  const first = requests[0]!.options;
+  expect(first.find((o) => o.value === "provider:claude")?.stays).toBe(true);
+  expect(first.find((o) => o.value === "model:gpt-6")?.stays).toBeUndefined();
   expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
+  // The switch publishes Claude's models: they go to the same open menu,
+  // its default ticked, and a model pick there runs.
+  const q = structuredClone(p);
+  q.snapshot.settings.provider = "claude";
+  q.snapshot.settings.model = "opus";
+  q.snapshot.catalog.models = [
+    ["opus", "Opus 5.5"],
+    ["sonnet", "Sonnet 5.5"],
+  ];
+  await root.render(<AgentView publication={q} menu={menu} send={send} />);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  expect(requests.length).toBe(2);
+  expect(requests[1]!.update).toBe(true);
+  expect(
+    requests[1]!.options
+      .filter((o) => o.category === "Claude")
+      .map((o) => [o.label, o.checked]),
+  ).toEqual([
+    ["Opus 5.5", true],
+    ["Sonnet 5.5", false],
+  ]);
+  expect(actions.at(-1)).toEqual({
+    type: "setModel",
+    model: "sonnet",
+    effort: q.snapshot.settings.effort,
+  });
   root.dispose();
 });
 test("Claude discovery updates the already-open picker without reopening it", async () => {
@@ -495,7 +548,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
   p.snapshot.catalog.providers = [
     ["chatgpt", "ChatGPT"],
     ["claude", "Claude"],
-    ["compatible", "OpenAI-compatible"],
+    ["compatible", "Connected model"],
   ];
   p.snapshot.settings.provider = "claude";
   p.snapshot.settings.model = "opus";
@@ -515,23 +568,25 @@ test("Claude discovery updates the already-open picker without reopening it", as
   const send = (action: Action) => actions.push(action);
   await root.render(<AgentView publication={p} menu={menu} send={send} />);
   await root.drive(byId(root, "agent-model").id, "click");
-  const headings = (request: Parameters<Menu>[0]) => request.options
-    .filter((row) => row.stays)
-    .map(({ provider, category, checked }) => ({ provider, category, checked }));
-  const claudeHeading = (request: Parameters<Menu>[0]) =>
-    request.options.find((row) => row.provider === "claude" && row.stays);
-  expect(claudeHeading(requests[0]!)?.detail).toBe("Finding models…");
+  expect(
+    requests[0]!.options
+      .filter((o) => o.category === "Claude")
+      .map((o) => [o.label, o.informational]),
+  ).toEqual([
+    ["Opus 5.5", undefined],
+    ["Finding models…", true],
+  ]);
 
-  // A failed discovery leaves the single-model section in place.
+  // A failed discovery does not change the catalog, but removes its notice.
   const failed = structuredClone(p);
   failed.native.findingModels = false;
   await root.render(<AgentView publication={failed} menu={menu} send={send} />);
   expect(requests).toHaveLength(2);
   expect(requests[1]!.refresh).toBe(true);
-  expect(claudeHeading(requests[1]!)?.detail).toBeUndefined();
+  expect(requests[1]!.options.some((o) => o.informational)).toBe(false);
   await root.render(<AgentView publication={p} menu={menu} send={send} />);
   expect(requests).toHaveLength(3);
-  expect(claudeHeading(requests[2]!)?.detail).toBe("Finding models…");
+  expect(requests[2]!.options.some((o) => o.informational)).toBe(true);
 
   const discovered = structuredClone(p);
   discovered.snapshot.catalog.models.push(
@@ -543,16 +598,11 @@ test("Claude discovery updates the already-open picker without reopening it", as
     <AgentView publication={discovered} menu={menu} send={send} />,
   );
   expect(requests).toHaveLength(4);
+  expect(requests[3]!.update).toBe(true);
   expect(requests[3]!.refresh).toBe(true);
-  for (const request of requests.slice(1)) {
-    expect(request.anchor).toBe(requests[0]!.anchor);
-    expect(headings(request)).toEqual(headings(requests[0]!));
-  }
-  expect(claudeHeading(requests[3]!)?.detail).toBeUndefined();
-  expect(actions).toEqual([]);
   expect(
     requests[3]!.options
-      .filter((o) => o.provider === "claude" && !o.stays)
+      .filter((o) => o.category === "Claude")
       .map((o) => [o.label, o.checked]),
   ).toEqual([
     ["Opus 5.5", true],
@@ -586,10 +636,15 @@ test("composer pickers use the pressed anchor and enable search only for a long 
   };
   const render = () => root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   await render();
-  for (const id of ["agent-model", "agent-effort", "agent-access"]) {
+  for (const id of ["agent-model", "agent-effort", "agent-add"]) {
     const button = byId(root, id);
     await root.drive(button.id, "click");
-    expect(requests.at(-1)).toMatchObject({ anchor: button.id, search: false });
+    // The effort part's menu is the pill's own reasoning menu (no search).
+    expect(requests.at(-1)).toMatchObject(
+      id === "agent-effort"
+        ? { anchor: button.id, picker: "chooser", menu: "effort" }
+        : { anchor: button.id, search: false },
+    );
     await Promise.resolve();
   }
   for (const length of [12, 13]) {
@@ -601,49 +656,39 @@ test("composer pickers use the pressed anchor and enable search only for a long 
   }
   root.dispose();
 });
-test("model menu keeps empty, single-model and long catalogs under provider disclosures", async () => {
+test("model menu groups discovered choices by provider and switches directly to a model", async () => {
   const { root } = mount();
   const p = fixture();
   p.snapshot.settings.model = "gpt-6.2-sol";
   p.snapshot.catalog.models = [["gpt-6.2-sol", "GPT-6.2 Sol"]];
   p.snapshot.catalog.providers = [
-    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "OpenRouter"],
+    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "gpt-6-astra"],
   ];
-  // The native snapshot can still include the configured model's name.
-  Object.assign(p.native, { connectedModelName: "GPT-6 Astra" });
   p.native.modelGroups = {
     chatgpt: [["gpt-6.2-sol", "GPT-6.2 Sol", true]],
-    claude: [],
-    compatible: Array.from({ length: 22 }, (_, i) => [
-      i === 0 ? "gpt-6-astra" : `model-${i}`,
-      i === 0 ? "GPT-6 Astra" : `Model ${i}`,
-      i === 0,
-    ]),
+    claude: [["opus", "Opus 5.5", true], ["sonnet", "Sonnet 5.5", false]],
+    compatible: [["gpt-6-astra", "gpt-6-astra", true]],
   };
+  p.native.connectedModelName = "GPT-6 Astra";
   const actions: Action[] = [];
   const requests: Parameters<Menu>[0][] = [];
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} menu={async (request) => {
     requests.push(request);
-    return "other:compatible:gpt-6-astra";
+    return "other:claude:sonnet";
   }} />);
   const model = byId(root, "agent-model");
   await root.drive(model.id, "keydown", { key: "Enter" });
-  const request = requests[0]!;
-  expect(request.options.some((row) => row.label === "Use Claude")).toBe(false);
-  expect(request.options.filter((row) => row.stays)).toEqual([
-    { category: "ChatGPT", label: "ChatGPT", provider: "chatgpt", value: "", stays: true, checked: true },
-    { category: "Claude", label: "Claude", provider: "claude", value: "", stays: true, checked: false, detail: "No models available" },
-    { category: "OpenRouter", label: "OpenRouter", provider: "compatible", value: "", stays: true, checked: false },
+  expect(requests[0]!.options.map(({ label, category, checked, default: isDefault }) =>
+    [category, label, checked, isDefault ?? false],
+  )).toEqual([
+    ["ChatGPT", "GPT-6.2 Sol", true, true],
+    ["Claude", "Opus 5.5", false, true],
+    ["Claude", "Sonnet 5.5", false, false],
+    ["GPT-6 Astra", "gpt-6-astra", false, true],
   ]);
-  expect(request.options.find((row) => row.label === "GPT-6 Astra")).toMatchObject({
-    category: "OpenRouter", provider: "compatible", value: "other:compatible:gpt-6-astra", default: true,
-  });
-  expect(request.options.filter((row) => row.value.startsWith("other:compatible:"))).toHaveLength(22);
-  expect(request.search).toBe(true);
-  expect(actions).toEqual([{ type: "setProvider", provider: "compatible", model: "gpt-6-astra" }]);
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude", model: "sonnet" }]);
   await root.drive(model.id, "keydown", { key: " " });
   expect(requests).toHaveLength(2);
-  expect(requests[1]!.options).toEqual(request.options);
   root.dispose();
 });
 test("suggestions read as buttons: a raised fill with a hairline edge, the label in body text", async () => {
@@ -1110,14 +1155,9 @@ test("mounted panel listens to model publications, forwards errors and unsubscri
     },
   };
   await root.render(
-    <AgentPanel
-      model={model}
-      menu={async () => "new"}
-      onError={(e) => errors.push(e)}
-    />,
+    <AgentPanel model={model} onError={(e) => errors.push(e)} />,
   );
-  await root.drive(byId(root, "agent-threads").id, "click");
-  await Promise.resolve();
+  await root.drive(byId(root, "agent-new").id, "click");
   await Promise.resolve();
   expect(errors.map(String)).toEqual(["Error: rejected"]);
   p = states.working();
@@ -1222,6 +1262,10 @@ test("composer sends direction with a draft during a run", async () => {
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
   expect(byId(root, "agent-composer-text").props.disabled).not.toBe(true);
   expect(byId(root, "agent-send").props.disabled).toBe(false);
+  // Stop steps back beside Send: a dim disc, and Send is the lit one.
+  const disc = (id: string) => root.inspect().nodes.find((n) => byId(root, id).children.includes(n.id))!;
+  expect(disc("agent-stop").props.style).toMatchObject({ background: { token: "colors.composer_send_idle" } });
+  expect(disc("agent-send").props.style).toMatchObject({ background: { token: "colors.text" } });
   await root.drive(byId(root, "agent-send").id, "click");
   expect(actions).toEqual([{ type: "submit" }]);
 });
@@ -1272,8 +1316,14 @@ test("each attachment kind has its tile, and file drops route to native attachme
   await root.render(
     <AgentView publication={p} send={(a) => actions.push(a)} />,
   );
-  expect(byId(root, "agent-attach").props.disabled).toBe(true);
-  expect(byId(root, "agent-pick-region").props.title).toContain("six");
+  // At six, "+" says so in place of its attachment rows.
+  let asked: MenuOption[] = [];
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} menu={async (r) => { asked = r.options; return null; }} />,
+  );
+  await root.drive(byId(root, "agent-add").id, "click");
+  expect(asked[0]).toMatchObject({ informational: true, label: "A message can carry six attachments" });
+  expect(asked.some((o) => o.value === "attach" || o.value === "pickRegion")).toBe(false);
   root.dispose();
 });
 
@@ -1430,17 +1480,23 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   };
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   const model = byId(root, "agent-model");
-  expect(model.props.metadata).toEqual({ menuAnchor: true });
+  expect(model.props.metadata).toEqual({ menuAnchor: true, pill: "part" });
   expect(model.props.role).toBe("button");
   expect(model.props.tabIndex).toBe(0);
-  expect(model.props.title).toBe("Model");
+  expect(model.props.title).toBeUndefined();
   expect(root.inspect().nodes.some((n) => n.text === "Opus 5.5")).toBe(true);
   await root.drive(model.id, "click");
   expect(byId(root, "agent-model").props.open).toBe(true);
   expect(byId(root, "agent-model").props["aria-expanded"]).toBe(true);
-  expect((byId(root, "agent-model").props.style as any).background).toEqual({
-    token: "colors.selected_fill",
-  });
+  // The host draws the pill on the open part (no fill of its own), and its
+  // chevron turns to point up.
+  expect((byId(root, "agent-model").props.style as any).background).toBeUndefined();
+  const turns = () =>
+    root
+      .inspect()
+      .nodes.filter((n) => n.props.metadata?.symbol === "composer.chevron")
+      .map((n) => n.props.metadata.turn);
+  expect(turns()).toEqual([true, false]);
   expect(
     requests[0]!.options.find((o) => o.value === "model:opus"),
   ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
@@ -1448,10 +1504,16 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   for (let i = 0; i < 4; i++) await Promise.resolve();
   await root.flush();
   expect(byId(root, "agent-model").props.open).toBe(false);
+  expect(turns()).toEqual([false, false]);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
-  for (const id of ["agent-model", "agent-effort", "agent-access"])
+  for (const id of ["agent-model", "agent-effort"])
     expect(byId(root, id).props.disabled).toBe(true);
+  // During a run "+" still adds files; Approvals wait for the run to end.
+  expect(byId(root, "agent-add").props.disabled).toBe(false);
+  await root.drive(byId(root, "agent-add").id, "click");
+  expect(requests.at(-1)!.options.some((o) => o.category === "Approvals")).toBe(false);
+  close(null);
   root.dispose();
 });
 
@@ -1469,7 +1531,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     return new Promise((resolve) => { settle = resolve; });
   };
   await root.render(<AgentView publication={fixture()} menu={menu} send={() => {}} />);
-  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-access", "Enter"]]) {
+  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-add", "Enter"]]) {
     const trigger = byId(root, id);
     await root.drive(trigger.id, "keydown", { key });
     expect(byId(root, id).props["aria-expanded"]).toBe(true);
@@ -1478,7 +1540,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     expect(byId(root, id).props["aria-expanded"]).toBe(false);
   }
   expect(requests.map(({ picker }) => picker)).toEqual([
-    "model", "model", "effort", "effort", "access", "access",
+    "model", "model", "chooser", "chooser", "add", "add",
   ]);
   root.dispose();
 });
@@ -1973,50 +2035,483 @@ test("queued directions are marked on the user bubble", async () => {
   expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
   await root.dispose();
 });
-
-test("steering directions do not render a Steering label on the user bubble", async () => {
+const harnessCatalog = (models: [string, string][], efforts: string[] = []) => ({
+  models,
+  providers: [
+    ["aero", "Aero"],
+    ["claude", "Claude Code"],
+    ["chatgpt", "Codex"],
+  ] as [string, string][],
+  efforts,
+});
+const textOf = (root: ReturnType<typeof mount>["root"], at: any): string => {
+  const nodes = root.inspect().nodes;
+  const walk = (n: any): string =>
+    (n.text ?? "") + (n.children ?? []).map((id: number) => walk(nodes.find((m) => m.id === id))).join("");
+  return walk(at);
+};
+const segmented = (root: ReturnType<typeof mount>["root"]) =>
+  root.inspect().nodes.filter((n) => n.type === "segmented-control" || n.props.role === "radiogroup");
+const chooserRows = (r: Parameters<Menu>[0]) =>
+  r.options.map((o) => [o.kind, o.label, o.checked ?? null, o.icon ?? null, !!o.disabled, !!o.stays]);
+test("with Aero the composer is one row: \"+\", the split pill (the Aero mark and model, then the effort, each its own menu), and Send; no segmented control", async () => {
   const { root } = mount();
   const p = fixture();
-  p.snapshot.runId = "run";
-  p.snapshot.rows = {
-    count: 3,
-    range: [0, 3],
-    items: [
-      { id: "user-0", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Start" } },
-      { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "like just the odd sounds and stuff", steering: true } },
-      { id: "user-2", commandId: "", chosen: {}, open: false, value: { role: "user", text: "also soften the kick", delivery: "steering" } },
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]], ["low", "high"]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
+  p.snapshot.settings.effort = "high";
+  await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+  expect(segmented(root)).toEqual([]);
+  const options = byId(root, "agent-options");
+  const kids = options.children.map((id: number) => root.inspect().nodes.find((n) => n.id === id)!);
+  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-chooser", null, "agent-send"]);
+  expect(byId(root, "agent-chooser").props.metadata).toEqual({ pill: "group" });
+  const inside = (id: string) => {
+    const part = byId(root, id);
+    expect(part.props.metadata).toEqual({ menuAnchor: true, pill: "part" });
+    return root
+      .inspect()
+      .nodes.filter((n) => part.children.includes(n.id))
+      .map((n) => [n.props.metadata?.symbol ?? textOf(root, n), n.props.metadata?.pill ?? null, n.props.style?.fontSize ?? null]);
+  };
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6 Sol");
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, High");
+  // At rest `[mark] GPT-6 Sol  High ⌄` in the panels' body size; the
+  // model's own chevron shows only with the pill.
+  const body = { token: "typography.body" };
+  expect(inside("agent-model")).toEqual([
+    ["provider.powermove", null, null],
+    ["GPT-6 Sol", null, body],
+    ["composer.chevron", "reveal", null],
+  ]);
+  expect(inside("agent-effort")).toEqual([
+    ["High", null, body],
+    ["composer.chevron", null, null],
+  ]);
+  // Send is the pill's highlight box: its height and corner.
+  const face = root.inspect().nodes.find((n) => n.props.metadata?.symbol === "composer.send")!;
+  expect(face.props.style.height).toEqual({ token: "metrics.hit" });
+  expect(face.props.style.borderRadius).toEqual({ token: "metrics.inner_radius" });
+  // The draft is the panels' body size too.
+  expect(byId(root, "agent-composer-text").props.style.fontSize).toEqual(body);
+  // A model with no effort levels is the model part alone, its chevron shown.
+  p.snapshot.catalog.efforts = [];
+  await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+  expect(root.inspect().nodes.some((n) => n.props.id === "agent-effort")).toBe(false);
+  expect(inside("agent-model").at(-1)).toEqual(["composer.chevron", null, null]);
+  root.dispose();
+});
+test("with Aero the model part opens the picker: the rail (Aero, Claude Code, Codex), Powermove's catalogue and the usage monitor at its foot; a model closes it", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = {
+    ...harnessCatalog(
+      [
+        ["pm/openai/gpt-6-sol", "GPT-6 Sol (272K context)"],
+        ["pm/anthropic/claude-opus-5.5", "Claude Opus 5.5"],
+        ["pm/google/gemini-3-pro", "Gemini 3 Pro"],
+      ],
+      ["low", "medium", "high"],
+    ),
+    defaultEffort: "medium",
+  };
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
+  p.snapshot.settings.effort = "high";
+  p.native.aero = {
+    usage: [
+      ["Credits", "812 of 1,000 left"],
+      ["Plan", "Aerolite"],
+      ["Resets", "Dec 25"],
     ],
   };
-  await root.render(<AgentView publication={p} send={() => {}} />);
-  expect(root.inspect().nodes.filter((node) => node.text === "Steering")).toHaveLength(0);
-  expect(has(root, "You said: like just the odd sounds and stuff")).toBe(true);
-  expect(has(root, "You said: also soften the kick")).toBe(true);
-  await root.dispose();
-});
-
-test("model picker shows the provider logo to the left of the model name", async () => {
-  const { root } = mount();
-  const iconOf = () => {
-    const picker = byId(root, "agent-model");
-    const firstChild = root.inspect().nodes.find((node) => node.id === picker.children[0]);
-    return (firstChild?.props.metadata as { symbol?: string } | undefined)?.symbol;
+  const asked: Parameters<Menu>[0][] = [];
+  const picks = ["model:pm/anthropic/claude-opus-5.5", "providers:"];
+  const menu: Menu = async (r) => {
+    asked.push(r);
+    return r.refresh ? null : picks.shift();
   };
+  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
+  await root.drive(byId(root, "agent-model").id, "click");
+  for (const _ of [0, 1, 2, 3]) await Promise.resolve();
+  await root.flush();
+  const first = asked[0]!;
+  expect(first.picker).toBe("chooser");
+  expect(first.menu).toBeUndefined();
+  expect(first.placeholder).toBe("Search models");
+  expect(chooserRows(first)).toEqual([
+    ["harness", "Aero", true, "provider.powermove", false, true],
+    ["harness", "Claude Code", false, "provider.claude", false, true],
+    ["harness", "Codex", false, "provider.chatgpt", false, true],
+    ["heading", "Powermove", null, "provider.powermove", false, false],
+    ["model", "GPT-6 Sol", true, "provider.chatgpt", false, false],
+    ["model", "Claude Opus 5.5", false, "provider.claude", false, false],
+    ["model", "Gemini 3 Pro", false, "provider.compatible", false, false],
+    ["add", "Providers…", null, null, false, false],
+  ]);
+  expect(first.options.some((o) => o.label === "Aerolite" || o.label === "Custom")).toBe(false);
+  expect(first.usage).toEqual([
+    ["Credits", "812 of 1,000 left"],
+    ["Plan", "Aerolite"],
+    ["Resets", "Dec 25"],
+  ]);
+  // The model closed the picker and the pill reads it at once, before the
+  // kernel's publication.
+  expect(actions).toEqual([{ type: "setModel", model: "pm/anthropic/claude-opus-5.5", effort: "high" }]);
+  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.5");
+  expect(byId(root, "agent-model").props.open).toBe(false);
+  // Providers… closes it for Settings › Providers.
+  await root.drive(byId(root, "agent-model").id, "click");
+  for (const _ of [0, 1, 2, 3]) await Promise.resolve();
+  expect(asked.filter((r) => !r.refresh).map((r) => !!r.update)).toEqual([false, false]);
+  expect(actions.at(-1)).toEqual({ type: "openSettings" });
+  root.dispose();
+});
+test("the effort part opens the reasoning menu: the model's levels in order, ✓ on the one in use; a level closes it and the pill reads it at once, never the old one", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
   const p = fixture();
+  p.snapshot.catalog = {
+    ...harnessCatalog([["gpt-6-sol", "GPT-6 Sol"]], ["low", "medium", "high", "xhigh", "max"]),
+    defaultEffort: "medium",
+  };
   p.snapshot.settings.provider = "chatgpt";
-  await root.render(<AgentView publication={p} send={() => {}} />);
-  expect(iconOf()).toBe("provider.openai");
-
+  p.snapshot.settings.model = "gpt-6-sol";
+  p.snapshot.settings.effort = "high";
+  const asked: Parameters<Menu>[0][] = [];
+  let answer: (value: unknown) => void = () => {};
+  const menu: Menu = (r) => {
+    asked.push(r);
+    return new Promise((resolve) => {
+      answer = resolve;
+    });
+  };
+  const render = () =>
+    root.render(<AgentView publication={structuredClone(p)} menu={menu} send={(a) => actions.push(a)} />);
+  await render();
+  const effort = byId(root, "agent-effort");
+  await root.drive(effort.id, "click");
+  const request = asked[0]!;
+  expect(request).toMatchObject({ anchor: effort.id, picker: "chooser", menu: "effort" });
+  expect(request.options.map((o) => [o.kind, o.label, o.value, !!o.checked, !!o.stays])).toEqual([
+    ["effort", "Low", "low", false, false],
+    ["effort", "Medium", "medium", false, false],
+    ["effort", "High", "high", true, false],
+    ["effort", "Extra high", "xhigh", false, false],
+    ["effort", "Max", "max", false, false],
+  ]);
+  expect(byId(root, "agent-effort").props.open).toBe(true);
+  answer("low");
+  for (const _ of [0, 1, 2, 3]) await Promise.resolve();
+  await root.flush();
+  expect(actions).toEqual([{ type: "setModel", model: "gpt-6-sol", effort: "low" }]);
+  expect(byId(root, "agent-effort").props.open).toBe(false);
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
+  // A publication from before the kernel took it still reads Low (the old
+  // level never flickers back); the kernel's answer settles it.
+  await render();
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
+  p.snapshot.settings.effort = "low";
+  await render();
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
+  // A level the model does not offer reads as the model's default.
+  p.snapshot.settings.effort = "minimal";
+  await render();
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Medium");
+  root.dispose();
+});
+test("Aero's card shows no usage monitor until the backend has answered", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
+  const asked: Parameters<Menu>[0][] = [];
+  await root.render(
+    <AgentView
+      publication={p}
+      menu={async (r) => {
+        asked.push(r);
+        return null;
+      }}
+      send={() => {}}
+    />,
+  );
+  await root.drive(byId(root, "agent-model").id, "click");
+  expect(asked[0]!.usage).toBeUndefined();
+  root.dispose();
+});
+test("Aero out of credits says until when in the chooser, and offers the bigger plan on Aerolite", async () => {
+  for (const [upgrade, rows] of [
+    [
+      "Aero",
+      [
+        ["status", "Out of credits until Dec 25."],
+        ["action", "Upgrade to Aero…"],
+      ],
+    ],
+    [null, [["status", "Out of credits until Dec 25."]]],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]], ["low"]);
+    p.snapshot.settings.provider = "aero";
+    p.snapshot.settings.model = "pm/openai/gpt-6-sol";
+    p.native.aero = {
+      usage: [["Credits", "0 of 1,000 left"]],
+      outOfCredits: { resets: "Dec 25", upgrade },
+    };
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return null;
+        }}
+        send={() => {}}
+      />,
+    );
+    await root.drive(byId(root, "agent-model").id, "click");
+    expect(
+      asked[0]!.options.filter((o) => o.kind === "status" || o.kind === "action").map((o) => [o.kind, o.label]),
+    ).toEqual(rows);
+    root.dispose();
+  }
+});
+test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings › Account", async () => {
+  for (const [needsPlan, rows] of [
+    [
+      true,
+      [
+        ["status", "Aero needs Aerolite or Aero."],
+        ["action", "Subscribe…"],
+      ],
+    ],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([]);
+    p.snapshot.settings.provider = "aero";
+    p.native.connection = "unavailable";
+    p.native.reason = "Aero needs Aerolite or Aero.";
+    p.native.aero = { usage: [], needsPlan };
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return null;
+        }}
+        send={() => {}}
+      />,
+    );
+    // Quiet: no fault notice in the panel.
+    expect(root.inspect().nodes.some((node) => node.props.id === "agent-connect-error")).toBe(false);
+    await root.drive(byId(root, "agent-model").id, "click");
+    expect(asked[0]!.options.filter((o) => o.kind !== "harness").map((o) => [o.kind, o.label])).toEqual(rows);
+    root.dispose();
+  }
+});
+test("the pill shows Claude Code's logo, OpenAI's for Codex, and the Aero (Powermove) mark for every Aero model", async () => {
+  for (const [harness, model, mark] of [
+    ["claude", "claude-opus-5-5", "provider.claude"],
+    ["aero", "pm/anthropic/claude-opus-5.5", "provider.powermove"],
+    ["aero", "pm/openai/gpt-6-sol", "provider.powermove"],
+    ["chatgpt", "gpt-6-sol", "provider.chatgpt"],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([[model, "Model"]]);
+    p.snapshot.settings.provider = harness;
+    p.snapshot.settings.model = model;
+    await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+    const pill = byId(root, "agent-model");
+    const symbols = root.inspect().nodes.filter((n) => pill.children.includes(n.id)).map((n) => n.props.metadata?.symbol);
+    expect(symbols[0]).toBe(mark);
+    root.dispose();
+  }
+});
+test("with the Codex and Claude Code harnesses the chooser heads their models with the account they run on, without Aerolite", async () => {
+  for (const [harness, accounts, heading] of [
+    ["chatgpt", undefined, "ChatGPT"],
+    ["chatgpt", { chatgpt: "OpenAI API key" }, "OpenAI API key"],
+    ["claude", undefined, "Claude"],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["m-1", "Model One"], ["m-2", "Model Two"]]);
+    p.snapshot.settings.provider = harness;
+    p.snapshot.settings.model = "m-2";
+    if (accounts) p.native.accounts = accounts;
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return null;
+        }}
+        send={() => {}}
+      />,
+    );
+    await root.drive(byId(root, "agent-model").id, "click");
+    expect(chooserRows(asked[0]!).filter(([kind]) => kind !== "harness" && kind !== "add")).toEqual([
+      ["heading", heading, null, harness === "claude" ? "provider.claude" : "provider.chatgpt", false, false],
+      ["model", "Model One", false, `provider.${harness === "claude" ? "claude" : "chatgpt"}`, false, false],
+      ["model", "Model Two", true, `provider.${harness === "claude" ? "claude" : "chatgpt"}`, false, false],
+    ]);
+    root.dispose();
+  }
+});
+test("a harness with no models offers one action and no card; one that couldn't start offers Try Again", async () => {
+  for (const [connection, rows, action] of [
+    ["connected", [["status", "Sign in to Claude in Settings › Providers"], ["action", "Connect a provider…"]], "providers:"],
+    ["unavailable", [["status", "Claude Code couldn’t start."], ["action", "Try Again"]], "retry:"],
+  ] as const) {
+    const { root } = mount();
+    const actions: Action[] = [];
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([]);
+    p.snapshot.settings.provider = "claude";
+    p.snapshot.settings.model = "";
+    p.native.connection = connection;
+    const asked: Parameters<Menu>[0][] = [];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return action;
+        }}
+        send={(a) => actions.push(a)}
+      />,
+    );
+    await root.drive(byId(root, "agent-model").id, "click");
+    await Promise.resolve();
+    expect(chooserRows(asked[0]!).filter(([kind]) => kind !== "harness").map(([kind, label]) => [kind, label])).toEqual(
+      rows.map((r) => [...r]),
+    );
+    expect(asked[0]!.usage).toBeUndefined();
+    expect(actions).toEqual([{ type: connection === "connected" ? "openSettings" : "retryConnection" }]);
+    root.dispose();
+  }
+});
+test("two context variants of one model never read alike, in the picker or the pill", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([
+    ["opus", "Opus 5.5"],
+    ["opus[1m]", "Opus 5.5 (1M context)"],
+    ["sonnet", "Sonnet 5.5 (200K context)"],
+  ]);
   p.snapshot.settings.provider = "claude";
-  await root.render(<AgentView publication={p} send={() => {}} />);
-  expect(iconOf()).toBe("provider.claude");
-
-  p.snapshot.catalog.providers = [["compatible", "OpenAI API"]];
-  p.snapshot.settings.provider = "compatible";
-  await root.render(<AgentView publication={p} send={() => {}} />);
-  expect(iconOf()).toBe("provider.openai");
-
-  p.snapshot.catalog.providers = [["compatible", "Ollama"]];
-  await root.render(<AgentView publication={p} send={() => {}} />);
-  expect(iconOf()).toBe("cpu");
-  await root.dispose();
+  p.snapshot.settings.model = "opus[1m]";
+  const asked: Parameters<Menu>[0][] = [];
+  await root.render(
+    <AgentView
+      publication={p}
+      menu={async (r) => {
+        asked.push(r);
+        return null;
+      }}
+      send={() => {}}
+    />,
+  );
+  expect(byId(root, "agent-model").props.label).toBe("Model, Opus 5.5 (1M)");
+  await root.drive(byId(root, "agent-model").id, "click");
+  const names = asked[0]!.options.filter((o) => o.kind === "model").map((o) => o.label);
+  expect(names).toEqual(["Opus 5.5", "Opus 5.5 (1M)", "Sonnet 5.5"]);
+  expect(new Set(names).size).toBe(names.length);
+  root.dispose();
+});
+test("Stop is the same rounded rect as Send: the pill's highlight box (no circles)", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.runId = "run-1";
+  await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
+  const stop = root.inspect().nodes.find((n) => n.props.metadata?.symbol === "composer.stop")!;
+  expect(stop.props.style.width).toEqual({ token: "metrics.hit" });
+  expect(stop.props.style.height).toEqual({ token: "metrics.hit" });
+  expect(stop.props.style.borderRadius).toEqual({ token: "metrics.inner_radius" });
+  root.dispose();
+});
+test("with Aero a rail harness keeps the chooser open and switches the harness", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.settings.model = "";
+  let answered = false;
+  const menu: Menu = async () => {
+    if (answered) return null;
+    answered = true;
+    return "provider:claude";
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />);
+  // No model chosen: the pill shows the one Aero runs.
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6 Sol");
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
+  root.dispose();
+});
+test("signed out: the pill reads Sign in to Powermove (Aero, with its mark) or Connect a provider, and opens the rail and one compact card; no line under the composer", async () => {
+  for (const [harness, line, pillText, mark, action] of [
+    ["aero", "Sign in to Powermove in Settings › Providers", "Sign in to Powermove", "provider.powermove", "Sign In to Powermove…"],
+    ["chatgpt", "Sign in to ChatGPT in Settings › Providers", "Connect a provider", null, "Connect a provider…"],
+    ["claude", "Sign in to Claude in Settings › Providers", "Connect a provider", null, "Connect a provider…"],
+  ] as const) {
+    const { root } = mount();
+    const actions: Action[] = [];
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["gpt-6-sol", "GPT-6 Sol"]], ["low", "high"]);
+    p.snapshot.settings.provider = harness;
+    p.native.connection = "unavailable";
+    p.native.signedOut = true;
+    const asked: Parameters<Menu>[0][] = [];
+    const picks = ["providers:"];
+    await root.render(
+      <AgentView
+        publication={p}
+        menu={async (r) => {
+          asked.push(r);
+          return picks.shift();
+        }}
+        send={(a) => actions.push(a)}
+      />,
+    );
+    expect(segmented(root)).toEqual([]);
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-connect")).toBe(false);
+    expect(root.inspect().nodes.some((n) => n.props.id === "agent-sign-in")).toBe(false);
+    expect(byId(root, "agent-welcome")).toBeDefined();
+    const pill = byId(root, "agent-model");
+    expect(pill.props.label).toBe(pillText);
+    expect(pill.props.disabled).toBeFalsy();
+    const inside = root.inspect().nodes.filter((n) => pill.children.includes(n.id));
+    expect(inside.map((n) => n.props.metadata?.symbol ?? textOf(root, n))).toEqual(
+      [mark, pillText, "composer.chevron"].filter((x) => x !== null),
+    );
+    expect(byId(root, "agent-composer-text").props.disabled).toBeFalsy();
+    expect(byId(root, "agent-send").props.disabled).toBe(true);
+    await root.drive(pill.id, "click");
+    await Promise.resolve();
+    expect(asked[0]!.picker).toBe("chooser");
+    expect(chooserRows(asked[0]!).map(([kind, label, checked]) => [kind, label, checked])).toEqual([
+      ["harness", "Aero", harness === "aero"],
+      ["harness", "Claude Code", harness === "claude"],
+      ["harness", "Codex", harness === "chatgpt"],
+      ["status", line, null],
+      ["action", action, null],
+    ]);
+    expect(asked[0]!.usage).toBeUndefined();
+    expect(actions).toEqual([{ type: "openSettings" }]);
+    root.dispose();
+  }
 });

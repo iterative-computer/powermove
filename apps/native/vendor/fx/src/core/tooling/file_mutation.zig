@@ -1,0 +1,3935 @@
+const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
+const builtin = @import("builtin");
+const diff_mod = @import("../output/diff.zig");
+const file_mutation_contract = @import("file_mutation_contract.zig");
+const io_mod = @import("../shared/io.zig");
+const model_context_encoding = @import("../shared/model_context_encoding.zig");
+const pathing = @import("../workspace/pathing.zig");
+const text_utils = @import("../shared/text_utils.zig");
+const types = @import("../shared/types.zig");
+
+const testing_permissions = if (builtin.is_test)
+    @import("../permissions/permissions.zig")
+else
+    struct {};
+const testing_builtin_tools = if (builtin.is_test)
+    @import("../../builtins/tools.zig")
+else
+    struct {};
+const testing_write_file = if (builtin.is_test)
+    @import("../../tools/filesystem/write_file.zig")
+else
+    struct {};
+const testing_edit_file = if (builtin.is_test)
+    @import("../../tools/filesystem/edit_file.zig")
+else
+    struct {};
+
+const Allocator = std.mem.Allocator;
+const PreparedFileMutation = file_mutation_contract.PreparedFileMutation;
+const PolicyEvaluatedFileTargets = file_mutation_contract.PolicyEvaluatedFileTargets;
+
+const max_content_bytes: usize = 16 * 1024 * 1024;
+const max_total_content_bytes: usize = 32 * 1024 * 1024;
+
+pub const ParentCleanupResidueReason = enum {
+    not_empty,
+    identity_changed,
+    remove_failed,
+};
+
+pub const CreatedParentResidue = struct {
+    component_index: usize,
+    path_end: usize,
+    permission_target_index: usize,
+    observed_identity: ?file_mutation_contract.FileIdentity,
+    reason: ParentCleanupResidueReason,
+};
+
+pub const ApplyRejectionReason = enum {
+    binding_mismatch,
+    stale_preimage,
+    cancelled,
+    traversal_changed,
+    staged_source_changed,
+    io_failure,
+};
+
+pub const ApplyRejection = struct {
+    reason: ApplyRejectionReason,
+    created_parent_residue: []const CreatedParentResidue,
+};
+
+pub const ChangeTrackerHandoff = struct {
+    kind: file_mutation_contract.Kind,
+    raw_path: []const u8,
+    previous_content: ?[]const u8,
+    committed_at_ms: i64,
+};
+
+pub const FullViewSnapshot = struct {
+    after_content: []const u8,
+    lifecycle_id: types.ToolLifecycleId,
+};
+
+pub const CommittedFileHandoff = struct {
+    preview: diff_mod.FileChangePreview,
+    tracker: ChangeTrackerHandoff,
+    full_view: ?FullViewSnapshot = null,
+
+    pub fn init(
+        preview: diff_mod.FileChangePreview,
+        tracker: ChangeTrackerHandoff,
+    ) CommittedFileHandoff {
+        return .{
+            .preview = preview,
+            .tracker = tracker,
+        };
+    }
+
+    pub fn deinit(self: CommittedFileHandoff, alloc: Allocator) void {
+        alloc.free(@constCast(self.preview.path));
+        for (self.preview.lines) |line| alloc.free(@constCast(line.text));
+        alloc.free(@constCast(self.preview.lines));
+        alloc.free(@constCast(self.tracker.raw_path));
+        if (self.tracker.previous_content) |content| {
+            alloc.free(@constCast(content));
+        }
+        if (self.full_view) |full_view| {
+            alloc.free(@constCast(full_view.after_content));
+            alloc.free(@constCast(full_view.lifecycle_id.call_id));
+        }
+    }
+
+    pub fn attachFullView(
+        self: *CommittedFileHandoff,
+        alloc: Allocator,
+        after_content: []const u8,
+        lifecycle_id: types.ToolLifecycleId,
+    ) Allocator.Error!void {
+        const owned_after_content = try alloc.dupe(u8, after_content);
+        errdefer alloc.free(owned_after_content);
+        const owned_call_id = try alloc.dupe(u8, lifecycle_id.call_id);
+        errdefer alloc.free(owned_call_id);
+
+        self.full_view = .{
+            .after_content = owned_after_content,
+            .lifecycle_id = .{
+                .turn_id = lifecycle_id.turn_id,
+                .call_id = owned_call_id,
+            },
+        };
+    }
+};
+
+pub const ApplyResult = union(enum) {
+    rejected: ApplyRejection,
+    committed: CommittedFileHandoff,
+};
+
+const target_mismatch_message =
+    "file mutation preparation failed: approved target no longer matches the call";
+const identity_changed_message =
+    "file mutation preparation failed: approved filesystem identity changed";
+const preview_too_large_message =
+    "file mutation preparation failed: diff preview exceeds preparation limits";
+// Limit messages name the limit and the way around it, so the model can
+// still make the change.
+const file_too_large_message = std.fmt.comptimePrint(
+    "file mutation preparation failed: the file is larger than the {d} MiB limit for edit_file and write_file; make the change with a shell command instead",
+    .{max_content_bytes / mib},
+);
+const edited_file_too_large_message = std.fmt.comptimePrint(
+    "edit_file failed: the edit would make the file larger than the {d} MiB limit for edit_file; make the change with a shell command instead",
+    .{max_content_bytes / mib},
+);
+const total_content_too_large_message = std.fmt.comptimePrint(
+    "file mutation preparation failed: the old and new file together are larger than the {d} MiB limit for edit_file and write_file; make the change with a shell command instead",
+    .{max_total_content_bytes / mib},
+);
+const mib = 1024 * 1024;
+
+const FileMutationPrepareError = error{
+    OutOfMemory,
+    Canceled,
+    Unexpected,
+    SystemResources,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+};
+
+const FileMutationApplyError = error{
+    OutOfMemory,
+    ResultContractViolation,
+};
+
+const PreimageResult = union(enum) {
+    preimage: file_mutation_contract.Preimage,
+    semantic_failure: []const u8,
+};
+
+const PostimageResult = union(enum) {
+    content: []const u8,
+    semantic_failure: []const u8,
+};
+
+const PreviewResult = union(enum) {
+    preview: diff_mod.FileChangePreview,
+    semantic_failure: []const u8,
+};
+
+const CommitClaim = struct {
+    claimed: std.atomic.Value(bool) = .init(false),
+};
+
+var target_resolution_check_count: usize = 0;
+
+pub fn resetTargetResolutionCheckCountForTest() void {
+    if (builtin.is_test) target_resolution_check_count = 0;
+}
+
+pub fn targetResolutionCheckCountForTest() usize {
+    return if (builtin.is_test) target_resolution_check_count else 0;
+}
+
+pub fn prepare(
+    call_alloc: std.mem.Allocator,
+    call: types.ToolCall,
+    input: file_mutation_contract.FileMutationInput,
+    policy_targets: file_mutation_contract.PolicyEvaluatedFileTargets,
+    failure_detail: file_mutation_contract.EditFailureDetail,
+) FileMutationPrepareError!file_mutation_contract.PrepareResult {
+    return prepareInternal(call_alloc, call, input, policy_targets, true, failure_detail);
+}
+
+/// Prepares a mutation whose decoded input and canonical target proof were
+/// produced together by tool admission. Identity, proof, preimage, and diff
+/// validation remain unchanged; only duplicate canonical resolution is skipped.
+pub fn prepareResolvedTarget(
+    call_alloc: std.mem.Allocator,
+    call: types.ToolCall,
+    input: file_mutation_contract.FileMutationInput,
+    policy_targets: file_mutation_contract.PolicyEvaluatedFileTargets,
+    failure_detail: file_mutation_contract.EditFailureDetail,
+) FileMutationPrepareError!file_mutation_contract.PrepareResult {
+    return prepareInternal(call_alloc, call, input, policy_targets, false, failure_detail);
+}
+
+fn prepareInternal(
+    call_alloc: std.mem.Allocator,
+    call: types.ToolCall,
+    input: file_mutation_contract.FileMutationInput,
+    policy_targets: file_mutation_contract.PolicyEvaluatedFileTargets,
+    verify_target_resolution: bool,
+    failure_detail: file_mutation_contract.EditFailureDetail,
+) FileMutationPrepareError!file_mutation_contract.PrepareResult {
+    if (policyIdentityBindingMismatch(policy_targets)) {
+        return .{ .semantic_failure = identity_changed_message };
+    }
+    if (!policy_targets.proofValid()) {
+        return .{ .semantic_failure = target_mismatch_message };
+    }
+    if (verify_target_resolution and !try resolvedTargetMatches(input, policy_targets)) {
+        return .{ .semantic_failure = target_mismatch_message };
+    }
+
+    const preimage_result = try verifyAndReadPreimage(call_alloc, input, policy_targets);
+    const preimage = switch (preimage_result) {
+        .preimage => |preimage| preimage,
+        .semantic_failure => |message| return .{ .semantic_failure = message },
+    };
+
+    const postimage_result = try derivePostimage(call_alloc, input, preimage, failure_detail);
+    const after_content = switch (postimage_result) {
+        .content => |content| content,
+        .semantic_failure => |message| return .{ .semantic_failure = message },
+    };
+    const before_content = switch (preimage) {
+        .absent => "",
+        .present => |present| present.content,
+    };
+    const total_content_bytes = std.math.add(
+        usize,
+        before_content.len,
+        after_content.len,
+    ) catch return .{ .semantic_failure = total_content_too_large_message };
+    if (total_content_bytes > max_total_content_bytes) {
+        return .{ .semantic_failure = total_content_too_large_message };
+    }
+
+    // External anchors show the resolved target so a symlink redirect cannot look local.
+    const approval_path = switch (policy_targets.anchor.scope) {
+        .external => policy_targets.canonical_target_path,
+        .workspace => input.path(),
+    };
+    const encoded_path = text_utils.encodeTerminalSafePathTail(
+        call_alloc,
+        approval_path,
+        diff_mod.max_encoded_path_bytes,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.PathBasenameTooLong => return .{
+            .semantic_failure = preview_too_large_message,
+        },
+    };
+    const preview_result = try buildPreview(
+        call_alloc,
+        encoded_path,
+        preimage,
+        before_content,
+        after_content,
+    );
+    const preview = switch (preview_result) {
+        .preview => |preview| preview,
+        .semantic_failure => |message| return .{ .semantic_failure = message },
+    };
+    const review = diff_mod.FileReview.init(
+        call_alloc,
+        before_content,
+        after_content,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ArithmeticOverflow => return .{
+            .semantic_failure = preview_too_large_message,
+        },
+    };
+
+    var arguments_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    arguments_hasher.update(call.arguments_json);
+    const commit_claim = try call_alloc.create(CommitClaim);
+    commit_claim.* = .{};
+    return .{ .prepared = .{
+        .call_id = call.id,
+        .tool_name = call.name,
+        .arguments_hash = arguments_hasher.finalResult(),
+        .target_path = policy_targets.canonical_target_path,
+        .display_path = encoded_path.bytes,
+        .policy_targets = policy_targets,
+        .kind = std.meta.activeTag(input),
+        .preimage = preimage,
+        .after_content = after_content,
+        .preview = preview,
+        .review = review,
+        .commit_token = commit_claim,
+    } };
+}
+
+const ApplyTestControls = struct {
+    ctx: ?*anyopaque = null,
+    after_write_chunk: ?*const fn (?*anyopaque, usize) anyerror!void = null,
+    after_stage: ?*const fn (?*anyopaque, std.Io.Dir, []const u8) anyerror!void = null,
+    after_final_preimage_read: ?*const fn (?*anyopaque, std.Io.Dir, []const u8) anyerror!void = null,
+    after_final_validation: ?*const fn (?*anyopaque) anyerror!void = null,
+};
+
+const CreatedParentRecord = struct {
+    component_index: usize,
+    path_end: usize,
+    permission_target_index: usize,
+    identity: file_mutation_contract.FileIdentity,
+};
+
+const PreimageValidation = union(enum) {
+    valid: ?std.Io.File.Permissions,
+    stale,
+    io_failure,
+};
+
+const TraversalValidation = union(enum) {
+    parent: std.Io.Dir,
+    changed,
+    io_failure,
+};
+
+const StagedSourceValidation = enum {
+    valid,
+    changed,
+    io_failure,
+};
+
+const TargetEntryValidation = enum {
+    valid,
+    changed,
+    io_failure,
+};
+
+const StagedWriteError = error{
+    Canceled,
+    IoFailure,
+};
+
+const ApplyResources = struct {
+    policy: PolicyEvaluatedFileTargets,
+    created: *[file_mutation_contract.max_file_target_components]CreatedParentRecord,
+    realized: *[file_mutation_contract.max_file_target_components]file_mutation_contract.FileIdentity,
+    residue_storage: []CreatedParentResidue,
+    created_count: usize = 0,
+    parent: ?std.Io.Dir = null,
+    temp_name: ?[]const u8 = null,
+    temp_identity: ?file_mutation_contract.FileIdentity = null,
+
+    fn closeParent(self: *ApplyResources) void {
+        if (self.parent) |parent| parent.close(io_mod.getIo());
+        self.parent = null;
+    }
+
+    fn reject(
+        self: *ApplyResources,
+        reason: ApplyRejectionReason,
+    ) ApplyResult {
+        self.cleanupTemp();
+        self.closeParent();
+        const residues = self.cleanupCreatedParents();
+        return .{ .rejected = .{
+            .reason = reason,
+            .created_parent_residue = residues,
+        } };
+    }
+
+    fn cleanupTemp(self: *ApplyResources) void {
+        const parent = self.parent orelse return;
+        const temp_name = self.temp_name orelse return;
+        const expected_identity = self.temp_identity orelse return;
+        const actual_identity = observedFileIdentity(parent, temp_name) orelse return;
+        if (!identityEql(actual_identity, expected_identity)) return;
+        parent.deleteFile(io_mod.getIo(), temp_name) catch return;
+        self.temp_name = null;
+        self.temp_identity = null;
+    }
+
+    fn cleanupCreatedParents(
+        self: *ApplyResources,
+    ) []const CreatedParentResidue {
+        var residue_count: usize = 0;
+        var index = self.created_count;
+        while (index > 0) {
+            index -= 1;
+            const created = self.created[index];
+            if (cleanupCreatedParent(self.policy, self.realized, created)) |residue| {
+                self.residue_storage[residue_count] = residue;
+                residue_count += 1;
+            }
+        }
+        return self.residue_storage[0..residue_count];
+    }
+};
+
+pub fn apply(
+    call_alloc: std.mem.Allocator,
+    result_alloc: std.mem.Allocator,
+    call: types.ToolCall,
+    authorization: file_mutation_contract.FileExecutionAuthorization,
+    cancel_flag: *std.atomic.Value(bool),
+) FileMutationApplyError!ApplyResult {
+    return applyWithTestControls(
+        call_alloc,
+        result_alloc,
+        call,
+        authorization,
+        cancel_flag,
+        .{},
+    );
+}
+
+fn applyWithTestControls(
+    call_alloc: std.mem.Allocator,
+    result_alloc: std.mem.Allocator,
+    call: types.ToolCall,
+    authorization: file_mutation_contract.FileExecutionAuthorization,
+    cancel_flag: *std.atomic.Value(bool),
+    test_controls: ApplyTestControls,
+) FileMutationApplyError!ApplyResult {
+    const prepared = authorization.prepared orelse {
+        return rejectedWithoutResidue(.binding_mismatch);
+    };
+    if (!applyBindingValid(call, authorization.policy_targets, prepared)) {
+        return rejectedWithoutResidue(.binding_mismatch);
+    }
+    const commit_claim = preparedCommitClaim(prepared);
+    if (commit_claim.claimed.load(.seq_cst)) {
+        return error.ResultContractViolation;
+    }
+    if (cancel_flag.load(.seq_cst)) return rejectedWithoutResidue(.cancelled);
+
+    const residue_storage = try call_alloc.alloc(
+        CreatedParentResidue,
+        prepared.policy_targets.traversal_directories.len,
+    );
+    const previous_content = switch (prepared.preimage) {
+        .absent => null,
+        .present => |present| present.content,
+    };
+    var handoff = try dupeCommittedFileHandoff(
+        result_alloc,
+        prepared.preview,
+        prepared.kind,
+        prepared.target_path,
+        previous_content,
+    );
+    var handoff_owned = true;
+    defer if (handoff_owned) handoff.deinit(result_alloc);
+
+    var created: [file_mutation_contract.max_file_target_components]CreatedParentRecord =
+        undefined;
+    var realized: [file_mutation_contract.max_file_target_components]file_mutation_contract.FileIdentity =
+        undefined;
+    var resources: ApplyResources = .{
+        .policy = prepared.policy_targets,
+        .created = &created,
+        .realized = &realized,
+        .residue_storage = residue_storage,
+    };
+    defer resources.closeParent();
+
+    io_mod.e2eFailIfDurableMutationAttempted();
+    if (realizeTraversal(&resources)) |reason| return resources.reject(reason);
+    const parent = resources.parent.?;
+    const target_name = prepared.policy_targets.component(
+        prepared.policy_targets.anchor.relative_components[
+            prepared.policy_targets.anchor.relative_components.len - 1
+        ],
+    );
+
+    const initial_preimage = validatePreimage(
+        parent,
+        target_name,
+        prepared,
+        null,
+        null,
+        null,
+    );
+    const destination_permissions = switch (initial_preimage) {
+        .valid => |permissions| permissions,
+        .stale => return resources.reject(.stale_preimage),
+        .io_failure => return resources.reject(.io_failure),
+    };
+
+    var random_bytes: [16]u8 = undefined;
+    io_mod.getIo().random(&random_bytes);
+    const suffix = std.fmt.bytesToHex(random_bytes, .lower);
+    var temp_name_buffer: [".fx-stage-".len + suffix.len]u8 = undefined;
+    @memcpy(temp_name_buffer[0..".fx-stage-".len], ".fx-stage-");
+    @memcpy(temp_name_buffer[".fx-stage-".len..], suffix[0..]);
+    const temp_name = temp_name_buffer[0..];
+
+    var stage = parent.createFile(io_mod.getIo(), temp_name, .{
+        .read = true,
+        .truncate = false,
+        .exclusive = true,
+        .permissions = destination_permissions orelse .default_file,
+        .resolve_beneath = true,
+    }) catch return resources.reject(.io_failure);
+    resources.temp_name = temp_name;
+    defer stage.close(io_mod.getIo());
+
+    const initial_stage_stat = stage.stat(io_mod.getIo()) catch
+        return resources.reject(.io_failure);
+    if (initial_stage_stat.kind != .file or initial_stage_stat.nlink != 1) {
+        return resources.reject(.staged_source_changed);
+    }
+    resources.temp_identity = pathing.fileIdentity(
+        pathing.descriptorDevice(stage.handle) catch return resources.reject(.io_failure),
+        initial_stage_stat,
+    );
+    if (destination_permissions) |permissions| {
+        stage.setPermissions(io_mod.getIo(), permissions) catch
+            return resources.reject(.io_failure);
+    }
+    writeStagedContent(
+        &stage,
+        prepared.after_content,
+        cancel_flag,
+        test_controls,
+    ) catch |err| {
+        return resources.reject(switch (err) {
+            error.Canceled => .cancelled,
+            error.IoFailure => .io_failure,
+        });
+    };
+    stage.sync(io_mod.getIo()) catch return resources.reject(.io_failure);
+    if (cancel_flag.load(.seq_cst)) return resources.reject(.cancelled);
+
+    if (test_controls.after_stage) |after_stage| {
+        after_stage(test_controls.ctx, parent, temp_name) catch
+            return resources.reject(.io_failure);
+    }
+    if (!applyBindingValid(call, authorization.policy_targets, prepared)) {
+        return resources.reject(.binding_mismatch);
+    }
+    if (cancel_flag.load(.seq_cst)) return resources.reject(.cancelled);
+
+    switch (validatePreimage(
+        parent,
+        target_name,
+        prepared,
+        destination_permissions,
+        test_controls.ctx,
+        test_controls.after_final_preimage_read,
+    )) {
+        .valid => {},
+        .stale => return resources.reject(.stale_preimage),
+        .io_failure => return resources.reject(.io_failure),
+    }
+    switch (validateStagedSource(
+        parent,
+        temp_name,
+        &stage,
+        resources.temp_identity.?,
+        prepared.after_content,
+    )) {
+        .valid => {},
+        .changed => return resources.reject(.staged_source_changed),
+        .io_failure => return resources.reject(.io_failure),
+    }
+    if (cancel_flag.load(.seq_cst)) return resources.reject(.cancelled);
+
+    const revalidated = revalidateTraversal(&resources);
+    var commit_parent = switch (revalidated) {
+        .parent => |revalidated_parent| revalidated_parent,
+        .changed => return resources.reject(.traversal_changed),
+        .io_failure => return resources.reject(.io_failure),
+    };
+    defer commit_parent.close(io_mod.getIo());
+
+    switch (validateTargetEntry(
+        commit_parent,
+        target_name,
+        prepared.policy_targets.items[0].expected_identity,
+    )) {
+        .valid => {},
+        .changed => return resources.reject(.stale_preimage),
+        .io_failure => return resources.reject(.io_failure),
+    }
+    switch (validateStagedSourceIdentity(
+        commit_parent,
+        temp_name,
+        &stage,
+        resources.temp_identity.?,
+        prepared.after_content.len,
+    )) {
+        .valid => {},
+        .changed => return resources.reject(.staged_source_changed),
+        .io_failure => return resources.reject(.io_failure),
+    }
+    if (cancel_flag.load(.seq_cst)) return resources.reject(.cancelled);
+    if (test_controls.after_final_validation) |after_final_validation| {
+        after_final_validation(test_controls.ctx) catch
+            return resources.reject(.io_failure);
+    }
+    if (commit_claim.claimed.cmpxchgStrong(
+        false,
+        true,
+        .seq_cst,
+        .seq_cst,
+    ) != null) {
+        resources.cleanupTemp();
+        resources.closeParent();
+        _ = resources.cleanupCreatedParents();
+        return error.ResultContractViolation;
+    }
+
+    // The fresh descriptor binds the final entry checks and rename to the
+    // revalidated parent. The platform cannot freeze its namespace after
+    // these checks, so a competing move can still win the remaining window.
+    commit_parent.rename(
+        temp_name,
+        commit_parent,
+        target_name,
+        io_mod.getIo(),
+    ) catch return resources.reject(.io_failure);
+    resources.temp_name = null;
+    resources.temp_identity = null;
+    resources.closeParent();
+
+    handoff.tracker.committed_at_ms = io_mod.milliTimestamp();
+    handoff_owned = false;
+    return .{ .committed = handoff };
+}
+
+fn preparedCommitClaim(prepared: PreparedFileMutation) *CommitClaim {
+    return @ptrCast(@alignCast(prepared.commit_token));
+}
+
+fn dupeCommittedFileHandoff(
+    alloc: Allocator,
+    preview: diff_mod.FileChangePreview,
+    kind: file_mutation_contract.Kind,
+    raw_path: []const u8,
+    previous_content: ?[]const u8,
+) Allocator.Error!CommittedFileHandoff {
+    const owned_path = try alloc.dupe(u8, preview.path);
+    errdefer alloc.free(owned_path);
+
+    const owned_lines = try alloc.alloc(
+        diff_mod.PreviewLine,
+        preview.lines.len,
+    );
+    errdefer alloc.free(owned_lines);
+    var initialized_lines: usize = 0;
+    errdefer for (owned_lines[0..initialized_lines]) |line| {
+        alloc.free(@constCast(line.text));
+    };
+    for (preview.lines, owned_lines) |source, *destination| {
+        destination.* = source;
+        destination.text = try alloc.dupe(u8, source.text);
+        initialized_lines += 1;
+    }
+
+    const owned_raw_path = try alloc.dupe(u8, raw_path);
+    errdefer alloc.free(owned_raw_path);
+    const owned_previous_content = if (previous_content) |content|
+        try alloc.dupe(u8, content)
+    else
+        null;
+    errdefer if (owned_previous_content) |content| alloc.free(content);
+
+    return CommittedFileHandoff.init(
+        .{
+            .path = owned_path,
+            .lines = owned_lines,
+            .additions = preview.additions,
+            .deletions = preview.deletions,
+            .truncated = preview.truncated,
+        },
+        .{
+            .kind = kind,
+            .raw_path = owned_raw_path,
+            .previous_content = owned_previous_content,
+            .committed_at_ms = 0,
+        },
+    );
+}
+
+fn writeStagedContent(
+    stage: *std.Io.File,
+    content: []const u8,
+    cancel_flag: *std.atomic.Value(bool),
+    test_controls: ApplyTestControls,
+) StagedWriteError!void {
+    const chunk_bytes: usize = 64 * 1024;
+    var offset: usize = 0;
+    while (offset < content.len) {
+        if (cancel_flag.load(.seq_cst)) return error.Canceled;
+        const end = @min(offset + chunk_bytes, content.len);
+        stage.writeStreamingAll(io_mod.getIo(), content[offset..end]) catch
+            return error.IoFailure;
+        offset = end;
+        if (test_controls.after_write_chunk) |after_write_chunk| {
+            after_write_chunk(test_controls.ctx, offset) catch return error.IoFailure;
+        }
+    }
+    if (cancel_flag.load(.seq_cst)) return error.Canceled;
+}
+
+fn rejectedWithoutResidue(
+    reason: ApplyRejectionReason,
+) ApplyResult {
+    return .{ .rejected = .{
+        .reason = reason,
+        .created_parent_residue = &.{},
+    } };
+}
+
+fn validateStagedSource(
+    parent: std.Io.Dir,
+    temp_name: []const u8,
+    stage: *std.Io.File,
+    expected_identity: file_mutation_contract.FileIdentity,
+    expected_content: []const u8,
+) StagedSourceValidation {
+    switch (validateStagedSourceIdentity(
+        parent,
+        temp_name,
+        stage,
+        expected_identity,
+        expected_content.len,
+    )) {
+        .valid => {},
+        .changed => return .changed,
+        .io_failure => return .io_failure,
+    }
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var reader_buffer: [8192]u8 = undefined;
+    var reader = stage.reader(io_mod.getIo(), &reader_buffer);
+    reader.seekTo(0) catch return .io_failure;
+    var chunk: [8192]u8 = undefined;
+    while (true) {
+        const bytes_read = reader.interface.readSliceShort(&chunk) catch
+            return .io_failure;
+        if (bytes_read == 0) break;
+        hasher.update(chunk[0..bytes_read]);
+    }
+
+    var expected_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    expected_hasher.update(expected_content);
+    if (!std.mem.eql(
+        u8,
+        &hasher.finalResult(),
+        &expected_hasher.finalResult(),
+    )) return .changed;
+    return .valid;
+}
+
+fn validateStagedSourceIdentity(
+    parent: std.Io.Dir,
+    temp_name: []const u8,
+    stage: *std.Io.File,
+    expected_identity: file_mutation_contract.FileIdentity,
+    expected_size: usize,
+) StagedSourceValidation {
+    const zio = io_mod.getIo();
+    const stat = stage.stat(zio) catch return .io_failure;
+    if (stat.kind != .file or
+        stat.nlink != 1 or
+        stat.size != expected_size)
+    {
+        return .changed;
+    }
+    const handle_identity = pathing.fileIdentity(
+        pathing.descriptorDevice(stage.handle) catch return .io_failure,
+        stat,
+    );
+    if (!identityEql(handle_identity, expected_identity)) return .changed;
+
+    const named_identity = observedFileIdentity(parent, temp_name) orelse
+        return .changed;
+    if (!identityEql(named_identity, expected_identity)) return .changed;
+    return .valid;
+}
+
+fn applyBindingValid(
+    call: types.ToolCall,
+    policy: PolicyEvaluatedFileTargets,
+    prepared: PreparedFileMutation,
+) bool {
+    if (!std.mem.eql(u8, call.id, prepared.call_id)) return false;
+    if (!std.mem.eql(u8, call.name, prepared.tool_name)) return false;
+    const expected_kind: file_mutation_contract.Kind =
+        if (std.mem.eql(u8, call.name, "write_file"))
+            .write
+        else if (std.mem.eql(u8, call.name, "edit_file"))
+            .edit
+        else
+            return false;
+    if (prepared.kind != expected_kind) return false;
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(call.arguments_json);
+    if (!std.mem.eql(u8, &hasher.finalResult(), &prepared.arguments_hash)) {
+        return false;
+    }
+    if (!PolicyEvaluatedFileTargets.authorizationEql(policy, prepared.policy_targets)) {
+        return false;
+    }
+    if (!policy.proofValid()) return false;
+    if (!std.mem.eql(u8, prepared.target_path, policy.canonical_target_path)) {
+        return false;
+    }
+    if (!std.mem.eql(u8, prepared.display_path, prepared.preview.path)) return false;
+    prepared.preview.validate() catch return false;
+    if (prepared.after_content.len > max_content_bytes) return false;
+    switch (prepared.preimage) {
+        .absent => {},
+        .present => |present| {
+            if (present.content.len > max_content_bytes) return false;
+            var content_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            content_hasher.update(present.content);
+            if (!std.mem.eql(
+                u8,
+                &content_hasher.finalResult(),
+                &present.content_hash,
+            )) return false;
+        },
+    }
+    return true;
+}
+
+fn realizeTraversal(
+    resources: *ApplyResources,
+) ?ApplyRejectionReason {
+    const zio = io_mod.getIo();
+    var current = std.Io.Dir.openDirAbsolute(
+        zio,
+        resources.policy.anchorPath(),
+        .{ .follow_symlinks = false },
+    ) catch |err| return if (pathStateChanged(err)) .traversal_changed else .io_failure;
+
+    const anchor_identity = pathing.directoryIdentity(current) catch {
+        current.close(zio);
+        return .io_failure;
+    };
+    if (!identityEql(anchor_identity, resources.policy.anchor.identity)) {
+        current.close(zio);
+        return .traversal_changed;
+    }
+
+    for (resources.policy.traversal_directories, 0..) |entry, index| {
+        const component = resources.policy.component(
+            resources.policy.anchor.relative_components[entry.component_index],
+        );
+        switch (entry.state) {
+            .existing => |expected_identity| {
+                const next = current.openDir(
+                    zio,
+                    component,
+                    .{ .follow_symlinks = false },
+                ) catch |err| {
+                    current.close(zio);
+                    return if (pathStateChanged(err)) .traversal_changed else .io_failure;
+                };
+                const actual_identity = pathing.directoryIdentity(next) catch {
+                    next.close(zio);
+                    current.close(zio);
+                    return .io_failure;
+                };
+                if (!identityEql(actual_identity, expected_identity)) {
+                    next.close(zio);
+                    current.close(zio);
+                    return .traversal_changed;
+                }
+                resources.realized[index] = actual_identity;
+                current.close(zio);
+                current = next;
+            },
+            .create => |create| {
+                current.createDir(zio, component, .default_dir) catch |err| {
+                    current.close(zio);
+                    return if (pathStateChanged(err) or err == error.PathAlreadyExists)
+                        .traversal_changed
+                    else
+                        .io_failure;
+                };
+                const next = current.openDir(
+                    zio,
+                    component,
+                    .{ .follow_symlinks = false },
+                ) catch {
+                    current.deleteDir(zio, component) catch {};
+                    current.close(zio);
+                    return .io_failure;
+                };
+                const actual_identity = pathing.directoryIdentity(next) catch {
+                    next.close(zio);
+                    current.deleteDir(zio, component) catch {};
+                    current.close(zio);
+                    return .io_failure;
+                };
+                resources.realized[index] = actual_identity;
+                resources.created[resources.created_count] = .{
+                    .component_index = entry.component_index,
+                    .path_end = entry.path_end,
+                    .permission_target_index = create.permission_target_index,
+                    .identity = actual_identity,
+                };
+                resources.created_count += 1;
+                current.close(zio);
+                current = next;
+            },
+        }
+    }
+    resources.parent = current;
+    return null;
+}
+
+fn revalidateTraversal(resources: *ApplyResources) TraversalValidation {
+    const zio = io_mod.getIo();
+    var current = std.Io.Dir.openDirAbsolute(
+        zio,
+        resources.policy.anchorPath(),
+        .{ .follow_symlinks = false },
+    ) catch |err| return if (pathStateChanged(err)) .changed else .io_failure;
+
+    const anchor_identity = pathing.directoryIdentity(current) catch {
+        current.close(zio);
+        return .io_failure;
+    };
+    if (!identityEql(anchor_identity, resources.policy.anchor.identity)) {
+        current.close(zio);
+        return .changed;
+    }
+
+    for (resources.policy.traversal_directories, 0..) |entry, index| {
+        const component = resources.policy.component(
+            resources.policy.anchor.relative_components[entry.component_index],
+        );
+        const next = current.openDir(
+            zio,
+            component,
+            .{ .follow_symlinks = false },
+        ) catch |err| {
+            current.close(zio);
+            return if (pathStateChanged(err)) .changed else .io_failure;
+        };
+        const actual_identity = pathing.directoryIdentity(next) catch {
+            next.close(zio);
+            current.close(zio);
+            return .io_failure;
+        };
+        if (!identityEql(actual_identity, resources.realized[index])) {
+            next.close(zio);
+            current.close(zio);
+            return .changed;
+        }
+        current.close(zio);
+        current = next;
+    }
+    return .{ .parent = current };
+}
+
+fn validatePreimage(
+    parent: std.Io.Dir,
+    target_name: []const u8,
+    prepared: PreparedFileMutation,
+    expected_permissions: ?std.Io.File.Permissions,
+    test_control_ctx: ?*anyopaque,
+    after_present_read: ?*const fn (?*anyopaque, std.Io.Dir, []const u8) anyerror!void,
+) PreimageValidation {
+    const zio = io_mod.getIo();
+    return switch (prepared.preimage) {
+        .absent => blk: {
+            _ = parent.statFile(
+                zio,
+                target_name,
+                .{ .follow_symlinks = false },
+            ) catch |err| switch (err) {
+                error.FileNotFound => break :blk .{ .valid = null },
+                else => break :blk if (pathStateChanged(err)) .stale else .io_failure,
+            };
+            break :blk .stale;
+        },
+        .present => |expected| blk: {
+            var file = parent.openFile(zio, target_name, .{
+                .allow_directory = false,
+                .follow_symlinks = false,
+                .resolve_beneath = true,
+            }) catch |err| break :blk if (pathStateChanged(err)) .stale else .io_failure;
+            defer file.close(zio);
+
+            const stat = file.stat(zio) catch break :blk .io_failure;
+            if (stat.kind != .file or stat.size != expected.content.len) {
+                break :blk .stale;
+            }
+            const actual_identity = pathing.fileIdentity(
+                pathing.descriptorDevice(file.handle) catch break :blk .io_failure,
+                stat,
+            );
+            const expected_identity = prepared.policy_targets.items[0].expected_identity orelse
+                break :blk .stale;
+            if (!identityEql(actual_identity, expected_identity)) break :blk .stale;
+            if (stat.permissions.toMode() & 0o222 == 0) break :blk .io_failure;
+            if (expected_permissions) |permissions| {
+                if (stat.permissions.toMode() != permissions.toMode()) break :blk .stale;
+            }
+
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            var read_buffer: [8192]u8 = undefined;
+            var reader = file.reader(zio, &read_buffer);
+            var chunk: [8192]u8 = undefined;
+            while (true) {
+                const bytes_read = reader.interface.readSliceShort(&chunk) catch
+                    break :blk .io_failure;
+                if (bytes_read == 0) break;
+                hasher.update(chunk[0..bytes_read]);
+            }
+            if (!std.mem.eql(u8, &hasher.finalResult(), &expected.content_hash)) {
+                break :blk .stale;
+            }
+            if (after_present_read) |after_read| {
+                after_read(test_control_ctx, parent, target_name) catch
+                    break :blk .io_failure;
+            }
+            switch (validateTargetEntry(parent, target_name, actual_identity)) {
+                .valid => {},
+                .changed => break :blk .stale,
+                .io_failure => break :blk .io_failure,
+            }
+            break :blk .{ .valid = stat.permissions };
+        },
+    };
+}
+
+fn validateTargetEntry(
+    parent: std.Io.Dir,
+    name: []const u8,
+    expected_identity: ?file_mutation_contract.FileIdentity,
+) TargetEntryValidation {
+    const zio = io_mod.getIo();
+    if (expected_identity == null) {
+        _ = parent.statFile(
+            zio,
+            name,
+            .{ .follow_symlinks = false },
+        ) catch |err| return switch (err) {
+            error.FileNotFound => .valid,
+            else => if (pathStateChanged(err)) .changed else .io_failure,
+        };
+        return .changed;
+    }
+
+    var file = parent.openFile(zio, name, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .path_only = true,
+        .resolve_beneath = true,
+    }) catch |err| return if (pathStateChanged(err)) .changed else .io_failure;
+    defer file.close(zio);
+    const stat = file.stat(zio) catch return .io_failure;
+    if (stat.kind != .file) return .changed;
+    const actual_identity = pathing.fileIdentity(
+        pathing.descriptorDevice(file.handle) catch return .io_failure,
+        stat,
+    );
+    return if (identityEql(actual_identity, expected_identity.?))
+        .valid
+    else
+        .changed;
+}
+
+fn observedFileIdentity(
+    parent: std.Io.Dir,
+    name: []const u8,
+) ?file_mutation_contract.FileIdentity {
+    var file = parent.openFile(io_mod.getIo(), name, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .path_only = true,
+        .resolve_beneath = true,
+    }) catch return null;
+    defer file.close(io_mod.getIo());
+    const stat = file.stat(io_mod.getIo()) catch return null;
+    if (stat.kind != .file or stat.nlink != 1) return null;
+    return pathing.fileIdentity(
+        pathing.descriptorDevice(file.handle) catch return null,
+        stat,
+    );
+}
+
+fn cleanupCreatedParent(
+    policy: PolicyEvaluatedFileTargets,
+    realized: *const [file_mutation_contract.max_file_target_components]file_mutation_contract.FileIdentity,
+    created: CreatedParentRecord,
+) ?CreatedParentResidue {
+    const zio = io_mod.getIo();
+    var current = std.Io.Dir.openDirAbsolute(
+        zio,
+        policy.anchorPath(),
+        .{ .follow_symlinks = false },
+    ) catch return createdParentResidue(created, null, .identity_changed);
+
+    const anchor_identity = pathing.directoryIdentity(current) catch {
+        current.close(zio);
+        return createdParentResidue(created, null, .identity_changed);
+    };
+    if (!identityEql(anchor_identity, policy.anchor.identity)) {
+        current.close(zio);
+        return createdParentResidue(created, null, .identity_changed);
+    }
+
+    for (policy.traversal_directories[0..created.component_index], 0..) |entry, index| {
+        const component = policy.component(
+            policy.anchor.relative_components[entry.component_index],
+        );
+        const next = current.openDir(
+            zio,
+            component,
+            .{ .follow_symlinks = false },
+        ) catch {
+            current.close(zio);
+            return createdParentResidue(created, null, .identity_changed);
+        };
+        const actual_identity = pathing.directoryIdentity(next) catch {
+            next.close(zio);
+            current.close(zio);
+            return createdParentResidue(created, null, .identity_changed);
+        };
+        if (!identityEql(actual_identity, realized[index])) {
+            next.close(zio);
+            current.close(zio);
+            return createdParentResidue(created, null, .identity_changed);
+        }
+        current.close(zio);
+        current = next;
+    }
+    defer current.close(zio);
+
+    const component = policy.component(
+        policy.anchor.relative_components[created.component_index],
+    );
+    const child = current.openDir(
+        zio,
+        component,
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return createdParentResidue(created, null, .identity_changed),
+    };
+    const observed = pathing.directoryIdentity(child) catch {
+        child.close(zio);
+        return createdParentResidue(created, null, .identity_changed);
+    };
+    child.close(zio);
+    if (!identityEql(observed, created.identity)) {
+        return createdParentResidue(created, observed, .identity_changed);
+    }
+
+    current.deleteDir(zio, component) catch |err| return createdParentResidue(
+        created,
+        observed,
+        if (err == error.DirNotEmpty) .not_empty else .remove_failed,
+    );
+    return null;
+}
+
+fn createdParentResidue(
+    created: CreatedParentRecord,
+    observed_identity: ?file_mutation_contract.FileIdentity,
+    reason: ParentCleanupResidueReason,
+) CreatedParentResidue {
+    return .{
+        .component_index = created.component_index,
+        .path_end = created.path_end,
+        .permission_target_index = created.permission_target_index,
+        .observed_identity = observed_identity,
+        .reason = reason,
+    };
+}
+
+fn pathStateChanged(err: anyerror) bool {
+    return switch (err) {
+        error.FileNotFound,
+        error.NotDir,
+        error.SymLinkLoop,
+        error.PathAlreadyExists,
+        error.IsDir,
+        => true,
+        else => false,
+    };
+}
+
+fn policyIdentityBindingMismatch(policy: PolicyEvaluatedFileTargets) bool {
+    if (policy.items.len < 2) return false;
+    const parent_item = policy.items[1];
+    if (parent_item.kind != .parent) return false;
+
+    if (policy.traversal_directories.len == 0) {
+        if (parent_item.disposition != .existing_parent or
+            parent_item.path_end != policy.anchor.path_end)
+        {
+            return false;
+        }
+        return !optionalIdentityEql(
+            parent_item.expected_identity,
+            policy.anchor.identity,
+        );
+    }
+
+    const parent = policy.traversal_directories[
+        policy.traversal_directories.len - 1
+    ];
+    return switch (parent.state) {
+        .existing => |identity| parent_item.disposition == .existing_parent and
+            parent_item.path_end == parent.path_end and
+            !optionalIdentityEql(parent_item.expected_identity, identity),
+        .create => parent_item.disposition == .create_parent and
+            parent_item.path_end == parent.path_end and
+            parent_item.expected_identity != null,
+    };
+}
+
+fn checkedCharge(base: usize, count: usize, item_size: usize) ?usize {
+    const bytes = std.math.mul(usize, count, item_size) catch return null;
+    return std.math.add(usize, base, bytes) catch null;
+}
+
+fn resolvedTargetMatches(
+    input: file_mutation_contract.FileMutationInput,
+    policy: PolicyEvaluatedFileTargets,
+) FileMutationPrepareError!bool {
+    if (builtin.is_test) target_resolution_check_count += 1;
+    var primary_path_scratch: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var secondary_path_scratch: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var component_scratch: [file_mutation_contract.max_file_target_components]pathing.BoundedFileTargetComponent =
+        undefined;
+    const resolved = pathing.resolveFileMutationTargetBounded(
+        policy.anchorPath(),
+        input.path(),
+        switch (input) {
+            .write => .create,
+            .edit => .existing,
+        },
+        &primary_path_scratch,
+        &secondary_path_scratch,
+        &component_scratch,
+    ) catch |err| {
+        if (operationalError(err)) |operational| return operational;
+        return false;
+    };
+
+    if (!std.mem.eql(
+        u8,
+        resolved.canonical_target_path,
+        policy.canonical_target_path,
+    )) return false;
+    if (resolved.anchor_path_end != policy.anchor.path_end) return false;
+    if (resolved.relative_components.len != policy.anchor.relative_components.len) {
+        return false;
+    }
+    for (resolved.relative_components, policy.anchor.relative_components) |actual, expected| {
+        if (actual.start != expected.start or actual.end != expected.end) return false;
+    }
+    return true;
+}
+
+fn verifyAndReadPreimage(
+    alloc: Allocator,
+    input: file_mutation_contract.FileMutationInput,
+    policy: PolicyEvaluatedFileTargets,
+) FileMutationPrepareError!PreimageResult {
+    const zio = io_mod.getIo();
+    var current_dir = std.Io.Dir.openDirAbsolute(
+        zio,
+        policy.anchorPath(),
+        .{ .follow_symlinks = false },
+    ) catch |err| {
+        if (operationalError(err)) |operational| return operational;
+        return .{ .semantic_failure = identity_changed_message };
+    };
+    defer current_dir.close(zio);
+
+    const anchor_identity = pathing.directoryIdentity(current_dir) catch |err| {
+        if (operationalError(err)) |operational| return operational;
+        return .{ .semantic_failure = identity_changed_message };
+    };
+    if (!identityEql(anchor_identity, policy.anchor.identity)) {
+        return .{ .semantic_failure = identity_changed_message };
+    }
+
+    var missing_parent_seen = false;
+    for (policy.traversal_directories) |entry| {
+        const component = policy.component(
+            policy.anchor.relative_components[entry.component_index],
+        );
+        switch (entry.state) {
+            .existing => |expected_identity| {
+                if (missing_parent_seen) {
+                    return .{ .semantic_failure = identity_changed_message };
+                }
+                const next_dir = current_dir.openDir(
+                    zio,
+                    component,
+                    .{ .follow_symlinks = false },
+                ) catch |err| {
+                    if (operationalError(err)) |operational| return operational;
+                    return .{ .semantic_failure = identity_changed_message };
+                };
+                const actual_identity = pathing.directoryIdentity(next_dir) catch |err| {
+                    next_dir.close(zio);
+                    if (operationalError(err)) |operational| return operational;
+                    return .{ .semantic_failure = identity_changed_message };
+                };
+                if (!identityEql(actual_identity, expected_identity)) {
+                    next_dir.close(zio);
+                    return .{ .semantic_failure = identity_changed_message };
+                }
+                current_dir.close(zio);
+                current_dir = next_dir;
+            },
+            .create => {
+                if (missing_parent_seen) continue;
+                _ = current_dir.statFile(
+                    zio,
+                    component,
+                    .{ .follow_symlinks = false },
+                ) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        missing_parent_seen = true;
+                        continue;
+                    },
+                    else => {
+                        if (operationalError(err)) |operational| return operational;
+                        return .{ .semantic_failure = identity_changed_message };
+                    },
+                };
+                return .{ .semantic_failure = identity_changed_message };
+            },
+        }
+    }
+
+    const target_span = policy.anchor.relative_components[
+        policy.anchor.relative_components.len - 1
+    ];
+    const target_name = policy.component(target_span);
+    const expected_target_identity = policy.items[0].expected_identity;
+    if (missing_parent_seen) {
+        if (expected_target_identity != null or input != .write) {
+            return .{ .semantic_failure = identity_changed_message };
+        }
+        return .{ .preimage = .absent };
+    }
+
+    const path_stat = current_dir.statFile(
+        zio,
+        target_name,
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (expected_target_identity != null or input != .write) {
+                return .{ .semantic_failure = identity_changed_message };
+            }
+            return .{ .preimage = .absent };
+        },
+        else => {
+            if (operationalError(err)) |operational| return operational;
+            return .{ .semantic_failure = identity_changed_message };
+        },
+    };
+    const expected_identity = expected_target_identity orelse {
+        return .{ .semantic_failure = identity_changed_message };
+    };
+    if (path_stat.kind != .file or expected_identity.kind != .file) {
+        return .{ .semantic_failure = "file mutation preparation failed: target is not a regular file" };
+    }
+
+    var file = current_dir.openFile(zio, target_name, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+    }) catch |err| {
+        if (operationalError(err)) |operational| return operational;
+        return .{ .semantic_failure = identity_changed_message };
+    };
+    defer file.close(zio);
+
+    const file_stat = file.stat(zio) catch |err| {
+        if (operationalError(err)) |operational| return operational;
+        return .{ .semantic_failure = identity_changed_message };
+    };
+    const actual_identity: file_mutation_contract.FileIdentity = .{
+        .device = try pathing.descriptorDevice(file.handle),
+        .inode = @intCast(file_stat.inode),
+        .kind = file_stat.kind,
+    };
+    if (!identityEql(actual_identity, expected_identity)) {
+        return .{ .semantic_failure = identity_changed_message };
+    }
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(zio, &read_buf);
+    const content = reader.interface.allocRemaining(
+        alloc,
+        .limited(max_content_bytes + 1),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StreamTooLong => return .{ .semantic_failure = file_too_large_message },
+        error.ReadFailed => {
+            const root = reader.err orelse return error.Unexpected;
+            if (operationalError(root)) |operational| return operational;
+            return .{ .semantic_failure = "file mutation preparation failed: unable to read the approved preimage" };
+        },
+    };
+    if (content.len > max_content_bytes) {
+        return .{ .semantic_failure = file_too_large_message };
+    }
+
+    var content_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    content_hasher.update(content);
+    return .{ .preimage = .{ .present = .{
+        .content = content,
+        .content_hash = content_hasher.finalResult(),
+    } } };
+}
+
+fn derivePostimage(
+    alloc: Allocator,
+    input: file_mutation_contract.FileMutationInput,
+    preimage: file_mutation_contract.Preimage,
+    failure_detail: file_mutation_contract.EditFailureDetail,
+) error{OutOfMemory}!PostimageResult {
+    return switch (input) {
+        .write => |write| .{
+            .content = try alloc.dupe(u8, write.content),
+        },
+        .edit => |edit| blk: {
+            if (std.mem.eql(u8, edit.old_string, edit.new_string)) {
+                break :blk .{ .semantic_failure = "edit_file failed: old_string and new_string are identical" };
+            }
+            const before = switch (preimage) {
+                .absent => break :blk .{ .semantic_failure = identity_changed_message },
+                .present => |present| present.content,
+            };
+            var old_string = edit.old_string;
+            var new_string = edit.new_string;
+            var occurrence_count = countOccurrences(before, old_string);
+            // Tool output shows a file's carried tags starting `&lt;` (D93), so an
+            // edit copied from it that matches only as the file has them
+            // means the file's `<`, in the old and the new text alike.
+            var shown_old: ?[]u8 = null;
+            defer if (shown_old) |text| alloc.free(text);
+            var shown_new: ?[]u8 = null;
+            defer if (shown_new) |text| alloc.free(text);
+            if (occurrence_count == 0) {
+                shown_old = try model_context_encoding.unescapeCarried(alloc, old_string);
+                if (shown_old) |shown| {
+                    const shown_count = countOccurrences(before, shown);
+                    if (shown_count > 0) {
+                        shown_new = try model_context_encoding.unescapeCarried(alloc, new_string);
+                        old_string = shown;
+                        new_string = shown_new orelse new_string;
+                        occurrence_count = shown_count;
+                    }
+                }
+            }
+            if (occurrence_count != 1) {
+                break :blk .{ .semantic_failure = try matchFailureMessage(alloc, failure_detail, before, old_string, occurrence_count) };
+            }
+
+            const match_start = std.mem.find(
+                u8,
+                before,
+                old_string,
+            ).?;
+            const prefix_len = match_start;
+            const suffix_start = match_start + old_string.len;
+            var after_len = std.math.add(
+                usize,
+                prefix_len,
+                new_string.len,
+            ) catch break :blk .{ .semantic_failure = edited_file_too_large_message };
+            after_len = std.math.add(
+                usize,
+                after_len,
+                before.len - suffix_start,
+            ) catch break :blk .{ .semantic_failure = edited_file_too_large_message };
+            if (after_len > max_content_bytes) {
+                break :blk .{ .semantic_failure = edited_file_too_large_message };
+            }
+
+            const after = try alloc.alloc(u8, after_len);
+            @memcpy(after[0..prefix_len], before[0..prefix_len]);
+            const replacement_end = prefix_len + new_string.len;
+            @memcpy(after[prefix_len..replacement_end], new_string);
+            @memcpy(after[replacement_end..], before[suffix_start..]);
+            break :blk .{ .content = after };
+        },
+    };
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    if (needle.len == 0) return 0;
+    var count: usize = 0;
+    var index: usize = 0;
+    while (std.mem.find(u8, haystack[index..], needle)) |relative| {
+        count += 1;
+        index += relative + needle.len;
+    }
+    return count;
+}
+
+const not_found_message = "edit_file failed: old_string not found in file. Re-read the file to see its current contents; if the change is already applied, do not retry this edit.";
+/// The closest match is shown only while it stays short enough to copy.
+const max_hint_lines = 40;
+const max_hint_bytes = 4096;
+/// The snippets of a not-unique old_string get half the hint budget; each
+/// needs only enough lines for the next call to add context.
+const max_snippet_bytes = max_hint_bytes / 2;
+/// Lines shorter than this, such as `}` or `end`, recur through most files
+/// and cannot place a match.
+const min_anchor_bytes = 4;
+/// A lone line places a match only when it shares this much of its start or
+/// end with a file line, and at least 1/min_shared_divisor of its length.
+const min_shared_bytes = 8;
+const min_shared_divisor = 2;
+const max_listed_lines = 5;
+const max_shown_occurrences = 3;
+/// Lines shown before each occurrence of a not-unique old_string.
+const context_lines_before = 2;
+/// Bounds the line comparison on large files; a longer old_string still
+/// places its window by its first lines.
+const max_compared_lines = 256;
+/// Finding the closest window compares every file line with old_string's
+/// lines, so past this many lines the hint would cost more time and memory
+/// than re-reading the file, and the message stays the plain advice.
+const max_hint_file_lines = 100_000;
+
+/// The failure for an old_string found zero or several times. `.file_lines`
+/// quotes the lines the edit most likely meant; `.plain` keeps the recovery
+/// advice alone, for a file the model may not read without approval.
+fn matchFailureMessage(
+    alloc: Allocator,
+    detail: file_mutation_contract.EditFailureDetail,
+    content: []const u8,
+    old_string: []const u8,
+    occurrence_count: usize,
+) error{OutOfMemory}![]const u8 {
+    if (occurrence_count == 0) return switch (detail) {
+        .plain => not_found_message,
+        .file_lines => try notFoundMessage(alloc, content, old_string),
+    };
+    return switch (detail) {
+        .plain => try alloc.print(
+            "edit_file failed: old_string is not unique (found {d} occurrences), provide more context",
+            .{occurrence_count},
+        ),
+        .file_lines => try notUniqueMessage(alloc, content, old_string, occurrence_count),
+    };
+}
+
+/// A failed edit usually copies text the model remembers rather than text the
+/// file holds now. Showing the lines it most likely meant lets the next call
+/// copy them instead of reading the whole file again. Without a close match
+/// the message stays the plain recovery advice.
+fn notFoundMessage(alloc: Allocator, content: []const u8, old_string: []const u8) error{OutOfMemory}![]const u8 {
+    const span = (try closestLines(alloc, content, old_string)) orelse return not_found_message;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    if (span.first == span.last) {
+        try out.print(alloc, "edit_file failed: old_string not found in file; the closest match is line {d}.\nIt currently reads:\n", .{span.first + 1});
+    } else {
+        try out.print(alloc, "edit_file failed: old_string not found in file; the closest match is lines {d}-{d}.\nThey currently read:\n", .{ span.first + 1, span.last + 1 });
+    }
+    try out.appendSlice(alloc, content[span.start..span.end]);
+    try out.appendSlice(alloc, "\nIf the change is already applied, do not retry this edit.");
+    return out.toOwnedSlice(alloc);
+}
+
+/// Names the lines of the first occurrences and shows each with the lines
+/// before it, so the next call can add the context that picks one without
+/// reading the file again.
+fn notUniqueMessage(alloc: Allocator, content: []const u8, old_string: []const u8, occurrence_count: usize) error{OutOfMemory}![]const u8 {
+    const found = occurrenceLines(content, old_string);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.print(alloc, "edit_file failed: old_string is not unique (found {d} occurrences, on line{s} ", .{ occurrence_count, if (found.count == 1) "" else "s" });
+    for (found.numbers[0..found.count], 0..) |number, i| {
+        try out.print(alloc, "{s}{d}", .{ if (i == 0) "" else ", ", number });
+    }
+    if (found.more) try out.appendSlice(alloc, ", ...");
+    try out.appendSlice(alloc, "), provide more context");
+    try appendOccurrenceSnippets(alloc, &out, content, old_string);
+    return out.toOwnedSlice(alloc);
+}
+
+const OccurrenceLines = struct {
+    /// One-based; a line that holds several occurrences is listed once.
+    numbers: [max_listed_lines]usize = undefined,
+    count: usize = 0,
+    /// More lines hold an occurrence than `numbers` lists.
+    more: bool = false,
+};
+
+fn occurrenceLines(content: []const u8, old_string: []const u8) OccurrenceLines {
+    var found: OccurrenceLines = .{};
+    var line: usize = 1;
+    var scanned: usize = 0;
+    var index: usize = 0;
+    while (std.mem.find(u8, content[index..], old_string)) |relative| {
+        const position = index + relative;
+        line += std.mem.count(u8, content[scanned..position], "\n");
+        scanned = position;
+        index = position + old_string.len;
+        if (found.count > 0 and found.numbers[found.count - 1] == line) continue;
+        if (found.count == found.numbers.len) {
+            found.more = true;
+            break;
+        }
+        found.numbers[found.count] = line;
+        found.count += 1;
+    }
+    return found;
+}
+
+/// Shows up to `max_shown_occurrences` occurrences, each from
+/// `context_lines_before` lines above it to the end of its last line, within
+/// `max_snippet_bytes` in total.
+fn appendOccurrenceSnippets(alloc: Allocator, out: *std.ArrayList(u8), content: []const u8, old_string: []const u8) error{OutOfMemory}!void {
+    var shown: usize = 0;
+    var shown_bytes: usize = 0;
+    var previous_end: usize = 0;
+    var search: usize = 0;
+    while (shown < max_shown_occurrences) {
+        const relative = std.mem.find(u8, content[search..], old_string) orelse return;
+        const position = search + relative;
+        search = position + old_string.len;
+        // An occurrence inside the last snippet is already shown, and a
+        // snippet starts after the one before it.
+        if (shown > 0 and position < previous_end) continue;
+        var begin = contextStart(content, position);
+        if (shown > 0) begin = @min(@max(begin, previous_end + 1), position);
+        const line_end = if (old_string[old_string.len - 1] == '\n')
+            search - 1
+        else
+            std.mem.findScalarPos(u8, content, search, '\n') orelse content.len;
+        const end = withoutCarriageReturn(content, begin, line_end);
+        if (shown_bytes + (end - begin) > max_snippet_bytes) return;
+        const first_line = 1 + std.mem.count(u8, content[0..begin], "\n");
+        const last_line = first_line + std.mem.count(u8, content[begin..end], "\n");
+        if (first_line == last_line) {
+            try out.print(alloc, "\nLine {d} reads:\n", .{first_line});
+        } else {
+            try out.print(alloc, "\nLines {d}-{d} read:\n", .{ first_line, last_line });
+        }
+        try out.appendSlice(alloc, content[begin..end]);
+        shown += 1;
+        shown_bytes += end - begin;
+        previous_end = line_end;
+    }
+}
+
+/// The start of the line `context_lines_before` lines above the one that
+/// holds `position`, or of the file.
+fn contextStart(content: []const u8, position: usize) usize {
+    var begin = position;
+    var lines_back: usize = 0;
+    while (begin > 0) : (begin -= 1) {
+        if (content[begin - 1] != '\n') continue;
+        if (lines_back == context_lines_before) break;
+        lines_back += 1;
+    }
+    return begin;
+}
+
+/// A CRLF line ends in `\r\n`, so a quoted range that leaves out its last
+/// `\n` leaves out the `\r` before it too.
+fn withoutCarriageReturn(content: []const u8, begin: usize, end: usize) usize {
+    return if (end > begin and content[end - 1] == '\r') end - 1 else end;
+}
+
+const LineSpan = struct {
+    /// Zero-based, inclusive.
+    first: usize,
+    last: usize,
+    /// Byte range of those lines, without the final line ending.
+    start: usize,
+    end: usize,
+};
+
+fn trimmedLine(line: []const u8) []const u8 {
+    return std.mem.trim(u8, line, " \t\r");
+}
+
+/// Line `index` of `content`, without its `\n` or `\r\n`.
+fn lineAt(content: []const u8, starts: []const usize, index: usize) []const u8 {
+    const begin = starts[index];
+    const finish = if (index + 1 < starts.len) starts[index + 1] - 1 else content.len;
+    const line = std.mem.trimEnd(u8, content[begin..finish], "\n");
+    return line[0..withoutCarriageReturn(line, 0, line.len)];
+}
+
+/// Finds the window of old_string's line count whose lines, ignoring
+/// indentation, agree with the most of old_string's distinctive lines. When
+/// none agree, its longest line places the window if it shares a long start
+/// or end with one file line. Null when nothing in the file is close.
+fn closestLines(alloc: Allocator, content: []const u8, old_string: []const u8) error{OutOfMemory}!?LineSpan {
+    var old_lines: std.ArrayList([]const u8) = .empty;
+    defer old_lines.deinit(alloc);
+    var old_iter = std.mem.splitScalar(u8, std.mem.trimEnd(u8, old_string, "\n"), '\n');
+    while (old_iter.next()) |line| {
+        if (old_lines.items.len == max_compared_lines) break;
+        try old_lines.append(alloc, trimmedLine(line));
+    }
+    if (old_lines.items.len == 0) return null;
+
+    // A final line ending does not start another line.
+    const ends_with_newline = content.len > 0 and content[content.len - 1] == '\n';
+    const line_count = 1 + std.mem.count(u8, content, "\n") - @intFromBool(ends_with_newline);
+    if (line_count > max_hint_file_lines) return null;
+    var starts: std.ArrayList(usize) = .empty;
+    defer starts.deinit(alloc);
+    try starts.ensureTotalCapacityPrecise(alloc, line_count);
+    starts.appendAssumeCapacity(0);
+    for (content, 0..) |byte, i| {
+        if (byte == '\n' and i + 1 < content.len) starts.appendAssumeCapacity(i + 1);
+    }
+    const first = (try votedWindowStart(alloc, content, starts.items, old_lines.items)) orelse
+        loneLineWindowStart(content, starts.items, old_lines.items) orelse
+        return null;
+    return boundedSpan(content, starts.items, first, old_lines.items.len);
+}
+
+/// The first line of the window whose lines agree with the most old lines,
+/// counting only file lines long enough to place a match.
+fn votedWindowStart(
+    alloc: Allocator,
+    content: []const u8,
+    starts: []const usize,
+    old_lines: []const []const u8,
+) error{OutOfMemory}!?usize {
+    const old_count = old_lines.len;
+    // votes[s + old_count - 1] counts the lines agreeing with a window that
+    // starts at file line s, which may begin before the file does.
+    const votes = try alloc.alloc(u32, starts.len + old_count);
+    defer alloc.free(votes);
+    @memset(votes, 0);
+    var best: ?usize = null;
+    for (0..starts.len) |file_index| {
+        const file_line = trimmedLine(lineAt(content, starts, file_index));
+        if (file_line.len < min_anchor_bytes) continue;
+        for (old_lines, 0..) |old_line, old_index| {
+            if (!std.mem.eql(u8, file_line, old_line)) continue;
+            const slot = file_index + old_count - 1 - old_index;
+            votes[slot] += 1;
+            if (best == null or votes[slot] > votes[best.?]) best = slot;
+        }
+    }
+    const slot = best orelse return null;
+    return (slot + 1) -| old_count;
+}
+
+/// When no line agrees, the longest old line places the window if one file
+/// line shares enough of its start or end.
+fn loneLineWindowStart(content: []const u8, starts: []const usize, old_lines: []const []const u8) ?usize {
+    var anchor_index: usize = 0;
+    for (old_lines, 0..) |line, i| {
+        if (line.len > old_lines[anchor_index].len) anchor_index = i;
+    }
+    const anchor = old_lines[anchor_index];
+    if (anchor.len < min_shared_bytes) return null;
+    var best_shared: usize = 0;
+    var best_line: usize = 0;
+    for (0..starts.len) |file_index| {
+        const shared = sharedEdgeBytes(trimmedLine(lineAt(content, starts, file_index)), anchor);
+        if (shared > best_shared) {
+            best_shared = shared;
+            best_line = file_index;
+        }
+    }
+    if (best_shared < min_shared_bytes or best_shared * min_shared_divisor < anchor.len) return null;
+    return best_line -| anchor_index;
+}
+
+/// The longer of the start and the end that `file_line` and `anchor` share.
+fn sharedEdgeBytes(file_line: []const u8, anchor: []const u8) usize {
+    const limit = @min(file_line.len, anchor.len);
+    var prefix: usize = 0;
+    while (prefix < limit and file_line[prefix] == anchor[prefix]) prefix += 1;
+    var suffix: usize = 0;
+    while (suffix < limit and file_line[file_line.len - 1 - suffix] == anchor[anchor.len - 1 - suffix]) suffix += 1;
+    return @max(prefix, suffix);
+}
+
+/// The `old_count` lines from `first`, cut at the file's end and at
+/// `max_hint_lines`, then shortened from the end until they fit
+/// `max_hint_bytes`. Null when even the first line does not fit.
+fn boundedSpan(content: []const u8, starts: []const usize, first: usize, old_count: usize) ?LineSpan {
+    var last = @min(first + old_count - 1, starts.len - 1);
+    last = @min(last, first + max_hint_lines - 1);
+    const start = starts[first];
+    while (true) {
+        const end = starts[last] + lineAt(content, starts, last).len;
+        if (end - start <= max_hint_bytes) return .{ .first = first, .last = last, .start = start, .end = end };
+        if (last == first) return null;
+        last -= 1;
+    }
+}
+
+fn buildPreview(
+    alloc: Allocator,
+    display_path: text_utils.EncodedPathTail,
+    preimage: file_mutation_contract.Preimage,
+    before_content: []const u8,
+    after_content: []const u8,
+) error{OutOfMemory}!PreviewResult {
+    var projection = diff_mod.buildBoundedPreview(
+        alloc,
+        before_content,
+        after_content,
+        .{},
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidPreviewOptions,
+        error.PreviewBudgetExceeded,
+        error.ArithmeticOverflow,
+        => return .{ .semantic_failure = preview_too_large_message },
+    };
+
+    const lines = if (projection.additions == 0 and projection.deletions == 0) blk: {
+        projection.deinit(alloc);
+        const notice = switch (preimage) {
+            .absent => if (after_content.len == 0) "empty file" else "no content changes",
+            .present => "no content changes",
+        };
+        const notice_text = try alloc.dupe(u8, notice);
+        errdefer alloc.free(notice_text);
+        const notice_lines = try alloc.alloc(diff_mod.PreviewLine, 1);
+        notice_lines[0] = .{ .op = .notice, .text = notice_text };
+        break :blk notice_lines;
+    } else blk: {
+        const preview_lines = alloc.alloc(
+            diff_mod.PreviewLine,
+            projection.lines.len,
+        ) catch |err| {
+            projection.deinit(alloc);
+            return err;
+        };
+        for (projection.lines, preview_lines) |source, *destination| {
+            destination.* = .{
+                .op = switch (source.op) {
+                    .context => .context,
+                    .addition => .addition,
+                    .deletion => .deletion,
+                    .elision => .elision,
+                    .notice => .notice,
+                },
+                .old_line = source.old_line,
+                .new_line = source.new_line,
+                .text = source.text,
+            };
+        }
+        alloc.free(projection.lines);
+        break :blk preview_lines;
+    };
+
+    const preview: diff_mod.FileChangePreview = .{
+        .path = display_path.bytes,
+        .path_basename_start = display_path.basename_start,
+        .path_source_truncated = display_path.source_truncated,
+        .lines = lines,
+        .additions = projection.additions,
+        .deletions = projection.deletions,
+        .truncated = projection.truncated,
+    };
+    preview.validate() catch return .{ .semantic_failure = preview_too_large_message };
+
+    var projection_charge = display_path.bytes.len;
+    projection_charge = checkedCharge(
+        projection_charge,
+        lines.len,
+        @sizeOf(diff_mod.PreviewLine),
+    ) orelse return .{ .semantic_failure = preview_too_large_message };
+    for (lines) |line| {
+        projection_charge = std.math.add(
+            usize,
+            projection_charge,
+            line.text.len,
+        ) catch return .{ .semantic_failure = preview_too_large_message };
+    }
+    if (projection_charge > diff_mod.max_request_projection_bytes) {
+        return .{ .semantic_failure = preview_too_large_message };
+    }
+    return .{ .preview = preview };
+}
+
+fn identityEql(
+    a: file_mutation_contract.FileIdentity,
+    b: file_mutation_contract.FileIdentity,
+) bool {
+    return a.device == b.device and a.inode == b.inode and a.kind == b.kind;
+}
+
+fn optionalIdentityEql(
+    a: ?file_mutation_contract.FileIdentity,
+    b: ?file_mutation_contract.FileIdentity,
+) bool {
+    if (a) |actual| {
+        const expected = b orelse return false;
+        return identityEql(actual, expected);
+    }
+    return b == null;
+}
+
+fn operationalError(err: anyerror) ?FileMutationPrepareError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+        error.SystemResources => error.SystemResources,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        else => null,
+    };
+}
+
+fn writeArgumentsJson(
+    alloc: Allocator,
+    path: []const u8,
+    content: []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try out.writer.writeAll("{\"path\":");
+    try std.json.Stringify.value(path, .{}, &out.writer);
+    try out.writer.writeAll(",\"content\":");
+    try std.json.Stringify.value(content, .{}, &out.writer);
+    try out.writer.writeByte('}');
+    return out.toOwnedSlice();
+}
+
+fn editArgumentsJson(
+    alloc: Allocator,
+    path: []const u8,
+    old_string: []const u8,
+    new_string: []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try out.writer.writeAll("{\"path\":");
+    try std.json.Stringify.value(path, .{}, &out.writer);
+    try out.writer.writeAll(",\"old_string\":");
+    try std.json.Stringify.value(old_string, .{}, &out.writer);
+    try out.writer.writeAll(",\"new_string\":");
+    try std.json.Stringify.value(new_string, .{}, &out.writer);
+    try out.writer.writeByte('}');
+    return out.toOwnedSlice();
+}
+
+fn workspaceRoot(alloc: Allocator, tmp: std.testing.TmpDir) ![]u8 {
+    return io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+}
+
+fn createFile(
+    tmp: *std.testing.TmpDir,
+    sub_path: []const u8,
+    content: []const u8,
+) !void {
+    var file = try tmp.dir.createFile(std.testing.io, sub_path, .{});
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, content);
+}
+
+fn evaluatePolicy(
+    alloc: Allocator,
+    workspace_root: []const u8,
+    call: types.ToolCall,
+) !PolicyEvaluatedFileTargets {
+    const input = try decodeTestMutationInput(alloc, call);
+    const result = try testing_permissions.evaluateFileMutationTargets(
+        alloc,
+        workspace_root,
+        input,
+        .ask,
+        .{},
+        &.{},
+        &.{},
+    );
+    return switch (result) {
+        .evaluated => |evaluated| evaluated,
+        .target_resolution_failure, .policy_denied => error.UnexpectedPolicyFailure,
+    };
+}
+
+fn expectPrepared(
+    alloc: Allocator,
+    call: types.ToolCall,
+    policy: PolicyEvaluatedFileTargets,
+) !PreparedFileMutation {
+    const input = try decodeTestMutationInput(alloc, call);
+    return switch (try prepare(alloc, call, input, policy, .plain)) {
+        .prepared => |prepared| prepared,
+        .semantic_failure => error.UnexpectedSemanticFailure,
+    };
+}
+
+fn expectSemanticFailure(
+    alloc: Allocator,
+    call: types.ToolCall,
+    policy: PolicyEvaluatedFileTargets,
+) ![]const u8 {
+    return expectSemanticFailureWithDetail(alloc, call, policy, .plain);
+}
+
+fn expectSemanticFailureWithDetail(
+    alloc: Allocator,
+    call: types.ToolCall,
+    policy: PolicyEvaluatedFileTargets,
+    failure_detail: file_mutation_contract.EditFailureDetail,
+) ![]const u8 {
+    const input = try decodeTestMutationInput(alloc, call);
+    return switch (try prepare(alloc, call, input, policy, failure_detail)) {
+        .prepared => error.UnexpectedPreparedMutation,
+        .semantic_failure => |message| message,
+    };
+}
+
+fn decodeTestMutationInput(
+    alloc: Allocator,
+    call: types.ToolCall,
+) !file_mutation_contract.FileMutationInput {
+    const kind: file_mutation_contract.Kind =
+        if (std.mem.eql(u8, call.name, "write_file"))
+            .write
+        else if (std.mem.eql(u8, call.name, "edit_file"))
+            .edit
+        else
+            return error.InvalidToolArguments;
+    const tool = switch (kind) {
+        .write => &testing_builtin_tools.write_file,
+        .edit => &testing_builtin_tools.edit_file,
+    };
+    const decoded = try tool.decode(.{ .allocator = alloc }, call.arguments_json);
+    return switch (decoded) {
+        .failure => error.InvalidToolArguments,
+        .input => |tool_input| blk: {
+            break :blk switch (kind) {
+                .write => testing_write_file.takeFileMutationInput(
+                    tool_input,
+                    alloc,
+                ),
+                .edit => testing_edit_file.takeFileMutationInput(
+                    tool_input,
+                    alloc,
+                ),
+            };
+        },
+    };
+}
+
+fn expectTerminalSafe(text: []const u8) !void {
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, text, '\n') == null);
+    try std.testing.expect(std.mem.findScalar(u8, text, '\r') == null);
+}
+
+fn expectNoStageFiles(root: []const u8) !void {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(std.testing.allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        try std.testing.expect(std.mem.find(u8, entry.path, ".fx-stage-") == null);
+    }
+}
+
+test "prepare derives a missing write without creating the target" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const arguments = try writeArgumentsJson(
+        arena,
+        "missing/parents/new.txt",
+        "hello\n",
+    );
+    const call: types.ToolCall = .{
+        .id = "write-missing",
+        .name = "write_file",
+        .arguments_json = arguments,
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    var input: file_mutation_contract.FileMutationInput = .{ .write = .{
+        .path = try arena.dupe(u8, "missing/parents/new.txt"),
+        .content = try arena.dupe(u8, "hello\n"),
+    } };
+    defer input.deinit(arena);
+    const prepared = switch (try prepare(arena, call, input, policy, .plain)) {
+        .prepared => |value| value,
+        .semantic_failure => return error.UnexpectedSemanticFailure,
+    };
+
+    try std.testing.expectEqual(file_mutation_contract.Kind.write, prepared.kind);
+    try std.testing.expect(prepared.preimage == .absent);
+    try std.testing.expectEqualStrings("hello\n", prepared.after_content);
+    try std.testing.expectEqualStrings("missing/parents/new.txt", prepared.display_path);
+    try std.testing.expect(prepared.target_path.ptr == policy.canonical_target_path.ptr);
+    try std.testing.expect(PolicyEvaluatedFileTargets.authorizationEql(policy, prepared.policy_targets));
+    try std.testing.expectEqual(@as(usize, 1), prepared.preview.additions);
+    try std.testing.expectEqual(@as(usize, 0), prepared.preview.deletions);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "missing", .{}),
+    );
+}
+
+test "prepare shows the canonical external target when a symlink redirects outside the workspace" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.createDir(std.testing.io, "workspace", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "outside", .default_dir);
+    tmp.dir.symLink(io_mod.getIo(), "../outside", "workspace/link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const workspace = try io_mod.dirRealpathAlloc(arena, tmp.dir, "workspace");
+    const misleading_path = try std.Io.Dir.path.join(arena, &.{ workspace, "link/new.txt" });
+    const call: types.ToolCall = .{
+        .id = "write-symlink-redirect",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(arena, misleading_path, "hello\n"),
+    };
+    const policy = try evaluatePolicy(arena, workspace, call);
+    const prepared = try expectPrepared(arena, call, policy);
+
+    try std.testing.expectEqual(.external, prepared.policy_targets.anchor.scope);
+    try std.testing.expectEqualStrings(policy.canonical_target_path, prepared.display_path);
+    try std.testing.expectEqualStrings(prepared.display_path, prepared.preview.path);
+}
+
+test "prepare retains full review separately from the bounded approval preview" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(std.testing.allocator);
+    for (1..31) |line_number| {
+        var line: [32]u8 = undefined;
+        try content.appendSlice(
+            std.testing.allocator,
+            try std.mem.print(&line, "line {d}\n", .{line_number}),
+        );
+    }
+
+    const call: types.ToolCall = .{
+        .id = "write-full-review",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            arena,
+            "full-review.txt",
+            content.items,
+        ),
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+    var prepared = try expectPrepared(arena, call, policy);
+
+    try std.testing.expect(prepared.preview.lines.len <= diff_mod.max_preview_lines);
+    var viewport = try prepared.review.viewport(arena, 24, 6);
+    defer viewport.deinit(arena);
+    try std.testing.expectEqual(@as(usize, 30), viewport.total_rows);
+    try std.testing.expectEqualStrings("line 25", viewport.lines[0].text);
+    try std.testing.expectEqualStrings("line 30", viewport.lines[5].text);
+}
+
+test "prepare derives an existing write from the exact reviewed preimage" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try createFile(&tmp, "note.txt", "old\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const arguments = try writeArgumentsJson(arena, "note.txt", "new\n");
+    const call: types.ToolCall = .{
+        .id = "write-existing",
+        .name = "write_file",
+        .arguments_json = arguments,
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    const prepared = try expectPrepared(arena, call, policy);
+
+    const present = prepared.preimage.present;
+    try std.testing.expectEqualStrings("old\n", present.content);
+    var expected_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    expected_hasher.update("old\n");
+    try std.testing.expectEqualSlices(u8, &expected_hasher.finalResult(), &present.content_hash);
+    try std.testing.expectEqualStrings("new\n", prepared.after_content);
+    try std.testing.expectEqual(@as(usize, 1), prepared.preview.additions);
+    try std.testing.expectEqual(@as(usize, 1), prepared.preview.deletions);
+
+    var file = try tmp.dir.openFile(std.testing.io, "note.txt", .{});
+    defer file.close(std.testing.io);
+    const unchanged = try io_mod.readFileToEnd(arena, &file, 64);
+    try std.testing.expectEqualStrings("old\n", unchanged);
+}
+
+test "prepare computes one exact edit occurrence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "note.txt", "alpha\nbeta\ngamma\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const arguments = try editArgumentsJson(arena, "note.txt", "beta", "BETA");
+    const call: types.ToolCall = .{
+        .id = "edit-exact",
+        .name = "edit_file",
+        .arguments_json = arguments,
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    const prepared = try expectPrepared(arena, call, policy);
+
+    try std.testing.expectEqual(file_mutation_contract.Kind.edit, prepared.kind);
+    try std.testing.expectEqualStrings("alpha\nbeta\ngamma\n", prepared.preimage.present.content);
+    try std.testing.expectEqualStrings("alpha\nBETA\ngamma\n", prepared.after_content);
+    try std.testing.expectEqual(@as(usize, 1), prepared.preview.additions);
+    try std.testing.expectEqual(@as(usize, 1), prepared.preview.deletions);
+}
+
+test "prepare preserves exact edit semantic failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "note.txt", "same twice same\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+
+    const identical_args = try editArgumentsJson(arena, "note.txt", "same", "same");
+    const identical_call: types.ToolCall = .{
+        .id = "edit-identical",
+        .name = "edit_file",
+        .arguments_json = identical_args,
+    };
+    const identical_policy = try evaluatePolicy(arena, root, identical_call);
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string and new_string are identical",
+        try expectSemanticFailure(arena, identical_call, identical_policy),
+    );
+
+    const missing_args = try editArgumentsJson(arena, "note.txt", "missing", "new");
+    const missing_call: types.ToolCall = .{
+        .id = "edit-missing",
+        .name = "edit_file",
+        .arguments_json = missing_args,
+    };
+    const missing_policy = try evaluatePolicy(arena, root, missing_call);
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string not found in file. Re-read the file to see its current contents; if the change is already applied, do not retry this edit.",
+        try expectSemanticFailure(arena, missing_call, missing_policy),
+    );
+
+    const duplicate_args = try editArgumentsJson(arena, "note.txt", "same", "new");
+    const duplicate_call: types.ToolCall = .{
+        .id = "edit-duplicate",
+        .name = "edit_file",
+        .arguments_json = duplicate_args,
+    };
+    const duplicate_policy = try evaluatePolicy(arena, root, duplicate_call);
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 2 occurrences), provide more context",
+        try expectSemanticFailure(arena, duplicate_call, duplicate_policy),
+    );
+    // Lines of the file appear only when the caller allows them.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 2 occurrences, on line 1), provide more context\nLine 1 reads:\nsame twice same",
+        try expectSemanticFailureWithDetail(arena, duplicate_call, duplicate_policy, .file_lines),
+    );
+}
+
+test "zero-occurrence edit failure explains recovery and leaves the file untouched" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The field is already gone, so a repeated removal must fail with
+    // guidance rather than a bare mismatch.
+    try createFile(&tmp, "strategy.ts", "export interface RacePlan {\n  laps: number;\n}\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const arguments = try editArgumentsJson(arena, "strategy.ts", "  trajectory?: Trajectory;\n}", "}");
+    const call: types.ToolCall = .{
+        .id = "edit-already-applied",
+        .name = "edit_file",
+        .arguments_json = arguments,
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    const failure = try expectSemanticFailure(arena, call, policy);
+    try std.testing.expect(std.mem.find(u8, failure, "old_string not found in file") != null);
+    try std.testing.expect(std.mem.find(u8, failure, "Re-read the file") != null);
+    try std.testing.expect(std.mem.find(u8, failure, "if the change is already applied, do not retry") != null);
+
+    var file = try tmp.dir.openFile(std.testing.io, "strategy.ts", .{});
+    defer file.close(std.testing.io);
+    const unchanged = try io_mod.readFileToEnd(arena, &file, 4096);
+    try std.testing.expectEqualStrings("export interface RacePlan {\n  laps: number;\n}\n", unchanged);
+}
+
+test "a failed edit shows the lines it most likely meant" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const content = "import os\n\ndef load(path):\n    with open(path) as f:\n        data = f.read()\n    return data.strip()\n\nTIMEOUT = 30 # secs\n";
+
+    // One remembered line differs and the indentation is off; the other
+    // lines place the window.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string not found in file; the closest match is lines 3-6.\nThey currently read:\n" ++
+            "def load(path):\n    with open(path) as f:\n        data = f.read()\n    return data.strip()\n" ++
+            "If the change is already applied, do not retry this edit.",
+        try notFoundMessage(arena, content, "def load(path):\n  with open(path) as f:\n    text = f.read()\n  return data.strip()\n"),
+    );
+    // A lone line is placed by what it shares with one file line.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string not found in file; the closest match is line 8.\nIt currently reads:\nTIMEOUT = 30 # secs\n" ++
+            "If the change is already applied, do not retry this edit.",
+        try notFoundMessage(arena, content, "TIMEOUT = 30  # seconds"),
+    );
+    // Short lines alone, or text that shares too little, keep the plain advice.
+    try std.testing.expectEqualStrings(not_found_message, try notFoundMessage(arena, content, "}\n)\n"));
+    try std.testing.expectEqualStrings(not_found_message, try notFoundMessage(arena, content, "class Loader:"));
+    try std.testing.expectEqualStrings(not_found_message, try notFoundMessage(arena, "", "def load(path):"));
+}
+
+test "a failed edit shows at most the lines a hint allows" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var content: std.ArrayList(u8) = .empty;
+    var old: std.ArrayList(u8) = .empty;
+    for (0..60) |i| {
+        try content.print(arena, "value_{d} = {d}\n", .{ i, i });
+        try old.print(arena, "value_{d} = {d}\n", .{ i, if (i == 30) 0 else i });
+    }
+    const message = try notFoundMessage(arena, content.items, old.items);
+    try std.testing.expect(std.mem.startsWith(u8, message, "edit_file failed: old_string not found in file; the closest match is lines 1-40.\n"));
+    try std.testing.expect(std.mem.find(u8, message, "value_39 = 39\nIf the change") != null);
+    try std.testing.expect(std.mem.find(u8, message, "value_40") == null);
+}
+
+test "a failed edit of a file past the hint's line limit keeps the plain advice" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const remembered = "timeout = 25 # seconds\nretries = 2\n";
+    var content: std.ArrayList(u8) = .empty;
+    try content.appendSlice(arena, "timeout = 30 # seconds\nretries = 2\n");
+    // The two lines above and these empty lines fill the file to the limit
+    // exactly; the final line ending starts no line.
+    try content.appendNTimes(arena, '\n', max_hint_file_lines - 2);
+    const at_limit = try notFoundMessage(arena, content.items, remembered);
+    try std.testing.expect(std.mem.startsWith(u8, at_limit, "edit_file failed: old_string not found in file; the closest match is lines 1-2."));
+
+    try content.append(arena, '\n');
+    try std.testing.expectEqualStrings(not_found_message, try notFoundMessage(arena, content.items, remembered));
+}
+
+test "a not-unique edit names the lines of its occurrences" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 3 occurrences, on lines 1, 3), provide more context\n" ++
+            "Line 1 reads:\na = 1; a = 1\nLines 2-3 read:\nb = 2\na = 1",
+        try notUniqueMessage(arena, "a = 1; a = 1\nb = 2\na = 1\n", "a = 1", 3),
+    );
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 7 occurrences, on lines 1, 2, 3, 4, 5, ...), provide more context\n" ++
+            "Line 1 reads:\nx\nLine 2 reads:\nx\nLine 3 reads:\nx",
+        try notUniqueMessage(arena, "x\nx\nx\nx\nx\nx\nx\n", "x", 7),
+    );
+    // A bare newline shows the line each occurrence ends.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 2 occurrences, on lines 1, 2), provide more context\nLine 1 reads:\na\nLine 2 reads:\nb",
+        try notUniqueMessage(arena, "a\nb\n", "\n", 2),
+    );
+    // Each occurrence shows the two lines before it, which name its function.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 2 occurrences, on lines 6, 11), provide more context\n" ++
+            "Lines 4-6 read:\ndef invoice_total(items):\n    total = sum(items)\n    return round(total, 2)\n" ++
+            "Lines 9-11 read:\ndef refund_total(items):\n    total = sum(items)\n    return round(total, 2)",
+        try notUniqueMessage(arena, "\"\"\"Totals.\"\"\"\n\n\ndef invoice_total(items):\n    total = sum(items)\n    return round(total, 2)\n\n\ndef refund_total(items):\n    total = sum(items)\n    return round(total, 2)\n", "    return round(total, 2)", 2),
+    );
+}
+
+test "hints for a CRLF file keep its line endings except after the last quoted line" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // An old_string with LF endings still places its window; the quote keeps
+    // the CRLF between lines, which the next call must copy.
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string not found in file; the closest match is lines 2-3.\nThey currently read:\n" ++
+            "port = 8080\r\nhost = \"localhost\"\n" ++
+            "If the change is already applied, do not retry this edit.",
+        try notFoundMessage(arena, "[server]\r\nport = 8080\r\nhost = \"localhost\"\r\n[client]\r\nretries = 3\r\n", "port = 8080\nhost = \"localhost\"\n"),
+    );
+    try std.testing.expectEqualStrings(
+        "edit_file failed: old_string is not unique (found 2 occurrences, on lines 1, 3), provide more context\n" ++
+            "Line 1 reads:\na = 1\nLines 2-3 read:\nb = 2\r\na = 1",
+        try notUniqueMessage(arena, "a = 1\r\nb = 2\r\na = 1\r\n", "a = 1", 2),
+    );
+}
+
+test "edit failure hints stay within their bounds for any file and old_string" {
+    try std.testing.fuzz({}, fuzzEditFailureHints, .{
+        .corpus = &(@import("fuzz_seed").slices(.{
+            "a = 1\nb = 2\na = 1\n",
+            "port = 8080\r\nhost = 1\r\nport = 8080\r\n",
+            "\n\n\n\n",
+            "\xff\x00\xe2\x82\n\xe2\x82\n",
+        }) ++ @import("fuzz_corpus").edit_failure_hints.*),
+    });
+}
+
+/// Edits a copy of a random part of the file, as a model's remembered
+/// old_string does, and checks the failure text stays bounded and quotes
+/// only lines the file holds.
+fn fuzzEditFailureHints(_: void, smith: *std.testing.Smith) anyerror!void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var content_buffer: [8192]u8 = undefined;
+    const content = content_buffer[0..smith.slice(&content_buffer)];
+    if (content.len == 0) return;
+    const start = smith.index(content.len);
+    var old_buffer: [512]u8 = undefined;
+    const old_string = old_buffer[0 .. 1 + smith.index(@min(old_buffer.len, content.len - start))];
+    @memcpy(old_string, content[start..][0..old_string.len]);
+    old_string[smith.index(old_string.len)] = smith.value(u8);
+
+    const occurrence_count = countOccurrences(content, old_string);
+    if (occurrence_count == 1) return;
+    const message = try matchFailureMessage(arena, .file_lines, content, old_string, occurrence_count);
+    try std.testing.expect(message.len <= max_hint_bytes + 512);
+    if (occurrence_count > 1) return;
+    // The plain advice has no quote; a hint's header ends at its first ":\n".
+    const quote_start = (std.mem.find(u8, message, ":\n") orelse return) + ":\n".len;
+    const quote_end = std.mem.findLast(u8, message, "\nIf the change is already applied") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.find(u8, content, message[quote_start..quote_end]) != null);
+}
+
+test "an edit copied from tool output that escaped a carried tag edits the file's tag (D93)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "doc.md", "intro\n<scoped-rules from=\"a\">old rule</scoped-rules>\nend\n");
+    try createFile(&tmp, "html.md", "&lt;scoped-rules> as text\n<scoped-rules> as tag\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+
+    // What read_file showed, copied into both strings.
+    const copied_call: types.ToolCall = .{
+        .id = "edit-copied",
+        .name = "edit_file",
+        .arguments_json = try editArgumentsJson(
+            arena,
+            "doc.md",
+            "&lt;scoped-rules from=\"a\">old rule&lt;/scoped-rules>",
+            "&lt;scoped-rules from=\"a\">new rule&lt;/scoped-rules>",
+        ),
+    };
+    const copied = try expectPrepared(arena, copied_call, try evaluatePolicy(arena, root, copied_call));
+    try std.testing.expectEqualStrings("intro\n<scoped-rules from=\"a\">new rule</scoped-rules>\nend\n", copied.after_content);
+
+    // Text the file really holds escaped is matched as it is first.
+    const literal_call: types.ToolCall = .{
+        .id = "edit-literal",
+        .name = "edit_file",
+        .arguments_json = try editArgumentsJson(arena, "html.md", "&lt;scoped-rules> as text", "&lt;scoped-rules> kept as text"),
+    };
+    const literal = try expectPrepared(arena, literal_call, try evaluatePolicy(arena, root, literal_call));
+    try std.testing.expectEqualStrings("&lt;scoped-rules> kept as text\n<scoped-rules> as tag\n", literal.after_content);
+
+    // Neither form matching still fails as before.
+    const missing_call: types.ToolCall = .{
+        .id = "edit-missing-tag",
+        .name = "edit_file",
+        .arguments_json = try editArgumentsJson(arena, "doc.md", "&lt;scoped-rules from=\"b\">", "x"),
+    };
+    const failure = try expectSemanticFailure(arena, missing_call, try evaluatePolicy(arena, root, missing_call));
+    try std.testing.expect(std.mem.find(u8, failure, "old_string not found in file") != null);
+}
+
+test "prepare emits explicit empty and no-change notices" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "same.txt", "same\n");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+
+    const empty_args = try writeArgumentsJson(arena, "empty.txt", "");
+    const empty_call: types.ToolCall = .{
+        .id = "write-empty",
+        .name = "write_file",
+        .arguments_json = empty_args,
+    };
+    const empty_policy = try evaluatePolicy(arena, root, empty_call);
+    const empty = try expectPrepared(arena, empty_call, empty_policy);
+    try std.testing.expectEqual(@as(usize, 0), empty.preview.additions);
+    try std.testing.expectEqual(@as(usize, 0), empty.preview.deletions);
+    try std.testing.expectEqual(@as(usize, 1), empty.preview.lines.len);
+    try std.testing.expectEqual(diff_mod.PreviewOp.notice, empty.preview.lines[0].op);
+    try std.testing.expectEqualStrings("empty file", empty.preview.lines[0].text);
+
+    const same_args = try writeArgumentsJson(arena, "same.txt", "same\n");
+    const same_call: types.ToolCall = .{
+        .id = "write-same",
+        .name = "write_file",
+        .arguments_json = same_args,
+    };
+    const same_policy = try evaluatePolicy(arena, root, same_call);
+    const same = try expectPrepared(arena, same_call, same_policy);
+    try std.testing.expectEqual(@as(usize, 0), same.preview.additions);
+    try std.testing.expectEqual(@as(usize, 0), same.preview.deletions);
+    try std.testing.expectEqualStrings("no content changes", same.preview.lines[0].text);
+}
+
+test "prepare terminal-encodes hostile path and preview content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const hostile_path = "name\x1b[31m\nfile.txt";
+    const hostile_content = "line\x1b[31mred\x1b[0m\n";
+    const arguments = try writeArgumentsJson(arena, hostile_path, hostile_content);
+    const call: types.ToolCall = .{
+        .id = "write-hostile",
+        .name = "write_file",
+        .arguments_json = arguments,
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    const prepared = try expectPrepared(arena, call, policy);
+
+    try expectTerminalSafe(prepared.display_path);
+    try std.testing.expect(!std.mem.eql(u8, hostile_path, prepared.display_path));
+    for (prepared.preview.lines) |line| try expectTerminalSafe(line.text);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, hostile_path, .{}),
+    );
+}
+
+test "prepare enforces independent preimage and postimage caps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+
+    const oversized_preimage = try arena.alloc(u8, max_content_bytes + 1);
+    @memset(oversized_preimage, 'x');
+    try createFile(&tmp, "oversized.txt", oversized_preimage);
+    const preimage_call: types.ToolCall = .{
+        .id = "oversized-preimage",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(arena, "oversized.txt", "new"),
+    };
+    const preimage_policy = try evaluatePolicy(arena, root, preimage_call);
+    try std.testing.expectEqualStrings(
+        file_too_large_message,
+        try expectSemanticFailure(arena, preimage_call, preimage_policy),
+    );
+
+    const maximum_preimage = try arena.alloc(u8, max_content_bytes);
+    @memset(maximum_preimage, 'x');
+    maximum_preimage[0] = 'a';
+    try createFile(&tmp, "maximum.txt", maximum_preimage);
+    const postimage_call: types.ToolCall = .{
+        .id = "oversized-postimage",
+        .name = "edit_file",
+        .arguments_json = try editArgumentsJson(arena, "maximum.txt", "a", "aa"),
+    };
+    const postimage_policy = try evaluatePolicy(arena, root, postimage_call);
+    try std.testing.expectEqualStrings(
+        edited_file_too_large_message,
+        try expectSemanticFailure(arena, postimage_call, postimage_policy),
+    );
+}
+
+test "prepare hashes exact raw JSON bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const call_a: types.ToolCall = .{
+        .id = "hash-a",
+        .name = "write_file",
+        .arguments_json = "{\"path\":\"note.txt\",\"content\":\"same\"}",
+    };
+    const call_b: types.ToolCall = .{
+        .id = "hash-b",
+        .name = "write_file",
+        .arguments_json = "{ \"content\": \"same\", \"path\": \"note.txt\" }",
+    };
+    const policy_a = try evaluatePolicy(arena, root, call_a);
+    const policy_b = try evaluatePolicy(arena, root, call_b);
+    const prepared_a = try expectPrepared(arena, call_a, policy_a);
+    const prepared_b = try expectPrepared(arena, call_b, policy_b);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(call_a.arguments_json);
+    try std.testing.expectEqualSlices(u8, &hasher.finalResult(), &prepared_a.arguments_hash);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &prepared_a.arguments_hash,
+        &prepared_b.arguments_hash,
+    ));
+}
+
+test "prepare rejects call target and authority identity mismatches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "a.txt", "a");
+    try createFile(&tmp, "b.txt", "b");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const call_a: types.ToolCall = .{
+        .id = "target-a",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(arena, "a.txt", "new"),
+    };
+    const policy_a = try evaluatePolicy(arena, root, call_a);
+    const call_b: types.ToolCall = .{
+        .id = "target-b",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(arena, "b.txt", "new"),
+    };
+    try std.testing.expectEqualStrings(
+        "file mutation preparation failed: approved target no longer matches the call",
+        try expectSemanticFailure(arena, call_b, policy_a),
+    );
+
+    var changed_anchor = policy_a;
+    changed_anchor.anchor.identity.inode +%= 1;
+    try std.testing.expectEqualStrings(
+        "file mutation preparation failed: approved filesystem identity changed",
+        try expectSemanticFailure(arena, call_a, changed_anchor),
+    );
+
+    try createFile(&tmp, "replacement.txt", "replacement");
+    try tmp.dir.rename("replacement.txt", tmp.dir, "a.txt", std.testing.io);
+    try std.testing.expectEqualStrings(
+        "file mutation preparation failed: approved filesystem identity changed",
+        try expectSemanticFailure(arena, call_a, policy_a),
+    );
+}
+
+test "prepare rejects an intermediate-directory retarget" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "approved", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "other", .default_dir);
+    {
+        var approved = try tmp.dir.openDir(std.testing.io, "approved", .{});
+        defer approved.close(std.testing.io);
+        var file = try approved.createFile(std.testing.io, "note.txt", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "approved");
+    }
+    {
+        var other = try tmp.dir.openDir(std.testing.io, "other", .{});
+        defer other.close(std.testing.io);
+        var file = try other.createFile(std.testing.io, "note.txt", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "other");
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const call: types.ToolCall = .{
+        .id = "retarget",
+        .name = "edit_file",
+        .arguments_json = try editArgumentsJson(arena, "approved/note.txt", "approved", "new"),
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    try tmp.dir.rename("approved", tmp.dir, "approved-old", std.testing.io);
+    try tmp.dir.symLink(std.testing.io, "other", "approved", .{ .is_directory = true });
+
+    try std.testing.expectEqualStrings(
+        "file mutation preparation failed: approved target no longer matches the call",
+        try expectSemanticFailure(arena, call, policy),
+    );
+}
+
+test "prepare rejects a corrupted permission target proof" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try workspaceRoot(arena, tmp);
+    const call: types.ToolCall = .{
+        .id = "corrupted-proof-prepare",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(arena, "new.txt", "new"),
+    };
+    const policy = try evaluatePolicy(arena, root, call);
+
+    var corrupted_components = try arena.dupe(
+        file_mutation_contract.PathSpan,
+        policy.anchor.relative_components,
+    );
+    corrupted_components[0].start = policy.anchor.path_end;
+    var corrupted_policy = policy;
+    corrupted_policy.anchor.relative_components = corrupted_components;
+
+    try std.testing.expectEqualStrings(
+        target_mismatch_message,
+        try expectSemanticFailure(arena, call, corrupted_policy),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "new.txt", .{}),
+    );
+}
+
+const TestPreparedMutation = struct {
+    input: file_mutation_contract.FileMutationInput,
+    policy: PolicyEvaluatedFileTargets,
+    prepared: PreparedFileMutation,
+};
+
+fn prepareForApply(
+    alloc: Allocator,
+    workspace_root: []const u8,
+    call: types.ToolCall,
+) !TestPreparedMutation {
+    const input = try decodeTestMutationInput(alloc, call);
+    const result = try testing_permissions.evaluateFileMutationTargets(
+        alloc,
+        workspace_root,
+        input,
+        .ask,
+        .{},
+        &.{},
+        &.{},
+    );
+    const policy = switch (result) {
+        .evaluated => |evaluated| evaluated,
+        .target_resolution_failure, .policy_denied => return error.UnexpectedPolicyFailure,
+    };
+    return .{
+        .input = input,
+        .policy = policy,
+        .prepared = switch (try prepare(alloc, call, input, policy, .plain)) {
+            .prepared => |prepared| prepared,
+            .semantic_failure => return error.UnexpectedSemanticFailure,
+        },
+    };
+}
+
+fn executionAuthorization(
+    prepared: TestPreparedMutation,
+) file_mutation_contract.FileExecutionAuthorization {
+    return .{
+        .input = prepared.input,
+        .policy_targets = prepared.policy,
+        .prepared = prepared.prepared,
+    };
+}
+
+fn expectApplyRejected(
+    result: ApplyResult,
+    reason: ApplyRejectionReason,
+) !ApplyRejection {
+    return switch (result) {
+        .rejected => |rejected| blk: {
+            try std.testing.expectEqual(reason, rejected.reason);
+            break :blk rejected;
+        },
+        .committed => error.UnexpectedCommittedMutation,
+    };
+}
+
+fn readTestFile(
+    alloc: Allocator,
+    tmp: *std.testing.TmpDir,
+    sub_path: []const u8,
+) ![]u8 {
+    var file = try tmp.dir.openFile(std.testing.io, sub_path, .{});
+    defer file.close(std.testing.io);
+    return io_mod.readFileToEnd(alloc, &file, max_content_bytes + 1);
+}
+
+test "apply atomically installs reviewed bytes and returns typed commit metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "apply-write",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "nested/new.txt", "reviewed\n"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const result = try apply(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+    );
+
+    const committed_handoff = switch (result) {
+        .committed => |handoff| handoff,
+        .rejected => return error.UnexpectedRejectedMutation,
+    };
+    try std.testing.expectEqualStrings(
+        prepared.prepared.target_path,
+        committed_handoff.tracker.raw_path,
+    );
+    try std.testing.expectEqual(
+        file_mutation_contract.Kind.write,
+        committed_handoff.tracker.kind,
+    );
+    try std.testing.expectEqual(
+        @as(?[]const u8, null),
+        committed_handoff.tracker.previous_content,
+    );
+    try std.testing.expectEqual(
+        prepared.prepared.preview.additions,
+        committed_handoff.preview.additions,
+    );
+
+    const installed = try readTestFile(call_alloc, &tmp, "nested/new.txt");
+    try std.testing.expectEqualStrings("reviewed\n", installed);
+}
+
+test "apply installs reviewed bytes beneath an authorized external anchor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "workspace", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "external", .default_dir);
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const workspace = try io_mod.dirRealpathAlloc(
+        call_alloc,
+        tmp.dir,
+        "workspace",
+    );
+    const external = try io_mod.dirRealpathAlloc(
+        call_alloc,
+        tmp.dir,
+        "external",
+    );
+    const target_path = try std.Io.Dir.path.join(
+        call_alloc,
+        &.{ external, "nested/new.txt" },
+    );
+    const call: types.ToolCall = .{
+        .id = "apply-external",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            call_alloc,
+            target_path,
+            "reviewed\n",
+        ),
+    };
+    const prepared = try prepareForApply(call_alloc, workspace, call);
+    try std.testing.expectEqual(
+        .external,
+        prepared.policy.anchor.scope,
+    );
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const result = try apply(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+    );
+
+    try std.testing.expect(result == .committed);
+    const installed = try readTestFile(
+        call_alloc,
+        &tmp,
+        "external/nested/new.txt",
+    );
+    try std.testing.expectEqualStrings("reviewed\n", installed);
+}
+
+test "apply rejects binding mismatches before allocation or filesystem access" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var owner = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer owner.deinit();
+    const owner_alloc = owner.allocator();
+    const root = try workspaceRoot(owner_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "binding",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(owner_alloc, "new.txt", "new"),
+    };
+    const prepared = try prepareForApply(owner_alloc, root, call);
+
+    var failing_call = std.testing.FailingAllocator.init(
+        testing_allocator.no_resize,
+        .{ .fail_index = 0 },
+    );
+    var failing_result = std.testing.FailingAllocator.init(
+        testing_allocator.no_resize,
+        .{ .fail_index = 0 },
+    );
+    const call_alloc = failing_call.allocator();
+    const result_alloc = failing_result.allocator();
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const authorization: file_mutation_contract.FileExecutionAuthorization = .{
+        .input = prepared.input,
+        .policy_targets = prepared.policy,
+        .prepared = null,
+    };
+
+    const rejected = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            call,
+            authorization,
+            &cancel_flag,
+        ),
+        .binding_mismatch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), rejected.created_parent_residue.len);
+    try std.testing.expectEqual(@as(usize, 0), failing_call.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), failing_result.allocated_bytes);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "new.txt", .{}),
+    );
+}
+
+test "apply rejects a corrupted prepared policy proof before mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "corrupted-proof-apply",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "new.txt", "new"),
+    };
+    var prepared = try prepareForApply(call_alloc, root, call);
+    var corrupted_components = try call_alloc.dupe(
+        file_mutation_contract.PathSpan,
+        prepared.policy.anchor.relative_components,
+    );
+    corrupted_components[0].start = prepared.policy.anchor.path_end;
+    var corrupted_policy = prepared.policy;
+    corrupted_policy.anchor.relative_components = corrupted_components;
+    prepared.policy = corrupted_policy;
+    prepared.prepared.policy_targets = corrupted_policy;
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const rejected = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+        ),
+        .binding_mismatch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), rejected.created_parent_residue.len);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "new.txt", .{}),
+    );
+}
+
+test "apply allocation failure before rename leaves target unchanged" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try createFile(&tmp, "note.txt", "old");
+    var owner = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer owner.deinit();
+    const call_alloc = owner.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "allocation-failure",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "note.txt", "new"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var failing = std.testing.FailingAllocator.init(
+        testing_allocator.no_resize,
+        .{ .fail_index = 3 },
+    );
+    var test_state = StageTestState{};
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        applyWithTestControls(
+            call_alloc,
+            failing.allocator(),
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+        ),
+    );
+    try std.testing.expect(!test_state.reached);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    const unchanged = try readTestFile(call_alloc, &tmp, "note.txt");
+    try std.testing.expectEqualStrings("old", unchanged);
+    try expectNoStageFiles(root);
+}
+
+test "apply rejects stale absent targets and stale existing preimages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "existing.txt", "old");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+
+    const missing_call: types.ToolCall = .{
+        .id = "stale-absent",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "missing.txt", "new"),
+    };
+    const missing_prepared = try prepareForApply(call_alloc, root, missing_call);
+    try createFile(&tmp, "missing.txt", "raced");
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    _ = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            missing_call,
+            executionAuthorization(missing_prepared),
+            &cancel_flag,
+        ),
+        .stale_preimage,
+    );
+    const raced = try readTestFile(call_alloc, &tmp, "missing.txt");
+    try std.testing.expectEqualStrings("raced", raced);
+
+    const existing_call: types.ToolCall = .{
+        .id = "stale-existing",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "existing.txt", "new"),
+    };
+    const existing_prepared = try prepareForApply(call_alloc, root, existing_call);
+    {
+        var file = try tmp.dir.openFile(std.testing.io, "existing.txt", .{ .mode = .write_only });
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, 0);
+        try file.writeStreamingAll(std.testing.io, "changed");
+    }
+    _ = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            existing_call,
+            executionAuthorization(existing_prepared),
+            &cancel_flag,
+        ),
+        .stale_preimage,
+    );
+    const changed = try readTestFile(call_alloc, &tmp, "existing.txt");
+    try std.testing.expectEqualStrings("changed", changed);
+}
+
+test "apply rejects replaced anchors and existing parents" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "workspace", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "workspace/parent", .default_dir);
+    try createFile(&tmp, "workspace/parent/note.txt", "old");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const workspace = try io_mod.dirRealpathAlloc(call_alloc, tmp.dir, "workspace");
+    const call: types.ToolCall = .{
+        .id = "replace-anchor",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "parent/note.txt", "new"),
+    };
+    const prepared = try prepareForApply(call_alloc, workspace, call);
+
+    try tmp.dir.rename("workspace", tmp.dir, "workspace-old", std.testing.io);
+    try tmp.dir.createDir(std.testing.io, "workspace", .default_dir);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    _ = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+        ),
+        .traversal_changed,
+    );
+    const anchor_unchanged = try readTestFile(call_alloc, &tmp, "workspace-old/parent/note.txt");
+    try std.testing.expectEqualStrings("old", anchor_unchanged);
+
+    try tmp.dir.rename("workspace", tmp.dir, "workspace-empty", std.testing.io);
+    try tmp.dir.rename("workspace-old", tmp.dir, "workspace", std.testing.io);
+    const parent_call: types.ToolCall = .{
+        .id = "replace-parent",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "parent/note.txt", "new"),
+    };
+    const parent_prepared = try prepareForApply(call_alloc, workspace, parent_call);
+    try tmp.dir.rename("workspace/parent", tmp.dir, "workspace/parent-old", std.testing.io);
+    try tmp.dir.createDir(std.testing.io, "workspace/parent", .default_dir);
+    _ = try expectApplyRejected(
+        try apply(
+            call_alloc,
+            result_alloc,
+            parent_call,
+            executionAuthorization(parent_prepared),
+            &cancel_flag,
+        ),
+        .traversal_changed,
+    );
+    const parent_unchanged = try readTestFile(call_alloc, &tmp, "workspace/parent-old/note.txt");
+    try std.testing.expectEqualStrings("old", parent_unchanged);
+}
+
+const CreatedParentReplacement = enum {
+    none,
+    shallow,
+    deep,
+};
+
+const StageTestState = struct {
+    reached: bool = false,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    workspace_root: ?[]const u8 = null,
+    replace_created_parent: CreatedParentReplacement = .none,
+    replace_temp: bool = false,
+    mutate_temp: bool = false,
+    add_blocker: bool = false,
+};
+
+fn mutateAfterStage(
+    ctx: ?*anyopaque,
+    parent: std.Io.Dir,
+    temp_name: []const u8,
+) anyerror!void {
+    const state: *StageTestState = @ptrCast(@alignCast(ctx.?));
+    state.reached = true;
+    if (state.replace_created_parent != .none) {
+        var root = std.Io.Dir.openDirAbsolute(
+            std.testing.io,
+            state.workspace_root.?,
+            .{},
+        ) catch return error.TestControlFailed;
+        defer root.close(std.testing.io);
+        switch (state.replace_created_parent) {
+            .none => unreachable,
+            .shallow => {
+                root.rename("one", root, "one-original", std.testing.io) catch
+                    return error.TestControlFailed;
+                root.createDir(std.testing.io, "one", .default_dir) catch
+                    return error.TestControlFailed;
+            },
+            .deep => {
+                root.rename("one/two", root, "one/two-original", std.testing.io) catch
+                    return error.TestControlFailed;
+                root.createDir(std.testing.io, "one/two", .default_dir) catch
+                    return error.TestControlFailed;
+            },
+        }
+    }
+    if (state.replace_temp) {
+        parent.rename(temp_name, parent, ".removed-stage", std.testing.io) catch return error.TestControlFailed;
+        parent.deleteFile(std.testing.io, ".removed-stage") catch return error.TestControlFailed;
+        var replacement = parent.createFile(std.testing.io, temp_name, .{
+            .truncate = false,
+            .exclusive = true,
+        }) catch return error.TestControlFailed;
+        defer replacement.close(std.testing.io);
+        replacement.writeStreamingAll(std.testing.io, "foreign") catch return error.TestControlFailed;
+    }
+    if (state.mutate_temp) {
+        var staged = parent.openFile(std.testing.io, temp_name, .{
+            .mode = .write_only,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch return error.TestControlFailed;
+        defer staged.close(std.testing.io);
+        staged.writeStreamingAll(std.testing.io, "tampered") catch return error.TestControlFailed;
+        staged.sync(std.testing.io) catch return error.TestControlFailed;
+    }
+    if (state.add_blocker) {
+        var blocker = parent.createFile(std.testing.io, "blocker", .{
+            .truncate = false,
+            .exclusive = true,
+        }) catch return error.TestControlFailed;
+        blocker.close(std.testing.io);
+    }
+    if (state.cancel_flag) |cancel_flag| cancel_flag.store(true, .seq_cst);
+}
+
+const StageChunkTestState = struct {
+    cancel_flag: *std.atomic.Value(bool),
+    chunk_count: usize = 0,
+};
+
+fn cancelAfterFirstStageChunk(
+    ctx: ?*anyopaque,
+    _: usize,
+) anyerror!void {
+    const state: *StageChunkTestState = @ptrCast(@alignCast(ctx.?));
+    state.chunk_count += 1;
+    if (state.chunk_count == 1) state.cancel_flag.store(true, .seq_cst);
+}
+
+fn replaceTargetAfterFinalPreimageRead(
+    _: ?*anyopaque,
+    parent: std.Io.Dir,
+    target_name: []const u8,
+) anyerror!void {
+    parent.rename(
+        target_name,
+        parent,
+        "reviewed-target",
+        std.testing.io,
+    ) catch return error.TestControlFailed;
+    var replacement = parent.createFile(std.testing.io, target_name, .{
+        .truncate = false,
+        .exclusive = true,
+    }) catch return error.TestControlFailed;
+    defer replacement.close(std.testing.io);
+    replacement.writeStreamingAll(std.testing.io, "old") catch
+        return error.TestControlFailed;
+}
+
+const MoveParentTestState = struct {
+    tmp: *std.testing.TmpDir,
+    reached: bool = false,
+};
+
+fn moveParentForTest(state: *MoveParentTestState) !void {
+    state.reached = true;
+    state.tmp.dir.rename(
+        "parent",
+        state.tmp.dir,
+        "moved-parent",
+        std.testing.io,
+    ) catch return error.TestControlFailed;
+    state.tmp.dir.createDir(std.testing.io, "parent", .default_dir) catch
+        return error.TestControlFailed;
+    createFile(state.tmp, "parent/existing.txt", "replacement") catch
+        return error.TestControlFailed;
+}
+
+fn moveParentAfterFinalPreimageRead(
+    ctx: ?*anyopaque,
+    _: std.Io.Dir,
+    _: []const u8,
+) anyerror!void {
+    const state: *MoveParentTestState = @ptrCast(@alignCast(ctx.?));
+    try moveParentForTest(state);
+}
+
+fn moveParentAfterFinalValidation(ctx: ?*anyopaque) anyerror!void {
+    const state: *MoveParentTestState = @ptrCast(@alignCast(ctx.?));
+    try moveParentForTest(state);
+}
+
+test "apply rejects replaced staged sources without deleting foreign replacements" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "replace-stage",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = StageTestState{ .replace_temp = true };
+
+    _ = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+        ),
+        .staged_source_changed,
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "new.txt", .{}),
+    );
+
+    var root_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root_dir.close(std.testing.io);
+    var iterator = root_dir.iterate();
+    var found_foreign = false;
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, ".fx-stage-")) {
+            const foreign = try readTestFile(call_alloc, &tmp, entry.name);
+            try std.testing.expectEqualStrings("foreign", foreign);
+            found_foreign = true;
+        }
+    }
+    try std.testing.expect(found_foreign);
+}
+
+test "apply rejects in-place staged content changes before rename" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "mutate-stage",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = StageTestState{ .mutate_temp = true };
+
+    _ = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+        ),
+        .staged_source_changed,
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "new.txt", .{}),
+    );
+
+    var root_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root_dir.close(std.testing.io);
+    var iterator = root_dir.iterate();
+    while (try iterator.next(std.testing.io)) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, ".fx-stage-"));
+    }
+}
+
+test "apply rejects a target pathname replaced during final preimage validation" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try createFile(&tmp, "existing.txt", "old");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "replace-target-during-read",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            call_alloc,
+            "existing.txt",
+            "new",
+        ),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    _ = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .after_final_preimage_read = replaceTargetAfterFinalPreimageRead },
+        ),
+        .stale_preimage,
+    );
+
+    const replacement = try readTestFile(call_alloc, &tmp, "existing.txt");
+    try std.testing.expectEqualStrings("old", replacement);
+    const reviewed = try readTestFile(call_alloc, &tmp, "reviewed-target");
+    try std.testing.expectEqualStrings("old", reviewed);
+    try expectNoStageFiles(root);
+}
+
+test "apply rejects a parent moved during final preimage validation" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "parent", .default_dir);
+    try createFile(&tmp, "parent/existing.txt", "old");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "move-parent-during-final-read",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            call_alloc,
+            "parent/existing.txt",
+            "new",
+        ),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = MoveParentTestState{ .tmp = &tmp };
+
+    _ = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{
+                .ctx = &test_state,
+                .after_final_preimage_read = moveParentAfterFinalPreimageRead,
+            },
+        ),
+        .traversal_changed,
+    );
+
+    try std.testing.expect(test_state.reached);
+    const canonical = try readTestFile(
+        call_alloc,
+        &tmp,
+        "parent/existing.txt",
+    );
+    try std.testing.expectEqualStrings("replacement", canonical);
+    const moved = try readTestFile(
+        call_alloc,
+        &tmp,
+        "moved-parent/existing.txt",
+    );
+    try std.testing.expectEqualStrings("old", moved);
+    try expectNoStageFiles(root);
+}
+
+test "apply commits through a parent moved after final validation" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "parent", .default_dir);
+    try createFile(&tmp, "parent/existing.txt", "old");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "move-parent-after-final-validation",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            call_alloc,
+            "parent/existing.txt",
+            "new",
+        ),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = MoveParentTestState{ .tmp = &tmp };
+
+    const result = try applyWithTestControls(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+        .{
+            .ctx = &test_state,
+            .after_final_validation = moveParentAfterFinalValidation,
+        },
+    );
+
+    const committed = switch (result) {
+        .committed => |handoff| handoff,
+        .rejected => return error.UnexpectedRejectedMutation,
+    };
+    try std.testing.expect(test_state.reached);
+    try std.testing.expectEqualStrings(
+        "parent/existing.txt",
+        committed.preview.path,
+    );
+    const canonical = try readTestFile(
+        call_alloc,
+        &tmp,
+        "parent/existing.txt",
+    );
+    try std.testing.expectEqualStrings("replacement", canonical);
+    const moved = try readTestFile(
+        call_alloc,
+        &tmp,
+        "moved-parent/existing.txt",
+    );
+    try std.testing.expectEqualStrings("new", moved);
+    try expectNoStageFiles(root);
+}
+
+test "apply observes cancellation between bounded stage writes" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const content = try call_alloc.alloc(u8, 128 * 1024);
+    @memset(content, 'x');
+    const call: types.ToolCall = .{
+        .id = "cancel-stage-chunk",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(
+            call_alloc,
+            "one/two/new.txt",
+            content,
+        ),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = StageChunkTestState{ .cancel_flag = &cancel_flag };
+
+    const rejected = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{
+                .ctx = &test_state,
+                .after_write_chunk = cancelAfterFirstStageChunk,
+            },
+        ),
+        .cancelled,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), test_state.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), rejected.created_parent_residue.len);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "one", .{}),
+    );
+    try expectNoStageFiles(root);
+}
+
+test "apply rejects replacement of transaction-created parent directories" {
+    inline for ([_]CreatedParentReplacement{ .shallow, .deep }) |replacement| {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer call_arena_state.deinit();
+        var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer result_arena_state.deinit();
+        const call_alloc = call_arena_state.allocator();
+        const result_alloc = result_arena_state.allocator();
+        const root = try workspaceRoot(call_alloc, tmp);
+        const call: types.ToolCall = .{
+            .id = switch (replacement) {
+                .none => unreachable,
+                .shallow => "replace-created-shallow",
+                .deep => "replace-created-deep",
+            },
+            .name = "write_file",
+            .arguments_json = try writeArgumentsJson(
+                call_alloc,
+                "one/two/new.txt",
+                "reviewed",
+            ),
+        };
+        const prepared = try prepareForApply(call_alloc, root, call);
+        var cancel_flag = std.atomic.Value(bool).init(false);
+        var test_state = StageTestState{
+            .workspace_root = root,
+            .replace_created_parent = replacement,
+        };
+
+        const rejected = try expectApplyRejected(
+            try applyWithTestControls(
+                call_alloc,
+                result_alloc,
+                call,
+                executionAuthorization(prepared),
+                &cancel_flag,
+                .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+            ),
+            .traversal_changed,
+        );
+
+        try std.testing.expectEqual(@as(usize, 2), rejected.created_parent_residue.len);
+        try std.testing.expect(
+            rejected.created_parent_residue[0].component_index >
+                rejected.created_parent_residue[1].component_index,
+        );
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(std.testing.io, "one/two/new.txt", .{}),
+        );
+        const moved_target = switch (replacement) {
+            .none => unreachable,
+            .shallow => "one-original/two/new.txt",
+            .deep => "one/two-original/new.txt",
+        };
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(std.testing.io, moved_target, .{}),
+        );
+        try expectNoStageFiles(root);
+    }
+}
+
+test "apply cancellation removes its temp and newly created parents" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try createFile(&tmp, "keep.txt", "keep");
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "cancel-clean",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "one/two/new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = StageTestState{ .cancel_flag = &cancel_flag };
+
+    const rejected = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+        ),
+        .cancelled,
+    );
+    try std.testing.expectEqual(@as(usize, 0), rejected.created_parent_residue.len);
+    const keep = try readTestFile(call_alloc, &tmp, "keep.txt");
+    try std.testing.expectEqualStrings("keep", keep);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "one", .{}),
+    );
+    try expectNoStageFiles(root);
+}
+
+test "apply returns deepest-first bounded residue when created parents are not empty" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "cancel-residue",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "one/two/new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var test_state = StageTestState{
+        .cancel_flag = &cancel_flag,
+        .add_blocker = true,
+    };
+
+    const rejected = try expectApplyRejected(
+        try applyWithTestControls(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+            .{ .ctx = &test_state, .after_stage = mutateAfterStage },
+        ),
+        .cancelled,
+    );
+    try std.testing.expectEqual(@as(usize, 2), rejected.created_parent_residue.len);
+    try std.testing.expect(
+        rejected.created_parent_residue[0].component_index >
+            rejected.created_parent_residue[1].component_index,
+    );
+    for (rejected.created_parent_residue) |residue| {
+        try std.testing.expectEqual(
+            ParentCleanupResidueReason.not_empty,
+            residue.reason,
+        );
+        try std.testing.expect(residue.observed_identity != null);
+    }
+    const blocker = try readTestFile(call_alloc, &tmp, "one/two/blocker");
+    try std.testing.expectEqualStrings("", blocker);
+}
+
+test "apply preserves the existing destination mode" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createFile(&tmp, "mode.txt", "old");
+    {
+        var file = try tmp.dir.openFile(std.testing.io, "mode.txt", .{});
+        defer file.close(std.testing.io);
+        try file.setPermissions(
+            std.testing.io,
+            std.Io.File.Permissions.fromMode(0o640),
+        );
+    }
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "mode",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "mode.txt", "new"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const result = try apply(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+    );
+    try std.testing.expect(result == .committed);
+    const stat = try tmp.dir.statFile(
+        std.testing.io,
+        "mode.txt",
+        .{ .follow_symlinks = false },
+    );
+    try std.testing.expectEqual(
+        @as(std.posix.mode_t, 0o640),
+        stat.permissions.toMode() & 0o777,
+    );
+}
+
+test "approved mutation cannot apply twice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena_state.deinit();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const call_alloc = call_arena_state.allocator();
+    const result_alloc = result_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "single-use-proof",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const first = try apply(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+    );
+    try std.testing.expect(first == .committed);
+    try std.testing.expectError(
+        error.ResultContractViolation,
+        apply(
+            call_alloc,
+            result_alloc,
+            call,
+            executionAuthorization(prepared),
+            &cancel_flag,
+        ),
+    );
+    const installed = try readTestFile(call_alloc, &tmp, "new.txt");
+    try std.testing.expectEqualStrings("reviewed", installed);
+}
+
+test "apply commit handoff remains valid after the call owner is destroyed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var result_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena_state.deinit();
+    const result_alloc = result_arena_state.allocator();
+    var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const call_alloc = call_arena_state.allocator();
+    const root = try workspaceRoot(call_alloc, tmp);
+    const call: types.ToolCall = .{
+        .id = "result-lifetime",
+        .name = "write_file",
+        .arguments_json = try writeArgumentsJson(call_alloc, "new.txt", "reviewed"),
+    };
+    const prepared = try prepareForApply(call_alloc, root, call);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const result = try apply(
+        call_alloc,
+        result_alloc,
+        call,
+        executionAuthorization(prepared),
+        &cancel_flag,
+    );
+    const committed_handoff = switch (result) {
+        .committed => |handoff| handoff,
+        .rejected => return error.UnexpectedRejectedMutation,
+    };
+
+    call_arena_state.deinit();
+
+    try std.testing.expectEqualStrings("new.txt", committed_handoff.preview.path);
+    try std.testing.expect(
+        std.mem.endsWith(u8, committed_handoff.tracker.raw_path, "new.txt"),
+    );
+    try std.testing.expectEqual(
+        file_mutation_contract.Kind.write,
+        committed_handoff.tracker.kind,
+    );
+}

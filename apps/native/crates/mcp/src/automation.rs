@@ -33,6 +33,17 @@ pub trait EngineHook: Send + Sync {
         Ok(())
     }
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
+    fn extension_probe(
+        &self, _project: &str, _document: u64, _revision: u64, _ids: &[String],
+    ) -> Result<Value> {
+        Err(Error::unavailable("native extension probe renderer"))
+    }
+    fn eval_registrations(&self, _project: &str, _document: u64, _revision: u64) -> Result<Value> {
+        Err(Error::unavailable("native registration evidence"))
+    }
+    fn measure_frame_time(&self, _project: &str, _document: u64, _revision: u64, _args: &Value) -> Result<Value> {
+        Err(Error::unavailable("paired native frame timing"))
+    }
     fn render_effect_lab(
         &self,
         _: &crate::effect_lab::Request,
@@ -806,6 +817,91 @@ impl Automation {
         )?;
         Ok(())
     }
+    pub(crate) fn begin_checked_edit(
+        &mut self, project: &str, writer: u32, label: &str, revision: u64,
+    ) -> Result<u64> {
+        use pm_kernel::EditCall;
+        let ack = self.call(project, Request::new(
+            Caller::realm(writer, 1, Origin::Mcp),
+            EditCall::MutateBegin { label: label.to_owned() },
+        ).outside_revision(revision))?;
+        match ack.reply {
+            Reply::Mutation(lease) => Ok(lease),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
+    /// Commits or aborts the lease. An abort that could not take everything
+    /// back (another writer changed the same values) keeps the work and
+    /// returns the kernel's reason with the revision.
+    pub(crate) fn finish_checked_edit(
+        &mut self, project: &str, writer: u32, lease: u64, commit: bool,
+    ) -> Result<(u64, Option<String>)> {
+        use pm_kernel::EditCall;
+        let call = if commit {
+            EditCall::MutateFinish { lease, ops: Vec::new(), label: None }
+        } else {
+            EditCall::MutateAbort { lease }
+        };
+        let ack = self.call(
+            project, Request::new(Caller::realm(writer, 1, Origin::Mcp), call),
+        )?;
+        let kept = match &ack.notice {
+            Some(pm_kernel::Notice::CommitWithNotice { reason, .. }) => Some(reason.clone()),
+            _ => None,
+        };
+        match &ack.reply {
+            Reply::Bool(true) => Ok((ack.revision, kept)),
+            Reply::Edit(value) if value.ok => Ok((ack.revision, kept)),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
+    /// [`Self::restore`] from a snapshot in its native form: no JSON
+    /// projection, so authored strings (lone surrogates included) come back
+    /// byte for byte. Current notes stay, as there.
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        id: &str,
+        snapshot: &pm_kernel::Snapshot,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        let mut project =
+            pm_model::canonical::realize_project(crate::automation::working_document(snapshot)?);
+        let view = self.view(id)?;
+        let current = crate::automation::working_document(&view.snapshot)?;
+        if let (pm_model::Value::Object(target), pm_model::Value::Object(current)) =
+            (&mut project, &current)
+        {
+            for key in ["memory", "memoryEnabled"] {
+                match current.get(key) {
+                    Some(value) => {
+                        target.insert(key, value.clone());
+                    }
+                    None => {
+                        target.remove(key);
+                    }
+                }
+            }
+        }
+        let ack = self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    Call::Restore {
+                        project,
+                        label: "Roll back agent changes".into(),
+                        expected_revision: expected,
+                        expected_document: view.document,
+                    },
+                ),
+            )
+            .map_err(|e| Error::conflict(e.message))?;
+        Ok(ack.revision)
+    }
+
     pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
         match self
             .call(
@@ -1617,7 +1713,7 @@ pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
 
 // Also exclude the retired field from snapshots supplied in memory, before
 // converting any nodes to owned values (file ingress already skips it).
-fn working_document(snapshot: &pm_kernel::Snapshot) -> Result<pm_model::Value> {
+pub(crate) fn working_document(snapshot: &pm_kernel::Snapshot) -> Result<pm_model::Value> {
     let root = snapshot
         .root()
         .ok_or_else(|| Error::invalid("Missing document"))?;

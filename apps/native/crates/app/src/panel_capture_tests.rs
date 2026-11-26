@@ -9,6 +9,22 @@ use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
 use std::sync::Arc;
 
+/// `PM_PANEL_CAPTURE_SIZE=w,h` draws every panel at that size instead.
+/// `PM_PANEL_CAPTURE_SCALE`: the backing scale to draw at (4: a panel shown
+/// at twice its size, still sharp).
+fn capture_scale() -> Option<f32> {
+    std::env::var("PM_PANEL_CAPTURE_SCALE").ok()?.parse().ok()
+}
+fn capture_size(w: f32, h: f32) -> (f32, f32) {
+    std::env::var("PM_PANEL_CAPTURE_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((w, h))
+}
+
 fn wait_export_publication(ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
@@ -283,7 +299,7 @@ fn capture_builtin_panels() {
                 let panel_fill = tokens.colors.panel;
                 let timeline_tokens = tokens.clone();
                 let window = cx
-                    .open_window(size(px(w), px(h)), |window, cx| {
+                    .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                         let natives = Natives::default();
                         let outline = natives.outline.clone();
                         if capture_timeline {
@@ -313,6 +329,9 @@ fn capture_builtin_panels() {
                         })
                     })
                     .unwrap();
+                if let Some(scale) = capture_scale() {
+                    cx.simulate_scale_change(window.into(), scale);
+                }
                 for _ in 0..40 {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -693,9 +712,9 @@ fn capture_agent_states() {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let (w, h) = if panel == "settings" {
                     (
-                        (pm_shell::settings_window::MIN_SIZE.0
-                            - pm_shell::settings_window::SIDEBAR_WIDTH) as f32,
-                        pm_shell::settings_window::MIN_SIZE.1 as f32,
+                        (pm_shell::settings_window::min_size().0
+                            - pm_shell::settings_window::sidebar_width()) as f32,
+                        pm_shell::settings_window::min_size().1 as f32,
                     )
                 } else if timeline {
                     (900., 200.)
@@ -726,11 +745,14 @@ fn capture_agent_states() {
                 );
                 let fill = if panel == "settings" {
                     tokens.colors.panel_secondary
+                } else if std::env::var_os("PM_PANEL_CAPTURE_DOCKED").is_some() {
+                    // A docked panel, on the editor's panel ground.
+                    tokens.colors.panel
                 } else {
                     tokens.colors.floating
                 };
                 let window = cx
-                    .open_window(size(px(w), px(h)), |window, cx| {
+                    .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                         let view = cx.new(|cx| {
                             let mut view = SurfaceView::new(
                                 runtime,
@@ -748,6 +770,9 @@ fn capture_agent_states() {
                         cx.new(|_| Frame { view, fill, timecode: None })
                     })
                     .unwrap();
+                if let Some(scale) = capture_scale() {
+                    cx.simulate_scale_change(window.into(), scale);
+                }
                 for _ in 0..30 {
                     window.update(&mut cx, |_, window, _| window.refresh()).unwrap();
                     cx.run_until_parked();
@@ -836,7 +861,7 @@ fn capture_colour_stack_states() {
                     );
                     let fill = tokens.colors.panel;
                     let window = cx
-                        .open_window(size(px(w), px(h)), |window, cx| {
+                        .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                             let view = cx.new(|cx| {
                                 let mut view = SurfaceView::new(
                                     runtime,
@@ -1165,7 +1190,7 @@ fn capture_threads_layout() {
                         surface,
                     };
                     let window = cx
-                        .open_window(size(px(w), px(h)), |window, cx| {
+                        .open_window({ let (w, h) = capture_size(w, h); size(px(w), px(h)) }, |window, cx| {
                             let view = cx.new(|cx| {
                                 let mut view = SurfaceView::new(
                                     rig.runtime.clone(),
@@ -1232,7 +1257,7 @@ fn capture_threads_layout() {
                     let pinned = composer.is_some_and(|composer| {
                         composer.top() >= header.bottom() - px(0.5)
                             && (f32::from(composer.bottom()) - (h - 8.)).abs() <= 0.5
-                            && ["agent-field", "agent-model", "agent-effort", "agent-access"]
+                            && ["agent-composer-text", "agent-options", "agent-add", "agent-model", "agent-effort"]
                                 .into_iter()
                                 .all(|id| {
                                     bounds(id).is_some_and(|part| {

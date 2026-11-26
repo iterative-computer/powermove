@@ -1,12 +1,15 @@
 //! AppKit presentation of the Settings panel's semantic tree. The panel
 //! still owns its values, search results, actions and change listeners.
 mod agent_app_icons;
+mod credits;
+mod plans;
+mod previews;
 
 use crate::{session::Controller, v4_compile::number_facts};
 use gpui::Context;
 use gpui_macos::native_text::{NativeTextSlot, TextEvent};
 use objc2::{
-    AllocAnyThread, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
+    AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
     runtime::ProtocolObject,
 };
 use objc2_app_kit::*;
@@ -23,16 +26,83 @@ use std::{
     rc::Rc,
 };
 
-const PAGE_INSET: f64 = 20.;
-const PAGE_MAX_WIDTH: f64 = 640.;
-const SECTION_SPACING: f64 = 20.;
-const ROW_INSET: f64 = 18.;
-const ROW_PADDING: f64 = 8.;
-const ROW_HEIGHT: f64 = 44.;
-const GROUP_RADIUS: f64 = 12.;
-const LABEL_SIZE: f64 = 13.;
-const FOOTER_SIZE: f64 = 11.;
-const LIST_ROW_HEIGHT: f64 = ROW_HEIGHT + 1.;
+// Every size here is a token (`pm_design::Settings`, `TextSize`, `Space`).
+fn st() -> pm_design::Settings {
+    pm_shell::scale().settings
+}
+fn text_size() -> pm_design::TextSize {
+    pm_shell::scale().text_size
+}
+/// The page's side inset (the header's tile starts on the same line).
+fn page_inset() -> f64 {
+    st().page_inset as f64
+}
+/// Air above the first card (the header sits in the title bar's band) and
+/// under the last.
+fn page_top() -> f64 {
+    st().page_top as f64
+}
+fn page_bottom() -> f64 {
+    st().page_bottom as f64
+}
+fn page_max_width() -> f64 {
+    st().column as f64
+}
+fn section_spacing() -> f64 {
+    st().section_gap as f64
+}
+fn row_inset() -> f64 {
+    st().row_inset as f64
+}
+fn row_padding() -> f64 {
+    st().row_padding as f64
+}
+fn row_height() -> f64 {
+    st().row as f64
+}
+fn group_radius() -> f64 {
+    st().group_radius as f64
+}
+/// The air a title's line leaves above its text: (line − text) / 2.
+fn title_air() -> f64 {
+    st().title_air as f64
+}
+/// A list's rows stand `metrics.list_gap` apart.
+fn list_row_height() -> f64 {
+    row_height() + pm_shell::scale().metrics.list_gap as f64
+}
+fn font(size: f32, weight: f32) -> Retained<NSFont> {
+    pm_shell::settings_window::font(size, weight)
+}
+/// A trailing button (or a stack holding buttons) yields width before the
+/// row's title: its compression resistance drops below the title's and it
+/// truncates its words at the end.
+fn give_way(view: &NSView) {
+    if let Some(stack) = view.downcast_ref::<NSStackView>() {
+        for child in stack.arrangedSubviews().iter() {
+            give_way(&child);
+        }
+    }
+    // Buttons and pop-ups only: a switch or a field keeps its size.
+    let Some(button) = view.downcast_ref::<NSButton>() else {
+        return;
+    };
+    button.setContentCompressionResistancePriority_forOrientation(
+        NSLayoutPriorityDefaultLow + 1.,
+        NSLayoutConstraintOrientation::Horizontal,
+    );
+    if let Some(cell) = button.cell() {
+        cell.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        cell.setTruncatesLastVisibleLine(true);
+    }
+}
+/// A `Space` step in points.
+fn space() -> pm_design::Space {
+    pm_shell::scale().space
+}
+fn regular() -> f32 {
+    pm_shell::scale().typography.regular_weight
+}
 const LIST_ROWS: usize = 40;
 
 pub(crate) struct Form {
@@ -53,9 +123,15 @@ impl Form {
             unsafe { msg_send![SettingsDocument::alloc(mtm), init] };
         wrapper.setTranslatesAutoresizingMaskIntoConstraints(false);
         set_document(scroll, &wrapper);
-        let document = Pile::new(mtm, false, SECTION_SPACING, 0., PAGE_INSET);
+        let document = Pile::new(mtm, false, section_spacing(), 0., 0.);
+        document.stack.setEdgeInsets(NSEdgeInsets {
+            top: page_top(),
+            left: 0.,
+            bottom: page_bottom(),
+            right: 0.,
+        });
         wrapper.addSubview(&document.stack);
-        let available = -2. * PAGE_INSET;
+        let available = -2. * page_inset();
         let fill = document
             .stack
             .widthAnchor()
@@ -83,7 +159,7 @@ impl Form {
             document
                 .stack
                 .widthAnchor()
-                .constraintLessThanOrEqualToConstant(PAGE_MAX_WIDTH),
+                .constraintLessThanOrEqualToConstant(page_max_width()),
         ]);
         Self {
             scroll: scroll.retain(),
@@ -144,7 +220,9 @@ impl Form {
             tokens,
             tx,
         );
-        reload.view().setTranslatesAutoresizingMaskIntoConstraints(false);
+        reload
+            .view()
+            .setTranslatesAutoresizingMaskIntoConstraints(false);
         self.document.set(&[label, reload.view().retain()]);
         self.memory_reload = Some(reload);
         cx.spawn(async move |owner, cx| {
@@ -242,7 +320,7 @@ impl Form {
         self.document.stack.layoutSubtreeIfNeeded();
         let clip = self.scroll.contentView();
         let rect = view.convertRect_toView(view.bounds(), Some(&clip));
-        clip.scrollToPoint(NSPoint::new(0., rect.origin.y - PAGE_INSET));
+        clip.scrollToPoint(NSPoint::new(0., (rect.origin.y - page_top()).max(0.)));
         self.scroll.reflectScrolledClipView(&clip);
         self.reveal = None;
     }
@@ -288,7 +366,7 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                     .context("Settings capture appearance")?;
                 let bounds = NSRect::new(
                     NSPoint::new(0., 0.),
-                    NSSize::new(PAGE_MAX_WIDTH + 2. * PAGE_INSET, 870.),
+                    NSSize::new(page_max_width() + 2. * page_inset(), 870.),
                 );
                 let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), bounds);
                 scroll.setAppearance(Some(&appearance));
@@ -311,7 +389,9 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                         && Component::of(node) == Some(Component::SegmentedControl)
                 }) {
                     let form = form.borrow();
-                    let control = form.widgets.get(&filter.id)
+                    let control = form
+                        .widgets
+                        .get(&filter.id)
                         .and_then(|widget| widget.view().downcast_ref::<NSSegmentedControl>())
                         .context("Settings status filter needs the system segmented control")?;
                     let (_, selected, _) = control_value(
@@ -324,7 +404,13 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                         "Settings status filter lost its selected segment",
                     );
                 }
-                capture_row_titles(&form.borrow(), &publication.surface, &name, theme, "initial");
+                capture_row_titles(
+                    &form.borrow(),
+                    &publication.surface,
+                    &name,
+                    theme,
+                    "initial",
+                );
                 appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
                     scroll.setNeedsLayout(true);
                     scroll.layoutSubtreeIfNeeded();
@@ -350,24 +436,38 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                     )
                 }
                 .context("encode Settings bitmap")?;
-                std::fs::write(output.join(format!("settings-{name}-{theme}.png")), unsafe {
-                    png.as_bytes_unchecked()
-                })?;
+                std::fs::write(
+                    output.join(format!("settings-{name}-{theme}.png")),
+                    unsafe { png.as_bytes_unchecked() },
+                )?;
                 Ok(())
             })?;
         }
     }
-    anyhow::ensure!(hidden_titles == 0, "Settings review found {hidden_titles} unusable row titles");
+    anyhow::ensure!(
+        hidden_titles == 0,
+        "Settings review found {hidden_titles} unusable row titles"
+    );
     Ok(())
 }
 
 /// Regresses the leading labels on the same AppKit view tree the capture paints.
 #[cfg(debug_assertions)]
-fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str, pass: &str) -> usize {
+fn capture_row_titles(
+    form: &Form,
+    surface: &Surface,
+    fixture: &str,
+    theme: &str,
+    pass: &str,
+) -> usize {
     let mut unusable = 0;
     for expected in ["Sign-Ins from the Original App", "Powermove Store"] {
         let field = form.widgets.iter().find_map(|(id, widget)| match widget {
-            Widget::Label(field) if surface.node(*id).is_some_and(|node| text(surface, node) == expected) => {
+            Widget::Label(field)
+                if surface
+                    .node(*id)
+                    .is_some_and(|node| text(surface, node) == expected) =>
+            {
                 Some(field)
             }
             _ => None,
@@ -391,12 +491,20 @@ fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str
                 ancestor = unsafe { view.superview() };
             }
             record["stringValue"] = json!(value);
-            record["frame"] = json!([frame.origin.x,frame.origin.y,frame.size.width,frame.size.height]);
+            record["frame"] = json!([
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height
+            ]);
             record["hidden"] = json!(hidden);
             record["alpha"] = json!(alpha);
             record["requiredWidth"] = json!(required_width);
-            value == expected && !hidden && alpha > 0.
-                && frame.size.width + 1. >= required_width && frame.size.height > 1.
+            value == expected
+                && !hidden
+                && alpha > 0.
+                && frame.size.width + 1. >= required_width
+                && frame.size.height > 1.
         });
         record["usable"] = json!(visible);
         eprintln!("SETTINGS_ROW_TITLE {record}");
@@ -560,8 +668,10 @@ impl Group {
         let box_view = NSBox::new(mtm);
         box_view.setBoxType(NSBoxType::Custom);
         box_view.setTitlePosition(NSTitlePosition::NoTitle);
-        box_view.setBorderWidth(0.);
-        box_view.setCornerRadius(GROUP_RADIUS);
+        // A hairline edge keeps the card crisp on either ground.
+        box_view.setBorderWidth(0.5);
+        box_view.setBorderColor(&NSColor::separatorColor());
+        box_view.setCornerRadius(group_radius());
         box_view.setFillColor(&pm_shell::settings_window::form_background(true));
         box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
         let rows = Pile::new(mtm, false, 0., 0., 0.);
@@ -615,9 +725,9 @@ fn separator(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
     view.addSubview(&line);
     constraints(&[
         line.leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_INSET),
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), row_inset()),
         line.trailingAnchor()
-            .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_INSET),
+            .constraintEqualToAnchor_constant(&view.trailingAnchor(), -row_inset()),
         line.topAnchor().constraintEqualToAnchor(&view.topAnchor()),
         line.bottomAnchor()
             .constraintEqualToAnchor(&view.bottomAnchor()),
@@ -636,6 +746,10 @@ fn flexible_space(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
 struct Row {
     body: Pile,
     line: Pile,
+    /// The title with its ⓘ, when the row has help, held to the leading
+    /// edge by a space after them.
+    title_line: Pile,
+    title_space: Retained<NSView>,
     space: Retained<NSView>,
     app: Option<agent_app_icons::LeadingIcon>,
     app_copy: Option<Pile>,
@@ -650,24 +764,54 @@ impl Row {
         let (padding, gap, line_height) = if agent_app.is_some() {
             // AppKit's button alignment rect excludes part of its frame.
             // Leave room for that inset so the text clears the button by 12 pt.
-            (10., 16., agent_app_icons::SIZE)
+            let space = pm_shell::scale().space;
+            (space.md as f64, space.xl as f64, agent_app_icons::size())
         } else {
-            (ROW_PADDING, 8., ROW_HEIGHT - 2. * ROW_PADDING)
+            let space = pm_shell::scale().space;
+            (
+                row_padding(),
+                space.md as f64,
+                row_height() - 2. * row_padding(),
+            )
         };
-        let body = Pile::new(mtm, false, 2., ROW_INSET, padding);
+        let body = Pile::new(
+            mtm,
+            false,
+            pm_shell::scale().space.hair as f64,
+            row_inset(),
+            padding,
+        );
         let line = Pile::new(mtm, true, gap, 0., 0.);
         line.stack
             .heightAnchor()
             .constraintGreaterThanOrEqualToConstant(line_height)
             .setActive(true);
-        let app = agent_app
-            .map(|id| agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, ROW_INSET));
+        let app = agent_app.map(|id| {
+            agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, row_inset())
+        });
+        let title_line = Pile::new(mtm, true, space().xs as f64, 0., 0.);
+        // The title truncates before the row's controls give way (a stack
+        // view refuses to clip by default and would widen the window).
+        title_line
+            .stack
+            .setClippingResistancePriority_forOrientation(
+                NSLayoutPriorityDefaultLow,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
+        title_line
+            .stack
+            .setContentCompressionResistancePriority_forOrientation(
+                NSLayoutPriorityDefaultHigh - 1.,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
         Self {
             body,
             line,
+            title_line,
+            title_space: flexible_space(mtm),
             space: flexible_space(mtm),
             app,
-            app_copy: agent_app.map(|_| Pile::new(mtm, false, 2., 0., 0.)),
+            app_copy: agent_app.map(|_| Pile::new(mtm, false, space().hair as f64, 0., 0.)),
         }
     }
 
@@ -709,12 +853,28 @@ impl Row {
             }
             views.extend(trailing);
             self.line.set(&views);
-            self.body.set(&[Retained::into_super(self.line.stack.clone())]);
+            self.body
+                .set(&[Retained::into_super(self.line.stack.clone())]);
             return;
         }
         views.push(self.space.clone());
+        // A row's controls give way before its title: a narrow column
+        // truncates a button's words, never the row's name.
+        for view in &trailing {
+            give_way(view);
+        }
         views.extend(trailing);
         self.line.set(&views);
+        // The title is centred in its line, which leaves air above its text;
+        // a row with a line under the title gets the same air below it, so
+        // its text sits in the middle of the row.
+        let mut insets = self.body.stack.edgeInsets();
+        insets.bottom = if footers.is_empty() {
+            insets.top
+        } else {
+            insets.top + title_air()
+        };
+        self.body.stack.setEdgeInsets(insets);
         self.body.set(
             &std::iter::once(Retained::into_super(self.line.stack.clone()))
                 .chain(footers)
@@ -745,6 +905,7 @@ impl VirtualList {
         set_document(&scroll, &document.stack);
         let rows = Group::new(mtm);
         rows.box_view.setFillColor(&NSColor::clearColor());
+        rows.box_view.setBorderWidth(0.);
         let before = NSView::new(mtm);
         let after = NSView::new(mtm);
         for view in [&before, &after] {
@@ -773,7 +934,7 @@ impl VirtualList {
                 return;
             }
             let bounds = clip.bounds();
-            let row = (bounds.origin.y.max(0.) / LIST_ROW_HEIGHT) as usize;
+            let row = (bounds.origin.y.max(0.) / list_row_height()) as usize;
             let end = (row + LIST_ROWS).min(count);
             let range = (row.min(end), end);
             if sent.replace(Some(range)) != Some(range) {
@@ -809,12 +970,12 @@ impl VirtualList {
             .and_then(|v| v[0].as_u64())
             .unwrap_or(0) as usize;
         self.height
-            .setConstant(count.min(LIST_ROWS) as f64 * LIST_ROW_HEIGHT - 1.);
+            .setConstant(count.min(LIST_ROWS) as f64 * list_row_height() - 1.);
         let after = count.saturating_sub(start + views.len());
         self.before_height
-            .setConstant(start as f64 * LIST_ROW_HEIGHT);
+            .setConstant(start as f64 * list_row_height());
         self.after_height
-            .setConstant(after as f64 * LIST_ROW_HEIGHT);
+            .setConstant(after as f64 * list_row_height());
         self.scroll.setHasVerticalScroller(count > LIST_ROWS);
         self.rows.set(views);
 
@@ -835,7 +996,7 @@ impl VirtualList {
             {
                 Some(
                     clip.bounds().origin.y
-                        + (*new_index as f64 - *old_index as f64) * LIST_ROW_HEIGHT,
+                        + (*new_index as f64 - *old_index as f64) * list_row_height(),
                 )
             }
             (Some(_), None) => Some(0.),
@@ -875,6 +1036,15 @@ enum Widget {
         resource: Rc<std::cell::RefCell<Option<String>>>,
     },
     Secure(Retained<NSSecureTextField>),
+    /// ⓘ beside a row's title: its explanation as a help tag and, clicked,
+    /// in a popover.
+    Help(Retained<NSButton>),
+    Picker(Picker),
+    /// Settings › Account's plan cards (Free).
+    Plans(plans::Plans),
+    /// Settings › Account's credits: the meter and the daily chart.
+    Meter(Retained<credits::Meter>),
+    Chart(Retained<credits::Chart>),
 }
 
 impl Widget {
@@ -891,6 +1061,11 @@ impl Widget {
             Self::Progress(value) => value,
             Self::Image { view, .. } => view,
             Self::Secure(value) => value,
+            Self::Help(value) => value,
+            Self::Picker(value) => &value.stack,
+            Self::Plans(value) => &value.stack,
+            Self::Meter(value) => value,
+            Self::Chart(value) => value,
         }
     }
 }
@@ -933,12 +1108,40 @@ impl Render<'_, '_> {
                 for child in node.children.iter().filter_map(|id| self.surface.node(*id)) {
                     match self::layout(child) {
                         "copy" => {
-                            let mut contents = self.children(&child.children).into_iter();
-                            leading = contents.next();
-                            footers.extend(contents);
+                            let mut title = None;
+                            let mut help = vec![];
+                            for (i, &part) in child.children.iter().enumerate() {
+                                let help_part = self
+                                    .surface
+                                    .node(part)
+                                    .is_some_and(|n| self::layout(n) == "help");
+                                let Some(view) = self.node(part) else {
+                                    continue;
+                                };
+                                if i == 0 {
+                                    title = Some(view);
+                                } else if help_part {
+                                    help.push(view);
+                                } else {
+                                    footers.push(view);
+                                }
+                            }
+                            leading = match title {
+                                Some(title) if !help.is_empty() => {
+                                    let line = std::iter::once(title)
+                                        .chain(help)
+                                        .chain([row.title_space.clone()])
+                                        .collect::<Vec<_>>();
+                                    row.title_line.set(&line);
+                                    Some(Retained::into_super(row.title_line.stack.clone()))
+                                }
+                                title => title,
+                            };
                         }
+                        // A visual picker runs the card's width under the title.
+                        _ if has_picker(self.surface, child) => footers.extend(self.node(child.id)),
                         "nameButton" => leading = self.node(child.id),
-                        "error" => footers.extend(self.node(child.id)),
+                        "error" | "meter" | "chart" => footers.extend(self.node(child.id)),
                         _ => trailing.extend(self.node(child.id)),
                     }
                 }
@@ -1003,6 +1206,36 @@ impl Render<'_, '_> {
                 }
             }
             Widget::Secure(field) => field.setEnabled(!disabled(node)),
+            Widget::Help(button) => {
+                let help = NSString::from_str(&text(self.surface, node));
+                if button.accessibilityHelp().as_deref() != Some(&*help) {
+                    button.setAccessibilityHelp(Some(&help));
+                }
+            }
+            Widget::Picker(picker) => {
+                let (_, value, _) = control_value(self.surface, node, component);
+                picker.update(value.as_u64().map(|v| v as usize), disabled(node));
+            }
+            Widget::Plans(plans) => {
+                let (_, value, _) = control_value(self.surface, node, component);
+                plans.update(value.as_u64().map(|v| v as usize), disabled(node));
+            }
+            Widget::Meter(meter) => {
+                let m = metadata(node);
+                let count = |k: &str| m[k].as_u64().unwrap_or(0);
+                meter.set(count("used"), count("included"), label(node));
+            }
+            Widget::Chart(chart) => {
+                let m = metadata(node);
+                let days = m["days"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| Some((d[0].as_str()?.to_owned(), d[1].as_u64()?)))
+                    .collect();
+                let slots = m["slots"].as_u64().unwrap_or(0) as usize;
+                chart.set(days, slots, label(node));
+            }
             Widget::Image { view, resource } => {
                 let key = node.props.get("resource").and_then(Value::as_str);
                 if let Some(key) = key.filter(|key| resource.borrow().as_deref() != Some(*key))
@@ -1031,35 +1264,42 @@ impl Render<'_, '_> {
             let (tx, rx) = async_channel::unbounded();
             let (id, generation) = (node.id, self.generation);
             if let Some(cx) = self.cx.as_deref_mut() {
-                cx
-                    .spawn(async move |owner, cx| {
-                        while let Ok(mut range) = rx.recv().await {
-                            while let Ok(latest) = rx.try_recv() {
-                                range = latest;
-                            }
-                            if owner
-                                .update(cx, |owner, cx| {
-                                    if owner.settings_node(generation, id).is_some() {
-                                        owner.settings_event(
-                                            id,
-                                            "rangechange",
-                                            EventDetail {
-                                                range: Some(range),
-                                                ..Default::default()
-                                            },
-                                            cx,
-                                        );
-                                    }
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
+                cx.spawn(async move |owner, cx| {
+                    while let Ok(mut range) = rx.recv().await {
+                        while let Ok(latest) = rx.try_recv() {
+                            range = latest;
                         }
-                    })
-                    .detach();
+                        if owner
+                            .update(cx, |owner, cx| {
+                                if owner.settings_node(generation, id).is_some() {
+                                    owner.settings_event(
+                                        id,
+                                        "rangechange",
+                                        EventDetail {
+                                            range: Some(range),
+                                            ..Default::default()
+                                        },
+                                        cx,
+                                    );
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
             }
             return Widget::Virtual(VirtualList::new(mtm, tx));
+        }
+        if layout(node) == "help" {
+            return Widget::Help(help_button(mtm, &text(self.surface, node)));
+        }
+        if component == Some(Component::SegmentedControl)
+            && let Some(kind) = metadata(node)["picker"].as_str()
+        {
+            return self.picker(node, kind);
         }
         match component {
             Some(Component::FormGroup) => return Widget::Group(Group::new(mtm)),
@@ -1072,12 +1312,12 @@ impl Render<'_, '_> {
                 let field = NSSecureTextField::new(mtm);
                 field.setControlSize(NSControlSize::Regular);
                 field.setFocusRingType(NSFocusRingType::None);
-                field.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
+                field.setFont(Some(&font(text_size().base, regular())));
                 field.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 field.setTranslatesAutoresizingMaskIntoConstraints(false);
                 field
                     .widthAnchor()
-                    .constraintEqualToConstant(160.)
+                    .constraintEqualToConstant(st().secure_width as f64)
                     .setActive(true);
                 return Widget::Secure(field);
             }
@@ -1091,7 +1331,7 @@ impl Render<'_, '_> {
                 progress.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 progress
                     .widthAnchor()
-                    .constraintEqualToConstant(96.)
+                    .constraintEqualToConstant(st().progress_width as f64)
                     .setActive(true);
                 return Widget::Progress(progress);
             }
@@ -1102,25 +1342,33 @@ impl Render<'_, '_> {
             return self.control(node, kind, &value, options);
         }
         match layout(node) {
+            "meter" => Widget::Meter(credits::Meter::new(mtm)),
+            "chart" => Widget::Chart(credits::Chart::new(mtm)),
             "row" => Widget::Row(Row::new(
                 mtm,
                 metadata(node)["agentApp"].as_str(),
                 self.app_icon,
             )),
             "header" => Widget::Header(
-                Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET),
+                Pile::new(mtm, true, row_inset(), row_inset(), row_inset()),
                 flexible_space(mtm),
                 2,
             ),
             "headingLine" => Widget::Header(
-                Pile::new(mtm, true, ROW_INSET, ROW_INSET, 0.),
+                Pile::new(mtm, true, row_inset(), row_inset(), 0.),
                 flexible_space(mtm),
                 1,
             ),
-            "line" => Widget::Pile(Pile::new(mtm, true, 6., 0., 0.)),
-            "group" => Widget::Pile(Pile::new(mtm, false, 8., 0., 0.)),
-            "section" => Widget::Pile(Pile::new(mtm, false, SECTION_SPACING, 0., 0.)),
-            "note" => Widget::Pile(Pile::new(mtm, false, 3., ROW_INSET, 8.)),
+            "line" => Widget::Pile(Pile::new(mtm, true, space().sm as f64, 0., 0.)),
+            "group" => Widget::Pile(Pile::new(mtm, false, space().md as f64, 0., 0.)),
+            "section" => Widget::Pile(Pile::new(mtm, false, section_spacing(), 0., 0.)),
+            "note" => Widget::Pile(Pile::new(
+                mtm,
+                false,
+                space().hair as f64,
+                row_inset(),
+                space().md as f64,
+            )),
             "path" => {
                 let path = NSPathControl::new(mtm);
                 path.setFocusRingType(NSFocusRingType::None);
@@ -1130,7 +1378,7 @@ impl Render<'_, '_> {
                 path.setControlSize(NSControlSize::Regular);
                 path.setAccessibilityLabel(Some(&NSString::from_str("Location")));
                 path.widthAnchor()
-                    .constraintLessThanOrEqualToConstant(210.)
+                    .constraintLessThanOrEqualToConstant(st().path_width as f64)
                     .setActive(true);
                 Widget::Path(path)
             }
@@ -1145,11 +1393,11 @@ impl Render<'_, '_> {
             }
             _ => {
                 let inset = if component == Some(Component::EmptyState) {
-                    ROW_INSET
+                    row_inset()
                 } else {
                     0.
                 };
-                Widget::Pile(Pile::new(mtm, false, 4., inset, inset))
+                Widget::Pile(Pile::new(mtm, false, space().xs as f64, inset, inset))
             }
         }
     }
@@ -1209,7 +1457,7 @@ impl Render<'_, '_> {
         }
         if layout(node) == "filterField" {
             view.widthAnchor()
-                .constraintGreaterThanOrEqualToConstant(175.)
+                .constraintGreaterThanOrEqualToConstant(st().filter_width as f64)
                 .setActive(true);
             view.setContentHuggingPriority_forOrientation(
                 NSLayoutPriorityDefaultLow - 1.,
@@ -1217,29 +1465,28 @@ impl Render<'_, '_> {
             );
         } else if matches!(kind, Kind::Search | Kind::Slider) {
             view.widthAnchor()
-                .constraintEqualToConstant(175.)
+                .constraintEqualToConstant(st().filter_width as f64)
                 .setActive(true);
         } else if matches!(layout(node), "shortcutButton" | "shortcutRecorder") {
             view.widthAnchor()
-                .constraintGreaterThanOrEqualToConstant(88.)
+                .constraintGreaterThanOrEqualToConstant(st().value_least as f64)
                 .setActive(true);
         }
         let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
-            cx
-                .spawn(async move |owner, cx| {
-                    while let Ok(value) = rx.recv().await {
-                        if owner
-                            .update(cx, |owner, cx| {
-                                owner.settings_control(generation, id, kind, value, cx);
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
+            cx.spawn(async move |owner, cx| {
+                while let Ok(value) = rx.recv().await {
+                    if owner
+                        .update(cx, |owner, cx| {
+                            owner.settings_control(generation, id, kind, value, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
-                })
-                .detach();
+                }
+            })
+            .detach();
         }
         Widget::Control(control)
     }
@@ -1268,30 +1515,29 @@ impl Render<'_, '_> {
         let weak = Rc::downgrade(&slot);
         let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
-            cx
-                .spawn(async move |owner, cx| {
-                    while rx.recv().await.is_ok() {
-                        let Some(slot) = weak.upgrade() else { break };
-                        for event in slot.take_events() {
-                            if owner
-                                .update(cx, |owner, cx| {
-                                    owner.settings_text(generation, id, &slot, event, cx);
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
+            cx.spawn(async move |owner, cx| {
+                while rx.recv().await.is_ok() {
+                    let Some(slot) = weak.upgrade() else { break };
+                    for event in slot.take_events() {
+                        if owner
+                            .update(cx, |owner, cx| {
+                                owner.settings_text(generation, id, &slot, event, cx);
+                            })
+                            .is_err()
+                        {
+                            return;
                         }
                     }
-                })
-                .detach();
+                }
+            })
+            .detach();
         }
         let container = if let Some(unit) = node.props.get("unit").and_then(Value::as_str) {
             let label = NSTextField::labelWithString(&NSString::from_str(unit), field.mtm());
             label.setTranslatesAutoresizingMaskIntoConstraints(false);
-            label.setFont(Some(&NSFont::systemFontOfSize(FOOTER_SIZE)));
+            label.setFont(Some(&font(text_size().xs, regular())));
             label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            let with_unit = Pile::new(field.mtm(), true, 5., 0., 0.);
+            let with_unit = Pile::new(field.mtm(), true, space().xs as f64, 0., 0.);
             with_unit.set(&[field.retain(), (label.as_ref() as &NSView).retain()]);
             Retained::into_super(with_unit.stack)
         } else {
@@ -1369,7 +1615,11 @@ fn control_value(
     (Some(kind), value, options)
 }
 
-fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> Retained<NSTextField> {
+fn text_label(
+    mtm: objc2::MainThreadMarker,
+    surface: &Surface,
+    node: &Node,
+) -> Retained<NSTextField> {
     let heading = node.props.get("role").and_then(Value::as_str) == Some("heading");
     let style = layout(node);
     let title = NSString::from_str(&node.text);
@@ -1377,43 +1627,53 @@ fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> R
         .props
         .get("style")
         .and_then(|style| style.get("whiteSpace"))
-        .and_then(Value::as_str) == Some("nowrap");
+        .and_then(Value::as_str)
+        == Some("nowrap");
     // Row titles sit beside controls. A wrapping label has no intrinsic
     // width, so the spacer can take all its drawable width on a later pass.
-    let row_title = node.parent.and_then(|id| surface.node(id)).is_some_and(|copy| {
-        layout(copy) == "copy"
-            && copy.children.first() == Some(&node.id)
-            && copy.parent.and_then(|id| surface.node(id)).is_some_and(|row| layout(row) == "row")
-    });
+    let row_title = node
+        .parent
+        .and_then(|id| surface.node(id))
+        .is_some_and(|copy| {
+            layout(copy) == "copy"
+                && copy.children.first() == Some(&node.id)
+                && copy
+                    .parent
+                    .and_then(|id| surface.node(id))
+                    .is_some_and(|row| layout(row) == "row")
+        });
     let field = if nowrap || row_title {
         let field = NSTextField::labelWithString(&title, mtm);
         field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        if style == "error" {
-            field.setContentCompressionResistancePriority_forOrientation(
-                NSLayoutPriorityDefaultHigh + 1.,
-                NSLayoutConstraintOrientation::Horizontal,
-            );
-        }
+        // An error keeps its words; a row's title holds against its
+        // controls, which give way first (`give_way`).
+        field.setContentCompressionResistancePriority_forOrientation(
+            if style == "error" {
+                NSLayoutPriorityDefaultHigh + 1.
+            } else {
+                NSLayoutPriorityDefaultHigh - 1.
+            },
+            NSLayoutConstraintOrientation::Horizontal,
+        );
         field
     } else {
         NSTextField::wrappingLabelWithString(&title, mtm)
     };
     field.setTranslatesAutoresizingMaskIntoConstraints(false);
     if heading {
-        field.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {
-            NSFontWeightSemibold
-        })));
+        field.setFont(Some(&font(text_size().base, st().heading_weight)));
     } else {
         let size = if matches!(style, "footer" | "secondary" | "error") {
-            FOOTER_SIZE
+            text_size().xs
         } else {
-            LABEL_SIZE
+            text_size().base
         };
-        field.setFont(Some(&NSFont::systemFontOfSize(size)));
+        field.setFont(Some(&font(size, regular())));
     }
     if style == "error" {
         field.setTextColor(Some(&NSColor::systemRedColor()));
-    } else if matches!(style, "footer" | "secondary" | "mutedHeading") {
+    } else if heading || matches!(style, "footer" | "secondary" | "mutedHeading") {
+        // A group's name over its card stays quiet: the rows carry the page.
         field.setTextColor(Some(&NSColor::secondaryLabelColor()));
     }
     field
@@ -1435,8 +1695,12 @@ fn settings_image(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImage
     image_view.setImage(image.as_deref());
     image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     constraints(&[
-        image_view.widthAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 100. }),
-        image_view.heightAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 56. }),
+        image_view
+            .widthAnchor()
+            .constraintEqualToConstant(if glyph { text_size().base as f64 } else { 100. }),
+        image_view
+            .heightAnchor()
+            .constraintEqualToConstant(if glyph { text_size().base as f64 } else { 56. }),
     ]);
     image_view
 }
@@ -1584,11 +1848,7 @@ impl Controller {
         let Some(node) = p.surface.node(id).filter(|node| !disabled(node)) else {
             return;
         };
-        let (generation, revision, semantic) = (
-            p.generation,
-            p.surface.revision(),
-            semantic(node),
-        );
+        let (generation, revision, semantic) = (p.generation, p.surface.revision(), semantic(node));
         let listen = node.listeners.contains_key(event);
         let binding = node
             .props
@@ -1615,5 +1875,389 @@ impl Controller {
             }
         })
         .detach();
+    }
+}
+
+/// Whether `node` (a row's trailing part) holds a visual picker.
+fn has_picker(surface: &Surface, node: &Node) -> bool {
+    metadata(node)["picker"].is_string()
+        || node
+            .children
+            .iter()
+            .filter_map(|id| surface.node(*id))
+            .any(|child| has_picker(surface, child))
+}
+
+define_class!(
+    /// ⓘ beside a row's title: hovering it opens the row's explanation after
+    /// a beat, with the lightest trackpad tick (as Radian's tips do), and
+    /// leaving closes it; a click opens or closes it too. The explanation is
+    /// the button's accessibility help.
+    #[unsafe(super(NSButton))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsHelpButton"]
+    #[ivars = HelpState]
+    struct HelpButton;
+
+    impl HelpButton {
+        #[unsafe(method(mouseEntered:))]
+        fn entered(&self, _: &NSEvent) {
+            self.schedule();
+        }
+        /// Movement over ⓘ also counts as arriving (an event that entered
+        /// without an entry, as a window coming forward under a still pointer).
+        #[unsafe(method(mouseMoved:))]
+        fn moved(&self, _: &NSEvent) {
+            if !self.ivars().waiting.get() && !self.shown() {
+                self.schedule();
+            }
+        }
+        #[unsafe(method(mouseExited:))]
+        fn exited(&self, _: &NSEvent) {
+            self.ivars().waiting.set(false);
+            unsafe {
+                let _: () = msg_send![objc2::class!(NSObject), cancelPreviousPerformRequestsWithTarget: self, selector: objc2::sel!(reveal:), object: std::ptr::null::<objc2::runtime::AnyObject>()];
+            }
+            if self.ivars().hovered.replace(false) {
+                self.close();
+            }
+        }
+        /// The pointer rested on ⓘ.
+        #[unsafe(method(reveal:))]
+        fn reveal(&self, _: *mut objc2::runtime::AnyObject) {
+            self.ivars().waiting.set(false);
+            if self.shown() {
+                return;
+            }
+            self.ivars().hovered.set(true);
+            self.open();
+            NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+                NSHapticFeedbackPattern::Alignment,
+                NSHapticFeedbackPerformanceTime::Now,
+            );
+        }
+        #[unsafe(method(toggle:))]
+        fn toggle(&self, _: *mut objc2::runtime::AnyObject) {
+            self.ivars().hovered.set(false);
+            if self.shown() { self.close() } else { self.open() }
+        }
+    }
+);
+
+#[derive(Default)]
+struct HelpState {
+    popover: std::cell::RefCell<Option<Retained<NSPopover>>>,
+    /// The popover was opened by hovering, so leaving closes it.
+    hovered: std::cell::Cell<bool>,
+    /// A reveal is scheduled.
+    waiting: std::cell::Cell<bool>,
+}
+
+/// How long the pointer rests on ⓘ before its explanation opens.
+const HELP_DELAY: f64 = 0.3;
+
+impl HelpButton {
+    /// The explanation opens once the pointer has rested on ⓘ.
+    fn schedule(&self) {
+        self.ivars().waiting.set(true);
+        unsafe {
+            let _: () = msg_send![self, performSelector: objc2::sel!(reveal:), withObject: std::ptr::null::<objc2::runtime::AnyObject>(), afterDelay: HELP_DELAY];
+        }
+    }
+    fn shown(&self) -> bool {
+        self.ivars()
+            .popover
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.isShown())
+    }
+    fn open(&self) {
+        if let Some(text) = self.accessibilityHelp() {
+            *self.ivars().popover.borrow_mut() = Some(show_help(self, &text));
+        }
+    }
+    fn close(&self) {
+        if let Some(popover) = self.ivars().popover.borrow_mut().take() {
+            // Closing a popover this button opened, from its own handler.
+            unsafe { popover.performClose(None) };
+        }
+    }
+}
+
+/// ⓘ: a borderless button with the system's info symbol (AppKit draws it in
+/// a real control) that shows the row's explanation.
+fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("info.circle"),
+        Some(&NSString::from_str("More Info")),
+    )
+    .and_then(|image| {
+        image.imageWithSymbolConfiguration(
+            &NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
+                text_size().sm as f64,
+                unsafe { NSFontWeightRegular },
+                NSImageSymbolScale::Medium,
+            ),
+        )
+    });
+    let button: Retained<HelpButton> = unsafe {
+        msg_send![super(HelpButton::alloc(mtm).set_ivars(HelpState::default())), initWithFrame: objc2_foundation::NSRect::ZERO]
+    };
+    let button: Retained<NSButton> = Retained::into_super(button);
+    button.setImage(image.as_deref());
+    button.setImagePosition(NSCellImagePosition::ImageOnly);
+    button.setBordered(false);
+    unsafe {
+        button.setTarget(Some(&button));
+        button.setAction(Some(objc2::sel!(toggle:)));
+    }
+    button.setContentTintColor(Some(&NSColor::tertiaryLabelColor()));
+    button.setTranslatesAutoresizingMaskIntoConstraints(false);
+    button.setAccessibilityLabel(Some(&NSString::from_str("More Info")));
+    button.setAccessibilityHelp(Some(&NSString::from_str(help)));
+    let tracking = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            objc2_foundation::NSRect::ZERO,
+            NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect,
+            Some(&button),
+            None,
+        )
+    };
+    button.addTrackingArea(&tracking);
+    button
+}
+
+/// The explanation in a transient popover under its ⓘ. The text is
+/// measured at its width up front (a wrapping label has no size of its own
+/// until it is laid out, and the popover would open empty).
+fn show_help(anchor: &NSButton, text: &NSString) -> Retained<NSPopover> {
+    let width = st().help_width as f64;
+    let pad = pm_shell::scale().space.lg as f64;
+    let mtm = anchor.mtm();
+    let label = NSTextField::wrappingLabelWithString(text, mtm);
+    label.setFont(Some(&font(text_size().sm, regular())));
+    let size = label.cell().map_or(NSSize::new(width, 20.), |cell| {
+        cell.cellSizeForBounds(objc2_foundation::NSRect::new(
+            NSPoint::new(0., 0.),
+            NSSize::new(width, 10_000.),
+        ))
+    });
+    let size = NSSize::new(size.width.min(width).ceil(), size.height.ceil());
+    label.setFrame(objc2_foundation::NSRect::new(NSPoint::new(pad, pad), size));
+    // The system's popover material under the text: the glass alone lets
+    // the row beneath read through it.
+    let content = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
+        objc2_foundation::NSRect::new(
+            NSPoint::new(0., 0.),
+            NSSize::new(size.width + 2. * pad, size.height + 2. * pad),
+        ),
+    );
+    content.setMaterial(NSVisualEffectMaterial::Popover);
+    content.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    content.setState(NSVisualEffectState::Active);
+    content.addSubview(&label);
+    let controller = NSViewController::new(mtm);
+    controller.setView(&content);
+    let popover = NSPopover::new(mtm);
+    popover.setBehavior(NSPopoverBehavior::Transient);
+    popover.setContentSize(content.frame().size);
+    popover.setContentViewController(Some(&controller));
+    popover.showRelativeToRect_ofView_preferredEdge(
+        anchor.bounds(),
+        anchor,
+        objc2_foundation::NSRectEdge::MaxY,
+    );
+    popover
+}
+
+define_class!(
+    /// Sends the picked option's index.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsPicker"]
+    #[ivars = async_channel::Sender<Value>]
+    struct PickerTarget;
+
+    impl PickerTarget {
+        #[unsafe(method(choose:))]
+        fn choose(&self, sender: &NSButton) {
+            let _ = self.ivars().try_send(json!(sender.tag()));
+        }
+    }
+);
+
+/// A visual picker: each option its picture over its name; the chosen one
+/// ringed, its name in the label colour.
+struct Picker {
+    stack: Retained<NSStackView>,
+    buttons: Vec<Retained<NSButton>>,
+    kind: String,
+    options: Vec<String>,
+    names: Vec<String>,
+    selected: Option<Option<usize>>,
+    _target: Retained<PickerTarget>,
+}
+
+impl Picker {
+    fn update(&mut self, selected: Option<usize>, disabled: bool) {
+        for button in &self.buttons {
+            button.setEnabled(!disabled);
+        }
+        if self.selected == Some(selected) {
+            return;
+        }
+        self.selected = Some(selected);
+        for (i, button) in self.buttons.iter().enumerate() {
+            let on = selected == Some(i);
+            button.setImage(previews::image(&self.kind, &self.options[i], on).as_deref());
+            let font = if on {
+                font(text_size().xs, st().heading_weight)
+            } else {
+                font(text_size().xs, regular())
+            };
+            let colour = if on {
+                NSColor::labelColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            let attributes =
+                objc2_foundation::NSDictionary::<NSString, objc2::runtime::AnyObject>::from_slices(
+                    &[unsafe { NSFontAttributeName }, unsafe {
+                        NSForegroundColorAttributeName
+                    }],
+                    &[font.as_ref(), colour.as_ref()],
+                );
+            // The attributes are a font and a colour, as AppKit expects.
+            let title = unsafe {
+                objc2_foundation::NSAttributedString::new_with_attributes(
+                    &NSString::from_str(&self.names[i]),
+                    &attributes,
+                )
+            };
+            button.setAttributedTitle(&title);
+            // A radio button's value is a number: 1 chosen, 0 not.
+            unsafe {
+                button.setAccessibilityValue(Some(&objc2_foundation::NSNumber::new_bool(on)))
+            };
+        }
+    }
+}
+
+impl Render<'_, '_> {
+    fn picker(&mut self, node: &Node, kind: &str) -> Widget {
+        let mtm = self.scroll.mtm();
+        let (tx, rx) = async_channel::unbounded();
+        let (id, generation) = (node.id, self.generation);
+        let forward = |rx: async_channel::Receiver<Value>, cx: &mut Context<Controller>| {
+            cx.spawn(async move |owner, cx| {
+                while let Ok(value) = rx.recv().await {
+                    if owner
+                        .update(cx, |owner, cx| {
+                            owner.settings_control(generation, id, Kind::Segmented, value, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        };
+        // Plans are cards in the Settings card anatomy, not picture tiles.
+        if kind == "plans" {
+            let options = node
+                .children
+                .iter()
+                .filter_map(|id| self.surface.node(*id))
+                .map(|child| label(child).to_owned())
+                .collect();
+            // Nested inside the group card by the row's inset.
+            let radius = self.tokens.radius.nested(st().group_radius, st().row_inset) as f64;
+            let plans = plans::Plans::new(mtm, label(node), options, radius, tx);
+            if let Some(cx) = self.cx.as_deref_mut() {
+                forward(rx, cx);
+            }
+            let (_, value, _) =
+                control_value(self.surface, node, Some(Component::SegmentedControl));
+            plans.update(value.as_u64().map(|v| v as usize), disabled(node));
+            return Widget::Plans(plans);
+        }
+        let target: Retained<PickerTarget> =
+            unsafe { msg_send![super(PickerTarget::alloc(mtm).set_ivars(tx)), init] };
+        let stack = NSStackView::new(mtm);
+        stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        stack.setAlignment(NSLayoutAttribute::Top);
+        // Every picker is one left-aligned grid: options in columns of one
+        // width (`settings.picker_column`), `space.lg` apart, the room left
+        // over after the last.
+        stack.setDistribution(NSStackViewDistribution::Fill);
+        stack.setSpacing(space().lg as f64);
+        stack.setEdgeInsets(NSEdgeInsets {
+            top: space().sm as f64,
+            left: 0.,
+            bottom: space().hair as f64,
+            right: 0.,
+        });
+        stack.setTranslatesAutoresizingMaskIntoConstraints(false);
+        stack.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioGroupRole }));
+        stack.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
+        let mut buttons = vec![];
+        let mut options = vec![];
+        let mut names = vec![];
+        for (i, child) in node
+            .children
+            .iter()
+            .filter_map(|id| self.surface.node(*id))
+            .enumerate()
+        {
+            // A segment's id ends with its option's ("…:dark").
+            let option = semantic(child)
+                .and_then(|id| id.rsplit(':').next())
+                .unwrap_or_default();
+            let name = label(child).to_owned();
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(&name),
+                    Some(&target),
+                    Some(objc2::sel!(choose:)),
+                    mtm,
+                )
+            };
+            button.setBordered(false);
+            button.setImagePosition(NSCellImagePosition::ImageAbove);
+            button.setImageScaling(NSImageScaling::ScaleNone);
+            button.setTag(i as isize);
+            button.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
+            button.setAccessibilityLabel(Some(&NSString::from_str(&name)));
+            stack.addArrangedSubview(&button);
+            button
+                .widthAnchor()
+                .constraintEqualToConstant(st().picker_column as f64)
+                .setActive(true);
+            buttons.push(button);
+            options.push(option.to_owned());
+            names.push(name);
+        }
+        stack.addArrangedSubview(&flexible_space(mtm));
+        if let Some(cx) = self.cx.as_deref_mut() {
+            forward(rx, cx);
+        }
+        let mut picker = Picker {
+            stack,
+            buttons,
+            kind: kind.to_owned(),
+            options,
+            names,
+            selected: None,
+            _target: target,
+        };
+        let (_, value, _) = control_value(self.surface, node, Some(Component::SegmentedControl));
+        picker.update(value.as_u64().map(|v| v as usize), disabled(node));
+        Widget::Picker(picker)
     }
 }

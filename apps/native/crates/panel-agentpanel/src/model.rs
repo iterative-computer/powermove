@@ -58,6 +58,7 @@ impl Settings {
             provider: match v["provider"].as_str() {
                 Some("claude") => Provider::Claude,
                 Some("compatible") => Provider::Compatible,
+                Some("aero") => Provider::Aero,
                 _ => Provider::Chatgpt,
             },
             model: v["model"].as_str().unwrap_or_default().into(),
@@ -125,7 +126,11 @@ impl Session {
     }
     fn from_record(v: &Value) -> Result<Self> {
         if v.get("provider").is_some_and(|p| {
-            !p.is_null() && !matches!(p.as_str(), Some("chatgpt" | "claude" | "compatible"))
+            !p.is_null()
+                && !matches!(
+                    p.as_str(),
+                    Some("chatgpt" | "claude" | "compatible" | "aero")
+                )
         }) {
             return Err(Error::Invalid("unsupported provider record"));
         }
@@ -1357,6 +1362,11 @@ impl Panel {
     }
 
     pub fn queued_thread(&self, available: impl Fn(Provider) -> bool) -> Option<String> {
+        self.queued_thread_with(|settings| available(settings.provider))
+    }
+    /// The next thread whose queued messages may go out, as `ready` judges
+    /// its settings (its harness, and the model it would run on).
+    pub fn queued_thread_with(&self, ready: impl Fn(&Settings) -> bool) -> Option<String> {
         self.sessions
             .iter()
             .filter(|(_, session)| {
@@ -1364,7 +1374,7 @@ impl Panel {
                     && session.run.is_none()
                     && !session.composer_disabled()
                     && (session.settings.access != Access::Computer || session.computer_consent)
-                    && available(session.settings.provider)
+                    && ready(&session.settings)
             })
             .map(|(id, _)| id)
             .min()
@@ -2539,6 +2549,15 @@ mod consent_tests {
             self.0.insert(key.into(), value.clone());
             Ok(())
         }
+    }
+    #[test]
+    fn a_saved_aero_thread_loads_and_an_unknown_provider_is_refused() {
+        let record = |provider: &str| {
+            json!({"id":"t","provider":provider,"conversation":[],"trace":[],"composerDraft":""})
+        };
+        let aero = Session::from_record(&record("aero"));
+        assert!(aero.is_ok(), "{:?}", aero.err());
+        assert!(Session::from_record(&record("bogus")).is_err());
     }
     #[test]
     fn launcher_attention_tracks_pending_consent_without_a_run() {

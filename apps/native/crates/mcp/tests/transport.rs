@@ -136,8 +136,17 @@ fn headless_startup_cleans_dead_pid_or_refused_socket_before_selecting_proxy() {
         let profile = Profile::new();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let original = descriptor(if dead_pid { exited_pid() } else { std::process::id() }, port);
-        if !dead_pid { drop(listener); }
+        let original = descriptor(
+            if dead_pid {
+                exited_pid()
+            } else {
+                std::process::id()
+            },
+            port,
+        );
+        if !dead_pid {
+            drop(listener);
+        }
         profile.write(&original);
         assert!(!pm_mcp::transport::has_running_host(&profile.0).unwrap());
         assert!(!profile.descriptor().exists());
@@ -356,4 +365,180 @@ fn running_stdio_proxy_reconnects_new_descriptor_without_replaying_or_inheriting
     drop(input);
     assert!(process.wait().unwrap().success());
     replacement.shutdown();
+}
+
+/// The eval host's bridge: a socket in the profile's mcp folder, which the
+/// replay sandbox allows, reached by the same proxy Codex and Claude Code run.
+#[test]
+fn unix_bridge_serves_the_stock_proxy_and_removes_its_socket() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+    };
+    struct Named;
+    impl ToolConnection for Named {
+        fn list(&mut self) -> Result<Value> {
+            Ok(json!([{"name":"probe"}]))
+        }
+        fn invoke(&mut self, name: &str, _: Value) -> Result<Value> {
+            Ok(pm_mcp::success(json!({"called":name})))
+        }
+        fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    let profile = Profile::new();
+    let mut server = LoopbackServer::start_unix_with(&profile.0, || Named).unwrap();
+    let published: Value =
+        serde_json::from_slice(&fs::read(profile.descriptor()).unwrap()).unwrap();
+    assert!(published.get("port").is_none(), "{published}");
+    let socket = profile
+        .0
+        .join("mcp")
+        .join(published["socket"].as_str().unwrap());
+    use std::os::unix::fs::FileTypeExt;
+    assert!(fs::metadata(&socket).unwrap().file_type().is_socket());
+    let mut process = Command::new(env!("CARGO_BIN_EXE_powermove-mcp"))
+        .arg("--profile")
+        .arg(&profile.0)
+        .arg("--powermove-mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap());
+    let mut call = |id: u64, method: &str, params: Value| -> Value {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    };
+    call(1, "initialize", json!({}));
+    assert_eq!(
+        call(2, "tools/list", json!({}))["result"]["tools"][0]["name"],
+        "probe"
+    );
+    let answer = call(3, "tools/call", json!({"name":"probe","arguments":{}}));
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    drop(input);
+    assert!(process.wait().unwrap().success());
+    server.shutdown();
+    assert!(!socket.exists());
+    assert!(!profile.descriptor().exists());
+}
+
+/// Sol's P1-7: the eval runner's run folders are deep
+/// (`<runs>/<task>/<slot>/profile/mcp/<pid>.sock` reached 127 bytes, past
+/// macOS's 104-byte `sun_path`). The host starts there as the runner starts
+/// it (`--listen`, working directory the profile, under a Seatbelt profile
+/// that allows writes and Unix sockets only inside the run folder), answers
+/// the runner on stdio, and the stock proxy reaches its bridge.
+#[test]
+fn the_eval_host_and_proxy_work_under_the_runners_long_run_path() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(pm_kernel::new_id("aero-eval-runs"));
+    let mut run = base
+        .join("cut-drop-flubbed-take")
+        .join("aero-gpt-6.2-sol-high-r1");
+    // At least the length Sol measured for the lane's own runs folder.
+    let socket_len = |run: &PathBuf| run.join("profile/mcp/99999.sock").as_os_str().len();
+    while socket_len(&run) < 127 {
+        run = run.join("r");
+    }
+    let profile = run.join("profile");
+    let exports = run.join("exports");
+    fs::create_dir_all(&profile).unwrap();
+    fs::create_dir_all(&exports).unwrap();
+    let root = base.to_str().unwrap().to_owned();
+    let seatbelt = format!(
+        "(version 1)\n(allow default)\n(deny network*)\n\
+         (allow network* (local unix-socket (subpath \"{root}\")) (remote unix-socket (subpath \"{root}\")))\n\
+         (deny file-write*)\n(allow file-write* (subpath \"{root}\") (subpath \"/dev\"))\n",
+    );
+    let tmp = base.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let confined = |args: &[&str]| {
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-p")
+            .arg(&seatbelt)
+            .arg(env!("CARGO_BIN_EXE_powermove-mcp"))
+            .args(args)
+            .current_dir(&profile)
+            .env("TMPDIR", &tmp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        command
+    };
+    let mut host = confined(&[
+        "--profile",
+        profile.to_str().unwrap(),
+        "--exports",
+        exports.to_str().unwrap(),
+        "--listen",
+    ])
+    .spawn()
+    .unwrap();
+    let mut host_in = host.stdin.take().unwrap();
+    let mut host_out = BufReader::new(host.stdout.take().unwrap());
+    let mut line = String::new();
+    writeln!(
+        host_in,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+    )
+    .unwrap();
+    assert!(
+        host_out.read_line(&mut line).unwrap() > 0,
+        "the host stopped before initialize"
+    );
+    let init: Value = serde_json::from_str(&line).unwrap();
+    assert!(init["result"]["capabilities"].is_object(), "{init}");
+    let descriptor: Value =
+        serde_json::from_slice(&fs::read(profile.join("mcp/connection.json")).unwrap()).unwrap();
+    let socket = profile
+        .join("mcp")
+        .join(descriptor["socket"].as_str().unwrap());
+    assert!(socket.as_os_str().len() >= 104, "{}", socket.display());
+    let mut proxy = confined(&["--profile", profile.to_str().unwrap(), "--powermove-mcp"])
+        .spawn()
+        .unwrap();
+    let mut proxy_in = proxy.stdin.take().unwrap();
+    let mut proxy_out = BufReader::new(proxy.stdout.take().unwrap());
+    let mut call = |id: u64, method: &str| -> Value {
+        writeln!(
+            proxy_in,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"protocolVersion":"2025-06-18"}})
+        )
+        .unwrap();
+        let mut line = String::new();
+        assert!(proxy_out.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    };
+    call(1, "initialize");
+    let tools = call(2, "tools/list");
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "get_project_state")),
+        "{tools}"
+    );
+    drop(proxy_in);
+    assert!(proxy.wait().unwrap().success());
+    drop(host_in);
+    let _ = host.wait();
+    assert!(!socket.exists(), "the host removes its socket");
+    let _ = fs::remove_dir_all(&base);
 }

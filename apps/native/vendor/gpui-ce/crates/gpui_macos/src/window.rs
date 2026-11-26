@@ -883,6 +883,9 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    /// The scene GPUI drew was not shown yet: the next update shows it,
+    /// without drawing the tree again.
+    present_pending: bool,
     frame_requested: bool,
     idle_cleanup: Option<gpui::Task<()>>,
     /// Powermove P-IDLE-WAKE: the link is paused because the window was idle
@@ -952,6 +955,7 @@ impl MacWindowState {
     fn next_frame_request(&mut self) -> RequestFrameOptions {
         RequestFrameOptions {
             force_render: mem::take(&mut self.force_render_pending),
+            require_presentation: mem::take(&mut self.present_pending),
             ..Default::default()
         }
     }
@@ -1100,7 +1104,14 @@ impl MacWindowState {
                 return;
             }
         }
-        let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
+        // A capture's window off every display has no screen: it keeps the
+        // main display's frames (P-OFFSCREEN-CAPTURE).
+        let display_id = display_id_for_screen(unsafe { self.native_window.screen() }).or_else(|| {
+            OFFSCREEN_CAPTURE
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| unsafe { CGMainDisplayID() })
+        });
+        let Some(display_id) = display_id else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
             self.stop_display_link();
             return;
@@ -1212,7 +1223,8 @@ impl MacWindowState {
             return;
         };
         let idle = self.direct_source.as_mut().is_none_or(|source| source.idle());
-        if !crate::composition::leaves_direct(moved.elapsed(), self.force_render_pending, idle) {
+        let waiting = self.force_render_pending || self.present_pending;
+        if !crate::composition::leaves_direct(moved.elapsed(), waiting, idle) {
             return;
         }
         if let Some(source) = self.direct_source.as_mut() {
@@ -1501,6 +1513,7 @@ impl MacWindow {
                 frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
+                present_pending: false,
                 frame_requested: false,
                 idle_cleanup: None,
                 idle: false,
@@ -1858,6 +1871,7 @@ impl Drop for MacWindow {
             }
         }
         crate::composition::forget_paints(this.native_view.as_ptr() as usize);
+        crate::slot_region::forget(this.native_view.as_ptr() as usize);
         unsafe {
             this.native_window.setDelegate_(NIL);
         }
@@ -2486,6 +2500,11 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().toggle_tab_bar_callback = Some(callback);
     }
 
+    fn set_slot_regions(&self, regions: &[gpui::SlotRegionGeometry]) {
+        let view = self.0.lock().native_view.as_ptr() as usize;
+        crate::slot_region::set(view, regions);
+    }
+
     fn painted(&self) {
         let mut this = self.0.lock();
         this.painted = true;
@@ -2595,25 +2614,28 @@ impl PlatformWindow for MacWindow {
         if crate::composition::waits_for_async_present(
             forced,
             this.renderer.async_presents_in_flight(),
-            this.renderer.async_presents_in_flight()
-                && crate::composition::pending(view, this.painted),
+            this.renderer.async_presents_in_flight() && crate::composition::pending(view, this.painted),
         ) {
-            this.force_render_pending = true;
+            this.present_pending = true;
             drop(this);
             return trace("wait", false, 0.);
         }
-        // P-SLOT-REGION: prepare the Metal frame first, and publish hosted
-        // AppKit views only when a drawable was acquired and encoded; a frame
-        // with no drawable or a failed encode leaves the picture and views
-        // together on screen and retries on the next update.
+        // A host that cannot say beforehand that it will move (it gave no
+        // `composition::set_pending`) and moves under a CAMetalDisplayLink
+        // (`PM_GPUI_METAL_DISPLAY_LINK=1`) is found out after its views moved:
+        // that frame asks the layer on the main thread (the layer's timeout
+        // bounds the wait), as before, and the window is direct from then on.
+        // P-SLOT-REGION: everywhere else the Metal frame is prepared first, and
+        // the hosted views are published only when it will present; a frame
+        // with no drawable or a failed encode leaves the picture and the views
+        // on screen together and shows its scene on the next update.
         let prepared = this.renderer.prepare(scene);
         let Some((prepared, transaction)) =
             crate::composition::publish(view, &mut this.painted, prepared)
         else {
-            this.force_render_pending = true;
-            let acquire = this.renderer.acquire_seconds * 1000.;
+            this.present_pending = true;
             drop(this);
-            return trace("skip", false, acquire);
+            return trace("unprepared", false, 0.);
         };
         let moved = transaction.as_ref().is_some_and(|t| t.moved());
         let now = std::time::Instant::now();
@@ -2623,19 +2645,17 @@ impl PlatformWindow for MacWindow {
         this.last_draw = Some(now);
         let direct = this.direct_moved.is_some();
         // Only a frame that moves a hosted view (or AppKit's own synchronous
-        // paint) presents with the slot transaction and waits for its command
-        // buffer to be scheduled; frames that do not move hosted AppKit views
-        // (timeline zoom, playback meters, inspector updates) present
-        // asynchronously without blocking the main thread on the GPU.
+        // paint) presents with the slot transaction and waits for its
+        // command buffer to be scheduled; the frames between moves of a
+        // direct stay present as soon as they are committed. A direct
+        // window's drawables come one at a time from the layer, so it is
+        // paced as a link's are.
         let sync = crate::composition::presents_with_transaction(
             forced,
             transaction.as_ref(),
             continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
             this.ca_display_link.is_some() || direct,
         );
-        // A host that cannot say beforehand that it will move (it gave no
-        // `composition::set_pending`) has moved its views by now, under a
-        // link: switch to direct for subsequent frames.
         let late = !forced && !direct && moved && this.renderer.display_link_bound();
         if late {
             path = "late";
@@ -2644,7 +2664,7 @@ impl PlatformWindow for MacWindow {
             this.release_display_link_for_sync_present();
             this.renderer.set_presents_with_transaction(true);
             if !this.renderer.draw(scene) {
-                this.force_render_pending = true;
+                this.present_pending = true;
             }
         } else {
             this.renderer.submit(prepared, sync);
@@ -2666,11 +2686,11 @@ impl PlatformWindow for MacWindow {
         // the lock first, or the main thread deadlocks on itself.
         drop(this);
         drop(transaction);
-        // A drawable presented with the transaction reaches the render server
-        // only when the outermost transaction does: flushed now, it shows with
-        // its slots this frame and returns to the layer immediately instead of
-        // waiting until run-loop end (where consecutive draws waited out the
-        // layer's 1 s nextDrawable timeout and triggered the macOS beachball).
+        // A drawable presented with the transaction reaches the render
+        // server only when the outermost transaction does: flushed now, it
+        // shows with its slots this frame and goes back to the layer, rather
+        // than at the run loop's end (a frame drawn before then waited out
+        // the layer's 1 s timeout for a drawable). NativeGPUI 0002 does the same.
         if sync || late {
             unsafe {
                 let _: () = msg_send![class!(CATransaction), flush];
@@ -2694,6 +2714,13 @@ impl PlatformWindow for MacWindow {
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
         let (device, queue) = self.0.lock().renderer.gpu_context();
         Some(Box::new((device, queue)))
+    }
+
+    #[cfg(not(feature = "wgpu"))]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        let this = self.0.lock();
+        let device = this.renderer.layer()?.device().to_owned();
+        Some(Box::new(device))
     }
 
     #[cfg(feature = "wgpu")]
@@ -2947,6 +2974,15 @@ impl PlatformWindow for MacWindow {
         this.renderer.render_to_image(scene)
     }
 
+    fn render_region_to_texture(
+        &self,
+        scene: &gpui::Scene,
+        region: gpui::Bounds<gpui::DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        let mut this = self.0.lock();
+        this.renderer.render_region_to_texture(scene, region)
+    }
+
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 
@@ -3135,12 +3171,35 @@ unsafe extern "C" fn pin_sheet_top(this: &Objc2Object, _: Sel, height: f64) {
 /// sheet, one centred in its parent. A pinned sheet answers with the same
 /// frame hung from the top edge it was pinned at, so it grows and shrinks
 /// downwards and follows its parent when that moves or is resized.
+/// Powermove P-OFFSCREEN-CAPTURE: a capture of a real window (its AppKit
+/// chrome and controls) places it off every display, where AppKit would
+/// otherwise move it back on screen. Set only by a capture process that shows
+/// nothing; never in the app.
+static OFFSCREEN_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> CGDirectDisplayID;
+}
+pub fn allow_offscreen_windows() {
+    OFFSCREEN_CAPTURE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 unsafe extern "C" fn constrain_window_frame(
     this: &Objc2Object,
     _: Sel,
     rect: Objc2NSRect,
     screen: ObjcId,
 ) -> Objc2NSRect {
+    if OFFSCREEN_CAPTURE.load(std::sync::atomic::Ordering::Relaxed) {
+        return rect;
+    }
+    // A window at the status level or above (Powermove's first-run stage)
+    // covers the whole screen, the menu bar's strip too: never kept under it.
+    // SAFETY: `this` is a GPUIWindow (an NSWindow) on the main thread.
+    let level: isize = unsafe { msg_send![this, level] };
+    if level >= 25 {
+        return rect;
+    }
     // SAFETY: registered on GPUIWindow, whose superclass is NSWindow.
     unsafe {
         let rect: Objc2NSRect = msg_send![
@@ -3657,6 +3716,19 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
                 | PlatformInput::Pinch(_)
         ) {
             lock.cursor_visible.store(true, Ordering::Relaxed);
+        }
+        // Powermove P-FEEL-OBSERVE: drags and scrolls for frame telemetry.
+        #[cfg(not(feature = "wgpu"))]
+        if gpui_apple::feel::observing() {
+            match &event {
+                PlatformInput::MouseMove(m) if m.pressed_button.is_some() => {
+                    gpui_apple::feel::observed_input(1)
+                }
+                PlatformInput::ScrollWheel(_) | PlatformInput::Pinch(_) => {
+                    gpui_apple::feel::observed_input(2)
+                }
+                _ => {}
+            }
         }
         // Powermove P-FEEL: input-to-photon probe (`PM_FEEL_TRACE`).
         #[cfg(not(feature = "wgpu"))]
@@ -4225,7 +4297,7 @@ extern "C" fn step(view: *mut c_void) {
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
             // Device recovery can demand a forced retry during presentation.
-            if lock.force_render_pending {
+            if lock.force_render_pending || lock.present_pending {
                 lock.start_display_link();
             }
             // Only pause once GPUI has finished and no next frame was asked

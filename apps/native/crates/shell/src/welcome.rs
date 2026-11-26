@@ -66,14 +66,37 @@ impl Button {
         self
     }
 }
-/// One mutually exclusive option: a card in a row of cards or a grouped-form row.
-#[derive(Clone, Debug, PartialEq)]
+/// One mutually exclusive option: a card in a row of cards or a row in a
+/// grouped list.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Choice {
     pub id: String,
     pub label: String,
     pub detail: Option<String>,
-    /// Illustration rows on a card, drawn with timeline clip recipes.
+    /// Illustration rows on a card, drawn with timeline clip recipes (the
+    /// Welcome window without the stage).
     pub lines: Vec<String>,
+    /// A mark beside the label: an SF Symbol or vendored glyph name, or
+    /// `powermove` for the Powermove mark.
+    pub mark: Option<String>,
+    /// A short tag beside the label ("Recommended").
+    pub badge: Option<String>,
+    /// A quiet value at the row's end (a download's size).
+    pub meta: Option<String>,
+    /// A small button at the row's end (Connect, Download); pressing it
+    /// sends `pill:<id>`.
+    pub pill: Option<String>,
+    /// What the row says in place of its button ("Connected · …").
+    pub status: Option<String>,
+}
+/// The first run's steps, shown on the Welcome: their names and the one
+/// under way (`None`: none yet).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outline {
+    pub steps: Vec<String>,
+    /// A line on each step, under its name.
+    pub notes: Vec<String>,
+    pub current: Option<usize>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
@@ -112,6 +135,51 @@ pub struct Frame {
     /// screens don't jump as it moves on (N004–N006); others are centred
     /// vertically.
     pub top: bool,
+    /// The Welcome's preview of the steps ahead.
+    pub outline: Option<Outline>,
+    /// On the stage: the product picture beside the step (`welcome_view::
+    /// preview`): `welcome`, `home`, `workspace`, `timeline-layers`, `timeline-tracks`, `agent`
+    /// or `speech`.
+    pub preview: Option<String>,
+    /// The Powermove account's sign-in, in the window: an email, then the
+    /// code sent to it.
+    pub sign_in: Option<SignIn>,
+    /// The primary action is at work: a spinner stands in its title.
+    pub busy: bool,
+}
+/// Where the account's sign-in is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SignInStage {
+    #[default]
+    Email,
+    /// The code sent to the email.
+    Code,
+    /// Signed in: a check, then the next step.
+    Done,
+    /// A new account picks its publisher handle.
+    Handle,
+    /// Signing in with Google in the browser; the return link continues.
+    Browser,
+}
+/// The account step's email and code. The fields send what is typed as
+/// `field:email:<text>` and `field:code:<digits>`; Return, Escape and Tab
+/// as `key:Enter`, `key:Escape` and `key:Tab`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SignIn {
+    pub stage: SignInStage,
+    pub email: String,
+    pub code: String,
+    /// The handle typed on the handle stage (`field:handle:<text>`).
+    pub handle: String,
+    /// A new revision puts `email` and `code` into the fields even while
+    /// they are typed in (a wrong code cleared, the email back on Change).
+    pub revision: u64,
+    /// A new value shakes the code once (a wrong or expired code).
+    pub shake: u64,
+    /// Seconds until Resend is offered again; `Some(0)` offers it.
+    pub resend_in: Option<u32>,
+    /// The error under the field offers Try again (`retry`).
+    pub retry: bool,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.
@@ -339,6 +407,7 @@ mod tests {
             label: id.into(),
             detail: None,
             lines: vec![],
+            ..Choice::default()
         };
         let frame = Frame {
             choices: vec![choice("layers"), choice("tracks")],

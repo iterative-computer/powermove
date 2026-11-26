@@ -39,7 +39,7 @@ pub fn load(provider: Provider, access: Access, vars: &BTreeMap<String, String>)
         Provider::Chatgpt => nonempty("CODEX_HOME")
             .or_else(|| nonempty("HOME").map(|p| p.join(".codex")))
             .map(|p| p.join("config.toml")),
-        Provider::Compatible => None,
+        Provider::Compatible | Provider::Aero => None,
     };
     let Some(path) = path else {
         return out;

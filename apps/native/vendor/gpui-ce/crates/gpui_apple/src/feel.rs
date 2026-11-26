@@ -113,6 +113,46 @@ pub fn set_frame_start() {
     if enabled() {
         *FRAME_START.lock() = now();
     }
+    if OBSERVERS.get().is_some() {
+        OBSERVED_START.store(now().to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// P-FEEL-OBSERVE (Powermove telemetry): the app's observers of each
+/// frame's build time (ms, from its start until it is encoded, before any
+/// wait for a drawable) and of
+/// drags and scrolls (`1` drag, `2` scroll). Unset, one atomic load a frame.
+struct Observers {
+    frame: fn(f32),
+    input: fn(u8),
+}
+static OBSERVERS: OnceLock<Observers> = OnceLock::new();
+static OBSERVED_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets the observers, once per process.
+pub fn observe(frame: fn(f32), input: fn(u8)) {
+    let _ = OBSERVERS.set(Observers { frame, input });
+}
+
+pub(crate) fn observed_frame() {
+    if let Some(observers) = OBSERVERS.get() {
+        // Once per started frame: a draw outside the frame callback has none.
+        let start = f64::from_bits(OBSERVED_START.swap(0, std::sync::atomic::Ordering::Relaxed));
+        if start > 0. {
+            (observers.frame)(((now() - start) * 1000.) as f32);
+        }
+    }
+}
+
+/// Whether anything observes input (the window classifies events only then).
+pub fn observing() -> bool {
+    OBSERVERS.get().is_some()
+}
+
+pub fn observed_input(kind: u8) {
+    if let Some(observers) = OBSERVERS.get() {
+        (observers.input)(kind);
+    }
 }
 pub(crate) fn frame_start() -> f64 {
     *FRAME_START.lock()

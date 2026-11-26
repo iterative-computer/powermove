@@ -225,6 +225,9 @@ pub struct HistorySummary {
     pub redo_label: Option<String>,
     pub entries: usize,
     pub applied: usize,
+    /// An Undo, Redo or save of the person's waits for an agent's edit that
+    /// is still applying (at most `UNDO_WAIT_LIMIT`).
+    pub waiting: bool,
 }
 
 /// The open entry ("gesture open" indicator).
@@ -1133,6 +1136,7 @@ fn publish_timed(
             redo_label: history.redo_label().map(str::to_owned),
             entries: history.len(),
             applied: history.applied(),
+            waiting: p.history_waiting(),
         },
         entry_before: p.entry_before(),
         entry: p.open_entry().map(|(id, label, depth)| OpenEntryInfo {
@@ -1242,7 +1246,24 @@ fn run(
     let mut turns = Turns::default();
     UNANSWERED.with(|u| *u.borrow_mut() = Some(Vec::new()));
     loop {
-        let received = if let Some(collect) = idle_memory_relief {
+        // A history call waiting on another writer's edit has a limit: at
+        // it, the kernel wakes itself to end that edit (`HistoryCall::Lapse`).
+        let lapse = kernel.wait_deadline();
+        let received = if let Some((at, project)) = lapse {
+            match rx.recv_timeout(at.saturating_duration_since(std::time::Instant::now())) {
+                Ok(msg) => Ok(msg),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(Msg::Call {
+                    project,
+                    request: Request::new(
+                        crate::tx::Caller::native(),
+                        crate::tx::HistoryCall::Lapse,
+                    ),
+                    source_finish: None,
+                    reply: Box::new(|_| {}),
+                }),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else if let Some(collect) = idle_memory_relief {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(msg) => Ok(msg),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -2026,6 +2047,10 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
 #[cfg(test)]
 #[path = "actor_fault_tests.rs"]
 mod fault_tests;
+
+#[cfg(test)]
+#[path = "actor_undo_race_tests.rs"]
+mod undo_race_tests;
 
 // ── the UI's synchronous query mirror ───────────────────────────────────────
 

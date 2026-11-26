@@ -18,10 +18,12 @@
 //! same draws in the same order with the same blending; a pass split or
 //! joined over the same attachment stores the same bits.
 //!
-//! A pass runs over the plan's region grown by the largest effect padding
-//! of its nodes (clamped to the frame); the region is cut from it at the
-//! end. A node that fails is reported and leaves the accumulator as it was
-//! (section 8, isolation).
+//! Effects run over the plan's region grown by the largest effect padding.
+//! When every node writes pointwise and no node samples the stack, a
+//! viewport accumulator can cut back the unused attachment edges while
+//! keeping the raster origin. Otherwise the accumulator shares the padded
+//! effect domain. A node that fails is reported and leaves the accumulator
+//! as it was (section 8, isolation).
 
 use pm_gpu::Target;
 use pm_protocol::color::{BlendMode, WorkingEncoding};
@@ -559,14 +561,39 @@ impl Exec<'_> {
                 _ => None,
             })
             .fold(Padding::NONE, Padding::max);
-        let mut rect = want.grow(padding, full);
+        let mut effect_rect = want.grow(padding, full);
         if padding > Padding::NONE {
-            rect = rect.align(EFFECT_GRID, full);
+            effect_rect = effect_rect.align(EFFECT_GRID, full);
         }
+        // Keep each effect on its original domain. The accumulator only
+        // needs to cover the visible destination of the source-over draws.
+        // Keep its GL pixel origin too: shifting the viewport can round the
+        // rasterizer's interpolants differently around sharp edges.
+        let rect = if effect_rect != want
+            && !self.final_frame
+            && self.recycle
+            && !matches!(plan.background, crate::plan::Background::Gradient(_))
+            && plan.draws.iter().all(|draw| match &draw.content {
+                Content::Composite(node) => {
+                    matches!(node.as_ref(), Node::Layer(n) if draws_over_the_stack(n))
+                }
+                _ => true,
+            }) {
+            Region {
+                x: effect_rect.x,
+                y: want.y,
+                width: want.x + want.width - effect_rect.x,
+                height: effect_rect.y + effect_rect.height - want.y,
+            }
+            .align(EFFECT_GRID, full)
+        } else {
+            effect_rect
+        };
+        let source_region = (effect_rect != Region::full(full.0, full.1)).then_some(effect_rect);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
-        // A layer image's bytes at most (it covers `rect` at most).
-        let image_bytes = u64::from(rect.width)
-            * u64::from(rect.height)
+        // Bound how many effect images can remain live before a flush.
+        let image_bytes = u64::from(effect_rect.width)
+            * u64::from(effect_rect.height)
             * u64::from(
                 pm_gpu::working_format(self.precision)
                     .block_copy_size(None)
@@ -604,7 +631,8 @@ impl Exec<'_> {
                 // Resolve adjacent draws together so their missing vector
                 // scenes can share a coverage pass. Nested targets stay
                 // live until the pending draws that read them are recorded.
-                let (resolved, groups) = self.resolve_draws_owned(encoder, plan, run, pass_region);
+                let (resolved, groups) =
+                    self.resolve_draws_owned(encoder, plan, run, source_region);
                 pending.draws.extend(resolved);
                 for target in groups {
                     pending.hold(target);
@@ -647,7 +675,7 @@ impl Exec<'_> {
             }
             match node.as_ref() {
                 Node::Layer(n) => {
-                    let Some(covered) = layer_rect(n, rect, full) else {
+                    let Some(covered) = layer_rect(n, effect_rect, full) else {
                         continue;
                     };
                     if !self.depth_id
@@ -677,6 +705,12 @@ impl Exec<'_> {
                     // reads no backdrop (`draws_over_the_stack`), and the
                     // stack beneath it is not drawn yet.
                     let backdrop = (!deferred).then_some(&acc);
+                    if !deferred && n.effects.is_some() {
+                        // The stack's draws have recorded all their reads.
+                        // Give back their rasters before taking the layer's
+                        // own large input, as well as the later pass targets.
+                        self.trim_vector_before_effect(encoder, covered);
+                    }
                     let Some((res, depth, res_owned, output_bounds)) =
                         self.layer_node(encoder, plan, n, covered, backdrop)
                     else {
@@ -780,7 +814,7 @@ impl Exec<'_> {
                             self.release(old);
                         }
                         in_target = false;
-                        ids.push(image);
+                        self.keep_draw_for_legend(&mut ids, image);
                     } else if n.blend == BlendMode::Normal {
                         // `drawFbo(res, W, H, compositeAlpha)`: given back
                         // after the flush that draws it, masked or not.
@@ -793,7 +827,7 @@ impl Exec<'_> {
                         self.blend_region(
                             encoder, &res, covered, &acc, rect, full, n.blend, n.alpha,
                         );
-                        ids.push(image);
+                        self.keep_draw_for_legend(&mut ids, image);
                         if res_owned {
                             self.release(res);
                         }
@@ -852,11 +886,24 @@ impl Exec<'_> {
     ) {
         self.draw_pass(encoder, plan, &pending.draws, pass_region, acc, !*cleared);
         *cleared = true;
-        ids.append(&mut pending.draws);
+        for draw in pending.draws.drain(..) {
+            self.keep_draw_for_legend(ids, draw);
+        }
         pending.images = 0;
         for t in pending.take_targets() {
             self.release(t);
         }
+    }
+
+    fn keep_draw_for_legend(&self, ids: &mut Vec<Resolved>, mut draw: Resolved) {
+        if !self.depth_id {
+            // Color has recorded its reads. Only the layer ID is needed
+            // from here, so the legend must not pin the draw's textures.
+            draw.view = None;
+            draw.depth = None;
+            draw.pyramid = None;
+        }
+        ids.push(draw);
     }
 
     /// Snapshot only the destination pixels read by the blend, then write
@@ -1058,6 +1105,48 @@ impl Exec<'_> {
         out
     }
 
+    // Submit the draws that already recorded their reads of the rasters
+    // before allocating the effect's pass targets. The queue retains every
+    // resource still in use, including inputs to the rest of the frame.
+    fn trim_vector_before_effect(&mut self, encoder: &mut wgpu::CommandEncoder, rect: Region) {
+        let Some((plan, (effect_pixels, vector_bytes))) = self.vector_trim else {
+            return;
+        };
+        if self.final_frame
+            || !self.recycle
+            || u64::from(rect.width) * u64::from(rect.height) < effect_pixels
+            || self.vector.bytes() < vector_bytes
+        {
+            return;
+        }
+        self.vector_trim = None;
+        let completed = std::mem::replace(
+            encoder,
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm frame after oversized vector draws"),
+            }),
+        );
+        self.effects.uniforms.flush(self.queue);
+        if let Some(slices) = &mut self.effects.slices {
+            slices.admit();
+        }
+        let submission = self.queue.submit([completed.finish()]);
+        let repeated = crate::renderer::media_prepare::repeated_vectors(plan);
+        self.binds.drop_textures(&self.vector.trim_submitted_prefix(&repeated));
+        // A sliced renderer already waits on its own thread, allowing these
+        // allocation waves to stay apart. The viewer worker never waits.
+        if let Some(slices) = &mut self.effects.slices {
+            let watchdog = &mut self.effects.watchdog;
+            slices.submitted(self.device, submission, || {
+                if watchdog.frames_in_flight() > 0 {
+                    watchdog.collect(self.device, self.queue, false);
+                }
+            });
+        } else {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
+    }
+
     /// `content`: where `input` can be non-zero ([`effect_input_bounds`]).
     #[allow(clippy::too_many_arguments)]
     fn run_effects(
@@ -1071,6 +1160,7 @@ impl Exec<'_> {
         view: Option<crate::plan::OutputView>,
         content: Option<(u32, u32, u32, u32)>,
     ) -> Result<Option<EffectOutput>, String> {
+        self.trim_vector_before_effect(encoder, rect);
         let mut ready = vec![];
         for producer in effects.passes.input_plans() {
             if ready
@@ -1121,6 +1211,7 @@ impl Exec<'_> {
                     size: [asset.width as f64, asset.height as f64],
                     bounds: [0., 0., asset.width as f64, asset.height as f64],
                     pixel_scale: [1., 1.],
+                    planar: true,
                 },
                 origin: [0., 0.],
             });

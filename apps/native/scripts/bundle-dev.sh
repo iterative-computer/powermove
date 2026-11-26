@@ -22,6 +22,7 @@ cp "$here/little-victory-deep.wav" "$app/Contents/Resources/"
 # The About window's notices, and the licence text of the icons it names.
 cp "$here/Credits.rtf" "$app/Contents/Resources/"
 cp "$here/icon.icns" "$here/document.icns" "$app/Contents/Resources/"
+cp "$here/Distortion Waves License.txt" "$app/Contents/Resources/"
 cp "$here/../crates/shell/icons/pierre/LICENSE" "$app/Contents/Resources/Pierre Icons License.txt"
 # The app starts these by path; without the shader compiler no effect draws.
 for helper in pm-glsl-compiler pm-store-helper; do

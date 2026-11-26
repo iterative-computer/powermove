@@ -723,6 +723,8 @@ async fn execute(
         &frozen.options,
         frozen.playhead,
     );
+    let telemetry =
+        crate::telemetry::export_started(&frozen.options, planned.as_ref().ok().map(|p| p.frames));
     let mut ticket = None;
     let mut result: Result<Finished, Failure> = match planned {
         Err(error) => Err(error.into()),
@@ -831,6 +833,19 @@ async fn execute(
             )
             .await
         }
+    }
+    if let Some(telemetry) = telemetry {
+        let (outcome, kind) = match &result {
+            Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
+                (pm_telemetry::Outcome::Cancelled, None)
+            }
+            Err(error) if !error.offline.is_empty() => {
+                (pm_telemetry::Outcome::Failed, Some("media_offline"))
+            }
+            Err(_) => (pm_telemetry::Outcome::Failed, Some("render_failed")),
+            Ok(_) => (pm_telemetry::Outcome::Ok, None),
+        };
+        crate::telemetry::export_finished(telemetry, outcome, kind);
     }
     result.map_err(|f| f.message)
 }

@@ -25,6 +25,7 @@ fn frame() -> Frame {
                 label: id.into(),
                 detail: None,
                 lines: vec!["1  Title".into()],
+                ..Choice::default()
             })
             .into(),
         buttons: vec![
@@ -189,7 +190,7 @@ fn a_new_frame_replaces_the_old_one_and_details_stay_closed_until_asked() {
     let (view, cx, log) = open(&mut cx, frame());
     let next = Frame {
         surface: "N001".into(),
-        title: "Copying Stopped".into(),
+        title: "Copying stopped".into(),
         line: "Your original app and library weren’t changed.".into(),
         details: Some("synthetic failure".into()),
         rows: vec![Row {

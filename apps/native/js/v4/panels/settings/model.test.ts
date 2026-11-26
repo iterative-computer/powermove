@@ -15,10 +15,11 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
       ...(project ? ["project" as const] : []),
       "media",
       "shortcuts",
-      "transcription",
       "storage",
       "agents",
+      "transcription",
       "extensions",
+      "privacy",
       "about",
     ]);
     expect(effects.filter((e) => e[0] === "present")).toHaveLength(2);
@@ -47,10 +48,13 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
     "extension-authored",
   );
   expect(requests.map((r) => r.operation.type)).toEqual(
-    Array(5).fill("settings.get"),
+    Array(6).fill("settings.get"),
   );
   expect(model.rows.find((r) => r.id === "cloud-media")?.value).toBe(false);
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
+  // Sharing usage data is on until it is turned off.
+  expect(model.rows.find((r) => r.id === "share-usage-data")?.value).toBe(true);
+  // Projects open in separate windows unless Tabs was chosen (PM-745).
   expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
     "windows",
   );
@@ -61,13 +65,13 @@ test("preferences persist immediately through serialized v4 host acknowledgement
   expect(await model.write("preview-memory", 0)).toBe(true);
   expect(await model.write("cloud-media", true)).toBe(true);
   expect(await model.write("restore-windows", false)).toBe(true);
-  expect(await model.write("open-projects-in", "tabs")).toBe(true);
+  expect(await model.write("open-projects-in", "windows")).toBe(true);
   expect([...settings]).toEqual([
     ["themeMode", "dark"],
     ["previewMemoryMiB", 0],
     ["autoDownloadCloudMedia", true],
     ["restoreWindows", false],
-    ["openProjectsIn", "tabs"],
+    ["openProjectsIn", "windows"],
   ]);
   expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3, 4]);
 });

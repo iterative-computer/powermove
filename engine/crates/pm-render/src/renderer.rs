@@ -11,7 +11,7 @@ mod footage;
 #[cfg(test)]
 mod image_budget_tests;
 mod layer_raster;
-mod media_prepare;
+pub(crate) mod media_prepare;
 mod material_capture;
 pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCaptureStats};
 mod source;
@@ -499,6 +499,8 @@ pub struct Renderer {
     isolate_layers: bool,
     /// See [`Renderer::set_early_target_release`].
     early_target_release: bool,
+    #[cfg(test)]
+    vector_trim_limits: Option<(u64, u64)>,
     /// [`Renderer::missing_effects`].
     missing_effects: Vec<crate::effects::versions::MissingEffect>,
     /// [`Renderer::set_channel_memo`].
@@ -566,6 +568,8 @@ impl Renderer {
             reuse_enabled: false,
             isolate_layers: false,
             early_target_release: true,
+            #[cfg(test)]
+            vector_trim_limits: Some(crate::exec::VECTOR_TRIM_LIMITS),
             missing_effects: Vec::new(),
             svg_warned: Default::default(),
             channel_memo: true,
@@ -2501,6 +2505,10 @@ impl Renderer {
             self.binds.begin_frame();
             self.text_gpu.begin_frame();
             self.pyramids.begin_frame();
+            #[cfg(not(test))]
+            let vector_trim_limits = Some(crate::exec::VECTOR_TRIM_LIMITS);
+            #[cfg(test)]
+            let vector_trim_limits = self.vector_trim_limits;
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -2522,6 +2530,16 @@ impl Renderer {
                 final_frame: request.export
                     || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
+                vector_trim: vector_trim_limits
+                    .filter(|_| {
+                        request.viewer
+                            && !request.export
+                            && !request.read_ahead
+                            && !scrub
+                            && region.is_some()
+                            && expanded_request.is_some()
+                    })
+                    .map(|limits| (&plan, limits)),
                 // The depth and id surface reads the frame's images after
                 // the frame: nothing it may read goes back early.
                 recycle: self.early_target_release && depth_id.is_none(),
@@ -2670,17 +2688,17 @@ impl Renderer {
         } else {
             false
         };
-        self.shaders.output.submitted(
-            &self.queue,
-            !abandoned
-                && !held
-                && pending.is_empty()
-                && unsupported.is_empty()
-                && !self.media.still_pending
-                && self.effects.fallback.fatal.is_none(),
-        );
+        let complete = !abandoned
+            && !held
+            && pending.is_empty()
+            && unsupported.is_empty()
+            && !self.media.still_pending
+            && self.effects.fallback.fatal.is_none();
+        self.shaders.output.submitted(&self.queue, complete);
         self.binds.end_frame();
         self.pool.end_submitted_frame(&self.queue, taken);
+        self.vector
+            .end_frame(complete && self.effects.watchdog.stopped().is_none());
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()
@@ -3181,6 +3199,68 @@ mod target_share_tests {
             // Bindings take the rounding remainder: under four bytes.
             assert!(targets <= bytes / 2 && pyramids <= bytes / 4 && binds < bytes / 4 + 4);
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/doc.rs"]
+mod vector_trim_doc;
+
+#[cfg(test)]
+mod vector_trim_tests {
+    use super::*;
+    use pm_perf::{Counter, snapshot};
+    use pm_protocol::common::Size;
+    use serde_json::json;
+    use vector_trim_doc::{ch, layer, load, project, solid_fill};
+
+    #[test]
+    fn trimming_before_a_wide_effect_keeps_the_viewport_bits_and_vector_reuse() {
+        let gpu = pm_gpu::Gpu::new("cropped vector trim differential").unwrap();
+        let (w, h) = (384, 216);
+        let shape = |id, x, y, color| {
+            layer(id, "shape", json!({
+                "shape": "star", "color": color, "w": 144, "h": 132,
+                "points": 5, "stroke": 1, "strokeColor": "#bd461e",
+            }), x, y, 2.)
+        };
+        let mut effect = layer("wide", "solid", json!({
+            "color": "#2077c0c0", "w": 122, "h": 130,
+        }), 32., 20., 2.);
+        effect["fx"] = json!([{
+            "id": "soften", "type": "blur", "version": 1, "on": true,
+            "p": { "amount": ch(json!(18.)) },
+        }]);
+        let mut p = project(w, h, 2., solid_fill("#434c54"), vec![
+            shape("front-a", 45., 56., "#407db5a0"),
+            shape("front-b", 105., 23., "#991d5ad0"),
+            effect,
+            shape("back-a", 45., 56., "#407db5a0"),
+            shape("back-b", 76., 52., "#de8832a0"),
+        ]);
+        p["colorDepth"] = json!(16);
+        let mut doc = load(&p);
+        doc.set_saving_app_version(Some("1.3.0".into()));
+        let mut request = RenderRequest::at_scale(Size::new(148, 106), 1., Precision::Float16);
+        request.viewer = true;
+        request.origin = Some((16., 27.));
+        let draw = |limits| {
+            let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+            renderer.vector_trim_limits = limits;
+            renderer.set_main_effects_for_document(&doc).unwrap();
+            let before = snapshot();
+            let frame = renderer.render(&doc, "Ptest-root", Ticks::ZERO, &request, &crate::MapResolver::default()).unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let counters = snapshot().since(&before);
+            let pixels = pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &frame.color.texture).unwrap();
+            (pixels, counters)
+        };
+        let (reference, before) = draw(None);
+        let (trimmed, after) = draw(Some((1, 1)));
+        assert_eq!(reference, trimmed);
+        assert!(after.get(Counter::VectorScratchClears) > before.get(Counter::VectorScratchClears));
+        assert!(before.get(Counter::VectorBatchedScenes) >= 2);
+        assert_eq!(before.get(Counter::VectorCacheMisses), after.get(Counter::VectorCacheMisses));
     }
 }
 

@@ -100,9 +100,274 @@ impl Backend {
         {
             remember["binding"] = fields["account.remember"].clone();
         }
-        rows.extend(self.subscription_rows());
-        rows.extend(provider_rows(&self.native.facts["provider"]));
+        let powermove = self
+            .native
+            .agent_link
+            .environment()
+            .is_some_and(|env| env.aero.is_some());
+        if powermove {
+            // Settings › Providers replaces the agent account rows.
+            rows.extend(self.providers_rows());
+            rows.push(notification_row());
+        } else {
+            rows.extend(self.subscription_rows());
+            rows.extend(provider_rows(&self.native.facts["provider"]));
+        }
         rows.extend(agent_client_rows(&self.native.facts["agentClients"]));
+        rows
+    }
+    /// Settings › Providers: three providers, each for its harness (the
+    /// Powermove Account for Aero, OpenAI for Codex, Anthropic for Claude
+    /// Code), each row the method, signed in or out with its name (keys
+    /// masked), and the action.
+    fn providers_rows(&self) -> Vec<Value> {
+        let row = |id: &str, group: &str, label: &str| {
+            json!({"id":format!("providers.{id}"),"section":"providers","group":group,"label":label,"control":"status"})
+        };
+        let action = |mut row: Value, action: &str, label: &str, detail: String| {
+            row["control"] = json!("action");
+            row["action"] = json!(action);
+            row["actionLabel"] = json!(label);
+            row["detail"] = json!(detail);
+            row
+        };
+        let mut rows = self.powermove_provider_rows(&row, &action);
+        let accounts = self.native.agent_link.accounts();
+        // OpenAI: Sign in with ChatGPT (Codex's sign-in) or an API key, in
+        // Codex's own Keychain item.
+        const OPENAI: &str = "OpenAI (Codex)";
+        let openai = accounts.as_ref().map(|a| a.status(Provider::Chatgpt));
+        let both = "Used by Codex.";
+        match openai.as_ref().map(|s| (s.state, s)) {
+            // Both ways in, as Anthropic (Claude Code) has them: Codex holds
+            // one sign-in, so the other row says it would replace it.
+            Some((State::Connected, status)) => {
+                let with_detail = |mut r: Value| {
+                    if let Some(detail) = &status.detail {
+                        r["detail"] = json!(format!(
+                            "{} {detail}",
+                            r["detail"].as_str().unwrap_or_default()
+                        ));
+                    }
+                    r
+                };
+                if status.api_key {
+                    rows.push(action(
+                        row("openai", OPENAI, "Sign in with ChatGPT"),
+                        "providers.openai.sign-in",
+                        "Sign In…",
+                        format!("Signed out. Signing in replaces the API key. {both}"),
+                    ));
+                    let mut r = action(
+                        row("openai-key", OPENAI, "API key"),
+                        "providers.openai.sign-out",
+                        "Remove",
+                        format!("Added. {both}"),
+                    );
+                    // Codex never hands out the key: the sign-in it was
+                    // added under stands for it (a new key moves it on).
+                    r["target"] = json!(format!("api-key {}", pm_agents::codex_auth::generation()));
+                    rows.push(with_detail(r));
+                } else {
+                    let name = [status.email.clone(), status.plan.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let detail = if name.is_empty() {
+                        format!("Signed in. {both}")
+                    } else {
+                        format!("Signed in as {name}. {both}")
+                    };
+                    let mut r = action(
+                        row("openai", OPENAI, "Sign in with ChatGPT"),
+                        "providers.openai.sign-out",
+                        "Sign Out",
+                        detail,
+                    );
+                    r["target"] = json!(name);
+                    rows.push(with_detail(r));
+                    rows.push(action(
+                        row("openai-key", OPENAI, "API key"),
+                        "providers.openai.key",
+                        "Add Key…",
+                        format!("Not added. Adding one replaces the ChatGPT sign-in. {both}"),
+                    ));
+                }
+            }
+            Some((State::Connecting, status)) => rows.push(action(
+                row("openai", OPENAI, "Sign in with ChatGPT"),
+                "providers.openai.sign-out",
+                "Cancel",
+                status.detail.clone().unwrap_or_else(|| "Finish signing in in your browser.".into()),
+            )),
+            Some((State::Checking, _)) => {
+                let mut r = row("openai", OPENAI, "OpenAI");
+                r["value"] = json!("Checking…");
+                rows.push(r);
+            }
+            _ => {
+                let detail = openai.and_then(|s| s.detail).map_or_else(
+                    || format!("Signed out. {both}"),
+                    |d| format!("Signed out. {d}"),
+                );
+                rows.push(action(
+                    row("openai", OPENAI, "Sign in with ChatGPT"),
+                    "providers.openai.sign-in",
+                    "Sign In…",
+                    detail,
+                ));
+                rows.push(action(
+                    row("openai-key", OPENAI, "API key"),
+                    "providers.openai.key",
+                    "Add Key…",
+                    format!("Not added. {both}"),
+                ));
+            }
+        }
+        // Anthropic: Claude Code's own sign-in, or an API key it runs on
+        // while signed out.
+        const ANTHROPIC: &str = "Anthropic (Claude Code)";
+        if let Some(accounts) = &accounts {
+            let claude = accounts.status(Provider::Claude);
+            let terms = "Used by Claude Code.";
+            let who = [claude.email.clone(), claude.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            let r = match claude.state {
+                State::Connected => {
+                    let mut r = action(
+                        row("claude", ANTHROPIC, "Sign in with Claude"),
+                        "providers.claude.sign-out",
+                        "Sign Out",
+                        format!("Signed in as {who}. {terms}"),
+                    );
+                    r["target"] = json!(who);
+                    r
+                }
+                State::Connecting => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-out",
+                    "Cancel",
+                    claude.detail.clone().unwrap_or_default(),
+                ),
+                State::Disconnected => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-in",
+                    "Sign In…",
+                    format!("Signed out. {terms}"),
+                ),
+                State::Checking => {
+                    let mut r = row("claude", ANTHROPIC, "Sign in with Claude");
+                    r["value"] = json!("Checking…");
+                    r["detail"] = json!(terms);
+                    r
+                }
+                // What went wrong reads under the title, and signing in
+                // again is at hand.
+                State::Unavailable => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-in",
+                    "Sign In…",
+                    format!("{} {terms}", claude.detail.clone().unwrap_or_default()).trim().to_owned(),
+                ),
+            };
+            rows.push(r);
+            let key = accounts.anthropic();
+            let used = "Used by Claude Code while signed out of Claude.";
+            rows.push(match &key.masked {
+                Some(masked) => {
+                    let detail = match (&key.detail, key.checking) {
+                        (_, true) => format!("{masked} · checking its models. {used}"),
+                        (Some(problem), _) => format!("{masked} · {problem}"),
+                        _ => format!(
+                            "{masked} · {} {}. {used}",
+                            key.models.len(),
+                            if key.models.len() == 1 { "model" } else { "models" }
+                        ),
+                    };
+                    let mut r = action(
+                        row("anthropic-key", ANTHROPIC, "API key"),
+                        "providers.anthropic.remove",
+                        "Remove",
+                        detail,
+                    );
+                    r["target"] = json!(masked);
+                    r
+                }
+                None => action(
+                    row("anthropic-key", ANTHROPIC, "API key"),
+                    "providers.anthropic.key",
+                    "Add Key…",
+                    format!("Not added. {used}"),
+                ),
+            });
+        }
+        rows
+    }
+    /// The Powermove Account, which Aero runs on (the same account as
+    /// Settings › Account): signed in or out, and where Aero stands on it.
+    fn powermove_provider_rows(
+        &self,
+        row: &dyn Fn(&str, &str, &str) -> Value,
+        action: &dyn Fn(Value, &str, &str, String) -> Value,
+    ) -> Vec<Value> {
+        use pm_agents::inference::Standing;
+        const GROUP: &str = "Powermove Account (Aero)";
+        let cloud = &self.native.facts["cloud"];
+        if !cloud.is_object() {
+            return vec![];
+        }
+        let standing = self.native.agent_link.accounts().map(|a| a.aero());
+        let aero = match &standing {
+            Some(Standing::Ready { billing, .. }) => {
+                let plan = billing.plan.as_ref().map_or("", |p| p.name.as_str());
+                format!("Aero runs on {plan}: {}.", billing.credits_left())
+            }
+            Some(Standing::Free(_)) => pm_agents::inference::NEEDS_PLAN.into(),
+            Some(Standing::Unreachable(why)) => why.clone(),
+            _ => "Aero runs on Powermove inference.".into(),
+        };
+        // Signed in here, but Powermove refused the session (it ended or
+        // was revoked): the way back is Sign In, never only Sign Out.
+        let rejected = cloud["signedIn"] == true && matches!(standing, Some(Standing::SignedOut));
+        let mut r = if rejected {
+            let identity = cloud["identity"].as_str().unwrap_or_default();
+            let mut r = action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-in",
+                "Sign In…",
+                format!("Your session as {identity} ended. Sign in again to use Aero."),
+            );
+            r["target"] = json!(identity);
+            r
+        } else if cloud["signedIn"] == true {
+            let identity = cloud["identity"].as_str().unwrap_or_default();
+            let mut r = action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-out",
+                "Sign Out",
+                format!("Signed in as {identity}. {aero}"),
+            );
+            r["target"] = json!(identity);
+            r
+        } else {
+            action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-in",
+                "Sign In…",
+                "Signed out. Aero runs on Powermove inference.".into(),
+            )
+        };
+        r["disabled"] = json!(cloud["busy"] == true);
+        let mut rows = vec![r];
+        // On Free: the plans are on Settings › Account.
+        if cloud["signedIn"] == true && matches!(standing, Some(Standing::Free(_))) {
+            rows.push(action(
+                row("aero-plan", GROUP, "Aero"),
+                "settings.show-account",
+                "Choose a Plan…",
+                "Aerolite or Aero, on your Powermove account.".into(),
+            ));
+        }
         rows
     }
     /// Settings › General › Timeline: hover-to-scrub (View ▸ Skimming), this
@@ -247,6 +512,7 @@ impl Backend {
             "project.name",
             "project.fps",
             "project.duration",
+            "project.background",
             "project.colorDepth",
             "project.output",
             "project.masteringPeak"
@@ -282,6 +548,17 @@ impl Backend {
                     .map(|n| wire(&n.to_value()))
                     .unwrap_or(json!(0.1)),
                 "",
+            ),
+            (
+                "project.background",
+                "Composition",
+                "Background",
+                "colour",
+                // No `bg` renders black (the engine's `normalize_fill`).
+                comp.get("bg")
+                    .map(|n| wire(&n.to_value()))
+                    .unwrap_or(json!("#000000")),
+                "Colour shown behind every layer of the composition.",
             ),
         ] {
             let mut row = json!({"id":id,"section":"project","group":group,"label":label,"control":control,"value":value,"detail":detail,"binding":fields[id],"disabled":false});
@@ -853,17 +1130,40 @@ impl Backend {
                 ));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
-            // The Powermove account's sheets, Keychain and registry calls are the app's.
+            // The Powermove account's sheets, Keychain, registry and billing
+            // calls are the app's.
             Some("row")
                 if matches!(
                     action["action"].as_str(),
-                    Some("account.sign-in" | "account.sign-out" | "account.delete")
+                    Some(
+                        "account.sign-in"
+                            | "account.sign-out"
+                            | "account.delete"
+                            | "account.subscribe"
+                            | "account.portal"
+                            | "account.checkout-cancel"
+                            | "account.billing-refresh"
+                    )
                 ) =>
             {
                 let name = match action["action"].as_str() {
-                    Some("account.sign-in") => "cloudSignIn",
-                    Some("account.sign-out") => "cloudSignOut",
-                    _ => "cloudDeleteAccount",
+                    Some("account.sign-in") => "cloudSignIn".to_owned(),
+                    Some("account.sign-out") => "cloudSignOut".to_owned(),
+                    Some("account.portal") => "cloudPortal".to_owned(),
+                    Some("account.checkout-cancel") => "cloudCheckoutCancel".to_owned(),
+                    Some("account.billing-refresh") => "cloudBilling".to_owned(),
+                    // Only a plan the account's billing offers is checked out.
+                    Some("account.subscribe") => {
+                        let plan = action["plan"].as_str().unwrap_or_default();
+                        let offered = self.native.facts["cloud"]["billing"]["plans"]
+                            .as_array()
+                            .is_some_and(|p| p.iter().any(|o| o["id"] == plan));
+                        if !offered {
+                            return Err("That plan isn’t offered.".into());
+                        }
+                        format!("cloudCheckout.{plan}")
+                    }
+                    _ => "cloudDeleteAccount".to_owned(),
                 };
                 self.native
                     .platform
@@ -885,6 +1185,13 @@ impl Backend {
                     .push(("command".into(), json!({"name": "checkForUpdates"})));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            // Settings › Privacy › What We Collect: the public list.
+            Some("row") if action["action"] == "privacy.what-we-collect" => {
+                self.native
+                    .platform
+                    .push(("command".into(), json!({"name": "openTelemetryDocs"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // The After Effects workspace comes over with the agent, in its panel.
             Some("row") if action["action"] == "workspace.import" => {
                 self.native
@@ -897,6 +1204,34 @@ impl Backend {
                 self.native
                     .platform
                     .push(("command".into(), json!({"name": "bringSignIns"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            Some("row")
+                if action["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("providers.")) =>
+            {
+                let accounts = self
+                    .native
+                    .agent_link
+                    .accounts()
+                    .ok_or("Agent accounts are unavailable")?;
+                match action["action"].as_str().unwrap_or_default() {
+                    "providers.openai.sign-in" => accounts.connect(Provider::Chatgpt),
+                    "providers.openai.sign-out" => accounts.disconnect(Provider::Chatgpt),
+                    "providers.claude.sign-in" => accounts.connect(Provider::Claude),
+                    "providers.claude.sign-out" => accounts.disconnect(Provider::Claude),
+                    "providers.anthropic.remove" => accounts.remove_anthropic_key()?,
+                    // The secure field is the app's native sheet.
+                    kind @ ("providers.openai.key" | "providers.anthropic.key") => {
+                        let which = if kind == "providers.openai.key" { "openai" } else { "anthropic" };
+                        self.native.platform.push((
+                            "command".into(),
+                            json!({"name": format!("providerKey.{which}")}),
+                        ));
+                    }
+                    _ => return Err("Unknown provider action".into()),
+                }
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
             Some("row") => {
@@ -998,6 +1333,9 @@ fn destructive(action: &str) -> bool {
             | "account.delete"
             | "provider.disconnect"
             | "agents.remove"
+            | "providers.openai.sign-out"
+            | "providers.claude.sign-out"
+            | "providers.anthropic.remove"
     ) || action.starts_with("storage.delete.")
 }
 /// (v1.2.0 SettingsScreen): Sign In… while signed out; the identity with Sign
@@ -1040,7 +1378,169 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     delete["action"] = json!("account.delete");
     delete["actionLabel"] = json!("Delete Account…");
     delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
-    vec![account, remember, delete]
+    // Deleting the account is the page's last card, after the plan.
+    delete["group"] = json!("Delete Account");
+    let mut rows = vec![account, remember];
+    rows.extend(billing_rows(&cloud["billing"], busy));
+    rows.push(delete);
+    rows
+}
+/// Settings › Account's plan card and this month's credits, from the
+/// account's billing (`GET /v2/billing`, the app's `cloud.billing` fact).
+/// Nothing before it is read, or when the backend has no billing.
+pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
+    const PLAN: &str = "Plan";
+    const CREDITS: &str = "Credits This Month";
+    let row = |id: &str, group: &str, label: &str, control: &str| {
+        json!({"id":format!("account.{id}"),"section":"account","group":group,
+            "label":label,"control":control,"disabled":busy})
+    };
+    let action = |mut r: Value, action: &str, label: &str| {
+        r["action"] = json!(action);
+        r["actionLabel"] = json!(label);
+        r
+    };
+    match billing["state"].as_str() {
+        Some("ready") => {}
+        Some("error") => {
+            let mut r = action(
+                row("plan", PLAN, "Plan", "action"),
+                "account.billing-refresh",
+                "Try Again",
+            );
+            r["value"] = json!("Couldn’t load your plan.");
+            return vec![r];
+        }
+        _ => return vec![],
+    }
+    let dollars = |cents: u64| {
+        if cents.is_multiple_of(100) {
+            format!("${}", cents / 100)
+        } else {
+            format!("${}.{:02}", cents / 100, cents % 100)
+        }
+    };
+    let resets = billing["resets"].as_str().unwrap_or_default();
+    let subscribed = billing["subscribed"] == true;
+    let mut rows = vec![];
+    if !subscribed {
+        let mut free = row("plan", PLAN, "Free", "status");
+        free["value"] = json!(pm_agents::inference::NEEDS_PLAN);
+        rows.push(free);
+        if billing["waiting"] == "checkout" {
+            rows.push(action(
+                row(
+                    "waiting",
+                    PLAN,
+                    "Waiting for checkout in your browser…",
+                    "action",
+                ),
+                "account.checkout-cancel",
+                "Cancel",
+            ));
+        } else {
+            let plans = billing["plans"].as_array().cloned().unwrap_or_default();
+            let mut choose = action(
+                row("choose", PLAN, "Choose a Plan", "plans"),
+                "account.subscribe",
+                "Continue…",
+            );
+            // Each plan's card: its name, price and monthly credits, and for
+            // a plan that gives more per dollar than the smallest, how much
+            // more (the website's wording).
+            let price = |p: &Value| p["priceCents"].as_u64().unwrap_or(0);
+            let credits = |p: &Value| p["credits"].as_u64().unwrap_or(0);
+            let per_dollar = |p: &Value| credits(p) as f64 / price(p).max(1) as f64;
+            let base = plans.iter().map(per_dollar).fold(f64::INFINITY, f64::min);
+            choose["options"] = plans
+                .iter()
+                .map(|p| {
+                    let mut lines = vec![
+                        p["name"].as_str().unwrap_or_default().to_owned(),
+                        format!("{} a month", dollars(price(p))),
+                        format!(
+                            "{} credits a month",
+                            pm_agents::inference::grouped(credits(p))
+                        ),
+                    ];
+                    let more = ((per_dollar(p) / base - 1.) * 100.).round();
+                    if more >= 1. {
+                        lines.push(format!("{more}% more credits per dollar"));
+                    }
+                    json!({"v": p["id"], "label": lines.join("\n")})
+                })
+                .collect();
+            choose["detail"] = json!("Credits reset each month and don’t roll over.");
+            if let Some(error) = billing["error"].as_str() {
+                choose["error"] = json!(error);
+            }
+            rows.push(choose);
+        }
+        return rows;
+    }
+    let plan = &billing["plan"];
+    let name = plan["name"].as_str().unwrap_or_default();
+    let mut card = action(
+        row("plan", PLAN, name, "action"),
+        "account.portal",
+        "Manage Billing…",
+    );
+    card["value"] = json!(match () {
+        _ if billing["status"] == "past_due" => "Payment failed".to_owned(),
+        _ if billing["cancelAtPeriodEnd"] == true => format!("Cancels {resets}"),
+        _ => format!(
+            "{} a month",
+            dollars(plan["priceCents"].as_u64().unwrap_or(0))
+        ),
+    });
+    if billing["status"] == "past_due" {
+        card["error"] = json!("Update your payment method to keep Aero running.");
+    }
+    if let Some(error) = billing["error"].as_str() {
+        card["error"] = json!(error);
+    }
+    rows.push(card);
+    let credits = &billing["credits"];
+    let count = |k: &str| credits[k].as_u64().unwrap_or(0);
+    let mut left = row(
+        "credits",
+        CREDITS,
+        &format!(
+            "{} of {} left",
+            pm_agents::inference::grouped(count("remaining")),
+            pm_agents::inference::grouped(count("included"))
+        ),
+        "status",
+    );
+    left["value"] = json!(format!("Resets {resets}"));
+    left["meter"] = json!({"used": count("used"), "included": count("included")});
+    if count("remaining") == 0 {
+        left["error"] = json!(format!("You’re out of credits until {resets}."));
+    }
+    rows.push(left);
+    let mut daily = row("daily", CREDITS, "Daily Use", "status");
+    daily["value"] = json!(format!(
+        "{} used",
+        pm_agents::inference::grouped(count("used"))
+    ));
+    daily["days"] = billing["daily"].clone();
+    daily["slots"] = billing["periodDays"].clone();
+    rows.push(daily);
+    if count("remaining") == 0
+        && let Some(upgrade) = billing["upgrade"].as_object()
+    {
+        let label = format!(
+            "{} · {} credits a month",
+            upgrade["name"].as_str().unwrap_or_default(),
+            pm_agents::inference::grouped(upgrade["credits"].as_u64().unwrap_or(0))
+        );
+        rows.push(action(
+            row("upgrade", CREDITS, &label, "action"),
+            "account.portal",
+            "Upgrade…",
+        ));
+    }
+    rows
 }
 /// Settings › Agents › API or Local Model, from the app's `provider` fact:
 /// what is connected (never the key), then Set Up… / Change… and Disconnect.
@@ -1185,7 +1685,7 @@ pub(crate) fn validate_profile(key: &str, value: &Value) -> Result<(), String> {
         "previewMemoryMiB" => value
             .as_f64()
             .is_some_and(|n| [0., 128., 256., 512., 1024., 2048.].contains(&n)),
-        "autoDownloadCloudMedia" | "restoreWindows" => value.is_boolean(),
+        "autoDownloadCloudMedia" | "restoreWindows" | "shareUsageData" => value.is_boolean(),
         _ => false,
     };
     if valid {
@@ -1331,6 +1831,111 @@ mod cloud_tests {
         assert_eq!(out[1]["value"], true);
         assert_eq!(out[1]["disabled"], false);
         assert_eq!(out[2]["action"], "account.delete");
+        assert_eq!(out[2]["group"], "Delete Account");
+    }
+    fn ready(extra: serde_json::Value) -> serde_json::Value {
+        let mut billing = json!({"state":"ready","subscribed":true,
+            "plan":{"id":"aerolite","name":"Aerolite","priceCents":999},
+            "status":"active","cancelAtPeriodEnd":false,
+            "credits":{"included":1000,"used":188,"remaining":812},"resets":"Dec 25",
+            "periodDays":30,"daily":[["Nov 25",40],["Nov 26",0]],
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
+                     {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}],
+            "upgrade":{"id":"aero","name":"Aero","credits":2500},"waiting":null,"error":null});
+        for (k, v) in extra.as_object().unwrap() {
+            billing[k] = v.clone();
+        }
+        billing
+    }
+    /// Settings › Account in each billing state: what a person reads and
+    /// the one action each card offers.
+    #[test]
+    fn the_plan_card_and_credits_follow_the_accounts_billing() {
+        use super::billing_rows;
+        let ids = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Before it is read, or a backend without billing: nothing.
+        assert!(billing_rows(&json!({"state":"loading"}), false).is_empty());
+        assert!(billing_rows(&json!({"state":"missing"}), false).is_empty());
+        let error = billing_rows(&json!({"state":"error"}), false);
+        assert_eq!(error[0]["action"], "account.billing-refresh");
+        // Free: says Aero needs a plan, then the plans and Continue…; no chart.
+        let free = billing_rows(
+            &ready(
+                json!({"subscribed":false,"plan":null,"status":null,"resets":null,
+                "credits":{"included":0,"used":0,"remaining":0},"daily":[]}),
+            ),
+            false,
+        );
+        assert_eq!(ids(&free), ["account.plan", "account.choose"]);
+        assert_eq!(free[0]["value"], "Aero needs Aerolite or Aero.");
+        assert_eq!(free[1]["control"], "plans");
+        assert_eq!(free[1]["action"], "account.subscribe");
+        assert_eq!(free[1]["actionLabel"], "Continue…");
+        assert_eq!(
+            free[1]["options"][0]["label"],
+            "Aerolite\n$9.99 a month\n1,000 credits a month"
+        );
+        assert_eq!(
+            free[1]["options"][1]["label"],
+            "Aero\n$19.99 a month\n2,500 credits a month\n25% more credits per dollar"
+        );
+        // Waiting for Checkout: a quiet line with Cancel instead.
+        let waiting = billing_rows(
+            &ready(json!({"subscribed":false,"plan":null,"waiting":"checkout"})),
+            false,
+        );
+        assert_eq!(waiting[1]["label"], "Waiting for checkout in your browser…");
+        assert_eq!(waiting[1]["action"], "account.checkout-cancel");
+        // Aerolite mid-period: the plan, Manage Billing…, the meter and the days.
+        let lite = billing_rows(&ready(json!({})), false);
+        assert_eq!(
+            ids(&lite),
+            ["account.plan", "account.credits", "account.daily"]
+        );
+        assert_eq!(lite[0]["label"], "Aerolite");
+        assert_eq!(lite[0]["value"], "$9.99 a month");
+        assert_eq!(lite[0]["action"], "account.portal");
+        assert_eq!(lite[1]["label"], "812 of 1,000 left");
+        assert_eq!(lite[1]["value"], "Resets Dec 25");
+        assert_eq!(lite[1]["meter"], json!({"used":188,"included":1000}));
+        assert_eq!(lite[2]["value"], "188 used");
+        assert_eq!(lite[2]["slots"], 30);
+        // Cancelling, past due.
+        let cancelling = billing_rows(&ready(json!({"cancelAtPeriodEnd":true})), false);
+        assert_eq!(cancelling[0]["value"], "Cancels Dec 25");
+        let due = billing_rows(&ready(json!({"status":"past_due"})), false);
+        assert_eq!(due[0]["value"], "Payment failed");
+        assert!(due[0]["error"].as_str().unwrap().contains("payment method"));
+        // Out of credits on Aerolite: until when, and the bigger plan.
+        let out = billing_rows(
+            &ready(json!({"credits":{"included":1000,"used":1000,"remaining":0}})),
+            false,
+        );
+        assert_eq!(out[1]["error"], "You’re out of credits until Dec 25.");
+        assert_eq!(out[3]["id"], "account.upgrade");
+        assert_eq!(out[3]["action"], "account.portal");
+        // On Aero, out of credits has no bigger plan.
+        let top = billing_rows(
+            &ready(json!({"upgrade":null,"credits":{"included":2500,"used":2500,"remaining":0}})),
+            false,
+        );
+        // A new period with nothing spent still shows its days (all ticks).
+        let fresh = billing_rows(
+            &ready(
+                json!({"credits":{"included":1000,"used":0,"remaining":1000},
+                "daily":[["Nov 25",0]]}),
+            ),
+            false,
+        );
+        assert_eq!(fresh[2]["days"], json!([["Nov 25", 0]]));
+        assert_eq!(
+            ids(&top),
+            ["account.plan", "account.credits", "account.daily"]
+        );
     }
 }
 #[cfg(test)]

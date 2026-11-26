@@ -186,6 +186,55 @@ pub fn settle_document(
     }
     Ok(publication)
 }
+/// Wait for the same load barrier the renderer uses, then read activation
+/// records for every live owner of the isolated extension roots.
+pub fn extension_health(roots: &[PathBuf], timeout: Duration) -> Result<Vec<Value>> {
+    let owners = {
+        let mut all = DEFINITION_BARRIERS.lock().unwrap();
+        all.retain(|(_, _, shared, _)| shared.strong_count() > 0);
+        all.iter().filter_map(|(_, project, shared, inbox)| {
+            let shared = shared.upgrade()?;
+            (shared.roots == roots && !shared.closing.load(Ordering::Acquire))
+                .then(|| (project.clone(), shared, inbox.clone()))
+        }).collect::<Vec<_>>()
+    };
+    if owners.is_empty() {
+        return Err(Error::Host("There are no live extension owners for this profile.".into()));
+    }
+    let mut rows = BTreeMap::<String, Value>::new();
+    let deadline = std::time::Instant::now() + timeout;
+    for (ordinal, (project, owner, inbox)) in owners.into_iter().enumerate() {
+        let window = format!("{project}/{ordinal}");
+        wait_definitions(&inbox, &owner, deadline.saturating_duration_since(std::time::Instant::now()), &|| false)?;
+        let published = owner.published.lock().unwrap();
+        for (id, record) in &published.records {
+            let row = rows.entry(id.clone()).or_insert_with(|| json!({
+                "id":id, "version":record["manifest"]["version"], "enabled":record["enabled"],
+                "health":{}
+            }));
+            row["health"][&window] = record["health"].clone();
+        }
+        for row in rows.values_mut() {
+            if row["health"][&window].is_null() {
+                row["health"][&window] = json!({"state":"unavailable","error":"Extension was not loaded in this window"});
+            }
+        }
+    }
+    // Extensions first seen in a later owner must still have a record for
+    // the earlier owners.
+    let windows: std::collections::BTreeSet<_> = rows.values()
+        .flat_map(|row| row["health"].as_object().into_iter().flat_map(|health| health.keys().cloned()))
+        .collect();
+    for row in rows.values_mut() {
+        for window in &windows {
+            if row["health"][window].is_null() {
+                row["health"][window] = json!({"state":"unavailable","error":"Extension was not loaded in this window"});
+            }
+        }
+    }
+    Ok(rows.into_values().collect())
+}
+
 fn wait_definitions(
     inbox: &Sender<Input>,
     shared: &Shared,
@@ -460,6 +509,7 @@ pub struct Publication {
 }
 
 struct Shared {
+    roots: Vec<PathBuf>,
     /// Set by `ExtensionHost::close` itself: an owner still waiting for
     /// isolate admission (its boot or the Svelte compiler) stops waiting
     /// at once, before it could read the queued close.
@@ -1011,6 +1061,7 @@ impl ExtensionHost {
         }
         let (inbox, input) = mpsc::channel();
         let shared = Arc::new(Shared {
+            roots: config.roots.clone(),
             published: Mutex::default(),
             changed: Condvar::new(),
             closing: AtomicBool::new(false),
@@ -1125,6 +1176,13 @@ impl ExtensionHost {
     pub fn records(&self) -> Vec<Value> {
         let published = self.shared.published.lock().unwrap();
         published.records.values().cloned().collect()
+    }
+    /// Reads the records in place, without the copy `records` makes (each
+    /// a whole manifest): for callers that look at a few fields on every
+    /// frame. `read` runs under the host's lock: keep it short.
+    pub fn read_records<R>(&self, read: impl FnOnce(&mut dyn Iterator<Item = &Value>) -> R) -> R {
+        let published = self.shared.published.lock().unwrap();
+        read(&mut published.records.values())
     }
     /// Enabled v4 surface extensions with their compiled graphs.
     pub fn surfaces(&self) -> Vec<Value> {

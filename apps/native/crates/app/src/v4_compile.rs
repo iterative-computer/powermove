@@ -274,6 +274,22 @@ pub struct NodeView {
     /// `data-pm-slot="body"`: the part of a sheet between its title and its
     /// actions, which gives way while the sheet's height changes.
     pub sheet_body: bool,
+    /// `metadata.hoverGroup`: the host keeps whether the pointer is over
+    /// this node (a row), and draws its hover itself: no publication.
+    pub hover_group: bool,
+    /// `metadata.hoverStyle`: the group's look while hovered (its
+    /// `background`), compiled as `style` is.
+    pub hover_background: Option<gpui::Fill>,
+    /// `metadata.hoverOnly` (`Some(true)`) or `metadata.hoverHide`
+    /// (`Some(false)`): drawn only while, or only until, the nearest hover
+    /// group holding it is hovered (a row's switch and the blank that keeps
+    /// its column).
+    pub hover_shows: Option<bool>,
+    /// `metadata.pill`: the composer pill's split hover (`pm_shell::pill`).
+    pub pill: Option<pm_shell::pill::Role>,
+    /// `metadata.turn`: a chevron that springs half a turn to point up
+    /// while `true` (its menu is open) and back when `false`.
+    pub turn: Option<bool>,
     /// `metadata.runs`: one wrapped paragraph whose words differ in style
     /// (prose with bold, italic, code and links), drawn as one text.
     pub rich: Option<Rich>,
@@ -581,10 +597,14 @@ fn compile(
             // Quiet source-list rows: selection and hover inset from the panel
             // edge by `gap`, text a further `gap` in (language §9 Lists).
             Some(Component::ListItem | Component::TreeItem) if variant(node) != Some("band") => {
+                // Each row keeps its pitch (`row`), its highlight `list_gap`
+                // shorter and centred in it: a hovered row and a selected one
+                // never touch.
                 sheet
                     .flex_row()
                     .items_center()
-                    .min_h(px(t.metrics.row))
+                    .min_h(px(t.metrics.row - t.metrics.list_gap))
+                    .my(px(t.metrics.list_gap / 2.))
                     .mx(px(t.metrics.gap))
                     .px(px(t.metrics.gap))
                     .gap(px(t.metrics.gap))
@@ -978,6 +998,27 @@ fn compile(
         bare: inline_rename || (component == Some(Component::TextField) && in_colour),
         code: meta.and_then(|m| m.get("code")) == Some(&Value::Bool(true)),
         sheet_body: slot == Some("body"),
+        hover_group: meta.and_then(|m| m.get("hoverGroup")) == Some(&Value::Bool(true)),
+        hover_background: meta
+            .and_then(|m| m.get("hoverStyle"))
+            .and_then(Value::as_object)
+            .and_then(|hover| {
+                apply(StyleRefinement::default(), hover, table)
+                    .sheet
+                    .background
+            }),
+        pill: meta
+            .and_then(|m| m.get("pill"))
+            .and_then(Value::as_str)
+            .and_then(pm_shell::pill::Role::named),
+        turn: meta.and_then(|m| m.get("turn")).and_then(Value::as_bool),
+        hover_shows: if meta.and_then(|m| m.get("hoverOnly")) == Some(&Value::Bool(true)) {
+            Some(true)
+        } else if meta.and_then(|m| m.get("hoverHide")) == Some(&Value::Bool(true)) {
+            Some(false)
+        } else {
+            None
+        },
         fixed_width: meta
             .and_then(|m| m.get("fixedWidthSample"))
             .and_then(Value::as_str)

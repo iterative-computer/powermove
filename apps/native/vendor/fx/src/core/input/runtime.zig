@@ -1,0 +1,236 @@
+const std = @import("std");
+const command_specs = @import("../slash_commands/command_specs.zig");
+const settings_catalog = @import("../config/settings_catalog.zig");
+const effort_menu = @import("effort_menu.zig");
+const info_panel = @import("info_panel.zig");
+const usage_menu = @import("../session/usage_menu.zig");
+const workspace_menu = @import("../workspace/workspace_menu.zig");
+const composer_deletion = @import("composer_deletion.zig");
+const composer_insertion = @import("composer_insertion.zig");
+const composer_kill_ring = @import("composer_kill_ring.zig");
+const composer_line_continuation = @import("composer_line_continuation.zig");
+const composer_replacement = @import("composer_replacement.zig");
+const composer_selection = @import("composer_selection.zig");
+const composer_skill_binding = @import("composer_skill_binding.zig");
+const composer_text_replacement = @import("composer_text_replacement.zig");
+const composer_undo = @import("composer_undo.zig");
+const composer_history = @import("composer_history.zig");
+const composer_stash = @import("composer_stash.zig");
+const edit_history = @import("edit_history.zig");
+const editor_state = @import("editor_state.zig");
+const gesture_state = @import("gesture_state.zig");
+const horizontal_navigation = @import("horizontal_navigation.zig");
+const input_action = @import("input_action.zig");
+const input_limit_rejection = @import("input_limit_rejection.zig");
+const input_reset = @import("input_reset.zig");
+const kill_ring = @import("kill_ring.zig");
+const paste_framing = @import("paste_framing.zig");
+const picker_state = @import("picker_state.zig");
+const registered_entities = @import("registered_entities.zig");
+const text_scalar = @import("text_scalar.zig");
+const vertical_navigation = @import("vertical_navigation.zig");
+
+const Allocator = std.mem.Allocator;
+const ImageBlocks = kill_ring.ImageBlocks;
+
+pub const Runtime = struct {
+    edit_state: editor_state.State = .{},
+    slash_menu_categories: bool = true,
+    picker: picker_state.State = .{},
+    help_menu: command_specs.HelpMenu = .{},
+    settings_menu: settings_catalog.Menu = .{},
+    statusline_menu: settings_catalog.StatuslineMenu = .{},
+    info_panel: info_panel.State = .{},
+    effort_menu: effort_menu.State = .{},
+    usage_menu: usage_menu.State = .{},
+    workspace_menu: workspace_menu.State = .{},
+    composer_history: composer_history.State = .{},
+    paste: paste_framing.State = .{},
+    entities: registered_entities.State = .{},
+    text_scalar: text_scalar.State = .{},
+    gestures: gesture_state.State = .{},
+    input_limit_rejection: input_limit_rejection.State = .{},
+    kill_ring: kill_ring.State = .{},
+    edit_history: edit_history.State = .{},
+    vertical_navigation: vertical_navigation.State = .{},
+    /// Set while the Ctrl+P model picker borrows the composer: first as the
+    /// catalog's query box, then for its inline effort and fast stages. Holds
+    /// the draft the composer is restored to when that flow ends.
+    model_picker_draft: ?composer_stash.State = null,
+
+    pub fn initInto(self: *Runtime) void {
+        const runtime_info = @typeInfo(Runtime).@"struct";
+        inline for (runtime_info.field_names, runtime_info.field_types, runtime_info.field_attrs) |field_name, field_type, field_attrs| {
+            if (comptime std.mem.eql(u8, field_name, "picker")) continue;
+            @field(self.*, field_name) = field_attrs.defaultValue(field_type).?;
+        }
+        self.picker.initInto();
+    }
+
+    pub fn deinit(self: *Runtime, alloc: Allocator) void {
+        input_reset.resetPendingTextScalarWithTrace(&self.text_scalar, "shutdown");
+        self.paste.deinit(alloc);
+        self.info_panel.close();
+        self.effort_menu.close(alloc);
+        self.usage_menu.close();
+        self.edit_state.deinit(alloc);
+        self.picker.deinit(alloc);
+        self.composer_history.deinit(alloc);
+        self.entities.deinit(alloc);
+        self.kill_ring.deinit(alloc);
+        self.edit_history.deinit(alloc);
+        if (self.model_picker_draft) |*draft| draft.deinit(alloc);
+    }
+
+    pub fn composerStashView(self: *Runtime) composer_stash.State.ComposerView {
+        return .{
+            .edit = &self.edit_state,
+            .entities = &self.entities,
+            .edit_history = &self.edit_history,
+            .vertical_navigation = &self.vertical_navigation,
+            .composer_history = &self.composer_history,
+        };
+    }
+
+    pub fn inputResetState(self: *Runtime) input_reset.State {
+        return .{
+            .edit = &self.edit_state,
+            .picker = &self.picker,
+            .composer_history = &self.composer_history,
+            .paste = &self.paste,
+            .entities = &self.entities,
+            .text_scalar = &self.text_scalar,
+            .gestures = &self.gestures,
+            .input_limit_rejection = &self.input_limit_rejection,
+            .kill_ring = &self.kill_ring,
+            .edit_history = &self.edit_history,
+            .vertical_navigation = &self.vertical_navigation,
+        };
+    }
+
+    pub fn insertionState(self: *Runtime) composer_insertion.State {
+        return .{
+            .edit = &self.edit_state,
+            .history = &self.edit_history,
+            .picker = &self.picker,
+            .entities = &self.entities,
+            .vertical_navigation = &self.vertical_navigation,
+            .input_limit_rejection = &self.input_limit_rejection,
+        };
+    }
+
+    pub fn selectionState(self: *Runtime) composer_selection.State {
+        return .{ .insertion = self.insertionState() };
+    }
+
+    pub fn replacementState(
+        self: *Runtime,
+        images: ?*ImageBlocks,
+    ) composer_replacement.State {
+        return .{
+            .insertion = self.insertionState(),
+            .images = images,
+        };
+    }
+
+    pub fn deletionState(
+        self: *Runtime,
+        images: ?*ImageBlocks,
+    ) composer_deletion.State {
+        return .{ .replacement = self.replacementState(images) };
+    }
+
+    pub fn undoState(self: *Runtime) composer_undo.State {
+        return .{
+            .edit = &self.edit_state,
+            .history = &self.edit_history,
+            .picker = &self.picker,
+            .entities = &self.entities,
+            .vertical_navigation = &self.vertical_navigation,
+            .input_limit_rejection = &self.input_limit_rejection,
+        };
+    }
+
+    pub fn killRingState(
+        self: *Runtime,
+        images: ?*ImageBlocks,
+    ) composer_kill_ring.State {
+        return .{
+            .ring = &self.kill_ring,
+            .history = &self.edit_history,
+            .active = .{
+                .edit = &self.edit_state,
+                .entities = &self.entities,
+                .picker = &self.picker,
+                .vertical_navigation = &self.vertical_navigation,
+                .input_limit_rejection = &self.input_limit_rejection,
+                .images = images,
+            },
+        };
+    }
+
+    pub fn textReplacementState(self: *Runtime) composer_text_replacement.State {
+        return .{
+            .edit = &self.edit_state,
+            .history = &self.edit_history,
+            .picker = &self.picker,
+            .entities = &self.entities,
+            .vertical_navigation = &self.vertical_navigation,
+            .input_limit_rejection = &self.input_limit_rejection,
+        };
+    }
+
+    pub fn moveInputCursor(self: *Runtime, intent: input_action.MoveIntent) bool {
+        return horizontal_navigation.moveIntent(
+            intent,
+            &self.edit_state,
+            &self.entities,
+            &self.vertical_navigation,
+        );
+    }
+
+    pub fn historyBoundary(self: *Runtime, alloc: Allocator) void {
+        self.edit_history.reset(alloc);
+    }
+
+    pub fn lineContinuationState(self: *Runtime) composer_line_continuation.State {
+        return .{
+            .edit = &self.edit_state,
+            .history = &self.edit_history,
+            .picker = &self.picker,
+            .entities = &self.entities,
+            .vertical_navigation = &self.vertical_navigation,
+        };
+    }
+
+    pub fn skillBindingState(self: *Runtime) composer_skill_binding.State {
+        return .{ .insertion = self.insertionState() };
+    }
+};
+
+test "runtime owns product input state without terminal mechanics" {
+    const alloc = std.testing.allocator;
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+
+    try runtime.insertionState().insertSlice(alloc, "draft", .clear);
+    try std.testing.expectEqualStrings("draft", runtime.edit_state.input.items);
+    try std.testing.expect(!@hasField(Runtime, "terminal_action_decoder"));
+    try std.testing.expect(!@hasField(Runtime, "terminal_cursor_probe"));
+}
+
+test "runtime initInto preserves defaults without copying file picker scratch buffers" {
+    var actual: Runtime = undefined;
+    @memset(std.mem.asBytes(&actual), 0xa5);
+    actual.initInto();
+
+    var expected: Runtime = .{};
+    @memset(expected.picker.file_completion.raw_query[0..], 0xa5);
+    @memset(expected.picker.file_completion.lookup_query[0..], 0xa5);
+    // The effort menu's options are undefined past `option_count`, so both
+    // get the same defined value instead of comparing undefined bytes.
+    @memset(expected.effort_menu.options[expected.effort_menu.option_count..], .auto);
+    @memset(actual.effort_menu.options[actual.effort_menu.option_count..], .auto);
+
+    try std.testing.expectEqualDeep(expected, actual);
+}

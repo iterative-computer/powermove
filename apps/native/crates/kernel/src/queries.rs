@@ -288,6 +288,9 @@ fn viewport_locks(layers: &[Node]) -> HashSet<&str> {
 pub struct QueryContext {
     engine: Engine,
     layer_indices: HashMap<Option<String>, HashMap<String, usize>>,
+    /// Whether a composition holds any layer marked `threeD`, at a revision:
+    /// `(revision, composition, marked)`. See [`QueryContext::is_3d_layer`].
+    marked_3d: Option<(u64, String, bool)>,
 }
 
 impl QueryContext {
@@ -298,6 +301,7 @@ impl QueryContext {
         QueryContext {
             engine,
             layer_indices: HashMap::new(),
+            marked_3d: None,
         }
     }
 
@@ -604,12 +608,35 @@ impl QueryContext {
     }
 
     /// Whether the layer (or any enclosing group) is in 2.5D 3D mode.
+    ///
+    /// Only a layer or group of the same composition marked `threeD` makes a
+    /// layer 3D, so a composition without one answers here (the viewer asks
+    /// for every layer it snaps to at each pointer move).
     pub fn is_3d_layer(
         &mut self,
         comp_id: Option<&str>,
         layer_id: &str,
         t: f64,
     ) -> Result<bool, QueryError> {
+        let (comp, _) = self.resolve(comp_id, layer_id)?;
+        let revision = self.engine.revision();
+        let marked = match &self.marked_3d {
+            Some((at, of, marked)) if *at == revision && *of == comp => *marked,
+            _ => {
+                let marked = self
+                    .root()
+                    .and_then(|root| model::comp_node(root, (!comp.is_empty()).then_some(&*comp)))
+                    .is_some_and(|node| {
+                        model::layers_of(node)
+                            .any(|layer| layer.get("threeD").is_some_and(model::truthy))
+                    });
+                self.marked_3d = Some((revision, comp, marked));
+                marked
+            }
+        };
+        if !marked {
+            return Ok(false);
+        }
         Ok(self.layer_query("is3DLayer", comp_id, layer_id, t, &[])? == Value::Bool(true))
     }
 

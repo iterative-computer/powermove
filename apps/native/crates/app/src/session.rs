@@ -266,6 +266,10 @@ pub struct Controller {
     pub settling: Option<String>,
     /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
     pub(crate) open_timer: crate::diag::OpenTimer,
+    /// The open `project_opened` reports once its first publication arrives.
+    pub(crate) telemetry_open: Option<crate::telemetry::Opening>,
+    /// The panels this window showed at its last layout (`panel_opened`).
+    pub(crate) telemetry_panels: Option<std::collections::BTreeSet<String>>,
     /// Project commands asked for while the project was arriving, bound to
     /// that open: they run once it has settled here (`settled`).
     pub(crate) after_open: crate::after_open::AfterOpen,
@@ -820,16 +824,23 @@ impl pm_shell::integration::Integration for Bridge {
             }
         }
         if let Some(host) = &v.extensions.host {
-            for surface in host.records().into_iter().filter(|record| {
-                record["surface"] == true && record["enabled"] == true && record["health"]["state"] == "ok"
-                    && crate::extension_authoring::replaced_panel(&record["manifest"]).is_none()
-            }) {
-                if let (Some(id), Some(title)) = (surface["id"].as_str(), surface["manifest"]["name"].as_str()) {
-                    if !panels.iter().any(|(known, _)| known == id) {
-                        panels.push((id.to_owned(), title.to_owned()));
+            // Asked several times a frame: the records are read in place.
+            host.read_records(|records| {
+                for surface in records.filter(|record| {
+                    record["surface"] == true
+                        && record["enabled"] == true
+                        && record["health"]["state"] == "ok"
+                        && crate::extension_authoring::replaced_panel(&record["manifest"]).is_none()
+                }) {
+                    if let (Some(id), Some(title)) =
+                        (surface["id"].as_str(), surface["manifest"]["name"].as_str())
+                    {
+                        if !panels.iter().any(|(known, _)| known == id) {
+                            panels.push((id.to_owned(), title.to_owned()));
+                        }
                     }
                 }
-            }
+            });
         }
         panels
     }
@@ -851,6 +862,9 @@ impl pm_shell::integration::Integration for Bridge {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
+            crate::telemetry::panels_shown(&mut v.telemetry_panels, open, |id| {
+                v.extensions.stores.get(id).map(|(store, _)| store.clone())
+            });
             let mut effective: Vec<&str> = open.to_vec();
             for id in open {
                 if let Some(target) = v
@@ -1014,17 +1028,8 @@ fn composition_size(w: f64, h: f64) -> [f64; 2] {
 fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
     clock.or(asked).unwrap_or(0.)
 }
-/// The history calls an Undo makes. An edit left open (its owner never
-/// ended it) would take the Undo into itself, so it is sealed first and is
-/// the step undone.
-pub(crate) fn undo_calls(left_open: bool) -> Vec<HistoryCall> {
-    let mut calls = Vec::with_capacity(2);
-    if left_open {
-        calls.push(HistoryCall::Seal);
-    }
-    calls.push(HistoryCall::Undo);
-    calls
-}
+/// Shown while an Undo or a save waits for an agent's edit to finish.
+pub(crate) const UNDO_WAITING: &str = "Undo waits for the agent's edit to finish";
 impl Controller {
     /// Toggles that are on: menu checkmarks, and `list_commands` for agents.
     pub(crate) fn checked_commands(&self, cx: &App) -> std::collections::BTreeSet<String> {
@@ -1084,7 +1089,7 @@ impl Controller {
         let mut off = v.disabled.clone();
         // Read at menu time so copies and pasteboard changes in another
         // window are visible without a fresh project publication here.
-        if v.published.is_some() && crate::layer_commands::can_paste() {
+        if v.published.is_some() && crate::layer_commands::can_paste_per_frame() {
             off.remove("pasteLayers");
         }
         if v.transition_refusal().is_some() {
@@ -1485,6 +1490,8 @@ impl Controller {
             revealed: Default::default(),
             settling: None,
             open_timer: Default::default(),
+            telemetry_open: None,
+            telemetry_panels: None,
             after_open: Default::default(),
             settling_open: 0,
             rows: Default::default(),
@@ -1659,6 +1666,9 @@ impl Controller {
             self.ghost_aspect = aspect;
             self.open_timer.begin();
             self.open_timer.mark("chosen", serde_json::json!({}));
+            if self.telemetry_open.as_ref().is_none_or(|o| o.settled) {
+                self.telemetry_open = crate::telemetry::opening(crate::telemetry::home_source());
+            }
         } else if aspect.is_some() {
             self.ghost_aspect = aspect;
         }
@@ -1939,6 +1949,11 @@ impl Controller {
             || previous.as_ref().is_some_and(|old| {
                 old.ui_state.viewer != p.ui_state.viewer || old.ui_state.tool != p.ui_state.tool
             });
+        if self.telemetry_open.as_ref().is_some_and(|o| o.settled)
+            && let Some(opening) = self.telemetry_open.take()
+        {
+            crate::telemetry::project_opened(opening, p.clone());
+        }
         let switched = self.published.as_ref().is_some_and(|old| {
             old.snapshot.doc_id == p.snapshot.doc_id
                 && old.snapshot.open_comp() != p.snapshot.open_comp()
@@ -2133,6 +2148,13 @@ impl Controller {
                 "composition": p.snapshot.open_comp(),
             })
         });
+        // An Undo or a save waits for an agent's edit still applying (PM-718).
+        let was_waiting = self.published.as_ref().is_some_and(|q| q.history.waiting);
+        if p.history.waiting && !was_waiting {
+            self.message = UNDO_WAITING.into();
+        } else if !p.history.waiting && self.message == UNDO_WAITING {
+            self.message.clear();
+        }
         self.published = Some(p);
         if document_changed {
             self.reconcile_missing_definitions();
@@ -2229,11 +2251,12 @@ impl Controller {
             }
         }
     }
-    /// The kernel holds an edit open although nothing is being edited: no
-    /// pointer button is down (a drag, a scrub) and no text is being typed.
-    pub fn edit_left_open(&self, cx: &App) -> bool {
-        self.published.as_ref().is_some_and(|p| p.entry.is_some())
-            && objc2_app_kit::NSEvent::pressedMouseButtons() == 0
+    /// The person is not editing: no pointer button is down (a drag, a
+    /// scrub) and no text is being typed. An edit the kernel still holds
+    /// open then is one its owner left open; the kernel decides that when
+    /// the call runs (and waits for an agent's edit that is applying).
+    pub fn not_editing(&self, cx: &App) -> bool {
+        objc2_app_kit::NSEvent::pressedMouseButtons() == 0
             && !self
                 .builtins
                 .gizmos
@@ -2772,6 +2795,7 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        crate::telemetry::note_source(&mut self.telemetry_open, &source);
         let received = match &source {
             SessionSource::File(path) => {
                 gpui_macos::ReceivedDrop::for_paths(std::slice::from_ref(path))
@@ -3184,6 +3208,9 @@ impl Controller {
                         info,
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
+                        if let Some(opening) = &mut v.telemetry_open {
+                            opening.settled = true;
+                        }
                         v.restoring = false;
                         if let Some((document, scope)) = &extension_scope {
                             v.reset_extensions();
@@ -3221,6 +3248,7 @@ impl Controller {
                     // A restored window whose project another restored
                     // window holds goes, without taking the front.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
+                        v.telemetry_open = None;
                         v.message = String::new();
                         if std::mem::take(&mut v.restoring) {
                             if pm_shell::live_window_ids().len() > 1 {
@@ -3232,6 +3260,7 @@ impl Controller {
                         }
                     }
                     Some(Err(error)) => {
+                        v.telemetry_open = None;
                         v.open_timer
                             .mark("failed", serde_json::json!({"message": error.to_string()}));
                         v.report_open_failure(&name, path, &error, cx)
@@ -3241,6 +3270,7 @@ impl Controller {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
                     other => {
+                        v.telemetry_open = None;
                         v.restoring = false;
                         v.message = format!("“{name}” couldn’t be opened.");
                         v.errors.borrow_mut().push(
@@ -3918,6 +3948,7 @@ impl Controller {
         };
         self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
+        pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
@@ -4044,8 +4075,11 @@ impl Controller {
         }
         // An edit left open (its owner never ended it: no button is held,
         // nothing is typed) would refuse the save: it is finished first, as
-        // Undo does, and the save takes it.
-        if self.edit_left_open(cx) {
+        // Undo does, and the save takes it. The kernel seals what is open
+        // when the call runs; an agent's edit still applying is waited for,
+        // at most `UNDO_WAIT_LIMIT` (under the 3 s the save waits), so the
+        // save always finishes.
+        if self.not_editing(cx) {
             self.call(Call::History(HistoryCall::Seal), cx);
         }
         if as_path.is_none()
@@ -4082,6 +4116,7 @@ impl Controller {
         let old_path = self.path.clone();
         let export_id = session.project.clone();
         let started = crate::diag::enabled().then(std::time::Instant::now);
+        let save_began = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 // The save panel already confirmed replacing an existing file.
@@ -4137,6 +4172,10 @@ impl Controller {
                         displaced,
                     })) => {
                         v.session = Some(session);
+                        crate::telemetry::project_saved(
+                            save_began.elapsed().as_millis() as u64,
+                            if file_save { as_path.clone().or_else(|| v.path.clone()) } else { None },
+                        );
                         let chosen = as_path.is_some();
                         if chosen {
                             v.path = as_path;
@@ -4460,6 +4499,25 @@ impl Controller {
         })
         .detach();
     }
+    /// The launcher's task switch. The main thread never waits on the Agent
+    /// panel's state (a launch can hold it while its completion waits behind
+    /// an agent's project check): busy, it tries again on the next frame.
+    fn switch_agent_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self
+            .builtins
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.agent_launcher_try_switch(&id) == Ok(false));
+        if busy {
+            let this = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                let _ = this.update(cx, |s, cx| s.switch_agent_task(id, window, cx));
+            });
+            return;
+        }
+        self.open_agent_from_launcher(window, cx);
+    }
+
     pub fn command(
         &mut self,
         cmd: &ShellCommand,
@@ -4672,6 +4730,9 @@ impl Controller {
             self.host.borrow().select_shape(&self.shape_variant);
         }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            if self.tool != cmd.name {
+                crate::telemetry::tool_selected(&cmd.name);
+            }
             self.tool = cmd.name.clone();
             if let Some(runtime) = &self.builtins.runtime {
                 runtime.set_active_tool(None);
@@ -4951,10 +5012,7 @@ impl Controller {
             "agent.launcher.open" => self.open_agent_from_launcher(window, cx),
             "agent.launcher.task" => {
                 if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
-                    if let Some(runtime) = &self.builtins.runtime {
-                        let _ = runtime.agent_launcher_switch(id);
-                    }
-                    self.open_agent_from_launcher(window, cx);
+                    self.switch_agent_task(id.to_owned(), window, cx);
                 }
             }
             "agent.stop" => {
@@ -5156,9 +5214,11 @@ impl Controller {
             "renderPending" => self.render_pending(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
-                for call in undo_calls(self.edit_left_open(cx)) {
-                    self.call(Call::History(call), cx);
-                }
+                let seal_left_open = self.not_editing(cx);
+                self.call(
+                    Call::History(HistoryCall::EditorUndo { seal_left_open }),
+                    cx,
+                );
             }
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
             "precompose" => {
@@ -5449,6 +5509,11 @@ impl Controller {
                     });
                 }
             }
+            // Settings › Account (the billing return link, Aero's Subscribe).
+            "accountSettings" => {
+                self.builtins.settings_page = Some("account".into());
+                self.show_builtin("settings", window, cx);
+            }
             // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
             "keyboardShortcuts" => {
                 self.builtins.settings_page = Some("shortcuts".into());
@@ -5619,6 +5684,7 @@ impl Controller {
                         if self.running() {
                             TransportCommand::Pause
                         } else {
+                            pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
                             TransportCommand::Play {
                                 rate: PlaybackRate::NORMAL,
                             }

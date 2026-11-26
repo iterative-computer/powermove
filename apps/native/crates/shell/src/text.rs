@@ -4,7 +4,6 @@ use gpui_macos::native_text::NativeTextSlot;
 pub use gpui_macos::native_text::{TextEvent, TextKind};
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
-use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::rc::Rc;
 
@@ -13,7 +12,6 @@ pub struct TextField {
     build_pixels: Rc<std::cell::RefCell<crate::native_control::BuildPixels>>,
     slot: Rc<NativeTextSlot>,
     /// Where the slot was painted inside a scroll layer, to follow it.
-    layer: Rc<crate::layer_stage::LayerStage>,
     kind: TextKind,
     value: String,
     placeholder: SharedString,
@@ -42,16 +40,9 @@ pub struct TextField {
     ink: Option<u32>,
     /// The width the editor was last given, to count its wrapped lines.
     width: Rc<std::cell::Cell<f32>>,
-    /// Shown as a picture of itself while its surface's body scrolls.
-    picture: crate::picture::Picture,
     /// A press opened it and the keyboard is on its way (it moves at the next
     /// present): keys typed meanwhile wait for it (`typing`, PM-487).
     awaiting_keyboard: bool,
-}
-impl Drop for TextField {
-    fn drop(&mut self) {
-        self.picture.retire();
-    }
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -114,7 +105,6 @@ impl TextField {
             build: None,
             build_pixels: Default::default(),
             slot,
-            layer: Rc::default(),
             kind,
             value: value.into(),
             placeholder: SharedString::default(),
@@ -130,7 +120,6 @@ impl TextField {
             code: None,
             ink: None,
             width: Rc::default(),
-            picture: Default::default(),
             awaiting_keyboard: false,
         }
     }
@@ -140,7 +129,7 @@ impl TextField {
     fn lines(&self, window: &mut Window) -> f32 {
         let text = self.slot.value();
         let size = px(self.tokens.typography.body);
-        let room = self.width.get() - 2. * MULTILINE_TEXT_ORIGIN.0;
+        let room = self.width.get() - 2. * self.text_origin().0;
         let mut lines = 0usize;
         for line in text.split('\n') {
             lines += 1;
@@ -276,17 +265,7 @@ impl TextField {
         let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
         let owner = cx.entity().downgrade();
         let slot = self.slot.clone();
-        let layer = self.layer.clone();
         let t = &self.tokens;
-        let rect = |b: Bounds<Pixels>| {
-            NSRect::new(
-                NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
-                NSSize::new(
-                    f32::from(b.size.width) as f64,
-                    f32::from(b.size.height) as f64,
-                ),
-            )
-        };
         let _ = window;
         div()
             .id("native-text")
@@ -308,12 +287,11 @@ impl TextField {
                         canvas(
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
-                                let mask = window.content_mask();
-                                let (bounds, mask) = layer.painted(bounds, mask, window);
-                                slot.stage_with_scroll_fade(
-                                    rect(bounds),
-                                    rect(mask.bounds),
-                                    crate::layer_stage::vertical_fade(mask),
+                                crate::slot_stage::stage_text(
+                                    &slot,
+                                    bounds,
+                                    window.content_mask(),
+                                    window,
                                 );
                                 if let Some(build) = build {
                                     if let Some(revision) = build.revision {
@@ -351,16 +329,6 @@ impl TextField {
             }))
             .into_any_element()
     }
-    /// Shares its surface's picture hold (P-SLOT-PICTURE).
-    pub fn picture_with(&mut self, hold: &crate::picture::PictureHold) {
-        self.picture.hold = hold.clone();
-    }
-    /// The surface's hold changed: a held editor draws as its picture, a
-    /// released one as itself again.
-    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
-        self.picture.hold_changed();
-        cx.notify();
-    }
     pub fn set_paste_handler(&mut self, handler: Rc<dyn Fn() -> bool>) {
         self.slot.set_paste_handler(handler);
     }
@@ -370,23 +338,10 @@ impl TextField {
             self.placeholder = text.to_owned().into();
         }
     }
-    /// Stages the slot again on a frame whose cached paint did not run: as
-    /// last painted, or shifted with the scroll layer it is in.
-    pub fn keep(&self, window: &Window) {
-        if self.picture.standing() {
-            // Its picture stands in the scene the frame replays.
-            self.slot.hide();
-            return;
-        }
-        match self.layer.kept(window) {
-            Some((bounds, clip)) => self.slot.stage_with_scroll_fade(
-                crate::native_control::ns_rect(bounds),
-                crate::native_control::ns_rect(clip.bounds),
-                crate::layer_stage::vertical_fade(clip),
-            ),
-            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
-            None => self.slot.keep(),
-        }
+    /// Stages the slot again on a frame whose cached paint did not run, as
+    /// last painted (in a scrolling region its container follows the scroll).
+    pub fn keep(&self, _window: &Window) {
+        self.slot.keep();
     }
     pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
         self.slot.accessibility_item()
@@ -450,6 +405,14 @@ impl TextField {
         self.await_keyboard();
         cx.notify();
     }
+    /// Where the first line's text starts in the field.
+    fn text_origin(&self) -> (f32, f32) {
+        if self.kind == TextKind::Composer {
+            COMPOSER_TEXT_ORIGIN
+        } else {
+            MULTILINE_TEXT_ORIGIN
+        }
+    }
     /// Select a UTF-16 prefix, leaving a filename extension intact.
     pub fn begin_editing_selecting_to(&mut self, end: usize, cx: &mut Context<Self>) {
         self.slot.begin_editing();
@@ -463,7 +426,9 @@ impl TextField {
             // A source field keeps its face at the new size.
             Some(family) if resized => self.set_code(&family),
             Some(_) => {}
-            None => self.slot.set_font_size(self.tokens.typography.body as f64),
+            None => self
+                .slot
+                .set_font_size(self.tokens.typography.body as f64),
         }
     }
     /// The panel marks a value its host set (`metadata.hostValue`, rising
@@ -585,6 +550,10 @@ impl TextField {
 /// Where a multi-line native editor draws its first glyph, from its own
 /// corner: the text container inset plus the line fragment padding.
 const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
+/// Where a composer's first line box starts: its draft is written straight
+/// on the composer, level with the controls under it
+/// (`gpui_macos::native_text::COMPOSER_INSET` and the line fragment padding).
+const COMPOSER_TEXT_ORIGIN: (f32, f32) = (7., 7.);
 /// How far under a dense well's top its one-line editor starts, so the
 /// text being edited stands on the baseline of the value drawn at rest.
 const DENSE_EDIT_DROP: f32 = 3.;
@@ -611,7 +580,6 @@ impl Render for TextField {
         let build = self.build;
         let pixels = self.build_pixels.clone();
         let slot = self.slot.clone();
-        let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
             .then(|| self.lines(window));
         // A composer grows with its wrapped lines too, not only its returns:
@@ -621,7 +589,6 @@ impl Render for TextField {
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing() && build.is_none();
-        let picture = self.picture.painter();
         let (t, bare) = (&self.tokens, self.bare);
         let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
         // A well is a soft ink fill with no outline; while it is edited a
@@ -654,7 +621,7 @@ impl Render for TextField {
                     // its inset above and below.
                     let line = self.tokens.typography.body
                         * gpui_macos::native_text::COMPOSER_LEADING as f32;
-                    (lines * line + 6.).max(self.tokens.metrics.hit)
+                    (lines * line + 2. * COMPOSER_TEXT_ORIGIN.1).max(self.tokens.metrics.hit)
                 } else if self.inline_name {
                     f32::from(window.line_height())
                 } else if bare {
@@ -699,15 +666,14 @@ impl Render for TextField {
             .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, _, _window, cx| {
                     if this.build.is_some() {
                         return;
                     }
-                    // A press on its picture goes to the editor once shown.
-                    // One while it already has the keyboard (a double-click's
+                    // A press while it already has the keyboard (a double-click's
                     // second press) leaves it: taking it again ended the edit,
                     // which commits and closes a field opened on demand.
-                    if this.build.is_none() && !this.picture.press(window) && !this.slot.has_keyboard() {
+                    if this.build.is_none() && !this.slot.has_keyboard() {
                         this.slot.begin_editing();
                         // Under load the keyboard moves a slow frame later:
                         // what is typed until then is for this field, never
@@ -733,12 +699,24 @@ impl Render for TextField {
                     && !self.placeholder.is_empty()
                     && self.slot.value().is_empty(),
                 |d| {
+                    let (left, top) = self.text_origin();
+                    let composer = self.kind == TextKind::Composer;
                     d.child(
                         div()
                             .absolute()
-                            .left(px(MULTILINE_TEXT_ORIGIN.0))
-                            .top(px(MULTILINE_TEXT_ORIGIN.1))
-                            .text_color(rgb(self.tokens.colors.muted))
+                            .left(px(left))
+                            .top(px(top))
+                            // A composer's placeholder is the third text step,
+                            // in the line box its draft is set in.
+                            .when(composer, |d| {
+                                d.line_height(px(self.tokens.typography.body
+                                    * gpui_macos::native_text::COMPOSER_LEADING as f32))
+                            })
+                            .text_color(rgb(if composer {
+                                self.tokens.colors.faint
+                            } else {
+                                self.tokens.colors.muted
+                            }))
                             .child(self.placeholder.clone()),
                     )
                 },
@@ -766,18 +744,6 @@ impl Render for TextField {
                             let _ = entity.update(cx, |_, cx| cx.notify());
                         }
                         let mask = window.content_mask();
-                        let rect = |b: Bounds<Pixels>| {
-                            NSRect::new(
-                                NSPoint::new(
-                                    f32::from(b.origin.x) as f64,
-                                    f32::from(b.origin.y) as f64,
-                                ),
-                                NSSize::new(
-                                    f32::from(b.size.width) as f64,
-                                    f32::from(b.size.height) as f64,
-                                ),
-                            )
-                        };
                         // Same content rectangle and token-sized native font in either mode.
                         // A one-line field sets its text at its top; the
                         // value drawn at rest is centred in the well. The
@@ -788,21 +754,10 @@ impl Render for TextField {
                             bounds.origin.y += px(DENSE_EDIT_DROP);
                             bounds.size.height -= px(DENSE_EDIT_DROP);
                         }
-                        let painted = bounds;
-                        let (bounds, mask) = layer.painted(bounds, mask, window);
-                        let size = rect(bounds).size;
                         if build.is_none() {
                             slot.stage_build_alpha(1.);
                         }
-                        if picture.paint(painted, || slot.picture(size), window) {
-                            slot.hide();
-                            return;
-                        }
-                        slot.stage_with_scroll_fade(
-                            rect(bounds),
-                            rect(mask.bounds),
-                            crate::layer_stage::vertical_fade(mask),
-                        );
+                        crate::slot_stage::stage_text(&slot, bounds, mask, window);
                         if let Some(build) = build {
                             if !dense {
                                 if let Some(revision) = build.revision {
@@ -827,8 +782,8 @@ impl Render for TextField {
                         let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
                         if let Some(image) = snapshot {
                             let _ = window.paint_image(
-                                painted,
-                                painted,
+                                bounds,
+                                bounds,
                                 Corners::default(),
                                 0.,
                                 image,

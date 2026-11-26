@@ -331,6 +331,34 @@ def verify_sparkle_archive(archive):
         raise ValueError("Sparkle archive does not match the reviewed SHA-256 pin")
 
 
+POSTHOG_PROJECT = "766251"
+POSTHOG_APP_HOST = "https://us.posthog.com"
+
+
+def symbols(executable, destination, version, build, run=run):
+    """Crash symbols for PostHog error tracking: a dSYM of the release binary
+    (the Rust symbol set, matched by its Mach-O UUID), uploaded only when a
+    `POSTHOG_CLI_API_KEY` is in the environment (a release secret). Without
+    one the dSYM is still written and the upload is skipped; `POSTHOG_CLI_DRY_RUN=1`
+    checks the upload command without contacting PostHog."""
+    macos()
+    executable = native_file(executable)
+    destination = new_destination(destination)
+    destination.mkdir(parents=True)
+    run(["dsymutil", executable, "-o", destination / (executable.name + ".dSYM")])
+    dry = os.environ.get("POSTHOG_CLI_DRY_RUN") == "1"
+    if not os.environ.get("POSTHOG_CLI_API_KEY") and not dry:
+        print("No POSTHOG_CLI_API_KEY: the dSYM is written; the upload is skipped.")
+        return
+    os.environ.setdefault("POSTHOG_CLI_HOST", POSTHOG_APP_HOST)
+    os.environ.setdefault("POSTHOG_CLI_PROJECT_ID", POSTHOG_PROJECT)
+    run(["posthog-cli"] + (["--dry-run"] if dry else []) + [
+        "dsym", "upload", "--directory", destination,
+        "--main-dsym", executable.name + ".dSYM",
+        "--release-name", "powermove", "--release-version", version, "--build", build,
+        "--skip-on-conflict"])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -348,6 +376,11 @@ def main():
     create.add_argument("--claude-runtime", type=Path, help="The pinned native claude binary")
     create.add_argument("--codex-vendor", type=Path, help="The pinned vendor/<triple> tree")
     create.add_argument("--layout-only", action="store_true", help="Linux proof only; output cannot be distribution-signed")
+    symbol_set = commands.add_parser("symbols")
+    symbol_set.add_argument("--executable", required=True, type=Path)
+    symbol_set.add_argument("--destination", required=True, type=Path)
+    symbol_set.add_argument("--version", required=True)
+    symbol_set.add_argument("--build", required=True)
     verify = commands.add_parser("verify-sparkle-archive")
     verify.add_argument("artifact", type=Path)
     for name in ("sign", "dmg", "transition-zip", "notarize"):
@@ -360,6 +393,8 @@ def main():
         bundle(args.executable, args.destination, args.channel, args.version, args.build,
                args.update_config, args.sparkle_framework, args.sparkle_feed, args.sparkle_key,
                not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor)
+    elif args.command == "symbols":
+        symbols(args.executable, args.destination, args.version, args.build)
     elif args.command == "verify-sparkle-archive":
         verify_sparkle_archive(args.artifact)
     elif args.command == "sign":

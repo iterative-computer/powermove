@@ -6,7 +6,7 @@ Rows N004 N005 N006. Grammar: [README](README.md) §1–5, and the gate in
 reasons). App: `crates/app/src/extension_transfer.rs`, `first_run.rs`, `storage.rs`.
 
 No new tokens. Reuses the Welcome window frame (S107) with an eyebrow,
-`Extensions From the Original App`.
+`Extensions from the original app`.
 
 ## When it shows
 
@@ -35,11 +35,11 @@ in full, and lists the rest by name only.
 
 - **Counts**: one card, the counts side by side, each figure at `display` size with its
   label under it in `c.secondary`; hairline dividers between counts only.
-- **Exceptions**: a heading (`Needs a Look` when something couldn't load, else `Not
-  Brought In`), then one card. Each row: symbol centred on the first line, the
+- **Exceptions**: a heading (`Needs a look` when something couldn't load, else `Not
+  brought in`), then one card. Each row: symbol centred on the first line, the
   extension's display name, its reason on the next line in `c.secondary`. Rows are
   separated by air (6 pt padding top and bottom), not hairlines.
-- **Names**: a heading (`To Bring In` / `Brought In`), then the display names (the
+- **Names**: a heading (`To bring in` / `Brought in`), then the display names (the
   manifest's `name`, else the folder's) in two columns, read down then across. Six show
   first; `Show All {n}` (accent) opens the rest, `Show Less` closes them.
 - The exceptions and names scroll together in the room between the counts and the
@@ -50,11 +50,11 @@ in full, and lists the rest by name only.
 
 | | |
 |---|---|
-| Title | `Bring In Your Extensions` |
+| Title | `Bring in your extensions` |
 | Line | `The original app has {n} extensions that aren’t in Powermove yet. Only extensions are copied. Your projects, settings and sign-ins stay as they are.` |
 | Counts | `New`, `Updated`, `Already in Powermove`, `Skipped` (non-zero only) |
-| Exceptions | `Not Brought In`: each skipped extension and why (`info.circle`) |
-| Names | `To Bring In` |
+| Exceptions | `Not brought in`: each skipped extension and why (`info.circle`) |
+| Names | `To bring in` |
 | Note | Startup: `Choose Not Now to open your library as it is. You can bring them in later from Settings › Storage.` |
 | Buttons | Startup: `Not Now`, `Bring In Extensions` (default). Settings: `Cancel`, `Bring In Extensions` (default; disabled when nothing is new) |
 
@@ -64,7 +64,7 @@ clears it, so something added to the original app later is offered at startup.
 
 ## N005 Bringing in
 
-Title `Bringing In Your Extensions`, the same line. One card row with the running bar:
+Title `Bringing in your extensions`, the same line. One card row with the running bar:
 `Copying` then `Checking that it loads`, with the extension's display name as the
 value. The engine copies every extension, then checks each one loads in a throwaway
 runtime (never the open project), with its declared dependencies installed first. No
@@ -74,15 +74,15 @@ buttons: it is quick, and quitting is safe.
 
 | Result | Title | Line starts |
 |---|---|---|
-| Something brought in | `Your Extensions Are In` | `Each one was checked and loads.` / `One couldn’t load. The reason is below.` / `{n} couldn’t load. The reasons are below.` |
-| Nothing new | `Nothing New to Bring In` | `They were already in Powermove.` |
-| Only failures | `Your Extensions Couldn’t Load` | as above |
-| Stopped (folder unreadable, locked) | `Your Extensions Couldn’t Be Brought In` | `Nothing in your library changed.` |
+| Something brought in | `Your extensions are in` | `Each one was checked and loads.` / `One couldn’t load. The reason is below.` / `{n} couldn’t load. The reasons are below.` |
+| Nothing new | `Nothing new to bring in` | `They were already in Powermove.` |
+| Only failures | `Your extensions couldn’t load` | as above |
+| Stopped (folder unreadable, locked) | `Your extensions couldn’t be brought in` | `Nothing in your library changed.` |
 
 Every line ends `Your original app stays unchanged.` Counts: `Brought in`, `Couldn’t
 load`, `Already in Powermove`, `Skipped`. Exceptions in order: couldn't load
 (`exclamationmark.triangle.fill`, `c.warning`), skipped, already here (`info.circle`).
-Names: `Brought In`, with no reason repeated.
+Names: `Brought in`, with no reason repeated.
 
 Buttons: Startup `Open Powermove` (default). Settings `Done`. Stopped: Startup `Try
 Again`, `Open Powermove` (default), with Details; Settings `Close`, `Try Again`.

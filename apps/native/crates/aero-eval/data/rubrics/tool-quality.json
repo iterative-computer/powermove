@@ -1,0 +1,58 @@
+{
+ "id": "tool-quality",
+ "title": "A small tool built from several parts",
+ "scale": 2,
+ "pass_mean": 1.25,
+ "evaluator_sees": [
+  "the prompt",
+  "panel capture before and after the probe",
+  "the layers and keys the tool wrote",
+  "frames around the tool's output"
+ ],
+ "criteria": [
+  {
+   "id": "end-to-end",
+   "question": "Does the whole flow work from the panel to the picture?",
+   "weight": 2,
+   "hard": true,
+   "anchors": {
+    "0": "No",
+    "1": "With a gap",
+    "2": "Fully"
+   }
+  },
+  {
+   "id": "editable",
+   "question": "Is what it writes live, named and easy to adjust by hand (sparse keys, plain names)?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Baked or messy",
+    "1": "Usable",
+    "2": "Tidy"
+   }
+  },
+  {
+   "id": "feel",
+   "question": "Do timing and motion look like a pro made them?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Amateur",
+    "1": "Acceptable",
+    "2": "Polished"
+   }
+  },
+  {
+   "id": "fits",
+   "question": "Does the panel fit the app's look and conventions?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Foreign",
+    "1": "Close",
+    "2": "Native"
+   }
+  }
+ ]
+}

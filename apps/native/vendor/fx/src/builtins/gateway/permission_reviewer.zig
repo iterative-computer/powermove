@@ -1,0 +1,639 @@
+const std = @import("std");
+const gateway_client = @import("../../gateway/client.zig");
+const permission_auto_classifier = @import("../../core/permissions/auto_classifier.zig");
+const debug_trace = @import("../../core/shared/debug_trace.zig");
+const types = @import("../../core/shared/types.zig");
+const stream_provider = @import("../../core/agent/stream_provider.zig");
+const vercel_protocol = @import("../../gateway/vercel_protocol.zig");
+const vercel_model_policy = @import("../../gateway/vercel_model_policy.zig");
+const typesafe_permission_reviewer = @import("typesafe_permission_reviewer.zig");
+const token_pass = @import("../../core/gateway/token_pass.zig");
+const token_pass_team = @import("../../core/gateway/token_pass_team.zig");
+
+const Allocator = std.mem.Allocator;
+
+const single_transport_attempt: usize = 1;
+const reviewer_model = "openai/gpt-5.6-luna";
+
+const StreamFn = *const fn (
+    *anyopaque,
+    Allocator,
+    []const u8,
+    ?[]const u8,
+    []const u8,
+    usize,
+    []const u8,
+    []const u8,
+    std.Io.Clock.Timestamp,
+    *gateway_client.DeliveryCertainty,
+    *std.atomic.Value(bool),
+) anyerror!gateway_client.StreamResult;
+
+var default_stream_ctx: u8 = 0;
+
+const GatewayConfig = struct {
+    api_key: ?[]const u8,
+    credential_source: ?types.CredentialSource = null,
+    team: ?[]const u8 = null,
+    chat_url: []const u8,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    stream_ctx: *anyopaque = @ptrCast(&default_stream_ctx),
+    stream_fn: StreamFn = streamGatewayReviewer,
+};
+
+pub const provider = permission_auto_classifier.Provider{ .review_fn = reviewGateway };
+
+fn reviewGateway(
+    _: ?*anyopaque,
+    alloc: Allocator,
+    input: permission_auto_classifier.ProviderInput,
+    request: permission_auto_classifier.ReviewRequest,
+) anyerror!permission_auto_classifier.ParseOutcome {
+    // The review_model setting (or FX_REVIEW_MODEL) overrides the reviewer
+    // model. typesafeai/jev selects the TypeSafe System One reviewer; any
+    // other value stays on this gateway chat path with that model id. Every
+    // composition site selects this provider, so the override covers
+    // interactive, ask, and subagent reviews uniformly. Without one, a
+    // session on a Token Pass model of a team with Token Pass is reviewed by
+    // a Token Pass model, so its reviews stay on Token Pass credit too.
+    const team = token_pass_team.snapshot();
+    const selected = selectedReviewerModel(input.reviewer_model, request.review_turn.model, &team);
+    if (typesafe_permission_reviewer.isJevModelId(selected)) {
+        debug_trace.logf("permission", "event=auto_review_provider_selected provider={s}", .{typesafe_permission_reviewer.review_model_id});
+        return typesafe_permission_reviewer.review(null, alloc, input, request);
+    }
+    return reviewGatewayConfig(.{
+        .api_key = if (input.credential_source == .host_managed) null else input.credential,
+        .credential_source = input.credential_source,
+        .team = input.tenant,
+        .chat_url = input.endpoint,
+        .cancel_flag = input.cancel_flag,
+    }, alloc, request, selected);
+}
+
+fn selectedReviewerModel(override: []const u8, session_model: []const u8, team: *const token_pass.Team) []const u8 {
+    if (override.len > 0) return override;
+    return token_pass.modelForSideCall(.review, session_model, reviewer_model, team);
+}
+
+test "the reviewer follows the override, then Token Pass, then the default" {
+    var team: token_pass.Team = .{ .has_pass = true };
+    for ([_][]const u8{ "zai/glm-5.3", "deepseek/deepseek-v4.1-flash" }) |id| try std.testing.expect(team.models.add(id));
+    try std.testing.expectEqualStrings("openai/gpt-5.6-luna", selectedReviewerModel("", "anthropic/claude-opus-4.8", &team));
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4.1-flash", selectedReviewerModel("", "zai/glm-5.3", &team));
+    try std.testing.expectEqualStrings("openai/gpt-6-sol", selectedReviewerModel("openai/gpt-6-sol", "zai/glm-5.3", &team));
+    // A team without Token Pass keeps the default reviewer.
+    team.has_pass = false;
+    try std.testing.expectEqualStrings("openai/gpt-5.6-luna", selectedReviewerModel("", "zai/glm-5.3", &team));
+}
+
+fn reviewGatewayConfig(
+    config: GatewayConfig,
+    alloc: Allocator,
+    request: permission_auto_classifier.ReviewRequest,
+    model: []const u8,
+) !permission_auto_classifier.ParseOutcome {
+    var local = config;
+    return permission_auto_classifier.Reviewer.withTransportModel(
+        .{
+            .context = @ptrCast(&local),
+            .send_fn = sendGatewayReview,
+            .build_fn = buildGatewayReview,
+        },
+        local.cancel_flag,
+        permission_auto_classifier.Reviewer.default_timeout_ms,
+        model,
+    ).review(alloc, request);
+}
+
+fn buildGatewayReview(
+    _: *anyopaque,
+    alloc: Allocator,
+    model: []const u8,
+    tools_json: []const u8,
+    instructions: []const types.ChatMessage,
+    messages: []const types.ChatMessage,
+    target_call_id: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+    cancel_flag: *std.atomic.Value(bool),
+) ![]u8 {
+    // No later request shares a review's prefix: the review data sits inside
+    // the policy instructions. A cache write would only add its premium.
+    return vercel_protocol.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+        alloc,
+        tools_json,
+        instructions,
+        messages,
+        target_call_id,
+        .{
+            .skip_cache_writes = vercel_model_policy.takesPromptCacheOptions(model),
+            .single_system_message = vercel_model_policy.singleSystemMessage(model),
+        },
+        2048,
+        deadline,
+        cancel_flag,
+    );
+}
+
+const OwnedStream = struct {
+    stream: gateway_client.StreamResult,
+};
+
+fn deinitOwnedStream(raw_ctx: *anyopaque, alloc: Allocator) void {
+    const owned: *OwnedStream = @ptrCast(@alignCast(raw_ctx));
+    owned.stream.deinit(alloc);
+    alloc.destroy(owned);
+}
+
+fn sendGatewayReview(
+    raw_ctx: *anyopaque,
+    alloc: Allocator,
+    model: []const u8,
+    payload: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+    cancel_flag: *std.atomic.Value(bool),
+) error{OutOfMemory}!permission_auto_classifier.TransportOutcome {
+    const config: *GatewayConfig = @ptrCast(@alignCast(raw_ctx));
+    debug_trace.logf(
+        "permission",
+        "event=auto_review_transport_start model={s} retry_count={d}",
+        .{ model, single_transport_attempt },
+    );
+    if (cancel_flag.load(.seq_cst)) return .cancelled;
+    if ((config.api_key == null and config.credential_source != .host_managed) or config.chat_url.len == 0) {
+        debug_trace.logf("permission", "event=auto_review_transport result=permanent_failure reason=missing_gateway_config", .{});
+        return .permanent_failure;
+    }
+
+    var delivery = gateway_client.DeliveryCertainty.init();
+    var stream = config.stream_fn(
+        config.stream_ctx,
+        alloc,
+        config.api_key orelse "",
+        config.team,
+        model,
+        single_transport_attempt,
+        config.chat_url,
+        payload,
+        deadline,
+        &delivery,
+        cancel_flag,
+    ) catch |err| return mapTransportError(err, cancel_flag);
+    var stream_owned = true;
+    defer if (stream_owned) stream.deinit(alloc);
+
+    if (cancel_flag.load(.seq_cst)) {
+        return .cancelled;
+    }
+    if (stream.status != .ok) {
+        const outcome = mapHttpStatus(stream.status);
+        debug_trace.logf(
+            "permission",
+            "event=auto_review_transport result={s} http_status={d}",
+            .{ @tagName(std.meta.activeTag(outcome)), @backingInt(stream.status) },
+        );
+        return outcome;
+    }
+    if (stream.completion.finish_reason) |reason| switch (reason) {
+        .provider_error => {
+            debug_trace.logf(
+                "permission",
+                "event=auto_review_transport result=transient_failure reason=provider_error",
+                .{},
+            );
+            return .transient_failure;
+        },
+        .content_filter => {
+            debug_trace.logf(
+                "permission",
+                "event=auto_review_transport result=permanent_failure reason=content_filter",
+                .{},
+            );
+            return .permanent_failure;
+        },
+        .stop, .length, .tool_calls, .other => {},
+    };
+    debug_trace.logf(
+        "permission",
+        "event=auto_review_transport result=completion finish_reason={s} tool_calls={d} content_bytes={d}",
+        .{
+            if (stream.completion.finish_reason) |reason| @tagName(reason) else "absent",
+            stream.completion.tool_calls.len,
+            if (stream.completion.content) |content| content.len else 0,
+        },
+    );
+
+    const owned = try alloc.create(OwnedStream);
+    owned.* = .{ .stream = stream };
+    stream_owned = false;
+    return .{ .completion = .{
+        .completion = owned.stream.completion,
+        .context = @ptrCast(owned),
+        .deinit_fn = deinitOwnedStream,
+    } };
+}
+
+fn mapTransportError(
+    err: anyerror,
+    cancel_flag: *std.atomic.Value(bool),
+) error{OutOfMemory}!permission_auto_classifier.TransportOutcome {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    const outcome: permission_auto_classifier.TransportOutcome =
+        if (err == error.Cancelled or cancel_flag.load(.seq_cst))
+            .cancelled
+        else if (err == error.Timeout)
+            .timed_out
+        else if (gateway_client.isRetryableGatewayError(err))
+            .transient_failure
+        else
+            .permanent_failure;
+    debug_trace.logf(
+        "permission",
+        "event=auto_review_transport result={s} reason=transport_error error={s}",
+        .{ @tagName(std.meta.activeTag(outcome)), @errorName(err) },
+    );
+    return outcome;
+}
+
+fn mapHttpStatus(status: std.http.Status) permission_auto_classifier.TransportOutcome {
+    const code: u16 = @backingInt(status);
+    if (code == 408 or code == 425 or code == 429 or code >= 500) {
+        return .transient_failure;
+    }
+    return .permanent_failure;
+}
+
+fn streamGatewayReviewer(
+    _: *anyopaque,
+    alloc: Allocator,
+    api_key: []const u8,
+    team: ?[]const u8,
+    model: []const u8,
+    retry_count: usize,
+    chat_url: []const u8,
+    payload: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+    delivery: *gateway_client.DeliveryCertainty,
+    cancel_flag: *std.atomic.Value(bool),
+) !gateway_client.StreamResult {
+    return gateway_client.streamGatewayRequiredToolCompletionBounded(
+        alloc,
+        .{
+            .api_key = if (api_key.len > 0) api_key else null,
+            .team = team,
+            .model = model,
+            .retry_count = retry_count,
+            .chat_url = chat_url,
+            .payload = payload,
+            .delivery = delivery,
+        },
+        deadline,
+        cancel_flag,
+    );
+}
+
+const FakeOutcome = enum {
+    valid,
+    malformed,
+    transient_error,
+    permanent_error,
+    ambiguous_error,
+    timeout,
+    cancelled,
+    transient_http,
+    permanent_http,
+};
+
+const FakeStream = struct {
+    outcomes: []const FakeOutcome,
+    calls: usize = 0,
+    expected_model: []const u8 = reviewer_model,
+    saw_single_attempt_only: bool = true,
+    saw_expected_model_only: bool = true,
+    saw_required_tool_payload: bool = true,
+    deadlines: [2]?std.Io.Clock.Timestamp = .{ null, null },
+
+    fn execute(
+        raw_ctx: *anyopaque,
+        alloc: Allocator,
+        _: []const u8,
+        _: ?[]const u8,
+        model: []const u8,
+        retry_count: usize,
+        _: []const u8,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        delivery: *gateway_client.DeliveryCertainty,
+        _: *std.atomic.Value(bool),
+    ) anyerror!gateway_client.StreamResult {
+        const self: *FakeStream = @ptrCast(@alignCast(raw_ctx));
+        if (self.calls < self.deadlines.len) self.deadlines[self.calls] = deadline;
+        self.saw_single_attempt_only = self.saw_single_attempt_only and retry_count == 1;
+        self.saw_expected_model_only = self.saw_expected_model_only and std.mem.eql(u8, model, self.expected_model);
+        self.saw_required_tool_payload = self.saw_required_tool_payload and
+            std.mem.find(u8, payload, "permission_decision") != null;
+        const outcome = self.outcomes[@min(self.calls, self.outcomes.len - 1)];
+        self.calls += 1;
+        return switch (outcome) {
+            .valid => validStream(alloc),
+            .malformed => malformedStream(alloc),
+            .transient_error => error.ConnectionResetByPeer,
+            .permanent_error => error.AccessDenied,
+            .ambiguous_error => {
+                delivery.markPossiblySent();
+                return error.ConnectionResetByPeer;
+            },
+            .timeout => error.Timeout,
+            .cancelled => error.Cancelled,
+            .transient_http => .{ .status = @fromBackingInt(@intCast(429)) },
+            .permanent_http => .{ .status = @fromBackingInt(@intCast(400)) },
+        };
+    }
+};
+
+fn validStream(alloc: Allocator) !gateway_client.StreamResult {
+    const generation_id = try alloc.dupe(u8, "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    errdefer alloc.free(generation_id);
+    const id = try alloc.dupe(u8, "review_1");
+    errdefer alloc.free(id);
+    const name = try alloc.dupe(u8, permission_auto_classifier.tool_name);
+    errdefer alloc.free(name);
+    const arguments = try alloc.dupe(
+        u8,
+        "{\"risk\":\"low\",\"decision\":\"clear\",\"rationale\":\"Narrow authorized action.\"}",
+    );
+    errdefer alloc.free(arguments);
+    const tool_calls = try alloc.alloc(types.ToolCall, 1);
+    errdefer alloc.free(tool_calls);
+    tool_calls[0] = .{
+        .id = id,
+        .name = name,
+        .arguments_json = arguments,
+    };
+    return .{
+        .status = .ok,
+        .completion = .{
+            .tool_calls = tool_calls,
+            .finish_reason = .tool_calls,
+            .generation_id = generation_id,
+        },
+    };
+}
+
+fn malformedStream(alloc: Allocator) !gateway_client.StreamResult {
+    return .{
+        .status = .ok,
+        .completion = .{
+            .content = try alloc.dupe(u8, "not a structured decision"),
+            .finish_reason = .stop,
+        },
+    };
+}
+
+fn testRequest() permission_auto_classifier.ReviewRequest {
+    const pending = types.ChatMessage{
+        .role = .assistant,
+        .tool_calls = &.{.{
+            .id = "call_1",
+            .name = "glob_files",
+            .arguments_json = "{\"pattern\":\"*\"}",
+        }},
+    };
+    return .{
+        .review_turn = .{
+            .model = "openai/gpt-5",
+            .pending_assistant = pending,
+            .target_call_id = "call_1",
+            .origin = .root,
+            .trusted_root_context = "User asked to inspect the repository.",
+        },
+        .targets = &.{},
+        .action = .{ .tool = .{
+            .tool_name = "glob_files",
+            .arguments_json = "{\"pattern\":\"*\"}",
+        } },
+    };
+}
+
+fn testConfig(fake: *FakeStream, cancel_flag: ?*std.atomic.Value(bool)) GatewayConfig {
+    return .{
+        .api_key = "test-key",
+        .chat_url = "https://example.test/chat",
+        .cancel_flag = cancel_flag,
+        .stream_ctx = @ptrCast(fake),
+        .stream_fn = FakeStream.execute,
+    };
+}
+
+test "gateway review asks GPT-5.6 and later to skip cache writes" {
+    var cancel = std.atomic.Value(bool).init(false);
+    const deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(1000),
+    });
+    const instructions = [_]types.ChatMessage{.{ .role = .system, .content = "Review the pending call." }};
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "review_context_kind: normal\n" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "shell", .arguments_json = "{}" }} },
+    };
+    for ([_]struct { model: []const u8, skip: bool }{
+        .{ .model = reviewer_model, .skip = true },
+        .{ .model = "openai/gpt-6.1-sol", .skip = true },
+        .{ .model = "openai/gpt-5", .skip = false },
+        .{ .model = "anthropic/claude-haiku-5.5", .skip = false },
+    }) |case| {
+        var unused: u8 = 0;
+        const body = try buildGatewayReview(@ptrCast(&unused), std.testing.allocator, case.model, "[]", &instructions, &messages, "call", deadline, &cancel);
+        defer std.testing.allocator.free(body);
+        try std.testing.expectEqual(case.skip, std.mem.find(u8, body, "\"promptCacheOptions\":{\"mode\":\"explicit\"}") != null);
+        // A review never asks the Gateway to cache.
+        try std.testing.expect(std.mem.find(u8, body, "\"caching\"") == null);
+    }
+}
+
+test "gateway review sends Qwen its instructions as one system message" {
+    var cancel = std.atomic.Value(bool).init(false);
+    const deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(1000),
+    });
+    const instructions = [_]types.ChatMessage{
+        .{ .role = .system, .content = "Review the pending call." },
+        .{ .role = .system, .content = "Review policy details." },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "review_context_kind: normal\n" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "shell", .arguments_json = "{}" }} },
+    };
+    for ([_]struct { model: []const u8, systems: usize }{
+        .{ .model = "alibaba/qwen3.8-max", .systems = 1 },
+        .{ .model = "zai/glm-5.3", .systems = 2 },
+    }) |case| {
+        var unused: u8 = 0;
+        const body = try buildGatewayReview(@ptrCast(&unused), std.testing.allocator, case.model, "[]", &instructions, &messages, "call", deadline, &cancel);
+        defer std.testing.allocator.free(body);
+        try std.testing.expectEqual(case.systems, std.mem.count(u8, body, "{\"role\":\"system\""));
+    }
+}
+
+test "gateway reviewer transport carries the resolved review-model override" {
+    var fake = FakeStream{ .outcomes = &.{.valid}, .expected_model = "openai/gpt-5-alt" };
+    const config = testConfig(&fake, null);
+    var outcome = try reviewGatewayConfig(config, std.testing.allocator, testRequest(), "openai/gpt-5-alt");
+    defer outcome.deinit(std.testing.allocator);
+
+    switch (outcome) {
+        .valid => |result| try std.testing.expectEqual(permission_auto_classifier.Decision.clear, result.decision),
+        .evidence_incomplete, .invalid => return error.TestExpectedEqual,
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expect(fake.saw_expected_model_only);
+    try std.testing.expect(fake.saw_required_tool_payload);
+}
+
+test "gateway automatic reviewer transport is single-attempt" {
+    var fake = FakeStream{ .outcomes = &.{.valid} };
+    const config = testConfig(&fake, null);
+    var outcome = try reviewGatewayConfig(config, std.testing.allocator, testRequest(), reviewer_model);
+    defer outcome.deinit(std.testing.allocator);
+
+    switch (outcome) {
+        .valid => |result| try std.testing.expectEqual(permission_auto_classifier.Decision.clear, result.decision),
+        .evidence_incomplete, .invalid => return error.TestExpectedEqual,
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expect(fake.saw_single_attempt_only);
+    try std.testing.expect(fake.saw_expected_model_only);
+    try std.testing.expect(fake.saw_required_tool_payload);
+}
+
+test "permission reviewer retries one transport failure with a fresh deadline" {
+    var fake = FakeStream{ .outcomes = &.{ .transient_error, .malformed } };
+    const config = testConfig(&fake, null);
+    const outcome = try reviewGatewayConfig(config, std.testing.allocator, testRequest(), reviewer_model);
+
+    try std.testing.expectEqual(
+        std.meta.Tag(permission_auto_classifier.ParseOutcome).invalid,
+        std.meta.activeTag(outcome),
+    );
+    // One transport retry, then one malformed-completion retry.
+    try std.testing.expectEqual(@as(usize, 3), fake.calls);
+    try std.testing.expect(fake.saw_single_attempt_only);
+    try std.testing.expect(fake.deadlines[0] != null);
+    try std.testing.expect(fake.deadlines[1] != null);
+    try std.testing.expect(fake.deadlines[1].?.raw.nanoseconds > fake.deadlines[0].?.raw.nanoseconds);
+}
+
+test "gateway automatic reviewer distinguishes transient and permanent HTTP failures" {
+    var transient_fake = FakeStream{ .outcomes = &.{ .transient_http, .valid } };
+    const transient_config = testConfig(&transient_fake, null);
+    var transient = try reviewGatewayConfig(transient_config, std.testing.allocator, testRequest(), reviewer_model);
+    defer transient.deinit(std.testing.allocator);
+    // Transient failures retry once and can recover.
+    try std.testing.expectEqual(
+        std.meta.Tag(permission_auto_classifier.ParseOutcome).valid,
+        std.meta.activeTag(transient),
+    );
+    try std.testing.expectEqual(
+        permission_auto_classifier.Decision.clear,
+        transient.valid.decision,
+    );
+    try std.testing.expectEqual(@as(usize, 2), transient_fake.calls);
+
+    var permanent_fake = FakeStream{ .outcomes = &.{ .permanent_http, .valid } };
+    const permanent_config = testConfig(&permanent_fake, null);
+    const permanent = try reviewGatewayConfig(permanent_config, std.testing.allocator, testRequest(), reviewer_model);
+    try std.testing.expectEqual(
+        std.meta.Tag(permission_auto_classifier.ParseOutcome).invalid,
+        std.meta.activeTag(permanent),
+    );
+    try std.testing.expectEqual(
+        permission_auto_classifier.InvalidReason.transport_permanent,
+        permanent.invalid,
+    );
+    try std.testing.expectEqual(@as(usize, 1), permanent_fake.calls);
+}
+
+test "gateway transport preserves cancellation timeout transient and permanent outcomes" {
+    var fake = FakeStream{ .outcomes = &.{
+        .cancelled,
+        .timeout,
+        .transient_error,
+        .permanent_error,
+    } };
+    var config = GatewayConfig{
+        .api_key = "test-key",
+        .chat_url = "https://example.test/chat",
+        .stream_ctx = @ptrCast(&fake),
+        .stream_fn = FakeStream.execute,
+    };
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(100),
+    });
+    const expected = [_]std.meta.Tag(permission_auto_classifier.TransportOutcome){
+        .cancelled,
+        .timed_out,
+        .transient_failure,
+        .permanent_failure,
+    };
+    for (expected) |expected_tag| {
+        const outcome = try sendGatewayReview(
+            @ptrCast(&config),
+            std.testing.allocator,
+            "openai/gpt-5",
+            "{}",
+            deadline,
+            &cancel_flag,
+        );
+        try std.testing.expectEqual(expected_tag, std.meta.activeTag(outcome));
+    }
+    try std.testing.expectEqual(expected.len, fake.calls);
+}
+
+test "gateway automatic reviewer distinguishes timeout permanent failure and cancellation" {
+    var timeout_fake = FakeStream{ .outcomes = &.{.timeout} };
+    const timeout_config = testConfig(&timeout_fake, null);
+    const timed_out = try reviewGatewayConfig(timeout_config, std.testing.allocator, testRequest(), reviewer_model);
+    try std.testing.expectEqual(
+        std.meta.Tag(permission_auto_classifier.ParseOutcome).invalid,
+        std.meta.activeTag(timed_out),
+    );
+    try std.testing.expectEqual(
+        permission_auto_classifier.InvalidReason.transport_timed_out,
+        timed_out.invalid,
+    );
+    // The timeout is retried once before the review is declared unavailable.
+    try std.testing.expectEqual(@as(usize, 2), timeout_fake.calls);
+
+    var permanent_fake = FakeStream{ .outcomes = &.{ .permanent_error, .valid } };
+    const permanent_config = testConfig(&permanent_fake, null);
+    const permanent = try reviewGatewayConfig(permanent_config, std.testing.allocator, testRequest(), reviewer_model);
+    try std.testing.expectEqual(
+        std.meta.Tag(permission_auto_classifier.ParseOutcome).invalid,
+        std.meta.activeTag(permanent),
+    );
+    try std.testing.expectEqual(
+        permission_auto_classifier.InvalidReason.transport_permanent,
+        permanent.invalid,
+    );
+    try std.testing.expectEqual(@as(usize, 1), permanent_fake.calls);
+
+    var cancelled_fake = FakeStream{ .outcomes = &.{.cancelled} };
+    const cancelled_config = testConfig(&cancelled_fake, null);
+    try std.testing.expectError(
+        error.Cancelled,
+        reviewGatewayConfig(cancelled_config, std.testing.allocator, testRequest(), reviewer_model),
+    );
+    try std.testing.expectEqual(@as(usize, 1), cancelled_fake.calls);
+
+    var cancel_flag = std.atomic.Value(bool).init(true);
+    var pre_cancelled_fake = FakeStream{ .outcomes = &.{.valid} };
+    const pre_cancelled_config = testConfig(&pre_cancelled_fake, &cancel_flag);
+    try std.testing.expectError(
+        error.Cancelled,
+        reviewGatewayConfig(pre_cancelled_config, std.testing.allocator, testRequest(), reviewer_model),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pre_cancelled_fake.calls);
+}

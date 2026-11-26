@@ -92,16 +92,7 @@ impl FrameSpec {
     /// crop) and frames of other moments keep their scale. Bounded at 4×
     /// the drawable.
     pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
-        // A crop that is the whole canvas is no crop: at Fit the shell's
-        // window can come out a pixel narrower than its canvas by rounding
-        // (a 1265 × 712 drawable on a 1266 × 712 canvas).
-        let zoomed = output.crop.is_some_and(|c| {
-            c.x != 0
-                || c.y != 0
-                || c.canvas_width.abs_diff(output.width) > 1
-                || c.canvas_height.abs_diff(output.height) > 1
-        });
-        if zoomed || output.width == 0 || output.height == 0 {
+        if output.is_zoomed() || output.width == 0 || output.height == 0 {
             return 1.;
         }
         let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
@@ -218,6 +209,30 @@ impl FrameSpec {
     pub(crate) fn preview_video(&self) -> bool {
         !self.exact && self.moment != Moment::Paused
     }
+    /// A large paused viewport can have an effect that needs the original
+    /// canvas. Record that picture behind the viewer on the sliced renderer.
+    pub(crate) fn wide_viewport(&self, scene: &Scene) -> bool {
+        use pm_eval::node::{array, member, truthy};
+
+        let Some(crop) = self.output.crop.filter(|_| {
+            self.moment == Moment::Paused && !self.exact && self.output.is_zoomed()
+        }) else {
+            return false;
+        };
+        if f64::from(crop.canvas_width) * f64::from(crop.canvas_height)
+            * self.scale * self.scale < (12 << 20) as f64
+        {
+            return false;
+        }
+        pm_eval::Comp::resolve(&scene.doc, &scene.comp).is_ok_and(|comp| {
+            comp.layers().iter().any(|layer| {
+                array(member(Some(layer), "fx")).is_some_and(|fx| {
+                    fx.iter().any(|effect| member(Some(effect), "on").is_none_or(|on| truthy(Some(on))))
+                })
+            })
+        })
+    }
+
     pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
@@ -757,6 +772,8 @@ pub struct Submission {
     /// presentation's SDR clip.
     #[cfg(test)]
     pub presented: Option<metal::Buffer>,
+    #[cfg(test)]
+    pub before_completed: Option<crate::CompletionHook>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -1518,7 +1535,7 @@ impl Engine {
         &self.studio_presence.as_ref().unwrap().1
     }
 
-    fn draws_studio(&mut self, scene: &Scene, time: Ticks) -> bool {
+    pub(crate) fn draws_studio(&mut self, scene: &Scene, time: Ticks) -> bool {
         self.studio_activity(scene).may_draw(time.get())
     }
 
@@ -2694,6 +2711,8 @@ impl Engine {
             readback,
             #[cfg(test)]
             presented,
+            #[cfg(test)]
+            before_completed: None,
             width: output.width,
             height: output.height,
             failures,
@@ -2701,6 +2720,22 @@ impl Engine {
             compat_late,
         }))
     }
+    #[cfg(test)]
+    pub(crate) fn invalidate_submission(&self, submission: &mut Submission) {
+        assert!(submission.drawable.is_none());
+        // The queue records just one blit with an unretained reference.
+        // Releasing its buffer before commit gives a real Invalid Resource
+        // completion, without executing a faulting shader.
+        submission.command = objc2::rc::autoreleasepool(|_| {
+            let command = self.queue.new_command_buffer_with_unretained_references();
+            let buffer = self.metal.new_buffer(4096, metal::MTLResourceOptions::StorageModePrivate);
+            let blit = command.new_blit_command_encoder();
+            blit.fill_buffer(&buffer, metal::NSRange::new(0, 4096), 0);
+            blit.end_encoding();
+            command.to_owned()
+        });
+    }
+
     /// Native text grids spend only the allowance already granted to this
     /// renderer, and give way under pressure just like the other previews.
     pub(crate) fn text_grid_scale(&self, scene: &Scene, output: &Output) -> Option<f64> {
@@ -3179,9 +3214,15 @@ impl Submission {
         );
         let t = self.trace.clone();
         let lease = self.surface.clone();
+        #[cfg(test)]
+        let before_completed = self.before_completed.clone();
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                if let Some(hook) = &before_completed {
+                    hook(b.status());
+                }
                 #[cfg(test)]
                 std::thread::sleep(std::time::Duration::from_millis(
                     LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),

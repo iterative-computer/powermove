@@ -226,6 +226,8 @@ pub(crate) struct Exec<'a> {
     /// Final output (an export, a cached frame, an agent capture): its
     /// regions equal the whole frame bit for bit.
     pub final_frame: bool,
+    /// Allow one vector cache trim before a wide effect in a paused viewport.
+    pub vector_trim: Option<(&'a CompPlan, (u64, u64))>,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -257,6 +259,9 @@ pub(crate) struct Exec<'a> {
     pub comps: Vec<RenderedComp>,
     pub groups: Option<&'a mut crate::frame_prefix::GroupCache>,
 }
+
+/// Minimum padded effect area and retained vector bytes for a prefix trim.
+pub(crate) const VECTOR_TRIM_LIMITS: (u64, u64) = (12 << 20, 192 << 20);
 
 /// A nested composition's target this frame, by its plan's address.
 pub(crate) struct RenderedComp {

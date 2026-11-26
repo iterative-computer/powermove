@@ -95,14 +95,52 @@ function colourName(hex: string) {
 }
 /** The row Settings › Project's header card holds. */
 const HEADER_ROW = "project.name";
-/** Rows the design gives a stepper beside the field. */
-const STEPPED = new Set(["project.fps"]);
 /** Short exclusive choices the design shows as a segmented control. */
 const SEGMENTED = new Set([
   "project.colorDepth",
   "appearance",
   "open-projects-in",
 ]);
+/** Rows whose explanation is worth an ⓘ: what they do, or what they cost,
+ *  is not plain from the title. Other rows' explanations stay with
+ *  VoiceOver (the control's description) and out of the window. */
+const EXPLAINED = new Set([
+  "workspace",
+  "preview-memory",
+  "media.backgroundRender",
+  "media.backgroundDelay",
+  "timeline.skimming",
+  "cloud-media",
+  "media.proxyCreate",
+  "media.renderLimit",
+  "media.cacheLimit",
+  "media.clear",
+  "media.folders",
+  "project.colorDepth",
+  "project.masteringPeak",
+  "memory.enabled",
+  "share-usage-data",
+  "notifications.agent",
+  "account.bring-sign-ins",
+  "storage.native.library",
+  "storage.native.media",
+  "storage.native.migration",
+  "storage.native.tools",
+]);
+const explained = (id: string) =>
+  EXPLAINED.has(id) ||
+  // What "Add Powermove" does to each agent app, and the app you came from.
+  id.startsWith("agents.") ||
+  id.startsWith("storage.original.");
+/** Rows whose detail is their reading, shown under the title (a long one
+ *  as a value would crush the title). */
+const READINGS = new Set(["media.used", "account.choose"]);
+/** Visual choices the window shows as rendered previews (Settings' visual
+ *  picker), named by what each option previews. */
+const PICKERS: Record<string, string> = {
+  appearance: "appearance",
+  "open-projects-in": "projects",
+};
 function RowControl({
   row,
   model,
@@ -130,6 +168,15 @@ function RowControl({
     onChange: change,
   };
   if (row.busy) return <UI.ProgressRow label="Checking…" />;
+  // Settings › Providers on Free: the plans are on Settings › Account.
+  if (row.control === "action" && row.action === "settings.show-account")
+    return (
+      <Button
+        label={row.actionLabel!}
+        disabled={disabled}
+        onClick={() => model.select("account")}
+      />
+    );
   if (row.control === "switch" && typeof row.value === "boolean")
     return <UI.Switch {...common} value={row.value} />;
   if (row.control === "secure")
@@ -153,6 +200,25 @@ function RowControl({
         />
       </div>
     );
+  // Free: Continue… opens Checkout for the plan chosen in the picker
+  // under the title (PlanPicker) in the browser.
+  if (row.control === "plans" && row.options?.length) {
+    const chosen = chosenPlan(row, model);
+    return (
+      <Button
+        label={row.actionLabel!}
+        disabled={disabled || !model.services}
+        onClick={() => {
+          void model.perform({
+            type: "row",
+            id: row.id,
+            action: row.action!,
+            plan: chosen,
+          });
+        }}
+      />
+    );
+  }
   if (row.control === "action") {
     const button = (
       <Button
@@ -178,12 +244,14 @@ function RowControl({
   if (row.control === "status")
     // An empty trailing text can stretch across the row and hide its title.
     return typeof row.value === "string" && row.value !== "" ? (
-      <Copy nowrap={nowrapStatus}>{row.value}</Copy>
+      <Copy nowrap={nowrapStatus} secondary={row.section === "storage"}>
+        {row.value}
+      </Copy>
     ) : null;
   // An unknown authored value stays in the service; never coerce it into a default.
   if (!row.binding) return null;
-  // The design's controls: AppKit's bordered fields (a stepper on Frame
-  // Rate), and a segmented control for a short exclusive choice.
+  // The design's controls: AppKit's bordered fields, and a segmented
+  // control for a short exclusive choice.
   if (row.control === "number" && typeof row.value === "number")
     return (
       <UI.NumberField
@@ -193,7 +261,7 @@ function RowControl({
         max={row.max}
         unit={row.unit}
         precision={row.precision}
-        metadata={{ form: true, stepper: STEPPED.has(row.id) }}
+        metadata={{ form: true }}
       />
     );
   if (row.control === "text" && typeof row.value === "string")
@@ -212,6 +280,7 @@ function RowControl({
         label={row.label}
         disabled={common.disabled}
         attr={common.attr}
+        {...(PICKERS[row.id] && { metadata: { picker: PICKERS[row.id] } })}
         value={String(row.value)}
         options={options.map((o) => ({ id: String(o.v), label: o.label }))}
         onChange={(id) => {
@@ -231,19 +300,51 @@ function RowControl({
     );
   return null;
 }
+/** The plan Settings › Account's picker has chosen: the person's choice,
+ *  else the first offered. */
+function chosenPlan(row: Row, model: SettingsModel): string {
+  const options = row.options ?? [];
+  return String(
+    options.find((o) => o.v === model.chosenPlan)?.v ?? options[0]?.v ?? "",
+  );
+}
+/** Aerolite or Aero, in Settings' visual picker, the card's width under
+ *  the title. */
+function PlanPicker({ row, model }: { row: Row; model: SettingsModel }) {
+  const options = row.options ?? [];
+  return (
+    <UI.SegmentedControl
+      label="Plan"
+      disabled={row.disabled || row.busy}
+      attr={{ "aria-description": row.detail ?? "" }}
+      metadata={{ picker: "plans" }}
+      value={chosenPlan(row, model)}
+      options={options.map((o) => ({ id: String(o.v), label: o.label }))}
+      onChange={(id) => model.choosePlan(id)}
+    />
+  );
+}
 function RowCopy({
   title,
   detail,
+  help,
   children,
 }: {
   title: string;
   detail?: string;
+  /** The detail explains the row: the window shows it on request (ⓘ)
+   *  rather than under the title. */
+  help?: boolean;
   children?: ComponentChildren;
 }) {
   return (
     <div metadata={{ settingsLayout: "copy" }}>
       <text>{title}</text>
-      {detail && <text metadata={{ settingsLayout: "footer" }}>{detail}</text>}
+      {detail && (
+        <text metadata={{ settingsLayout: help ? "help" : "footer" }}>
+          {detail}
+        </text>
+      )}
       {children}
     </div>
   );
@@ -252,11 +353,14 @@ function Group({
   title,
   symbol,
   muted,
+  untitled,
   children,
 }: {
   title: string;
   symbol?: string;
   muted?: boolean;
+  /** The card's one row says what the title would (Appearance). */
+  untitled?: boolean;
   children: ComponentChildren;
   key?: string;
 }) {
@@ -270,14 +374,14 @@ function Group({
   );
   return (
     <div role="group" label={title} metadata={{ settingsLayout: "group" }}>
-      <div metadata={{ settingsLayout: "headingLine" }}>
+      {untitled ? null : <div metadata={{ settingsLayout: "headingLine" }}>
         {symbol ? (
           <div metadata={{ settingsLayout: "line" }}>
             <img metadata={{ settingsLayout: "glyph", symbol }} alt="" />
             {heading}
           </div>
         ) : heading}
-      </div>
+      </div>}
       <UI.FormGroup label={title}>{children}</UI.FormGroup>
     </div>
   );
@@ -290,6 +394,13 @@ function SettingRow({
   model: SettingsModel;
   key?: string;
 }) {
+  // Storage names a place and its size in one title ("Media Cache · 1 MB"):
+  // the size reads as the row's value, beside its button.
+  const sized = row.section === "storage" && !row.value && row.label.includes(" · ");
+  if (sized) {
+    const at = row.label.indexOf(" · ");
+    row = { ...row, label: row.label.slice(0, at), value: row.label.slice(at + 3) };
+  }
   const agentApp = row.section === "agents" && row.id.startsWith("agents.")
     ? row.id.slice("agents.".length)
     : undefined;
@@ -302,7 +413,18 @@ function SettingRow({
     >
       <RowCopy
         title={row.label}
-        detail={row.id === "media.location" ? undefined : row.detail}
+        // A provider's detail is its state (signed in as…, not added) and
+        // Space Used's its reading: data, not an explanation, so it stays
+        // in view. Other explanations show behind ⓘ only where they help.
+        detail={
+          row.id === "media.location" ||
+          (row.section !== "providers" &&
+            !READINGS.has(row.id) &&
+            !explained(row.id))
+            ? undefined
+            : row.detail
+        }
+        help={row.section !== "providers" && !READINGS.has(row.id)}
       >
         {row.error && (
           <div
@@ -323,6 +445,31 @@ function SettingRow({
         )}
         <RowControl row={row} model={model} nowrapStatus={Boolean(agentApp)} />
       </div>
+      {row.control === "plans" && row.options?.length ? (
+        <PlanPicker row={row} model={model} />
+      ) : null}
+      {/* This month's credits (Settings › Account): a meter of what is
+          used, and each day's use as thin bars; the window draws both. */}
+      {row.meter && (
+        <div
+          role="img"
+          label={`${row.meter.used} of ${row.meter.included} credits used`}
+          metadata={{ settingsLayout: "meter", ...row.meter }}
+        />
+      )}
+      {row.days && row.days.length > 0 && (
+        <div
+          role="img"
+          label={`${row.label}: ${row.days
+            .map(([day, credits]) => `${day} ${credits}`)
+            .join(", ")}`}
+          metadata={{
+            settingsLayout: "chart",
+            days: row.days,
+            slots: row.slots ?? row.days.length,
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -591,6 +738,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               <RowCopy
                 title="Delete Extension"
                 detail="Its files move to the archive in your Powermove profile, and its settings are kept."
+                help
               />
               <div metadata={{ settingsLayout: "line" }}>
                 <Button
@@ -612,12 +760,37 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
     );
   const counts = model.extensionCounts;
   const state = model.publication.extensionsState;
+  const openStore = (
+    <Button
+      label="Open Store"
+      disabled={!model.services}
+      onClick={() => {
+        void model.perform({ type: "store.open" });
+      }}
+    />
+  );
+  // Nothing installed: one card, not a search, filters and counts of zero.
+  if (state === "ready" && counts.all === 0)
+    return (
+      <Group title="Extensions" untitled>
+        <div
+          role="group"
+          label="No extensions yet"
+          metadata={{ settingsLayout: "row" }}
+        >
+          <RowCopy title="No extensions yet" />
+          <div metadata={{ settingsLayout: "line" }}>{openStore}</div>
+        </div>
+      </Group>
+    );
   return (
     <>
-      <div metadata={{ settingsLayout: "copy" }}>
-        <text role="heading" metadata={{ settingsLayout: "heading" }}>Extensions</text>
-        <Copy secondary>{sectionCopy.extensions.description}</Copy>
-      </div>
+      {/* The page header names the page; a search's results name it here. */}
+      {model.query.trim() ? (
+        <div metadata={{ settingsLayout: "note" }}>
+          <text role="heading" metadata={{ settingsLayout: "heading" }}>Extensions</text>
+        </div>
+      ) : null}
       <div metadata={{ settingsLayout: "line" }}>
         <UI.TextField
           label="Search extensions"
@@ -686,9 +859,11 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               action={null}
             />
           )}
-          <Copy secondary>
-            {`${counts.all} installed · ${counts.enabled} enabled · ${counts.off} off`}
-          </Copy>
+          <div metadata={{ settingsLayout: "note" }}>
+            <Copy secondary>
+              {`${counts.all} installed · ${counts.enabled} enabled · ${counts.off} off`}
+            </Copy>
+          </div>
         </>
       )}
       <Group title="Store">
@@ -697,19 +872,8 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           label="Powermove Store"
           metadata={{ settingsLayout: "row" }}
         >
-          <RowCopy
-            title="Powermove Store"
-            detail="Publish and manage your extensions on the Store."
-          />
-          <div metadata={{ settingsLayout: "line" }}>
-            <Button
-              label="Open Store"
-              disabled={!model.services}
-              onClick={() => {
-                void model.perform({ type: "store.open" });
-              }}
-            />
-          </div>
+          <RowCopy title="Powermove Store" />
+          <div metadata={{ settingsLayout: "line" }}>{openStore}</div>
         </div>
       </Group>
     </>
@@ -849,7 +1013,6 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
     >
       <RowCopy
         title="Share Shortcuts"
-        detail="Bring in keys from another Mac or your agent, or save them to a file."
       />
       <div metadata={{ settingsLayout: "line" }}>
         <Button
@@ -1117,9 +1280,15 @@ function SectionContent({
   window,
 }: SettingsPanelProps & { section: Section }) {
   const copy = sectionCopy[section];
+  // Settings › Providers replaces the agent account rows (PM-750): where it
+  // shows, their placeholders (no service publishes them) are not listed.
+  const replaced = model.availableSections.includes("providers")
+    ? new Set(["Subscriptions", "API or Local Model"])
+    : new Set<string>();
   const matching = model.rows.filter(
     (row) =>
       row.section === section &&
+      !(row.section === "agents" && replaced.has(row.group)) &&
       (!model.query.trim() || model.matches.rows.has(row.id)),
   );
   const searching = !!model.query.trim();
@@ -1134,10 +1303,14 @@ function SectionContent({
   );
   const rows = searching ? listed.slice(0, SEARCH_ROWS) : listed;
   const groups = [...new Set(rows.map((row) => row.group))];
-  const speech = model.publication.speech.filter(
-    (item) =>
-      !model.query.trim() || model.matches.rows.has(`speech.${item.id}`),
-  );
+  // The recommended models first (Parakeet Unified EN, then Cohere, as
+  // onboarding lists them), then the rest in catalogue order.
+  const speech = model.publication.speech
+    .filter(
+      (item) =>
+        !model.query.trim() || model.matches.rows.has(`speech.${item.id}`),
+    )
+    .sort((a, b) => Number(!!b.recommended) - Number(!!a.recommended));
   return (
     <div
       id={`settings.section.${section}`}
@@ -1152,7 +1325,14 @@ function SectionContent({
         <ProjectHeader model={model} bindings={bindings} window={window} />
       ) : null}
       {groups.map((group) => (
-        <Group key={group} title={group}>
+        <Group
+          key={group}
+          title={group}
+          untitled={
+            rows.filter((row) => row.group === group).length === 1 &&
+            rows.find((row) => row.group === group)?.label === group
+          }
+        >
           {keysCard(
             rows.filter((row) => row.group === group),
             model,

@@ -11,6 +11,136 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
+    ("colors.welcome_ground", "Welcome stage: the ground left of the window"),
+    ("colors.welcome_field_light", "Welcome stage: the orange field, light end"),
+    ("colors.welcome_field_deep", "Welcome stage: the orange field, deep end"),
+    ("colors.brand_claude", "Anthropic's mark colour for the Claude Code mark"),
+    ("colors.white", "Pure white: marks over the welcome field"),
+    ("colors.black", "Pure black: veils, a clear window's backing"),
+    ("metrics.list_gap", "Space between adjacent hoverable or selectable list rows: highlights never touch"),
+    ("metrics.nav_row", "A source-list row's pitch in Home and utility sidebars"),
+    ("settings.window_width", "Settings window width (fixed)"),
+    ("settings.window_height", "Settings window least height"),
+    ("settings.window_default_height", "Settings window first height"),
+    ("settings.sidebar", "Settings sidebar width"),
+    ("settings.sidebar_row", "Settings sidebar row highlight height"),
+    ("settings.sidebar_tile", "Settings sidebar section tile side"),
+    ("settings.tile_radius", "A section tile's corner"),
+    ("settings.sidebar_inset", "Sidebar highlight's side inset"),
+    ("settings.account_row", "Settings account row height"),
+    ("settings.avatar", "Settings account avatar side"),
+    ("settings.header_height", "Settings page header band and sidebar group header row"),
+    ("settings.header_tile", "Settings page header's tile side"),
+    ("settings.page_inset", "Settings page side inset"),
+    ("settings.page_top", "Air above the first Settings card"),
+    ("settings.page_bottom", "Air under the last Settings card"),
+    ("settings.column", "Settings form column's greatest width"),
+    ("settings.section_gap", "Space between Settings groups"),
+    ("settings.row_inset", "A Settings row's side inset"),
+    ("settings.row_padding", "A Settings row's vertical padding"),
+    ("settings.row", "A Settings row's least height"),
+    ("settings.group_radius", "A Settings group card's corner"),
+    ("settings.title_air", "Air under a Settings row's second line"),
+    ("settings.help_delay", "Seconds the pointer rests before an ⓘ popover opens"),
+    ("settings.help_width", "The ⓘ popover's text width"),
+    ("settings.secure_width", "A Settings secure field width"),
+    ("settings.progress_width", "A Settings progress bar width"),
+    ("settings.path_width", "A Settings folder path pop-up's greatest width"),
+    ("settings.filter_width", "A Settings filter field's least width"),
+    ("settings.value_least", "A Settings shortcut value's least width"),
+    ("settings.picker_width", "A visual picker tile's width"),
+    ("settings.picker_height", "A visual picker tile's height"),
+    ("settings.picker_ring_gap", "Gap between a picker tile and its selection ring"),
+    ("settings.picker_ring", "A picker selection ring's width"),
+    ("settings.picker_radius", "A picker tile's corner"),
+    ("settings.picker_window_radius", "A picker's mini window corner"),
+    ("settings.picker_column", "A picker option's column: every picker is one left-aligned grid"),
+    ("settings.credits_meter", "Settings › Account credits meter thickness"),
+    ("settings.credits_chart", "Settings › Account daily credits chart height"),
+    ("settings.credits_bar", "A day's bar width in the daily credits chart, at most"),
+    ("settings.credits_bar_radius", "The daily credits chart's bar caps' corner"),
+    ("settings.credits_today", "Today's marker under the daily credits chart"),
+    ("settings.credits_bar_gap", "Least space between the daily credits chart's bars"),
+    ("settings.credits_air", "Air above the credits meter and the daily chart"),
+    ("settings.app_icon", "Settings › Agents app mark side"),
+    ("settings.app_icon_gap", "Space after a Settings › Agents app mark"),
+    ("settings.dark_veil", "Dark Settings sidebar veil over the system material"),
+    ("settings.hover_opacity", "A hovered sidebar row's wash relative to the selection"),
+    ("settings.header_weight", "Settings page header weight"),
+    ("settings.heading_weight", "Settings group heading and chosen picker label weight"),
+    ("settings.group_weight", "Settings sidebar group name weight"),
+    ("settings.account_weight", "Settings account name and initial weight"),
+    ("settings.tile.body_top", "Section tile: body gradient top"),
+    ("settings.tile.body_bottom", "Section tile: body gradient bottom"),
+    ("settings.tile.edge", "Section tile: inner edge colour"),
+    ("settings.tile.edge_top", "Section tile: inner edge opacity at the top"),
+    ("settings.tile.edge_bottom", "Section tile: inner edge opacity at the bottom"),
+    ("settings.tile.light", "Section tile: top light colour"),
+    ("settings.tile.light_opacity", "Section tile: top light opacity"),
+    ("settings.tile.glyph_top", "Section tile: glyph gradient top"),
+    ("settings.tile.glyph_bottom", "Section tile: glyph gradient bottom"),
+    ("settings.tile.shadow", "Section tile: drop shadow colour"),
+    ("settings.tile.shadow_offset", "Section tile: drop shadow offset"),
+    ("settings.tile.shadow_blur", "Section tile: drop shadow blur"),
+    ("settings.tile.shadow_opacity", "Section tile: drop shadow opacity"),
+    ("settings.tile.press", "Section tile: glyph's pressed-in shadow colour"),
+    ("settings.tile.press_opacity", "Section tile: glyph's pressed-in shadow opacity"),
+    ("settings.tile.account_glyph", "Section tile: signed-out account glyph"),
+    ("settings.picker.sky_top", "Picker art: wallpaper sky top"),
+    ("settings.picker.sky_mid", "Picker art: wallpaper sky middle"),
+    ("settings.picker.sky_bottom", "Picker art: wallpaper sky at the horizon"),
+    ("settings.picker.fold", "Picker art: dark fold colour"),
+    ("settings.picker.fold_opacity", "Picker art: dark fold opacity"),
+    ("settings.picker.glow", "Picker art: low warm glow colour"),
+    ("settings.picker.glow_opacity", "Picker art: low warm glow opacity"),
+    ("settings.picker.sheen", "Picker art: sheen colour along the fold"),
+    ("settings.picker.sheen_opacity", "Picker art: sheen opacity"),
+    ("settings.picker.close", "Picker art: mini window close light"),
+    ("settings.picker.minimize", "Picker art: mini window minimise light"),
+    ("settings.picker.zoom", "Picker art: mini window zoom light"),
+    ("settings.picker.window_shadow", "Picker art: mini window shadow opacity"),
+    ("settings.picker.window_edge", "Picker art: mini window edge opacity"),
+    ("settings.picker.tile_edge", "Picker art: unselected tile's edge opacity"),
+    ("text_size.xs", "Text size step 11 pt: secondary text, group names"),
+    ("text_size.sm", "Text size step 12 pt: small labels"),
+    ("text_size.base", "Text size step 13 pt: the macOS body"),
+    ("text_size.lg", "Text size step 15 pt: page headers"),
+    ("text_size.xl", "Text size step 17 pt"),
+    ("text_size.x2l", "Text size step 20 pt: sheet titles"),
+    ("text_size.x3l", "Text size step 22 pt: code digits"),
+    ("text_size.x4l", "Text size step 26 pt: the welcome title"),
+    ("ink.wash", "Ink alpha: a hovered row's faint wash"),
+    ("ink.well", "Ink alpha: a field's or cell's quiet fill"),
+    ("ink.edge", "Ink alpha: a well's or hairline's edge"),
+    ("ink.tint", "Ink alpha: an accent tint behind a mark"),
+    ("welcome.half", "Each half of the welcome window"),
+    ("welcome.column", "The welcome column's width"),
+    ("welcome.window_scale", "The welcome window picture's scale"),
+    ("welcome.window_left", "The welcome window picture's left"),
+    ("welcome.window_top", "The welcome window picture's top"),
+    ("welcome.list_radius", "The welcome list's corner"),
+    ("welcome.list_row", "A welcome list row's least height"),
+    ("welcome.list_max_height", "The welcome list's greatest height before it scrolls"),
+    ("welcome.list_fade", "The welcome list's edge fade"),
+    ("welcome.list_widen", "How much wider than the column the welcome list runs"),
+    ("welcome.list_inset", "A welcome list row's side inset"),
+    ("welcome.icon_tile", "A welcome list icon's tile"),
+    ("welcome.primary_width", "The welcome primary action's width"),
+    ("welcome.primary_height", "The welcome primary action's height"),
+    ("welcome.logo_top", "The welcome mark's height from the top"),
+    ("welcome.actions_top", "Where the welcome actions start"),
+    ("welcome.actions_room", "Room left above the welcome actions"),
+    ("welcome.sheet_width", "Sign-in sheet width"),
+    ("welcome.sheet_height", "Sign-in sheet first height"),
+    ("welcome.sheet_padding", "Sign-in sheet column inset"),
+    ("welcome.sheet_control", "Sign-in sheet controls' height"),
+    ("welcome.sheet_tile", "Sign-in sheet tile side"),
+    ("welcome.sheet_foot", "Cancel's line above the sheet's bottom"),
+    ("welcome.sheet_foot_gap", "Cancel's line under the last control"),
+    ("welcome.cell_width", "A code cell width"),
+    ("welcome.cell_height", "A code cell height"),
+    ("welcome.field_height", "The welcome email well's height"),
+    ("welcome.field_radius", "The welcome well's and cells' corner"),
     (
         "metrics.agent_attachment",
         "Square draft attachment thumbnail edge",
@@ -18,14 +148,6 @@ const ROLES: &[(&str, &str)] = &[
     (
         "metrics.agent_attachment_sent",
         "Square sent attachment thumbnail edge",
-    ),
-    (
-        "metrics.agent_model_min",
-        "Minimum composer model pop-up width",
-    ),
-    (
-        "metrics.agent_effort_width",
-        "Fixed composer effort pop-up width",
     ),
     (
         "colors.timeline_selected",
@@ -274,6 +396,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.palette_height", "Command palette maximum height"),
     ("metrics.field_menu_width", "Field menu width"),
     ("metrics.field_menu_height", "Field menu maximum height"),
+    ("metrics.chooser_rail", "Agent chooser harness rail width"),
+    ("metrics.chooser_list", "Agent chooser model list width"),
+    ("metrics.chooser_height", "Agent chooser height"),
+    ("metrics.chooser_mark", "Agent chooser mark size (rail, rows)"),
     ("metrics.settings_width", "Settings window width"),
     ("metrics.settings_height", "Settings window height"),
     ("metrics.settings_sidebar", "Settings sidebar width"),
@@ -401,8 +527,24 @@ const ROLES: &[(&str, &str)] = &[
         "Agent composer grows to this many lines, then scrolls",
     ),
     (
-        "metrics.composer_tray",
-        "Agent composer's tray around its field",
+        "metrics.composer_radius",
+        "Agent composer corner, concentric in its panel",
+    ),
+    (
+        "metrics.composer_popover_radius",
+        "Agent composer corner, concentric in the popover",
+    ),
+    (
+        "metrics.composer_control",
+        "Agent composer control row height, its + button and Send circle",
+    ),
+    (
+        "metrics.composer_add_symbol",
+        "Agent composer thin + glyph square",
+    ),
+    (
+        "metrics.composer_symbol",
+        "Agent composer Send arrow, Stop square and model chevron",
     ),
     ("metrics.group_radius", "Settings grouped-form card corner"),
     ("metrics.form_row", "Minimum Settings row height"),
@@ -707,6 +849,10 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("colors.hairline", "Opaque control and card edge (derived)"),
     (
+        "colors.composer_send_idle",
+        "Agent composer Send circle with nothing to send (derived)",
+    ),
+    (
         "metrics.pill_radius",
         "Segmented track and tab-strip corner",
     ),
@@ -751,6 +897,10 @@ fn leaves(t: &Tokens) -> Vec<(String, Value)> {
         "typography",
         "motion",
         "translucency",
+        "settings",
+        "text_size",
+        "ink",
+        "welcome",
     ] {
         flatten(group, &v[group], &mut out);
     }
@@ -758,7 +908,8 @@ fn leaves(t: &Tokens) -> Vec<(String, Value)> {
 }
 
 fn show(key: &str, v: &Value) -> String {
-    if key.starts_with("colors.") || key == "translucency.ground" {
+    let art = key.starts_with("settings.tile.") || key.starts_with("settings.picker.");
+    if key.starts_with("colors.") || key == "translucency.ground" || (art && v.is_u64()) {
         format!("`#{:06X}`", v.as_u64().unwrap())
     } else {
         let n = v.as_f64().unwrap();
@@ -970,9 +1121,14 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        // The composer sits `text_padding` inside its panel or popover.
         assert_eq!(
-            m.panel_radius,
-            t.radius.nested(m.popover_radius, m.composer_tray)
+            m.composer_radius,
+            t.radius.nested(m.panel_radius, m.text_padding)
+        );
+        assert_eq!(
+            m.composer_popover_radius,
+            t.radius.nested(m.popover_radius, m.text_padding)
         );
         assert_eq!(m.inner_radius, t.radius.nested(m.panel_radius, m.gap));
         assert_eq!(m.media_small_radius, m.inner_radius - m.pill_inset);

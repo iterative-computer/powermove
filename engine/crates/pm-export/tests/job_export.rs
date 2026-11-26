@@ -1278,6 +1278,75 @@ fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
     );
 }
 
+/// Panics on the export's audio worker: the one thread, other than the
+/// render (this test's) and the encoder (the one reporting progress), that
+/// syncs its QoS at each frame.
+struct PanicsTheMixer {
+    render: std::thread::ThreadId,
+    encoder: Mutex<Option<std::thread::ThreadId>>,
+}
+
+impl GpuGate for PanicsTheMixer {
+    fn sync_worker_qos(&self) {
+        let here = std::thread::current().id();
+        if here != self.render
+            && self
+                .encoder
+                .lock()
+                .unwrap()
+                .is_some_and(|encoder| encoder != here)
+        {
+            panic!("injected mixer panic");
+        }
+    }
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        (!cancel.load(Ordering::Relaxed)).then_some(units)
+    }
+    fn finished(&self, _: u64, _: u32, _: f64) {}
+    fn abandoned(&self, _: u64) {}
+}
+
+/// A panic in the audio worker ends the export with an audio error (not a
+/// panic through the caller) and the frames' reuse is released.
+#[test]
+fn a_panicking_mixer_is_an_audio_error_and_releases_frame_reuse() {
+    let dur = 1.0;
+    let mut doc = project(W, H, dur, no_fill(), vec![audio("tone", "tone", 0.0, dur)]);
+    asset(&mut doc, "tone", "audio", "wav", 0, 0, dur);
+    let mut media = MediaPaths::default();
+    media.insert("tone", fixture("tone.wav"));
+    let job = job(
+        &doc,
+        media,
+        settings(ExportFormat::H264, WireAlpha::None, dur),
+        PathBuf::from("/unused.mp4"),
+    );
+    let plan = plan_export(&job).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let gate = PanicsTheMixer {
+        render: std::thread::current().id(),
+        encoder: Mutex::new(None),
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            &gate,
+            &AtomicBool::new(false),
+            &mut |_| *gate.encoder.lock().unwrap() = Some(std::thread::current().id()),
+        )
+    }));
+    match outcome {
+        Ok(Err(JobError::Audio(why))) => assert!(why.contains("panicked"), "{why}"),
+        Ok(Err(e)) => panic!("another error: {e}"),
+        Ok(Ok(_)) => panic!("the mixer never panicked"),
+        Err(_) => panic!("the mixer's panic escaped the export"),
+    }
+    assert_eq!(renderer.frame_reuse_bytes(), 0, "frame reuse kept");
+}
+
 /// Admits whole frames, but holds the admission of frame `at` for `hold`
 /// (a viewer playing through an export defers it that long).
 struct HoldOnce {

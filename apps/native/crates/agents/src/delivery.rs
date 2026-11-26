@@ -12,6 +12,7 @@ pub enum Surface {
     CodexExec,
     /// A run on an API or local model (`compatible`), with no runtime process.
     Compatible,
+    Aero,
 }
 #[derive(Debug, PartialEq)]
 pub enum Delivery {

@@ -1,0 +1,12 @@
+{
+  "id": "shot-notes",
+  "name": "Shot Notes",
+  "version": "0.4.0",
+  "apiVersion": 3,
+  "permissions": [],
+  "description": "A note for every layer.",
+  "contributes": [
+    "panels"
+  ],
+  "author": "user"
+}

@@ -15,12 +15,14 @@ pub mod corner;
 pub mod dots;
 pub mod motion;
 mod recipe;
+pub mod settings;
 pub mod sketch;
 mod strip;
 pub use color::mix;
 use color::oklch;
 pub use recipe::{Elevation, Shadow, Text, TextStyle};
 use serde::{Deserialize, Serialize};
+pub use settings::{Ink, PickerPalette, Settings, TextSize, TilePalette, Welcome, css, with_alpha};
 pub use strip::{GLOW_REACH, GRID_FADE, Playhead, Strip, StripState, TrimGrip};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
@@ -68,6 +70,10 @@ pub struct Colors {
     /// Opaque hairline for control and card edges (`text` ink at
     /// `translucency.edge` over `panel`; `separator` under Increase Contrast).
     pub hairline: u32,
+    /// The Agent composer's Send circle while there is nothing to send: a
+    /// dim neutral disc (`text` ink at half `translucency.hover` over
+    /// `floating`).
+    pub composer_send_idle: u32,
     /// Metadata on a selected row (`selected_fill`): ≥ 4.5:1 where `muted` is not.
     pub selected_secondary: u32,
     /// `danger` words on a selected row (`Missing`): ≥ 4.5:1 on `selected_fill`.
@@ -106,6 +112,17 @@ pub struct Colors {
     pub channel_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
+    /// The welcome window's stage art: the ground left of the window and
+    /// the orange field's light and deep ends (the same in both appearances).
+    pub welcome_ground: u32,
+    pub welcome_field_light: u32,
+    pub welcome_field_deep: u32,
+    /// Anthropic's mark colour, for the Claude Code mark.
+    pub brand_claude: u32,
+    /// Pure white: marks drawn over the welcome field.
+    pub white: u32,
+    /// Pure black: veils and a clear window's backing.
+    pub black: u32,
 }
 /// Eight label colours, in menu order. Fills are muted so artwork stays the loudest thing on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +300,13 @@ pub struct Metrics {
     pub palette_height: f32,
     pub field_menu_width: f32,
     pub field_menu_height: f32,
+    /// The Agent chooser popover (PM-727), measured on Capy's picker: the
+    /// harness rail, the model list, the model card, its height, and the
+    /// marks in the rail, the rows and the card.
+    pub chooser_rail: f32,
+    pub chooser_list: f32,
+    pub chooser_height: f32,
+    pub chooser_mark: f32,
     pub settings_width: f32,
     pub settings_height: f32,
     pub settings_sidebar: f32,
@@ -384,8 +408,6 @@ pub struct Metrics {
     /// Agent attachment and pop-up geometry, shared by light and dark themes.
     pub agent_attachment: f32,
     pub agent_attachment_sent: f32,
-    pub agent_model_min: f32,
-    pub agent_effort_width: f32,
     /// The Agent popover's height when the window has room (the original
     /// app's 680 pt conversation).
     pub agent_height: f32,
@@ -417,8 +439,19 @@ pub struct Metrics {
     pub export_preview: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
-    /// The agent composer's tray around its field (v1's 4 pt).
-    pub composer_tray: f32,
+    /// The agent composer's corner: concentric with the panel corner it
+    /// sits `text_padding` inside (`radius.nested(panel_radius, text_padding)`).
+    pub composer_radius: f32,
+    /// The same in the Agent popover (`radius.nested(popover_radius, text_padding)`).
+    pub composer_popover_radius: f32,
+    /// The composer's control row: its height, the "+" button and the Send
+    /// circle's diameter.
+    pub composer_control: f32,
+    /// The composer's "+" glyph square (a thin plus).
+    pub composer_add_symbol: f32,
+    /// The composer's small glyphs: Send's arrow, Stop's square, the model
+    /// chooser's chevron.
+    pub composer_symbol: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -485,6 +518,12 @@ pub struct Metrics {
     pub channel_strip: f32,
     /// Mixer fader knob height.
     pub fader_knob: f32,
+    /// Space between adjacent rows of any list with hover or selection
+    /// (sidebars, the Project panel, Effects, pickers, the panel library):
+    /// two highlights never touch.
+    pub list_gap: f32,
+    /// A source-list row's pitch in Home and utility windows' sidebars.
+    pub nav_row: f32,
     /// Welcome window width.
     pub welcome_width: f32,
     /// Welcome window height.
@@ -611,6 +650,14 @@ pub struct Tokens {
     pub typography: TypeScale,
     pub motion: Motion,
     pub translucency: Translucency,
+    /// Settings, the sign-in sheet and the pickers ([`Settings`]).
+    pub settings: Settings,
+    /// Text size steps ([`TextSize`]).
+    pub text_size: TextSize,
+    /// Ink alpha steps ([`Ink`]).
+    pub ink: Ink,
+    /// The welcome window and the sign-in sheet ([`Welcome`]).
+    pub welcome: Welcome,
 }
 /// Layer colours, dark then light: the body of a kind badge and the hue a
 /// strip takes. Text on them is `text`.
@@ -704,6 +751,7 @@ impl Colors {
             fill: 0,
             fill_strong: 0,
             hairline: 0,
+            composer_send_idle: 0,
             selected_secondary: secondary,
             selected_danger: if dark { 0xff8a80 } else { 0xa82319 },
             focus: mix(panel, ink, if dark { 0.58 } else { 0.5 }),
@@ -761,6 +809,12 @@ impl Colors {
                 oklch(0.52, 0.16, 262.)
             },
             labels: LABELS[usize::from(!dark)],
+            welcome_ground: 0x131212,
+            welcome_field_light: 0xff7a2e,
+            welcome_field_deep: 0xa3301a,
+            brand_claude: 0xd97757,
+            white: 0xffffff,
+            black: 0x000000,
         }
     }
 }
@@ -820,12 +874,16 @@ impl Tokens {
             self.translucency.panel,
         )
     }
-    /// Header, idle composer tray (field, actions and pickers) and bottom inset.
+    /// Header, the idle composer (one line of draft over its row of
+    /// controls, inside its edge and padding) and the bottom inset.
+    /// The Agent panel's header and its idle composer: the edge, one line
+    /// of draft (v1's 1.5 leading, 7 pt inset above and below: the shell's
+    /// composer text origin), `space.xl`, the control row and `space.md`
+    /// under it, the composer `text_padding` off the panel's bottom.
     pub fn agent_panel_minimum_height(&self) -> f32 {
         let m = &self.metrics;
-        let text = (self.typography.body * 1.5 + 6.).max(m.hit);
-        m.header + m.text_padding + 2. * m.composer_tray
-            + 4. * m.gap + 2. * m.border + 2. * m.control + text
+        let draft = (self.typography.body * 1.5 + 2. * 7.).max(m.hit);
+        m.header + m.text_padding + 2. * m.border + draft + self.space.xl + m.hit + self.space.md
     }
 
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
@@ -896,6 +954,10 @@ impl Tokens {
                 palette_height: 360.,
                 field_menu_width: 300.,
                 field_menu_height: 280.,
+                chooser_rail: 36.,
+                chooser_list: 320.,
+                chooser_height: 360.,
+                chooser_mark: 16.,
                 settings_width: 760.,
                 settings_height: 520.,
                 settings_sidebar: 200.,
@@ -953,8 +1015,6 @@ impl Tokens {
                 agent_width: 440.,
                 agent_attachment: 56.,
                 agent_attachment_sent: 40.,
-                agent_model_min: 96.,
-                agent_effort_width: 72.,
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
@@ -970,7 +1030,12 @@ impl Tokens {
                 export_job_progress_height: 2.,
                 export_preview: 315.,
                 composer_max_lines: 10.,
-                composer_tray: space.xs,
+                // Derived with the panel corners (`derive_composer_radii`).
+                composer_radius: 0.,
+                composer_popover_radius: 0.,
+                composer_control: 22.,
+                composer_add_symbol: 16.,
+                composer_symbol: 15.,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
@@ -1007,6 +1072,8 @@ impl Tokens {
                 message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
+                list_gap: 2.,
+                nav_row: 32.,
                 welcome_width: 900.,
                 welcome_height: 640.,
                 mark_bracket: 6.,
@@ -1048,6 +1115,10 @@ impl Tokens {
                 note_hold: 2.2,
                 menu_fade: 0.1,
             },
+            settings: Settings::of(scheme),
+            text_size: TextSize::new(),
+            ink: Ink::new(),
+            welcome: Welcome::new(),
             translucency: {
                 // The translucent shell is a heavy tint of the window colour
                 // over a behind-window blur; Reduce Transparency makes it solid.
@@ -1093,7 +1164,14 @@ impl Tokens {
         tokens.enforce_accessibility();
         tokens.derive_fills();
         tokens.derive_media_geometry();
+        tokens.derive_composer_radii();
         tokens
+    }
+    /// The composer sits `text_padding` inside its panel's bottom corners.
+    fn derive_composer_radii(&mut self) {
+        let (r, m) = (self.radius, &mut self.metrics);
+        m.composer_radius = r.nested(m.panel_radius, m.text_padding);
+        m.composer_popover_radius = r.nested(m.popover_radius, m.text_padding);
     }
     fn derive_media_geometry(&mut self) {
         let m = &mut self.metrics;
@@ -1116,6 +1194,7 @@ impl Tokens {
             Scheme::Light => c.floating,
         };
         c.faint = mix(ground, ink, t.faint);
+        c.composer_send_idle = mix(c.floating, ink, t.hover / 2.);
         c.hairline = if self.accessibility.increase_contrast {
             c.separator
         } else {
@@ -1163,7 +1242,6 @@ impl Tokens {
         metrics.tab: size, metrics.pill_radius: size, metrics.pill_inset: size,
         metrics.segment_radius: size,
         metrics.agent_attachment: size, metrics.agent_attachment_sent: size,
-        metrics.agent_model_min: size, metrics.agent_effort_width: size,
         metrics.row: size, metrics.control: size, metrics.field: size,
         metrics.value_column: size, metrics.border: size, metrics.track_row: size,
         typography.minimum: size, typography.body: size, typography.label: size,
@@ -1193,6 +1271,7 @@ impl Tokens {
         next.enforce_accessibility();
         next.derive_fills();
         next.derive_media_geometry();
+        next.derive_composer_radii();
         *self = next;
         Ok(())
     }
@@ -1266,7 +1345,10 @@ pub mod workspace {
 pub const DOCK_SCROLL_FADE: f32 = 28.;
 
 pub fn dock_scroll_edges(offset: f32, maximum: f32) -> (bool, bool) {
-    (maximum > 1. && offset > 1., maximum > 1. && maximum - offset > 1.)
+    (
+        maximum > 1. && offset > 1.,
+        maximum > 1. && maximum - offset > 1.,
+    )
 }
 
 #[cfg(test)]

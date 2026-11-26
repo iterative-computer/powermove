@@ -107,8 +107,12 @@ impl<T: Lerp + Clone + PartialEq + 'static> Transition<T> {
 
     fn sample(&self, cx: &mut App) -> Ref<'_, TransitionCache<T>> {
         if self.cache.borrow().value.is_none() {
-            let mut state = self.state.as_mut(cx);
-            let sample = state.sample(Instant::now());
+            // A transition at rest is read: a mutable borrow notifies its
+            // state when dropped, and every view that evaluated it would draw
+            // again next frame though nothing changed (PM-702: the
+            // workspace's fades and slides drew the whole window each frame).
+            let rest = self.state.read(cx).resting_sample();
+            let sample = rest.unwrap_or_else(|| self.state.as_mut(cx).sample(Instant::now()));
 
             *self.cache.borrow_mut() = TransitionCache {
                 value: Some(sample.value),

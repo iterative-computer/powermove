@@ -33,10 +33,11 @@ mod composition_accessibility_order;
 pub mod native_text;
 pub mod native_control;
 mod scroll_fade;
+pub mod slot_region;
 mod platform;
 mod window;
 #[cfg(feature = "frame-capture")]
-pub use window::split_cursor_is_custom;
+pub use window::{allow_offscreen_windows, split_cursor_is_custom};
 mod window_appearance;
 
 pub(crate) use dispatcher::*;

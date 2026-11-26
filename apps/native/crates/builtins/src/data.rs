@@ -196,6 +196,10 @@ impl Backend {
         }
     }
     pub(crate) fn sync(&mut self) -> Result<(), String> {
+        // A sign-in or sign-out of the Powermove account: Aero reads its plan again.
+        self.native
+            .agent_link
+            .follow_account(self.native.facts["cloud"]["revision"].as_u64().unwrap_or(0));
         let published = self.published();
         if self.model.is_none() {
             let accounts = self.native.agent_link.accounts_revision();

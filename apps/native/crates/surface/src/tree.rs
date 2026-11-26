@@ -154,6 +154,9 @@ pub struct Surface {
     /// children or place. An event planned earlier may still land on an
     /// element whose subtree has not changed since.
     changed: BTreeMap<Id, u64>,
+    /// Whether the last commit changed any node: a commit can set what is
+    /// already there (a re-render that came out the same).
+    last_changed: bool,
     pub limits: Limits,
     pub allow_webview: bool,
     styles: crate::style::StyleSheet,
@@ -165,6 +168,7 @@ impl Default for Surface {
             nodes: BTreeMap::from([(0, Node::new(0, "root".into()))]),
             high_id: 0,
             changed: BTreeMap::new(),
+            last_changed: false,
             limits: Limits::default(),
             allow_webview: false,
             styles: crate::style::StyleSheet::default(),
@@ -174,6 +178,10 @@ impl Default for Surface {
 impl Surface {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Whether the last commit applied changed any node.
+    pub fn last_commit_changed(&self) -> bool {
+        self.last_changed
     }
     pub fn nodes(&self) -> &BTreeMap<Id, Node> {
         &self.nodes
@@ -206,14 +214,39 @@ impl Surface {
             .revision
             .checked_add(1)
             .ok_or_else(|| reject(None, "revision exhausted"))?;
+        let mut changed = false;
         for (index, op) in commit.ops.into_iter().enumerate() {
             let touched = next.touched(&op);
+            let before: Vec<Option<Node>> = touched
+                .iter()
+                .map(|id| next.nodes.get(id).cloned())
+                .collect();
+            // A node moved within its parent is itself unchanged; its place
+            // is not, and an event planned where it was must not land.
+            let moved = match &op {
+                Op::InsertBefore { id, .. } => Some((*id, next.place(*id))),
+                _ => None,
+            };
             next.apply_op(op, &mut diagnostics)
                 .map_err(|reason| reject(Some(index), &reason))?;
-            for id in touched {
+            // Only what the op really changed: an event planned on the last
+            // revision still lands on a node a commit set to what it was.
+            for (id, was) in touched.into_iter().zip(before) {
+                if next.nodes.get(&id) != was.as_ref() {
+                    next.changed.insert(id, revision);
+                    changed = true;
+                }
+            }
+            if let Some((id, was)) = moved
+                && next.place(id) != was
+            {
                 next.changed.insert(id, revision);
+                changed = true;
             }
         }
+        // A surface's first commit always counts, empty or not: it replaces
+        // whatever an earlier realm left on screen.
+        next.last_changed = changed || self.revision == 0;
         next.validate().map_err(|reason| reject(None, &reason))?;
         let nodes = &next.nodes;
         next.changed.retain(|id, _| nodes.contains_key(id));
@@ -236,6 +269,17 @@ impl Surface {
                 vec![*id]
             }
         }
+    }
+    /// Where a node stands: its parent and its index there.
+    fn place(&self, id: Id) -> Option<(Id, usize)> {
+        let parent = self.nodes.get(&id)?.parent?;
+        let index = self
+            .nodes
+            .get(&parent)?
+            .children
+            .iter()
+            .position(|c| *c == id)?;
+        Some((parent, index))
     }
     /// True when `id` exists and nothing in its subtree changed after `revision`.
     pub fn unchanged_since(&self, id: Id, revision: u64) -> bool {

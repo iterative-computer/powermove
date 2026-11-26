@@ -1131,6 +1131,9 @@ impl Editor {
             };
             self.library_places.insert(rest.into(), place);
         }
+        if kind == "panel" && matches!(verb, "toggle" | "show" | "activate") {
+            crate::telemetry::panel_requested(rest);
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
@@ -1518,10 +1521,9 @@ impl Editor {
                 .panels
                 .iter()
                 .find(|p| {
-                    self.layout.docks[p.dock].groups[p.group]
-                        .tabs
-                        .iter()
-                        .any(|tab| tab == id)
+                    self.layout
+                        .placed(p)
+                        .is_some_and(|g| g.tabs.iter().any(|tab| tab == id))
                 })
                 .cloned()
                 && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
@@ -1552,7 +1554,7 @@ impl Editor {
                     .geometry
                     .panels
                     .iter()
-                    .find(|p| self.layout.docks[p.dock].groups[p.group].active() == *panel)
+                    .find(|p| self.layout.placed(p).is_some_and(|g| g.active() == *panel))
                 && let Some(divider) = self
                     .geometry
                     .dividers
@@ -1793,11 +1795,7 @@ impl Editor {
                         .panels
                         .iter()
                         .find(|p| p.rect.contains(at.x.into(), at.y.into()))
-                        .map(|p| {
-                            self.layout.docks[p.dock].groups[p.group]
-                                .active()
-                                .to_owned()
-                        })
+                        .and_then(|p| self.layout.placed(p).map(|g| g.active().to_owned()))
                         .or_else(|| {
                             self.panel_order
                                 .iter()
@@ -2046,6 +2044,16 @@ impl Editor {
     /// Where tab `id` (or a lone title) is drawn in its header, as last
     /// rendered. For headless recordings and tests.
     #[doc(hidden)]
+    /// How far dock `id` (a column of panels) is scrolled (benches).
+    #[doc(hidden)]
+    pub fn dock_scroll_offset(&self, id: &str) -> f32 {
+        self.dock_scroll.get(id).copied().unwrap_or(0.)
+    }
+    /// The dividers as last laid out (benches drive their drags).
+    #[doc(hidden)]
+    pub fn dividers(&self) -> &[layout::Divider] {
+        &self.geometry.dividers
+    }
     pub fn tab_rect(&self, id: &str) -> Option<Rect> {
         let (dock, group, tab) = self.layout.find(id)?;
         let p = self
@@ -2536,7 +2544,9 @@ impl Editor {
             .panels
             .iter()
             .find(|p| {
-                let group = &self.layout.docks[p.dock].groups[p.group];
+                let Some(group) = self.layout.placed(p) else {
+                    return false;
+                };
                 group.tabs.get(group.active).is_some_and(|tab| tab == id)
                     && self
                         .maximized_panel
@@ -3023,6 +3033,54 @@ fn native_body(panel: Rect, edge: f32, header: f32) -> Rect {
         y: panel.y + header,
         w: (panel.w - edge * 2.).max(0.),
         h: (panel.h - header - edge).max(0.),
+    }
+}
+/// A panel's split/join/dock grip in `corner`, shown while the pointer is in
+/// that corner's hit zone: a hairline along the panel's own corner curve (a
+/// quad at the panel's corner with its radius and smoothing, bordered on the
+/// two sides that meet there), so it is concentric by construction and never
+/// leaves the panel's rounded shape.
+fn area_grip(
+    panel: Rect,
+    corner: crate::area::Corner,
+    ink: Rgba,
+    clip: Option<Rect>,
+    t: &Tokens,
+) -> impl Fn(&mut Window) + 'static {
+    let radius = t.metrics.panel_radius;
+    let smoothing = t.radius.smoothing;
+    // The corner curve's whole reach, so the stroke is the curve alone.
+    let side = (radius * (1. + smoothing)).ceil();
+    let x = if corner.left() { panel.x } else { panel.x + panel.w - side };
+    let y = if corner.top() { panel.y } else { panel.y + panel.h - side };
+    let round = |left: bool, top: bool| {
+        if corner.left() == left && corner.top() == top { px(radius) } else { Pixels::ZERO }
+    };
+    let stroke = |on: bool| if on { px(t.metrics.border) } else { Pixels::ZERO };
+    let quad = PaintQuad::new(Bounds::new(point(px(x), px(y)), size(px(side), px(side))))
+        .corner_radii(Corners {
+            top_left: round(true, true),
+            top_right: round(false, true),
+            bottom_right: round(false, false),
+            bottom_left: round(true, false),
+        })
+        .corner_smoothing(smoothing)
+        .border_widths(Edges {
+            top: stroke(corner.top()),
+            bottom: stroke(!corner.top()),
+            left: stroke(corner.left()),
+            right: stroke(!corner.left()),
+        })
+        .border_color(ink);
+    move |window: &mut Window| match clip {
+        Some(c) => window.with_content_mask(
+            Some(ContentMask {
+                bounds: Bounds::new(point(px(c.x), px(c.y)), size(px(c.w), px(c.h))),
+                ..Default::default()
+            }),
+            |window| window.paint_quad(quad.clone()),
+        ),
+        None => window.paint_quad(quad.clone()),
     }
 }
 fn positioned(r: Rect) -> Div {
@@ -3593,16 +3651,14 @@ impl Editor {
                         .panels
                         .iter()
                         .find(|p| p.rect.contains(at.0, at.1))
-                        .map(|p| {
-                            let id = this.layout.docks[p.dock].groups[p.group]
-                                .active()
-                                .to_string();
-                            (
+                        .and_then(|p| {
+                            let id = this.layout.placed(p)?.active().to_string();
+                            Some((
                                 id,
                                 crate::area::Corner::ALL
                                     .into_iter()
                                     .find(|c| c.rect(p.rect).contains(at.0, at.1)),
-                            )
+                            ))
                         })).flatten();
                     if this.area_hover != hover {
                         this.area_hover = hover;
@@ -4125,7 +4181,15 @@ impl Editor {
                         .tab_index(0)
                         .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                             if event.is_keyboard() {
-                                this.layout.docks[p.dock].groups[p.group].active = ti;
+                                // `p` is from the last layout pass (see `Layout::placed`).
+                                if let Some(g) = this
+                                    .layout
+                                    .docks
+                                    .get_mut(p.dock)
+                                    .and_then(|d| d.groups.get_mut(p.group))
+                                {
+                                    g.active = ti;
+                                }
                                 this.save();
                                 cx.notify();
                             }
@@ -4872,7 +4936,6 @@ impl Editor {
                 let id = self.layout.docks[p.dock].groups[p.group]
                     .active()
                     .to_string();
-                let panel_hover = self.area_hover.as_ref().is_some_and(|(h, _)| h == &id);
                 for (i, corner) in crate::area::Corner::ALL.into_iter().enumerate() {
                     let corner_rect = self.geometry.side_docks.get(&p.dock)
                         .map_or(corner.rect(p.rect), |clip| corner.rect(p.rect).intersection(*clip));
@@ -4881,61 +4944,36 @@ impl Editor {
                         .area_hover
                         .as_ref()
                         .is_some_and(|(h, c)| h == &id && *c == Some(corner));
-                    let goal = if active {
-                        1.
-                    } else if panel_hover {
-                        0.7
-                    } else {
-                        0.
-                    };
+                    // Only the corner's own hit zone shows its grip; a
+                    // plain panel hover shows nothing in the corners.
+                    let goal = if active { 1. } else { 0. };
                     let fade = w
                         .use_keyed_transition(
                             format!("area-fade-{id}-{i}"),
                             cx,
-                            Duration::from_millis(100),
+                            Duration::from_secs_f64(t.motion.interaction),
                             |_, _| goal,
                         )
                         .with_easing(|p| 1. - (1. - p).powi(3));
                     fade.update(cx, |value, _| *value = goal);
                     let opacity = *fade.evaluate(w, cx);
-                    let ink = if active {
-                        tint(c.accent, opacity)
-                    } else {
-                        tint(c.text, 0.34 * opacity)
-                    };
+                    let ink = tint(c.accent, opacity);
                     let id_down = id.clone();
+                    let grip = area_grip(
+                        p.rect,
+                        corner,
+                        ink,
+                        self.geometry.side_docks.get(&p.dock).copied(),
+                        &t,
+                    );
                     root = root.child(
                         positioned(corner_rect)
                             .id(format!("area-{id}-{i}"))
                             .tooltip(tooltip(&t, "Drag to split, join or dock"))
                             .cursor(CursorStyle::Crosshair)
                             .child(
-                                canvas(
-                                    move |_, _, _| (),
-                                    move |b, _, window, _| {
-                                        let x = f32::from(b.origin.x) + 2.;
-                                        let y = f32::from(b.origin.y) + 2.;
-                                        // CSS 7px square with a diagonal 30% (34% on hover) stop.
-                                        let leg = 7. * 2. * if active { 0.34 } else { 0.30 };
-                                        let x = if corner.left() { x } else { x + 7. };
-                                        let y = if corner.top() { y } else { y + 7. };
-                                        let mut path = PathBuilder::fill();
-                                        path.move_to(point(px(x), px(y)));
-                                        path.line_to(point(
-                                            px(x + if corner.left() { leg } else { -leg }),
-                                            px(y),
-                                        ));
-                                        path.line_to(point(
-                                            px(x),
-                                            px(y + if corner.top() { leg } else { -leg }),
-                                        ));
-                                        path.close();
-                                        if let Ok(path) = path.build() {
-                                            window.paint_path(path, ink);
-                                        }
-                                    },
-                                )
-                                .size_full(),
+                                canvas(move |_, _, _| (), move |_, _, window, _| grip(window))
+                                    .size_full(),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -5226,6 +5264,62 @@ mod keyboard_tests {
         )
     }
 
+    /// The owner closed the Colour panel from its menu and the next pointer
+    /// move aborted the app: the move listener read the closed stack through
+    /// the last pass's geometry. Every panel closed from its menu, then the
+    /// pointer crosses every place the old layout drew, before a redraw.
+    #[gpui::test]
+    fn closing_any_panel_then_moving_the_pointer_never_panics(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(
+                Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let ids: Vec<String> = view.read_with(cx, |v, _| {
+            v.layout
+                .open_panels()
+                .into_iter()
+                .filter(|id| crate::layout::closable(id))
+                .map(str::to_owned)
+                .collect()
+        });
+        assert!(ids.len() >= 4, "{ids:?}");
+        let original = view.read_with(cx, |v, _| v.layout.clone());
+        for id in ids {
+            let rects: Vec<Rect> =
+                view.read_with(cx, |v, _| v.geometry.panels.iter().map(|p| p.rect).collect());
+            // As AppKit does after the menu closes: the moves arrive before
+            // the window draws the new layout.
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| {
+                    assert!(v.shell_command(&format!("panel:close:{id}"), cx), "{id}");
+                });
+                for r in &rects {
+                    for (x, y) in [(0.5, 0.5), (0.02, 0.02), (0.98, 0.98), (0.5, 0.05)] {
+                        let position = point(px(r.x + r.w * x), px(r.y + r.h * y));
+                        window.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position,
+                                pressed_button: None,
+                                modifiers: Modifiers::none(),
+                            }),
+                            cx,
+                        );
+                    }
+                }
+            });
+            cx.run_until_parked();
+            view.update(cx, |v, cx| {
+                v.layout = original.clone();
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+    }
+
     #[gpui::test]
     fn area_corners_capture_pointer_and_escape_restores_layout(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| {
@@ -5256,10 +5350,135 @@ mod keyboard_tests {
             view.read_with(cx, |v, _| assert_eq!(v.layout, original));
         }
     }
+    /// The owner: hovering any panel put grey bits in its corners. A plain
+    /// panel hover changes no corner pixel; with the pointer in a corner's
+    /// hit zone its grip shows, and every pixel it changes lies inside the
+    /// panel's rounded shape. Both schemes, every panel, every corner.
+    #[::core::prelude::v1::test]
+    fn panel_corners_change_only_inside_the_panel_and_only_for_the_grip() {
+        for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
+            let t = Tokens::new(scheme, Default::default());
+            // The renderer's continuous corner (normalized superellipse).
+            let (radius, smoothing) = (t.metrics.panel_radius, t.radius.smoothing);
+            let extent = radius * (1. + smoothing);
+            let power = -(2f32.ln())
+                / (1. - (1. - std::f32::consts::FRAC_1_SQRT_2) / (1. + smoothing)).ln();
+            let outside = |u: f32, v: f32| {
+                u < 0.
+                    || v < 0.
+                    || (u < extent
+                        && v < extent
+                        && ((extent - u) / extent).powf(power) + ((extent - v) / extent).powf(power)
+                            > 1.)
+            };
+            objc2::rc::autoreleasepool(|_| {
+                let mut cx = HeadlessAppContext::with_platform(
+                    Arc::new(gpui_parley::ParleyTextSystem::new(
+                        gpui_parley::SystemFonts::Load,
+                    )),
+                    Arc::new(()),
+                    || {
+                        Some(Box::new(
+                            gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                        ))
+                    },
+                );
+                let w = cx
+                    .open_window(size(px(1440.), px(900.)), |_, cx| {
+                        cx.new(|cx| Editor::new(Tokens::new(scheme, Default::default()), None, cx))
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let panels: Vec<(String, Rect)> = w
+                    .update(&mut cx, |v, _, _| {
+                        v.geometry
+                            .panels
+                            .iter()
+                            .map(|p| (v.layout.placed(p).unwrap().active().to_string(), p.rect))
+                            .collect()
+                    })
+                    .unwrap();
+                assert!(panels.len() >= 4, "{panels:?}");
+                let capture = |cx: &mut HeadlessAppContext, hover| {
+                    w.update(cx, |v, _, cx| {
+                        v.area_hover = hover;
+                        cx.notify();
+                    })
+                    .unwrap();
+                    cx.run_until_parked();
+                    // Settle the grip's fade before the frame.
+                    std::thread::sleep(Duration::from_millis(150));
+                    w.update(cx, |_, _, cx| cx.notify()).unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(w.into()).unwrap()
+                };
+                let rest = capture(&mut cx, None);
+                let scale = rest.width() as f32 / 1440.;
+                // Pixels within `extent + 4` pt of each corner, as (u, v) in
+                // points from the corner (pixel centres) and the largest
+                // channel change from rest.
+                let changes = |image: &image::RgbaImage, r: Rect, corner: crate::area::Corner| {
+                    let n = ((extent + 4.) * scale) as i32;
+                    let mut out = vec![];
+                    for i in -4..n {
+                        for j in -4..n {
+                            let (u, v) = ((i as f32 + 0.5) / scale, (j as f32 + 0.5) / scale);
+                            let x = if corner.left() { r.x + u } else { r.x + r.w - u };
+                            let y = if corner.top() { r.y + v } else { r.y + r.h - v };
+                            let (px_, py) = ((x * scale) as u32, (y * scale) as u32);
+                            let a = rest.get_pixel(px_, py);
+                            let b = image.get_pixel(px_, py);
+                            let d = a.0.iter().zip(b.0).map(|(a, b)| a.abs_diff(b)).max().unwrap();
+                            out.push((u, v, d));
+                        }
+                    }
+                    out
+                };
+                for (id, r) in &panels {
+                    let hovered = capture(&mut cx, Some((id.clone(), None)));
+                    for corner in crate::area::Corner::ALL {
+                        let worst = changes(&hovered, *r, corner).into_iter().map(|c| c.2).max();
+                        assert!(
+                            worst <= Some(2),
+                            "{scheme:?} {id} {corner:?}: a plain hover changed the corner ({worst:?})"
+                        );
+                    }
+                    for grip in crate::area::Corner::ALL {
+                        let shown = capture(&mut cx, Some((id.clone(), Some(grip))));
+                        for corner in crate::area::Corner::ALL {
+                            let changed: Vec<_> = changes(&shown, *r, corner)
+                                .into_iter()
+                                .filter(|c| c.2 > 2)
+                                .collect();
+                            if corner != grip {
+                                assert!(changed.is_empty(), "{scheme:?} {id} {corner:?} changed for {grip:?}");
+                                continue;
+                            }
+                            assert!(changed.len() > 10, "{scheme:?} {id} {grip:?}: no grip");
+                            // A changed pixel a whole point outside the shape
+                            // is outside it (edge pixels are half covered).
+                            for (u, v, d) in changed {
+                                assert!(
+                                    !outside(u + 1., v + 1.),
+                                    "{scheme:?} {id} {grip:?}: ({u:.2}, {v:.2}) outside the panel changed by {d}"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
     #[::core::prelude::v1::test]
     fn area_corners_headless_capture() {
         let Some(dir) = std::env::var_os("PM_PANEL_CORNERS_CAPTURE_DIR") else {
             return;
+        };
+        // `PM_PANEL_CORNERS_LIGHT=1` captures the light scheme.
+        let scheme = if std::env::var_os("PM_PANEL_CORNERS_LIGHT").is_some() {
+            pm_design::Scheme::Light
+        } else {
+            pm_design::Scheme::Dark
         };
         objc2::rc::autoreleasepool(|_| {
             let mut cx = HeadlessAppContext::with_platform(
@@ -5277,7 +5496,7 @@ mod keyboard_tests {
                 .open_window(size(px(1440.), px(900.)), |_, cx| {
                     cx.new(|cx| {
                         Editor::new(
-                            Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                            Tokens::new(scheme, Default::default()),
                             None,
                             cx,
                         )
@@ -5289,7 +5508,7 @@ mod keyboard_tests {
                 .update(&mut cx, |v, _, _| {
                     let p = &v.geometry.panels[0];
                     (
-                        v.layout.docks[p.dock].groups[p.group].active().to_string(),
+                        v.layout.placed(p).unwrap().active().to_string(),
                         p.rect,
                     )
                 })
@@ -5326,11 +5545,12 @@ mod keyboard_tests {
                 let image = cx.capture_screenshot(w.into()).unwrap();
                 let scale = image.width() as f32 / 1440.;
                 let path = std::path::Path::new(&dir);
-                image.save(path.join(format!("native-{name}.png"))).unwrap();
+                image.save(path.join(format!("{scheme:?}-{name}.png"))).unwrap();
                 for (i, c) in crate::area::Corner::ALL.into_iter().enumerate() {
-                    let hit = c.rect(r);
-                    let x = ((hit.x - 6.).max(0.) * scale) as u32;
-                    let y = ((hit.y - 6.).max(0.) * scale) as u32;
+                    // 28 pt from 4 pt outside the corner: the whole curve.
+                    let x = if c.left() { r.x - 4. } else { r.x + r.w - 24. };
+                    let y = if c.top() { r.y - 4. } else { r.y + r.h - 24. };
+                    let (x, y) = ((x.max(0.) * scale) as u32, (y.max(0.) * scale) as u32);
                     image::imageops::crop_imm(
                         &image,
                         x,
@@ -5339,7 +5559,7 @@ mod keyboard_tests {
                         (28. * scale) as u32,
                     )
                     .to_image()
-                    .save(path.join(format!("native-{name}-corner-{i}.png")))
+                    .save(path.join(format!("{scheme:?}-{name}-corner-{i}.png")))
                     .unwrap();
                 }
             }

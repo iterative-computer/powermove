@@ -23,23 +23,6 @@ use gpui_render::{
 };
 use image::RgbaImage;
 
-#[derive(Clone, Copy)]
-enum DotPass {
-    Matrix {
-        detail: f32,
-        resolve: f32,
-        accent: u32,
-        scale: f32,
-    },
-    Aurora {
-        age: f32,
-        opening: f32,
-        fade: f32,
-        palette: [u32; 3],
-        scale: f32,
-    },
-}
-
 use core_foundation::base::TCFType;
 use core_video::{
     metal_texture::CVMetalTextureGetTexture, metal_texture_cache::CVMetalTextureCache,
@@ -169,6 +152,15 @@ pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
     // Reborrow its Objective-C object as the generated objc2 class to keep
     // selector encodings and the autoresizing mask type checked here.
     let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
+    // GPUI's packed surfaces (including snapshot transitions) are encoded sRGB.
+    // Label the layer explicitly so ColorSync converts them on wide-gamut displays.
+    let space = core_graphics::color_space::CGColorSpace::create_with_name(unsafe {
+        core_graphics::color_space::kCGColorSpaceSRGB
+    })
+    .expect("sRGB color space");
+    // The core-graphics and objc2-core-graphics wrappers retain the same CF type;
+    // CAMetalLayer retains the color space before the local wrapper is dropped.
+    unsafe { layer_object.setColorspace(Some(&*space.as_ptr().cast())) };
     // Powermove: the layer is asked for a drawable off the main thread
     // (`DrawableSource`) or inside AppKit's own synchronous paints; with the
     // timeout a full pool gives up after a second instead of waiting for ever.
@@ -306,6 +298,10 @@ pub struct MetalRenderer {
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     headless_render_target: Option<metal::Texture>,
+    /// Snapshot transitions: the reused full-size target and their event.
+    snapshot_target: Option<metal::Texture>,
+    snapshot_event: Option<metal::Event>,
+    snapshot_value: u64,
     /// When the last scene was encoded (`release_idle_targets`).
     last_draw: Option<std::time::Instant>,
     /// `PM_GPUI_PRESENT_TRACE`: how long the last draw waited for its drawable.
@@ -426,6 +422,46 @@ impl DrawableSource {
     pub fn resized(&mut self) {
         self.release();
         self.request();
+    }
+}
+
+/// A frame encoded into its drawable, not yet committed or presented
+/// ([`MetalRenderer::prepare`], [`MetalRenderer::submit`]).
+pub struct PreparedFrame {
+    drawable: metal::MetalDrawable,
+    command_buffer: metal::CommandBuffer,
+    from_link: bool,
+}
+
+/// How a prepared frame reaches the layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    /// Committed, scheduled, then presented inside the current transaction.
+    Transaction,
+    /// A CAMetalDisplayLink's drawable: presented right after the commit.
+    Link,
+    /// Presented by its command buffer once scheduled.
+    Queued,
+}
+
+/// Whether a supplied drawable is a CAMetalDisplayLink's: only while a link
+/// owns the layer (`link_bound`). A direct window's drawables are supplied
+/// too, but the layer gave them.
+pub fn supplied_from_link(supplied: bool, link_bound: bool) -> bool {
+    supplied && link_bound
+}
+
+/// The present for a frame: with the transaction when it moves hosted views,
+/// at its link's update when a CAMetalDisplayLink supplied its drawable, and
+/// otherwise queued on its commands (a drawable the layer gave must never be
+/// presented before its rendering is scheduled).
+pub fn present_mode(with_transaction: bool, from_link: bool) -> PresentMode {
+    if with_transaction {
+        PresentMode::Transaction
+    } else if from_link {
+        PresentMode::Link
+    } else {
+        PresentMode::Queued
     }
 }
 
@@ -705,10 +741,13 @@ impl MetalRenderer {
             intermediate_texture_size: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             headless_render_target: None,
+            snapshot_target: None,
+            snapshot_event: None,
+            snapshot_value: 0,
             last_draw: None,
             acquire_seconds: 0.,
-            presented_once: false,
             async_in_flight: Default::default(),
+            presented_once: false,
         }
     }
 
@@ -946,55 +985,33 @@ impl MetalRenderer {
         }
     }
 
-}
-
-/// A frame encoded into its drawable, not yet committed or presented
-/// ([`MetalRenderer::prepare`], [`MetalRenderer::submit`]).
-pub struct PreparedFrame {
-    drawable: metal::MetalDrawable,
-    command_buffer: metal::CommandBuffer,
-    from_link: bool,
-}
-
-/// How a prepared frame reaches the layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PresentMode {
-    /// Committed, scheduled, then presented inside the current transaction.
-    Transaction,
-    /// A CAMetalDisplayLink's drawable: presented right after the commit.
-    Link,
-    /// Presented by its command buffer once scheduled.
-    Queued,
-}
-
-/// Whether a supplied drawable is a CAMetalDisplayLink's: only while a link
-/// owns the layer (`link_bound`). A direct window's drawables are supplied
-/// too, but the layer gave them.
-pub fn supplied_from_link(supplied: bool, link_bound: bool) -> bool {
-    supplied && link_bound
-}
-
-/// The present for a frame: with the transaction when it moves hosted views,
-/// at its link's update when a CAMetalDisplayLink supplied its drawable, and
-/// otherwise queued on its commands (a drawable the layer gave must never be
-/// presented before its rendering is scheduled).
-pub fn present_mode(with_transaction: bool, from_link: bool) -> PresentMode {
-    if with_transaction {
-        PresentMode::Transaction
-    } else if from_link {
-        PresentMode::Link
-    } else {
-        PresentMode::Queued
+    /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
+    /// the layer, a draw outside its update has none, and asking the layer for
+    /// one raises `CAMetalLayerInvalidOperation` (aborting the app): the caller
+    /// paints on the link's next update instead. Synchronous presents release
+    /// the link first, so they may ask.
+    /// Draws `scene` and presents it, with the transaction when
+    /// [`Self::set_presents_with_transaction`] asked for it. False when no
+    /// frame could be prepared (see [`Self::prepare`]).
+    pub fn draw(&mut self, scene: &Scene) -> bool {
+        match self.prepare(scene) {
+            Some(frame) => {
+                let with_transaction = self.presents_with_transaction;
+                self.submit(frame, with_transaction);
+                true
+            }
+            None => false,
+        }
     }
-}
 
-impl MetalRenderer {
     /// Acquires a drawable of the layer's size and encodes `scene` into it,
     /// committing and presenting nothing (Powermove P-SLOT-REGION: hosted
     /// views are published only once their frame is sure to present).
     /// `None` when there is no drawable or encoding failed: nothing was shown
     /// and nothing needs undoing.
     pub fn prepare(&mut self, scene: &Scene) -> Option<PreparedFrame> {
+        // The frame's work ends here, before any wait for a drawable.
+        crate::feel::observed_frame();
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -1018,13 +1035,16 @@ impl MetalRenderer {
         if supplied.is_none() && self.display_link_bound {
             return None;
         }
-        let asked = present_trace().then(std::time::Instant::now);
+        // Only a CAMetalDisplayLink's drawable is presented at its update
+        // (before its deadline, without a scheduled wait); one the layer gave
+        // (directly or through `DrawableSource`) is queued on its commands.
         let from_link = supplied_from_link(supplied.is_some(), self.display_link_bound);
+        let asked = present_trace().then(std::time::Instant::now);
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
-            supplied.or_else(|| layer.next_drawable().map(|d| d.to_owned()))
+            supplied.as_deref().or_else(|| layer.next_drawable())
         }) {
             self.acquire_seconds = asked.map_or(0., |at| at.elapsed().as_secs_f64());
-            drawable
+            drawable.to_owned()
         } else {
             log::error!(
                 "failed to retrieve next drawable, drawable size: {:?}",
@@ -1032,21 +1052,21 @@ impl MetalRenderer {
             );
             return None;
         };
+        let drawable_ref: &metal::MetalDrawableRef = &drawable;
 
         // A display-link update can carry the previous size during live resize.
         // Encode against the supplied texture, not the layer's next requested size.
         let viewport_size = size(
-            DevicePixels(drawable.texture().width() as i32),
-            DevicePixels(drawable.texture().height() as i32),
+            DevicePixels(drawable_ref.texture().width() as i32),
+            DevicePixels(drawable_ref.texture().height() as i32),
         );
-
         // Powermove P-120: opt-in timestamps of the actual GPUI drawable, not a sibling viewer.
         if std::env::var_os("PM_FRAME_PACING").is_some() {
             let handler = ConcreteBlock::new(|d: &metal::DrawableRef| {
                 println!("PM_GPUI_PRESENT {:.9}", d.presented_time());
             })
             .copy();
-            drawable.add_presented_handler(&handler);
+            drawable_ref.add_presented_handler(&handler);
         }
         if crate::launch::enabled() {
             let labels = crate::launch::take_armed(!std::mem::replace(&mut self.presented_once, true));
@@ -1055,12 +1075,12 @@ impl MetalRenderer {
                     crate::launch::presented(&labels, d.presented_time());
                 })
                 .copy();
-                drawable.add_presented_handler(&handler);
+                drawable_ref.add_presented_handler(&handler);
             }
         }
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer = match measure_native("GPUI encode", || {
-            self.draw_primitives(scene, &mut instance_buffer, &drawable, viewport_size)
+            self.draw_primitives(scene, &mut instance_buffer, drawable_ref, viewport_size)
         }) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
@@ -1069,7 +1089,6 @@ impl MetalRenderer {
             }
         };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
-
         Some(PreparedFrame {
             drawable,
             command_buffer,
@@ -1144,29 +1163,8 @@ impl MetalRenderer {
     /// Whether a frame presented outside a transaction has not completed yet
     /// (P-SLOT-REGION: a frame that moves hosted views waits for it).
     pub fn async_presents_in_flight(&self) -> bool {
-        self.async_in_flight
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0
+        self.async_in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
     }
-
-    /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
-    /// the layer, a draw outside its update has none, and asking the layer for
-    /// one raises `CAMetalLayerInvalidOperation` (aborting the app): the caller
-    /// paints on the link's next update instead. Synchronous presents release
-    /// the link first, so they may ask.
-    pub fn draw(&mut self, scene: &Scene) -> bool {
-        match self.prepare(scene) {
-            Some(frame) => {
-                let with_transaction = self.presents_with_transaction;
-                self.submit(frame, with_transaction);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-impl MetalRenderer {
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing
@@ -1346,6 +1344,107 @@ impl MetalRenderer {
         })
     }
 
+    /// `render_scene_region_to_texture` at the window layer's drawable size.
+    pub fn render_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        region: Bounds<DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        let layer = self
+            .layer
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("render_region_to_texture requires a layer"))?;
+        let d = layer.drawable_size();
+        let size = gpui::size(
+            DevicePixels(d.width.ceil() as i32),
+            DevicePixels(d.height.ceil() as i32),
+        );
+        self.render_scene_region_to_texture(scene, size, region)
+    }
+
+    /// Pictures `region` of `scene` into a new GPU texture without reading
+    /// it back or waiting: the scene is drawn into a reused full-size
+    /// target, the region is blitted into the texture, and `snapshot_event`
+    /// is signalled at the returned value when it is done. Snapshot
+    /// transitions (Powermove's wave) wait on that event on the GPU.
+    pub fn render_scene_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+    ) -> Result<gpui::GpuSnapshot> {
+        objc2::rc::autoreleasepool(|_| {
+            anyhow::ensure!(
+                size.width.0 > 0
+                    && size.height.0 > 0
+                    && region.size.width.0 > 0
+                    && region.size.height.0 > 0
+                    && region.origin.x.0 >= 0
+                    && region.origin.y.0 >= 0
+                    && region.origin.x.0 + region.size.width.0 <= size.width.0
+                    && region.origin.y.0 + region.size.height.0 <= size.height.0,
+                "snapshot region outside the target"
+            );
+            let needs_new_target = self.snapshot_target.as_ref().is_none_or(|texture| {
+                texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
+            });
+            if needs_new_target {
+                let d = metal::TextureDescriptor::new();
+                d.set_width(size.width.0 as u64);
+                d.set_height(size.height.0 as u64);
+                d.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                d.set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+                d.set_storage_mode(metal::MTLStorageMode::Private);
+                self.snapshot_target = Some(self.device.new_texture(&d));
+            }
+            let target = self.snapshot_target.clone().expect("just ensured");
+            let d = metal::TextureDescriptor::new();
+            d.set_width(region.size.width.0 as u64);
+            d.set_height(region.size.height.0 as u64);
+            d.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            d.set_usage(metal::MTLTextureUsage::ShaderRead | metal::MTLTextureUsage::RenderTarget);
+            d.set_storage_mode(metal::MTLStorageMode::Private);
+            let picture = self.device.new_texture(&d);
+            let mut instance_buffer = self.acquire_instance_buffer(scene);
+            let command_buffer =
+                self.draw_primitives_to_texture(scene, &mut instance_buffer, &target, size)?;
+            let blit = command_buffer.new_blit_command_encoder();
+            blit.copy_from_texture(
+                &target,
+                0,
+                0,
+                metal::MTLOrigin {
+                    x: region.origin.x.0 as u64,
+                    y: region.origin.y.0 as u64,
+                    z: 0,
+                },
+                metal::MTLSize {
+                    width: region.size.width.0 as u64,
+                    height: region.size.height.0 as u64,
+                    depth: 1,
+                },
+                &picture,
+                0,
+                0,
+                metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+            blit.end_encoding();
+            let event = self
+                .snapshot_event
+                .get_or_insert_with(|| self.device.new_event())
+                .clone();
+            self.snapshot_value += 1;
+            command_buffer.encode_signal_event(&event, self.snapshot_value);
+            self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
+            command_buffer.commit();
+            Ok(gpui::GpuSnapshot {
+                texture: picture,
+                event,
+                value: self.snapshot_value,
+            })
+        })
+    }
+
     fn acquire_instance_buffer(&self, scene: &Scene) -> InstanceBuffer {
         self.instance_buffer_pool.lock().acquire(
             &self.device,
@@ -1410,11 +1509,7 @@ impl MetalRenderer {
         }
         // Captured objects survive dropped scenes and repeat for cached scene submissions.
         let completed = ConcreteBlock::new(move |buffer: &metal::CommandBufferRef| {
-            let status = buffer.status();
-            let succeeded = status == metal::MTLCommandBufferStatus::Completed;
-            if !succeeded {
-                log::error!("GPUI Metal command buffer failed with status {:?}", status);
-            }
+            let succeeded = buffer.status() == metal::MTLCommandBufferStatus::Completed;
             for t in &textures {
                 if !succeeded {
                     t.retire();
@@ -1655,25 +1750,7 @@ impl MetalRenderer {
                                 resolve,
                                 accent,
                                 scale,
-                            } => Some(DotPass::Matrix {
-                                detail: *detail,
-                                resolve: *resolve,
-                                accent: *accent,
-                                scale: *scale,
-                            }),
-                            gpui::ScaledFilter::DotAurora {
-                                age,
-                                opening,
-                                fade,
-                                palette,
-                                scale,
-                            } => Some(DotPass::Aurora {
-                                age: *age,
-                                opening: *opening,
-                                fade: *fade,
-                                palette: *palette,
-                                scale: *scale,
-                            }),
+                            } => Some((*detail, *resolve, *accent, *scale)),
                             _ => None,
                         }),
                     );
@@ -1831,7 +1908,7 @@ impl MetalRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
-        dots: Option<DotPass>,
+        dots: Option<(f32, f32, u32, f32)>,
     ) {
         if clip_rounded && blur_radius <= 0.0 {
             return;
@@ -1853,7 +1930,7 @@ impl MetalRenderer {
         if scissor.is_empty() {
             return;
         }
-        let clip = if clip_rounded || matches!(dots, Some(DotPass::Aurora { .. })) {
+        let clip = if clip_rounded {
             gpui_render::blur::FilterCompositeClip::RoundedBounds
         } else {
             gpui_render::blur::FilterCompositeClip::ContentShape
@@ -1920,39 +1997,14 @@ impl MetalRenderer {
             source_size,
             full_size,
         );
-        if let Some(dots) = dots {
-            match dots {
-                DotPass::Matrix {
-                    detail,
-                    resolve,
-                    accent,
-                    scale,
-                } => {
-                    composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
-                    composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
-                        ((accent >> 16) & 255) as f32 / 255.0,
-                        ((accent >> 8) & 255) as f32 / 255.0,
-                        (accent & 255) as f32 / 255.0,
-                        1.0,
-                    );
-                }
-                DotPass::Aurora {
-                    age,
-                    opening,
-                    fade,
-                    palette: [gold, accent, rose],
-                    scale,
-                } => {
-                    composite_uniforms.dots = wgsl_rs::std::vec4f(-1.0, age, opening, scale);
-                    // Each packed RGB24 stop fits exactly in one f32, preserving the uniform layout.
-                    composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
-                        (gold & 0x00ff_ffff) as f32,
-                        (accent & 0x00ff_ffff) as f32,
-                        (rose & 0x00ff_ffff) as f32,
-                        fade,
-                    );
-                }
-            }
+        if let Some((detail, resolve, accent, scale)) = dots {
+            composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
+            composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
+                ((accent >> 16) & 255) as f32 / 255.0,
+                ((accent >> 8) & 255) as f32 / 255.0,
+                (accent & 255) as f32 / 255.0,
+                1.0,
+            );
         }
         let encoder = new_command_encoder_for_texture(
             command_buffer,
@@ -2793,6 +2845,15 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+
+    fn render_scene_region_to_texture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        region: Bounds<DevicePixels>,
+    ) -> anyhow::Result<gpui::GpuSnapshot> {
+        self.renderer.render_scene_region_to_texture(scene, size, region)
     }
 }
 

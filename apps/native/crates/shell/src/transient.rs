@@ -5,18 +5,33 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComposerPicker {
     Model,
-    Effort,
     Access,
     Threads,
+    /// The composer's "+": attachments, Select Part of the Screen and the
+    /// Approvals choice.
+    Add,
 }
 impl ComposerPicker {
+    /// The kind a panel's menu request names (`picker`).
+    pub fn named(name: Option<&str>) -> Option<Self> {
+        match name? {
+            "model" => Some(Self::Model),
+            "access" => Some(Self::Access),
+            "threads" => Some(Self::Threads),
+            "add" => Some(Self::Add),
+            _ => None,
+        }
+    }
     pub fn width(self) -> f32 {
         match self {
             Self::Model => 260.,
-            Self::Effort => 156.,
-            Self::Access => 360.,
             Self::Threads => 288.,
+            Self::Access | Self::Add => 360.,
         }
+    }
+    /// Its rows carry their description under the label (Approvals').
+    pub fn describes(self) -> bool {
+        matches!(self, Self::Access | Self::Add)
     }
 }
 

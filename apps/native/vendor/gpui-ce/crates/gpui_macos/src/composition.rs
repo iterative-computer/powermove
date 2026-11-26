@@ -12,8 +12,10 @@ use objc2_foundation::{NSPoint, NSRect};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Convert a paint-space rect, whose y runs down from the editor's top, to
-/// the actual AppKit parent that owns the hosted view.
-pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRect {
+/// GPUI's view's parent, where hosted views outside a scrolling region live
+/// (P-EMBED) — whatever parent the view has now: one leaving a region's
+/// container is placed there in the same present (PM-696 review).
+pub(crate) fn hosted_rect(editor: &NSView, rect: NSRect) -> NSRect {
     let bounds = editor.bounds();
     let local = NSRect::new(
         NSPoint::new(
@@ -26,8 +28,7 @@ pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRec
         ),
         rect.size,
     );
-    // Lazy control wrappers use the editor's parent on their first paint.
-    let parent = unsafe { view.superview().or_else(|| editor.superview()) };
+    let parent = unsafe { editor.superview() };
     editor.convertRect_toView(local, parent.as_deref())
 }
 
@@ -162,12 +163,6 @@ thread_local! {
     /// open (this count); a present places what the last complete paint
     /// staged and nothing an earlier one left behind.
     static PAINTS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
-    /// Monotonic paint-order counter per GPUI view so overlays painted after
-    /// underlying native controls/text fields can occlude only controls below
-    /// them while keeping controls inside the overlay itself visible.
-    static STAGE_ORDER: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
-    static OCCLUDERS: RefCell<HashMap<usize, (u64, Vec<(u64, NSRect)>)>> =
-        RefCell::new(HashMap::new());
 }
 /// The paint a slot staged now belongs to.
 pub(crate) fn open_paint(view: usize) -> u64 {
@@ -177,66 +172,12 @@ pub(crate) fn open_paint(view: usize) -> u64 {
 pub(crate) fn last_paint(view: usize) -> Option<u64> {
     open_paint(view).checked_sub(1)
 }
-pub(crate) fn next_stage_order(view: usize) -> u64 {
-    STAGE_ORDER.with(|s| {
-        let mut s = s.borrow_mut();
-        let entry = s.entry(view).or_default();
-        *entry += 1;
-        *entry
-    })
-}
-/// Record an opaque GPUI overlay rect (in GPUI paint coordinates, y down) for
-/// the current paint so any AppKit control/text slot staged earlier in the
-/// frame that intersects `rect` is hidden instead of bleeding through it.
-pub fn occlude(view: &NSView, rect: NSRect) {
-    if rect.size.width <= 0. || rect.size.height <= 0. {
-        return;
-    }
-    let key = view as *const NSView as usize;
-    let paint = open_paint(key);
-    let order = next_stage_order(key);
-    OCCLUDERS.with(|o| {
-        let mut o = o.borrow_mut();
-        let entry = o.entry(key).or_insert_with(|| (paint, Vec::new()));
-        if entry.0 != paint {
-            entry.0 = paint;
-            entry.1.clear();
-        }
-        entry.1.push((order, rect));
-    });
-}
-pub(crate) fn is_occluded(view: usize, order: u64, rect: NSRect) -> bool {
-    if rect.size.width <= 0. || rect.size.height <= 0. {
-        return false;
-    }
-    let Some(last) = last_paint(view) else {
-        return false;
-    };
-    OCCLUDERS.with(|o| {
-        let o = o.borrow();
-        let Some((paint, rects)) = o.get(&view) else {
-            return false;
-        };
-        if *paint != last {
-            return false;
-        }
-        rects.iter().any(|(occ_order, occ)| {
-            *occ_order > order
-                && rect.origin.x < occ.origin.x + occ.size.width
-                && rect.origin.x + rect.size.width > occ.origin.x
-                && rect.origin.y < occ.origin.y + occ.size.height
-                && rect.origin.y + rect.size.height > occ.origin.y
-        })
-    })
-}
 /// A paint of `view` ended.
 pub(crate) fn painted(view: usize) {
     PAINTS.with(|p| *p.borrow_mut().entry(view).or_default() += 1);
 }
 pub(crate) fn forget_paints(view: usize) {
     PAINTS.with(|p| p.borrow_mut().remove(&view));
-    STAGE_ORDER.with(|s| s.borrow_mut().remove(&view));
-    OCCLUDERS.with(|o| o.borrow_mut().remove(&view));
 }
 /// Whether presenting now would move a hosted view. Nothing is touched.
 pub(crate) fn pending(view: usize, painted: bool) -> bool {
@@ -246,7 +187,10 @@ pub(crate) fn pending(view: usize, painted: bool) -> bool {
     {
         return true;
     }
-    painted && (crate::native_text::pending(view) || crate::native_control::pending(view))
+    painted
+        && (crate::slot_region::pending(view)
+            || crate::native_text::pending(view)
+            || crate::native_control::pending(view))
 }
 
 /// Where a window's frames get their drawables (P-120).
@@ -347,55 +291,6 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
     }
     Some(order)
 }
-/// Whether `view` has any registered composition host or managed native text /
-/// control slots that must stay synchronized with GPUI's `CAMetalLayer`.
-pub(crate) fn has_host(view: usize) -> bool {
-    HOSTS.with(|h| h.borrow().contains_key(&view))
-        || crate::native_text::has_slots(view)
-        || crate::native_control::has_slots(view)
-}
-
-/// RAII explicit `CATransaction` with implicit actions disabled.
-pub(crate) struct TransactionGuard;
-impl Drop for TransactionGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _: () = msg_send![class!(CATransaction), commit];
-        }
-    }
-}
-
-/// Opens an explicit `CATransaction` with implicit actions disabled.
-pub(crate) fn begin_transaction() -> TransactionGuard {
-    unsafe {
-        let _: () = msg_send![class!(CATransaction), begin];
-        let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-    }
-    TransactionGuard
-}
-
-/// Runs the registered host and managed text/control slot presenters inside an
-/// already-open `CATransaction`.
-pub(crate) fn present_in_transaction(view: usize, painted: bool) -> SlotChange {
-    let hook = HOSTS.with(|h| {
-        h.borrow_mut()
-            .get_mut(&view)
-            .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
-    });
-    let mut change = SlotChange::Unchanged;
-    if let Some((present, fresh)) = hook {
-        let host_change = gpui_util::measure("native composition", || present());
-        change = host_change.or(fresh.into());
-    }
-    if painted {
-        let text = crate::native_text::present(view);
-        change = change
-            .or(text)
-            .or(crate::native_control::present(view));
-    }
-    change
-}
-
 /// Opens the explicit CATransaction for this frame's slot publication and runs the
 /// host. When geometry moved, GPUI's drawable must be presented with the
 /// transaction ([`Transaction::moved`]); otherwise it presents asynchronously.
@@ -403,13 +298,33 @@ pub(crate) fn present_in_transaction(view: usize, painted: bool) -> SlotChange {
 /// one: text and control slots, placed from what a paint staged, are left
 /// as they are.
 pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
-    if !has_host(view) {
+    let hook = HOSTS.with(|h| {
+        h.borrow_mut()
+            .get_mut(&view)
+            .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
+    });
+    if hook.is_none() && !crate::native_text::has_slots(view) && !crate::native_control::has_slots(view) {
         return None;
     }
-    let _guard = begin_transaction();
-    std::mem::forget(_guard);
-    let change = present_in_transaction(view, painted);
-    Some(Transaction { change })
+    unsafe {
+        let _: () = msg_send![class!(CATransaction), begin];
+        let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+    }
+    let mut transaction = Transaction {
+        change: SlotChange::Unchanged,
+    };
+    if let Some((present, fresh)) = hook {
+        let change = gpui_util::measure("native composition", || present());
+        transaction.change = change.or(fresh.into());
+    }
+    if painted {
+        // Slots in a scrolling region place its container first (P-SLOT-REGION).
+        let text = crate::native_text::present(view);
+        let control = crate::native_control::present(view);
+        let regions = crate::slot_region::finish(view);
+        transaction.change = transaction.change.or(text).or(control).or(regions.into());
+    }
+    Some(transaction)
 }
 /// Whether a frame waits for the next update rather than present: it would
 /// move hosted views (`pending`) while an earlier frame presented outside a
@@ -562,15 +477,13 @@ pub mod probe {
     pub fn place(view: &NSView) -> bool {
         present(view as *const NSView as usize, true).is_some_and(|t| t.moved())
     }
-    /// Whether a host is registered for `view`.
-    pub fn has_host(view: &NSView) -> bool {
-        super::has_host(view as *const NSView as usize)
-    }
-    /// Places what the last paint of `view` staged inside an explicit
-    /// `CATransaction`, mirroring `MacWindow::draw`.
-    pub fn place_in_transaction(view: &NSView, painted: bool) -> bool {
-        let _tx = super::begin_transaction();
-        super::present_in_transaction(view as *const NSView as usize, painted).moved()
+    /// A frame of `view` as a window presents one: its hosted views are
+    /// published only when its Metal frame was prepared (`prepared`).
+    /// `None` when nothing was published; otherwise whether a view moved.
+    pub fn publish_frame(view: &NSView, prepared: bool) -> Option<bool> {
+        let mut painted = true;
+        publish(view as *const NSView as usize, &mut painted, prepared.then_some(()))
+            .map(|(_, t)| t.is_some_and(|t| t.moved()))
     }
     pub fn forget(view: &NSView) {
         super::forget_paints(view as *const NSView as usize);

@@ -31,6 +31,7 @@ pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 pm-panel-media = { path = "../panel-media" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }
 pm-agents = { path = "../agents" }
+pm-telemetry = { path = "../telemetry" }
 pm-services = { path = "../services" }
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
 pm-transcribe = { path = "../transcribe" }

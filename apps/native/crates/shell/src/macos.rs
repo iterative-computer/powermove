@@ -140,6 +140,19 @@ fn launch(
     });
     Ok(())
 }
+/// Development builds: an app that runs `run` and shows nothing (never
+/// activated, no Dock icon): captures of real windows placed off every
+/// display (`gpui_macos::allow_offscreen_windows`).
+#[cfg(debug_assertions)]
+pub fn capture_app(device: metal::Device, run: impl FnOnce(&mut App) + 'static) {
+    let platform = gpui_macos::MacPlatform::new_with_metal_device(false, device.clone());
+    Application::with_platform(Rc::new(platform))
+        .with_activation_policy(MacActivationPolicy::Prohibited)
+        .run(move |cx| {
+            cx.set_global(SharedMetalDevice(device));
+            run(cx);
+        });
+}
 /// Whether the left mouse button is down now, as the hardware (HID system)
 /// state has it: whatever events reached this app, or the session's view of
 /// the button after a release that went astray.

@@ -179,9 +179,19 @@ pub fn detect(config: &Config) -> Launch {
         Launch::Fresh
     }
 }
-/// Copied from the source, or written when onboarding finishes.
+/// Written here when the last onboarding step finishes: the person's
+/// choices. Its own file, so the original app's `onboarding-v1.json`, which
+/// comes across with the library, never stands for this app's onboarding.
+pub const ONBOARDING_MARKER: &str = "onboarding-native.json";
+/// Whether this app's onboarding finished in this profile. Builds before
+/// `ONBOARDING_MARKER` wrote the choices into `onboarding-v1.json` (the
+/// original app's marker is `{"version":1}` with no choices), so those count.
 pub fn onboarding_completed(native: &Path) -> bool {
-    native.join("onboarding-v1.json").is_file()
+    native.join(ONBOARDING_MARKER).is_file()
+        || std::fs::read(native.join("onboarding-v1.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|record| record.get("timelineMode").is_some())
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {

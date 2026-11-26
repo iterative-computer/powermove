@@ -820,6 +820,9 @@ impl DocumentStore {
             });
         }
         let staged = self.stage_commands(commands, options.origin)?;
+        if options.origin == Origin::Interface && staged.changed {
+            crate::commands::report_additions(commands);
+        }
         let label = options
             .label
             .or_else(|| commands.first().map(Command::label))

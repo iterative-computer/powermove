@@ -109,6 +109,7 @@ export interface Shortcuts {
 export interface Publication {
   revision: number;
   accountName?: string | null;
+  accountEmail?: string | null;
   shortcuts?: Shortcuts;
   project?: { id: string; name: string };
   /** Settings › Project's header: the project's poster (a host picture
@@ -126,7 +127,7 @@ export interface Publication {
   speech: readonly SpeechModel[];
 }
 export type Action =
-  | { type: "row"; id: string; action: string }
+  | { type: "row"; id: string; action: string; plan?: string }
   | { type: "shortcut"; op: "record" | "reset" | "clear"; id: string }
   | { type: "write"; id: string; value: Json }
   | { type: "extension.enabled"; id: string; enabled: boolean }
@@ -236,6 +237,12 @@ export class SettingsModel {
   private changed() {
     if (this.alive) for (const listener of this.listeners) listener();
   }
+  /** The plan chosen in Settings › Account's picker, before Continue. */
+  chosenPlan: string | null = null;
+  choosePlan(id: string) {
+    this.chosenPlan = id;
+    this.changed();
+  }
   get rows(): Row[] {
     const base = [
       ...(this.publication.project ? projectRows() : []),
@@ -272,7 +279,11 @@ export class SettingsModel {
   }
   get availableSections() {
     return sections.filter(
-      (s) => s !== "project" || !!this.publication.project,
+      (s) =>
+        (s !== "project" || !!this.publication.project) &&
+        // Providers is published by the development switch's Powermove harness.
+        (s !== "providers" ||
+          (this.publication.rows ?? []).some((r) => r.section === "providers")),
     );
   }
   get visibleSections() {

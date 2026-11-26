@@ -11,6 +11,8 @@ use std::{
 };
 
 mod hold;
+#[path = "aero_tools.rs"]
+pub mod aero_tools;
 use hold::PendingHold;
 
 /// Tools the running app answers on its main thread (`SurfaceHook`).
@@ -131,6 +133,8 @@ pub struct McpSession {
     /// Its close rolled the run's edits back ([`Self::take_rolled_back`]).
     rolled_back: bool,
     panel_lease: Option<crate::panel_lease::Lease>,
+    aero_project: Option<String>,
+    aero_revision: Option<u64>,
 }
 fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
     let Some(note) = pending.take() else {
@@ -200,6 +204,8 @@ impl McpSession {
             bypass_hold: false,
             hold_note: None,
             panel_lease: None,
+            aero_project: None,
+            aero_revision: None,
             rolled_back: false,
         }
     }
@@ -211,6 +217,12 @@ impl McpSession {
     pub fn tools(&self) -> Value {
         json!(catalog::served_tools())
     }
+    pub(crate) fn note_eval_playhead(&mut self, time: f64) {
+        if let Some(active) = &mut self.active {
+            active.time = time;
+        }
+    }
+
     pub fn set_agent_run(&mut self, token: &str) {
         self.agent_token = Some(token.to_owned());
     }
@@ -1179,8 +1191,13 @@ impl McpSession {
                 Ok(result)
             }
             "select_layers" => {
+                if let Some(expected) = self.aero_revision
+                    && host.revision(&id)? != expected
+                {
+                    return Err(Error::conflict("Project revision changed. Read project state and retry."));
+                }
                 let ids = prepared_selection.unwrap();
-                if self.agent_token.is_none() {
+                if self.agent_token.is_none() && self.aero_project.is_none() {
                     let selection =
                         host.select_layers(&id, &ids, args["add"] == true, self.writer)?;
                     return Ok(json!({"selection":selection}));
@@ -1207,10 +1224,9 @@ impl McpSession {
             "save_project" => host.save_project(&id),
             "export_project" => host.export_project(&id),
             "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
-                let expected = session
-                    .transaction
-                    .as_ref()
-                    .map_or(session.baseline, |t| t.revision);
+                let expected = self.aero_revision.unwrap_or_else(|| {
+                    session.transaction.as_ref().map_or(session.baseline, |t| t.revision)
+                });
                 let revision = host.revision(&id)?;
                 if expected != revision {
                     let current = host.read_document(&id)?;
@@ -1338,7 +1354,7 @@ impl McpSession {
                         &label,
                         expected,
                         self.writer,
-                        self.agent_token.is_some(),
+                        self.agent_token.is_some() && self.aero_project.is_none(),
                     )?;
                     let applied = if ack.revision != revision {
                         vec![crate::video::describe(args)]
@@ -1353,7 +1369,7 @@ impl McpSession {
                         &label,
                         expected,
                         self.writer,
-                        self.agent_token.is_some(),
+                        self.agent_token.is_some() && self.aero_project.is_none(),
                     )?;
                     let result = if plan.state {
                         json!({"results":plan.results,"revision":ack.revision})
@@ -1370,9 +1386,9 @@ impl McpSession {
                         Origin::Mcp,
                         expected,
                         self.writer,
-                        self.agent_token.is_some(),
+                        self.agent_token.is_some() && self.aero_project.is_none(),
                     )?;
-                    if self.agent_token.is_none() {
+                    if self.agent_token.is_none() && self.aero_project.is_none() {
                         host.select_layers(&id, &batch.selection, false, self.writer)?;
                     }
                     session.focus = batch.selection;
@@ -1561,10 +1577,11 @@ impl McpSession {
         }
         let context = args["context"].as_str().unwrap_or("project");
         // A run works in its thread's project, not whichever window is in front.
-        let pinned = self
-            .agent_token
-            .as_deref()
-            .and_then(|token| (host.agent_projects.as_ref()?)(token));
+        let pinned = self.aero_project.clone().or_else(|| {
+            self.agent_token
+                .as_deref()
+                .and_then(|token| (host.agent_projects.as_ref()?)(token))
+        });
         if pinned.is_some() && context == "app" {
             return Err(Error::invalid(
                 "This run belongs to a project's thread: start the session without context \"app\".",
@@ -1599,6 +1616,7 @@ impl McpSession {
         let include_extension_staging = args["includeExtensionStaging"] == true;
         let has_workspace =
             access != "editor" || context == "app" || granted.is_some() || include_extension_staging;
+        let has_workspace = has_workspace && self.aero_project.is_none();
         let input = if (has_workspace || full) && let Some(id) = &project {
             crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
         } else {
@@ -1701,7 +1719,7 @@ impl McpSession {
             document,
             access: access.into(),
             context: context.into(),
-            internal: granted.is_some(),
+            internal: granted.is_some() || self.aero_project.is_some(),
             baseline,
             transaction: None,
             workspace,
@@ -1741,45 +1759,59 @@ impl McpSession {
             };
             assert_project(&session, &host, &id)?;
             host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
-            if self.agent_token.is_some() {
-                host.agent_turn(&id, self.writer, false)?;
-            }
-            if let Some(owner) = &session.owner
-                && let Some(receipt) = host.completion_receipt_mut(owner)
-            {
-                receipt.unsafe_undo |= session.external_actions || session.panel_actions;
-                receipt.changed |= session.external_actions || session.panel_actions;
-            }
-            let Some(tx) = session.transaction.as_ref() else {
-                return Ok(json!({"changed":session.committed}));
-            };
-            if commit {
-                let history = checkpoint(&mut session, &mut host, &id, self.agent_token.is_some())?;
-                return Ok(json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}));
-            }
-            if session.panel_actions {
-                let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
-                if changed {
-                    return Err(Error::invalid(
-                        "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
-                    ));
-                }
-                return Ok(json!({"changed":session.committed || changed,"historyId":null}));
-            }
-            if tx.changed {
-                rollback(&mut session, &mut host, &id, self.writer)?;
-                if !session.committed
-                    && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+            let (agent, writer) = (self.agent_token.is_some(), self.writer);
+            let rolled_back = &mut self.rolled_back;
+            let ended = (|| {
+                if let Some(owner) = &session.owner
+                    && let Some(receipt) = host.completion_receipt_mut(owner)
                 {
-                    app.forget_turn_writer(
-                        &id,
-                        document,
-                        pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                    receipt.unsafe_undo |= session.external_actions || session.panel_actions;
+                    receipt.changed |= session.external_actions || session.panel_actions;
+                }
+                let Some(tx) = session.transaction.as_ref() else {
+                    return Ok(json!({"changed":session.committed}));
+                };
+                if commit {
+                    let history = checkpoint(&mut session, &mut host, &id, agent)?;
+                    return Ok(
+                        json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}),
                     );
                 }
-                self.rolled_back = true;
-            }
-            Ok(json!({"changed":session.committed,"historyId":null}))
+                if session.panel_actions {
+                    let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
+                    if changed {
+                        return Err(Error::invalid(
+                            "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
+                        ));
+                    }
+                    return Ok(json!({"changed":session.committed || changed,"historyId":null}));
+                }
+                if tx.changed {
+                    rollback(&mut session, &mut host, &id, writer)?;
+                    if !session.committed
+                        && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+                    {
+                        app.forget_turn_writer(
+                            &id,
+                            document,
+                            pm_kernel::Caller::realm(writer, 1, Origin::Mcp).writer,
+                        );
+                    }
+                    *rolled_back = true;
+                }
+                Ok(json!({"changed":session.committed,"historyId":null}))
+            })();
+            // The run's steps are one step before its turn is unfenced: a
+            // person's Undo in between takes back their own newest step, never
+            // one tool call of the run (PM-718).
+            let unfenced = if agent {
+                host.agent_turn(&id, writer, false)
+            } else {
+                Ok(())
+            };
+            let value = ended?;
+            unfenced?;
+            Ok(value)
         })();
         if let Some(root) = session.workspace {
             let cleanup = archive_workspace(&root, commit);

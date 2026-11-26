@@ -1661,3 +1661,658 @@ fn agent_native_plan_preserves_a_concurrent_editors_history_group() {
         before
     );
 }
+
+#[test]
+fn aero_repairs_a_compile_error_and_loads_the_published_extension() {
+    use pm_agents::{
+        Access, Event, Provider, RunResult,
+        aero::{self, Model, Options, Reply},
+        launch::Request as Launch,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        session.dispatch("apply_commands", &json!({"commands":[
+            {"type":"add_layer","id":"plate","name":"Plate","layerType":"solid","from":0,"duration":2}
+        ]})).unwrap();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+    }
+    // Project frames need the app binary as the engine worker (libtest cannot
+    // serve --engine-job): lane runs pass it as PM_TIMELINE_ENGINE_WORKER.
+    let worker = std::env::var_os("PM_TIMELINE_ENGINE_WORKER");
+    let jobs = match &worker {
+        Some(worker) => crate::mcp_services::connect_engine_with_executable(
+            &fixture.tools,
+            Default::default(),
+            Default::default(),
+            worker.into(),
+        ),
+        None => crate::mcp_services::connect_engine(
+            &fixture.tools,
+            Default::default(),
+            Default::default(),
+        ),
+    }
+    .unwrap();
+    let frames = worker.is_some();
+    let scope = fixture.host.profile.join("aero/sessions/extension");
+    let host = fixture.tools.automation.clone();
+    let source = include_str!("../../../js/compat/api-pack/samples/gradient-tint/index.ts");
+    let manifest = include_str!("../../../js/compat/api-pack/samples/gradient-tint/manifest.json");
+    let step = AtomicUsize::new(0);
+    let revisions = host.clone();
+    let model = Model::fake(move |request| {
+        let tool = |name: &str, op: &str, args: Value| Reply::Tool {
+            name: name.into(),
+            args: json!({"op":op,"args":args}),
+        };
+        let text = String::from_utf8_lossy(request);
+        match step.fetch_add(1, Ordering::Relaxed) {
+            0 => tool(
+                "files",
+                "write",
+                json!({"path":"gradient-tint/manifest.json","text":manifest}),
+            ),
+            1 => tool(
+                "files",
+                "write",
+                json!({"path":"gradient-tint/index.ts","text":"const valid = 1;\nexport default function ( {"}),
+            ),
+            2 => tool("extension", "check", json!({"id":"gradient-tint"})),
+            3 => {
+                assert!(String::from_utf8_lossy(request).contains("index.ts:2:"));
+                tool(
+                    "files",
+                    "write",
+                    json!({"path":"gradient-tint/index.ts","text":source}),
+                )
+            }
+            4 => tool("extension", "check", json!({"id":"gradient-tint"})),
+            5 => tool(
+                "extension",
+                "publish",
+                json!({"extensions":[{"id":"gradient-tint","action":"created","summary":"Gradient tint effect"}]}),
+            ),
+            6 => {
+                // The publish probe rendered the effect over a reference clip.
+                assert!(text.contains(r#"\"changed\":true"#), "{text}");
+                assert!(text.contains(r#"\"nan\":false"#) && text.contains(r#"\"black\":false"#));
+                let revision = revisions.lock().unwrap().revision("test").unwrap();
+                Reply::Tool {
+                    name: "edit".into(),
+                    args: json!({"op":"commands","revision":revision,
+                    "args":{"commands":[{"type":"add_effect","target":"plate","effect":"gradient-tint.effect"}]}}),
+                }
+            }
+            7 if frames => tool("look", "frames", json!({"times":[0.5],"width":160})),
+            8 if frames => {
+                assert!(text.contains("Capture id"), "{text}");
+                Reply::Text("Published the repaired gradient tint.".into())
+            }
+            _ => Reply::Text("Published the repaired gradient tint.".into()),
+        }
+    });
+    let report: aero::Report = Arc::new(|_| {});
+    let handle = aero::start(
+        Launch {
+            run: "extension".into(),
+            prompt: "Make a gradient tint effect.".into(),
+            provider: Provider::Aero,
+            model: None,
+            effort: None,
+            access: Access::Project,
+            approval: Default::default(),
+            computer_consent: false,
+            workspace: scope.clone(),
+            images: Vec::new(),
+            role: None,
+            files: Vec::new(),
+            project: Some("test".into()),
+        },
+        "extension".into(),
+        scope,
+        Options {
+            model,
+            wall: Duration::from_secs(45),
+            report: Some(report),
+            ..Options::development()
+        },
+        move |scope| {
+            pm_mcp::session::aero_tools::Tools::open(
+                host,
+                "test",
+                None,
+                scope,
+                Access::Project,
+                None,
+            )
+            .map(|tools| Box::new(tools) as Box<dyn aero::Session>)
+            .map_err(|e| e.to_string())
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(50);
+    let result = loop {
+        match handle.try_event() {
+            Ok(Event::Completed { result, .. }) => break result,
+            Ok(Event::Trace { value, .. }) if value["kind"] == "tool-end" => eprintln!("{value}"),
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            event => panic!("Aero did not complete: {event:?}"),
+        }
+    };
+    assert_eq!(
+        result,
+        RunResult::success(
+            "Published the repaired gradient tint.".into(),
+            Access::Project
+        )
+    );
+    let published = fixture.host.kernel.published("test").unwrap();
+    let resources = jobs.resources(&published, true, &|| false).unwrap();
+    assert!(
+        resources
+            .definitions
+            .iter()
+            .any(|d| d.id.as_str() == "gradient-tint.effect")
+    );
+    let document = fixture
+        .tools
+        .automation
+        .lock()
+        .unwrap()
+        .read_document("test")
+        .unwrap();
+    let plate = document["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|layer| layer["id"] == "plate")
+        .cloned()
+        .unwrap();
+    assert_eq!(plate["fx"][0]["type"], "gradient-tint.effect", "{plate}");
+    // The eval host attributes the registration to the extension that made it.
+    let (engine, view) = {
+        let host = fixture.tools.automation.lock().unwrap();
+        (host.engine.clone().unwrap(), host.view("test").unwrap())
+    };
+    let registrations = engine
+        .eval_registrations("test", view.document, view.revision)
+        .unwrap();
+    assert!(
+        registrations["registeredEffects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "gradient-tint.effect" && row["extension"] == "gradient-tint"),
+        "{registrations}"
+    );
+    drop(handle);
+    drop(jobs);
+}
+
+/// The eval runner's evidence tools on the real app tool host, over the same
+/// stdio loop `powermove-native --listen` serves.
+#[test]
+fn eval_host_seeks_times_an_effect_and_reports_registrations() {
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct Lines(Vec<u8>, mpsc::Sender<Value>);
+    impl Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            while let Some(end) = self.0.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.0.drain(..=end).collect();
+                let _ = self.1.send(serde_json::from_slice(&line).unwrap());
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        session
+            .dispatch(
+                "apply_commands",
+                &json!({"commands":[
+                    {"type":"add_layer","id":"plate","name":"Plate","layerType":"solid","from":0,"duration":2},
+                    {"type":"add_effect","target":"plate","effect":"blur"}
+                ]}),
+            )
+            .unwrap();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+    }
+    let _jobs =
+        crate::mcp_services::connect_engine(&fixture.tools, Default::default(), Default::default())
+            .unwrap();
+    let (reader, mut input) = std::io::pipe().unwrap();
+    let (sender, output) = mpsc::channel();
+    let automation = fixture.tools.automation.clone();
+    let profile = fixture.host.profile.clone();
+    let served = std::thread::spawn(move || {
+        pm_mcp::aero_rpc::serve(
+            std::io::BufReader::new(reader),
+            Lines(Vec::new(), sender),
+            automation,
+            profile,
+        )
+    });
+    let mut id = 0;
+    let mut send = |method: &str, params: Value| -> Value {
+        id += 1;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        output.recv_timeout(Duration::from_secs(60)).unwrap()
+    };
+    let tool = |send: &mut dyn FnMut(&str, Value) -> Value, name: &str, args: Value| {
+        let answer = send("tools/call", json!({"name":name,"arguments":args}));
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        (answer["result"]["isError"] == true, text)
+    };
+    let init = send("initialize", json!({"protocolVersion":"2025-06-18"}));
+    let flags = &init["result"]["capabilities"]["experimental"]["powermoveEval"];
+    assert_eq!(flags["transitions"], true, "{flags}");
+    assert_eq!(flags["evaluator"], false);
+    let names: Vec<_> = send("tools/list", json!({}))["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    for name in ["measure_frame_time", "set_playhead", "render_frames"] {
+        assert!(names.iter().any(|n| n == name), "{name} missing: {names:?}");
+    }
+    let (failed, text) = tool(&mut send, "open_project", json!({"projectId":"test"}));
+    assert!(!failed, "{text}");
+    let (failed, text) = tool(&mut send, "set_playhead", json!({"time":1.25}));
+    assert!(!failed, "{text}");
+    let ui = fixture.host.kernel.state().ui.get("test").cloned().unwrap();
+    assert_eq!(
+        ui.transport
+            .as_object()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| t.as_f64()),
+        Some(1.25)
+    );
+    let (failed, text) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"blur","times":[0.5],"samples":2,"width":160}),
+    );
+    assert!(!failed, "{text}");
+    let timed: Value = serde_json::from_str(&text).unwrap();
+    for key in ["enabledMs", "disabledMs"] {
+        let samples = timed[key].as_array().unwrap();
+        assert_eq!(samples.len(), 2, "{timed}");
+        assert!(
+            samples
+                .iter()
+                .all(|ms| ms.as_f64().is_some_and(|ms| ms > 0.))
+        );
+    }
+    // A target that is not active at the asked time is refused, not timed.
+    let (failed, text) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"blur","times":[2.5],"samples":1,"width":160}),
+    );
+    assert!(failed && text.contains("not active"), "{text}");
+    let (failed, _) = tool(
+        &mut send,
+        "measure_frame_time",
+        json!({"target":"no-such-effect","times":[0.5],"samples":1,"width":160}),
+    );
+    assert!(failed);
+    let (failed, text) = tool(&mut send, "get_workspace_state", json!({}));
+    assert!(!failed, "{text}");
+    let state: Value = serde_json::from_str(&text).unwrap();
+    // Built-ins are the engine's; registrations list extension definitions.
+    for key in ["registeredEffects", "registeredTransitions", "registeredPanels"] {
+        assert!(state[key].is_array(), "{key}: {state}");
+    }
+    assert!(state["extensions"].is_array());
+    drop(input);
+    served.join().unwrap().unwrap();
+}
+
+fn aero_tools(fixture: &Fixture, name: &str) -> pm_mcp::session::aero_tools::Tools {
+    let scope = fixture.host.profile.join("aero/sessions").join(name);
+    std::fs::create_dir_all(&scope).unwrap();
+    pm_mcp::session::aero_tools::Tools::open(
+        fixture.tools.automation.clone(),
+        "test",
+        None,
+        &scope,
+        pm_agents::Access::Project,
+        None,
+    )
+    .unwrap()
+}
+
+/// P1-3: the editor writes while Aero reads the project (the editor's
+/// writes reach the kernel actor directly, between Aero's reads). Every
+/// answer's data belongs to the revision it is stamped with.
+///
+/// The editor writes once per read, racing it, and records its edit only
+/// after its ack, so a read can be stamped with a revision the log does not
+/// hold yet; the check waits for that record instead of guessing (PM-737).
+/// No sleeps: the edits are paced by the reads.
+#[test]
+fn a_human_edit_between_reads_never_mislabels_project_state() {
+    use std::sync::{Condvar, Mutex};
+    #[derive(Default)]
+    struct Shared {
+        /// Reads started; the editor writes once for each.
+        reads: u32,
+        done: bool,
+        edits: Vec<(u64, String)>,
+    }
+    const READS: u32 = 300;
+    let fixture = Fixture::new();
+    let mut tools = aero_tools(&fixture, "race");
+    let kernel = fixture.host.kernel.clone();
+    let base = kernel.published("test").unwrap().revision();
+    let shared = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
+    let human = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let (lock, changed) = &*shared;
+            for i in 1..=READS {
+                drop(
+                    changed
+                        .wait_while(lock.lock().unwrap(), |s| s.reads < i && !s.done)
+                        .unwrap(),
+                );
+                if lock.lock().unwrap().done {
+                    return;
+                }
+                let name = format!("Human take {i:04}");
+                let revision = human_rename(&kernel, &name);
+                lock.lock().unwrap().edits.push((revision, name));
+                changed.notify_all();
+            }
+        })
+    };
+    let (lock, changed) = &*shared;
+    let mut checked = 0;
+    for _ in 0..READS {
+        // The previous read's edit is in, so at most one write lands during
+        // this read: one retry, never "kept changing".
+        changed
+            .wait_while(lock.lock().unwrap(), |s| (s.edits.len() as u32) < s.reads)
+            .unwrap()
+            .reads += 1;
+        changed.notify_all();
+        let state = tools
+            .call("project", r#"{"op":"summary"}"#, &mut |_| false)
+            .unwrap();
+        let revision = state["revision"].as_u64().unwrap();
+        if revision <= base {
+            continue;
+        }
+        // Only the editor writes after `base`: its record of this revision
+        // comes once its ack does.
+        let shared = changed
+            .wait_while(lock.lock().unwrap(), |s| {
+                s.edits.last().is_none_or(|(at, _)| *at < revision)
+            })
+            .unwrap();
+        let (at, expected) = shared
+            .edits
+            .iter()
+            .rfind(|(at, _)| *at <= revision)
+            .unwrap();
+        assert_eq!(*at, revision, "revision {revision} was not the editor's");
+        let text = state.to_string();
+        assert!(
+            text.contains(expected.as_str()),
+            "data from another revision was stamped {revision}: expected {expected}"
+        );
+        checked += 1;
+    }
+    lock.lock().unwrap().done = true;
+    changed.notify_all();
+    human.join().unwrap();
+    // Only the first read can be answered before the editor's first edit.
+    assert!(checked >= READS - 1, "only {checked} reads were checked");
+}
+
+/// The editor's edit: a composition rename written straight to the kernel
+/// actor, as a panel's write is. Returns the revision it committed.
+fn human_rename(kernel: &KernelHandle, name: &str) -> u64 {
+    kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("UI edit".into()),
+                    body: WriteBody::Commands(vec![
+                        CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some(name.into()),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .unwrap()
+        .revision
+}
+
+/// PM-737: the editor's commit is visible to Powermove's reads before the
+/// editor's own thread hears its ack. A read in that window is stamped with
+/// the new revision and carries the new name; the old race test compared it
+/// with an edit log that did not have the commit yet and failed.
+#[test]
+fn a_read_before_the_editor_hears_its_ack_is_stamped_with_that_edit() {
+    let fixture = Fixture::new();
+    let mut tools = aero_tools(&fixture, "ack-window");
+    let kernel = fixture.host.kernel.clone();
+    let mut log: Vec<(u64, String)> = Vec::new();
+    for i in 1..=20 {
+        let name = format!("Human take {i:04}");
+        // Committed; the person's log does not have it yet.
+        let revision = human_rename(&kernel, &name);
+        let state = tools
+            .call("project", r#"{"op":"summary"}"#, &mut |_| false)
+            .unwrap();
+        let text = state.to_string();
+        assert_eq!(state["revision"].as_u64(), Some(revision), "{text}");
+        assert!(
+            text.contains(&name),
+            "revision {revision} lacks {name}: {text}"
+        );
+        if let Some((_, older)) = log.last() {
+            assert!(
+                !text.contains(older),
+                "revision {revision} still has {older}"
+            );
+        }
+        log.push((revision, name));
+    }
+}
+
+/// P1-5: the project is reopened (a new document under the same id) while
+/// an Aero run is bound to the old one: its next edit is a terminal
+/// conflict and the new document is untouched.
+#[test]
+fn reopening_the_project_during_a_run_never_edits_the_new_document() {
+    let fixture = Fixture::new();
+    {
+        let mut session = fixture.connection();
+        start(&mut session);
+        add(&mut session, "plate");
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+    }
+    let mut tools = aero_tools(&fixture, "reopen");
+    let revision = fixture.host.kernel.published("test").unwrap().revision();
+    // Reopen the saved project: a new document under the same id.
+    fixture.host.save(fixture.host.current().unwrap(), None).unwrap();
+    fixture
+        .host
+        .shell(ShellCall::Close(fixture.host.current().unwrap()))
+        .unwrap();
+    fixture
+        .host
+        .open(
+            "test".into(),
+            SessionSource::Library {
+                profile: fixture.host.profile.clone(),
+                project: "test".into(),
+            },
+        )
+        .unwrap();
+    let _ = tools.call("project", r#"{"op":"summary"}"#, &mut |_| false);
+    let edit = json!({"op":"commands","revision":revision,"args":{"commands":[
+        {"type":"set_layer","target":"plate","patch":{"name":"Old run"}}]}})
+    .to_string();
+    let error = tools.call("edit", &edit, &mut |_| false).unwrap_err();
+    assert_eq!(error.code, "revision_conflict", "{}", error.message);
+    let document = document(&fixture.host.kernel.published("test").unwrap());
+    assert_ne!(document["layers"][0]["name"], "Old run");
+}
+
+/// PM-724: a project made while another project with media is open starts
+/// with no media, in its Project panel and in its saved file, whichever way it
+/// is made: MCP `create_project` or File › New Project (the library's Create).
+#[test]
+fn a_new_project_never_lists_another_open_projects_media() {
+    use crate::library_surface::{
+        controller::{Command, Outcome},
+        form::NewProjectForm,
+        kernel::KernelLibrary,
+    };
+    let f = Fixture::new();
+    // Window 1 shows the open project; window 2 is empty, as a new window is.
+    let _first = f.host.attach_window(1);
+    f.host.bind_window(1, f.host.current());
+    let _second = f.host.attach_window(2);
+    // The open project has a real imported clip and is saved with it.
+    let still = f.host.profile.join("other-project.png");
+    std::fs::write(
+        &still,
+        crate::mcp_services::png(&[20, 40, 60, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let panels = pm_builtins::Builtins::new(f.host.kernel.clone(), "test", || {}).unwrap();
+    let open = f.host.kernel.published("test").unwrap();
+    let outcome = panels
+        .import_media(
+            open.snapshot.doc_id,
+            &f.host.profile,
+            pm_builtins::media_import::ImportRequest {
+                paths: vec![still],
+                ..Default::default()
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.imported, ["other-project.png"]);
+    let test = f.host.session_of("test").unwrap();
+    f.host.save(test.clone(), None).unwrap();
+    let open = f.host.kernel.published("test").unwrap();
+    assert_eq!(
+        pm_panel_media::Catalog::published(&open)
+            .unwrap()
+            .assets
+            .len(),
+        1
+    );
+    // MCP create_project.
+    let mut c = f.connection();
+    let by_mcp = c
+        .dispatch("create_project", &json!({"name":"By MCP"}))
+        .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // File › New Project from the open project's window (its format seeds the form).
+    let form = NewProjectForm::new(
+        "test".into(),
+        crate::project_library::current_format(Some(&open)).as_ref(),
+        &crate::project_library::default_format(),
+        &["Synthetic".into(), "By MCP".into()],
+    );
+    let mut library = KernelLibrary {
+        kernel: f.host.kernel.clone(),
+        profile: f.host.profile.clone(),
+    };
+    let Outcome::Opened(ShellReply::Opened { session, .. }) = library
+        .execute(Command::Create(form.values().unwrap()))
+        .unwrap()
+    else {
+        panic!("a new project opens without recovery");
+    };
+    let by_menu = session.project.clone();
+    f.host
+        .kernel
+        .shell(ShellCall::Save(session))
+        .wait()
+        .unwrap()
+        .unwrap();
+    for project in [&by_mcp, &by_menu] {
+        let published = f.host.kernel.published(project).unwrap();
+        let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+        assert!(
+            catalog.assets.is_empty(),
+            "{project}: {:?}",
+            catalog.assets.keys()
+        );
+        // The Project panel lists the new project's composition and nothing else.
+        let mut panel = pm_panel_media::MediaPanel::default();
+        panel.refresh(&catalog, &pm_panel_media::UnknownRuntime);
+        let page = panel
+            .page(&catalog, &pm_panel_media::UnknownRuntime, 0, 100)
+            .unwrap();
+        assert!(
+            page.rows
+                .iter()
+                .all(|row| matches!(row.data, pm_panel_media::RowData::Composition(_))),
+            "{project}: {:?}",
+            page.rows
+        );
+        // Its saved file has no media either.
+        let saved = pm_kernel::LibraryStore::open(&f.host.profile)
+            .load(project)
+            .unwrap()
+            .expect("saved in the library")
+            .project;
+        let assets = saved.get("assets").and_then(|a| a.as_object());
+        assert!(assets.is_none_or(|a| a.is_empty()), "{project}: {saved:?}");
+    }
+    // The open project keeps its own clip.
+    assert_eq!(
+        pm_panel_media::Catalog::published(&f.host.kernel.published("test").unwrap())
+            .unwrap()
+            .assets
+            .len(),
+        1
+    );
+}

@@ -2,7 +2,10 @@
 //! loopback bridge ({id,method,name,arguments}, discovered by connection.json).
 use crate::{Automation, Error, McpSession, Result, catalog, failure};
 use serde_json::{Value, json};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::{
+    fs::{DirBuilderExt, OpenOptionsExt},
+    net::{UnixListener, UnixStream},
+};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -15,6 +18,94 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub(crate) const MAX_LINE: usize = 2 * 1024 * 1024;
+
+/// macOS `sun_path` holds 104 bytes, its terminator included.
+const SUN_PATH: usize = 104;
+static WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
+
+/// Binds or connects the socket at `path`. A path too long for `sun_path`
+/// (the eval runner's run folders are deep, and its sandbox allows sockets
+/// only inside them) is reached by its name from its own folder; the working
+/// directory changes only under a process-wide lock and is put back at once.
+fn at_socket<T>(path: &Path, op: impl FnOnce(&Path) -> std::io::Result<T>) -> std::io::Result<T> {
+    if path.as_os_str().len() < SUN_PATH {
+        return op(path);
+    }
+    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+        return op(path);
+    };
+    let _held = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::current_dir()?;
+    std::env::set_current_dir(folder)?;
+    let result = op(Path::new(name));
+    std::env::set_current_dir(previous)?;
+    result
+}
+
+enum Listener {
+    Tcp(TcpListener),
+    Unix(UnixListener),
+}
+
+enum Stream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+macro_rules! socket {
+    ($socket:expr, $stream:ident => $call:expr) => {
+        match $socket {
+            Stream::Tcp($stream) => $call,
+            Stream::Unix($stream) => $call,
+        }
+    };
+}
+
+impl Stream {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        match self {
+            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            Self::Unix(stream) => stream.try_clone().map(Self::Unix),
+        }
+    }
+
+    fn set_nonblocking(&self, enabled: bool) -> std::io::Result<()> {
+        socket!(self, stream => stream.set_nonblocking(enabled))
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        socket!(self, stream => stream.set_read_timeout(timeout))
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        socket!(self, stream => stream.shutdown(how))
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        socket!(self, stream => stream.read(buf))
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        socket!(self, stream => stream.write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        socket!(self, stream => stream.flush())
+    }
+}
+
+impl Listener {
+    fn accept(&self) -> std::io::Result<Stream> {
+        match self {
+            Self::Tcp(listener) => listener.accept().map(|(stream, _)| Stream::Tcp(stream)),
+            Self::Unix(listener) => listener.accept().map(|(stream, _)| Stream::Unix(stream)),
+        }
+    }
+}
 
 fn descriptor_lock(directory: &Path) -> std::io::Result<std::fs::File> {
     let lock = std::fs::OpenOptions::new()
@@ -207,6 +298,13 @@ impl<T: ToolConnection> Rpc<T> {
         };
         Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
     }
+    pub(crate) fn initialized(&self) -> bool {
+        self.initialized
+    }
+    pub(crate) fn session_mut(&mut self) -> &mut T {
+        &mut self.session
+    }
+
     pub fn close(&mut self) -> Result<()> {
         self.session.disconnect()
     }
@@ -227,7 +325,7 @@ pub(crate) fn line(reader: &mut impl BufRead) -> std::io::Result<Option<Vec<u8>>
     }
     Ok(Some(bytes))
 }
-fn write_json(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
+pub(crate) fn write_json(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
     writer.write_all(&bytes)?;
@@ -281,11 +379,7 @@ fn constant_eq(a: &str, b: &str) -> bool {
         .fold(0u8, |diff, (a, b)| diff | (a ^ b))
         == 0
 }
-fn connection<T: ToolConnection>(
-    mut stream: TcpStream,
-    token: String,
-    mut session: T,
-) -> Result<()> {
+fn connection<T: ToolConnection>(mut stream: Stream, token: String, mut session: T) -> Result<()> {
     // macOS accepted sockets inherit the listener's nonblocking flag.
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -350,7 +444,8 @@ fn connection<T: ToolConnection>(
 /// and removes only this instance's descriptor. It never logs the credential.
 pub struct LoopbackServer {
     stop: Arc<AtomicBool>,
-    clients: Arc<Mutex<std::collections::HashMap<u64, TcpStream>>>,
+    clients: Arc<Mutex<std::collections::HashMap<u64, Stream>>>,
+    socket: Option<PathBuf>,
     worker: Option<thread::JoinHandle<()>>,
     file: PathBuf,
     instance: String,
@@ -359,10 +454,29 @@ impl LoopbackServer {
     pub fn start(profile: &Path, host: Arc<Mutex<Automation>>) -> Result<Self> {
         Self::start_with(profile, move || McpSession::new(host.clone()))
     }
+    /// A run-folder socket works inside replay sandboxes that allow only the
+    /// recorded model's port over TCP.
+    pub fn start_unix(profile: &Path, host: Arc<Mutex<Automation>>) -> Result<Self> {
+        Self::start_unix_with(profile, move || McpSession::new(host.clone()))
+    }
+    pub fn start_unix_with<T: ToolConnection + Send + 'static>(
+        profile: &Path,
+        factory: impl Fn() -> T + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::bind(profile, true, factory)
+    }
     /// Bind an existing application actor without introducing another kernel.
     /// The factory and all connection operations run exclusively on workers.
     pub fn start_with<T: ToolConnection + Send + 'static>(
         profile: &Path,
+        factory: impl Fn() -> T + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::bind(profile, false, factory)
+    }
+
+    fn bind<T: ToolConnection + Send + 'static>(
+        profile: &Path,
+        unix: bool,
         factory: impl Fn() -> T + Send + Sync + 'static,
     ) -> Result<Self> {
         let factory = Arc::new(factory);
@@ -376,10 +490,27 @@ impl LoopbackServer {
         let file = directory.join("connection.json");
         let _publication = descriptor_lock(&directory)?;
         recover_descriptor(&file)?;
-        // Probe the old endpoint before choosing ours: the OS may reuse its port.
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        listener.set_nonblocking(true)?;
-        let descriptor = json!({"version":1,"instanceId":instance,"pid":std::process::id(),"port":listener.local_addr()?.port(),"token":token});
+        let mut descriptor =
+            json!({"version":1,"instanceId":instance,"pid":std::process::id(),"token":token});
+        let (listener, socket) = if unix {
+            // A distinct name leaves a crashed instance's socket inert and
+            // prevents shutdown from unlinking a replacement listener.
+            let name = format!("{}.sock", std::process::id());
+            let path = directory.join(&name);
+            if path.exists() {
+                return Err(Error::invalid("MCP socket path already exists"));
+            }
+            let listener = at_socket(&path, |path| UnixListener::bind(path))?;
+            listener.set_nonblocking(true)?;
+            descriptor["socket"] = json!(name);
+            (Listener::Unix(listener), Some(path))
+        } else {
+            // Probe the old endpoint before choosing ours: the OS may reuse its port.
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            listener.set_nonblocking(true)?;
+            descriptor["port"] = json!(listener.local_addr()?.port());
+            (Listener::Tcp(listener), None)
+        };
         let temp = directory.join(format!("connection-{instance}.tmp"));
         let mut fd = std::fs::OpenOptions::new()
             .write(true)
@@ -396,16 +527,14 @@ impl LoopbackServer {
         std::fs::remove_file(temp)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
-        let clients = Arc::new(Mutex::new(
-            std::collections::HashMap::<u64, TcpStream>::new(),
-        ));
+        let clients = Arc::new(Mutex::new(std::collections::HashMap::<u64, Stream>::new()));
         let sockets = clients.clone();
         let worker = thread::spawn(move || {
             let mut children: Vec<thread::JoinHandle<()>> = vec![];
             let mut next = 0u64;
             while !stopping.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         let Ok(copy) = stream.try_clone() else {
                             continue;
                         };
@@ -442,6 +571,7 @@ impl LoopbackServer {
         Ok(Self {
             stop,
             clients,
+            socket,
             worker: Some(worker),
             file,
             instance,
@@ -457,6 +587,9 @@ impl LoopbackServer {
             let _ = worker.join();
         }
         self.clients.lock().unwrap().clear();
+        if let Some(path) = self.socket.take() {
+            let _ = std::fs::remove_file(path);
+        }
         if let Ok(_publication) = descriptor_lock(self.file.parent().expect("descriptor directory"))
             && std::fs::read(&self.file)
                 .ok()
@@ -483,17 +616,10 @@ pub fn proxy_stdio(profile: &Path, agent_run: Option<String>) -> Result<()> {
         Bridge::open(profile, agent_run)?,
     )
 }
-fn bridge_channel(
-    profile: &Path,
-    agent_run: Option<&str>,
-) -> Result<(TcpStream, BufReader<TcpStream>)> {
+fn bridge_channel(profile: &Path, agent_run: Option<&str>) -> Result<(Stream, BufReader<Stream>)> {
     let descriptor: Value =
         serde_json::from_slice(&std::fs::read(profile.join("mcp/connection.json"))?)
             .map_err(|_| Error::invalid("Invalid MCP descriptor"))?;
-    let port = descriptor["port"]
-        .as_u64()
-        .filter(|n| *n > 0 && *n <= 65535)
-        .ok_or_else(|| Error::invalid("Invalid MCP port"))? as u16;
     let token = descriptor["token"]
         .as_str()
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -501,7 +627,23 @@ fn bridge_channel(
     if descriptor["version"] != 1 {
         return Err(Error::invalid("Invalid MCP descriptor version"));
     }
-    let mut stream = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))?;
+    let mut stream = if let Some(socket) = descriptor["socket"].as_str() {
+        let valid = socket
+            .strip_suffix(".sock")
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        if !valid {
+            return Err(Error::invalid("Invalid MCP socket name"));
+        }
+        Stream::Unix(at_socket(&profile.join("mcp").join(socket), |path| {
+            UnixStream::connect(path)
+        })?)
+    } else {
+        let port = descriptor["port"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= 65535)
+            .ok_or_else(|| Error::invalid("Invalid MCP port"))? as u16;
+        Stream::Tcp(TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))?)
+    };
     let mut connect = json!({"id":0,"method":"connect","token":token});
     if let Some(run) = agent_run {
         connect["agentRun"] = json!(run);
@@ -520,7 +662,7 @@ fn bridge_channel(
 struct Bridge {
     profile: PathBuf,
     agent_run: Option<String>,
-    channel: Option<(TcpStream, BufReader<TcpStream>)>,
+    channel: Option<(Stream, BufReader<Stream>)>,
     next: u64,
 }
 impl Bridge {
@@ -616,7 +758,11 @@ mod teardown_tests {
         let owned = closed.clone();
         let worker = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            connection(stream, "synthetic".into(), Failing { closed: owned })
+            connection(
+                Stream::Tcp(stream),
+                "synthetic".into(),
+                Failing { closed: owned },
+            )
         });
         let mut client = TcpStream::connect(address).unwrap();
         client
@@ -665,7 +811,7 @@ mod teardown_tests {
             )
             .unwrap();
         });
-        let stream = TcpStream::connect(address).unwrap();
+        let stream = Stream::Tcp(TcpStream::connect(address).unwrap());
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

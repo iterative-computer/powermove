@@ -13,6 +13,21 @@ size, type value and motion value. The system they encode is
 - Token names are the contract of built-in panels, user extensions and themes
   (`Tokens::PATCHABLE`): add names, never rename one.
 - A theme's `metrics.gap` also sets `metrics.dock_gap` (v1 themes have one gap).
+- `text_size.*` are the text steps, like a utility scale (`xs` 11, `sm` 12,
+  `base` 13 = the macOS body, `lg` 15, `xl` 17, `x2l` 20, `x3l` 22, `x4l` 26);
+  `ink.*` are the alpha steps for `text` or `accent` ink over a surface
+  (`wash`, `well`, `edge`, `tint`). Views pick a step, never a number.
+- `settings.*` is the Settings window at the macOS settings scale (13 pt rows,
+  11 pt secondary, 30 pt sidebar rows with 20 pt tiles, a 700 pt window), its
+  section tiles' material (`settings.tile.*`) and the visual pickers' art
+  (`settings.picker.*`, a dusk wallpaper with a mini window).
+  `welcome.*` places the welcome window and the sign-in sheet.
+- `metrics.list_gap` keeps two highlights of any hoverable or selectable list
+  apart: a row keeps its pitch and its highlight is `list_gap` shorter, centred
+  (Settings' and Home's sidebars, kit rows, v4 list and tree items).
+- The Settings, sign-in, welcome and picker views name no colour and no text
+  size of their own: `crates/design/tests/view_tokens.rs` fails on a hex
+  colour, an RGB literal, an ink alpha byte or a numeric font size there.
 
 To change a value: edit `crates/design/src/lib.rs`, then regenerate the table
 and the snapshot with `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
@@ -23,19 +38,22 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 |---|---|---|---|---|---|
 | `colors.accent` | Powermove orange: primary button, playhead, selection marks | `#F0580C` | `#FA6310` | `#F0580C` | `#FA6310` |
 | `colors.accent_text` | Accent as text or a thin mark on panels (4.5:1) | `#B93800` | `#FF8B4D` | `#9A2F00` | `#FFA073` |
-| `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FCEDE6` | `#3F271A` | `#FCEDE6` | `#3F271A` |
+| `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FCEDE6` | `#402617` | `#FCEDE6` | `#402617` |
+| `colors.black` | Pure black: veils, a clear window's backing | `#000000` | `#000000` | `#000000` | `#000000` |
+| `colors.brand_claude` | Anthropic's mark colour for the Claude Code mark | `#D97757` | `#D97757` | `#D97757` | `#D97757` |
 | `colors.channel_blue` | Blue channel ink on panels (curves, channel values) | `#3263C3` | `#70ADFB` | `#3263C3` | `#70ADFB` |
 | `colors.channel_green` | Green channel ink on panels (curves, channel values) | `#1D7D3E` | `#6FD087` | `#1D7D3E` | `#6FD087` |
 | `colors.channel_red` | Red channel ink on panels (curves, channel values) | `#BA3630` | `#F47B74` | `#BA3630` | `#F47B74` |
+| `colors.composer_send_idle` | Agent composer Send circle with nothing to send (derived) | `#FAFAFA` | `#2F2B2A` | `#F6F6F6` | `#332F2E` |
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
-| `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#696969` | `#9FA0A3` | `#696969` |
-| `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#262626` | `#F3F3F4` | `#262626` |
-| `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#272727` | `#EBEBED` | `#303030` |
-| `colors.fill_strong` | Selected tab or segment over a raised track, never the accent (derived) | `#EFEFF0` | `#3B3B3B` | `#E4E4E5` | `#474747` |
-| `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#262626` | `#FFFFFF` | `#262626` |
-| `colors.focus` | Keyboard focus ring | `#898A8D` | `#999999` | `#383A3F` | `#DBDBDB` |
-| `colors.hairline` | Opaque control and card edge (derived) | `#EBEBED` | `#292929` | `#86878B` | `#7F7F7F` |
-| `colors.hover` | Pointer hover fill on rows and borderless buttons | `#ECECED` | `#2D2D2D` | `#ECECED` | `#2D2D2D` |
+| `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#6A6867` | `#9FA0A3` | `#6A6867` |
+| `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#282523` | `#F3F3F4` | `#282523` |
+| `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#292624` | `#EBEBED` | `#322F2D` |
+| `colors.fill_strong` | Selected tab or segment over a raised track, never the accent (derived) | `#EFEFF0` | `#3D3A39` | `#E4E4E5` | `#4A4645` |
+| `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#292524` | `#FFFFFF` | `#292524` |
+| `colors.focus` | Keyboard focus ring | `#898A8D` | `#9A9997` | `#383A3F` | `#DBDBD9` |
+| `colors.hairline` | Opaque control and card edge (derived) | `#EBEBED` | `#2B2826` | `#86878B` | `#807E7D` |
+| `colors.hover` | Pointer hover fill on rows and borderless buttons | `#ECECED` | `#2E2C2A` | `#ECECED` | `#2E2C2A` |
 | `colors.labels.blue` | Label: default for text and shape layers | `#C9D4E8` | `#3B4250` | `#C9D4E8` | `#3B4250` |
 | `colors.labels.gray` | Label: guides, nulls, cameras | `#DCDCE0` | `#3A3A3A` | `#DCDCE0` | `#3A3A3A` |
 | `colors.labels.green` | Label: audio | `#C5E3D1` | `#24503A` | `#C5E3D1` | `#24503A` |
@@ -45,35 +63,37 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.labels.violet` | Label: adjustment and effect layers | `#D8CFF0` | `#4A3B6B` | `#D8CFF0` | `#4A3B6B` |
 | `colors.labels.yellow` | Label: user colour | `#EFE0B2` | `#5C4A17` | `#EFE0B2` | `#5C4A17` |
 | `colors.media_badge` | Badge fill over media (duration, offline); always dark | `#000000` | `#000000` | `#000000` | `#000000` |
-| `colors.muted` | Captions, metadata, placeholder, units | `#66676B` | `#9D9D9D` | `#57595D` | `#BCBCBC` |
-| `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1A1A1A` | `#FDFDFE` | `#1A1A1A` |
-| `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#131313` | `#F5F5F7` | `#131313` |
-| `colors.raised` | Raised neutral surface: selected segment or tab, neutral button, card (derived) | `#FFFFFF` | `#343434` | `#FFFFFF` | `#343434` |
+| `colors.muted` | Captions, metadata, placeholder, units | `#66676B` | `#9C9B99` | `#57595D` | `#BDBCBB` |
+| `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1C1917` | `#FDFDFE` | `#1C1917` |
+| `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#151311` | `#F5F5F7` | `#151311` |
+| `colors.raised` | Raised neutral surface: selected segment or tab, neutral button, card (derived) | `#FFFFFF` | `#373433` | `#FFFFFF` | `#373433` |
 | `colors.scope_blue` | Blue channel scope trace on the dark viewer | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` |
 | `colors.scope_green` | Green channel scope trace on the dark viewer | `#4FD58A` | `#4FD58A` | `#4FD58A` | `#4FD58A` |
 | `colors.scope_red` | Red channel scope trace on the dark viewer | `#FF6B62` | `#FF6B62` | `#FF6B62` | `#FF6B62` |
-| `colors.secondary` | Row labels, secondary text | `#515257` | `#B3B3B3` | `#3C3E43` | `#D6D6D6` |
+| `colors.secondary` | Row labels, secondary text | `#515257` | `#B4B3B2` | `#3C3E43` | `#D7D6D5` |
 | `colors.selected_danger` | Danger words on a selected row | `#A82319` | `#FF8A80` | `#A82319` | `#FF8A80` |
-| `colors.selected_fill` | Neutral selected row / segment fill | `#E6E6E7` | `#343434` | `#E6E6E7` | `#343434` |
-| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#515257` | `#B3B3B3` | `#3C3E43` | `#D6D6D6` |
+| `colors.selected_fill` | Neutral selected row / segment fill | `#E6E6E7` | `#363332` | `#E6E6E7` | `#363332` |
+| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#515257` | `#B4B3B2` | `#3C3E43` | `#D7D6D5` |
 | `colors.selected_text` | Text and glyphs on an accent fill | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
-| `colors.separator` | Hairline separators and panel edges | `#DCDDDE` | `#343434` | `#86878B` | `#7F7F7F` |
+| `colors.separator` | Hairline separators and panel edges | `#DCDDDE` | `#363332` | `#86878B` | `#807E7D` |
 | `colors.success` | Completed, online, rendered | `#107A52` | `#40CF8E` | `#107A52` | `#40CF8E` |
-| `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F5` | `#1D1F25` | `#F5F5F5` |
-| `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#43291A` | `#FBDFD2` | `#43291A` |
-| `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#512D1A` | `#FAD5C3` | `#512D1A` |
+| `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F4` | `#1D1F25` | `#F5F5F4` |
+| `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#452818` | `#FBDFD2` | `#452818` |
+| `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#522D18` | `#FAD5C3` | `#522D18` |
 | `colors.verified` | A verified publisher's seal (Store), the system blue | `#007AFF` | `#0A84FF` | `#007AFF` | `#0A84FF` |
-| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#080808` | `#E6E6EA` | `#080808` |
+| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#090807` | `#E6E6EA` | `#090807` |
 | `colors.viewer_grid` | The viewer's grid over the picture | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` |
 | `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
 | `colors.warning` | Warnings, missing-but-recoverable states | `#A15C01` | `#F59E0A` | `#A15C01` | `#F59E0A` |
-| `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0A0A0A` | `#EEEEF1` | `#0A0A0A` |
+| `colors.welcome_field_deep` | Welcome stage: the orange field, deep end | `#A3301A` | `#A3301A` | `#A3301A` | `#A3301A` |
+| `colors.welcome_field_light` | Welcome stage: the orange field, light end | `#FF7A2E` | `#FF7A2E` | `#FF7A2E` | `#FF7A2E` |
+| `colors.welcome_ground` | Welcome stage: the ground left of the window | `#131212` | `#131212` | `#131212` | `#131212` |
+| `colors.white` | Pure white: marks over the welcome field | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
+| `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `metrics.agent_attachment` | Square draft attachment thumbnail edge | 56 | 56 | 56 | 56 |
 | `metrics.agent_attachment_sent` | Square sent attachment thumbnail edge | 40 | 40 | 40 | 40 |
-| `metrics.agent_effort_width` | Fixed composer effort pop-up width | 72 | 72 | 72 | 72 |
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
-| `metrics.agent_model_min` | Minimum composer model pop-up width | 96 | 96 | 96 | 96 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
 | `metrics.align_well` | Least width of an alignment well: three cells at the least hit target | 72 | 72 | 72 | 72 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
@@ -83,6 +103,10 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
 | `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
+| `metrics.chooser_height` | Agent chooser height | 360 | 360 | 360 | 360 |
+| `metrics.chooser_list` | Agent chooser model list width | 320 | 320 | 320 | 320 |
+| `metrics.chooser_mark` | Agent chooser mark size (rail, rows) | 16 | 16 | 16 | 16 |
+| `metrics.chooser_rail` | Agent chooser harness rail width | 36 | 36 | 36 | 36 |
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
 | `metrics.color_picker_plane_height` | Height of the colour saturation plane and vertical tracks | 256 | 256 | 256 | 256 |
 | `metrics.color_picker_plane_width` | Width of the colour saturation and brightness plane | 230 | 230 | 230 | 230 |
@@ -96,8 +120,12 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.comp_tab_height` | Composition tab height | 22 | 22 | 22 | 22 |
 | `metrics.comp_tab_leading` | Composition tab leading padding | 10 | 10 | 10 | 10 |
 | `metrics.comp_tab_trailing` | Composition tab trailing padding | 6 | 6 | 6 | 6 |
+| `metrics.composer_add_symbol` | Agent composer thin + glyph square | 16 | 16 | 16 | 16 |
+| `metrics.composer_control` | Agent composer control row height, its + button and Send circle | 22 | 22 | 22 | 22 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
-| `metrics.composer_tray` | Agent composer's tray around its field | 4 | 4 | 4 | 4 |
+| `metrics.composer_popover_radius` | Agent composer corner, concentric in the popover | 8 | 8 | 8 | 8 |
+| `metrics.composer_radius` | Agent composer corner, concentric in its panel | 6 | 6 | 6 | 6 |
+| `metrics.composer_symbol` | Agent composer Send arrow, Stop square and model chevron | 15 | 15 | 15 | 15 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
 | `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |
@@ -138,6 +166,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
 | `metrics.label_column` | Most an inspector row's label takes before its value | 120 | 120 | 120 | 120 |
 | `metrics.layer_column` | Timeline layer list column width | 320 | 320 | 320 | 320 |
+| `metrics.list_gap` | Space between adjacent hoverable or selectable list rows: highlights never touch | 2 | 2 | 2 | 2 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_height` | Height of a Project tile's duration and status badges | 16 | 16 | 16 | 16 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
@@ -161,6 +190,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.min_height` | Minimum window height | 640 | 640 | 640 | 640 |
 | `metrics.min_panel` | Smallest panel extent | 72 | 72 | 72 | 72 |
 | `metrics.min_width` | Minimum window width | 980 | 980 | 980 | 980 |
+| `metrics.nav_row` | A source-list row's pitch in Home and utility sidebars | 32 | 32 | 32 | 32 |
 | `metrics.palette_height` | Command palette maximum height | 360 | 360 | 360 | 360 |
 | `metrics.palette_width` | Command palette width | 520 | 520 | 520 | 520 |
 | `metrics.panel_drag_threshold` | Travel before a panel header or tab drags | 5 | 5 | 5 | 5 |
@@ -172,7 +202,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.playhead` | Playhead line width | 1 | 1 | 1 | 1 |
 | `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
-| `metrics.property_row` | Timeline property sub-row | 28 | 28 | 28 | 28 |
+| `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
 | `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |
 | `metrics.row` | Inspector and list row height | 28 | 28 | 28 | 28 |
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |
@@ -275,7 +305,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `translucency.glass_menu` | Floating colour under a palette's or menu's rows on system glass | 0.84 | 0.72 | 0.84 | 0.72 |
 | `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.6 | 0.9 | 0.6 | 0.9 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
-| `translucency.ground` | Tint over the behind-window blur, initialized from `colors.window` | `#EEEEF1` | `#0A0A0A` | `#EEEEF1` | `#0A0A0A` |
+| `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.offline_hatch` | Media Offline hatch on timeline clips, as `danger` ink | 0.28 | 0.28 | 0.28 | 0.28 |
@@ -285,4 +315,126 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
 | `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.9 | 0.62 | 0.9 |
+| `settings.account_row` | Settings account row height | 40 | 40 | 40 | 40 |
+| `settings.account_weight` | Settings account name and initial weight | 600 | 600 | 600 | 600 |
+| `settings.app_icon` | Settings › Agents app mark side | 20 | 20 | 20 | 20 |
+| `settings.app_icon_gap` | Space after a Settings › Agents app mark | 10 | 10 | 10 | 10 |
+| `settings.avatar` | Settings account avatar side | 26 | 26 | 26 | 26 |
+| `settings.column` | Settings form column's greatest width | 560 | 560 | 560 | 560 |
+| `settings.credits_air` | Air above the credits meter and the daily chart | 8 | 8 | 8 | 8 |
+| `settings.credits_bar` | A day's bar width in the daily credits chart, at most | 6 | 6 | 6 | 6 |
+| `settings.credits_bar_gap` | Least space between the daily credits chart's bars | 2 | 2 | 2 | 2 |
+| `settings.credits_bar_radius` | The daily credits chart's bar caps' corner | 2 | 2 | 2 | 2 |
+| `settings.credits_chart` | Settings › Account daily credits chart height | 52 | 52 | 52 | 52 |
+| `settings.credits_meter` | Settings › Account credits meter thickness | 6 | 6 | 6 | 6 |
+| `settings.credits_today` | Today's marker under the daily credits chart | 3 | 3 | 3 | 3 |
+| `settings.dark_veil` | Dark Settings sidebar veil over the system material | 0.37 | 0.37 | 0.37 | 0.37 |
+| `settings.filter_width` | A Settings filter field's least width | 175 | 175 | 175 | 175 |
+| `settings.group_radius` | A Settings group card's corner | 10 | 10 | 10 | 10 |
+| `settings.group_weight` | Settings sidebar group name weight | 600 | 600 | 600 | 600 |
+| `settings.header_height` | Settings page header band and sidebar group header row | 30 | 30 | 30 | 30 |
+| `settings.header_tile` | Settings page header's tile side | 20 | 20 | 20 | 20 |
+| `settings.header_weight` | Settings page header weight | 700 | 700 | 700 | 700 |
+| `settings.heading_weight` | Settings group heading and chosen picker label weight | 600 | 600 | 600 | 600 |
+| `settings.help_delay` | Seconds the pointer rests before an ⓘ popover opens | 0.3 | 0.3 | 0.3 | 0.3 |
+| `settings.help_width` | The ⓘ popover's text width | 260 | 260 | 260 | 260 |
+| `settings.hover_opacity` | A hovered sidebar row's wash relative to the selection | 0.5 | 0.5 | 0.5 | 0.5 |
+| `settings.page_bottom` | Air under the last Settings card | 20 | 20 | 20 | 20 |
+| `settings.page_inset` | Settings page side inset | 20 | 20 | 20 | 20 |
+| `settings.page_top` | Air above the first Settings card | 4 | 4 | 4 | 4 |
+| `settings.path_width` | A Settings folder path pop-up's greatest width | 210 | 210 | 210 | 210 |
+| `settings.picker.close` | Picker art: mini window close light | `#FF5F57` | `#FF5F57` | `#FF5F57` | `#FF5F57` |
+| `settings.picker.fold` | Picker art: dark fold colour | `#2E2F8A` | `#0D0B2A` | `#2E2F8A` | `#0D0B2A` |
+| `settings.picker.fold_opacity` | Picker art: dark fold opacity | 0.35 | 0.5 | 0.35 | 0.5 |
+| `settings.picker.glow` | Picker art: low warm glow colour | `#FFB36B` | `#FF8A3D` | `#FFB36B` | `#FF8A3D` |
+| `settings.picker.glow_opacity` | Picker art: low warm glow opacity | 0.5 | 0.5 | 0.5 | 0.5 |
+| `settings.picker.minimize` | Picker art: mini window minimise light | `#FEBC2E` | `#FEBC2E` | `#FEBC2E` | `#FEBC2E` |
+| `settings.picker.sheen` | Picker art: sheen colour along the fold | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
+| `settings.picker.sheen_opacity` | Picker art: sheen opacity | 0.22 | 0.14 | 0.22 | 0.14 |
+| `settings.picker.sky_bottom` | Picker art: wallpaper sky at the horizon | `#FF9A5A` | `#F0703A` | `#FF9A5A` | `#F0703A` |
+| `settings.picker.sky_mid` | Picker art: wallpaper sky middle | `#9B5CC4` | `#5B2A86` | `#9B5CC4` | `#5B2A86` |
+| `settings.picker.sky_top` | Picker art: wallpaper sky top | `#4C4FC4` | `#1E1B4B` | `#4C4FC4` | `#1E1B4B` |
+| `settings.picker.tile_edge` | Picker art: unselected tile's edge opacity | 0.1 | 0.12 | 0.1 | 0.12 |
+| `settings.picker.window_edge` | Picker art: mini window edge opacity | 0.12 | 0.16 | 0.12 | 0.16 |
+| `settings.picker.window_shadow` | Picker art: mini window shadow opacity | 0.3 | 0.45 | 0.3 | 0.45 |
+| `settings.picker.zoom` | Picker art: mini window zoom light | `#28C840` | `#28C840` | `#28C840` | `#28C840` |
+| `settings.picker_column` | A picker option's column: every picker is one left-aligned grid | 120 | 120 | 120 | 120 |
+| `settings.picker_height` | A visual picker tile's height | 64 | 64 | 64 | 64 |
+| `settings.picker_radius` | A picker tile's corner | 9 | 9 | 9 | 9 |
+| `settings.picker_ring` | A picker selection ring's width | 2 | 2 | 2 | 2 |
+| `settings.picker_ring_gap` | Gap between a picker tile and its selection ring | 3 | 3 | 3 | 3 |
+| `settings.picker_width` | A visual picker tile's width | 96 | 96 | 96 | 96 |
+| `settings.picker_window_radius` | A picker's mini window corner | 4 | 4 | 4 | 4 |
+| `settings.progress_width` | A Settings progress bar width | 96 | 96 | 96 | 96 |
+| `settings.row` | A Settings row's least height | 38 | 38 | 38 | 38 |
+| `settings.row_inset` | A Settings row's side inset | 12 | 12 | 12 | 12 |
+| `settings.row_padding` | A Settings row's vertical padding | 6 | 6 | 6 | 6 |
+| `settings.section_gap` | Space between Settings groups | 14 | 14 | 14 | 14 |
+| `settings.secure_width` | A Settings secure field width | 160 | 160 | 160 | 160 |
+| `settings.sidebar` | Settings sidebar width | 210 | 210 | 210 | 210 |
+| `settings.sidebar_inset` | Sidebar highlight's side inset | 10 | 10 | 10 | 10 |
+| `settings.sidebar_row` | Settings sidebar row highlight height | 30 | 30 | 30 | 30 |
+| `settings.sidebar_tile` | Settings sidebar section tile side | 20 | 20 | 20 | 20 |
+| `settings.tile.account_glyph` | Section tile: signed-out account glyph | `#6A6A70` | `#98989F` | `#6A6A70` | `#98989F` |
+| `settings.tile.body_bottom` | Section tile: body gradient bottom | `#E2E2E6` | `#26262B` | `#E2E2E6` | `#26262B` |
+| `settings.tile.body_top` | Section tile: body gradient top | `#FFFFFF` | `#55555C` | `#FFFFFF` | `#55555C` |
+| `settings.tile.edge` | Section tile: inner edge colour | `#000000` | `#FFFFFF` | `#000000` | `#FFFFFF` |
+| `settings.tile.edge_bottom` | Section tile: inner edge opacity at the bottom | 0.2 | 0.06 | 0.2 | 0.06 |
+| `settings.tile.edge_top` | Section tile: inner edge opacity at the top | 0.08 | 0.42 | 0.08 | 0.42 |
+| `settings.tile.glyph_bottom` | Section tile: glyph gradient bottom | `#232327` | `#D4D4DA` | `#232327` | `#D4D4DA` |
+| `settings.tile.glyph_top` | Section tile: glyph gradient top | `#55555B` | `#FFFFFF` | `#55555B` | `#FFFFFF` |
+| `settings.tile.light` | Section tile: top light colour | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
+| `settings.tile.light_opacity` | Section tile: top light opacity | 0.9 | 0.24 | 0.9 | 0.24 |
+| `settings.tile.press` | Section tile: glyph's pressed-in shadow colour | `#FFFFFF` | `#000000` | `#FFFFFF` | `#000000` |
+| `settings.tile.press_opacity` | Section tile: glyph's pressed-in shadow opacity | 0.9 | 0.5 | 0.9 | 0.5 |
+| `settings.tile.shadow` | Section tile: drop shadow colour | `#000000` | `#000000` | `#000000` | `#000000` |
+| `settings.tile.shadow_blur` | Section tile: drop shadow blur | 0.7 | 0.7 | 0.7 | 0.7 |
+| `settings.tile.shadow_offset` | Section tile: drop shadow offset | 0.6 | 0.6 | 0.6 | 0.6 |
+| `settings.tile.shadow_opacity` | Section tile: drop shadow opacity | 0.2 | 0.6 | 0.2 | 0.6 |
+| `settings.tile_radius` | A section tile's corner | 5 | 5 | 5 | 5 |
+| `settings.title_air` | Air under a Settings row's second line | 4 | 4 | 4 | 4 |
+| `settings.value_least` | A Settings shortcut value's least width | 88 | 88 | 88 | 88 |
+| `settings.window_default_height` | Settings window first height | 600 | 600 | 600 | 600 |
+| `settings.window_height` | Settings window least height | 500 | 500 | 500 | 500 |
+| `settings.window_width` | Settings window width (fixed) | 700 | 700 | 700 | 700 |
+| `text_size.base` | Text size step 13 pt: the macOS body | 13 | 13 | 13 | 13 |
+| `text_size.lg` | Text size step 15 pt: page headers | 15 | 15 | 15 | 15 |
+| `text_size.sm` | Text size step 12 pt: small labels | 12 | 12 | 12 | 12 |
+| `text_size.x2l` | Text size step 20 pt: sheet titles | 20 | 20 | 20 | 20 |
+| `text_size.x3l` | Text size step 22 pt: code digits | 22 | 22 | 22 | 22 |
+| `text_size.x4l` | Text size step 26 pt: the welcome title | 26 | 26 | 26 | 26 |
+| `text_size.xl` | Text size step 17 pt | 17 | 17 | 17 | 17 |
+| `text_size.xs` | Text size step 11 pt: secondary text, group names | 11 | 11 | 11 | 11 |
+| `ink.edge` | Ink alpha: a well's or hairline's edge | 0.12 | 0.12 | 0.12 | 0.12 |
+| `ink.tint` | Ink alpha: an accent tint behind a mark | 0.15 | 0.15 | 0.15 | 0.15 |
+| `ink.wash` | Ink alpha: a hovered row's faint wash | 0.03 | 0.03 | 0.03 | 0.03 |
+| `ink.well` | Ink alpha: a field's or cell's quiet fill | 0.05 | 0.05 | 0.05 | 0.05 |
+| `welcome.actions_room` | Room left above the welcome actions | 20 | 20 | 20 | 20 |
+| `welcome.actions_top` | Where the welcome actions start | 510 | 510 | 510 | 510 |
+| `welcome.cell_height` | A code cell height | 48 | 48 | 48 | 48 |
+| `welcome.cell_width` | A code cell width | 38 | 38 | 38 | 38 |
+| `welcome.column` | The welcome column's width | 330 | 330 | 330 | 330 |
+| `welcome.field_height` | The welcome email well's height | 40 | 40 | 40 | 40 |
+| `welcome.field_radius` | The welcome well's and cells' corner | 10 | 10 | 10 | 10 |
+| `welcome.half` | Each half of the welcome window | 450 | 450 | 450 | 450 |
+| `welcome.icon_tile` | A welcome list icon's tile | 32 | 32 | 32 | 32 |
+| `welcome.list_fade` | The welcome list's edge fade | 18 | 18 | 18 | 18 |
+| `welcome.list_inset` | A welcome list row's side inset | 16 | 16 | 16 | 16 |
+| `welcome.list_max_height` | The welcome list's greatest height before it scrolls | 224 | 224 | 224 | 224 |
+| `welcome.list_radius` | The welcome list's corner | 12 | 12 | 12 | 12 |
+| `welcome.list_row` | A welcome list row's least height | 50 | 50 | 50 | 50 |
+| `welcome.list_widen` | How much wider than the column the welcome list runs | 20 | 20 | 20 | 20 |
+| `welcome.logo_top` | The welcome mark's height from the top | 104 | 104 | 104 | 104 |
+| `welcome.primary_height` | The welcome primary action's height | 36 | 36 | 36 | 36 |
+| `welcome.primary_width` | The welcome primary action's width | 280 | 280 | 280 | 280 |
+| `welcome.sheet_control` | Sign-in sheet controls' height | 36 | 36 | 36 | 36 |
+| `welcome.sheet_foot` | Cancel's line above the sheet's bottom | 22 | 22 | 22 | 22 |
+| `welcome.sheet_foot_gap` | Cancel's line under the last control | 20 | 20 | 20 | 20 |
+| `welcome.sheet_height` | Sign-in sheet first height | 428 | 428 | 428 | 428 |
+| `welcome.sheet_padding` | Sign-in sheet column inset | 32 | 32 | 32 | 32 |
+| `welcome.sheet_tile` | Sign-in sheet tile side | 48 | 48 | 48 | 48 |
+| `welcome.sheet_width` | Sign-in sheet width | 400 | 400 | 400 | 400 |
+| `welcome.window_left` | The welcome window picture's left | 32 | 32 | 32 | 32 |
+| `welcome.window_scale` | The welcome window picture's scale | 0.88 | 0.88 | 0.88 | 0.88 |
+| `welcome.window_top` | The welcome window picture's top | 104 | 104 | 104 | 104 |
 <!-- tokens:end -->

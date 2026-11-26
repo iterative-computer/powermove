@@ -182,6 +182,17 @@ impl Handle {
         self.surface != Surface::CodexExec
     }
     /// On saturation, returns the original action for a later retry.
+    /// Asks the worker to cancel `run`, from any thread, for as long as the
+    /// worker lives (a sign-out watcher).
+    pub fn canceller(&self, run: String) -> impl Fn() + Send + 'static {
+        let tx = self.tx.clone();
+        move || {
+            let _ = tx.try_send(QueuedAction {
+                action: Action::Cancel(run.clone()),
+                reply: None,
+            });
+        }
+    }
     pub fn send(&self, a: Action) -> Result<(), TrySendError<Action>> {
         self.enqueue(a, None)
     }

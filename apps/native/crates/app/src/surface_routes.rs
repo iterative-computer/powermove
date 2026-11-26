@@ -170,8 +170,12 @@ impl Controller {
             }
             "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
+            "welcomeIntro" => crate::first_run_stage::replay(cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
             "panelLibrary" => self.open_panel_library(cx),
+            "openTelemetryDocs" => {
+                crate::platform::open_url(pm_telemetry::DOCS_URL);
+            }
             // Settings › General › Agent Notifications, when macOS says no.
             "openNotificationSettings" => {
                 let id = crate::platform::bundle_id().unwrap_or_default();
@@ -189,11 +193,30 @@ impl Controller {
                 crate::cloud::open_sign_in(window, cx)
             }
             "cloudSignOut" => crate::cloud::sign_out(cx),
+            "cloudPortal" => crate::cloud::manage_billing(cx),
+            "cloudCheckoutCancel" => crate::cloud::cancel_checkout(cx),
+            "cloudBilling" => crate::cloud::refresh_billing(cx),
+            command if command.starts_with("cloudCheckout.") => {
+                let plan = command.trim_start_matches("cloudCheckout.").to_owned();
+                crate::cloud::subscribe(plan, cx)
+            }
             "providerSetUp" => {
                 let window = self.account_window(cx);
                 crate::providers::open(window, cx)
             }
             "providerDisconnect" => crate::providers::disconnect(cx),
+            "providerKey.openai" | "providerKey.anthropic" => {
+                let kind = if name == "providerKey.openai" {
+                    crate::provider_keys::Kind::OpenAi
+                } else {
+                    crate::provider_keys::Kind::Anthropic
+                };
+                let accounts = self.builtins.runtime.as_ref().and_then(|r| r.agent_accounts());
+                if let Some(accounts) = accounts {
+                    let window = self.account_window(cx);
+                    crate::provider_keys::open(kind, window, accounts, cx)
+                }
+            }
             "agentClientsCopy" => crate::agent_clients::copy_setup(cx),
             command
                 if command.starts_with("agentClientAdd.")

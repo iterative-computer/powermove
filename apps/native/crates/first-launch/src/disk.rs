@@ -9,7 +9,7 @@ use std::{
 };
 
 pub const RESERVE: u64 = 6 * 1024 * 1024 * 1024;
-/// Typed so the gate can show `Not Enough Space` with real byte counts.
+/// Typed so the gate can show `Not enough space` with real byte counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LowDisk {
     pub needed: u64,

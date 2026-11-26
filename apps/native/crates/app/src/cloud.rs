@@ -7,17 +7,17 @@
 //! Keychain, AppKit sheets for the steps, and Settings › Account rows through
 //! the built-in facts. Every request runs on one service worker, so an
 //! exchange, its save and the refresh never interleave.
-use crate::sheets::{OpenSheet, from_surface};
 use gpui::{App, AsyncApp, Global};
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
+use pm_agents::inference::{Billing, BillingAnswer};
 use pm_compat_runner::store_install;
 use pm_services::{
     ServiceError, ServiceErrorCode,
     surfaces::{
         agent_auth::{
             Account, BrowserAuth, CloudHost, CloudReply, CloudTask, CloudWork, Exchange, Secret,
-            SessionPayload, SignIn, SignInStep, otp, valid_handle,
+            SessionPayload, valid_handle,
         },
         copy::{self, AuthError},
     },
@@ -201,10 +201,31 @@ pub(crate) mod keychain {
         unsafe { SecKeychainItemFreeContent(ptr::null_mut(), data) };
         Ok(Some((bytes, item)))
     }
+    /// Every Keychain call goes through here first. A development build
+    /// launched against the local fakes answers from their fake store, and a
+    /// missing or invalid fake-store setting closes the Keychain instead of
+    /// falling through to the real one (`pm_agents::edge::keychain_mode`).
+    fn fake() -> Option<Box<dyn pm_agents::edge::Secrets>> {
+        use pm_agents::edge::{KeychainMode, RefusedKeychain, keychain_mode};
+        let vars = std::env::vars().filter(|(k, _)| k.starts_with("PM_")).collect();
+        match keychain_mode(&vars) {
+            KeychainMode::Real => None,
+            KeychainMode::Fake(store) => Some(Box::new(store)),
+            KeychainMode::Refused(why) => Some(Box::new(RefusedKeychain(why))),
+        }
+    }
     pub fn read(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.read(service, account);
+        }
         Ok(find(service, account, false)?.map(|(bytes, _)| bytes))
     }
     pub fn delete(service: &str, account: &str) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.delete(service, account);
+        }
         if let Some((_, item)) = find(service, account, true)? {
             let status = unsafe { SecKeychainItemDelete(item) };
             unsafe { CFRelease(item) };
@@ -215,6 +236,10 @@ pub(crate) mod keychain {
         Ok(())
     }
     pub fn write(service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        use pm_agents::edge::Secrets as _;
+        if let Some(fake) = fake() {
+            return fake.write(service, account, bytes);
+        }
         delete(service, account)?;
         let status = unsafe {
             SecKeychainAddGenericPassword(
@@ -312,6 +337,10 @@ impl Http {
         kind: Option<String>,
         auth: bool,
     ) -> pm_services::Result<Value> {
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return review::answer(method, path, &body);
+        }
         let mut headers = vec![(
             "X-Powermove-Client".to_owned(),
             format!("desktop/{}", env!("CARGO_PKG_VERSION")),
@@ -343,6 +372,7 @@ impl Http {
         }
         let code = value["error"]
             .as_str()
+            .or_else(|| value["error"]["code"].as_str())
             .filter(|c| c.len() <= 40 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
             .unwrap_or("unknown");
         let kind = match response.status {
@@ -391,10 +421,51 @@ impl Http {
     pub fn signed_in(&self) -> bool {
         stored_token(self.vault.as_ref(), self.origin).is_some()
     }
+    /// The session Aero runs on, with the origin it belongs to. A
+    /// development review account has no inference origin ("review").
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let token = stored_token(self.vault.as_ref(), self.origin)?;
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return Some(pm_agents::inference::Session {
+                origin: "review".into(),
+                token: token.expose().to_owned(),
+            });
+        }
+        Some(pm_agents::inference::Session {
+            origin: self.origin.into(),
+            token: token.expose().to_owned(),
+        })
+    }
     /// `DELETE /v1/me`, then the session is forgotten.
     pub fn delete_account(&mut self) -> pm_services::Result<()> {
         self.call("DELETE", "/v1/me", None, true)?;
         self.forget()
+    }
+    /// `GET /v2/billing`: the plan, this period's credits and what can be
+    /// bought. A backend without the route says Missing.
+    fn billing(&mut self) -> pm_services::Result<BillingAnswer> {
+        match self.call("GET", pm_agents::inference::BILLING, None, true) {
+            Ok(value) => pm_agents::inference::parse_billing(200, value.to_string().as_bytes())
+                .map_err(|e| ServiceError::message(ServiceErrorCode::InvalidData, e)),
+            Err(error) if error.code == ServiceErrorCode::NotFound => Ok(BillingAnswer::Missing),
+            Err(error) if error.code == ServiceErrorCode::PermissionDenied => {
+                Ok(BillingAnswer::SignedOut)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    /// `POST /v2/billing/checkout` or `/portal`: the Stripe page to open,
+    /// when it is one of Stripe's (or, in a development build, the local
+    /// stack's own page).
+    fn billing_page(&mut self, page: &str, plan: Option<&str>) -> pm_services::Result<String> {
+        let body = plan.map(|plan| json!({ "plan": plan }));
+        let path = format!("{}/{page}", pm_agents::inference::BILLING);
+        let value = self.call("POST", &path, body.or(Some(json!({}))), true)?;
+        value["url"]
+            .as_str()
+            .and_then(billing_url)
+            .ok_or_else(|| ServiceError::message(ServiceErrorCode::InvalidData, "billing_url"))
     }
     /// Remember Installs: what the Store installed or removed on this Mac.
     pub fn record_install(&mut self, repo: &str, release: Option<&str>) -> pm_services::Result<()> {
@@ -466,6 +537,11 @@ impl CloudHost for Http {
             }
             Err(error) => return Err(error),
         };
+        // Telemetry joins this install to the account's others by its
+        // opaque id (never the e-mail).
+        if let Some(id) = me["user"]["id"].as_str() {
+            pm_telemetry::identify(id);
+        }
         let account = Account {
             email: me["user"]["email"].as_str().unwrap_or_default().to_owned(),
             handle: me["publisher"]["handle"].as_str().map(str::to_owned),
@@ -517,15 +593,9 @@ fn cached(profile: &Path, origin: &str) -> Option<Account> {
 
 // ---- App state ----
 
-struct Flow {
-    signin: SignIn,
-    email: String,
-    error: Option<String>,
-    sheet: Option<OpenSheet>,
-    window: Retained<NSWindow>,
-    /// The handle the person typed, for a "taken" message.
-    handle: String,
-}
+/// A sign-in with Google, waiting for its `powermove://auth` return link:
+/// told the account's email, or the error.
+type Google = Box<dyn FnOnce(Result<String, String>, &mut App)>;
 struct Cloud {
     profile: PathBuf,
     origin: &'static str,
@@ -534,10 +604,22 @@ struct Cloud {
     revision: u64,
     worker: ServiceWorker<Http>,
     browser: BrowserAuth,
-    flow: Option<Flow>,
+    google: Option<Google>,
     busy: bool,
+    billing: Billed,
 }
 impl Global for Cloud {}
+/// The account's billing, as Settings › Account shows it.
+#[derive(Default)]
+struct Billed {
+    state: Option<Result<Option<Billing>, ()>>,
+    /// Checkout or the Portal is open in the browser.
+    waiting: Option<&'static str>,
+    /// The last Subscribe or Manage Billing that failed, in words.
+    error: Option<String>,
+    read_at: Option<std::time::Instant>,
+    reading: bool,
+}
 
 /// Starts the account service for this profile and refreshes a stored session.
 pub fn init(profile: PathBuf, cx: &mut App) {
@@ -547,6 +629,24 @@ pub fn init(profile: PathBuf, cx: &mut App) {
     let origin = store_install::origin();
     let worker_profile = profile.clone();
     let Ok(worker) = ServiceWorker::start(move || {
+        // A local development stack's session, given at launch
+        // (`PM_CLOUD_SESSION`), lives in memory, never the Keychain.
+        if let Some(sealed) = local_session(origin) {
+            return Ok(Http::new(
+                origin,
+                Box::new(Memory(Some(sealed))),
+                worker_profile,
+            ));
+        }
+        // A development review's account lives in memory, never the Keychain.
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return Ok(Http::new(
+                origin,
+                Box::new(review::Memory::seeded(origin)),
+                worker_profile,
+            ));
+        }
         Ok(Http::new(
             origin,
             Box::new(Keychain::for_app(&worker_profile)),
@@ -563,9 +663,11 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         revision: 1,
         worker,
         browser: BrowserAuth::default(),
-        flow: None,
+        google: None,
         busy: false,
+        billing: Billed::default(),
     });
+    follow_activation(cx);
     // Whether a session is stored, and who it is, off the main thread.
     if let Ok(pending) = cx.global::<Cloud>().worker.submit(|host| {
         let signed = host.signed_in();
@@ -593,10 +695,46 @@ pub fn init(profile: PathBuf, cx: &mut App) {
                     cloud.account = None;
                 }
                 changed(cx);
+                if signed {
+                    refresh_billing(cx);
+                }
             });
         })
         .detach();
     }
+}
+/// A session held in memory only (a local stack's, a review's).
+#[derive(Default)]
+pub(crate) struct Memory(Option<Vec<u8>>);
+impl Vault for Memory {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.clone())
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.0 = Some(bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self) -> Result<(), String> {
+        self.0 = None;
+        Ok(())
+    }
+}
+/// The session `PM_CLOUD_SESSION` gives a build on a local development
+/// stack (debug, or the Sandbox's `dev-cloud-origin`), sealed for `origin`:
+/// signed in as that stack's account from the start. Never on the real
+/// cloud, never in a shipped release.
+fn local_session(origin: &str) -> Option<Vec<u8>> {
+    if !store_install::LOCAL_CLOUD || !pm_agents::inference::local_origin(origin) {
+        return None;
+    }
+    let token = std::env::var("PM_CLOUD_SESSION")
+        .ok()
+        .filter(|t| !t.is_empty() && t.len() <= 4096 && !t.chars().any(char::is_control))?;
+    Some(
+        json!({"origin":origin,"token":token,"expiresAt":"2099-01-01T00:00:00.000Z"})
+            .to_string()
+            .into_bytes(),
+    )
 }
 async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) -> Option<T> {
     loop {
@@ -610,6 +748,38 @@ async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) ->
             .await;
     }
 }
+/// The Powermove account as Aero reads it: the session, asked of the
+/// account's own worker each time (never cached), so a sign-out or another
+/// account is seen by the next request. Called on workers, never on main.
+#[derive(Clone)]
+pub struct AeroAccount(ServiceWorker<Http>);
+impl std::fmt::Debug for AeroAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AeroAccount")
+    }
+}
+impl pm_agents::inference::PowermoveAccount for AeroAccount {
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let pending = self.0.submit(|host| Ok(host.session())).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match pending.try_take() {
+                Ok(Some(session)) => return session,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+/// The account Aero runs on, once the account service has started.
+pub fn aero_account(
+    cx: &App,
+) -> Option<std::sync::Arc<dyn pm_agents::inference::PowermoveAccount>> {
+    let cloud = cx.try_global::<Cloud>()?;
+    Some(std::sync::Arc::new(AeroAccount(cloud.worker.clone())))
+}
 /// Settings › Account reads this through the built-in facts.
 pub fn fact(cx: &App) -> Value {
     let Some(cloud) = cx.try_global::<Cloud>() else {
@@ -618,7 +788,37 @@ pub fn fact(cx: &App) -> Value {
     let account = cloud.account.as_ref().filter(|_| cloud.signed_in);
     json!({"revision":cloud.revision,"signedIn":account.is_some(),
         "identity":account.map(Account::identity),"email":account.map(|a| a.email.clone()),
-        "rememberInstalls":account.map(|a| a.remember_installs),"busy":cloud.busy})
+        "rememberInstalls":account.map(|a| a.remember_installs),"busy":cloud.busy,
+        "billing":account.map(|_| billing_fact(&cloud.billing))})
+}
+/// Settings › Account's plan card and credits (`pm_builtins` builds the rows).
+fn billing_fact(billed: &Billed) -> Value {
+    use pm_agents::inference::{Status, short_day};
+    let billing = match &billed.state {
+        None => return json!({"state":"loading"}),
+        Some(Err(())) => return json!({"state":"error"}),
+        Some(Ok(None)) => return json!({"state":"missing"}),
+        Some(Ok(Some(billing))) => billing,
+    };
+    json!({"state":"ready","subscribed":billing.subscribed(),
+        "plan":billing.plan.as_ref().map(|p| json!({"id":p.id,"name":p.name,"priceCents":p.price_cents})),
+        "status":billing.status.map(|s| match s {
+            Status::Active => "active",
+            Status::PastDue => "past_due",
+            Status::Canceled => "canceled",
+        }),
+        "cancelAtPeriodEnd":billing.cancel_at_period_end,
+        "credits":{"included":billing.included,"used":billing.used,"remaining":billing.remaining},
+        "resets":billing.resets().map(short_day),
+        // The period's length in days: the daily chart's slots.
+        "periodDays":billing.period.map(|(start, end)| {
+            let days = |d: pm_agents::inference::Day| pm_services::surfaces::store::civil_days(d);
+            (days(end) - days(start)).max(0)
+        }),
+        "daily":billing.daily.iter().map(|(day, credits)| json!([short_day(*day), credits])).collect::<Vec<_>>(),
+        "plans":billing.plans.iter().map(|p| json!({"id":p.id,"name":p.name,"priceCents":p.price_cents,"credits":p.credits})).collect::<Vec<_>>(),
+        "upgrade":billing.upgrade().map(|p| json!({"id":p.id,"name":p.name,"credits":p.credits})),
+        "waiting":billed.waiting,"error":billed.error})
 }
 /// Every editor republishes its built-ins, so Settings shows the change.
 fn changed(cx: &mut App) {
@@ -632,225 +832,329 @@ fn changed(cx: &mut App) {
     });
 }
 
+/// The email code's two steps for the first run's account step, on the same
+/// worker, host and session store as the sign-in sheet: `send_code` asks the
+/// registry to email a code; `verify_code` checks it, saves the session and
+/// reads the account. `done` gets the registry's error code on a failure
+/// (`api:unauthorized` wrong, `api:gone` expired, `network`).
+pub fn send_code(
+    email: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<(), String>, &mut App) + 'static,
+) {
+    run_code(CloudWork::SendEmail { email }, cx, move |result, cx| {
+        done(result.map(drop), cx)
+    });
+}
+pub fn verify_code(
+    email: String,
+    code: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+) {
+    let work = CloudWork::VerifyEmail {
+        email: email.clone(),
+        code: Secret::new(code),
+    };
+    run_code(work, cx, move |result, cx| {
+        done(
+            result.map(|reply| match reply {
+                CloudReply::Account(Some(account)) if !account.email.is_empty() => account.email,
+                _ => email,
+            }),
+            cx,
+        )
+    });
+}
+fn run_code(
+    work: CloudWork,
+    cx: &mut App,
+    done: impl FnOnce(Result<CloudReply, String>, &mut App) + 'static,
+) {
+    let Some(cloud) = cx.try_global::<Cloud>() else {
+        return done(Err("unavailable".into()), cx);
+    };
+    let ticket = pm_services::surfaces::Flight::default().start();
+    let Some(task) = CloudTask::new(ticket, cloud.origin, work) else {
+        return done(Err("unavailable".into()), cx);
+    };
+    let Ok(pending) = cloud.worker.submit(move |host| Ok(task.run(host))) else {
+        return done(Err("unavailable".into()), cx);
+    };
+    cx.spawn(async move |cx| {
+        let result = wait(pending, cx)
+            .await
+            .map(|done| done.result.map_err(|e| e.to_string()))
+            .unwrap_or_else(|| Err("unavailable".into()));
+        cx.update(|cx| {
+            if let Ok(CloudReply::Account(account)) = &result {
+                let cloud = cx.global_mut::<Cloud>();
+                cloud.signed_in = account.is_some();
+                cloud.account = account.clone();
+                changed(cx);
+                refresh_billing(cx);
+            }
+            done(result, cx);
+        });
+    })
+    .detach();
+}
+/// The sign-in sheet's sentence for a failed send (`verifying: false`) or
+/// check of a code, for the first run's account step.
+pub(crate) fn code_error(code: &str, verifying: bool) -> String {
+    let error = match (verifying, code) {
+        (_, "api:rate_limited") => AuthError::RateLimited,
+        (_, "api:client_too_old") => AuthError::OldClient,
+        (false, "network") => AuthError::Offline,
+        (false, _) => AuthError::EmailRejected,
+        (true, "api:unauthorized" | "api:bad_request") => AuthError::WrongCode,
+        (true, "api:gone") => AuthError::ExpiredCode,
+        (true, _) => AuthError::CheckCode,
+    };
+    copy::auth_error(error, "", "")
+}
+/// Development builds: the account step against a review backend
+/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain; signed in from the
+/// start with `PM_NATIVE_REVIEW_SIGNED_IN=<email>`.
+#[cfg(debug_assertions)]
+fn review_cloud() -> bool {
+    std::env::var_os("PM_NATIVE_REVIEW_CLOUD").is_some()
+}
+/// The review backend: code 123456 signs in, 000000 is wrong, 111111 has
+/// expired; an address at `offline.example` can't be reached; the handle
+/// `taken` is someone else's. The session stays in memory.
+#[cfg(debug_assertions)]
+mod review {
+    use super::*;
+    use std::sync::Mutex;
+    static EMAIL: Mutex<String> = Mutex::new(String::new());
+    /// The review account's billing: free, aerolite, aero, cancelling,
+    /// past_due or out (`PM_NATIVE_REVIEW_BILLING`, or a review link).
+    static BILLING: std::sync::LazyLock<Mutex<String>> = std::sync::LazyLock::new(|| {
+        Mutex::new(std::env::var("PM_NATIVE_REVIEW_BILLING").unwrap_or_else(|_| "free".into()))
+    });
+    pub fn set_billing(state: &str) {
+        *BILLING.lock().unwrap() = state.to_owned();
+    }
+    /// `GET /v2/billing` for a review state, shaped as the contract says.
+    fn billing(state: &str) -> Value {
+        let plans = json!([{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
+            {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}]);
+        if state == "free" {
+            return json!({"plan":null,"status":null,"cancelAtPeriodEnd":false,
+                "credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":plans});
+        }
+        let aero = state == "aero";
+        let (id, name, price, included) = if aero {
+            ("aero", "Aero", 1999, 2500)
+        } else {
+            ("aerolite", "Aerolite", 999, 1000)
+        };
+        let mut spent: Vec<u64> = [40, 12, 0, 66, 18, 0, 0, 24, 9, 5, 0, 14, 0, 0]
+            .iter()
+            .map(|c| if aero { c * 3 } else { *c })
+            .collect();
+        if state == "out" {
+            let before: u64 = spent[..spent.len() - 1].iter().sum();
+            *spent.last_mut().unwrap() = included - before;
+        }
+        let used: u64 = spent.iter().sum();
+        let daily: Vec<Value> = spent
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let date = if i < 6 {
+                    format!("2026-11-{}", 25 + i)
+                } else {
+                    format!("2026-12-{:02}", i - 5)
+                };
+                json!({"date": date, "credits": c})
+            })
+            .collect();
+        json!({"plan":{"id":id,"name":name,"priceCents":price,"interval":"month"},
+            "status":if state == "past_due" { "past_due" } else { "active" },
+            "cancelAtPeriodEnd":state == "cancelling",
+            "credits":{"included":included,"used":used,"remaining":included - used},
+            "period":{"start":"2026-11-25T00:00:00Z","end":"2026-12-25T00:00:00Z"},
+            "daily":daily,"plans":plans})
+    }
+    static HANDLE: Mutex<String> = Mutex::new(String::new());
+    pub(super) use super::Memory;
+    impl Memory {
+        /// Signed in from the start as `PM_NATIVE_REVIEW_SIGNED_IN` (an
+        /// email), when the review launch names one; else signed out.
+        pub fn seeded(origin: &str) -> Self {
+            let Ok(email) = std::env::var("PM_NATIVE_REVIEW_SIGNED_IN") else {
+                return Self::default();
+            };
+            *EMAIL.lock().unwrap() = email;
+            Self(Some(
+                json!({"origin":origin,"token":"review-session","expiresAt":"2099-01-01T00:00:00.000Z"})
+                    .to_string()
+                    .into_bytes(),
+            ))
+        }
+    }
+    pub fn answer(method: &str, path: &str, body: &[u8]) -> pm_services::Result<Value> {
+        let body: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let fail = |kind, code: &str| Err(ServiceError::message(kind, code.to_owned()));
+        // A beat, as a network would take.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        match (method, path) {
+            ("POST", "/v1/auth/email/send") => {
+                let email = body["email"].as_str().unwrap_or_default();
+                if email.ends_with("@offline.example") {
+                    return fail(ServiceErrorCode::Offline, "network");
+                }
+                *EMAIL.lock().unwrap() = email.to_owned();
+                Ok(json!({ "ok": true }))
+            }
+            ("POST", "/v1/auth/email/verify") => match body["otp"].as_str() {
+                Some("123456") => {
+                    Ok(json!({"token":"review-session","expiresAt":"2099-01-01T00:00:00.000Z"}))
+                }
+                Some("111111") => fail(ServiceErrorCode::NotFound, "api:gone"),
+                _ => fail(ServiceErrorCode::PermissionDenied, "api:unauthorized"),
+            },
+            ("GET", "/v2/billing") => Ok(billing(&BILLING.lock().unwrap())),
+            // Checkout "paid" at once (as its webhook would land before the
+            // browser comes back); the Portal changes nothing.
+            ("POST", "/v2/billing/checkout") => {
+                let plan = body["plan"].as_str().unwrap_or_default().to_owned();
+                if !matches!(plan.as_str(), "aerolite" | "aero") {
+                    return fail(ServiceErrorCode::InvalidInput, "api:bad_plan");
+                }
+                if *BILLING.lock().unwrap() != "free" {
+                    return fail(ServiceErrorCode::InvalidInput, "api:has_plan");
+                }
+                *BILLING.lock().unwrap() = plan.clone();
+                Ok(json!({"url": format!("https://checkout.stripe.com/c/pay/cs_review_{plan}")}))
+            }
+            ("POST", "/v2/billing/portal") => {
+                Ok(json!({"url": "https://billing.stripe.com/p/session/review"}))
+            }
+            ("GET", "/v1/me") => {
+                let handle = HANDLE.lock().unwrap().clone();
+                Ok(json!({"user":{"id":"review","email":EMAIL.lock().unwrap().clone()},
+                    "publisher":{"handle":(!handle.is_empty()).then_some(handle)}}))
+            }
+            // A new account's handle; "taken" is someone else's.
+            ("POST", "/v1/me/handle") => match body["handle"].as_str() {
+                Some("taken") => fail(ServiceErrorCode::InvalidInput, "api:handle_taken"),
+                Some(handle) => {
+                    *HANDLE.lock().unwrap() = handle.to_owned();
+                    Ok(json!({ "ok": true }))
+                }
+                None => fail(ServiceErrorCode::InvalidInput, "api:handle_invalid"),
+            },
+            _ => Ok(json!({ "ok": true })),
+        }
+    }
+}
+/// Development review link `powermove://review/billing/<state>`: the review
+/// account's billing changes (as its webhooks would) and is read again.
+#[cfg(debug_assertions)]
+pub fn review_billing(state: &str, cx: &mut App) {
+    if review_cloud() {
+        review::set_billing(state);
+        refresh_billing(cx);
+    }
+}
+/// Who is signed in, if anyone: the account's email (its handle if it has
+/// no email), as the first run's account step names it.
+pub fn identity(cx: &App) -> Option<String> {
+    let cloud = cx.try_global::<Cloud>()?;
+    let account = cloud.account.as_ref().filter(|_| cloud.signed_in)?;
+    Some(if account.email.is_empty() {
+        account.identity()
+    } else {
+        account.email.clone()
+    })
+}
+/// Calls `f` with who is signed in whenever the account changes.
+pub fn on_change(cx: &mut App, f: impl Fn(Option<String>, &mut App) + 'static) {
+    cx.observe_global::<Cloud>(move |cx| f(identity(cx), cx))
+        .detach();
+}
 pub(crate) fn sign_in_available(cx: &App) -> bool {
     cx.has_global::<Cloud>()
 }
 
-/// Settings › Account › Sign In…: the first step's sheet on `window`.
+/// Settings › Account › Sign In…, Home's and the Store's: the sign-in sheet
+/// on `window` (`sign_in`, the first run's sign-in in a sheet).
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
-    if !cx.has_global::<Cloud>() {
-        return;
+    if cx.has_global::<Cloud>() {
+        crate::sign_in::open(window, cx);
     }
-    let cloud = cx.global_mut::<Cloud>();
-    if cloud.flow.is_some() {
-        return;
-    }
-    let account = cloud.account.clone().filter(|_| cloud.signed_in);
-    cloud.flow = Some(Flow {
-        signin: SignIn::new(account.as_ref()),
-        email: account.map(|a| a.email).unwrap_or_default(),
-        error: None,
-        sheet: None,
-        window,
-        handle: String::new(),
+}
+/// Who is signed in has no publisher handle yet (a new account).
+pub(crate) fn needs_handle(cx: &App) -> bool {
+    cx.try_global::<Cloud>()
+        .and_then(|c| c.account.as_ref().filter(|_| c.signed_in))
+        .is_some_and(|a| a.handle.as_deref().is_none_or(str::is_empty))
+}
+/// The sign-in sheet's handle step: claim `handle` for the account.
+/// `done` gets the registry's error code on a failure.
+pub(crate) fn claim_handle(
+    handle: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<(), String>, &mut App) + 'static,
+) {
+    run_code(CloudWork::ClaimHandle { handle }, cx, move |result, cx| {
+        done(result.map(drop), cx)
     });
-    present(cx);
 }
-fn surface(flow: &Flow) -> Option<crate::dialogs::Surface> {
-    use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
-    let message = copy::sign_in(flow.signin.step, false, "Google", &flow.email)?;
-    let button = |id: &'static str, label: &'static str, default: bool| Button {
-        id,
-        label,
-        default,
-        destructive: false,
-        enabled: true,
+/// The handle step's sentence for a failure.
+pub(crate) fn handle_error(code: &str, handle: &str) -> String {
+    let error = match code {
+        "api:rate_limited" => AuthError::RateLimited,
+        "api:client_too_old" => AuthError::OldClient,
+        "api:handle_taken" => AuthError::HandleTaken,
+        "api:handle_reserved" => AuthError::HandleReserved,
+        "api:handle_invalid" => AuthError::InvalidHandle,
+        _ => AuthError::SaveHandle,
     };
-    let field = |id: &str, label: &str, value: &str, placeholder: &'static str| Field {
-        placeholder: Some(placeholder),
-        ..Field::new(id, label, NativePiece::TextField, vec![value.into()])
-    };
-    let (fields, buttons) = match flow.signin.step {
-        SignInStep::Start => (
-            vec![field("email", "Email", &flow.email, "name@example.com")],
-            vec![
-                Button::cancel(false),
-                button("google", "Continue with Google", false),
-                button("apply", "Continue with Email", true),
-            ],
-        ),
-        SignInStep::Browser => (vec![], vec![Button::cancel(true)]),
-        SignInStep::Code => (
-            vec![field("code", "Code", "", "6-digit code")],
-            vec![
-                button("back", "Back", false),
-                button("resend", "Resend Code", false),
-                button("apply", "Continue", true),
-            ],
-        ),
-        SignInStep::Handle => (
-            vec![field("handle", "Handle", &flow.handle, "your-name")],
-            vec![
-                button("cancel", "Not Now", false),
-                button("apply", "Choose Handle", true),
-            ],
-        ),
-        SignInStep::Complete | SignInStep::Closed => return None,
-    };
-    let mut surface = Surface::sheet(
-        DialogId("cloud-sign-in".into()),
-        WindowId("cloud".into()),
-        &message.title,
-        fields,
-        "Continue",
-    );
-    surface.line = Some(message.line);
-    surface.buttons = buttons;
-    surface.warning = flow.error.clone();
-    Some(surface)
+    copy::auth_error(error, "Google", handle)
 }
-/// Shows the flow's current step, replacing the sheet of the last one.
-fn present(cx: &mut App) {
-    let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() else {
-        return;
-    };
-    if let Some(sheet) = flow.sheet.take() {
-        sheet.close();
-    }
-    let Some(surface) = surface(flow) else {
-        finish(cx);
-        return;
-    };
-    let window = flow.window.clone();
-    let tokens = pm_shell::tokens();
-    let open = OpenSheet::present(
-        from_surface(&surface, &tokens),
-        &window,
-        surface.first_selected.as_deref(),
-    );
-    let actions = open.actions.clone();
-    if let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() {
-        flow.sheet = Some(open);
-    }
-    cx.spawn(async move |cx| {
-        // Buttons only: a field also sends its id when editing ends. The
-        // loop ends when this step's sheet is replaced or closed.
-        while let Ok(action) = actions.recv().await {
-            if ["cancel", "apply", "google", "back", "resend"].contains(&action.as_str()) {
-                cx.update(|cx| act(&action, cx));
-            }
-        }
-    })
-    .detach();
+pub(crate) fn invalid_handle(handle: &str) -> Option<String> {
+    (!valid_handle(handle)).then(|| copy::auth_error(AuthError::InvalidHandle, "", handle))
 }
-fn finish(cx: &mut App) {
-    let cloud = cx.global_mut::<Cloud>();
-    if let Some(flow) = cloud.flow.take()
-        && let Some(sheet) = flow.sheet
-    {
-        sheet.close();
-    }
-    cloud.browser.cancel();
-    changed(cx);
-}
-/// A button of the current step.
-fn act(action: &str, cx: &mut App) {
-    let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() else {
-        return;
-    };
-    let text = |flow: &Flow, id: &str| {
-        flow.sheet
-            .as_ref()
-            .map(|s| s.text(id).trim().to_owned())
-            .unwrap_or_default()
-    };
-    match (flow.signin.step, action) {
-        (_, "cancel") => {
-            flow.signin.close();
-            finish(cx);
-        }
-        (SignInStep::Code, "back") => {
-            flow.signin.back();
-            flow.error = None;
-            present(cx);
-        }
-        (SignInStep::Start, "google") => {
-            flow.email = text(flow, "email");
-            browser(cx);
-        }
-        (SignInStep::Start, "apply") | (SignInStep::Code, "resend") => {
-            if flow.signin.step == SignInStep::Start {
-                flow.email = text(flow, "email");
-            }
-            let email = flow.email.clone();
-            if !email.contains('@') || email.len() > 254 {
-                flow.error = Some(copy::auth_error(AuthError::EmailRejected, "", ""));
-                present(cx);
-                return;
-            }
-            submit(CloudWork::SendEmail { email }, Step::Send, cx);
-        }
-        (SignInStep::Code, "apply") => {
-            let code = otp(&text(flow, "code"));
-            if code.len() != 6 {
-                flow.error = Some(copy::auth_error(AuthError::WrongCode, "", ""));
-                present(cx);
-                return;
-            }
-            let email = flow.email.clone();
-            submit(
-                CloudWork::VerifyEmail {
-                    email,
-                    code: Secret::new(code),
-                },
-                Step::Arrive,
-                cx,
-            );
-        }
-        (SignInStep::Handle, "apply") => {
-            let handle = text(flow, "handle").trim_start_matches('@').to_lowercase();
-            flow.handle = handle.clone();
-            if !valid_handle(&handle) {
-                flow.error = Some(copy::auth_error(AuthError::InvalidHandle, "", &handle));
-                present(cx);
-                return;
-            }
-            submit(CloudWork::ClaimHandle { handle }, Step::Arrive, cx);
-        }
-        _ => {}
-    }
-}
-/// Continue with Google: the registry's page opens in the browser and comes
-/// back through `powermove://auth`.
-fn browser(cx: &mut App) {
+/// Continue with Google: the registry's page opens in the browser and the
+/// `powermove://auth` return link finishes the sign-in, telling `done` the
+/// account's email or why not. `Err` here: the browser could not open.
+pub(crate) fn sign_in_with_google(
+    cx: &mut App,
+    done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+) -> Result<(), String> {
     let mut verifier = [0u8; 32];
     let mut state = [0u8; 16];
     if !random(&mut verifier) || !random(&mut state) {
-        return;
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     }
     let cloud = cx.global_mut::<Cloud>();
     let origin = cloud.origin;
     let Some(url) = cloud.browser.begin(origin, verifier, state, now_ms()) else {
-        return;
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     };
-    let profile = cloud.profile.clone();
-    let Some(flow) = cloud.flow.as_mut() else {
-        return;
-    };
-    let Some(ticket) = flow.signin.begin(SignInStep::Browser) else {
-        return;
-    };
-    // Nothing to wait for: the return link continues the flow.
-    let _ = ticket;
-    flow.error = None;
     // A development build reading a fixture Store never opens a browser over
     // the person's work: the review plays the browser from this file.
     if store_install::is_dev() {
-        let _ = std::fs::write(profile.join("dev-sign-in-url.txt"), url.as_str());
+        let _ = std::fs::write(cloud.profile.join("dev-sign-in-url.txt"), url.as_str());
     } else if !crate::platform::open_url(url.as_str()) {
-        flow.error = Some(copy::auth_error(AuthError::Browser, "Google", ""));
+        cloud.browser.cancel();
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     }
-    present(cx);
+    cloud.google = Some(Box::new(done));
+    Ok(())
+}
+/// The sheet closed or went back while Google was open: a late return link
+/// finds nothing waiting.
+pub(crate) fn cancel_google(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        let cloud = cx.global_mut::<Cloud>();
+        cloud.google = None;
+        cloud.browser.cancel();
+    }
 }
 fn random(bytes: &mut [u8]) -> bool {
     use std::io::Read;
@@ -858,17 +1162,14 @@ fn random(bytes: &mut [u8]) -> bool {
         .and_then(|mut f| f.read_exact(bytes))
         .is_ok()
 }
-/// A `powermove://auth` return link (entrypoints). Only a sign-in waiting in
-/// its browser step takes it; anything else stays an Error Log line.
+/// A `powermove://auth` return link (entrypoints). Only a Google sign-in
+/// waiting for it takes it; anything else stays an Error Log line.
 pub fn receive_link(state: &str, token: &str, cx: &mut App) -> bool {
     if !cx.has_global::<Cloud>() {
         return false;
     }
     let cloud = cx.global_mut::<Cloud>();
-    let waiting = cloud
-        .flow
-        .as_ref()
-        .is_some_and(|f| f.signin.step == SignInStep::Browser);
+    let waiting = cloud.google.is_some();
     let raw = url::Url::parse_with_params("powermove://auth", [("state", state), ("token", token)])
         .map(String::from)
         .unwrap_or_default();
@@ -879,33 +1180,26 @@ pub fn receive_link(state: &str, token: &str, cx: &mut App) -> bool {
     else {
         return false;
     };
-    submit(CloudWork::Exchange(exchange), Step::Arrive, cx);
+    let Some(done) = cloud.google.take() else {
+        return false;
+    };
+    run_code(CloudWork::Exchange(exchange), cx, move |result, cx| {
+        done(
+            result
+                .map(|reply| match reply {
+                    CloudReply::Account(Some(account)) => account.email,
+                    _ => String::new(),
+                })
+                .map_err(|_| copy::auth_error(AuthError::ReturnLink, "Google", "")),
+            cx,
+        )
+    });
     true
 }
-#[derive(Clone, Copy)]
-enum Step {
-    Send,
-    Arrive,
-    Settings,
-}
-/// Runs one account action on the worker and applies its reply.
-fn submit(work: CloudWork, step: Step, cx: &mut App) {
+/// Runs one Settings › Account action on the worker and applies its reply.
+fn submit(work: CloudWork, cx: &mut App) {
     let cloud = cx.global_mut::<Cloud>();
-    let ticket = match cloud.flow.as_mut() {
-        Some(flow) if !matches!(step, Step::Settings) => {
-            // The browser step already holds its flight; the exchange reuses
-            // a fresh one so a late reply of an older attempt is refused.
-            if flow.signin.step == SignInStep::Browser {
-                flow.signin.back();
-                flow.signin.step = SignInStep::Browser;
-            }
-            flow.signin.begin(SignInStep::Code)
-        }
-        _ => Some(pm_services::surfaces::Flight::default().start()),
-    };
-    let Some(ticket) = ticket else {
-        return;
-    };
+    let ticket = pm_services::surfaces::Flight::default().start();
     let Some(task) = CloudTask::new(ticket, cloud.origin, work) else {
         return;
     };
@@ -918,68 +1212,29 @@ fn submit(work: CloudWork, step: Step, cx: &mut App) {
         let Some(done) = wait(pending, cx).await else {
             return;
         };
-        cx.update(|cx| complete(done, step, cx));
+        cx.update(|cx| complete(done, cx));
     })
     .detach();
 }
-fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, step: Step, cx: &mut App) {
+fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, cx: &mut App) {
     let cloud = cx.global_mut::<Cloud>();
     cloud.busy = false;
-    let error = done.result.as_ref().err().map(|e| e.to_string());
-    match (&done.result, cloud.flow.as_mut()) {
-        (Ok(CloudReply::Account(account)), _) => {
+    match &done.result {
+        Ok(CloudReply::Account(account)) => {
             cloud.signed_in = account.is_some();
             cloud.account = account.clone();
         }
-        (Ok(CloudReply::SignedOut), _) => {
+        Ok(CloudReply::SignedOut) => {
             cloud.signed_in = false;
             cloud.account = None;
         }
         _ => {}
     }
-    if let Some(flow) = cloud.flow.as_mut()
-        && !matches!(step, Step::Settings)
-    {
-        let applied = match (step, done.result) {
-            (Step::Send, result) => flow.signin.sent(
-                done.ticket,
-                now_ms(),
-                result.map(drop).map_err(|e| e.to_string()),
-            ),
-            (_, Ok(CloudReply::Account(Some(account)))) => {
-                flow.signin.arrived(done.ticket, Ok(account))
-            }
-            (_, result) => flow.signin.arrived(
-                done.ticket,
-                Err(result.err().map(|e| e.to_string()).unwrap_or_default()),
-            ),
-        };
-        if applied {
-            flow.error = error.map(|code| explain(&code, flow));
-            present(cx);
-        }
-    } else if let Some(code) = error {
-        crate::alert::note(&explain_settings(&code), "");
+    if let Err(error) = &done.result {
+        crate::alert::note(&explain_settings(&error.to_string()), "");
     }
     changed(cx);
-}
-/// The sheet's sentence for a failure, by step (v1.2.0 SignInSheet).
-fn explain(code: &str, flow: &Flow) -> String {
-    let error = match (flow.signin.step, code) {
-        (_, "api:rate_limited") => AuthError::RateLimited,
-        (_, "api:client_too_old") => AuthError::OldClient,
-        (SignInStep::Start, "network") => AuthError::Offline,
-        (SignInStep::Start, _) => AuthError::EmailRejected,
-        (SignInStep::Code, "api:unauthorized" | "api:bad_request") => AuthError::WrongCode,
-        (SignInStep::Code, "api:gone") => AuthError::ExpiredCode,
-        (SignInStep::Code, _) => AuthError::CheckCode,
-        (SignInStep::Handle, "api:handle_taken") => AuthError::HandleTaken,
-        (SignInStep::Handle, "api:handle_reserved") => AuthError::HandleReserved,
-        (SignInStep::Handle, "api:handle_invalid") => AuthError::InvalidHandle,
-        (SignInStep::Handle, _) => AuthError::SaveHandle,
-        _ => AuthError::ReturnLink,
-    };
-    copy::auth_error(error, "Google", &flow.handle)
+    refresh_billing(cx);
 }
 fn explain_settings(code: &str) -> String {
     if code == "network" {
@@ -991,16 +1246,231 @@ fn explain_settings(code: &str) -> String {
     }
 }
 
+// ---- Billing (Settings › Account) ----
+
+/// Reads the account's billing on the worker; Settings › Account and Aero
+/// follow the answer. Signed out: forgotten.
+pub fn refresh_billing(cx: &mut App) {
+    if !cx.has_global::<Cloud>() {
+        return;
+    }
+    let cloud = cx.global_mut::<Cloud>();
+    if !cloud.signed_in {
+        cloud.billing = Billed::default();
+        return;
+    }
+    if cloud.billing.reading {
+        return;
+    }
+    cloud.billing.reading = true;
+    let Ok(pending) = cloud.worker.submit(|host| Ok(host.billing())) else {
+        cloud.billing.reading = false;
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let answer = wait(pending, cx).await;
+        cx.update(|cx| {
+            let cloud = cx.global_mut::<Cloud>();
+            cloud.billing.reading = false;
+            cloud.billing.read_at = Some(std::time::Instant::now());
+            match answer {
+                Some(Ok(BillingAnswer::Billing(billing))) => {
+                    // A plan bought: the wait for Checkout is over.
+                    if billing.subscribed() && cloud.billing.waiting == Some("checkout") {
+                        cloud.billing.waiting = None;
+                    }
+                    cloud.billing.state = Some(Ok(Some(billing)));
+                }
+                Some(Ok(BillingAnswer::Missing)) => cloud.billing.state = Some(Ok(None)),
+                // The session ended: the account's own refresh signs out.
+                Some(Ok(BillingAnswer::SignedOut)) => cloud.billing = Billed::default(),
+                _ => {
+                    // Offline: what was read stays; nothing read yet is an error.
+                    if !matches!(cloud.billing.state, Some(Ok(Some(_)))) {
+                        cloud.billing.state = Some(Err(()));
+                    }
+                }
+            }
+            changed(cx);
+        });
+    })
+    .detach();
+}
+/// Subscribe: Stripe Checkout for `plan` opens in the browser, and the page
+/// waits for it (the return link, or the app coming back).
+pub fn subscribe(plan: String, cx: &mut App) {
+    open_billing_page("checkout", Some(plan), cx);
+}
+/// Manage Billing: the Stripe Customer Portal opens in the browser.
+pub fn manage_billing(cx: &mut App) {
+    open_billing_page("portal", None, cx);
+}
+fn open_billing_page(page: &'static str, plan: Option<String>, cx: &mut App) {
+    if !cx.has_global::<Cloud>() {
+        return;
+    }
+    let cloud = cx.global_mut::<Cloud>();
+    if cloud.busy || !cloud.signed_in {
+        return;
+    }
+    cloud.busy = true;
+    cloud.billing.error = None;
+    let Ok(pending) = cloud
+        .worker
+        .submit(move |host| Ok(host.billing_page(page, plan.as_deref())))
+    else {
+        cloud.busy = false;
+        return;
+    };
+    changed(cx);
+    cx.spawn(async move |cx| {
+        let answer = wait(pending, cx).await;
+        cx.update(|cx| {
+            let cloud = cx.global_mut::<Cloud>();
+            cloud.busy = false;
+            match answer {
+                Some(Ok(url)) if crate::platform::open_url(&url) => {
+                    cloud.billing.waiting = Some(page);
+                }
+                Some(Ok(_)) => {
+                    cloud.billing.error =
+                        Some("Powermove couldn’t open your browser. Try again.".into());
+                }
+                Some(Err(error)) => {
+                    let code = error.to_string();
+                    cloud.billing.error = Some(billing_error(&code).into());
+                    // Already on a plan (bought in another window): read it.
+                    if code == "api:has_plan" {
+                        changed(cx);
+                        return refresh_billing(cx);
+                    }
+                }
+                None => cloud.billing.error = Some(billing_error("network").into()),
+            }
+            changed(cx);
+        });
+    })
+    .detach();
+}
+fn billing_error(code: &str) -> &'static str {
+    match code {
+        "network" => "Can’t reach Powermove. Check your connection and try again.",
+        "api:has_plan" => "You already have a plan. Manage it with Manage Billing.",
+        "api:no_billing_account" => "There’s no billing to manage yet. Choose a plan first.",
+        "api:rate_limited" => "Too many tries. Wait a moment and try again.",
+        _ => "Billing couldn’t open. Try again.",
+    }
+}
+/// Waiting for Checkout: Cancel stops waiting (the browser's page stays).
+pub fn cancel_checkout(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        cx.global_mut::<Cloud>().billing.waiting = None;
+        changed(cx);
+    }
+}
+/// The Stripe page a billing call may open: Checkout or the Portal on
+/// Stripe's own hosts over https, or a local stack's page in a build that
+/// may use one. Kept canonical; nothing else is ever opened.
+fn billing_url(raw: &str) -> Option<String> {
+    let url = url::Url::parse(raw).ok()?;
+    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+    let stripe = url.scheme() == "https"
+        && url.port().is_none()
+        && matches!(
+            url.host_str(),
+            Some("checkout.stripe.com" | "billing.stripe.com")
+        );
+    let local = pm_agents::inference::LOCAL_ORIGINS
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+        && url.port().is_some();
+    (plain && (stripe || local)).then(|| url.to_string())
+}
+/// `powermove://billing/return?status=success|cancel|portal`: Checkout
+/// paid or cancelled, or the Portal closed, when the link is exactly that.
+pub fn billing_return(raw: &str) -> Option<&'static str> {
+    let url = url::Url::parse(raw).ok()?;
+    if url.scheme() != "powermove"
+        || url.host_str() != Some("billing")
+        || url.path() != "/return"
+        || !url.username().is_empty()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let mut pairs = url.query_pairs();
+    let (key, value) = pairs.next()?;
+    if key != "status" || pairs.next().is_some() {
+        return None;
+    }
+    match value.as_ref() {
+        "success" => Some("success"),
+        "cancel" => Some("cancel"),
+        "portal" => Some("portal"),
+        _ => None,
+    }
+}
+/// The browser came back from Checkout or the Portal: stop waiting, read
+/// the plan again, and Settings › Account comes forward.
+pub fn billing_returned(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        cx.global_mut::<Cloud>().billing.waiting = None;
+        refresh_billing(cx);
+        changed(cx);
+    }
+    crate::settings_window::show_page("account", cx);
+}
+/// The app became active: while Checkout or the Portal is open, or when
+/// the plan was read a while ago, it is read again.
+fn follow_activation(cx: &mut App) {
+    use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
+    let (tx, rx) = async_channel::unbounded::<()>();
+    let block = block2::RcBlock::new(
+        move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+            let _ = tx.try_send(());
+        },
+    );
+    // SAFETY: a notification name constant; the observer lives for the process.
+    let token = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidBecomeActiveNotification),
+                None,
+                None,
+                &block,
+            )
+    };
+    std::mem::forget(token);
+    cx.spawn(async move |cx| {
+        while rx.recv().await.is_ok() {
+            cx.update(|cx| {
+                let Some(cloud) = cx.try_global::<Cloud>() else {
+                    return;
+                };
+                let stale = cloud
+                    .billing
+                    .read_at
+                    .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(300));
+                if cloud.billing.waiting.is_some() || stale {
+                    refresh_billing(cx);
+                }
+            });
+        }
+    })
+    .detach();
+}
+
 /// Settings › Account › Sign Out.
 pub fn sign_out(cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        submit(CloudWork::SignOut, Step::Settings, cx);
+        submit(CloudWork::SignOut, cx);
     }
 }
 /// Settings › Account › Remember Installs on This Account.
 pub fn set_remember(remember: bool, cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        submit(CloudWork::RememberInstalls(remember), Step::Settings, cx);
+        submit(CloudWork::RememberInstalls(remember), cx);
     }
 }
 /// Settings › Account › Delete Account…, after its confirmation.
@@ -1057,5 +1527,63 @@ pub fn remember_install(profile: &Path, repo: &str, release: Option<&str>) {
     let remember = cached(profile, store_install::origin()).is_some_and(|a| a.remember_installs);
     if remember && http.signed_in() {
         let _ = http.record_install(repo, release);
+    }
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::{billing_return, billing_url};
+
+    /// Only Stripe's Checkout and Portal over https open; a local stack's
+    /// page only in a build that may use one.
+    #[test]
+    fn only_stripes_pages_open_from_billing() {
+        for ok in [
+            "https://checkout.stripe.com/c/pay/cs_test_1",
+            "https://billing.stripe.com/p/session/test_1",
+        ] {
+            assert_eq!(billing_url(ok).as_deref(), Some(ok));
+        }
+        for refused in [
+            "http://checkout.stripe.com/c/pay/cs_test_1",
+            "https://checkout.stripe.com.evil.example/c",
+            "https://evil.example/?u=https://checkout.stripe.com",
+            "https://user@checkout.stripe.com/c",
+            "https://checkout.stripe.com:8443/c",
+            "https://stripe.com/c",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(billing_url(refused), None, "{refused}");
+        }
+        let local = billing_url("http://127.0.0.1:8787/v2/dev/checkout?s=1");
+        assert_eq!(local.is_some(), pm_agents::inference::LOCAL_ORIGINS);
+    }
+
+    /// A shipped release never opens a local page from billing.
+    #[cfg(all(not(debug_assertions), not(feature = "dev-cloud-origin")))]
+    #[test]
+    fn a_shipped_release_opens_only_stripe() {
+        assert_eq!(billing_url("http://127.0.0.1:8787/checkout"), None);
+        assert_eq!(billing_url("http://localhost:8787/checkout"), None);
+    }
+
+    #[test]
+    fn the_billing_return_link_is_exactly_success_or_cancel() {
+        for status in ["success", "cancel", "portal"] {
+            let link = format!("powermove://billing/return?status={status}");
+            assert_eq!(billing_return(&link), Some(status));
+        }
+        for other in [
+            "powermove://billing/return",
+            "powermove://billing/return?status=paid",
+            "powermove://billing/return?status=success&x=1",
+            "powermove://billing/return?status=success&status=portal",
+            "powermove://billing/elsewhere?status=success",
+            "powermove://auth?state=s&token=t",
+            "https://billing/return?status=success",
+        ] {
+            assert_eq!(billing_return(other), None, "{other}");
+        }
     }
 }

@@ -280,6 +280,9 @@ mod tests {
     // ---------------------------------------------- real kernel, real realms
 
     struct Stage {
+        /// What each realm published when it mounted: what its view shows
+        /// until it publishes again.
+        mounted: Vec<Publication>,
         kernel: KernelHandle,
         panels: Builtins,
         _actor: KernelActor,
@@ -339,8 +342,9 @@ mod tests {
         for id in MOUNTED {
             finish(panels.mount(id).unwrap());
         }
-        let _ = panels.take_publications();
+        let mounted = panels.take_publications();
         Stage {
+            mounted,
             kernel,
             panels,
             _actor: actor,
@@ -512,7 +516,13 @@ mod tests {
         assert!(d.owed(gesture_open(entry_open(&s), || false)));
         let scope = d.scope(gesture_open(entry_open(&s), || false), &set(&["assets"]));
         assert_eq!(publish(&s, &scope), set(&MOUNTED));
-        let shown = shown_opacity(&s.panels.take_publications()).expect("Properties");
+        // Properties never showed the step (it waited), so its tree after
+        // the cancel is the one it shows already: that commit changes
+        // nothing and is not published again (PM-698). Its view shows its
+        // newest publication either way.
+        let mut seen = s.mounted.clone();
+        seen.extend(s.panels.take_publications());
+        let shown = shown_opacity(&seen).expect("Properties");
         assert!(
             shown.contains("\"value\":100"),
             "back to the value before: {shown}"

@@ -1,22 +1,29 @@
 //! Headless agent services. All runtime and disk work belongs on workers.
 //! OAuth homes are opaque runtime-owned paths, never read or modified here.
 pub mod account;
+pub mod aero;
 pub mod approvals;
 pub mod citations;
 pub mod claude;
 pub mod claude_launch;
 pub mod codex;
+pub mod codex_auth;
 pub mod codex_exec;
 pub mod compatible;
 pub mod context;
 pub mod conversation;
 pub mod delivery;
+pub mod edge;
 pub mod history;
+pub mod inference;
+pub mod keys;
 pub mod launch;
 pub mod monitor;
+pub mod stats;
 pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
+pub mod refresh_broker;
 pub mod runtime;
 pub mod trace;
 pub mod transport;
@@ -48,6 +55,7 @@ pub enum Provider {
     Chatgpt,
     Claude,
     Compatible,
+    Aero,
 }
 impl Provider {
     pub fn name(self) -> &'static str {
@@ -55,6 +63,7 @@ impl Provider {
             Self::Chatgpt => "chatgpt",
             Self::Claude => "claude",
             Self::Compatible => "compatible",
+            Self::Aero => "aero",
         }
     }
 }

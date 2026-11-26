@@ -868,10 +868,21 @@ impl Backend {
             .agent_link
             .accounts()
             .is_some_and(|a| a.finding_models(provider));
+        // The account Codex runs on, as the chooser heads its models (an API
+        // key or the ChatGPT sign-in).
+        let accounts: BTreeMap<&str, &str> = self
+            .native
+            .agent_link
+            .accounts()
+            .filter(|a| a.status(pm_agents::Provider::Chatgpt).api_key)
+            .map(|_| (pm_agents::Provider::Chatgpt.name(), "OpenAI API key"))
+            .into_iter()
+            .collect();
         let model_groups: BTreeMap<_, Vec<_>> = [
             pm_agents::Provider::Chatgpt,
             pm_agents::Provider::Claude,
             pm_agents::Provider::Compatible,
+            pm_agents::Provider::Aero,
         ]
         .into_iter()
         .map(|provider| {
@@ -886,6 +897,15 @@ impl Backend {
             .get(pm_agents::Provider::Compatible.name())
             .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
             .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
+        // Aero's usage monitor (credits, plan, reset day); on Free, that Aero
+        // needs a plan; out of credits, the reset day and the bigger plan.
+        let (usage, billing) = self.native.agent_link.aero_usage();
+        let out = billing.as_ref().filter(|b| b.remaining == 0);
+        let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
+            "needsPlan": self.native.agent_link.aero_needs_plan(),
+            "outOfCredits": out.map(|b| json!({
+                "resets": b.resets().map(pm_agents::inference::short_day),
+                "upgrade": b.upgrade().map(|p| p.name.clone())}))});
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -895,7 +915,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"connectedModelName":connected_model_name,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"accounts":accounts,"connectedModelName":connected_model_name,"aero":aero,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
@@ -991,6 +1011,7 @@ impl Backend {
         }
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
             "accountName":self.native.facts["cloud"]["identity"],
+            "accountEmail":self.native.facts["cloud"]["email"],
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.
             "shortcuts":self.native.facts["shortcuts"],
@@ -2493,6 +2514,7 @@ impl Backend {
                                 "chatgpt" => pm_agents::Provider::Chatgpt,
                                 "claude" => pm_agents::Provider::Claude,
                                 "compatible" => pm_agents::Provider::Compatible,
+                                "aero" => pm_agents::Provider::Aero,
                                 _ => return Err("Unknown provider".into()),
                             };
                             let mut state = agent.shared();
@@ -2732,6 +2754,7 @@ fn profile_key(key: &str) -> bool {
             | "autoDownloadCloudMedia"
             | "restoreWindows"
             | "openProjectsIn"
+            | "shareUsageData"
     )
 }
 

@@ -1,5 +1,7 @@
 //! Every first-launch path on synthetic profiles, through the real coordinator.
 use super::*;
+use crate::sign_in::SIGNED_IN_PAUSE;
+use std::time::Instant;
 use pm_shell::welcome::Frame;
 use serde_json::json;
 use std::{fs, sync::Arc};
@@ -115,23 +117,45 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     assert!(flow.visible());
     let welcome = flow.frame();
     assert!(welcome.animate);
-    titled(&welcome, "Welcome to Powermove.");
+    titled(&welcome, "Welcome to Powermove");
     // Begin is enabled from the first frame, and skips the animation.
     assert_eq!(welcome.default_action(), Some("begin"));
     flow.action("begin");
-    titled(&flow.frame(), "Pick Your Timeline.");
+    titled(&flow.frame(), "Choose your timeline");
     flow.action("choose:tracks");
     assert_eq!(flow.frame().chosen.as_deref(), Some("tracks"));
     flow.action("continue");
-    titled(&flow.frame(), "Pick Your Agent.");
+    // The Powermove account, before the agents: an email first, Continue
+    // waiting for one that could be an address, and Not now.
+    let account = flow.frame();
+    titled(&account, "Create your account");
+    assert_eq!(account.default_action(), None);
+    assert!(account.buttons.iter().any(|b| b.id == "not_now"));
+    assert_eq!(
+        account.note.as_deref(),
+        Some("Already have an account? Use the same email.")
+    );
+    // Signed in: the step says who, and carries on.
+    flow.message(Message::Powermove(Some("ana@example.com".into())));
+    let signed = flow.frame();
+    titled(&signed, "Your Powermove account");
+    assert!(signed.line.contains("ana@example.com"));
+    assert_eq!(signed.default_action(), Some("continue"));
+    assert!(signed.buttons.iter().any(|b| b.id == "use_other"));
+    flow.message(Message::Powermove(None));
+    flow.action("not_now");
+    titled(&flow.frame(), "Choose your agent");
     flow.action("back");
-    titled(&flow.frame(), "Pick Your Timeline.");
+    titled(&flow.frame(), "Create your account");
+    flow.action("back");
+    titled(&flow.frame(), "Choose your timeline");
     flow.action("continue");
+    flow.action("not_now");
     flow.action("choose:claude");
     flow.action("continue");
-    titled(&flow.frame(), "Pick Your Speech Model.");
+    titled(&flow.frame(), "Speech to text");
     flow.action("continue");
-    titled(&flow.frame(), "Grab Your Suitcase.");
+    titled(&flow.frame(), "Bring your workspace");
     let effects = flow.action("fresh");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
@@ -152,8 +176,8 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     start(&mut flow);
     flow.action("begin");
     flow.action("back");
-    titled(&flow.frame(), "Welcome to Powermove.");
-    for action in ["begin", "continue", "continue", "continue"] {
+    titled(&flow.frame(), "Welcome to Powermove");
+    for action in ["begin", "continue", "not_now", "continue", "continue"] {
         flow.action(action);
     }
     let effects = flow.action("import");
@@ -172,21 +196,31 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     assert!(!crate::first_run::take_workspace_request(), "taken once");
 }
 #[test]
-fn an_existing_user_just_opens_with_a_clean_library_and_no_click() {
+fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     let (_temp, home) = home();
     source(&home.join(APPLICATION_SUPPORT));
     let plan = plan(&home);
     assert_eq!(plan.launch, Launch::Migrate);
+    // The original app finished its own onboarding: its marker comes across
+    // with the library, and this first run here still plans the steps.
+    assert!(plan.onboard);
     let profile = plan.profile.clone();
     let source_files = home.join(APPLICATION_SUPPORT).join("Powermove");
     let before = fs::read(source_files.join("store/project.p.json")).unwrap();
-    // The source finished onboarding: its marker comes across with the library.
     write(
         &source_files.join("onboarding-v1.json"),
         &json!({"version":1}),
     );
     let mut flow = Flow::new(plan);
-    assert_eq!(start(&mut flow), vec![Effect::Enter(None)]);
+    // The copy runs first (the window the intro draws holds it)…
+    let first = flow.start();
+    assert_eq!(first, vec![Effect::Run(Run::Ordinary)]);
+    assert!(flow.visible());
+    assert!(flow.onboarding.is_none());
+    assert!(
+        drive(&mut flow, first).is_empty(),
+        "no Enter before the steps"
+    );
     assert_eq!(
         fs::read(source_files.join("store/project.p.json")).unwrap(),
         before
@@ -194,6 +228,64 @@ fn an_existing_user_just_opens_with_a_clean_library_and_no_click() {
     let copies = pm_kernel::LibraryStore::open(&profile).projects().unwrap();
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].name, "Synthetic project");
+    // …then the Welcome and the steps, then Home.
+    let welcome = flow.frame();
+    assert!(welcome.animate);
+    titled(&welcome, "Welcome to Powermove");
+    flow.action("begin");
+    titled(&flow.frame(), "Choose your timeline");
+    flow.action("continue");
+    titled(&flow.frame(), "Create your account");
+    flow.action("not_now");
+    titled(&flow.frame(), "Choose your agent");
+    flow.action("continue");
+    titled(&flow.frame(), "Speech to text");
+    flow.action("continue");
+    titled(&flow.frame(), "Bring your workspace");
+    let effects = flow.action("fresh");
+    assert!(
+        matches!(&effects[..], [Effect::Enter(Some(_))]),
+        "{effects:?}"
+    );
+}
+#[test]
+fn a_quit_in_the_steps_after_the_copy_brings_them_back_until_they_finish() {
+    let (_temp, home) = home();
+    source(&home.join(APPLICATION_SUPPORT));
+    write(
+        &home
+            .join(APPLICATION_SUPPORT)
+            .join("Powermove/onboarding-v1.json"),
+        &json!({"version":1}),
+    );
+    let mut flow = Flow::new(plan(&home));
+    assert!(start(&mut flow).is_empty());
+    titled(&flow.frame(), "Welcome to Powermove");
+    flow.action("begin");
+    titled(&flow.frame(), "Choose your timeline");
+    // Quit here. The copy is done and the original app's marker came
+    // across; the next launch still leads to the steps.
+    drop(flow);
+    let again = plan(&home);
+    assert_eq!(again.launch, Launch::Later);
+    assert!(again.onboard);
+    let profile = again.profile.clone();
+    let mut flow = Flow::new(again);
+    assert!(flow.start().is_empty());
+    titled(&flow.frame(), "Welcome to Powermove");
+    flow.action("begin");
+    flow.action("continue");
+    flow.action("not_now");
+    flow.action("continue");
+    flow.action("continue");
+    let effects = flow.action("fresh");
+    let [Effect::Enter(Some(choices))] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    // Finishing the last step is what ends them.
+    write_marker(&profile, choices).unwrap();
+    assert!(onboarding_completed(&profile));
+    assert!(!plan(&home).onboard);
 }
 #[test]
 fn a_migrated_user_who_never_finished_onboarding_sees_it_after_the_copy() {
@@ -201,7 +293,7 @@ fn a_migrated_user_who_never_finished_onboarding_sees_it_after_the_copy() {
     source(&home.join(APPLICATION_SUPPORT));
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
-    titled(&flow.frame(), "Welcome to Powermove.");
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn outcomes_that_need_review_stop_on_the_summary() {
@@ -221,7 +313,7 @@ fn outcomes_that_need_review_stop_on_the_summary() {
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "Your Library Is Ready");
+    titled(&frame, "Your library is ready");
     assert_eq!(frame.rows.len(), 1);
     assert_eq!(frame.rows[0].severity, Severity::Note);
     assert!(
@@ -230,7 +322,9 @@ fn outcomes_that_need_review_stop_on_the_summary() {
             .starts_with("1 project in the original app’s list had nothing saved")
     );
     assert_eq!(flow.action("show_report"), vec![Effect::ShowReport]);
-    assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
+    // A first run here: the steps follow the summary.
+    assert!(flow.action("open_native").is_empty());
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn keychain_consent_is_asked_once_and_not_now_finishes_without_touching_it() {
@@ -250,7 +344,7 @@ fn keychain_consent_is_asked_once_and_not_now_finishes_without_touching_it() {
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
     let consent = flow.frame();
-    titled(&consent, "Keep Your Sign-Ins");
+    titled(&consent, "Keep your sign-ins");
     assert_eq!(consent.surface, "N002");
     assert_eq!(consent.default_action(), Some("resume_with_secret_consent"));
     assert!(consent.buttons.iter().any(|b| b.label == "Not Now"));
@@ -258,7 +352,7 @@ fn keychain_consent_is_asked_once_and_not_now_finishes_without_touching_it() {
     assert_eq!(effects, vec![Effect::Run(Run::SkipConsent)]);
     assert!(drive(&mut flow, effects).is_empty());
     let summary = flow.frame();
-    titled(&summary, "Your Library Is Ready");
+    titled(&summary, "Your library is ready");
     // Sign-ins left behind go to the report, never as a count on the gate.
     assert!(summary.rows.is_empty());
     assert!(summary.buttons.iter().any(|b| b.id == "show_report"));
@@ -280,7 +374,7 @@ fn a_denied_keychain_offers_a_fresh_click_and_carrying_on_without() {
     );
     let denied = flow.frame();
     assert!(denied.line.contains("wasn’t found"));
-    titled(&denied, "Keychain Access Wasn’t Allowed");
+    titled(&denied, "Keychain access wasn’t allowed");
     assert_eq!(denied.default_action(), Some("skip_secret_consent"));
     assert_eq!(
         flow.action("resume_with_secret_consent"),
@@ -310,7 +404,7 @@ fn a_running_original_app_waits_and_the_copy_starts_when_it_quits() {
     let profile = plan.profile.clone();
     let mut flow = Flow::new(plan);
     assert_eq!(start(&mut flow), vec![Effect::Watch]);
-    titled(&flow.frame(), "Quit the Original App to Continue");
+    titled(&flow.frame(), "Quit the original app to continue");
     assert!(flow.frame().spinner);
     assert!(!profile.join("migration.json").exists());
     assert_eq!(
@@ -327,7 +421,7 @@ fn an_owner_on_another_mac_asks_for_a_check() {
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "The Original App Might Still Be Open");
+    titled(&frame, "The original app might still be open");
     assert_eq!(frame.default_action(), Some("check_again"));
 }
 #[test]
@@ -357,7 +451,7 @@ fn pausing_stops_at_a_durable_boundary_and_resume_picks_up() {
     }
     assert!(paused);
     let frame = flow.frame();
-    titled(&frame, "Copying Is Paused");
+    titled(&frame, "Copying is paused");
     assert_eq!(frame.default_action(), Some("resume"));
     let effects = flow.action("resume");
     assert_eq!(effects, vec![Effect::Run(Run::Ordinary)]);
@@ -366,7 +460,7 @@ fn pausing_stops_at_a_durable_boundary_and_resume_picks_up() {
         Some("Picking up where it stopped…")
     );
     assert!(drive(&mut flow, effects).is_empty());
-    titled(&flow.frame(), "Welcome to Powermove.");
+    titled(&flow.frame(), "Welcome to Powermove");
 }
 #[test]
 fn low_disk_and_refused_profiles_say_so_with_real_numbers() {
@@ -377,7 +471,7 @@ fn low_disk_and_refused_profiles_say_so_with_real_numbers() {
         available: 1_200_000_000,
     })));
     let frame = flow.frame();
-    titled(&frame, "Not Enough Space");
+    titled(&frame, "Not enough space");
     assert!(frame.line.contains("7.5 GB"));
     assert!(frame.line.contains("1.2 GB"));
     assert_eq!(frame.default_action(), Some("check_again"));
@@ -395,7 +489,7 @@ fn a_foreign_destination_is_refused_without_touching_either_side() {
     let mut flow = Flow::new(plan);
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "Powermove Can’t Start");
+    titled(&frame, "Powermove can’t start");
     assert!(frame.details.is_some());
 }
 #[test]
@@ -422,9 +516,12 @@ fn migrated_then_original_changed(home: &Path) -> Plan {
     // The first launch: the full migration, once.
     let first = plan(home);
     assert_eq!(first.launch, Launch::Migrate);
+    let profile = first.profile.clone();
     let mut flow = Flow::new(first);
     assert!(flow.visible());
     start(&mut flow);
+    // The person went through the steps after the copy.
+    write_marker(&profile, &json!({"timelineMode":"layers"})).unwrap();
     // The original app is used afterwards: its stamp changes.
     write(&support.join("Powermove/store/theme.json"), &json!("light"));
     let later = plan(home);
@@ -474,7 +571,7 @@ fn asked_for_recent_work_runs_on_screen_then_opens_the_library() {
     assert_eq!(flow.start(), vec![Effect::BringIn]);
     assert!(flow.visible());
     let frame = flow.frame();
-    titled(&frame, "Bringing In Recent Work");
+    titled(&frame, "Bringing in recent work");
     assert_eq!(frame.line, "Your original app stays unchanged.");
     assert!(frame.spinner);
     assert_eq!(frame.buttons.len(), 1);
@@ -541,7 +638,7 @@ fn a_failed_bring_in_is_recorded_and_no_launch_tries_it_again() {
         details: format!("{error:#}"),
     }));
     let frame = flow.frame();
-    titled(&frame, "Recent Work Couldn’t Come In");
+    titled(&frame, "Recent work couldn’t come in");
     assert!(
         frame
             .line
@@ -599,7 +696,7 @@ fn a_low_disk_stop_and_a_running_original_app_say_so() {
     assert!(flow.visible());
     flow.message(Message::Recent(RecentEnd::WaitingForElectron));
     let frame = flow.frame();
-    titled(&frame, "Quit the Original App");
+    titled(&frame, "Quit the original app");
     assert!(frame.spinner);
     assert_eq!(
         flow.action("open_native"),
@@ -675,7 +772,7 @@ fn opening_from_the_summary_happens_once_however_often_it_is_asked() {
     let (_temp, home) = home();
     let mut flow = finished_onboarding(&home);
     review(&mut flow, Ok(Default::default()));
-    titled(&flow.frame(), "Your Library Is Ready");
+    titled(&flow.frame(), "Your library is ready");
     assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
     // A double click, or Return held down.
     assert!(flow.action("open_native").is_empty());
@@ -702,7 +799,7 @@ fn an_unread_report_stops_on_the_summary_and_says_so() {
         Err("unreadable".into()),
     )));
     let frame = flow.frame();
-    titled(&frame, "Your Library Is Ready");
+    titled(&frame, "Your library is ready");
     assert!(frame.rows[0].text.contains("couldn’t be read"));
     assert!(frame.buttons.iter().any(|b| b.id == "show_report"));
 }
@@ -713,6 +810,7 @@ fn a_failed_library_stays_on_a_gate_and_retries_with_the_same_choices() {
     flow.start();
     flow.action("begin");
     flow.action("continue");
+    flow.action("not_now");
     flow.action("choose:claude");
     flow.action("continue");
     flow.action("continue");
@@ -723,7 +821,7 @@ fn a_failed_library_stays_on_a_gate_and_retries_with_the_same_choices() {
     assert!(flow.enter_failed("locked".into()).is_empty());
     assert!(flow.visible());
     let frame = flow.frame();
-    titled(&frame, "Your Library Couldn’t Open");
+    titled(&frame, "Your library couldn’t open");
     assert_eq!(frame.details.as_deref(), Some("locked"));
     assert_eq!(frame.default_action(), Some("try_again"));
     assert!(flow.action("begin").is_empty());
@@ -756,14 +854,14 @@ fn pause_waits_for_the_worker_and_resume_cannot_start_a_second_one() {
     )));
     assert_eq!(flow.action("pause"), vec![Effect::Pause]);
     let frame = flow.frame();
-    titled(&frame, "Copying Your Library");
+    titled(&frame, "Copying your library");
     assert_eq!(frame.status.as_deref(), Some("Pausing…"));
     // The worker's next event must not read as running again.
     flow.message(Message::Event(Event::Started(pm_first_launch::Step::Media)));
     assert_eq!(flow.model.gate, Gate::Pausing);
     assert!(flow.action("resume").is_empty());
     flow.message(Message::Finished(Finished::Paused));
-    titled(&flow.frame(), "Copying Is Paused");
+    titled(&flow.frame(), "Copying is paused");
     assert_eq!(flow.action("resume"), vec![Effect::Run(Run::Ordinary)]);
 }
 #[test]
@@ -778,7 +876,7 @@ fn protected_folders_are_explained_then_a_waiting_prompt_can_be_skipped() {
     )));
     assert!(flow.activity((250, 1000), None));
     let frame = flow.frame();
-    titled(&frame, "Copying Your Library");
+    titled(&frame, "Copying your library");
     assert_eq!(frame.steps[0].title, "Library snapshot");
     assert_eq!(frame.steps[0].value, "250 bytes of 1.0 KB");
     assert_eq!(frame.steps[0].progress, Some(Progress::Determinate(0.25)));
@@ -791,7 +889,7 @@ fn protected_folders_are_explained_then_a_waiting_prompt_can_be_skipped() {
         },
     )));
     let frame = flow.frame();
-    titled(&frame, "Allow Access to Your Media");
+    titled(&frame, "Allow access to your media");
     assert_eq!(frame.default.as_deref(), Some("allow_folders"));
     assert_eq!(
         (frame.steps[0].title.as_str(), frame.steps[0].value.as_str()),
@@ -812,7 +910,7 @@ fn protected_folders_are_explained_then_a_waiting_prompt_can_be_skipped() {
     assert_eq!(frame.default, None);
     assert_eq!(flow.action("skip_folder"), vec![Effect::SkipFolder]);
     flow.activity((0, 0), None);
-    titled(&flow.frame(), "Copying Your Library");
+    titled(&flow.frame(), "Copying your library");
     // Skip These Files before macOS is ever asked.
     flow.message(Message::Finished(Finished::Outcome(
         Outcome::NeedsFolderAccess {
@@ -851,7 +949,10 @@ fn existing_library_with_original_extensions(home: &Path) -> (Plan, PathBuf) {
         &native.join("store/projects.json"),
         &json!([{"id":"mine","name":"Made here"}]),
     );
-    write(&native.join("onboarding-v1.json"), &json!({"version":1}));
+    write(
+        &native.join(pm_first_launch::ONBOARDING_MARKER),
+        &json!({"version":1,"timelineMode":"layers"}),
+    );
     let plan = plan(home);
     assert_eq!(
         plan.launch,
@@ -877,7 +978,7 @@ fn not_now_opens_the_library_and_later_launches_do_not_ask_again() {
     assert!(flow.visible());
     let frame = flow.frame();
     assert_eq!(frame.surface, "N004");
-    titled(&frame, "Bring In Your Extensions");
+    titled(&frame, "Bring in your extensions");
     assert!(frame.line.contains("2 extensions"), "{}", frame.line);
     // The skip, in full; the rest by display name.
     assert_eq!(frame.rows.len(), 1, "{:?}", frame.rows);
@@ -912,7 +1013,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
     let (plan, native) = existing_library_with_original_extensions(&home);
     let config = plan.config.clone().unwrap();
     let library = fs::read(native.join("store/projects.json")).unwrap();
-    let onboarding = fs::read(native.join("onboarding-v1.json")).unwrap();
+    let onboarding = fs::read(native.join(pm_first_launch::ONBOARDING_MARKER)).unwrap();
     let mut flow = Flow::new(plan.clone());
     flow.start();
     scan_into(&mut flow);
@@ -941,7 +1042,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
     assert!(saw_progress);
     let frame = flow.frame();
     assert_eq!(frame.surface, "N006");
-    titled(&frame, "Your Extensions Are In");
+    titled(&frame, "Your extensions are in");
     assert!(
         frame
             .line
@@ -963,7 +1064,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
         ]
     );
     // Exceptions first and in full, by display name, with their reasons.
-    assert_eq!(frame.rows_title.as_deref(), Some("Needs a Look"));
+    assert_eq!(frame.rows_title.as_deref(), Some("Needs a look"));
     assert_eq!(frame.rows[0].text, "Broken Glow");
     let reason = frame.rows[0].detail.as_deref().unwrap();
     assert!(
@@ -980,7 +1081,7 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
         library
     );
     assert_eq!(
-        fs::read(native.join("onboarding-v1.json")).unwrap(),
+        fs::read(native.join(pm_first_launch::ONBOARDING_MARKER)).unwrap(),
         onboarding
     );
     assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
@@ -1194,8 +1295,335 @@ fn pm348_refused_worker_updates_without_a_window() {
     assert_eq!(plan.launch, Launch::Migrate);
     let mut flow = Flow::new(plan);
     assert!(start(&mut flow).is_empty());
-    titled(&flow.frame(), "Powermove Can’t Start");
+    titled(&flow.frame(), "Powermove can’t start");
     assert!(!flow.frame().spinner);
     assert!(flow.frame().details.is_some());
     assert!(!isolated.exists());
+}
+#[cfg(debug_assertions)] // `show_for_review` is a development-build switch
+#[test]
+fn each_review_frame_shows_on_its_own_and_its_buttons_do_nothing() {
+    let (_temp, home) = home();
+    for (name, title) in [
+        ("consent", "Keep your sign-ins"),
+        ("denied", "Keychain access wasn’t allowed"),
+        ("ready", "Your library is ready"),
+        ("low-disk", "Not enough space"),
+        ("original-running", "Quit the original app to continue"),
+        ("original-elsewhere", "The original app might still be open"),
+        ("library-failed", "Your library couldn’t open"),
+    ] {
+        let mut flow = Flow::new(plan(&home));
+        assert!(flow.show_for_review(name), "{name}");
+        assert!(flow.visible(), "{name}");
+        let frame = flow.frame();
+        titled(&frame, title);
+        // Its own window, not the stage; nothing copies or asks macOS.
+        assert!(!flow.plan.onboard, "{name}");
+        for button in &frame.buttons {
+            let effects = flow.action(&button.id);
+            assert!(
+                effects.is_empty() || effects == vec![Effect::Quit],
+                "{name}: {} did {effects:?}",
+                button.id
+            );
+        }
+    }
+    let mut flow = Flow::new(plan(&home));
+    assert!(!flow.show_for_review("nothing"));
+    // A ready library without review rows offers only to open it.
+    assert!(flow.show_for_review("ready"));
+    let frame = flow.frame();
+    assert!(frame.rows.is_empty());
+    assert_eq!(frame.default_action(), Some("open_native"));
+}
+
+/// A flow on the account step (Welcome, then the timeline's Continue).
+fn on_account() -> (tempfile::TempDir, Flow) {
+    let (temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    assert!(start(&mut flow).is_empty());
+    flow.action("begin");
+    flow.action("continue");
+    titled(&flow.frame(), "Create your account");
+    (temp, flow)
+}
+fn sign_in(frame: &Frame) -> &pm_shell::welcome::SignIn {
+    frame.sign_in.as_ref().expect("the sign-in")
+}
+/// Types an email and presses Continue; the code goes out.
+fn send(flow: &mut Flow, email: &str) {
+    flow.action(&format!("field:email:{email}"));
+    assert_eq!(
+        flow.action("continue"),
+        vec![Effect::SendCode(email.into())]
+    );
+    assert!(flow.frame().busy, "Continue spins while the code goes out");
+    let effects = flow.message(Message::CodeSent(Ok(())));
+    assert_eq!(effects, vec![Effect::After(Duration::from_secs(1), "tick")]);
+}
+#[test]
+fn the_account_step_sends_a_code_to_a_plausible_email() {
+    let (_temp, mut flow) = on_account();
+    for typed in [
+        "",
+        "ana",
+        "ana@",
+        "ana@example",
+        "@example.com",
+        "ana @example.com",
+    ] {
+        flow.action(&format!("field:email:{typed}"));
+        assert_eq!(flow.frame().default_action(), None, "{typed:?}");
+        assert_eq!(flow.action("continue"), vec![], "{typed:?}");
+    }
+    flow.action("field:email:ana@example.com");
+    assert_eq!(flow.frame().default_action(), Some("continue"));
+    assert_eq!(
+        flow.action("continue"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // A second press (or Return) while it goes out does nothing.
+    assert_eq!(flow.action("continue"), vec![]);
+    let sending = flow.frame();
+    assert!(sending.busy);
+    assert_eq!(sign_in(&sending).stage, SignInStage::Email);
+    flow.message(Message::CodeSent(Ok(())));
+    let code = flow.frame();
+    titled(&code, "Check your email");
+    assert_eq!(code.line, "We sent a 6-digit code to ana@example.com.");
+    assert!(!code.busy);
+    let s = sign_in(&code);
+    assert_eq!(
+        (s.stage, s.email.as_str(), s.code.as_str()),
+        (SignInStage::Code, "ana@example.com", "")
+    );
+    assert_eq!(code.default_action(), None, "Continue waits for six digits");
+}
+#[test]
+fn the_sixth_digit_checks_the_code_and_the_check_moves_on() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    assert_eq!(flow.action("field:code:12345"), vec![]);
+    // A pasted full code arrives at once, and checks itself.
+    let effects = flow.action("field:code:123456");
+    assert_eq!(
+        effects,
+        vec![Effect::VerifyCode {
+            email: "ana@example.com".into(),
+            code: "123456".into()
+        }]
+    );
+    assert!(flow.frame().busy);
+    assert_eq!(flow.action("continue"), vec![], "already being checked");
+    let effects = flow.message(Message::Verified(Ok("ana@example.com".into())));
+    assert_eq!(effects, vec![Effect::After(SIGNED_IN_PAUSE, "signed_in")]);
+    let done = flow.frame();
+    titled(&done, "You’re in");
+    assert_eq!(done.line, "Signed in as ana@example.com.");
+    assert_eq!(sign_in(&done).stage, SignInStage::Done);
+    // Continue stays: it moves on before the pause ends, and the pause's
+    // own move does nothing more.
+    assert_eq!(done.default_action(), Some("continue"));
+    flow.action("signed_in");
+    titled(&flow.frame(), "Choose your agent");
+    flow.action("signed_in");
+    titled(&flow.frame(), "Choose your agent");
+    // Back on the step: who is signed in, and another account on offer.
+    flow.action("back");
+    let signed = flow.frame();
+    titled(&signed, "Your Powermove account");
+    assert_eq!(signed.line, "Signed in as ana@example.com.");
+    flow.action("use_other");
+    titled(&flow.frame(), "Create your account");
+    assert_eq!(sign_in(&flow.frame()).email, "");
+    flow.action("escape");
+    titled(&flow.frame(), "Your Powermove account");
+}
+#[test]
+fn a_wrong_or_expired_code_shakes_clears_and_says_so() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let before = sign_in(&flow.frame()).clone();
+    flow.action("field:code:000000");
+    assert_eq!(
+        flow.message(Message::Verified(Err("api:unauthorized".into()))),
+        vec![]
+    );
+    let wrong = flow.frame();
+    let s = sign_in(&wrong);
+    assert_eq!(s.stage, SignInStage::Code);
+    assert_eq!(s.code, "");
+    assert_eq!(s.shake, before.shake + 1);
+    assert!(s.revision > before.revision, "the field is cleared");
+    assert!(!s.retry);
+    assert_eq!(
+        wrong.error.as_deref(),
+        Some("That code didn’t match. Check it, or send a new one.")
+    );
+    // Typing again takes the line away.
+    flow.action("field:code:1");
+    assert_eq!(flow.frame().error, None);
+    flow.action("field:code:111111");
+    flow.message(Message::Verified(Err("api:gone".into())));
+    let expired = flow.frame();
+    assert_eq!(
+        expired.error.as_deref(),
+        Some("That code has expired. Send a new one.")
+    );
+    assert_eq!(sign_in(&expired).shake, before.shake + 2);
+    // An expired code can be sent again at once.
+    assert_eq!(sign_in(&expired).resend_in, Some(0));
+    assert_eq!(
+        flow.action("resend"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+}
+#[test]
+fn network_errors_stay_inline_with_try_again() {
+    let (_temp, mut flow) = on_account();
+    flow.action("field:email:ana@example.com");
+    flow.action("continue");
+    flow.message(Message::CodeSent(Err("network".into())));
+    let offline = flow.frame();
+    titled(&offline, "Create your account");
+    assert_eq!(
+        offline.error.as_deref(),
+        Some("Couldn’t send a code. Check your connection and try again.")
+    );
+    assert!(sign_in(&offline).retry);
+    assert!(!offline.busy);
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    flow.message(Message::CodeSent(Ok(())));
+    flow.action("field:code:123456");
+    flow.message(Message::Verified(Err("network".into())));
+    let offline = flow.frame();
+    assert!(sign_in(&offline).retry);
+    // The code stays: Try again checks it again.
+    assert_eq!(sign_in(&offline).code, "123456");
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::VerifyCode {
+            email: "ana@example.com".into(),
+            code: "123456".into()
+        }]
+    );
+}
+#[test]
+fn resend_waits_thirty_seconds() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let wait = sign_in(&flow.frame()).resend_in.unwrap();
+    assert!((29..=30).contains(&wait), "{wait}");
+    assert_eq!(flow.action("resend"), vec![]);
+    // The countdown ticks while it runs.
+    assert_eq!(
+        flow.action("tick"),
+        vec![Effect::After(Duration::from_secs(1), "tick")]
+    );
+    flow.sign_in.resend_at = Some(Instant::now());
+    assert_eq!(sign_in(&flow.frame()).resend_in, Some(0));
+    assert_eq!(flow.action("tick"), vec![]);
+    assert_eq!(
+        flow.action("resend"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // Continue does not spin for it, and a second press does nothing.
+    assert!(!flow.frame().busy);
+    assert_eq!(flow.action("resend"), vec![]);
+    // A failed resend stays inline; Continue still checks the code, never
+    // leaves the step.
+    flow.message(Message::CodeSent(Err("network".into())));
+    assert!(sign_in(&flow.frame()).retry);
+    assert_eq!(flow.action("continue"), vec![]);
+    titled(&flow.frame(), "Check your email");
+    assert_eq!(
+        flow.action("retry"),
+        vec![Effect::SendCode("ana@example.com".into())]
+    );
+    // Resending keeps the step on the code, and starts the wait again.
+    flow.message(Message::CodeSent(Ok(())));
+    let again = flow.frame();
+    titled(&again, "Check your email");
+    assert!(sign_in(&again).resend_in.unwrap() >= 29);
+}
+#[test]
+fn change_and_escape_go_back_to_the_email_as_typed() {
+    let (_temp, mut flow) = on_account();
+    send(&mut flow, "ana@example.com");
+    let revision = sign_in(&flow.frame()).revision;
+    flow.action("field:code:12");
+    flow.action("change");
+    let email = flow.frame();
+    titled(&email, "Create your account");
+    let s = sign_in(&email);
+    assert_eq!(
+        (s.stage, s.email.as_str()),
+        (SignInStage::Email, "ana@example.com")
+    );
+    assert!(s.revision > revision, "the field shows the email again");
+    assert_eq!(email.default_action(), Some("continue"));
+    // Escape and Back do the same from the code.
+    send(&mut flow, "ana@example.com");
+    flow.action("escape");
+    assert_eq!(sign_in(&flow.frame()).stage, SignInStage::Email);
+    send(&mut flow, "ana@example.com");
+    flow.action("back");
+    titled(&flow.frame(), "Create your account");
+    // A code checked after Change is not wanted.
+    send(&mut flow, "ana@example.com");
+    flow.action("field:code:123456");
+    flow.action("change");
+    flow.message(Message::Verified(Ok("ana@example.com".into())));
+    titled(&flow.frame(), "Create your account");
+    // From the email, Back leaves the step.
+    flow.action("back");
+    titled(&flow.frame(), "Choose your timeline");
+}
+#[test]
+fn chosen_speech_models_download_in_the_order_asked() {
+    let (_temp, mut flow) = on_account();
+    flow.action("not_now");
+    flow.action("continue");
+    titled(&flow.frame(), "Speech to text");
+    let ids: Vec<String> = flow.frame().choices.iter().map(|c| c.id.clone()).collect();
+    flow.action(&format!("pill:{}", ids[6]));
+    flow.action(&format!("pill:{}", ids[0]));
+    flow.action(&format!("pill:{}", ids[2]));
+    // Asked twice, queued once.
+    flow.action(&format!("pill:{}", ids[0]));
+    // A press on a queued row takes it back.
+    flow.action(&format!("choose:{}", ids[2]));
+    // A press on a row not queued asks for nothing.
+    flow.action(&format!("choose:{}", ids[3]));
+    let frame = flow.frame();
+    let queued: Vec<_> = frame
+        .choices
+        .iter()
+        .filter(|c| c.status.is_some())
+        .map(|c| c.id.clone())
+        .collect();
+    assert_eq!(queued, [ids[0].clone(), ids[6].clone()]);
+    flow.action("continue");
+    let effects = flow.action("fresh");
+    let [Effect::Enter(Some(choices))] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(choices["speechModels"], json!([ids[6], ids[0]]));
+}
+/// Aero runs on the Powermove account: its Connect on the agent step goes
+/// back to the account step's sign-in, never to a ChatGPT sign-in.
+#[test]
+fn aeros_connect_on_the_agent_step_is_the_powermove_account_sign_in() {
+    let (_temp, mut flow) = on_account();
+    flow.action("not_now");
+    titled(&flow.frame(), "Choose your agent");
+    assert!(
+        flow.action("pill:aero").is_empty(),
+        "no agent sign-in starts"
+    );
+    titled(&flow.frame(), "Create your account");
 }

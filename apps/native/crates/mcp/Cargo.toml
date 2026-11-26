@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pm-agents = { path = "../agents" }
+tempfile = "3"
 pm-glsl = { path = "../../../../engine/crates/pm-glsl" }
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-scene3d = { path = "../scene3d" }
@@ -24,7 +26,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
-tempfile = "3"
 
 [features]
 # Synthetic large projects for the scale bench (pm_kernel::synthetic).

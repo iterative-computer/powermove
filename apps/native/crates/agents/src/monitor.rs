@@ -112,6 +112,10 @@ impl Monitor {
         self.records.insert(id.clone(), run);
         Ok(&self.records[&id])
     }
+    /// One run's record by its id.
+    pub fn run(&self, id: &str) -> Option<&Run> {
+        self.records.get(id)
+    }
     pub fn get(
         &self,
         project: &str,

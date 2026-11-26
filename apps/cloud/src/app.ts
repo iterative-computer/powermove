@@ -18,6 +18,10 @@ import { repoManagement, storeUtility } from './routes/repo-management';
 import { adminRoutes } from './routes/admin';
 import { storeRoutes } from './routes/store';
 import { installRoutes } from './routes/installs';
+import { billing } from './routes/billing';
+import { stripeWebhook } from './routes/stripe-webhook';
+import { aero } from './routes/aero';
+import { V2Error } from './v2-error';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
@@ -51,6 +55,7 @@ export function createApp(deps: {
     }
     const data = deps.data(c.env);
     c.set('data', data);
+    c.set('openData', () => deps.data(c.env));
     try {
       await next();
     } finally {
@@ -70,6 +75,20 @@ export function createApp(deps: {
     await next();
   });
   app.onError((err, c) => {
+    // v2 answers with a code only: `{"error": {"code": "..."}}`, never the backend's own text.
+    if (err instanceof V2Error) {
+      if (err.retryAfter !== undefined) c.header('Retry-After', String(err.retryAfter));
+      return c.json({ error: { code: err.code } }, err.status);
+    }
+    if (c.req.path.startsWith('/v2/')) {
+      if (err instanceof ApiError) {
+        if (err.status === 429 && !c.res.headers.has('Retry-After')) c.header('Retry-After', '60');
+        return c.json({ error: { code: err.body.error } }, err.status as 400);
+      }
+      if (err instanceof HTTPException || err instanceof ZodError) return c.json({ error: { code: 'bad_request' } }, 400);
+      console.error('v2', c.req.path, (err as Error)?.name);
+      return c.json({ error: { code: 'internal' } }, 500);
+    }
     if (err instanceof ApiError) {
       if (err.status === 429 && !c.res.headers.has('Retry-After')) c.header('Retry-After', '60');
       return c.json(err.body, err.status as 400);
@@ -83,7 +102,7 @@ export function createApp(deps: {
     console.error(err);
     return c.json({ error: 'internal' }, 500);
   });
-  app.notFound((c) => c.json({ error: 'not_found' }, 404));
+  app.notFound((c) => c.req.path.startsWith('/v2/') ? c.json({ error: { code: 'not_found' } }, 404) : c.json({ error: 'not_found' }, 404));
   const routes = app.route('/v1/human', human).route('/health', health).route('/v1/auth/desktop', desktop).route('/v1/auth/web', web).route('/v1/auth/email', email).route(
     '/v1/auth/sign-out',
     signout,
@@ -93,7 +112,7 @@ export function createApp(deps: {
   ).route('/v1/repos', repoManagement).route('/v1/admin', adminRoutes).route('/v1/store', storeRoutes).route(
     '/v1/store',
     storeUtility,
-  ).route('/v1/installs', installRoutes);
+  ).route('/v1/installs', installRoutes).route('/v2/billing', billing).route('/v2/stripe/webhook', stripeWebhook).route('/v2/aero', aero);
   app.post('/v1/auth/sign-in/oauth2', async (c) => {
     const body = await c.req.json().catch(() => null) as { providerId?: unknown; callbackURL?: unknown } | null;
     if (body?.providerId !== 'google') return c.json({ error: 'not_found' }, 404);
