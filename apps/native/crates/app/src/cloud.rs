@@ -1471,7 +1471,7 @@ fn follow_activation(cx: &mut App) {
     std::mem::forget(token);
     cx.spawn(async move |cx| {
         while rx.recv().await.is_ok() {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(cloud) = cx.try_global::<Cloud>() else {
                     return;
                 };

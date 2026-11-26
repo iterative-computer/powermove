@@ -1013,9 +1013,9 @@ mod tests {
             origin: "https://cloud.trypowermove.com".into(),
             token: "t".into(),
         };
-        let route = route(&env, &session, READ_IDLE).unwrap();
-        assert_eq!(route.origin, "https://cloud.trypowermove.com");
-        assert_eq!(route.bearer, "t");
+        let found = route(&env, &session, READ_IDLE).unwrap();
+        assert_eq!(found.origin, "https://cloud.trypowermove.com");
+        assert_eq!(found.bearer, "t");
         // A session on a local stack never runs in a shipped build.
         let local = Session {
             origin: "http://127.0.0.1:8787".into(),

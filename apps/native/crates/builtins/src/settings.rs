@@ -1415,7 +1415,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
         _ => return vec![],
     }
     let dollars = |cents: u64| {
-        if cents % 100 == 0 {
+        if cents.is_multiple_of(100) {
             format!("${}", cents / 100)
         } else {
             format!("${}.{:02}", cents / 100, cents % 100)
