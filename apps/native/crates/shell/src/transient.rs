@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, HashSet};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComposerPicker {
     Model,
-    Effort,
     Access,
     /// The composer's "+": attachments, Select Part of the Screen and the
     /// Approvals choice.
@@ -16,7 +15,6 @@ impl ComposerPicker {
     pub fn named(name: Option<&str>) -> Option<Self> {
         match name? {
             "model" => Some(Self::Model),
-            "effort" => Some(Self::Effort),
             "access" => Some(Self::Access),
             "add" => Some(Self::Add),
             _ => None,
@@ -25,7 +23,6 @@ impl ComposerPicker {
     pub fn width(self) -> f32 {
         match self {
             Self::Model => 260.,
-            Self::Effort => 156.,
             Self::Access | Self::Add => 360.,
         }
     }

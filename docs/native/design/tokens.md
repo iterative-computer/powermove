@@ -105,7 +105,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
 | `metrics.chooser_height` | Agent chooser height | 360 | 360 | 360 | 360 |
 | `metrics.chooser_list` | Agent chooser model list width | 320 | 320 | 320 | 320 |
-| `metrics.chooser_mark` | Agent chooser mark size (rail, rows, card) | 16 | 16 | 16 | 16 |
+| `metrics.chooser_mark` | Agent chooser mark size (rail, rows) | 16 | 16 | 16 | 16 |
 | `metrics.chooser_rail` | Agent chooser harness rail width | 36 | 36 | 36 | 36 |
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
 | `metrics.color_picker_plane_height` | Height of the colour saturation plane and vertical tracks | 256 | 256 | 256 | 256 |

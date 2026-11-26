@@ -392,7 +392,7 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.chooser_rail", "Agent chooser harness rail width"),
     ("metrics.chooser_list", "Agent chooser model list width"),
     ("metrics.chooser_height", "Agent chooser height"),
-    ("metrics.chooser_mark", "Agent chooser mark size (rail, rows, card)"),
+    ("metrics.chooser_mark", "Agent chooser mark size (rail, rows)"),
     ("metrics.settings_width", "Settings window width"),
     ("metrics.settings_height", "Settings window height"),
     ("metrics.settings_sidebar", "Settings sidebar width"),

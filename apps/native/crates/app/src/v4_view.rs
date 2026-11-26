@@ -4407,7 +4407,11 @@ impl SurfaceView {
             .is_some_and(|v| v.target[0] == 1.);
         let shown = pm_shell::pill::revealed(lit, holder, was);
         let t = &self.table.tokens;
-        let spring = t.spring(if shown { Preset::HoverIn } else { Preset::HoverOut });
+        let spring = t.spring(if shown {
+            Preset::HoverIn
+        } else {
+            Preset::HoverOut
+        });
         let amount = pm_shell::motion::animate(
             &self.motion.values,
             node.id,
@@ -5276,7 +5280,11 @@ impl SurfaceView {
         // animation must not paint a wash behind a ring-only grid card.
         // A split pill's part washes through the pill its row draws.
         let own_wash = !ring_only && node.pill != Some(pm_shell::pill::Role::Part);
-        let wash = if own_wash { self.motion.hovers.amount(id) } else { 0. };
+        let wash = if own_wash {
+            self.motion.hovers.amount(id)
+        } else {
+            0.
+        };
         let pressed = self.pressed == Some(id) && own_wash;
         if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
@@ -6475,7 +6483,13 @@ impl SurfaceView {
                     if up { 1. } else { 0. },
                     spring,
                 );
-                if self.motion.values.borrow().get(&key).is_some_and(|v| v.moving()) {
+                if self
+                    .motion
+                    .values
+                    .borrow()
+                    .get(&key)
+                    .is_some_and(|v| v.moving())
+                {
                     window.request_animation_frame();
                 }
                 pm_shell::pill::turn_degrees(amount)

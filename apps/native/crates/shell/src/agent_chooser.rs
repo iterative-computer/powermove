@@ -892,15 +892,16 @@ fn build_models(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadM
     state.borrow_mut().width = shape.list;
     let mut views: Vec<Retained<NSView>> = vec![];
     let push = |views: &mut Vec<Retained<NSView>>, view: &NSView| views.push(view.retain());
-    let row = |views: &mut Vec<Retained<NSView>>, x: f64, y: f64, inner: f64, key: &str, value: &str| {
-        let k = label(key, t.typography.body, t.colors.muted, mtm);
-        let v = label(value, t.typography.body, t.colors.text, mtm);
-        let w = fitting(&v).width.min(inner * 0.6);
-        place(&v, x + inner - w, pad + y, shape.fact, w, body_h);
-        place(&k, x, pad + y, shape.fact, inner - w - shape.pad, body_h);
-        views.push(Retained::into_super(Retained::into_super(k)));
-        views.push(Retained::into_super(Retained::into_super(v)));
-    };
+    let row =
+        |views: &mut Vec<Retained<NSView>>, x: f64, y: f64, inner: f64, key: &str, value: &str| {
+            let k = label(key, t.typography.body, t.colors.muted, mtm);
+            let v = label(value, t.typography.body, t.colors.text, mtm);
+            let w = fitting(&v).width.min(inner * 0.6);
+            place(&v, x + inner - w, pad + y, shape.fact, w, body_h);
+            place(&k, x, pad + y, shape.fact, inner - w - shape.pad, body_h);
+            views.push(Retained::into_super(Retained::into_super(k)));
+            views.push(Retained::into_super(Retained::into_super(v)));
+        };
 
     let list = ChooserView::new(
         mtm,
@@ -1165,9 +1166,7 @@ fn build_models(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadM
 pub fn placement(size: NSSize, part: NSRect, lead: f64, room: NSRect, offset: f64) -> NSRect {
     let (min_x, max_x) = (room.origin.x, room.origin.x + room.size.width);
     let (min_y, max_y) = (room.origin.y, room.origin.y + room.size.height);
-    let x = (part.origin.x - lead)
-        .min(max_x - size.width)
-        .max(min_x);
+    let x = (part.origin.x - lead).min(max_x - size.width).max(min_x);
     let above = part.origin.y + part.size.height + offset;
     let below = part.origin.y - offset - size.height;
     let y = if above + size.height <= max_y || below < min_y {
