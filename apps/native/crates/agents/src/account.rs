@@ -191,8 +191,16 @@ impl Accounts {
         if !crate::keys::valid_key(&key) {
             return Err("That doesn’t look like an API key.".into());
         }
-        let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
-        secrets.write(&crate::keys::anthropic_service(&self.environment), "api-key", key.as_bytes())?;
+        let secrets = self
+            .environment
+            .secrets
+            .clone()
+            .ok_or("The Keychain is unavailable.")?;
+        secrets.write(
+            &crate::keys::anthropic_service(&self.environment),
+            "api-key",
+            key.as_bytes(),
+        )?;
         self.refresh_anthropic();
         Ok(())
     }

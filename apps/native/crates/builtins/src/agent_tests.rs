@@ -56,6 +56,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
         composition_tools: vec!["get_project_state".into()],
         compatible: None,
         aero: None,
+        powermove: None,
         secrets: None,
         net: None,
         keychain_prefix: String::new(),

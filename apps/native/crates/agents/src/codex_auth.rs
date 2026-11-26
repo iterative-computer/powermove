@@ -105,6 +105,7 @@ pub fn identity_changed() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn the_store_key_is_codexs() {

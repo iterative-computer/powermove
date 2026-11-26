@@ -40,7 +40,9 @@ pub struct Session {
 }
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session").field("origin", &self.origin).finish_non_exhaustive()
+        f.debug_struct("Session")
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
     }
 }
 /// The app's Powermove account, as Aero reads it: the session, read each
@@ -116,7 +118,13 @@ fn route(
 ) -> Result<(String, Arc<dyn Net>), String> {
     let development = cfg!(debug_assertions) && env.providers();
     if let Some(base) = test_endpoint(&env.vars, development) {
-        return Ok((base, Arc::new(Idle { inner: Arc::new(Loopback), after: idle })));
+        return Ok((
+            base,
+            Arc::new(Idle {
+                inner: Arc::new(Loopback),
+                after: idle,
+            }),
+        ));
     }
     let origin = session.origin.trim_end_matches('/');
     if !origin.starts_with("https://") {
@@ -126,10 +134,19 @@ fn route(
         .net
         .clone()
         .ok_or("Powermove's network client is unavailable.")?;
-    Ok((format!("{origin}{PATH}"), Arc::new(Idle { inner: net, after: idle })))
+    Ok((
+        format!("{origin}{PATH}"),
+        Arc::new(Idle {
+            inner: net,
+            after: idle,
+        }),
+    ))
 }
 fn client(env: &Environment) -> (String, String) {
-    ("x-powermove-client".into(), format!("desktop/{}", env.app_version))
+    (
+        "x-powermove-client".into(),
+        format!("desktop/{}", env.app_version),
+    )
 }
 
 /// Reads `GET /usage`, then (with a plan) `GET /models`. Blocks: call it on
@@ -143,7 +160,10 @@ pub fn standing(env: &Environment) -> Standing {
         Err(reason) => return Standing::Unreachable(reason),
     };
     let headers = [
-        ("authorization".to_owned(), format!("Bearer {}", session.token)),
+        (
+            "authorization".to_owned(),
+            format!("Bearer {}", session.token),
+        ),
         client(env),
     ];
     let get = |path: &str| {
@@ -168,7 +188,9 @@ pub fn standing(env: &Environment) -> Standing {
         Ok(UsageAnswer::Plan(usage)) => match get("/models") {
             Ok((200, body)) => match parse_models(&body) {
                 Ok(models) => Standing::Ready { usage, models },
-                Err(_) => Standing::Unreachable("Aero couldn’t read its models from Powermove.".into()),
+                Err(_) => {
+                    Standing::Unreachable("Aero couldn’t read its models from Powermove.".into())
+                }
             },
             Ok((401 | 403, _)) => Standing::SignedOut,
             _ => unreachable(),
@@ -227,12 +249,12 @@ fn offer(value: &Value) -> Option<Offer> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     let ours = host == "trypowermove.com" || host.ends_with(".trypowermove.com");
-    (parsed.scheme() == "https" && ours && !label.is_empty() && label.chars().count() <= 40).then(|| {
-        Offer {
+    (parsed.scheme() == "https" && ours && !label.is_empty() && label.chars().count() <= 40).then(
+        || Offer {
             label: label.to_owned(),
             url: url.to_owned(),
-        }
-    })
+        },
+    )
 }
 /// `YYYY-MM-DD` at the start of an RFC 3339 time.
 fn calendar_day(iso: &str) -> Option<(i32, u32, u32)> {
@@ -302,10 +324,17 @@ impl Usage {
         vec![
             (
                 "Credits".into(),
-                format!("{} of {} left", grouped(self.remaining), grouped(self.included)),
+                format!(
+                    "{} of {} left",
+                    grouped(self.remaining),
+                    grouped(self.included)
+                ),
             ),
             ("Plan".into(), self.plan.name.clone()),
-            ("Resets".into(), format!("{} {day}", MONTHS[month as usize - 1])),
+            (
+                "Resets".into(),
+                format!("{} {day}", MONTHS[month as usize - 1]),
+            ),
         ]
     }
 }
@@ -413,10 +442,22 @@ mod tests {
     #[test]
     fn the_usage_contract_refuses_an_answer_missing_a_field() {
         for (body, missing) in [
-            (r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#, "credits.remaining"),
-            (r#"{"plan":{"id":"aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#, "plan.name"),
-            (r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000}}"#, "resetsAt"),
-            (r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"soon"}"#, "resetsAt"),
+            (
+                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#,
+                "credits.remaining",
+            ),
+            (
+                r#"{"plan":{"id":"aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"2026-12-25T00:00:00Z"}"#,
+                "plan.name",
+            ),
+            (
+                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000}}"#,
+                "resetsAt",
+            ),
+            (
+                r#"{"plan":{"id":"aerolite","name":"Aerolite"},"credits":{"remaining":1,"included":1000},"resetsAt":"soon"}"#,
+                "resetsAt",
+            ),
         ] {
             let error = parse_usage(200, body.as_bytes()).unwrap_err();
             assert!(error.contains(missing), "{body}: {error}");
@@ -440,9 +481,16 @@ mod tests {
             })))
         );
         // An offer anywhere but a Powermove https page is not shown.
-        for url in ["http://trypowermove.com/aero", "https://trypowermove.com.example/aero"] {
+        for url in [
+            "http://trypowermove.com/aero",
+            "https://trypowermove.com.example/aero",
+        ] {
             let body = json!({"plan":null,"offer":{"label":"Get Aerolite","url":url}}).to_string();
-            assert_eq!(parse_usage(200, body.as_bytes()), Ok(UsageAnswer::NoPlan(None)), "{url}");
+            assert_eq!(
+                parse_usage(200, body.as_bytes()),
+                Ok(UsageAnswer::NoPlan(None)),
+                "{url}"
+            );
         }
     }
 
@@ -455,10 +503,20 @@ mod tests {
             {"id":"google/gemini-3-pro"}]}"#)
         .unwrap();
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["anthropic/claude-opus-5.5", "openai/gpt-6-sol", "google/gemini-3-pro"]);
+        assert_eq!(
+            ids,
+            [
+                "anthropic/claude-opus-5.5",
+                "openai/gpt-6-sol",
+                "google/gemini-3-pro"
+            ]
+        );
         assert!(models[0].default);
         assert_eq!(models[0].default_effort.as_deref(), Some("high"));
-        assert_eq!(models[1].default_effort, None, "a level the model doesn't list");
+        assert_eq!(
+            models[1].default_effort, None,
+            "a level the model doesn't list"
+        );
         assert_eq!(models[2].label, "google/gemini-3-pro");
         assert!(parse_models(br#"{"data":[]}"#).is_err());
     }
@@ -503,7 +561,9 @@ mod tests {
         let env = Environment {
             vars: vars("http://127.0.0.1:4014/v1/aero"),
             net: Some(Arc::new(Never)),
-            aero: Some(crate::aero::Launcher(Arc::new(|_, _, _| Err("unused".into())))),
+            aero: Some(crate::aero::Launcher(Arc::new(|_, _, _| {
+                Err("unused".into())
+            }))),
             ..Environment::default()
         };
         let session = Session {
@@ -516,13 +576,23 @@ mod tests {
 
     #[test]
     fn each_picker_level_is_sent_as_reasoning_effort_and_none_sends_none() {
-        let with: Value = serde_json::from_str(&configured("https://a.example/v1/aero", "openai/gpt-6-sol", "xhigh")).unwrap();
+        let with: Value = serde_json::from_str(&configured(
+            "https://a.example/v1/aero",
+            "openai/gpt-6-sol",
+            "xhigh",
+        ))
+        .unwrap();
         assert_eq!(
             with["aero"]["model_metadata"]["openai/gpt-6-sol"]["reasoning_efforts"]["xhigh"],
             json!({"reasoning_effort":"xhigh"})
         );
         assert_eq!(with["aero"]["protocol"], "openai-chat-completions");
-        let without: Value = serde_json::from_str(&configured("https://a.example/v1/aero", "m", "")).unwrap();
-        assert!(without["aero"]["model_metadata"]["m"].get("reasoning_efforts").is_none());
+        let without: Value =
+            serde_json::from_str(&configured("https://a.example/v1/aero", "m", "")).unwrap();
+        assert!(
+            without["aero"]["model_metadata"]["m"]
+                .get("reasoning_efforts")
+                .is_none()
+        );
     }
 }

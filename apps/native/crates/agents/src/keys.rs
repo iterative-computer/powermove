@@ -31,11 +31,7 @@ const CLAUDE: &[(&[&str], &[&str])] = &[
         &["low", "medium", "high", "max"],
     ),
     (
-        &[
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
-        ],
+        &["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
         &["low", "medium", "high"],
     ),
 ];
@@ -126,7 +122,10 @@ pub fn anthropic_models(net: &dyn Net, key: &str) -> Result<Vec<Model>, String> 
                     .map_or_else(|| crate::account::codex_model_label(id), str::to_owned),
                 // Claude's own default is lower on some models (medium on
                 // Opus 5.5); agent work runs at high.
-                default_effort: efforts.iter().any(|l| l == "high").then(|| "high".to_owned()),
+                default_effort: efforts
+                    .iter()
+                    .any(|l| l == "high")
+                    .then(|| "high".to_owned()),
                 efforts,
                 default: false,
                 aliases: vec![],

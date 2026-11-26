@@ -2929,7 +2929,11 @@ mod routes {
             "chatgpt/gpt-6-sol",
         ] {
             for request in r.turn(id, "high") {
-                assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"), "{id}");
+                assert_eq!(
+                    request.url,
+                    format!("{ORIGIN}/v1/aero/chat/completions"),
+                    "{id}"
+                );
                 assert_eq!(
                     request.header("authorization"),
                     Some(format!("Bearer {TOKEN}").as_str()),
@@ -2948,7 +2952,9 @@ mod routes {
             ..r.env.clone()
         };
         assert_eq!(
-            pm_agents::inference::live(&signed_out, "openai/gpt-6-sol", "high").err().as_deref(),
+            pm_agents::inference::live(&signed_out, "openai/gpt-6-sol", "high")
+                .err()
+                .as_deref(),
             Some(pm_agents::inference::SIGN_IN)
         );
     }

@@ -9,7 +9,6 @@
 use pm_agents::account::{Accounts, State};
 use pm_agents::edge::{FakeKeychain, Loopback, NetRequest, Reroute, fetch};
 use pm_agents::launch::Environment;
-use pm_agents::inference::{PowermoveAccount, Session, Standing};
 use pm_agents::{Provider, aero, codex_auth, keys};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -430,25 +429,41 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     assert_eq!(models[0].id, "anthropic/claude-opus-5.5");
     assert_eq!(models[0].default_effort.as_deref(), Some("high"));
     accounts.refresh_aero();
-    until("Aero's standing", || matches!(accounts.aero(), Standing::Ready { .. }));
+    until("Aero's standing", || {
+        matches!(accounts.aero(), Standing::Ready { .. })
+    });
 
     let before = stats(&f.base)["requests"].as_array().unwrap().len();
-    for model in ["anthropic/claude-opus-5.5", "openai/gpt-fake-key", "custom/custom-fake-model"] {
+    for model in [
+        "anthropic/claude-opus-5.5",
+        "openai/gpt-fake-key",
+        "custom/custom-fake-model",
+    ] {
         let text = powermove_says(env, model, "high").unwrap_or_else(|e| panic!("{model}: {e}"));
         assert!(text.contains("Hello from the fake provider"), "{text}");
     }
     let seen = stats(&f.base);
-    let turns = &seen["requests"].as_array().unwrap()[before..];
+    let turns: Vec<&Value> = seen["requests"].as_array().unwrap()[before..]
+        .iter()
+        .filter(|r| !matches!(r["path"].as_str(), Some("/stats" | "/control")))
+        .collect();
     assert!(!turns.is_empty());
-    for request in turns {
-        assert_eq!(request["path"], "/aero/v1/aero/chat/completions", "{request}");
+    for request in &turns {
+        assert_eq!(
+            request["path"], "/aero/v1/aero/chat/completions",
+            "{request}"
+        );
         assert_eq!(request["authorization"], "Bearer pm-sessio", "{request}");
         assert_eq!(request["x-api-key"], false, "{request}");
     }
     for sent in seen["raw"].as_array().unwrap() {
         let sent = sent.as_str().unwrap();
         if sent.starts_with("POST /aero/") {
-            for key in ["sk-fake-openai-123456", "sk-ant-fake-abcdef12", "custom-fake-key"] {
+            for key in [
+                "sk-fake-openai-123456",
+                "sk-ant-fake-abcdef12",
+                "custom-fake-key",
+            ] {
                 assert!(!sent.contains(key), "{key} reached Aero's request");
             }
         }
@@ -466,14 +481,23 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     assert_eq!(pm_agents::inference::standing(env), Standing::NoPlan(None));
     // Out of credits: the turn ends in Aero's words.
     control(&f.base, serde_json::json!({"aero": "out"}));
-    let spent = powermove_says(env, "anthropic/claude-opus-5.5", "").unwrap_err();
+    let model = aero::Model::live(
+        pm_agents::inference::live(env, "anthropic/claude-opus-5.5", "").unwrap(),
+    );
+    let scope = env.profile.join("turn-spent");
+    std::fs::create_dir_all(&scope).unwrap();
+    assert!(aero::evaluate(&model, &scope, "Say hello.", &[]).is_err());
+    let spent = model.take_failure().unwrap_or_default();
     assert!(spent.contains("out of Aero credits"), "{spent}");
     control(&f.base, serde_json::json!({"aero": "plan"}));
     let signed_out = Environment {
         powermove: None,
         ..env.clone()
     };
-    assert_eq!(pm_agents::inference::standing(&signed_out), Standing::SignedOut);
+    assert_eq!(
+        pm_agents::inference::standing(&signed_out),
+        Standing::SignedOut
+    );
     assert!(powermove_says(&signed_out, "anthropic/claude-opus-5.5", "").is_err());
     accounts.close();
 }
@@ -701,7 +725,10 @@ fn two_codex_runs_never_spend_the_same_refresh_token() {
     let answered = |replies: &std::sync::mpsc::Receiver<String>| {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !replies.try_iter().any(|line| line.contains(r#""id": 2"#)) {
-            assert!(Instant::now() < deadline, "a Codex run's refresh never answered");
+            assert!(
+                Instant::now() < deadline,
+                "a Codex run's refresh never answered"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     };

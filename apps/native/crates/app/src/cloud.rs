@@ -722,7 +722,9 @@ impl pm_agents::inference::PowermoveAccount for AeroAccount {
     }
 }
 /// The account Aero runs on, once the account service has started.
-pub fn aero_account(cx: &App) -> Option<std::sync::Arc<dyn pm_agents::inference::PowermoveAccount>> {
+pub fn aero_account(
+    cx: &App,
+) -> Option<std::sync::Arc<dyn pm_agents::inference::PowermoveAccount>> {
     let cloud = cx.try_global::<Cloud>()?;
     Some(std::sync::Arc::new(AeroAccount(cloud.worker.clone())))
 }

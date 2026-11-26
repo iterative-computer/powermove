@@ -30,7 +30,10 @@ RICH_ANTHROPIC = [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"},
                   {"id": "claude-opus-5-5-1m", "display_name": "Claude Opus 5.5 (1M context)"},
                   {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"}]
 ACCOUNT = "acct-fake-1"
-AERO_SESSION = "pm-session-fake"
+# A development review account signs in as "review-session" (PM_FAKE_AERO_SESSION for on-screen runs).
+AERO_SESSION = os.environ.get("PM_FAKE_AERO_SESSION", "pm-session-fake")
+# On-screen runs: Aero's chat goes on to emulate at this base (its Chat Completions), the rest stays here.
+AERO_EMULATE = os.environ.get("PM_FAKE_AERO_EMULATE")
 AERO_MODELS = [{"id": "anthropic/claude-opus-5.5", "name": "Claude Opus 5.5", "efforts": ["low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "high", "default": True},
                {"id": "openai/gpt-6-sol", "name": "GPT-6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh"]},
@@ -180,6 +183,17 @@ class Handler(BaseHTTPRequestHandler):
                 "authorization": (self.headers.get("Authorization") or "")[:16],
                 "account": self.headers.get("chatgpt-account-id"), "x-api-key": bool(self.headers.get("x-api-key"))})
 
+    def forward(self, url, body):
+        import urllib.request
+        request = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json"})
+        with urllib.request.urlopen(request) as answer:
+            self.send_response(answer.status)
+            self.send_header("Content-Type", answer.headers.get("Content-Type", "text/event-stream"))
+            self.end_headers()
+            while chunk := answer.read1(4096):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
     def bearer(self):
         return (self.headers.get("Authorization") or "").removeprefix("Bearer ")
 
@@ -293,6 +307,8 @@ class Handler(BaseHTTPRequestHandler):
             if control["aero"] not in ("plan", "out"):
                 return self.reply(403, {"error": {"code": "no_plan"}})
             time.sleep(control["hold_seconds"])
+            if AERO_EMULATE:
+                return self.forward(f"{AERO_EMULATE}/v1/chat/completions", body)
             return self.reply(200, chat_sse(demo(body), body), "text/event-stream")
         keys = {"/openai/v1/chat/completions": lambda: self.bearer().startswith(OPENAI_KEY_PREFIX),
                 "/custom/v1/chat/completions": lambda: self.bearer() == CUSTOM_KEY}

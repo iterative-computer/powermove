@@ -1619,6 +1619,9 @@ fn aeros_connect_on_the_agent_step_is_the_powermove_account_sign_in() {
     let (_temp, mut flow) = on_account();
     flow.action("not_now");
     titled(&flow.frame(), "Choose your agent");
-    assert!(flow.action("pill:aero").is_empty(), "no agent sign-in starts");
+    assert!(
+        flow.action("pill:aero").is_empty(),
+        "no agent sign-in starts"
+    );
     titled(&flow.frame(), "Create your account");
 }

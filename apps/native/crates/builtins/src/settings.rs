@@ -150,7 +150,12 @@ impl Backend {
                     (None, true) => format!("Signed in. {both}"),
                     (None, false) => format!("Signed in as {name}. {both}"),
                 };
-                let mut r = action(row("openai", OPENAI, method), "providers.openai.sign-out", label, detail);
+                let mut r = action(
+                    row("openai", OPENAI, method),
+                    "providers.openai.sign-out",
+                    label,
+                    detail,
+                );
                 r["target"] = json!(name);
                 if let Some(detail) = &status.detail {
                     r["detail"] = json!(format!("{} {detail}", r["detail"].as_str().unwrap_or_default()));
@@ -169,9 +174,22 @@ impl Backend {
                 rows.push(r);
             }
             _ => {
-                let detail = openai.and_then(|s| s.detail).map_or_else(|| format!("Signed out. {both}"), |d| format!("Signed out. {d}"));
-                rows.push(action(row("openai", OPENAI, "Sign in with ChatGPT"), "providers.openai.sign-in", "Sign In…", detail));
-                rows.push(action(row("openai-key", OPENAI, "API key"), "providers.openai.key", "Add Key…", format!("Not added. {both}")));
+                let detail = openai.and_then(|s| s.detail).map_or_else(
+                    || format!("Signed out. {both}"),
+                    |d| format!("Signed out. {d}"),
+                );
+                rows.push(action(
+                    row("openai", OPENAI, "Sign in with ChatGPT"),
+                    "providers.openai.sign-in",
+                    "Sign In…",
+                    detail,
+                ));
+                rows.push(action(
+                    row("openai-key", OPENAI, "API key"),
+                    "providers.openai.key",
+                    "Add Key…",
+                    format!("Not added. {both}"),
+                ));
             }
         }
         // Anthropic: Claude Code's own sign-in, or an API key it runs on
@@ -183,12 +201,27 @@ impl Backend {
             let who = [claude.email.clone(), claude.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
             let mut r = match claude.state {
                 State::Connected => {
-                    let mut r = action(row("claude", ANTHROPIC, "Sign in with Claude"), "providers.claude.sign-out", "Sign Out", format!("Signed in as {who}. {terms}"));
+                    let mut r = action(
+                        row("claude", ANTHROPIC, "Sign in with Claude"),
+                        "providers.claude.sign-out",
+                        "Sign Out",
+                        format!("Signed in as {who}. {terms}"),
+                    );
                     r["target"] = json!(who);
                     r
                 }
-                State::Connecting => action(row("claude", ANTHROPIC, "Sign in with Claude"), "providers.claude.sign-out", "Cancel", claude.detail.clone().unwrap_or_default()),
-                State::Disconnected => action(row("claude", ANTHROPIC, "Sign in with Claude"), "providers.claude.sign-in", "Sign In…", format!("Signed out. {terms}")),
+                State::Connecting => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-out",
+                    "Cancel",
+                    claude.detail.clone().unwrap_or_default(),
+                ),
+                State::Disconnected => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-in",
+                    "Sign In…",
+                    format!("Signed out. {terms}"),
+                ),
                 State::Checking | State::Unavailable => {
                     let mut r = row("claude", ANTHROPIC, "Sign in with Claude");
                     r["value"] = json!(if claude.state == State::Checking { "Checking…".to_owned() } else { claude.detail.clone().unwrap_or_default() });
@@ -210,11 +243,21 @@ impl Backend {
                             if key.models.len() == 1 { "model" } else { "models" }
                         ),
                     };
-                    let mut r = action(row("anthropic-key", ANTHROPIC, "API key"), "providers.anthropic.remove", "Remove", detail);
+                    let mut r = action(
+                        row("anthropic-key", ANTHROPIC, "API key"),
+                        "providers.anthropic.remove",
+                        "Remove",
+                        detail,
+                    );
                     r["target"] = json!(masked);
                     r
                 }
-                None => action(row("anthropic-key", ANTHROPIC, "API key"), "providers.anthropic.key", "Add Key…", format!("Not added. {used}")),
+                None => action(
+                    row("anthropic-key", ANTHROPIC, "API key"),
+                    "providers.anthropic.key",
+                    "Add Key…",
+                    format!("Not added. {used}"),
+                ),
             });
         }
         rows

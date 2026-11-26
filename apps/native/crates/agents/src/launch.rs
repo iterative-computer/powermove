@@ -203,6 +203,7 @@ impl Environment {
             composition_tools,
             compatible: None,
             aero: None,
+            powermove: None,
             secrets: None,
             net: None,
             keychain_prefix: "com.powermove.native.dev".into(),
@@ -456,8 +457,14 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
         use sha2::{Digest, Sha256};
         let crate::aero::Launcher(open) = environment.aero.clone()
             .ok_or("Aero's development switch is off.")?;
-        let project = request.project.as_deref().ok_or("Open a composition before running Aero.")?;
-        let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
+        let project = request
+            .project
+            .as_deref()
+            .ok_or("Open a composition before running Aero.")?;
+        let id = format!(
+            "{:x}",
+            Sha256::digest(format!("{project}\n{}", request.workspace.display()))
+        );
         let scope = environment.profile.join("aero").join("sessions").join(&id);
         let authority = request.clone();
         // Aero runs on Powermove inference only; the development switch's
@@ -471,10 +478,9 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             }
             None => return Err("Choose a model for Aero.".into()),
         };
-        let handle = crate::aero::start(
-            request, id, scope, options,
-            move |path| open(&authority, path, &token),
-        );
+        let handle = crate::aero::start(request, id, scope, options, move |path| {
+            open(&authority, path, &token)
+        });
         return Ok(handle.hold(grant));
     }
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
@@ -573,8 +579,14 @@ fn claude(
     // Code says plainly that it is signed out: a status that times out or
     // fails never bills the key (P1-5). Switch off: nothing is read.
     if env.providers()
-        && crate::account::claude_key_fallback(&crate::account::claude_status_of(&executable, &vars))
-        && let Some(key) = env.secrets.as_deref().and_then(|s| crate::keys::anthropic_key(s, env))
+        && crate::account::claude_key_fallback(&crate::account::claude_status_of(
+            &executable,
+            &vars,
+        ))
+        && let Some(key) = env
+            .secrets
+            .as_deref()
+            .and_then(|s| crate::keys::anthropic_key(s, env))
     {
         vars.insert("ANTHROPIC_API_KEY".into(), key);
     }
@@ -906,6 +918,7 @@ mod exec_reply_tests {
             composition_tools: vec![],
             compatible: None,
             aero: None,
+            powermove: None,
             secrets: None,
             net: None,
             keychain_prefix: String::new(),

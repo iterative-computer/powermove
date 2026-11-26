@@ -233,9 +233,9 @@ impl AgentLink {
     pub fn signed_out(&self, provider: Provider) -> bool {
         match provider {
             Provider::Compatible => self.compatible().is_none(),
-            Provider::Aero => self.accounts().is_some_and(|a| {
-                a.aero() == pm_agents::inference::Standing::SignedOut
-            }),
+            Provider::Aero => self
+                .accounts()
+                .is_some_and(|a| a.aero() == pm_agents::inference::Standing::SignedOut),
             _ => self
                 .accounts()
                 .is_some_and(|a| matches!(a.status(provider).state, State::Disconnected)),
