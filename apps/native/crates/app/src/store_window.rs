@@ -2144,6 +2144,7 @@ impl StoreWindow {
                     |_, _, _, _| (),
                 )
                 .absolute()
+                .inset_0()
                 .size_full(),
             )
             .debug_selector(move || selector.clone())

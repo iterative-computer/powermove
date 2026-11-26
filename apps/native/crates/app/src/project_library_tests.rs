@@ -1,6 +1,6 @@
 //! The Project Library under real input events, over a real kernel and library.
 use super::*;
-use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use pm_design::{Accessibility, Scheme};
 use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::ShellCall};
 use std::{

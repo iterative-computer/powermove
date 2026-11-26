@@ -649,6 +649,15 @@ impl ProjectLibrary {
 /// (the NSMenu callback's body) without pressing a menu item.
 #[cfg(debug_assertions)]
 impl ProjectLibrary {
+    /// The account menu's item `label`, as its NSMenu callback runs it.
+    pub fn review_account_menu(&mut self, label: &str, cx: &mut Context<Self>) {
+        let index = ACCOUNT_MENU
+            .iter()
+            .position(|item| item.is_some_and(|(l, _)| l == label));
+        if let Some(index) = index {
+            self.choose(Menu::Account, index, cx);
+        }
+    }
     pub fn review_row_menu(&mut self, name: &str, label: &str, cx: &mut Context<Self>) {
         let Some(row) = self.controller.rows.iter().find(|r| r.name == name) else {
             return;
@@ -1541,6 +1550,7 @@ impl ProjectLibrary {
                         |_, _, _, _| (),
                     )
                     .absolute()
+                    .inset_0()
                     .size_full(),
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1722,6 +1732,7 @@ impl Render for ProjectLibrary {
                 |_, _, _, _| (),
             )
             .absolute()
+            .inset_0()
             .size_full()
         };
         let sidebar = div()

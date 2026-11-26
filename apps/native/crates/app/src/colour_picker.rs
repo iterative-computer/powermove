@@ -923,6 +923,7 @@ impl Render for Picker {
                 |_, _, _, _| {},
             )
             .absolute()
+            .inset_0()
             .size_full()
         };
         let weak = cx.entity().downgrade();
