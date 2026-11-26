@@ -751,7 +751,7 @@ impl TimelineModel {
             return Err(ModelError::InvalidGesture);
         }
         let expanded = self.index.expanded_ids(ids);
-        let selected: HashSet<_> = expanded.iter().cloned().collect();
+        let selected: HashSet<_> = expanded.iter().map(String::as_str).collect();
         if selected.contains(target) {
             return Err(ModelError::InvalidGesture);
         }
@@ -765,14 +765,20 @@ impl TimelineModel {
                 return Err(ModelError::Locked(id.clone()));
             }
         }
-        let roots: Vec<_> = self
-            .index
-            .layers
+        let requested: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let roots: Vec<_> = expanded
             .iter()
-            .filter(|l| {
-                ids.contains(&l.id) && !l.group.as_ref().is_some_and(|g| selected.contains(g))
+            .filter(|id| {
+                requested.contains(id.as_str())
+                    && !self
+                        .index
+                        .layer(id)
+                        .unwrap()
+                        .group
+                        .as_deref()
+                        .is_some_and(|group| selected.contains(group))
             })
-            .map(|l| l.id.clone())
+            .cloned()
             .collect();
         let group = if mode == DropMode::Inside {
             Some(target.into())
@@ -809,7 +815,7 @@ impl TimelineModel {
             .index
             .layers
             .iter()
-            .filter(|l| !selected.contains(&l.id))
+            .filter(|l| !selected.contains(l.id.as_str()))
             .map(|l| l.id.clone())
             .collect();
         let mut at = remaining

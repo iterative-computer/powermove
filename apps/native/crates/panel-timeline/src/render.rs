@@ -474,7 +474,10 @@ pub struct Scene {
     // The previewed start and its offset from the stored layer start.
     time_preview: HashMap<String, (f64, f64)>,
     tops: std::sync::Arc<Vec<f64>>,
+    layer_rows: std::sync::Arc<Vec<Option<usize>>>,
+    layer_ends: std::sync::Arc<Vec<usize>>,
     property_layers: std::sync::Arc<Vec<Option<String>>>,
+    property_positions: std::sync::Arc<HashMap<String, Vec<usize>>>,
     positions: std::sync::Arc<HashMap<String, usize>>,
     control_times: std::sync::Arc<HashMap<String, std::sync::Arc<[f64]>>>,
     track_ends: std::sync::Arc<HashMap<String, Vec<f64>>>,
@@ -545,59 +548,63 @@ impl Scene {
                 model.index.layer(id).map(|layer| (id.clone(), (*from, from - layer.from)))
             })
             .collect();
-        for row in std::sync::Arc::make_mut(&mut self.rows) {
-            let Ok(id) = crate::v4::parse_row(&row.id) else {
-                continue;
-            };
-            let layer = match &id {
-                crate::RowId::Layer(id) => id,
-                crate::RowId::Property { layer_id, .. }
-                | crate::RowId::Path { layer_id, .. }
-                | crate::RowId::Effect { layer_id, .. } => layer_id,
-            };
-            let Some(&(from, offset)) = offsets.get(layer) else {
-                continue;
-            };
-            let delta = offset - self.time_preview.get(layer).map_or(0., |&(_, offset)| offset);
-            let moving_strip = matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
-            if delta == 0. && !moving_strip {
-                continue;
-            }
-            let row = std::sync::Arc::make_mut(row);
-            match &mut row.content {
-                RowContent::Layer { clip, summary } => {
-                    if let Some(bands) = std::sync::Arc::make_mut(&mut self.stagger).get_mut(layer) {
-                        for band in bands {band.start += delta;band.end += delta;}
+        let rows = std::sync::Arc::make_mut(&mut self.rows);
+        for (layer, &(from, offset)) in &offsets {
+            let indexed = model
+                .index
+                .layer(layer)
+                .expect("offset has an indexed layer");
+            let delta = offset
+                - self
+                    .time_preview
+                    .get(layer)
+                    .map_or(0., |&(_, offset)| offset);
+            if let Some(&i) = self.positions.get(&indexed.row_id) {
+                let row = &mut rows[i];
+                let moving = matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
+                if (delta != 0. || moving)
+                    && let RowContent::Layer { clip, summary } =
+                        &mut std::sync::Arc::make_mut(row).content
+                {
+                    if self.stagger.contains_key(layer)
+                        && let Some(bands) =
+                            std::sync::Arc::make_mut(&mut self.stagger).get_mut(layer)
+                    {
+                        for band in bands {
+                            band.start += delta;
+                            band.end += delta;
+                        }
                     }
                     if let Some(clip) = clip {
                         clip.from = from;
                     }
-                    *summary = summary
-                        .iter()
-                        .cloned()
-                        .map(|mut k| {
-                            k.seconds += delta;
-                            k
-                        })
-                        .collect();
-                }
-                RowContent::Property { keys, state } => {
-                    for k in keys.iter_mut() {
-                        k.seconds += delta;
+                    for key in std::sync::Arc::make_mut(summary) {
+                        key.seconds += delta;
                     }
-                    *state = if keys.is_empty() {
-                        KeyState::Static
-                    } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
-                        KeyState::AtPlayhead
-                    } else {
-                        KeyState::Animated
-                    };
-                    std::sync::Arc::make_mut(&mut self.control_times).insert(
-                        row.id.clone(),
-                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
-                    );
                 }
-                RowContent::Track { .. } => {}
+            }
+            if delta == 0. {
+                continue;
+            }
+            for &i in self.property_positions.get(layer).into_iter().flatten() {
+                let row = std::sync::Arc::make_mut(&mut rows[i]);
+                let RowContent::Property { keys, state } = &mut row.content else {
+                    continue;
+                };
+                for key in keys.iter_mut() {
+                    key.seconds += delta;
+                }
+                *state = if keys.is_empty() {
+                    KeyState::Static
+                } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
+                    KeyState::AtPlayhead
+                } else {
+                    KeyState::Animated
+                };
+                std::sync::Arc::make_mut(&mut self.control_times).insert(
+                    row.id.clone(),
+                    keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                );
             }
         }
         self.time_preview = offsets;
@@ -659,15 +666,24 @@ impl Scene {
                     || matches!(row.id, RowId::Property { .. } | RowId::Path { .. })
             })
             .map(|row| {
-                let id = crate::v4::row_id(&row.id);
-                if let Some(previous) = previous.and_then(|scene| scene.row(&id))
+                use std::borrow::Cow;
+                let layer = match &row.id {
+                    RowId::Layer(id) => Some(model.index.layer(id).ok_or(Error::DuplicateId)?),
+                    _ => None,
+                };
+                let id = layer.map_or_else(
+                    || Cow::Owned(crate::v4::row_id(&row.id)),
+                    |layer| Cow::Borrowed(layer.row_id.as_str()),
+                );
+                if let Some(previous) = previous
+                    .and_then(|scene| scene.positions.get(id.as_ref()).map(|&i| &scene.rows[i]))
                     && previous.depth == row.depth
                 {
                     return Ok(previous.clone());
                 }
                 let (content, is_selected) = match &row.id {
                     RowId::Layer(id) => {
-                        let layer = model.index.layer(id).ok_or(Error::DuplicateId)?;
+                        let layer = layer.expect("a layer row has an indexed layer");
                         let summary = layer.summary(|layer| {
                             keys(layer, layer.channels.iter().collect())
                                 .into_iter()
@@ -741,15 +757,15 @@ impl Scene {
                         .unwrap_or_else(|| p.accessibility_label(&row.id)),
                     _ => p.accessibility_label(&row.id),
                 };
-                Ok(PaintRow {
-                    id,
+                Ok(std::sync::Arc::new(PaintRow {
+                    id: id.into_owned(),
                     accessibility_label,
                     depth: row.depth,
                     selected: is_selected,
                     hovered: false,
                     focused: false,
                     content,
-                })
+                }))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let rows = if model.mode == crate::TimelineMode::Tracks {
@@ -788,7 +804,7 @@ impl Scene {
                         .map(|(_, e)| *e),
                 });
             }
-            let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
+            let mut properties: HashMap<(Area, usize), Vec<_>> = HashMap::new();
             for row in rows {
                 if let Ok(crate::RowId::Property { layer_id, .. } | crate::RowId::Path { layer_id, .. }) =
                     crate::v4::parse_row(&row.id)
@@ -799,7 +815,7 @@ impl Scene {
             }
             let mut tracks = vec![];
             for (area, lane) in layout.display_order() {
-                tracks.push(PaintRow {
+                tracks.push(std::sync::Arc::new(PaintRow {
                     id: json!(["track", format!("{area:?}"), lane]).to_string(),
                     accessibility_label: p
                         .track_accessibility_label(area, lane)
@@ -811,7 +827,7 @@ impl Scene {
                     content: RowContent::Track {
                         clips: clips.remove(&(area, lane)).unwrap_or_default(),
                     },
-                });
+                }));
                 if !model.track_collapsed(area, lane) {
                     tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
                 }
@@ -820,7 +836,7 @@ impl Scene {
         } else {
             rows
         };
-        let mut scene = Self::new(rows, model.index.duration, model.index.fps, t)?;
+        let mut scene = Self::from_rows(rows, model.index.duration, model.index.fps, t, previous)?;
         scene.work_area = (model.index.work[0], model.index.work[1]);
         scene.markers = model
             .index
@@ -835,7 +851,6 @@ impl Scene {
             .collect();
         if let Some(previous) = previous {
             scene.stagger = previous.stagger.clone();
-            scene.transitions = previous.transitions.clone();
             scene.preview_selection(std::sync::Arc::new(SceneSelection::new(
                 model.selection.layers(),
                 &model.selected_key_pairs(),
@@ -856,51 +871,40 @@ impl Scene {
         if let Some(snapshot) = &model.index.source
             && let Some(root) = snapshot.root()
         {
-            let layers = pm_kernel::model::comp_node(root, model.index.comp_id.as_deref())
-                .and_then(|comp| comp.get("layers"));
-            let by_id: HashMap<_, _> = match layers.map(pm_model::Node::kind) {
-                Some(pm_model::NodeKind::Array(layers)) => layers
-                    .iter()
-                    .filter_map(|layer| {
-                        let value = layer.get("id")?.to_value();
-                        Some((value.as_str()?.to_owned(), layer))
-                    })
-                    .collect(),
-                _ => HashMap::new(),
-            };
+            let layers = model.index.source_layers();
             let mut transitions: HashMap<String, Vec<TransitionCapsule>> = HashMap::new();
             for clip in &model.index.layers {
-                let Some(layer) = by_id.get(&clip.id) else {
+                if !clip.has_authored_transition {
+                    continue;
+                }
+                let Some(layer) = model
+                    .index
+                    .source_ordinal(&clip.id)
+                    .and_then(|i| layers.get(i))
+                else {
                     continue;
                 };
                 for (field, edge) in [("transitionIn", "in"), ("transitionOut", "out")] {
                     let Some(transition) = layer.get(field) else {
                         continue;
                     };
-                    let value = transition.to_value();
-                    let Some(kind) = value.get("type").and_then(pm_model::Value::as_str) else {
+                    let Some(kind) = transition.get("type").and_then(crate::snapshot::as_str)
+                    else {
                         continue;
                     };
-                    let paired = value
-                        .get("paired")
-                        .and_then(pm_model::Value::as_str)
-                        .is_some();
+                    let peer = transition.get("paired").and_then(crate::snapshot::as_str);
+                    let paired = peer.is_some();
                     if paired && edge == "out" {
                         continue;
                     }
-                    let duration = value
-                        .get("dur")
-                        .and_then(pm_model::Value::as_f64)
-                        .unwrap_or(0.5);
+                    let duration = crate::snapshot::number(transition.get("dur")).unwrap_or(0.5);
                     if !duration.is_finite() || duration <= 0. {
                         continue;
                     }
                     let intended_duration = duration;
                     let fitted = if paired {
-                        value
-                            .get("paired")
-                            .and_then(pm_model::Value::as_str)
-                            .and_then(|id| by_id.get(id))
+                        peer.and_then(|id| model.index.source_ordinal(id))
+                            .and_then(|i| layers.get(i))
                             .and_then(|peer| {
                                 pm_kernel::commands::transition_edges::fitted_pair(
                                     root, layer, peer, true,
@@ -949,17 +953,37 @@ impl Scene {
     }
     /// O(rows + keys log keys) on publication, never on a display callback.
     /// Sort presentation indexes only; the source model's ordering is untouched.
-    pub fn new(
-        mut rows: Vec<PaintRow>,
+    pub fn new(rows: Vec<PaintRow>, duration: f64, fps: f64, t: &Tokens) -> Result<Self, Error> {
+        Self::from_rows(
+            rows.into_iter().map(std::sync::Arc::new).collect(),
+            duration,
+            fps,
+            t,
+            None,
+        )
+    }
+
+    fn from_rows(
+        mut rows: Vec<std::sync::Arc<PaintRow>>,
         duration: f64,
         fps: f64,
         t: &Tokens,
+        previous: Option<&Self>,
     ) -> Result<Self, Error> {
         if !duration.is_finite() || duration < 0. || !fps.is_finite() || fps <= 0. {
             return Err(Error::InvalidTime);
         }
-        let mut tops = vec![0.];
-        let mut positions = HashMap::new();
+        let mut tops = Vec::with_capacity(rows.len() + 1);
+        tops.push(0.);
+        let mut positions = HashMap::with_capacity(rows.len());
+        let mut property_layers = Vec::with_capacity(rows.len());
+        let mut property_positions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut control_times = HashMap::new();
+        let mut track_ends = HashMap::new();
+        let mut layer_rows = Vec::with_capacity(rows.len());
+        let mut layer_ends = vec![rows.len(); rows.len()];
+        let mut ancestors: Vec<(usize, usize)> = Vec::new();
+        let mut layer = None;
         for (i, row) in rows.iter_mut().enumerate() {
             if row.id.is_empty()
                 || row.accessibility_label.is_empty()
@@ -967,126 +991,148 @@ impl Scene {
             {
                 return Err(Error::DuplicateId);
             }
-            let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
-            let (clips, keys): (Vec<&Clip>, &[Key]) = match &mut row.content {
-                RowContent::Layer { clip, summary } => {
-                    if !sorted(summary) {
-                        let mut keys = summary.to_vec();
-                        keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-                        *summary = keys.into();
+            // Shared rows already passed validation and sorting in the previous scene.
+            if let Some(row) = std::sync::Arc::get_mut(row) {
+                let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
+                let keys: &[Key] = match &mut row.content {
+                    RowContent::Layer { clip, summary } => {
+                        if clip.as_ref().is_some_and(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        if !sorted(summary) {
+                            let mut keys = summary.to_vec();
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                            *summary = keys.into();
+                        }
+                        summary
                     }
-                    (clip.iter().collect(), summary)
-                }
-                RowContent::Property { keys, .. } => {
-                    if !sorted(keys) {
-                        keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                    RowContent::Property { keys, .. } => {
+                        if !sorted(keys) {
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                        }
+                        keys
                     }
-                    (vec![], keys)
-                }
-                RowContent::Track { clips } => {
-                    if clips.iter().any(|c| !valid_clip(c)) {
-                        return Err(Error::InvalidTime);
+                    RowContent::Track { clips } => {
+                        if clips.iter().any(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        clips.sort_by(|a, b| a.from.total_cmp(&b.from));
+                        &[]
                     }
-                    clips.sort_by(|a, b| a.from.total_cmp(&b.from));
-                    tops.push(tops.last().unwrap() + row.height(t));
-                    continue;
+                };
+                if keys.iter().any(|key| !key.seconds.is_finite()) {
+                    return Err(Error::InvalidTime);
                 }
-            };
-            if clips.iter().any(|c| !valid_clip(c)) || keys.iter().any(|k| !k.seconds.is_finite()) {
-                return Err(Error::InvalidTime);
             }
-            tops.push(tops.last().unwrap() + row.height(t));
-        }
-        let property_layers = rows
-            .iter()
-            .map(|row| {
-                if matches!(row.content, RowContent::Property { .. })
-                    && let Ok(crate::RowId::Property { layer_id, .. }) = crate::v4::parse_row(&row.id)
-                {
-                    Some(layer_id)
-                } else {
+            let property = match &row.content {
+                RowContent::Layer { .. } => {
+                    while ancestors
+                        .last()
+                        .is_some_and(|&(_, depth)| depth >= row.depth)
+                    {
+                        let (ancestor, _) = ancestors.pop().unwrap();
+                        layer_ends[ancestor] = i;
+                    }
+                    ancestors.push((i, row.depth));
+                    layer = Some(i);
                     None
                 }
-            })
-            .collect();
-        let control_times = rows
-            .iter()
-            .filter_map(|row| match &row.content {
-                RowContent::Property { keys, .. } => Some((
-                    row.id.clone(),
-                    keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
-                )),
-                _ => None,
-            })
-            .collect();
-        let track_ends = rows
-            .iter()
-            .filter_map(|row| match &row.content {
+                RowContent::Property { keys, .. } => {
+                    control_times.insert(
+                        row.id.clone(),
+                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                    );
+                    match crate::v4::parse_row(&row.id) {
+                        Ok(crate::RowId::Property { layer_id, .. }) => {
+                            property_positions
+                                .entry(layer_id.clone())
+                                .or_default()
+                                .push(i);
+                            Some(layer_id)
+                        }
+                        _ => None,
+                    }
+                }
                 RowContent::Track { clips } => {
                     let mut end = f64::NEG_INFINITY;
-                    Some((
+                    track_ends.insert(
                         row.id.clone(),
                         clips
                             .iter()
-                            .map(|c| {
-                                end = end.max(c.from + c.duration);
+                            .map(|clip| {
+                                end = end.max(clip.from + clip.duration);
                                 end
                             })
                             .collect(),
-                    ))
+                    );
+                    None
                 }
-                _ => None,
-            })
-            .collect();
-        let transitions = rows.iter().flat_map(|row| {
-            let clips = match &row.content {
-                RowContent::Layer { clip, .. } => clip.as_slice(),
-                RowContent::Track { clips } => clips.as_slice(),
-                _ => &[],
             };
-            clips.iter().filter_map(|clip| {
-                let edges: Vec<_> = [(Edge::In, "in"), (Edge::Out, "out")].into_iter()
-                    .zip(clip.transitions)
-                    .filter_map(|((kind, edge), duration)| {
-                        let duration = duration?.min(clip.duration);
-                        (duration > 0.).then(|| TransitionCapsule {
+            property_layers.push(property);
+            layer_rows.push(layer);
+            tops.push(tops.last().unwrap() + row.height(t));
+        }
+        let (transitions, clip_selection) = if let Some(previous) = previous {
+            (
+                previous.transitions.clone(),
+                previous.clip_selection.clone(),
+            )
+        } else {
+            let mut transitions = HashMap::new();
+            let mut selection = HashSet::new();
+            for row in &rows {
+                let clips = match &row.content {
+                    RowContent::Layer { clip, .. } => clip.as_slice(),
+                    RowContent::Track { clips } => clips.as_slice(),
+                    _ => &[],
+                };
+                for clip in clips {
+                    if clip.selected {
+                        selection.insert(clip.id.clone());
+                    }
+                    let mut edges = Vec::new();
+                    for ((kind, edge), duration) in [(Edge::In, "in"), (Edge::Out, "out")]
+                        .into_iter()
+                        .zip(clip.transitions)
+                    {
+                        let Some(duration) =
+                            duration.map(|d| d.min(clip.duration)).filter(|d| *d > 0.)
+                        else {
+                            continue;
+                        };
+                        edges.push(TransitionCapsule {
                             paired: false,
                             selected: clip.transition_selected == Some(kind),
                             edge,
-                            from: if kind == Edge::In { clip.from } else { clip.from + clip.duration - duration },
+                            from: if kind == Edge::In {
+                                clip.from
+                            } else {
+                                clip.from + clip.duration - duration
+                            },
                             duration,
                             label: "Transition".into(),
                             shortened: false,
                             disabled: false,
-                        })
-                    }).collect();
-                (!edges.is_empty()).then(|| (clip.id.clone(), edges))
-            })
-        }).collect();
-        let mut clip_selection = std::collections::HashSet::new();
-        for row in &rows {
-            match &row.content {
-                RowContent::Layer {
-                    clip: Some(clip), ..
-                } if clip.selected => {
-                    clip_selection.insert(clip.id.clone());
+                        });
+                    }
+                    if !edges.is_empty() {
+                        transitions.insert(clip.id.clone(), edges);
+                    }
                 }
-                RowContent::Track { clips } => {
-                    clip_selection.extend(
-                        clips
-                            .iter()
-                            .filter(|clip| clip.selected)
-                            .map(|clip| clip.id.clone()),
-                    );
-                }
-                _ => {}
             }
-        }
+            (
+                std::sync::Arc::new(transitions),
+                std::sync::Arc::new(selection),
+            )
+        };
         Ok(Self {
-            rows: std::sync::Arc::new(rows.into_iter().map(std::sync::Arc::new).collect()),
+            rows: std::sync::Arc::new(rows),
             time_preview: HashMap::new(),
             tops: std::sync::Arc::new(tops),
+            layer_rows: std::sync::Arc::new(layer_rows),
+            layer_ends: std::sync::Arc::new(layer_ends),
             property_layers: std::sync::Arc::new(property_layers),
+            property_positions: std::sync::Arc::new(property_positions),
             positions: std::sync::Arc::new(positions),
             control_times: std::sync::Arc::new(control_times),
             track_ends: std::sync::Arc::new(track_ends),
@@ -1096,8 +1142,8 @@ impl Scene {
             markers: vec![],
             bars: vec![],
             stagger: Default::default(),
-            transitions: std::sync::Arc::new(transitions),
-            clip_selection: std::sync::Arc::new(clip_selection),
+            transitions,
+            clip_selection,
             selection: None,
             transition_selection: None,
             focused: true,
@@ -1114,24 +1160,15 @@ impl Scene {
         }
         let ruler = t.metrics.ruler as f64;
         let content = (y - ruler + v.scroll_y).max(0.);
-        let mut i = self
+        let row = self
             .tops
             .partition_point(|top| *top <= content)
             .saturating_sub(1)
             .min(total - 1);
-        let is_layer = |i: usize| matches!(self.rows[i].content, RowContent::Layer { .. });
-        while i > 0 && !is_layer(i) {
-            i -= 1;
-        }
-        if !is_layer(i) {
-            return None;
-        }
+        let i = self.layer_rows[row]?;
         let depth = self.rows[i].depth;
         let height = self.rows[i].height(t).max(1.);
-        let mut end = i + 1;
-        while end < total && (!is_layer(end) || self.rows[end].depth > depth) {
-            end += 1;
-        }
+        let end = self.layer_ends[i];
         let bottom = |j: usize| {
             if j < total {
                 self.tops[j]

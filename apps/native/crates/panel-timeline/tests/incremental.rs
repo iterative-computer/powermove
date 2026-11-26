@@ -391,3 +391,23 @@ fn a_key_id_two_layers_share_is_selected_on_the_layer_it_was_picked_on() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn independent_layer_nodes_with_equal_revisions_are_read_again() {
+    let snapshot = |name| Snapshot {
+        doc_id: 1,
+        revision: 12,
+        document: Arc::new(pm_model::Document::new(
+            Some(
+                pm_model::json::parse(&format!(
+                    r#"{{"layers":[{{"id":"layer","name":"{name}"}}]}}"#
+                ))
+                .unwrap(),
+            ),
+            12,
+        )),
+    };
+    let before = TimelineIndex::from_snapshot(&snapshot("Before"));
+    let after = before.updated(&snapshot("After"));
+    assert_eq!(after.layer("layer").unwrap().name.as_str(), Some("After"));
+}

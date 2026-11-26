@@ -136,7 +136,7 @@ struct LayerPreview {
     commands: Vec<pm_kernel::Command>,
     frame: Option<LayerPreviewFrame>,
     serial: u64,
-    sample: Option<DragSample>,
+    sample: Option<(DragSample, u64)>,
 }
 /// Awaitable kernel adapter. No wait(), call_blocking(), platform or JS calls.
 /// Caller identity is injected so agent/MCP lock protections are retained.
@@ -183,7 +183,9 @@ impl TimelineClient {
         }) {
             self.preview = None;
         }
-        if let Some(sample) = self.preview.as_ref().and_then(|p| p.sample) {
+        if let Some((sample, edition)) = self.preview.as_ref().and_then(|p| p.sample)
+            && edition != p.snapshot.document.edition()
+        {
             self.preview_sample(sample)?;
         }
         Ok(())
@@ -462,6 +464,9 @@ impl TimelineClient {
             .kernel
             .published(&self.project)
             .ok_or(ClientError::Closed)?;
+        if !self.model.follows_snapshot(&p.snapshot) {
+            self.model.sync(&p);
+        }
         let preview = self.preview.as_mut().ok_or(ClientError::NoGesture)?;
         if p.snapshot.doc_id != preview.drag.start.doc_id
             || p.snapshot.open_comp() != preview.drag.start.comp_id
@@ -487,7 +492,7 @@ impl TimelineClient {
             {
                 keys.sample(&preview.drag.start, key_ids, *delta);
             }
-            preview.sample = Some(sample);
+            preview.sample = Some((sample, p.snapshot.document.edition()));
             preview.commands = commands;
             return Ok(preview_ack(p.revision()));
         }
@@ -528,7 +533,7 @@ impl TimelineClient {
                 gain_commands: preview.gain.then(|| commands.clone().into()),
                 trimmed,
             });
-            preview.sample = Some(sample);
+            preview.sample = Some((sample, p.snapshot.document.edition()));
             preview.commands = commands;
             return Ok(preview_ack(p.revision()));
         }
@@ -541,28 +546,18 @@ impl TimelineClient {
                 _ => None,
             })
             .collect();
-        // Resolve the current stack once, including a concurrent reorder. A
-        // foreign edit remains visible and cancellation never rolls it back.
+        // Use ordinals from this publication, including after a foreign reorder.
         let root = p.snapshot.root().ok_or(ClientError::Closed)?;
-        let comp = pm_kernel::model::comp_node(root, preview.drag.start.comp_id.as_deref())
-            .ok_or(ClientError::DocumentChanged)?;
-        let locations: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
-            .enumerate()
-            .filter_map(|(index, layer)| {
-                layer
-                    .get("id")
-                    .map(pm_model::Node::to_value)
-                    .and_then(|id| id.as_str().map(|id| (id.to_owned(), index)))
-            })
-            .collect();
         let mut ops = Vec::with_capacity(starts.len());
         for command in &commands {
             let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id: id, patch }) = command else {
                 continue;
             };
             let Some(from) = patch.from else { continue };
-            let index = *locations
-                .get(id)
+            let index = self
+                .model
+                .index
+                .source_ordinal(id)
                 .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
             let mut path = pm_kernel::model::LayerLoc {
                 comp_id: preview.drag.start.comp_id.clone(),
@@ -583,7 +578,7 @@ impl TimelineClient {
         document
             .apply_ops_at(&ops, revision)
             .map_err(|e| ClientError::Kernel(e.to_string()))?;
-        preview.sample = Some(sample);
+        preview.sample = Some((sample, p.snapshot.document.edition()));
         preview.commands = commands;
         preview.frame = Some(LayerPreviewFrame {
             starts: starts.into(),
@@ -783,11 +778,6 @@ impl TimelineClient {
     /// one published: every view the panel draws from (the mode, the graph,
     /// reveals) follows whatever changed the model, menu, key or control.
     pub async fn publish_view_if_changed(&self) -> Result<(), ClientError> {
-        let state = self.kernel.state();
-        let old = state.ui.get(&self.project).cloned().unwrap_or_default();
-        if self.model.patch_ui(&old) == old {
-            return Ok(());
-        }
         self.publish_view().await
     }
     pub async fn publish_view(&self) -> Result<(), ClientError> {
@@ -807,13 +797,17 @@ impl TimelineClient {
         const TRIES: usize = 8;
         for attempt in 1..=TRIES {
             let old = state.ui.get(&self.project).cloned().unwrap_or_default();
+            let next = self.model.patch_ui(&old);
+            if next == old && self.kernel.state().revision == state.revision {
+                return Ok(());
+            }
             let written = self
                 .kernel
                 .state_transaction(StateTransaction {
                     expected_revision: Some(state.revision),
                     ops: vec![StateOp::Ui {
                         project: self.project.clone(),
-                        next: self.model.patch_ui(&old),
+                        next,
                     }],
                 })
                 .await

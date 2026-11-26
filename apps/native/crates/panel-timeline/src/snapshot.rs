@@ -67,6 +67,7 @@ pub struct Transition {
 #[derive(Clone, Debug)]
 pub struct Layer {
     pub id: String,
+    pub(crate) row_id: String,
     pub name: JsString,
     pub kind: String,
     pub group: Option<String>,
@@ -105,6 +106,7 @@ pub struct Layer {
     /// The In and Out transitions (`transitionIn`, `transitionOut`); an
     /// audio clip's fades (`d.fadeIn`, `d.fadeOut`) stand in for them.
     pub transitions: [Option<Transition>; 2],
+    pub(crate) has_authored_transition: bool,
     pub masks: Vec<String>,
     /// The composition id referenced by a `precomp` layer (`d.comp`).
     pub comp: Option<String>,
@@ -112,7 +114,6 @@ pub struct Layer {
     pub channels: Vec<Channel>,
     /// Revision at which the layer's tree node last changed: an unchanged
     /// layer is reused, not read again, by the next index.
-    rev: u64,
     channel_at: HashMap<String, usize>,
     key_at: HashMap<String, (usize, usize)>,
     /// The collapsed row's key marks, sorted, none selected: built once per
@@ -121,6 +122,10 @@ pub struct Layer {
 }
 
 impl Layer {
+    pub(crate) fn channel(&self, path: &str) -> Option<&Channel> {
+        self.channel_at.get(path).map(|i| &self.channels[*i])
+    }
+
     pub fn can_be_3d(&self) -> bool {
         !matches!(self.kind.as_str(), "audio" | "adjustment")
     }
@@ -186,15 +191,34 @@ pub struct TimelineIndex {
     pub work: [f64; 2],
     pub layers: Vec<Arc<Layer>>,
     pub markers: Vec<Marker>,
-    by_id: HashMap<String, usize>,
-    locked_descendants: HashSet<String>,
-    groups_with_children: HashSet<String>,
+    by_id: Arc<HashMap<String, usize>>,
+    source_ordinals: Arc<Vec<usize>>,
+    hierarchy: Arc<Hierarchy>,
+    locked_descendants: Arc<Vec<bool>>,
+    pub(crate) shy_layers: bool,
     /// Legacy groups use the union of their leaf layers' timing.
-    group_extents: Vec<Option<(f64, f64)>>,
+    group_extents: Arc<Vec<Option<(f64, f64)>>>,
     layer_time_bounds: (f64, f64),
     /// Key ids by layer position, [`KEY_BLOCK`] layers a block. A block whose
     /// layers are all reused is reused, so an edit re-indexes one block.
     key_blocks: Vec<Arc<KeyBlock>>,
+    split_targets: Arc<OnceLock<Vec<(f64, usize)>>>,
+}
+
+#[derive(Debug, Default)]
+struct Hierarchy {
+    children: Vec<Vec<usize>>,
+    roots: Vec<usize>,
+    parent: Vec<Option<usize>>,
+}
+
+fn same_node(old: &Node, new: &Node) -> bool {
+    old.rev() == new.rev()
+        && match (old.kind(), new.kind()) {
+            (NodeKind::Object(a), NodeKind::Object(b)) => Arc::ptr_eq(a, b),
+            (NodeKind::Array(a), NodeKind::Array(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
 }
 const KEY_BLOCK: usize = 64;
 #[derive(Debug, Default)]
@@ -254,12 +278,15 @@ impl Default for TimelineIndex {
             work: [0., 0.],
             layers: Vec::new(),
             markers: Vec::new(),
-            by_id: HashMap::new(),
-            locked_descendants: HashSet::new(),
-            groups_with_children: HashSet::new(),
-            group_extents: Vec::new(),
+            by_id: Default::default(),
+            source_ordinals: Default::default(),
+            hierarchy: Default::default(),
+            locked_descendants: Default::default(),
+            shy_layers: false,
+            group_extents: Default::default(),
             layer_time_bounds: (0., 0.),
             key_blocks: Vec::new(),
+            split_targets: Default::default(),
         }
     }
 }
@@ -329,109 +356,75 @@ impl TimelineIndex {
             number(comp.get("work").and_then(|v| v.at(0))).unwrap_or(0.),
             number(comp.get("work").and_then(|v| v.at(1))).unwrap_or(result.duration),
         ];
-        for (ordinal, layer) in model::layers_of(comp).enumerate() {
-            let Some(id) = string(layer.get("id")).filter(|id| !id.is_empty()) else {
-                eprintln!("Timeline skipped layer {} with no usable id", ordinal + 1);
-                continue;
-            };
-            if result.by_id.contains_key(&id) {
-                eprintln!("Timeline skipped duplicate layer id at row {}", ordinal + 1);
-                continue;
-            }
-            let from = number(layer.get("from")).unwrap_or(0.);
-            let duration = number(layer.get("dur")).unwrap_or(0.);
-            if !from.is_finite()
-                || !duration.is_finite()
-                || duration < 0.
-                || !(from + duration).is_finite()
-            {
-                eprintln!("Timeline skipped layer {} with invalid timing", ordinal + 1);
-                continue;
-            }
-            let reused = same
-                .then(|| self.layer_arc(&id))
-                .flatten()
-                .filter(|previous| previous.rev == layer.rev());
-            result.by_id.insert(id.clone(), result.layers.len());
-            let layer = reused
-                .cloned()
-                .unwrap_or_else(|| Arc::new(Self::read_layer(layer, id, from, duration)));
-            result.layer_time_bounds.0 = result.layer_time_bounds.0.min(layer.from);
-            result.layer_time_bounds.1 = result.layer_time_bounds.1.max(layer.from + layer.duration);
-            result.layers.push(layer);
-        }
-        result.groups_with_children.extend(
-            result
-                .layers
-                .iter()
-                .filter_map(|layer| layer.group.as_ref().filter(|id| **id != layer.id).cloned()),
-        );
-        if result.layers.iter().any(|layer| layer.kind == "group" && layer.duration == 0.) {
-            result.group_extents = result.group_extents();
-        }
-        // Memoised group locks, bounded even on corrupt/cyclic input. Transform parents
-        // do not imply group locks (kernel's lock policy).
-        let mut locked = vec![None; result.layers.len()];
-        for first in 0..result.layers.len() {
-            let mut chain = Vec::new();
-            let mut seen = HashSet::new();
-            let mut at = Some(first);
-            let mut inherited = false;
-            while let Some(i) = at {
-                if let Some(value) = locked[i] {
-                    inherited |= value;
-                    break;
-                }
-                if !seen.insert(i) {
-                    inherited |= chain.iter().any(|i: &usize| result.layers[*i].locked);
-                    break;
-                }
-                chain.push(i);
-                at = result.layers[i]
-                    .group
-                    .as_ref()
-                    .and_then(|id| result.by_id.get(id))
-                    .copied();
-            }
-            for i in chain.into_iter().rev() {
-                inherited |= result.layers[i].locked;
-                locked[i] = Some(inherited);
-            }
-        }
-        for (i, l) in result.layers.iter_mut().enumerate() {
-            let effective = locked[i].unwrap_or(l.locked);
-            if l.effectively_locked != effective {
-                Arc::make_mut(l).effectively_locked = effective;
-            }
-        }
-        for layer in result.layers.iter().filter(|layer| layer.locked) {
-            let mut parent = layer.group.clone();
-            while let Some(id) = parent {
-                let Some(group) = result.layer(&id) else {
-                    break;
-                };
-                if group.id == layer.id || group.kind != "group" {
-                    break;
-                }
-                parent = group.group.clone();
-                if !result.locked_descendants.insert(id) {
-                    break;
-                }
-            }
-        }
-        let previous: HashMap<*const Layer, &Arc<KeyBlock>> = self
-            .key_blocks
-            .iter()
-            .filter_map(|b| Some((Arc::as_ptr(b.layers.first()?), b)))
-            .collect();
-        result.key_blocks = result
-            .layers
-            .chunks(KEY_BLOCK)
-            .map(|chunk| match previous.get(&Arc::as_ptr(&chunk[0])) {
-                Some(block) if block.holds(chunk) => Arc::clone(block),
-                _ => Arc::new(KeyBlock::new(chunk)),
+        let layers = array(comp.get("layers"));
+        let old_comp = same
+            .then(|| {
+                self.root()
+                    .and_then(|root| model::comp_node(root, self.comp_id.as_deref()))
             })
-            .collect();
+            .flatten();
+        let old_layers = array(old_comp.and_then(|comp| comp.get("layers")));
+        if let Some((layers, timing_changed, locks_changed)) =
+            self.update_in_place(old_layers, layers)
+        {
+            result.layers = layers;
+            result.by_id = self.by_id.clone();
+            result.source_ordinals = self.source_ordinals.clone();
+            result.hierarchy = self.hierarchy.clone();
+            if locks_changed {
+                result.index_locks();
+            } else {
+                result.locked_descendants = self.locked_descendants.clone();
+            }
+            if timing_changed {
+                result.index_timing();
+            } else {
+                result.layer_time_bounds = self.layer_time_bounds;
+                result.group_extents = self.group_extents.clone();
+            }
+        } else {
+            let mut by_id = HashMap::with_capacity(layers.len());
+            let mut ordinals = Vec::with_capacity(layers.len());
+            result.layers.reserve(layers.len());
+            for (ordinal, layer) in layers.iter().enumerate() {
+                let Some(id) = string(layer.get("id")).filter(|id| !id.is_empty()) else {
+                    eprintln!("Timeline skipped layer {} with no usable id", ordinal + 1);
+                    continue;
+                };
+                if by_id.contains_key(&id) {
+                    eprintln!("Timeline skipped duplicate layer id at row {}", ordinal + 1);
+                    continue;
+                }
+                let Some((from, duration)) = Self::timing(layer) else {
+                    eprintln!("Timeline skipped layer {} with invalid timing", ordinal + 1);
+                    continue;
+                };
+                let previous = same
+                    .then(|| self.layer_ordinal(&id))
+                    .flatten()
+                    .map(|i| (&self.layers[i], &old_layers[self.source_ordinals[i]]));
+                let indexed = match previous {
+                    Some((indexed, old)) if same_node(old, layer) => indexed.clone(),
+                    _ => Arc::new(Self::read_layer(
+                        layer,
+                        id.clone(),
+                        from,
+                        duration,
+                        previous.map(|(index, node)| (index.as_ref(), node)),
+                    )),
+                };
+                by_id.insert(id, result.layers.len());
+                ordinals.push(ordinal);
+                result.layers.push(indexed);
+            }
+            result.by_id = Arc::new(by_id);
+            result.source_ordinals = Arc::new(ordinals);
+            result.index_hierarchy();
+            result.index_locks();
+            result.index_timing();
+        }
+        result.shy_layers = result.layers.iter().any(|layer| layer.shy);
+        result.index_keys(self);
         if let Some(NodeKind::Array(markers)) = comp.get("markers").map(Node::kind) {
             result.markers = markers
                 .iter()
@@ -446,8 +439,188 @@ impl TimelineIndex {
         }
         result
     }
+
+    fn timing(node: &Node) -> Option<(f64, f64)> {
+        let from = number(node.get("from")).unwrap_or(0.);
+        let duration = number(node.get("dur")).unwrap_or(0.);
+        (duration >= 0. && (from + duration).is_finite()).then_some((from, duration))
+    }
+
+    /// Compare persistent layer nodes in stack order. Scalar edits leave every
+    /// other object and the layer topology intact, even across missed revisions.
+    fn update_in_place(
+        &self,
+        old_nodes: &[Node],
+        nodes: &[Node],
+    ) -> Option<(Vec<Arc<Layer>>, bool, bool)> {
+        if nodes.len() != old_nodes.len() || old_nodes.len() != self.layers.len() {
+            return None;
+        }
+        let mut layers = Vec::with_capacity(nodes.len());
+        let mut timing_changed = false;
+        let mut locks_changed = false;
+        for ((old, node), indexed) in old_nodes.iter().zip(nodes).zip(&self.layers) {
+            if same_node(old, node) {
+                layers.push(indexed.clone());
+                continue;
+            }
+            if node.get("id").and_then(as_str) != Some(indexed.id.as_str())
+                || node.get("group").and_then(as_str) != indexed.group.as_deref()
+                || node.get("type").and_then(as_str).unwrap_or_default() != indexed.kind
+            {
+                return None;
+            }
+            let (from, duration) = Self::timing(node)?;
+            timing_changed |= (from, duration) != (indexed.from, indexed.duration);
+            let mut layer = Self::read_layer(
+                node,
+                indexed.id.clone(),
+                from,
+                duration,
+                Some((indexed, old)),
+            );
+            locks_changed |= layer.locked != indexed.locked;
+            layer.effectively_locked = indexed.effectively_locked;
+            layers.push(Arc::new(layer));
+        }
+        Some((layers, timing_changed, locks_changed))
+    }
+
+    fn index_timing(&mut self) {
+        for layer in &self.layers {
+            self.layer_time_bounds.0 = self.layer_time_bounds.0.min(layer.from);
+            self.layer_time_bounds.1 = self.layer_time_bounds.1.max(layer.from + layer.duration);
+        }
+        if self
+            .layers
+            .iter()
+            .any(|layer| layer.kind == "group" && layer.duration == 0.)
+        {
+            self.group_extents = Arc::new(self.group_extents());
+        }
+    }
+
+    pub(crate) fn shares_hierarchy(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.hierarchy, &previous.hierarchy)
+    }
+
+    fn index_hierarchy(&mut self) {
+        let len = self.layers.len();
+        let parent: Vec<_> = self
+            .layers
+            .iter()
+            .map(|layer| layer.group.as_deref().and_then(|id| self.layer_ordinal(id)))
+            .collect();
+        let mut children = vec![Vec::new(); len];
+        let mut roots = Vec::new();
+        for (i, p) in parent.iter().copied().enumerate() {
+            if let Some(p) = p.filter(|p| *p != i) {
+                children[p].push(i);
+            } else {
+                roots.push(i);
+            }
+        }
+        // Keep cyclic layers reachable in stored order, as with regular roots.
+        let mut seen = vec![false; len];
+        let mut stack = Vec::new();
+        for candidate in roots.clone().into_iter().chain(0..len) {
+            if seen[candidate] {
+                continue;
+            }
+            if parent[candidate].is_some_and(|p| p != candidate) {
+                roots.push(candidate);
+            }
+            stack.push(candidate);
+            while let Some(i) = stack.pop() {
+                if !std::mem::replace(&mut seen[i], true) {
+                    stack.extend(&children[i]);
+                }
+            }
+        }
+        self.hierarchy = Arc::new(Hierarchy {
+            children,
+            roots,
+            parent,
+        });
+    }
+
+    fn index_locks(&mut self) {
+        let len = self.layers.len();
+        let parent = &self.hierarchy.parent;
+        // Memoised group locks, bounded even on corrupt/cyclic input. Transform parents
+        // do not imply group locks (kernel's lock policy).
+        let mut locked = vec![None; len];
+        let mut chain = Vec::new();
+        let mut visited = vec![None; len];
+        for first in 0..len {
+            let mut at = Some(first);
+            let mut inherited = false;
+            while let Some(i) = at {
+                if let Some(value) = locked[i] {
+                    inherited = value;
+                    break;
+                }
+                if visited[i] == Some(first) {
+                    inherited = chain.iter().any(|i: &usize| self.layers[*i].locked);
+                    break;
+                }
+                visited[i] = Some(first);
+                chain.push(i);
+                at = parent[i];
+            }
+            for i in chain.drain(..).rev() {
+                inherited |= self.layers[i].locked;
+                locked[i] = Some(inherited);
+            }
+        }
+        let mut locked_descendants = vec![false; len];
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let effective = locked[i].unwrap_or(layer.locked);
+            if layer.effectively_locked != effective {
+                Arc::make_mut(layer).effectively_locked = effective;
+            }
+        }
+        for (i, _) in self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| layer.locked)
+        {
+            let mut at = parent[i];
+            while let Some(p) = at {
+                if p == i || self.layers[p].kind != "group" || locked_descendants[p] {
+                    break;
+                }
+                locked_descendants[p] = true;
+                at = parent[p];
+            }
+        }
+        self.locked_descendants = Arc::new(locked_descendants);
+    }
+
+    fn index_keys(&mut self, old: &Self) {
+        let previous: HashMap<*const Layer, &Arc<KeyBlock>> = old
+            .key_blocks
+            .iter()
+            .filter_map(|b| Some((Arc::as_ptr(b.layers.first()?), b)))
+            .collect();
+        self.key_blocks = self
+            .layers
+            .chunks(KEY_BLOCK)
+            .map(|chunk| match previous.get(&Arc::as_ptr(&chunk[0])) {
+                Some(block) if block.holds(chunk) => Arc::clone(block),
+                _ => Arc::new(KeyBlock::new(chunk)),
+            })
+            .collect();
+    }
     /// One stored layer as the timeline reads it.
-    fn read_layer(layer: &Node, id: String, from: f64, duration: f64) -> Layer {
+    fn read_layer(
+        layer: &Node,
+        id: String,
+        from: f64,
+        duration: f64,
+        previous: Option<(&Layer, &Node)>,
+    ) -> Layer {
         let mut channels = Vec::new();
         let mut path_groups = HashMap::new();
         collect_channels(layer.get("p"), "", &mut channels);
@@ -499,9 +672,36 @@ impl TimelineIndex {
                 &mut channels,
             );
         }
-        for path in array(content.and_then(|d| d.get("paths"))) {
-            if let Some(id) = string(path.get("id")) {
-                collect_path(path, &format!("g.{id}"), &mut channels, &mut path_groups);
+        if let Some(paths) = content.and_then(|d| d.get("paths")) {
+            if let Some((indexed, _)) = previous.filter(|(_, old)| {
+                old.get("d")
+                    .and_then(|d| d.get("paths"))
+                    .is_some_and(|old| same_node(old, paths))
+            }) {
+                channels.extend(
+                    indexed
+                        .channels
+                        .iter()
+                        .filter(|c| {
+                            c.path_group
+                                .as_deref()
+                                .is_some_and(|group| group.starts_with("g."))
+                        })
+                        .cloned(),
+                );
+                path_groups.extend(
+                    indexed
+                        .path_groups
+                        .iter()
+                        .filter(|(id, _)| id.starts_with("g."))
+                        .map(|(id, name)| (id.clone(), name.clone())),
+                );
+            } else {
+                for path in array(Some(paths)) {
+                    if let Some(id) = string(path.get("id")) {
+                        collect_path(path, &format!("g.{id}"), &mut channels, &mut path_groups);
+                    }
+                }
             }
         }
         for (field, prefix) in [("animators", "ta"), ("styles", "ts")] {
@@ -619,6 +819,11 @@ impl TimelineIndex {
             asset,
             missing_effects,
             transitions,
+            has_authored_transition: ["transitionIn", "transitionOut"]
+                .iter()
+                .any(|field| matches!(layer.get(field).map(Node::kind), Some(NodeKind::Object(_)))),
+            row_id: serde_json::to_string(&("layer", &id))
+                .expect("row identifiers contain only strings"),
             id,
             name: js_string(layer.get("name")).unwrap_or_default(),
             kind: string(layer.get("type")).unwrap_or_default(),
@@ -663,7 +868,6 @@ impl TimelineIndex {
             preferred_track: number(layer.get("track")).unwrap_or(0.).max(0.).floor() as usize,
             channels,
             path_groups,
-            rev: layer.rev(),
             channel_at: HashMap::new(),
             key_at: HashMap::new(),
             summary: Default::default(),
@@ -676,9 +880,6 @@ impl TimelineIndex {
         }
         read
     }
-    fn layer_arc(&self, id: &str) -> Option<&Arc<Layer>> {
-        self.by_id.get(id).map(|i| &self.layers[*i])
-    }
     /// Original ordinal for the v4 index column; O(1), independent of viewport.
     pub fn layer_ordinal(&self, id: &str) -> Option<usize> {
         self.by_id.get(id).copied()
@@ -687,7 +888,8 @@ impl TimelineIndex {
         self.by_id.get(id).map(|i| &*self.layers[*i])
     }
     pub fn has_locked_descendant(&self, group: &str) -> bool {
-        self.locked_descendants.contains(group)
+        self.layer_ordinal(group)
+            .is_some_and(|i| self.locked_descendants[i])
     }
 
     /// The nearest explicit lock, including a lock inherited from a group.
@@ -702,8 +904,7 @@ impl TimelineIndex {
         None
     }
     pub fn channel(&self, layer: &str, channel: &str) -> Option<&Channel> {
-        let layer = self.layer(layer)?;
-        layer.channel_at.get(channel).map(|c| &layer.channels[*c])
+        self.layer(layer)?.channel(channel)
     }
     /// The key `id` on layer `layer` (key ids may repeat across layers).
     pub fn key_on(&self, layer: &str, id: &str) -> Option<(&Layer, &Channel, &Key)> {
@@ -722,17 +923,19 @@ impl TimelineIndex {
     /// The selected keys, each on the layer it was picked on; a key selected
     /// by id alone is selected on every layer holding it.
     pub fn selected_keys(&self, selection: &pm_kernel::Selection) -> Vec<(&Layer, &Channel, &Key)> {
-        selection
-            .keys()
-            .iter()
-            .flat_map(|id| match selection.key_owners(id) {
-                Some(owners) => owners
-                    .into_iter()
-                    .filter_map(|layer| self.key_on(layer, id))
-                    .collect(),
-                None => self.key_holders(id),
-            })
-            .collect()
+        let mut owners: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (layer, key) in selection.key_layers() {
+            owners.entry(key).or_default().push(layer);
+        }
+        let mut selected = Vec::new();
+        for id in selection.keys() {
+            if let Some(layers) = owners.get(id.as_str()) {
+                selected.extend(layers.iter().filter_map(|layer| self.key_on(layer, id)));
+            } else {
+                selected.extend(self.key_holders(id));
+            }
+        }
+        selected
     }
     /// A key by id alone: its last layer. Keys picked on a row resolve with
     /// [`key_on`](Self::key_on); the selection with
@@ -747,6 +950,32 @@ impl TimelineIndex {
         let (c, k) = layer.key_at.get(id)?;
         Some((layer, &layer.channels[*c], &layer.channels[*c].keys[*k]))
     }
+    /// The nearest razor target can be found with a binary search. Equal
+    /// distances prefer the playhead, then markers, then the original stack.
+    pub(crate) fn split_targets(&self) -> &[(f64, usize)] {
+        self.split_targets.get_or_init(|| {
+            let markers = self.markers.iter().map(|marker| marker.time);
+            let layers = self.layers.iter().flat_map(|layer| {
+                let keys = layer
+                    .channels
+                    .iter()
+                    .flat_map(|c| c.keys.iter().map(|k| layer.from + k.time));
+                [layer.from, layer.from + layer.duration]
+                    .into_iter()
+                    .chain(keys)
+            });
+            let mut targets: Vec<_> = markers
+                .chain(layers)
+                .enumerate()
+                .filter(|(_, time)| time.is_finite())
+                .map(|(i, time)| (time, i + 1))
+                .collect();
+            targets.sort_by(|(a, _), (b, _)| a.partial_cmp(b).expect("finite time"));
+            targets.dedup_by(|(a, _), (b, _)| *a == *b);
+            targets
+        })
+    }
+
     pub fn marker_at(&self, time: f64) -> Option<&Marker> {
         self.markers
             .iter()
@@ -761,7 +990,27 @@ impl TimelineIndex {
         self.layer_time_bounds.0.min(self.work[0])
     }
     pub(crate) fn group_has_children(&self, id: &str) -> bool {
-        self.groups_with_children.contains(id)
+        self.layer_ordinal(id)
+            .is_some_and(|i| !self.child_ordinals(i).is_empty())
+    }
+
+    pub(crate) fn child_ordinals(&self, ordinal: usize) -> &[usize] {
+        &self.hierarchy.children[ordinal]
+    }
+
+    pub(crate) fn root_ordinals(&self) -> &[usize] {
+        &self.hierarchy.roots
+    }
+
+    pub(crate) fn source_layers(&self) -> &[Node] {
+        let comp = self
+            .root()
+            .and_then(|root| model::comp_node(root, self.comp_id.as_deref()));
+        array(comp.and_then(|comp| comp.get("layers")))
+    }
+
+    pub(crate) fn source_ordinal(&self, id: &str) -> Option<usize> {
+        self.layer_ordinal(id).map(|i| self.source_ordinals[i])
     }
 
     pub fn children(&self) -> HashMap<Option<String>, Vec<usize>> {
@@ -801,12 +1050,12 @@ impl TimelineIndex {
     /// Accumulate descendants once, from leaves to parents. On malformed
     /// cycles, each participant can reach the same remaining subtree.
     fn group_extents(&self) -> Vec<Option<(f64, f64)>> {
-        let parent: Vec<_> = self.layers.iter().enumerate().map(|(i, layer)| {
-            layer.group.as_ref().and_then(|id| self.by_id.get(id)).copied().filter(|p| *p != i)
-        }).collect();
+        let parent = |i: usize| self.hierarchy.parent[i].filter(|p| *p != i);
         let mut children = vec![0; self.layers.len()];
-        for p in parent.iter().flatten() {
-            children[*p] += 1;
+        for i in 0..self.layers.len() {
+            if let Some(p) = parent(i) {
+                children[p] += 1;
+            }
         }
         let mut bounds: Vec<_> = self.layers.iter().map(|layer| {
             (layer.kind != "group").then_some((layer.from, layer.from + layer.duration))
@@ -817,7 +1066,7 @@ impl TimelineIndex {
         };
         let mut leaves: Vec<_> = children.iter().enumerate().filter_map(|(i, &n)| (n == 0).then_some(i)).collect();
         while let Some(i) = leaves.pop() {
-            if let Some(p) = parent[i] {
+            if let Some(p) = parent(i) {
                 bounds[p] = combine(bounds[p], bounds[i]);
                 children[p] -= 1;
                 if children[p] == 0 {
@@ -833,7 +1082,7 @@ impl TimelineIndex {
                 children[at] = 0;
                 cycle.push(at);
                 extent = combine(extent, bounds[at]);
-                at = parent[at].expect("remaining layers have a parent in their cycle");
+                at = parent(at).expect("remaining layers have a parent in their cycle");
             }
             for i in cycle {
                 bounds[i] = extent;
@@ -852,24 +1101,21 @@ impl TimelineIndex {
             .map_or((0., self.duration), |(start, end)| (start, end - start))
     }
     pub fn expanded_ids(&self, roots: &[String]) -> Vec<String> {
-        let children = self.children();
         let mut seen = HashSet::new();
         let mut todo: Vec<_> = roots
             .iter()
-            .filter_map(|id| self.by_id.get(id).copied())
+            .filter_map(|id| self.layer_ordinal(id))
             .collect();
         while let Some(i) = todo.pop() {
-            if seen.insert(i)
-                && let Some(kids) = children.get(&Some(self.layers[i].id.clone()))
-            {
-                todo.extend(kids);
+            if seen.insert(i) {
+                todo.extend(self.child_ordinals(i));
             }
         }
-        self.layers
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| seen.contains(i))
-            .map(|(_, l)| l.id.clone())
+        let mut ordinals: Vec<_> = seen.into_iter().collect();
+        ordinals.sort_unstable();
+        ordinals
+            .into_iter()
+            .map(|i| self.layers[i].id.clone())
             .collect()
     }
 }
@@ -927,6 +1173,12 @@ pub(crate) fn boolean(n: Option<&Node>) -> bool {
 pub(crate) fn js_string(n: Option<&Node>) -> Option<JsString> {
     match n?.kind() {
         NodeKind::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+pub(crate) fn as_str(n: &Node) -> Option<&str> {
+    match n.kind() {
+        NodeKind::String(s) => s.as_str(),
         _ => None,
     }
 }

@@ -1268,6 +1268,7 @@ pub struct Drag {
     /// Locked layers a move or trim left where they were (After Effects skips
     /// locked layers in a mixed selection instead of refusing the gesture).
     skipped_locked: usize,
+    trim_limit: f64,
 }
 /// Each side's ease of the keys `ids` as the graph shows it: the speed (value
 /// units per second) and influence (percent) of its direction handle, so a
@@ -1472,6 +1473,7 @@ impl Drag {
             _ => {}
         }
         let mut anchors = Vec::new();
+        let mut trim_limit = 0.;
         match &kind {
             DragKind::Layers { ids } | DragKind::DuplicateLayers { ids, .. } => {
                 for id in ids {
@@ -1492,6 +1494,12 @@ impl Drag {
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
                 let is_in = matches!(kind, DragKind::TrimIn { .. });
+                trim_limit = if is_in {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let frame = 1. / index.fps;
                 for id in ids {
                     let l = index.layer(id).unwrap();
                     let (from, duration) = index.strip_span(l);
@@ -1499,6 +1507,22 @@ impl Drag {
                         time: if is_in { from } else { from + duration },
                         edge: Some(if is_in { Edge::In } else { Edge::Out }),
                     });
+                    if l.kind == "group" {
+                        // Capture the limit from the starting geometry once.
+                        // Each unlocked member keeps at least one frame.
+                        for member in index.expanded_ids(std::slice::from_ref(id)) {
+                            let child = index.layer(&member).unwrap();
+                            if child.id == *id || child.effectively_locked {
+                                continue;
+                            }
+                            let (start, length) = index.strip_span(child);
+                            trim_limit = if is_in {
+                                trim_limit.min(start + length - frame - from)
+                            } else {
+                                trim_limit.max(start + frame - (from + duration))
+                            };
+                        }
+                    }
                 }
             }
             DragKind::Transition { layer, edge } => {
@@ -1570,6 +1594,7 @@ impl Drag {
             lanes,
             handle_key,
             skipped_locked,
+            trim_limit,
             speed_eases,
             kind,
             start: index.clone(),
@@ -1684,12 +1709,16 @@ impl Drag {
                 is_key,
             ));
         }
-        let mut targets = self.fixed.clone().unwrap_or_default();
-        if is_key {
+        let mut targets = if snapping {
+            self.fixed.clone().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if is_key && snapping {
             // Electron keys prefer the playhead on equal distances. They do not
             // offer the strip-only exclusive out-edge at playhead + one frame.
             targets.insert(0, Target::at(sample.playhead));
-        } else {
+        } else if snapping {
             targets.push(Target {
                 time: sample.playhead,
                 edge: None,
@@ -1867,30 +1896,11 @@ impl Drag {
                 } else {
                     f64::NEG_INFINITY
                 };
-                // A group's edge stops where an unlocked member would have
-                // to stay outside it: each member keeps at least a frame.
-                let mut delta = delta;
-                for id in ids {
-                    let group = self.start.layer(id).unwrap();
-                    if group.kind != "group" {
-                        continue;
-                    }
-                    let (start, duration) = self.start.strip_span(group);
-                    for member in self.start.expanded_ids(std::slice::from_ref(id)) {
-                        let Some(l) = self.start.layer(&member).filter(|l| l.id != *id) else {
-                            continue;
-                        };
-                        if l.effectively_locked {
-                            continue;
-                        }
-                        let (from, length) = self.start.strip_span(l);
-                        delta = if is_in {
-                            delta.min(from + length - min_duration - start)
-                        } else {
-                            delta.max(from + min_duration - (start + duration))
-                        };
-                    }
-                }
+                let delta = if is_in {
+                    delta.min(self.trim_limit)
+                } else {
+                    delta.max(self.trim_limit)
+                };
                 let mut legacy_groups = Vec::new();
                 let mut batch_by_time = HashMap::new();
                 let mut batches: Vec<(f64, Vec<String>)> = Vec::new();
@@ -2866,17 +2876,19 @@ pub fn menu_label(id: &str) -> &'static str {
 impl TimelineModel {
     /// Pointer cuts share the playhead split kernel command and one transaction.
     pub fn split_at(&self, hit: &str, time: f64, all: bool) -> Result<Plan, ModelError> {
-        if !time.is_finite() || self.index.layer(hit).is_none() {
+        let Some(hit) = self.index.layer_ordinal(hit).filter(|_| time.is_finite()) else {
             return Ok(Plan::default());
-        }
+        };
+        let candidates = if all {
+            &self.index.layers[..]
+        } else {
+            &self.index.layers[hit..=hit]
+        };
         let margin = 1. / self.index.fps.max(1.);
-        let layers: Vec<_> = self
-            .index
-            .layers
+        let layers: Vec<_> = candidates
             .iter()
             .filter(|l| {
-                (all || l.id == hit)
-                    && !l.effectively_locked
+                !l.effectively_locked
                     && time - l.from > margin + 1e-9
                     && l.from + l.duration - time > margin + 1e-9
             })
@@ -2916,20 +2928,19 @@ impl TimelineModel {
         if self.track_snap_disabled {
             return rounded;
         }
-        let mut times = vec![playhead];
-        times.extend(self.index.markers.iter().map(|m| m.time));
-        for l in &self.index.layers {
-            times.extend([l.from, l.from + l.duration]);
-            times.extend(
-                l.channels
-                    .iter()
-                    .flat_map(|c| c.keys.iter().map(|k| l.from + k.time)),
-            );
-        }
-        times
+        let cuts = self.index.split_targets();
+        let next = cuts.partition_point(|(time, _)| *time < raw);
+        let previous = next.checked_sub(1).and_then(|i| cuts.get(i).copied());
+        [Some((playhead, 0)), previous, cuts.get(next).copied()]
             .into_iter()
-            .filter(|t| t.is_finite() && (*t - raw).abs() <= radius)
-            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
-            .unwrap_or(rounded)
+            .flatten()
+            .filter(|(t, _)| t.is_finite() && (*t - raw).abs() <= radius)
+            .min_by(|(a, a_order), (b, b_order)| {
+                (a - raw)
+                    .abs()
+                    .total_cmp(&(b - raw).abs())
+                    .then(a_order.cmp(b_order))
+            })
+            .map_or(rounded, |(time, _)| time)
     }
 }

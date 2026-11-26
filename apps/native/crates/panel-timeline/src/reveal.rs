@@ -79,12 +79,27 @@ impl TimelineModel {
         if !"psrtaumfel*".contains(key) {
             return Err(ModelError::UnknownCommand(key.to_string()));
         }
-        let layers: Vec<_> = self
-            .index
-            .layers
-            .iter()
-            .filter(|l| self.selection.layers().is_empty() || self.selection.contains(&l.id))
-            .collect();
+        let layers: Vec<_> = if self.selection.layers().is_empty() {
+            self.index
+                .layers
+                .iter()
+                .map(|layer| layer.as_ref())
+                .collect()
+        } else {
+            // Preserve stack order without walking every unselected layer.
+            let mut ordinals: Vec<_> = self
+                .selection
+                .layers()
+                .iter()
+                .filter_map(|id| self.index.layer_ordinal(id))
+                .collect();
+            ordinals.sort_unstable();
+            ordinals.dedup();
+            ordinals
+                .into_iter()
+                .map(|i| self.index.layers[i].as_ref())
+                .collect()
+        };
         if layers.is_empty() {
             return Ok(());
         }
@@ -269,8 +284,14 @@ impl TimelineModel {
             .reveal
             .layers
             .get(layer)
-            .filter(|d| !d.collapsed)
-            .and_then(|d| d.paths.clone())
+            .and_then(|d| {
+                d.paths.as_ref().filter(|paths| {
+                    // Older views can retain an all-properties flag after
+                    // collapse. Opening for a new key must leave it closed.
+                    !d.collapsed || !paths.iter().any(|p| p == "*")
+                })
+            })
+            .cloned()
             .unwrap_or_else(|| {
                 l.channels
                     .iter()
