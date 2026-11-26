@@ -5639,6 +5639,14 @@ impl TimelineSurface {
     pub fn model(&self) -> Arc<TimelineModel> {
         self.model.clone()
     }
+    /// Whether any layer currently exposes expanded property rows whose
+    /// evaluated readouts and at-playhead keyframe state depend on playhead time.
+    pub fn has_expanded_properties(&self) -> bool {
+        self.model
+            .rows()
+            .iter()
+            .any(|row| matches!(row.id, pm_panel_timeline::RowId::Property { .. }))
+    }
 }
 /// The graph to show after a rebuild. A key or handle drag maps the pointer
 /// through the value range, so from the press until release the range on

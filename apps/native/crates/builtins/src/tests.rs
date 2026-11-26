@@ -6407,6 +6407,83 @@ fn properties_follow_the_playhead_while_playing() {
     assert!(panels.take_errors().is_empty());
 }
 
+/// Scrubbing the ruler, expanded Timeline property rows follow the playhead's
+/// evaluated value and at-playhead keyframe state via `follow_time`, without
+/// waiting for a kernel publication on mouse-up.
+#[test]
+fn timeline_expanded_properties_follow_the_playhead_during_scrub() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
+    let kernel = actor.handle();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("timeline").unwrap());
+    let read_opacity = |panels: &Builtins| -> std::result::Result<(String, String), String> {
+        let publication = panels
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "timeline")
+            .ok_or_else(|| "no timeline publication".to_string())?;
+        let row_id = r#"["property","a","opacity"]"#;
+        let ids: Vec<String> = publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let value = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                n.props.get("id").and_then(Value::as_str)
+                    == Some(&format!("timeline:value:{row_id}:opacity"))
+            })
+            .map(|n| Value::Object(n.props.clone()).to_string())
+            .ok_or_else(|| format!("missing value node; ids={ids:?}"))?;
+        let diamond = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                n.props.get("id").and_then(Value::as_str)
+                    == Some(&format!("timeline:diamond:{row_id}"))
+            })
+            .map(|n| Value::Object(n.props.clone()).to_string())
+            .ok_or_else(|| format!("missing diamond node; ids={ids:?}"))?;
+        Ok((value, diamond))
+    };
+    let (v0, d0) = read_opacity(&panels).unwrap();
+    assert!(v0.contains("\"value\":0"), "t=0 value: {v0}");
+    assert!(d0.contains("Remove Keyframe"), "t=0 diamond: {d0}");
+
+    finish(
+        panels
+            .follow_time("timeline", 5., false)
+            .unwrap()
+            .unwrap(),
+    );
+    let (v5, d5) = read_opacity(&panels).unwrap();
+    assert!(v5.contains("\"value\":50"), "t=5 value: {v5}");
+    assert!(d5.contains("Add Keyframe"), "t=5 diamond: {d5}");
+
+    finish(
+        panels
+            .follow_time("timeline", 10., false)
+            .unwrap()
+            .unwrap(),
+    );
+    let (v10, d10) = read_opacity(&panels).unwrap();
+    assert!(v10.contains("\"value\":100"), "t=10 value: {v10}");
+    assert!(d10.contains("Remove Keyframe"), "t=10 diamond: {d10}");
+    assert!(panels.take_errors().is_empty());
+}
+
 /// Properties' Parent and Track Matte rows carry only what the closed
 /// pop-up shows (None and the current layer) and the source the host lists
 /// the rest from when the menu opens: no list of every layer is built,

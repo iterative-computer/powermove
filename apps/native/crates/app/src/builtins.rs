@@ -1031,10 +1031,10 @@ impl Controller {
         }
         self.sync_viewer_stage();
         let due = self.builtins.clock.due(time, playing);
-        // Scrubbing the ruler, Properties follows the time as it does in
-        // playback (each new frame, off the main thread); the other panels
-        // (the timeline's own, whose only change is its spoken time) hear it
-        // once the scrub ends. The playhead and timecode are CALayers.
+        // Scrubbing the ruler, Properties (and Timeline when it has expanded
+        // property rows) follow the time as they do in playback (each new
+        // frame, off the main thread); the other panels hear it once the scrub
+        // ends. The playhead and timecode are CALayers.
         if self.builtins.scrubbing && !playing {
             if due {
                 self.builtins.scrubbed = true;
@@ -1042,13 +1042,13 @@ impl Controller {
                     gizmos.update(cx, |g, cx| g.refresh(cx));
                 }
             }
-            self.follow_playback(time, cx);
+            self.follow_playback(time, playing, cx);
             return;
         }
         let rested = std::mem::take(&mut self.builtins.scrubbed);
         if !due && !rested {
             if playing {
-                self.follow_playback(time, cx);
+                self.follow_playback(time, playing, cx);
             }
             return;
         }
@@ -1057,22 +1057,19 @@ impl Controller {
         }
         self.update_view_builtins(cx);
     }
-    /// Playing, Properties shows the values of each frame the viewer shows
-    /// (v1's inspector refreshed at 15 Hz): only that panel publishes, once
-    /// per new frame, one update at a time off the main thread, so it keeps
-    /// the picture's pace up to the display's and skips a frame while an
-    /// update is under way rather than queueing behind playback.
-    fn follow_playback(&mut self, time: f64, cx: &mut Context<Self>) {
-        const PANEL: &str = "inspector";
+    /// Playing or scrubbing, Properties — and Timeline when it shows expanded
+    /// property rows — display the evaluated values and at-playhead keyframe
+    /// state of each frame (v1's inspector refreshed at 15 Hz): only those
+    /// panels publish, once per new frame, one batch at a time off the main
+    /// thread, skipping frames while an update is under way rather than
+    /// queueing behind playback or ruler scrubs.
+    fn follow_playback(&mut self, time: f64, playing: bool, cx: &mut Context<Self>) {
         let Some(frame) = crate::session::frame_start_at(self.rate, time) else {
             return;
         };
         let now = std::time::Instant::now();
         if self.builtins.updating
             || self.builtins.followed == Some(frame)
-            || !self.builtins.open.contains(PANEL)
-            || !self.builtins.ready.contains(PANEL)
-            || !follows_selection(self.published.as_deref())
             || !follow_due(
                 self.builtins.followed,
                 self.builtins.followed_at,
@@ -1080,6 +1077,26 @@ impl Controller {
                 now,
             )
         {
+            return;
+        }
+        let mut panels: Vec<&'static str> = Vec::with_capacity(2);
+        if self.builtins.open.contains("inspector")
+            && self.builtins.ready.contains("inspector")
+            && follows_selection(self.published.as_deref())
+        {
+            panels.push("inspector");
+        }
+        if self.builtins.open.contains("timeline")
+            && self.builtins.ready.contains("timeline")
+            && self
+                .builtins
+                .timeline
+                .as_ref()
+                .is_some_and(|t| t.read(cx).has_expanded_properties())
+        {
+            panels.push("timeline");
+        }
+        if panels.is_empty() {
             return;
         }
         self.builtins.followed_at = Some(now);
@@ -1092,17 +1109,27 @@ impl Controller {
         let check = runtime.clone();
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let ticket = cx
+            let tickets = cx
                 .background_executor()
-                .spawn(async move { runtime.follow_time(PANEL, time, true) })
+                .spawn(async move {
+                    panels
+                        .into_iter()
+                        .filter_map(|panel| {
+                            runtime
+                                .follow_time(panel, time, playing)
+                                .map(|ticket| (panel, ticket))
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .await;
-            if let Some(Err(error)) = match ticket {
-                Some(Ok(ticket)) => Some(ticket.await.map(|_| ())),
-                Some(Err(error)) => Some(Err(error)),
-                None => None,
-            } && error != pm_runtime_v8::Error::Superseded
-            {
-                eprintln!("Panel {PANEL} update: {error}");
+            for (panel, ticket) in tickets {
+                if let Some(Err(error)) = match ticket {
+                    Ok(ticket) => Some(ticket.await.map(|_| ())),
+                    Err(error) => Some(Err(error)),
+                } && error != pm_runtime_v8::Error::Superseded
+                {
+                    eprintln!("Panel {panel} update: {error}");
+                }
             }
             let _ = this.update(cx, |v, cx| {
                 if !v
@@ -1119,7 +1146,7 @@ impl Controller {
                     v.drain_builtins(cx);
                 }
                 crate::diag::line(
-                    json!({"follow": PANEL, "ms": started.elapsed().as_secs_f64() * 1000.}),
+                    json!({"follow": "playback", "ms": started.elapsed().as_secs_f64() * 1000.}),
                 );
                 if let Some(full) = v.builtins.again.take() {
                     v.update_builtins_scoped(full, cx);
