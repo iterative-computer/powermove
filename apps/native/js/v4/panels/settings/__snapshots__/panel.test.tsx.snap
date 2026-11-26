@@ -775,11 +775,6 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                   button push-button label="Bring Sign-Ins from the Original App…"
                     text "Bring Sign-Ins from the Original App…"
         div
-          text heading
-            text "Extensions"
-          text
-            text "Manage extensions and turn them on or off."
-        div
           input text-field label="Search extensions" value=""
           button pop-up-button label="Extension Type" value="All Types"
         div
@@ -1281,8 +1276,9 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                     button switch switch label="Fixture 30039" value=true disabled
                     button push-button label="Details for Fixture 30039"
                       text "Details"
-        text
-          text "60000 installed · 60000 enabled · 0 off"
+        div
+          text
+            text "60000 installed · 60000 enabled · 0 off"
         div group label="Store"
           div
             text heading

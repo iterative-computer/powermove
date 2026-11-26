@@ -8,7 +8,7 @@
 //! Radian's spring, its insets equal on every side of the row's tile and its
 //! corner concentric with the tile's. The tiles are drawn once per
 //! appearance and size from SVG: Pierre's glyphs (ours in its grammar where
-//! it has none) on a monochrome lit squircle ([`Tiles`]).
+//! it has none) on a monochrome lit squircle.
 
 use objc2::{
     AllocAnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class,
@@ -27,11 +27,11 @@ pub const SIDEBAR_WIDTH: f64 = 224.;
 /// The window's default and minimum content sizes. The width is fixed (the
 /// maximum width is the minimum): the page fills it, never a centred column
 /// in a gutter. The height is the person's, and remembered.
-pub const DEFAULT_SIZE: (f64, f64) = (780., 640.);
+pub const DEFAULT_SIZE: (f64, f64) = (780., 700.);
 pub const MIN_SIZE: (f64, f64) = (780., 520.);
 /// A section row: its tile with an equal inset on all four sides inside the
 /// selection (Radian's 38 pt row holds a 22 pt tile 8 pt in on every side).
-const ROW_HEIGHT: f64 = 36.;
+const ROW_HEIGHT: f64 = 38.;
 /// The tile's side in a sidebar row.
 const TILE: f64 = 22.;
 /// The inset around a tile inside the selected row, on every side.
@@ -42,7 +42,7 @@ const TILE_RADIUS: f64 = 6.;
 const SELECTION_RADIUS: f64 = TILE_RADIUS + TILE_INSET;
 /// The selection's inset from the sidebar's sides.
 const SIDEBAR_INSET: f64 = 10.;
-const LABEL_SIZE: f64 = 13.;
+const LABEL_SIZE: f64 = 14.;
 /// The account row: its avatar with the same equal inset as a tile's.
 const AVATAR: f64 = 32.;
 const ACCOUNT_HEIGHT: f64 = 52.;
@@ -87,24 +87,6 @@ fn is_dark(appearance: &NSAppearance) -> bool {
     appearance
         .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
         .is_some_and(|name| &*name == names[1])
-}
-
-/// The tile family the sidebar and the page header draw: `Lit`, a dark
-/// (light in Aqua) squircle with a soft top light, an inner edge and a
-/// monochrome glyph; or `Flat`, one flat Powermove-orange tile with a white
-/// glyph. `PM_SETTINGS_ICONS=flat` draws the second for a comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tiles {
-    Lit,
-    Flat,
-}
-pub const TILES: Tiles = Tiles::Lit;
-fn tiles() -> Tiles {
-    match std::env::var("PM_SETTINGS_ICONS").as_deref() {
-        Ok("flat") => Tiles::Flat,
-        Ok("lit") => Tiles::Lit,
-        _ => TILES,
-    }
 }
 
 /// One row of the sidebar.
@@ -196,9 +178,12 @@ define_class!(
 define_class!(
     /// The sidebar's list. Its cells span their rows edge to edge (AppKit
     /// insets them otherwise), so a tile's place in its row is ours exactly.
+    /// It also draws the hover: a faint wash under the row the pointer is
+    /// on, arriving quickly and leaving slowly (quiet-md's hover springs).
     #[unsafe(super(NSTableView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMSettingsSidebar"]
+    #[ivars = Hover]
     struct Sidebar;
 
     impl Sidebar {
@@ -206,8 +191,92 @@ define_class!(
         fn cell_frame(&self, _: NSInteger, row: NSInteger) -> NSRect {
             self.rectOfRow(row)
         }
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            self.hover(self.rowAtPoint(at));
+        }
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _: &NSEvent) {
+            self.hover(-1);
+        }
     }
 );
+
+#[derive(Default)]
+struct Hover {
+    wash: RefCell<Option<Retained<NSView>>>,
+    /// The row the pointer is on (-1: none).
+    row: Cell<NSInteger>,
+}
+
+/// quiet-md's hover springs: in quickly, out slowly (unit mass).
+const HOVER_IN: (f64, f64) = (1100., 66.);
+const HOVER_OUT: (f64, f64) = (300., 35.);
+/// The hover wash's opacity over the selection's colour.
+const HOVER_OPACITY: f32 = 0.5;
+
+impl Sidebar {
+    /// The pointer is on `row`: the wash goes under it, unless the row is
+    /// the selected one or no section's.
+    fn hover(&self, row: NSInteger) {
+        use objc2_quartz_core::{CAMediaTiming, CATransaction};
+        let section = row >= 0 && row < self.numberOfRows() && {
+            let delegate: *mut AnyObject = unsafe { msg_send![self, delegate] };
+            !delegate.is_null()
+                && unsafe { msg_send![delegate, tableView: self, shouldSelectRow: row] }
+        };
+        let target = if section && row != self.selectedRow() {
+            row
+        } else {
+            -1
+        };
+        if self.ivars().row.replace(target) == target {
+            return;
+        }
+        let Some(wash) = self.ivars().wash.borrow().clone() else {
+            return;
+        };
+        let Some(layer) = wash.layer() else { return };
+        let shown = unsafe { layer.presentationLayer() };
+        let mut from = shown.as_deref().unwrap_or(&layer).opacity();
+        let to = if target >= 0 { HOVER_OPACITY } else { 0. };
+        if target >= 0 {
+            let rect = self.rectOfRow(target);
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            wash.setFrame(NSRect::new(
+                NSPoint::new(SIDEBAR_INSET, rect.origin.y),
+                NSSize::new(
+                    self.bounds().size.width - 2. * SIDEBAR_INSET,
+                    rect.size.height,
+                ),
+            ));
+            layer.setCornerRadius(if rect.size.height > ROW_HEIGHT {
+                rect.size.height / 2.
+            } else {
+                SELECTION_RADIUS
+            });
+            CATransaction::commit();
+            // A new row's wash arrives from nothing (two rows never share one).
+            from = 0.;
+        }
+        layer.setOpacity(to);
+        let (stiffness, damping) = if target >= 0 { HOVER_IN } else { HOVER_OUT };
+        let spring = objc2_quartz_core::CASpringAnimation::animationWithKeyPath(Some(
+            &NSString::from_str("opacity"),
+        ));
+        spring.setMass(1.);
+        spring.setStiffness(stiffness);
+        spring.setDamping(damping);
+        unsafe {
+            spring.setFromValue(Some(&NSNumber::new_f32(from)));
+            spring.setToValue(Some(&NSNumber::new_f32(to)));
+        }
+        spring.setDuration(spring.settlingDuration());
+        layer.addAnimation_forKey(&spring, Some(&NSString::from_str("pm.settings.hover")));
+    }
+}
 
 define_class!(
     /// The selected row's fill: one view under the rows that glides between
@@ -287,6 +356,11 @@ define_class!(
             if self.ivars().quiet.get() { return; }
             self.place_selection(true);
             let Some(table) = self.ivars().table.borrow().clone() else { return };
+            if let Some(list) = table.downcast_ref::<Sidebar>() {
+                // The row just chosen loses its hover wash to the selection.
+                let row = list.ivars().row.replace(-2);
+                list.hover(row);
+            }
             let row = table.selectedRow();
             if row < 0 { return; }
             let id = self.ivars().rows.borrow().get(row as usize)
@@ -446,9 +520,16 @@ impl Chrome {
         let Some(fill) = self.ivars().selection.borrow().clone() else {
             return;
         };
-        let Some(layer) = fill.layer() else { return };
+        let wash = self.ivars().table.borrow().as_ref().and_then(|t| {
+            t.downcast_ref::<Sidebar>()
+                .and_then(|s| s.ivars().wash.borrow().clone())
+        });
+        let layers = [fill.layer(), wash.and_then(|w| w.layer())];
         appearance.performAsCurrentDrawingAppearance(&block2::RcBlock::new(|| {
-            layer.setBackgroundColor(Some(&NSColor::quaternaryLabelColor().CGColor()));
+            let colour = NSColor::quaternaryLabelColor().CGColor();
+            for layer in layers.iter().flatten() {
+                layer.setBackgroundColor(Some(&colour));
+            }
         }));
     }
 }
@@ -620,8 +701,9 @@ impl SettingsChrome {
         }
         search.setTranslatesAutoresizingMaskIntoConstraints(false);
         let table: Retained<Sidebar> = unsafe {
-            msg_send![super(Sidebar::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+            msg_send![super(Sidebar::alloc(mtm).set_ivars(Hover::default())), initWithFrame: NSRect::ZERO]
         };
+        let sidebar_list = table.clone();
         let table: Retained<NSTableView> = Retained::into_super(table);
         table.setFocusRingType(NSFocusRingType::None);
         let column =
@@ -657,6 +739,33 @@ impl SettingsChrome {
         }
         selection.setHidden(true);
         table.addSubview_positioned_relativeTo(&selection, NSWindowOrderingMode::Below, None);
+        // The hover wash, under the selection; the pointer is tracked over
+        // the list while the window is open, key or not.
+        let wash: Retained<Selection> = unsafe {
+            msg_send![super(Selection::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+        };
+        let wash: Retained<NSView> = Retained::into_super(wash);
+        wash.setWantsLayer(true);
+        if let Some(layer) = wash.layer() {
+            layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+            layer.setOpacity(0.);
+        }
+        table.addSubview_positioned_relativeTo(&wash, NSWindowOrderingMode::Below, None);
+        *sidebar_list.ivars().wash.borrow_mut() = Some(wash);
+        sidebar_list.ivars().row.set(-1);
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                NSRect::ZERO,
+                NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&table),
+                None,
+            )
+        };
+        table.addTrackingArea(&tracking);
         let scroll = NSScrollView::new(mtm);
         scroll.setDocumentView(Some(&table));
         scroll.setDrawsBackground(false);
@@ -712,7 +821,7 @@ impl SettingsChrome {
         header_tile.setImageScaling(NSImageScaling::ScaleNone);
         header_tile.setTranslatesAutoresizingMaskIntoConstraints(false);
         let header_title = NSTextField::labelWithString(ns_string!(""), mtm);
-        header_title.setFont(Some(&NSFont::systemFontOfSize_weight(15., unsafe {
+        header_title.setFont(Some(&NSFont::systemFontOfSize_weight(16., unsafe {
             NSFontWeightBold
         })));
         header_title.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -1261,36 +1370,31 @@ struct Look {
     /// The glyph's own offset shadow (pressed in): colour and opacity.
     press: (&'static str, f64),
 }
-fn look(tiles: Tiles, dark: bool) -> Look {
-    match (tiles, dark) {
-        (Tiles::Lit, true) => Look {
-            body: ("#45454b", "#25252a"),
-            edge: ("#ffffff", 0.3, 0.05),
-            light: 0.16,
-            glyph: ("#ffffff", "#c6c6cc"),
-            shadow: (0.6, 0.7, 0.55),
+/// The tile: a dark (light in Aqua) squircle with a soft top light, an
+/// inner edge and a monochrome glyph pressed into it.
+fn look(dark: bool) -> Look {
+    if dark {
+        Look {
+            body: ("#55555c", "#26262b"),
+            edge: ("#ffffff", 0.42, 0.06),
+            light: 0.24,
+            glyph: ("#ffffff", "#d4d4da"),
+            shadow: (0.6, 0.7, 0.6),
             press: ("#000000", 0.5),
-        },
-        (Tiles::Lit, false) => Look {
-            body: ("#ffffff", "#e7e7ea"),
-            edge: ("#000000", 0.07, 0.17),
-            light: 0.8,
-            glyph: ("#5c5c62", "#2b2b2f"),
-            shadow: (0.5, 0.6, 0.16),
+        }
+    } else {
+        Look {
+            body: ("#ffffff", "#e2e2e6"),
+            edge: ("#000000", 0.08, 0.2),
+            light: 0.9,
+            glyph: ("#55555b", "#232327"),
+            shadow: (0.6, 0.7, 0.2),
             press: ("#ffffff", 0.9),
-        },
-        (Tiles::Flat, _) => Look {
-            body: ("#ff8a4c", "#f0621c"),
-            edge: ("#ffffff", 0.22, 0.),
-            light: 0.,
-            glyph: ("#ffffff", "#ffffff"),
-            shadow: (0.4, 0.5, 0.2),
-            press: ("#000000", 0.),
-        },
+        }
     }
 }
 
-fn tile_svg(id: &str, dark: bool, tiles: Tiles) -> Option<String> {
+fn tile_svg(id: &str, dark: bool) -> Option<String> {
     let glyph = glyph_body(glyph(id)?, "url(#g)");
     let Look {
         body,
@@ -1299,12 +1403,12 @@ fn tile_svg(id: &str, dark: bool, tiles: Tiles) -> Option<String> {
         glyph: ink,
         shadow,
         press,
-    } = look(tiles, dark);
+    } = look(dark);
     let s = TILE_UNITS;
     let m = MARGIN_UNITS;
     let full = s + 2. * m;
-    // The glyph: 12.5 of the tile's 22 units, centred.
-    let k = 12.5 / 16.;
+    // The glyph: 14 of the tile's 22 units, centred.
+    let k = 14. / 16.;
     let at = (s - 16. * k) / 2.;
     Some(format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{full}" height="{full}" viewBox="{nm} {nm} {full} {full}">
@@ -1350,7 +1454,7 @@ pub fn tile_image(id: &str, dark: bool, side: f64) -> Option<Retained<NSImage>> 
     if let Some(image) = TILE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         return Some(image);
     }
-    let svg = tile_svg(id, dark, tiles())?;
+    let svg = tile_svg(id, dark)?;
     let (w, h) = tile_size(side);
     let image = svg_image(&svg, NSSize::new(w, h))?;
     TILE_CACHE.with(|cache| cache.borrow_mut().insert(key, image.clone()));
@@ -1371,7 +1475,7 @@ fn avatar_image(signed_in: bool, dark: bool) -> Option<Retained<NSImage>> {
     }
     let Look {
         body, edge, light, ..
-    } = look(Tiles::Lit, dark);
+    } = look(dark);
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
 <defs>

@@ -32,12 +32,12 @@ const PAGE_TOP: f64 = 4.;
 const PAGE_BOTTOM: f64 = 24.;
 const PAGE_MAX_WIDTH: f64 = 640.;
 const SECTION_SPACING: f64 = 18.;
-const ROW_INSET: f64 = 14.;
-const ROW_PADDING: f64 = 7.;
-const ROW_HEIGHT: f64 = 40.;
-const GROUP_RADIUS: f64 = 12.;
-const LABEL_SIZE: f64 = 13.;
-const FOOTER_SIZE: f64 = 11.;
+const ROW_INSET: f64 = 16.;
+const ROW_PADDING: f64 = 8.;
+const ROW_HEIGHT: f64 = 42.;
+const GROUP_RADIUS: f64 = 14.;
+const LABEL_SIZE: f64 = 14.;
+const FOOTER_SIZE: f64 = 12.;
 const LIST_ROW_HEIGHT: f64 = ROW_HEIGHT + 1.;
 const LIST_ROWS: usize = 40;
 
@@ -604,7 +604,9 @@ impl Group {
         let box_view = NSBox::new(mtm);
         box_view.setBoxType(NSBoxType::Custom);
         box_view.setTitlePosition(NSTitlePosition::NoTitle);
-        box_view.setBorderWidth(0.);
+        // A hairline edge keeps the card crisp on either ground.
+        box_view.setBorderWidth(0.5);
+        box_view.setBorderColor(&NSColor::separatorColor());
         box_view.setCornerRadius(GROUP_RADIUS);
         box_view.setFillColor(&pm_shell::settings_window::form_background(true));
         box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -710,10 +712,25 @@ impl Row {
             .setActive(true);
         let app = agent_app
             .map(|id| agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, ROW_INSET));
+        let title_line = Pile::new(mtm, true, 5., 0., 0.);
+        // The title truncates before the row's controls give way (a stack
+        // view refuses to clip by default and would widen the window).
+        title_line
+            .stack
+            .setClippingResistancePriority_forOrientation(
+                NSLayoutPriorityDefaultLow,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
+        title_line
+            .stack
+            .setContentCompressionResistancePriority_forOrientation(
+                NSLayoutPriorityDefaultHigh - 1.,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
         Self {
             body,
             line,
-            title_line: Pile::new(mtm, true, 5., 0., 0.),
+            title_line,
             title_space: flexible_space(mtm),
             space: flexible_space(mtm),
             app,
@@ -796,6 +813,7 @@ impl VirtualList {
         set_document(&scroll, &document.stack);
         let rows = Group::new(mtm);
         rows.box_view.setFillColor(&NSColor::clearColor());
+        rows.box_view.setBorderWidth(0.);
         let before = NSView::new(mtm);
         let after = NSView::new(mtm);
         for view in [&before, &after] {
@@ -1090,8 +1108,7 @@ impl Render<'_, '_> {
             Widget::Secure(field) => field.setEnabled(!disabled(node)),
             Widget::Help(button) => {
                 let help = NSString::from_str(&text(self.surface, node));
-                if button.toolTip().as_deref() != Some(&*help) {
-                    button.setToolTip(Some(&help));
+                if button.accessibilityHelp().as_deref() != Some(&*help) {
                     button.setAccessibilityHelp(Some(&help));
                 }
             }
@@ -1742,31 +1759,86 @@ fn has_picker(surface: &Surface, node: &Node) -> bool {
 }
 
 define_class!(
-    /// Shows a row's explanation in a popover from its ⓘ.
-    #[unsafe(super(NSObject))]
+    /// ⓘ beside a row's title: hovering it opens the row's explanation after
+    /// a beat, with the lightest trackpad tick (as Radian's tips do), and
+    /// leaving closes it; a click opens or closes it too. The explanation is
+    /// the button's accessibility help.
+    #[unsafe(super(NSButton))]
     #[thread_kind = MainThreadOnly]
-    #[name = "PMSettingsHelp"]
-    struct HelpTarget;
+    #[name = "PMSettingsHelpButton"]
+    #[ivars = HelpState]
+    struct HelpButton;
 
-    impl HelpTarget {
-        #[unsafe(method(show:))]
-        fn show(&self, sender: &NSButton) {
-            if let Some(text) = sender.toolTip() {
-                show_help(sender, &text);
+    impl HelpButton {
+        #[unsafe(method(mouseEntered:))]
+        fn entered(&self, _: &NSEvent) {
+            unsafe {
+                let _: () = msg_send![self, performSelector: objc2::sel!(reveal:), withObject: std::ptr::null::<objc2::runtime::AnyObject>(), afterDelay: HELP_DELAY];
             }
+        }
+        #[unsafe(method(mouseExited:))]
+        fn exited(&self, _: &NSEvent) {
+            unsafe {
+                let _: () = msg_send![objc2::class!(NSObject), cancelPreviousPerformRequestsWithTarget: self, selector: objc2::sel!(reveal:), object: std::ptr::null::<objc2::runtime::AnyObject>()];
+            }
+            if self.ivars().hovered.replace(false) {
+                self.close();
+            }
+        }
+        /// The pointer rested on ⓘ.
+        #[unsafe(method(reveal:))]
+        fn reveal(&self, _: *mut objc2::runtime::AnyObject) {
+            if self.shown() {
+                return;
+            }
+            self.ivars().hovered.set(true);
+            self.open();
+            NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+                NSHapticFeedbackPattern::Alignment,
+                NSHapticFeedbackPerformanceTime::Now,
+            );
+        }
+        #[unsafe(method(toggle:))]
+        fn toggle(&self, _: *mut objc2::runtime::AnyObject) {
+            self.ivars().hovered.set(false);
+            if self.shown() { self.close() } else { self.open() }
         }
     }
 );
 
-thread_local! {
-    static HELP: Retained<HelpTarget> = {
-        let mtm = objc2::MainThreadMarker::new().expect("Settings runs on the main thread");
-        unsafe { msg_send![super(HelpTarget::alloc(mtm).set_ivars(())), init] }
-    };
+#[derive(Default)]
+struct HelpState {
+    popover: std::cell::RefCell<Option<Retained<NSPopover>>>,
+    /// The popover was opened by hovering, so leaving closes it.
+    hovered: std::cell::Cell<bool>,
+}
+
+/// How long the pointer rests on ⓘ before its explanation opens.
+const HELP_DELAY: f64 = 0.3;
+
+impl HelpButton {
+    fn shown(&self) -> bool {
+        self.ivars()
+            .popover
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.isShown())
+    }
+    fn open(&self) {
+        if let Some(text) = self.accessibilityHelp() {
+            *self.ivars().popover.borrow_mut() = Some(show_help(self, &text));
+        }
+    }
+    fn close(&self) {
+        if let Some(popover) = self.ivars().popover.borrow_mut().take() {
+            // Closing a popover this button opened, from its own handler.
+            unsafe { popover.performClose(None) };
+        }
+    }
 }
 
 /// ⓘ: a borderless button with the system's info symbol (AppKit draws it in
-/// a real control), its explanation as the help tag.
+/// a real control) that shows the row's explanation.
 fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str("info.circle"),
@@ -1781,61 +1853,81 @@ fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
             ),
         )
     });
-    let button = HELP.with(|target| unsafe {
-        NSButton::buttonWithImage_target_action(
-            &image.unwrap_or_else(NSImage::new),
-            Some(target),
-            Some(objc2::sel!(show:)),
-            mtm,
-        )
-    });
+    let button: Retained<HelpButton> = unsafe {
+        msg_send![super(HelpButton::alloc(mtm).set_ivars(HelpState::default())), initWithFrame: objc2_foundation::NSRect::ZERO]
+    };
+    let button: Retained<NSButton> = Retained::into_super(button);
+    button.setImage(image.as_deref());
+    button.setImagePosition(NSCellImagePosition::ImageOnly);
     button.setBordered(false);
+    unsafe {
+        button.setTarget(Some(&button));
+        button.setAction(Some(objc2::sel!(toggle:)));
+    }
     button.setContentTintColor(Some(&NSColor::tertiaryLabelColor()));
     button.setTranslatesAutoresizingMaskIntoConstraints(false);
-    let help = NSString::from_str(help);
-    button.setToolTip(Some(&help));
     button.setAccessibilityLabel(Some(&NSString::from_str("More Info")));
-    button.setAccessibilityHelp(Some(&help));
+    button.setAccessibilityHelp(Some(&NSString::from_str(help)));
+    let tracking = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            objc2_foundation::NSRect::ZERO,
+            NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect,
+            Some(&button),
+            None,
+        )
+    };
+    button.addTrackingArea(&tracking);
     button
 }
 
-/// The explanation in a transient popover under its ⓘ.
-fn show_help(anchor: &NSButton, text: &NSString) {
+/// The explanation in a transient popover under its ⓘ. The text is
+/// measured at its width up front (a wrapping label has no size of its own
+/// until it is laid out, and the popover would open empty).
+fn show_help(anchor: &NSButton, text: &NSString) -> Retained<NSPopover> {
+    const WIDTH: f64 = 260.;
+    const PAD: (f64, f64) = (14., 12.);
     let mtm = anchor.mtm();
     let label = NSTextField::wrappingLabelWithString(text, mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE - 1.)));
-    label.setPreferredMaxLayoutWidth(260.);
-    label.setTranslatesAutoresizingMaskIntoConstraints(false);
-    let content = NSView::new(mtm);
+    let size = label.cell().map_or(NSSize::new(WIDTH, 20.), |cell| {
+        cell.cellSizeForBounds(objc2_foundation::NSRect::new(
+            NSPoint::new(0., 0.),
+            NSSize::new(WIDTH, 10_000.),
+        ))
+    });
+    let size = NSSize::new(size.width.min(WIDTH).ceil(), size.height.ceil());
+    label.setFrame(objc2_foundation::NSRect::new(
+        NSPoint::new(PAD.0, PAD.1),
+        size,
+    ));
+    // The system's popover material under the text: the glass alone lets
+    // the row beneath read through it.
+    let content = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
+        objc2_foundation::NSRect::new(
+            NSPoint::new(0., 0.),
+            NSSize::new(size.width + 2. * PAD.0, size.height + 2. * PAD.1),
+        ),
+    );
+    content.setMaterial(NSVisualEffectMaterial::Popover);
+    content.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    content.setState(NSVisualEffectState::Active);
     content.addSubview(&label);
-    constraints(&[
-        label
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.),
-        label
-            .trailingAnchor()
-            .constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.),
-        label
-            .topAnchor()
-            .constraintEqualToAnchor_constant(&content.topAnchor(), 10.),
-        label
-            .bottomAnchor()
-            .constraintEqualToAnchor_constant(&content.bottomAnchor(), -10.),
-        label
-            .widthAnchor()
-            .constraintLessThanOrEqualToConstant(260.),
-    ]);
     let controller = NSViewController::new(mtm);
     controller.setView(&content);
     let popover = NSPopover::new(mtm);
     popover.setBehavior(NSPopoverBehavior::Transient);
+    popover.setContentSize(content.frame().size);
     popover.setContentViewController(Some(&controller));
-    popover.setContentSize(content.fittingSize());
     popover.showRelativeToRect_ofView_preferredEdge(
         anchor.bounds(),
         anchor,
         objc2_foundation::NSRectEdge::MaxY,
     );
+    popover
 }
 
 define_class!(

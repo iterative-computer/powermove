@@ -103,6 +103,9 @@ const SEGMENTED = new Set([
   "appearance",
   "open-projects-in",
 ]);
+/** Rows whose detail is their reading, shown under the title (a long one
+ *  as a value would crush the title). */
+const READINGS = new Set(["media.used"]);
 /** Visual choices the window shows as rendered previews (Settings' visual
  *  picker), named by what each option previews. */
 const PICKERS: Record<string, string> = {
@@ -321,9 +324,10 @@ function SettingRow({
       <RowCopy
         title={row.label}
         detail={row.id === "media.location" ? undefined : row.detail}
-        // A provider's detail is its state (signed in as…, not added), not
-        // an explanation: it stays in view.
-        help={row.section !== "providers"}
+        // A provider's detail is its state (signed in as…, not added) and
+        // Space Used's its reading: data, not an explanation, so it stays
+        // in view.
+        help={row.section !== "providers" && !READINGS.has(row.id)}
       >
         {row.error && (
           <div
@@ -612,6 +616,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               <RowCopy
                 title="Delete Extension"
                 detail="Its files move to the archive in your Powermove profile, and its settings are kept."
+                help
               />
               <div metadata={{ settingsLayout: "line" }}>
                 <Button
@@ -635,10 +640,12 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
   const state = model.publication.extensionsState;
   return (
     <>
-      <div metadata={{ settingsLayout: "copy" }}>
-        <text role="heading" metadata={{ settingsLayout: "heading" }}>Extensions</text>
-        <Copy secondary>{sectionCopy.extensions.description}</Copy>
-      </div>
+      {/* The page header names the page; a search's results name it here. */}
+      {model.query.trim() ? (
+        <div metadata={{ settingsLayout: "note" }}>
+          <text role="heading" metadata={{ settingsLayout: "heading" }}>Extensions</text>
+        </div>
+      ) : null}
       <div metadata={{ settingsLayout: "line" }}>
         <UI.TextField
           label="Search extensions"
@@ -707,9 +714,11 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               action={null}
             />
           )}
-          <Copy secondary>
-            {`${counts.all} installed · ${counts.enabled} enabled · ${counts.off} off`}
-          </Copy>
+          <div metadata={{ settingsLayout: "note" }}>
+            <Copy secondary>
+              {`${counts.all} installed · ${counts.enabled} enabled · ${counts.off} off`}
+            </Copy>
+          </div>
         </>
       )}
       <Group title="Store">
@@ -721,6 +730,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           <RowCopy
             title="Powermove Store"
             detail="Publish and manage your extensions on the Store."
+            help
           />
           <div metadata={{ settingsLayout: "line" }}>
             <Button
@@ -871,6 +881,7 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
       <RowCopy
         title="Share Shortcuts"
         detail="Bring in keys from another Mac or your agent, or save them to a file."
+        help
       />
       <div metadata={{ settingsLayout: "line" }}>
         <Button
@@ -1138,9 +1149,15 @@ function SectionContent({
   window,
 }: SettingsPanelProps & { section: Section }) {
   const copy = sectionCopy[section];
+  // Settings › Providers replaces the agent account rows (PM-750): where it
+  // shows, their placeholders (no service publishes them) are not listed.
+  const replaced = model.availableSections.includes("providers")
+    ? new Set(["Subscriptions", "API or Local Model"])
+    : new Set<string>();
   const matching = model.rows.filter(
     (row) =>
       row.section === section &&
+      !(row.section === "agents" && replaced.has(row.group)) &&
       (!model.query.trim() || model.matches.rows.has(row.id)),
   );
   const searching = !!model.query.trim();
@@ -1155,10 +1172,14 @@ function SectionContent({
   );
   const rows = searching ? listed.slice(0, SEARCH_ROWS) : listed;
   const groups = [...new Set(rows.map((row) => row.group))];
-  const speech = model.publication.speech.filter(
-    (item) =>
-      !model.query.trim() || model.matches.rows.has(`speech.${item.id}`),
-  );
+  // The recommended models first (Parakeet Unified EN, then Cohere, as
+  // onboarding lists them), then the rest in catalogue order.
+  const speech = model.publication.speech
+    .filter(
+      (item) =>
+        !model.query.trim() || model.matches.rows.has(`speech.${item.id}`),
+    )
+    .sort((a, b) => Number(!!b.recommended) - Number(!!a.recommended));
   return (
     <div
       id={`settings.section.${section}`}
