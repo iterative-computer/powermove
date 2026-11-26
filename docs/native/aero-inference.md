@@ -1,109 +1,105 @@
-# Aero on Powermove inference: the client contract
+# Aero on Powermove inference: billing and inference v2
 
-Aero, Powermove's own harness, runs only on Powermove inference: the Aero and Aerolite plans, paid by the person's
-Powermove account. It has no bring-your-own keys and no custom endpoint. Claude Code and Codex keep their own sign-ins and
-keys (Settings › Providers › Anthropic (Claude Code) and OpenAI (Codex)).
+Aero, Powermove's own harness, runs only on Powermove inference, paid by the person's Powermove plan. No
+bring-your-own keys, no custom endpoint. Claude Code and Codex keep their own sign-ins and keys.
 
-This is what the desktop app sends and reads (`apps/native/crates/agents/src/inference.rs`). The backend doesn't exist
-yet; until it does, the app says so honestly (below).
+The backend is `apps/cloud` (`src/routes/billing.ts`, `stripe-webhook.ts`, `aero.ts`). Everything is under
+`{origin}/v2`, with `Authorization: Bearer <Powermove session>` as in v1. `/v1/aero/*` answers 404.
 
-## Where and how
+## Plans and credits
 
-- **Base:** `{origin}/v1/aero`, where `origin` is the API origin of the signed-in Powermove account
-  (`https://cloud.trypowermove.com`, the Store's origin; `pm_compat_runner::store_install::ORIGIN`).
-- **Auth:** `Authorization: Bearer <session>`, the Powermove account's session (the app's Cloud sign-in, kept in the
-  Keychain). Also `X-Powermove-Client: desktop/<version>`. No other credential is ever sent, and the session goes only
-  to the Aero base's origin.
-- **Protocol:** OpenAI Chat Completions. The backend forwards each request to the Vercel AI Gateway's OpenAI-compatible
-  Chat Completions (`https://ai-gateway.vercel.sh/v1/chat/completions`) with its own gateway key, which never reaches
-  the app. The client uses fx's `openai-chat-completions` connection through the host transport, not fx's native AI
-  Gateway protocol: the host transport (where Rust adds the credential) carries only Chat Completions and Anthropic
-  Messages, the backend meters credits and holds the gateway key, and emulate can stand in for it in development.
-
-## `GET /v1/aero/usage`
-
-The plan and its credits. Read when the account changes, after each turn, and when the app starts.
-
-| Answer | Meaning | The app shows |
+| Plan | Price | Credits a month |
 |---|---|---|
-| `200 {"plan": {...}, "credits": {...}, "resetsAt": "..."}` | A plan | Aero's models, and the usage monitor |
-| `200 {"plan": null, "offer": {"label", "url"}}` | No plan; a plan is offered | "Aero inference is coming soon." and the offer as an action |
-| `200 {"plan": null}` | No plan | "Aero inference is coming soon." |
-| `404` | The route isn't there (before the backend ships) | "Aero inference is coming soon." |
-| `401`, `403` | The session ended | "Sign in to Powermove to use Aero." |
-| other status, unreadable body, a missing field | — | No monitor; "Aero couldn't read your plan from Powermove." |
+| Free | $0 | none (new accounts get none) |
+| Aerolite | $9.99 | 1,000 |
+| Aero | $19.99 | 2,500 |
+
+- Credits are granted when a billing period's invoice is paid and **don't roll over**: only the current period's
+  grant and the spends inside the period count. An upgrade mid-period tops the period up to the new plan.
+- **1 credit = $0.005 of provider list price**: `credits = ceil(cost_usd * 200)`. Each model has an input, cached
+  input, cache write and output price per million tokens (`src/aero/catalogue.ts`). Cached input costs the cached
+  rate, so caching saves credits.
+- Checkout is Stripe Checkout (Stripe Tax on, billing address required, tax IDs collected). Manage, cancel and change
+  plan are the Stripe Customer Portal. Plan changes are prorated.
+
+## Billing
+
+`GET /v2/billing`
 
 ```json
-{
-  "plan": { "id": "aerolite", "name": "Aerolite" },
-  "credits": { "remaining": 812, "included": 1000 },
-  "resetsAt": "2026-12-25T00:00:00Z"
-}
+{ "plan": {"id": "aerolite", "name": "Aerolite", "priceCents": 999, "interval": "month"},
+  "status": "active", "cancelAtPeriodEnd": false,
+  "credits": {"included": 1000, "used": 188, "remaining": 812},
+  "period": {"start": "2026-11-25T00:00:00.000Z", "end": "2026-12-25T00:00:00.000Z"},
+  "daily": [{"date": "2026-11-25", "credits": 40}],
+  "plans": [{"id": "aerolite", "name": "Aerolite", "priceCents": 999, "credits": 1000},
+            {"id": "aero", "name": "Aero", "priceCents": 1999, "credits": 2500}] }
 ```
 
-- `plan.id`, `plan.name`: non-empty strings of at most 64 characters. Aerolite is $9.99 for 1,000 credits a month.
-- `credits.remaining`, `credits.included`: unsigned integers.
-- `resetsAt`: an RFC 3339 time in UTC. The app shows its calendar day.
-- `plan` is required: no plan is `plan: null`, never a missing field.
-- `offer` (only with `plan: null`): `label` at most 40 plain characters (no control or bidi characters), `url` an https
-  page on `trypowermove.com` or one of its subdomains, with no userinfo and no other port. Any other offer, or one that
-  repeats the credential, isn't shown. Only its canonical form is opened, natively; the panel gets the label alone.
+- No plan: `plan: null`, `status: null` (or `"canceled"` after a plan ended), credits all 0, `period: null`,
+  `daily: []`. `status` is `active`, `past_due` (a failed renewal: no new credits) or `canceled`.
+- `daily` is every UTC day of the current period up to today, zero days included.
 
-The usage monitor, at the bottom of Aero's picker card: **Credits** `812 of 1,000 left`, **Plan** `Aerolite`,
-**Resets** `Dec 25`. It shows nothing until the backend answers.
+`POST /v2/billing/checkout {"plan": "aerolite" | "aero"}` → `{"url"}` (Stripe Checkout); `400 invalid_plan` for any other plan, `409 has_plan` when the
+account has a live plan: use the portal. `POST /v2/billing/portal` → `{"url"}`; `409 no_billing_account` before the
+first checkout. Open both in the default browser.
 
-## `GET /v1/aero/models`
+Both send the browser back to `{origin}/v2/billing/return?status=success|cancel|portal`, which says "You can return to
+Powermove" and opens `powermove://billing/return?status=…`. On that link, read `/v2/billing` again: the plan turns
+active when Stripe's webhook arrives, usually before the page loads.
 
-The curated catalogue (Opus, GPT, Gemini and others; tens, not hundreds), read only with a plan. An OpenAI-shaped list:
+## Models
 
-```json
-{ "data": [
-  { "id": "anthropic/claude-opus-5.5", "name": "Claude Opus 5.5",
-    "efforts": ["low", "medium", "high", "xhigh", "max"], "defaultEffort": "high", "default": true },
-  { "id": "openai/gpt-6-sol", "name": "GPT-6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh"] },
-  { "id": "google/gemini-3-pro" }
-] }
-```
+`GET /v2/aero/models` → `{"data": [{"id", "name", "efforts", "defaultEffort", "context", "default"?}]}`. Ids are
+`openai/<model>` and `anthropic/<model>` (GPT-6.2 Sol (the default), GPT-6.2 Astra, GPT-6 Luna, Claude Opus 5.5,
+Claude Sonnet 5.5); send the id back as `model`.
 
-- `id` (required): the gateway's model id (`provider/model`), at most 128 characters of `A-Za-z0-9._:/[]-`; the app
-  sends it back as `model`. Entries with an invalid id are skipped; a list with none is an error. The app keeps it as
-  `pm/<id>`: a thread saved before Aero ran only on Powermove (an OpenAI-key, Anthropic-key, ChatGPT or Custom model)
-  names no such id, so it sends nothing, queued or resumed, until the person picks a model from this catalogue.
-- `name`: the label (defaults to the id). `efforts`: the levels the picker offers, in order (lowercase words).
-  `defaultEffort`: one of them. `default`: the model chosen when none is (else the first). `context`: the context
-  window in tokens (the card shows it). The picker marks each row by the id's provider (Claude's logo for
-  `anthropic/`, OpenAI's blossom for `openai/`, a neutral sparkle for the rest).
+## Chat completions
 
-## `POST /v1/aero/chat/completions`
+`POST /v2/aero/chat/completions`: OpenAI Chat Completions with `stream: true`, the model id, `reasoning_effort` (one
+of the model's `efforts`; omitted means `defaultEffort`), function tools, `tool_choice`, `parallel_tool_calls`,
+`max_completion_tokens`. Images only as `data:` URLs. Optional headers:
 
-OpenAI Chat Completions with `stream: true`, the catalogue `id` as `model`, the picked level as `reasoning_effort`
-(omitted for no level), function tools, and no `tool_choice`.
+- `X-Powermove-Request-Id` (8–128 of `A-Za-z0-9._:-`): the request's id. Each id is metered once; a repeat answers
+  `409 duplicate_request` and is not run.
+- `X-Powermove-Thread` (or the body's `prompt_cache_key`): names the thread for OpenAI's prompt cache. Without it the
+  thread's opening (system prompt and first user turn) names it.
 
-| Answer | The app shows |
+The answer is Chat Completions SSE, in the subset fx's `openai-chat-completions` connection parses: one choice at
+index 0; `role`, `content`, `reasoning_content`, `reasoning_details` and `tool_calls` deltas; a `finish_reason`
+chunk (`tool_calls` exactly when the reply calls tools); a chunk with `choices: []` and `usage` (`prompt_tokens`
+including cached, `prompt_tokens_details.cached_tokens` and `cache_write_tokens`,
+`completion_tokens_details.reasoning_tokens`); then `data: [DONE]`.
+
+`reasoning_details` items (`{"type": "reasoning.aero", "provider", "text", "metadata"}`) carry the provider's
+continuity data (Anthropic's thinking signature, OpenAI's encrypted reasoning). Send them back unchanged on the
+assistant message, as fx does, so a tool loop keeps its reasoning.
+
+| Answer | Meaning |
 |---|---|
-| `200` SSE (`data:` chunks, `data: [DONE]`) | The turn |
-| `401` | "Your Powermove session ended. Sign in to Powermove again to use Aero." |
-| `402 {"error": {"code": "credits_exhausted"}}` | "You're out of Aero credits. They come back when your plan resets." |
-| `429` | The rate-limit words |
-| an `error` event in the stream | Powermove's own words for its category, never the backend's text |
+| `200` SSE | The turn |
+| `400 invalid_request`, `unknown_model` | A request the backend won't send |
+| `401 unauthorized` | Signed out or the session ended |
+| `402 credits_exhausted` | No plan, or no credits left this period |
+| `409 duplicate_request` | That request id was already used |
+| `429 rate_limited` (`Retry-After`) | 60 requests a minute per account |
+| `503 inference_unavailable` | The backend has no provider key |
+| `data: {"error": {"code": "upstream_error"}}` in the stream | The provider failed mid-turn |
 
-The backend's own error text never reaches the panel, the trace or the session's files. A turn is fenced to the
-account it started on: a sign-out or another account stops its open stream, discards that reply and runs no more of
-its tools.
+Every error body is `{"error": {"code": "…"}}`; the backend's own text never reaches the client.
 
-## Before the backend exists
+After the stream ends, or the client goes away (which stops the provider call), the request's one ledger row holds
+the model, tokens in, cached, cache written and out, and the credits. A stream cut off before the provider reported
+usage is estimated (four characters a token) and marked so.
 
-- Signed out: Aero shows **Sign in to Powermove** (the picker, the pill, Settings › Providers, onboarding).
-- Signed in, no plan (today `/usage` answers 404): **Aero inference is coming soon**, or the offer when there is one.
+## Prompt caching
+
+Always on. Anthropic: cache breakpoints on the system prompt, the last tool definition, the newest message and the
+previous request's last message. OpenAI: a stable `prompt_cache_key` per thread, scoped to the account; the Responses
+API with `store: false` and encrypted reasoning. Both meter cache reads and writes from the provider's usage.
 
 ## Development
 
-Debug builds with the development switch on (`PM_AERO_DEV=1` or the profile's `aero-dev` file) read
-`PM_AERO_ENDPOINT=http://127.0.0.1:<port>/<path>`: Aero's base, for emulate or the test fakes
-(`crates/agents/tests/fakes/fake_backends.py` serves `/aero/v1/aero/*`). It is sent a development credential
-(`pm-aero-development`), never the person's session; Aero's real traffic never goes through the development fakes
-that reroute other providers (`PM_AGENT_FAKES`). The fake model (`PM_AERO_FAKE_MODEL=1`) is listed and runs in debug
-builds only. Release builds never read the endpoint
-(`inference::tests::a_release_build_has_no_test_endpoint`, and in `cargo test --release`
-`this_release_build_sends_aero_only_to_the_account_origin`). A development review account
-(`PM_NATIVE_REVIEW_CLOUD=1`) has no inference origin of its own, so it needs the test endpoint.
+`bun run local:billing` in `apps/cloud` runs the whole stack locally (Postgres, the Worker, a fake Stripe with
+Checkout and Portal pages, an AI simulator for both providers) and seeds Jude on Free and Mara on Aerolite; see
+`apps/cloud/README.md` › Local stack. Point a debug or Sandbox build's development origin at that Worker.
