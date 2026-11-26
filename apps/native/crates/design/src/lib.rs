@@ -164,8 +164,6 @@ pub struct TypeScale {
     pub reading: f32,
     /// Sheet, Settings pane and empty-state headings.
     pub heading: f32,
-    /// The Agent composer's draft and placeholder.
-    pub composer: f32,
     /// Transport and timeline timecode (SF Pro, tabular figures, medium).
     pub timecode: f32,
     pub regular_weight: f32,
@@ -307,7 +305,6 @@ pub struct Metrics {
     /// marks in the rail, the rows and the card.
     pub chooser_rail: f32,
     pub chooser_list: f32,
-    pub chooser_card: f32,
     pub chooser_height: f32,
     pub chooser_mark: f32,
     pub settings_width: f32,
@@ -887,7 +884,7 @@ impl Tokens {
     /// under it, the composer `text_padding` off the panel's bottom.
     pub fn agent_panel_minimum_height(&self) -> f32 {
         let m = &self.metrics;
-        let draft = (self.typography.composer * 1.5 + 2. * 7.).max(m.hit);
+        let draft = (self.typography.body * 1.5 + 2. * 7.).max(m.hit);
         m.header + m.text_padding + 2. * m.border + draft + self.space.xl + m.hit + self.space.md
     }
 
@@ -961,7 +958,6 @@ impl Tokens {
                 field_menu_height: 280.,
                 chooser_rail: 36.,
                 chooser_list: 320.,
-                chooser_card: 288.,
                 chooser_height: 360.,
                 chooser_mark: 16.,
                 settings_width: 760.,
@@ -1095,7 +1091,6 @@ impl Tokens {
                 display: 24.,
                 reading: 13.,
                 heading: 15.,
-                composer: 15.,
                 timecode: 13.,
                 regular_weight: 400.,
                 medium_weight: 500.,

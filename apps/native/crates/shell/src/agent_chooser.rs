@@ -1,14 +1,15 @@
-//! The Agent composer's chooser (PM-727): three floating surfaces in one
-//! borderless panel above the composer, on Capy's layout (the owner's
-//! reference). A rail of harness marks
-//! with a tile on the chosen one; the models that harness runs, searchable
-//! and scrolling, under their account headings, with ⌘1…⌘9 local to the
-//! chooser; a card for the chosen model: its mark and name, its context when
-//! known, Reasoning as a snapping slider with the level's name, and one
-//! existing action. The panel's TypeScript sends the rows (`kind` says where
-//! each stands) and gets the chosen row's index back as `agentPick:i`, as
-//! its menus do; a row that `stays` keeps the chooser open for the rows that
-//! follow it.
+//! The Agent composer's two menus (PM-727, w110), our own floating panels
+//! anchored to the composer's pill: the model picker above the model part,
+//! the reasoning menu above the effort part.
+//! The model picker, on Capy's layout (the owner's reference): a rail of
+//! harness marks with a tile on the chosen one, attached to the card of the
+//! models that harness runs, searchable and scrolling, under their account
+//! headings, with ⌘1…⌘9 local to the picker and Aero's usage monitor at the
+//! card's foot. The reasoning menu: the model's levels in order, one short
+//! list on the same card, row and type, ✓ on the current level. The panel's
+//! TypeScript sends the rows (`kind` says where each stands) and gets the
+//! chosen row's index back as `agentPick:i`, as its menus do; a row that
+//! `stays` keeps the picker open for the rows that follow it.
 use super::*;
 use objc2::Message;
 use objc2::runtime::Bool;
@@ -55,7 +56,7 @@ pub struct Row {
     pub stays: bool,
 }
 
-/// `[[label, value], …]` as the panel sends a card's facts.
+/// `[[label, value], …]` as the panel sends the usage monitor.
 fn pairs(list: &serde_json::Value) -> Vec<(String, String)> {
     list.as_array()
         .map(|items| {
@@ -66,20 +67,23 @@ fn pairs(list: &serde_json::Value) -> Vec<(String, String)> {
         })
         .unwrap_or_default()
 }
-/// The chooser's rows and its card, from the panel's request.
+/// Which of the pill's two menus the panel shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Menu {
+    /// The model picker: the rail and the searchable card of models.
+    #[default]
+    Models,
+    /// The reasoning menu: the model's levels, one short list.
+    Effort,
+}
+/// The menu's rows, from the panel's request.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Spec {
     pub rows: Vec<Row>,
-    /// The card's title (the chosen model, or the harness while signed
-    /// out) and its mark.
-    pub title: Option<(String, Option<String>)>,
-    /// The card's facts as (label, value), only those the provider reports.
-    pub facts: Vec<(String, String)>,
-    /// The usage monitor at the card's foot (Aero's credits, plan and reset
-    /// day), as (label, value); none until the backend reports them.
+    pub menu: Menu,
+    /// The usage monitor at the model card's foot (Aero's credits, plan and
+    /// reset day), as (label, value); none until the backend reports them.
     pub usage: Vec<(String, String)>,
-    /// A quiet line on the card (where to sign in).
-    pub note: String,
     pub placeholder: String,
 }
 impl Spec {
@@ -103,22 +107,25 @@ impl Spec {
                     .collect()
             })
             .unwrap_or_default();
-        let card = &input["chooser"];
         Self {
             rows,
-            title: card["title"]
-                .as_str()
-                .map(|t| (t.to_owned(), card["icon"].as_str().map(str::to_owned))),
-            facts: pairs(&card["facts"]),
-            usage: pairs(&card["usage"]),
-            note: text(&card["note"]),
+            menu: if input["menu"] == "effort" {
+                Menu::Effort
+            } else {
+                Menu::Models
+            },
+            usage: pairs(&input["usage"]),
             placeholder: text(&input["placeholder"]),
         }
     }
-    /// The middle list's rows for `query`, in order: a heading stands only
-    /// over rows that match; a disabled heading (a source coming later)
-    /// shows only while nothing is searched.
+    /// The list's rows for `query`, in order. The reasoning menu lists its
+    /// levels. The model card: a heading stands only over rows that match; a
+    /// disabled heading (a source coming later) shows only while nothing is
+    /// searched.
     pub fn listed(&self, query: &str) -> Vec<usize> {
+        if self.menu == Menu::Effort {
+            return self.of(Part::Effort).map(|(i, _)| i).collect();
+        }
         let query = query.trim().to_lowercase();
         let mut out = vec![];
         let mut heading: Option<usize> = None;
@@ -144,6 +151,9 @@ impl Spec {
     }
     /// The model rows ⌘1…⌘9 choose, in listed order.
     pub fn numbered(&self, query: &str) -> Vec<usize> {
+        if self.menu == Menu::Effort {
+            return vec![];
+        }
         self.listed(query)
             .into_iter()
             .filter(|&i| self.rows[i].part == Some(Part::Model) && !self.rows[i].disabled)
@@ -168,10 +178,10 @@ impl Spec {
     }
 }
 
-/// The chooser's sizes, all from tokens (measured against Capy's picker in
-/// the lane notes).
+/// The menus' sizes, all from tokens (the model card measured against
+/// Capy's picker in the lane notes).
 struct Shape {
-    /// The gap between the three surfaces.
+    /// The gap between the rail and the card.
     gutter: f64,
     /// Room round the surfaces for their shadows, inside the clear panel.
     shadow: f64,
@@ -180,22 +190,30 @@ struct Shape {
     tile_gap: f64,
     rail_icon: f64,
     list: f64,
-    card: f64,
-    /// The most the list surface grows to; it scrolls past it.
+    /// The most the model list grows to; it scrolls past it.
     most: f64,
     search: f64,
     heading: f64,
     row: f64,
+    /// A usage monitor line.
     fact: f64,
     control: f64,
     mark: f64,
     title_mark: f64,
     /// A surface's leading content inset (the mark column starts here).
     inset: f64,
+    /// How far a row's highlight stands in from the surface's sides.
+    lane: f64,
+    /// The gap between two rows' highlights.
+    list_gap: f64,
     gap: f64,
     pad: f64,
     radius: f64,
     line: f64,
+    /// The list's scroll fades.
+    fade: f64,
+    /// The menu's distance from the pill.
+    offset: f64,
 }
 impl Shape {
     fn new(t: &Tokens) -> Self {
@@ -211,7 +229,6 @@ impl Shape {
             tile_gap: t.space.hair as f64,
             rail_icon: (m.chooser_mark + t.space.hair) as f64,
             list: m.chooser_list as f64,
-            card: m.chooser_card as f64,
             most: m.chooser_height as f64,
             search: (m.control + t.space.md) as f64,
             heading: m.hit as f64,
@@ -221,16 +238,24 @@ impl Shape {
             mark: m.chooser_mark as f64,
             title_mark: m.symbol_panel as f64,
             inset: t.space.lg as f64,
+            lane: t.space.xs as f64,
+            list_gap: m.list_gap as f64,
             gap: t.space.sm as f64,
             pad: t.space.md as f64,
             radius: t.radius.nested(m.popover_radius, t.space.md) as f64,
             shadow: (t.space.xl + t.space.lg) as f64,
             line: scale.recip().max(0.5),
+            fade: t.space.xxl as f64,
+            offset: t.space.sm as f64,
         }
     }
-    /// Where a list row's label starts: the mark column, then the gap.
-    fn label_x(&self) -> f64 {
-        self.inset + self.mark + self.gap
+    /// Where a list row's label starts: the mark column, then the gap; the
+    /// reasoning menu's rows have no mark.
+    fn label_x(&self, menu: Menu) -> f64 {
+        match menu {
+            Menu::Models => self.inset + self.mark + self.gap,
+            Menu::Effort => self.inset,
+        }
     }
 }
 
@@ -245,13 +270,16 @@ pub(super) struct State {
     picked: bool,
     tokens: Tokens,
     /// One borderless, transparent panel (a child of the editor window)
-    /// holding the three floating surfaces.
+    /// holding the floating surfaces.
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
     open: bool,
-    /// The pill, the composer and the screen's visible frame it was opened
-    /// off, in screen points: every layout is placed from them.
-    around: (NSRect, Option<NSRect>, NSRect),
+    /// The pill part it was opened off and the room it stays inside (the
+    /// editor window on its screen), in screen points: every layout is
+    /// placed from them.
+    around: (NSRect, NSRect),
+    /// The list's width as laid out.
+    width: f64,
     /// What dismisses it from outside (the app going inactive, its window
     /// moving or resizing) and the mouse-down monitor, removed when it closes.
     watchers: Vec<Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>,
@@ -269,8 +297,8 @@ pub(super) struct State {
 }
 
 define_class!(
-    /// A flipped view that is the chooser's target: rows, rail, search and
-    /// the access pop-up all send here.
+    /// A flipped view that is the chooser's target: rows, rail and search
+    /// all send here.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMAgentChooserView"]
@@ -285,21 +313,19 @@ define_class!(
         fn accepts_first_mouse(&self, _: Option<&NSEvent>) -> bool {
             true
         }
+        /// The reasoning menu's keys come here (it has no search field).
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+        /// Keys the menu does not use (the host gave it the arrows, Return
+        /// and Escape) do nothing, rather than beep.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, _: &NSEvent) {}
         #[unsafe(method(pick:))]
         fn pick(&self, sender: &NSControl) {
             if let Some(state) = self.ivars().upgrade() {
                 choose(&state, sender.tag() as usize);
-            }
-        }
-        /// The Reasoning track settled on a level: that level's row.
-        #[unsafe(method(reason:))]
-        fn reason(&self, sender: &NSSlider) {
-            if let Some(state) = self.ivars().upgrade() {
-                let level = sender.doubleValue().round().max(0.) as usize;
-                let row = state.borrow().spec.of(Part::Effort).nth(level).map(|(i, _)| i);
-                if let Some(index) = row {
-                    choose(&state, index);
-                }
             }
         }
         #[unsafe(method(updateTrackingAreas))]
@@ -408,7 +434,7 @@ impl ChooserView {
 }
 
 fn choosable(row: &Row) -> bool {
-    row.part == Some(Part::Model) && !row.disabled
+    matches!(row.part, Some(Part::Model | Part::Effort)) && !row.disabled
 }
 
 /// Sends the chosen row; a row that does not stay closes the chooser.
@@ -534,7 +560,15 @@ fn key(state: &Rc<RefCell<State>>, key: &str) -> bool {
                 if rows.is_empty() {
                     return true;
                 }
-                let at = s.lit.and_then(|l| rows.iter().position(|&i| i == l));
+                // The reasoning menu's walk starts from the current level.
+                let at = s
+                    .lit
+                    .or_else(|| {
+                        (s.spec.menu == Menu::Effort)
+                            .then(|| rows.iter().copied().find(|&i| s.spec.rows[i].checked))
+                            .flatten()
+                    })
+                    .and_then(|l| rows.iter().position(|&i| i == l));
                 let next = match (at, key) {
                     (None, "up") => rows.len() - 1,
                     (None, _) => 0,
@@ -549,12 +583,14 @@ fn key(state: &Rc<RefCell<State>>, key: &str) -> bool {
         "enter" => {
             let lit = {
                 let s = state.borrow();
-                s.lit.or_else(|| {
-                    s.spec
-                        .listed(&s.query)
-                        .into_iter()
-                        .find(|&i| choosable(&s.spec.rows[i]))
-                })
+                let listed = s.spec.listed(&s.query);
+                s.lit
+                    .or_else(|| {
+                        (s.spec.menu == Menu::Effort)
+                            .then(|| listed.iter().copied().find(|&i| s.spec.rows[i].checked))
+                            .flatten()
+                    })
+                    .or_else(|| listed.into_iter().find(|&i| choosable(&s.spec.rows[i])))
             };
             if let Some(index) = lit {
                 choose(state, index);
@@ -576,7 +612,13 @@ fn light(state: &Rc<RefCell<State>>) {
         .and_then(|lit| s.frames.iter().find(|(i, _)| *i == lit))
     {
         Some((_, frame)) => {
-            highlight.setFrame(*frame);
+            // A row keeps its pitch; its highlight stands `list_gap` apart
+            // from a neighbour's.
+            let gap = Shape::new(&s.tokens).list_gap;
+            highlight.setFrame(NSRect::new(
+                NSPoint::new(frame.origin.x, frame.origin.y + gap / 2.),
+                NSSize::new(frame.size.width, frame.size.height - gap),
+            ));
             highlight.setHidden(false);
             if let Some(list) = &s.list {
                 list.scrollRectToVisible(*frame);
@@ -663,20 +705,24 @@ fn fitting(view: &NSView) -> NSSize {
     NSSize::new(size.width.ceil(), size.height.ceil())
 }
 
-/// One of the chooser's three floating surfaces: the floating token, a
-/// hairline edge, the nested corner and a soft shadow (the shell's popup
-/// recipe, lighter, as three panels stand close together).
+/// One of the menus' floating surfaces: the floating token, a hairline
+/// edge, the nested corner and the menu elevation's drop shadow.
 fn surface(frame: NSRect, t: &Tokens, shape: &Shape, mtm: MainThreadMarker) -> Retained<NSBox> {
     let surface = tile(frame, t.colors.floating, shape.radius, mtm);
     surface.setBorderWidth(shape.line);
     surface.setBorderColor(&native_color(t.colors.separator));
     surface.setWantsLayer(true);
-    if let Some(layer) = surface.layer() {
+    let drop = t
+        .elevation(pm_design::Elevation::Menu)
+        .into_iter()
+        .find(|s| s.blur > 0. && !s.inset);
+    if let (Some(layer), Some(drop)) = (surface.layer(), drop) {
         layer.setMasksToBounds(false);
-        layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
-        layer.setShadowOpacity(if t.scheme == Scheme::Dark { 0.36 } else { 0.12 });
-        layer.setShadowRadius(16.);
-        layer.setShadowOffset(NSSize::new(0., -6.));
+        layer.setShadowColor(Some(&native_color(drop.color).CGColor()));
+        layer.setShadowOpacity(drop.alpha);
+        // A CSS blur is twice Core Animation's shadow radius.
+        layer.setShadowRadius(drop.blur as f64 / 2.);
+        layer.setShadowOffset(NSSize::new(0., -drop.y as f64));
     }
     surface
 }
@@ -700,17 +746,18 @@ fn action(
     };
     button.setTag(index as isize);
     button.setBezelStyle(NSBezelStyle::AccessoryBarAction);
-    button.setFont(Some(&NSFont::systemFontOfSize(t.typography.reading as f64)));
+    button.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
     button.setFrame(frame);
     button
 }
 
-/// The list's fades: 24 pt at the bottom while rows lie below, and at the
-/// top once it has scrolled, as a mask on the scroll view.
+/// The list's fades: `space.xxl` at the bottom while rows lie below, and
+/// at the top once it has scrolled, as a mask on the scroll view.
 fn fades(state: &Rc<RefCell<State>>) {
     let Some(scroll) = state.borrow().scroll.clone() else {
         return;
     };
+    let fade_h = Shape::new(&state.borrow().tokens).fade;
     let shown = scroll.contentSize().height;
     let (top, bottom) = scroll.documentView().map_or((false, false), |doc| {
         let y = scroll.contentView().bounds().origin.y;
@@ -724,7 +771,7 @@ fn fades(state: &Rc<RefCell<State>>) {
         unsafe { layer.setMask(None) };
         return;
     }
-    let edge = FADE / shown.max(1.);
+    let edge = fade_h / shown.max(1.);
     let stop = |on: bool| {
         let color = if on {
             NSColor::clearColor()
@@ -754,35 +801,107 @@ fn fades(state: &Rc<RefCell<State>>) {
     fade.setFrame(NSRect::new(NSPoint::ZERO, scroll.frame().size));
     unsafe { layer.setMask(Some(&fade)) };
 }
-/// How tall the list's fades are.
-const FADE: f64 = 24.;
 
-/// Lays the whole chooser out from its state (an open or a refresh): three
-/// floating surfaces with one top edge and a gap between, inside a clear
-/// panel with room for their shadows. The rail: a mark per harness and
-/// "+" (Add a provider…) at its foot. The list: search over the rows, as
-/// tall as they are up to the chooser's height, then it scrolls between
-/// fades. The card: the chosen model, what its provider reports, then
-/// Reasoning. Signed out or a harness that couldn't start: one compact card
-/// in the list's place (the harness, a status line, its one button).
+/// The body text's line height, for centring a label in its band.
+fn body_height(t: &Tokens, mtm: MainThreadMarker) -> f64 {
+    fitting(&label("Ag", t.typography.body, 0, mtm)).height
+}
+
+/// Lays the open menu out from its state (an open or a refresh) inside a
+/// clear panel with room for the surfaces' shadows; answers the panel's
+/// size.
 fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
+    let menu = state.borrow().spec.menu;
+    let root = {
+        let s = state.borrow();
+        let root = ChooserView::new(mtm, state, NSRect::ZERO);
+        root.setAccessibilityElement(true);
+        root.setAccessibilityRole(Some(unsafe { NSAccessibilityPopoverRole }));
+        root.setAccessibilityLabel(Some(&NSString::from_str(match s.spec.menu {
+            Menu::Models => "Harness and model",
+            Menu::Effort => "Reasoning effort",
+        })));
+        root
+    };
+    let size = match menu {
+        Menu::Models => build_models(state, &root, mtm),
+        Menu::Effort => build_effort(state, &root, mtm),
+    };
+    root.setFrame(NSRect::new(NSPoint::ZERO, size));
+    state.borrow_mut().root = Some(root);
+    fades(state);
+    size
+}
+
+/// The reasoning menu: one surface holding the model's levels, as wide as
+/// its longest level (never narrower than the part it hangs from).
+fn build_effort(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadMarker) -> NSSize {
+    let (spec, t, anchor) = {
+        let s = state.borrow();
+        (s.spec.clone(), s.tokens.clone(), s.around.0)
+    };
+    let shape = Shape::new(&t);
+    let check = t.metrics.symbol_inline as f64;
+    let widest = spec
+        .of(Part::Effort)
+        .map(|(_, r)| fitting(&label(&r.label, t.typography.body, 0, mtm)).width)
+        .fold(0., f64::max);
+    let width = (shape.inset + widest + shape.gap + check + shape.inset).max(anchor.size.width);
+    let pad = shape.shadow;
+    let list = ChooserView::new(
+        mtm,
+        state,
+        NSRect::new(NSPoint::new(pad, pad), NSSize::new(width, 0.)),
+    );
+    {
+        let mut s = state.borrow_mut();
+        s.width = width;
+        s.list = Some(list.clone());
+        s.scroll = None;
+        s.search = None;
+    }
+    let h = build_list(state);
+    list.setFrameSize(NSSize::new(width, h));
+    root.addSubview(&surface(
+        NSRect::new(NSPoint::new(pad, pad), NSSize::new(width, h)),
+        &t,
+        &shape,
+        mtm,
+    ));
+    root.addSubview(&list);
+    NSSize::new(pad + width + pad, pad + h + pad)
+}
+
+/// The model picker: the rail attached to the card. The rail: a mark per
+/// harness and "+" (Providers…) at its foot. The card: search over the
+/// rows, as tall as they are up to the picker's height, then it scrolls
+/// between fades; Aero's usage monitor at its foot. Signed out or a harness
+/// that couldn't start: the card is compact (the harness, a status line,
+/// its one button).
+fn build_models(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadMarker) -> NSSize {
     let (spec, t) = {
         let s = state.borrow();
         (s.spec.clone(), s.tokens.clone())
     };
-    let body_h = fitting(&label("Ag", t.typography.reading, 0, mtm)).height;
+    let body_h = body_height(&t, mtm);
     let shape = Shape::new(&t);
     let empty = spec.of(Part::Model).next().is_none();
     let (pad, g) = (shape.shadow, shape.gutter);
     let rail_x = pad;
     let list_x = rail_x + shape.rail + g;
-    let card_x = list_x + shape.list + g;
-    let root = ChooserView::new(mtm, state, NSRect::ZERO);
-    root.setAccessibilityElement(true);
-    root.setAccessibilityRole(Some(unsafe { NSAccessibilityPopoverRole }));
-    root.setAccessibilityLabel(Some(&NSString::from_str("Harness and model")));
+    state.borrow_mut().width = shape.list;
     let mut views: Vec<Retained<NSView>> = vec![];
     let push = |views: &mut Vec<Retained<NSView>>, view: &NSView| views.push(view.retain());
+    let row =
+        |views: &mut Vec<Retained<NSView>>, x: f64, y: f64, inner: f64, key: &str, value: &str| {
+            let k = label(key, t.typography.body, t.colors.muted, mtm);
+            let v = label(value, t.typography.body, t.colors.text, mtm);
+            let w = fitting(&v).width.min(inner * 0.6);
+            place(&v, x + inner - w, pad + y, shape.fact, w, body_h);
+            place(&k, x, pad + y, shape.fact, inner - w - shape.pad, body_h);
+            views.push(Retained::into_super(Retained::into_super(k)));
+            views.push(Retained::into_super(Retained::into_super(v)));
+        };
 
     let list = ChooserView::new(
         mtm,
@@ -790,7 +909,7 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         NSRect::new(NSPoint::ZERO, NSSize::new(shape.list, 0.)),
     );
     let mut search = None;
-    let list_h;
+    let mut list_h;
     if empty {
         // The compact card: the harness, one status line, one button.
         let x = list_x + shape.inset;
@@ -811,9 +930,10 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
                 push(&mut views, &image);
                 lead += shape.title_mark + shape.gap;
             }
-            let name = label(&harness.label, t.typography.heading, t.colors.text, mtm);
+            let title = t.text(pm_design::Text::Title);
+            let name = label(&harness.label, title.size, t.colors.text, mtm);
             name.setFont(Some(&NSFont::systemFontOfSize_weight(
-                t.typography.heading as f64,
+                title.size as f64,
                 unsafe { NSFontWeightMedium },
             )));
             let h = fitting(&name).height;
@@ -823,14 +943,14 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         }
         if let Some((_, row)) = spec.of(Part::Status).next() {
             let (status, h) =
-                popup_description(&row.label, t.typography.reading, t.colors.muted, inner, mtm);
+                popup_description(&row.label, t.typography.body, t.colors.muted, inner, mtm);
             status.setFrame(NSRect::new(NSPoint::new(x, pad + y), NSSize::new(inner, h)));
             push(&mut views, &status);
             y += h + shape.pad;
         }
         if let Some((i, row)) = spec.of(Part::Action).next() {
             let button = action(
-                &root,
+                root,
                 i,
                 &row.label,
                 NSRect::new(NSPoint::new(x, pad + y), NSSize::new(inner, shape.control)),
@@ -858,20 +978,20 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         field.setBordered(false);
         field.setDrawsBackground(false);
         field.setFocusRingType(NSFocusRingType::None);
-        field.setFont(Some(&NSFont::systemFontOfSize(t.typography.reading as f64)));
+        field.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
         field.setTextColor(Some(&native_color(t.colors.text)));
         field.setPlaceholderString(Some(&NSString::from_str(&spec.placeholder)));
         field.setStringValue(&NSString::from_str(&state.borrow().query));
-        let field_x = list_x + shape.label_x();
+        let field_x = list_x + shape.label_x(Menu::Models);
         place(
             &field,
             field_x,
             pad,
             shape.search,
             list_x + shape.list - shape.inset - field_x,
-            body_h + 2.,
+            body_h + t.space.hair as f64,
         );
-        unsafe { field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*root))) };
+        unsafe { field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(root))) };
         field.setAccessibilityLabel(Some(&NSString::from_str("Search models")));
         push(&mut views, &field);
         push(
@@ -893,7 +1013,7 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
             NSScrollView::alloc(mtm),
             NSRect::new(
                 NSPoint::new(list_x, pad + top),
-                NSSize::new(shape.list, list_h - top - shape.radius / 2.),
+                NSSize::new(shape.list, list_h - top),
             ),
         );
         scroll.setDrawsBackground(false);
@@ -929,130 +1049,26 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         }
         search = Some(field);
     }
-
-    // The card: the chosen model, what its provider reports, Reasoning.
-    let mut card_h = 0.;
-    if let (false, Some((title, icon))) = (empty, &spec.title) {
-        let x = card_x + shape.inset;
-        let inner = shape.card - 2. * shape.inset;
-        let mut y = 0.;
-        let mut lead = x;
-        if let Some(icon) = icon {
-            let image = mark(icon, shape.title_mark, t.colors.text, mtm);
-            place(
-                &image,
-                x,
-                pad + y,
-                shape.search,
-                shape.title_mark,
-                shape.title_mark,
-            );
-            push(&mut views, &image);
-            lead += shape.title_mark + shape.gap;
-        }
-        let size = t.typography.heading;
-        let name = label(title, size, t.colors.text, mtm);
-        name.setFont(Some(&NSFont::systemFontOfSize_weight(
-            size as f64,
-            unsafe { NSFontWeightMedium },
-        )));
-        let name_h = fitting(&name).height;
-        place(&name, lead, pad + y, shape.search, x + inner - lead, name_h);
-        push(&mut views, &name);
-        y += shape.search;
-        let row = |views: &mut Vec<Retained<NSView>>,
-                   y: f64,
-                   key: &str,
-                   value: &str,
-                   tip: Option<&str>| {
-            let k = label(key, t.typography.reading, t.colors.muted, mtm);
-            let v = label(value, t.typography.reading, t.colors.text, mtm);
-            let w = fitting(&v).width.min(inner * 0.6);
-            place(&v, x + inner - w, pad + y, shape.fact, w, body_h);
-            place(&k, x, pad + y, shape.fact, inner - w - shape.pad, body_h);
-            if let Some(tip) = tip {
-                v.setToolTip(Some(&NSString::from_str(tip)));
-            }
-            views.push(Retained::into_super(Retained::into_super(k)));
-            views.push(Retained::into_super(Retained::into_super(v)));
-        };
-        for (key, value) in &spec.facts {
-            row(&mut views, y, key, value, None);
-            y += shape.fact;
-        }
-        let efforts: Vec<_> = spec.of(Part::Effort).collect();
-        if !efforts.is_empty() {
-            y += shape.pad;
-            push(
-                &mut views,
-                &rule(
-                    NSRect::new(
-                        NSPoint::new(card_x, pad + y),
-                        NSSize::new(shape.card, shape.line),
-                    ),
-                    &t,
-                    mtm,
+    // The usage monitor (Aero's credits), under a hairline at the card's foot.
+    if !spec.usage.is_empty() {
+        push(
+            &mut views,
+            &rule(
+                NSRect::new(
+                    NSPoint::new(list_x, pad + list_h),
+                    NSSize::new(shape.list, shape.line),
                 ),
-            );
-            y += shape.pad;
-            let chosen = efforts.iter().position(|(_, r)| r.checked);
-            let level = chosen.map(|p| efforts[p].1);
-            let default = efforts
-                .iter()
-                .find(|(_, r)| r.default)
-                .map(|(_, r)| format!("{} is this model's default", r.label));
-            row(
-                &mut views,
-                y,
-                "Reasoning",
-                level.map_or("", |r| r.label.as_str()),
-                default.as_deref(),
-            );
-            y += shape.fact;
-            let slider = NSSlider::new(mtm);
-            slider.setMinValue(0.);
-            slider.setMaxValue((efforts.len().max(2) - 1) as f64);
-            slider.setNumberOfTickMarks(efforts.len().max(2) as isize);
-            slider.setAllowsTickMarkValuesOnly(true);
-            slider.setTickMarkPosition(NSTickMarkPosition::Below);
-            slider.setContinuous(false);
-            slider.setEnabled(efforts.len() > 1);
-            slider.setDoubleValue(chosen.unwrap_or(0) as f64);
-            if let Some(default) = &default {
-                slider.setToolTip(Some(&NSString::from_str(default)));
-            }
-            unsafe {
-                slider.setTarget(Some(&root));
-                slider.setAction(Some(sel!(reason:)));
-            }
-            slider.setAccessibilityLabel(Some(&NSString::from_str("Reasoning")));
-            let h = fitting(&slider).height.max(shape.control);
-            slider.setFrame(NSRect::new(NSPoint::new(x, pad + y), NSSize::new(inner, h)));
-            push(&mut views, &slider);
-            y += h;
+                &t,
+                mtm,
+            ),
+        );
+        let inner = shape.list - 2. * shape.inset;
+        list_h += shape.line + shape.lane;
+        for (key, value) in &spec.usage {
+            row(&mut views, list_x + shape.inset, list_h, inner, key, value);
+            list_h += shape.fact;
         }
-        // The usage monitor (Aero's credits), below a hairline at its foot.
-        if !spec.usage.is_empty() {
-            y += shape.pad;
-            push(
-                &mut views,
-                &rule(
-                    NSRect::new(
-                        NSPoint::new(card_x, pad + y),
-                        NSSize::new(shape.card, shape.line),
-                    ),
-                    &t,
-                    mtm,
-                ),
-            );
-            y += shape.pad;
-            for (key, value) in &spec.usage {
-                row(&mut views, y, key, value, None);
-                y += shape.fact;
-            }
-        }
-        // It ends at its content, as Capy's does (top edges aligned).
-        card_h = y + shape.inset;
+        list_h += shape.lane;
     }
 
     // The rail: a mark per harness on its tile, then "+" at its foot.
@@ -1063,9 +1079,8 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
     let rail_content = 2. * tile_inset + (harnesses + if add.is_some() { 1. } else { 0. }) * step
         - shape.tile_gap
         + if add.is_some() { shape.gap } else { 0. };
-    // The rail and the list share one height: the taller of the list and
-    // the card (as in Capy); the card keeps its own.
-    let rail_h = rail_content.max(list_h).max(card_h);
+    // The rail and the card share one height.
+    let rail_h = rail_content.max(list_h);
     let rail_tile = |views: &mut Vec<Retained<NSView>>, i: usize, row: &Row, top: f64| {
         let frame = NSRect::new(
             NSPoint::new(rail_x + tile_inset, top),
@@ -1097,7 +1112,7 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
             ));
             views.push(Retained::into_super(Retained::into_super(image)));
         }
-        let button = press(&root, i, frame, &row.label, mtm);
+        let button = press(root, i, frame, &row.label, mtm);
         button.setToolTip(Some(&NSString::from_str(&row.label)));
         if row.checked {
             unsafe { button.setAccessibilityValue(Some(&NSString::from_str("Selected"))) };
@@ -1115,9 +1130,8 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         rail_tile(&mut views, i, &row, pad + rail_h - tile_inset - shape.tile);
     }
 
-    let width = card_x + if card_h > 0. { shape.card } else { -g } + pad;
-    let height = pad + rail_h.max(card_h) + pad;
-    root.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+    let width = list_x + shape.list + pad;
+    let height = pad + rail_h + pad;
     root.addSubview(&surface(
         NSRect::new(NSPoint::new(rail_x, pad), NSSize::new(shape.rail, rail_h)),
         &t,
@@ -1130,67 +1144,35 @@ fn build(state: &Rc<RefCell<State>>, mtm: MainThreadMarker) -> NSSize {
         &shape,
         mtm,
     ));
-    if card_h > 0. {
-        root.addSubview(&surface(
-            NSRect::new(NSPoint::new(card_x, pad), NSSize::new(shape.card, card_h)),
-            &t,
-            &shape,
-            mtm,
-        ));
-    }
     for view in views {
         root.addSubview(&view);
     }
     {
         let mut s = state.borrow_mut();
-        s.root = Some(root);
         s.search = search;
         if empty {
             s.list = None;
             s.scroll = None;
         }
     }
-    fades(state);
     NSSize::new(width, height)
 }
 
-/// Where the chooser's surfaces go, in screen points (AppKit's: y up): above
-/// the composer with a gap, starting at its leading edge; below it when the
-/// screen has no room above; beside it when neither has. Always on screen,
-/// never over the composer.
-pub fn placement(
-    size: NSSize,
-    pill: NSRect,
-    composer: Option<NSRect>,
-    screen: NSRect,
-    gap: f64,
-) -> NSRect {
-    let around = composer.unwrap_or(pill);
-    let (min_x, max_x) = (
-        screen.origin.x + gap,
-        screen.origin.x + screen.size.width - gap,
-    );
-    let (min_y, max_y) = (
-        screen.origin.y + gap,
-        screen.origin.y + screen.size.height - gap,
-    );
-    let x = around.origin.x.min(max_x - size.width).max(min_x);
-    let above = around.origin.y + around.size.height + gap;
-    if above + size.height <= max_y {
-        return NSRect::new(NSPoint::new(x, above), size);
-    }
-    let below = around.origin.y - gap - size.height;
-    if below >= min_y {
-        return NSRect::new(NSPoint::new(x, below), size);
-    }
-    let y = (around.origin.y + around.size.height - size.height)
-        .min(max_y - size.height)
-        .max(min_y);
-    let right = around.origin.x + around.size.width + gap;
-    let x = if right + size.width <= max_x {
-        right
+/// Where a menu's surfaces go, in screen points (AppKit's: y up): above the
+/// pill part it hangs from, `offset` clear of it, the card's leading edge
+/// (`lead` into the surfaces: past the model picker's rail) on the part's
+/// leading edge; below the part when there is no room above. Always inside
+/// `room` (the editor window on its screen), moved in along each axis.
+pub fn placement(size: NSSize, part: NSRect, lead: f64, room: NSRect, offset: f64) -> NSRect {
+    let (min_x, max_x) = (room.origin.x, room.origin.x + room.size.width);
+    let (min_y, max_y) = (room.origin.y, room.origin.y + room.size.height);
+    let x = (part.origin.x - lead).min(max_x - size.width).max(min_x);
+    let above = part.origin.y + part.size.height + offset;
+    let below = part.origin.y - offset - size.height;
+    let y = if above + size.height <= max_y || below < min_y {
+        above.min(max_y - size.height).max(min_y)
     } else {
-        (around.origin.x - gap - size.width).max(min_x)
+        below
     };
     NSRect::new(NSPoint::new(x, y), size)
 }
@@ -1205,19 +1187,18 @@ fn build_list(state: &Rc<RefCell<State>>) -> f64 {
     for view in list.subviews().to_vec() {
         view.removeFromSuperview();
     }
-    let (spec, t, query) = {
+    let (spec, t, query, width) = {
         let s = state.borrow();
-        (s.spec.clone(), s.tokens.clone(), s.query.clone())
+        (s.spec.clone(), s.tokens.clone(), s.query.clone(), s.width)
     };
     let shape = Shape::new(&t);
     let caption = t.text(pm_design::Text::Caption).size;
     let caption_h = fitting(&label("Ag", caption, 0, mtm)).height;
-    let body_h = fitting(&label("Ag", t.typography.reading, 0, mtm)).height;
-    let width = shape.list;
+    let body_h = body_height(&t, mtm);
     let x = shape.inset;
-    let label_x = shape.label_x();
+    let label_x = shape.label_x(spec.menu);
     // The highlight sits inside the surface with the content's own inset.
-    let lane = t.space.xs as f64;
+    let lane = shape.lane;
     let highlight = tile(
         NSRect::ZERO,
         t.colors.hover,
@@ -1237,7 +1218,7 @@ fn build_list(state: &Rc<RefCell<State>>) -> f64 {
             } else {
                 "No models match"
             },
-            t.typography.reading,
+            t.typography.body,
             t.colors.muted,
             mtm,
         );
@@ -1331,7 +1312,7 @@ fn build_list(state: &Rc<RefCell<State>>) -> f64 {
             name.push_str(&format!(", Command-{}", n + 1));
         }
         // The name gives way first, keeping room for its check.
-        let title = label(&row.label, t.typography.reading, ink, mtm);
+        let title = label(&row.label, t.typography.body, ink, mtm);
         let room = trailing - label_x - if row.checked { check + shape.gap } else { 0. };
         let title_w = fitting(&title).width.min(room.max(0.));
         place(&title, label_x, y, shape.row, title_w, body_h);
@@ -1389,14 +1370,32 @@ impl Chooser {
     }
 }
 
+/// The part of `a` inside `b` (`a` when they do not meet).
+fn intersection(a: NSRect, b: NSRect) -> NSRect {
+    let x = a.origin.x.max(b.origin.x);
+    let y = a.origin.y.max(b.origin.y);
+    let r = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let t = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    if r <= x || t <= y {
+        return a;
+    }
+    NSRect::new(NSPoint::new(x, y), NSSize::new(r - x, t - y))
+}
+
 /// Places the chooser's panel for its surfaces (`size` holds their shadow
 /// room) from the pill and composer it was opened off, in screen points.
 fn frame_panel(state: &Rc<RefCell<State>>, size: NSSize) {
     let s = state.borrow();
-    let shadow = Shape::new(&s.tokens).shadow;
+    let shape = Shape::new(&s.tokens);
+    let shadow = shape.shadow;
     let surfaces = NSSize::new(size.width - 2. * shadow, size.height - 2. * shadow);
-    let (pill, composer, screen) = s.around;
-    let at = placement(surfaces, pill, composer, screen, s.tokens.space.md as f64);
+    let (part, room) = s.around;
+    // The model card, not its rail, stands on the part's leading edge.
+    let lead = match s.spec.menu {
+        Menu::Models => shape.rail + shape.gutter,
+        Menu::Effort => 0.,
+    };
+    let at = placement(surfaces, part, lead, room, shape.offset);
     s.window.setFrame_display(
         NSRect::new(
             NSPoint::new(at.origin.x - shadow, at.origin.y - shadow),
@@ -1407,16 +1406,15 @@ fn frame_panel(state: &Rc<RefCell<State>>, size: NSSize) {
 }
 
 impl Host {
-    /// Opens the chooser off `anchor` (the pill) above `composer` (both in
-    /// the owner's content coordinates), replacing one already open: one
-    /// borderless panel, a child of the editor window, holding the three
+    /// Opens one of the pill's menus above `anchor` (the pill part, in the
+    /// owner's content coordinates), replacing one already open: one
+    /// borderless panel, a child of the editor window, holding its floating
     /// surfaces. It closes on a press outside it, Escape, the app going
     /// inactive, and its window moving or resizing.
     pub fn open_chooser(
         &mut self,
         owner: Option<Retained<NSWindow>>,
         anchor: crate::layout::Rect,
-        composer: Option<crate::layout::Rect>,
         spec: Spec,
         dismiss: Option<String>,
     ) {
@@ -1438,9 +1436,12 @@ impl Host {
         appearance(&window, &self.tokens);
         let around = {
             let h = owner.contentView().map_or(0., |c| c.bounds().size.height);
-            let screen = |r: crate::layout::Rect| owner.convertRectToScreen(rect(r, h));
-            let visible = owner.screen().map_or(owner.frame(), |s| s.visibleFrame());
-            (screen(anchor), composer.map(screen), visible)
+            let part = owner.convertRectToScreen(rect(anchor, h));
+            // The editor window it belongs to (the Agent popover is its
+            // child), on its screen.
+            let editor = owner.parentWindow().unwrap_or_else(|| owner.clone());
+            let visible = editor.screen().map_or(editor.frame(), |s| s.visibleFrame());
+            (part, intersection(editor.frame(), visible))
         };
         let state = Rc::new(RefCell::new(State {
             spec,
@@ -1454,6 +1455,7 @@ impl Host {
             parent: owner.clone(),
             open: true,
             around,
+            width: 0.,
             watchers: vec![],
             observers: vec![],
             monitor: None,
@@ -1547,6 +1549,9 @@ impl Host {
         unsafe { objc2_foundation::NSOperationQueue::mainQueue().addOperationWithBlock(&later) };
         if let Some(search) = state.borrow().search.clone() {
             window.makeFirstResponder(Some(&search));
+        } else if let Some(root) = state.borrow().root.clone() {
+            // The reasoning menu takes the keys itself.
+            window.makeFirstResponder(Some(&root));
         }
         self.chooser = Some(Chooser { state });
     }
@@ -1692,60 +1697,48 @@ mod tests {
         }
     }
     #[test]
-    fn it_stands_above_the_composer_with_a_gap_and_never_over_it() {
+    fn a_menu_hangs_above_its_part_on_the_parts_leading_edge_inside_the_window() {
         let r = |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-        let screen = r(0., 0., 1440., 900.);
-        let composer = r(20., 40., 420., 90.);
-        let pill = r(60., 48., 140., 24.);
-        let size = NSSize::new(668., 360.);
-        let overlaps = |a: NSRect, b: NSRect| {
-            a.origin.x < b.origin.x + b.size.width
-                && b.origin.x < a.origin.x + a.size.width
-                && a.origin.y < b.origin.y + b.size.height
-                && b.origin.y < a.origin.y + a.size.height
-        };
-        // Room above: on top of it with an 8 pt gap, from its leading edge.
-        let at = placement(size, pill, Some(composer), screen, 8.);
-        assert_eq!(at.origin.y, 40. + 90. + 8.);
-        assert_eq!(at.origin.x, 20.);
-        // No room above: below it.
-        let high = r(20., 520., 420., 90.);
-        let at = placement(size, pill, Some(high), screen, 8.);
-        assert_eq!(at.origin.y + at.size.height, 520. - 8.);
-        // Room neither above nor below: beside it, on screen.
-        let tall = r(20., 200., 420., 500.);
-        let at = placement(size, pill, Some(tall), screen, 8.);
-        assert!(at.origin.x >= 20. + 420. + 8.);
-        for c in [composer, high, tall] {
-            let at = placement(size, pill, Some(c), screen, 8.);
-            assert!(!overlaps(at, c), "{at:?} over {c:?}");
-            assert!(at.origin.x >= 8. && at.origin.x + at.size.width <= 1432.);
-            assert!(at.origin.y >= 8. && at.origin.y + at.size.height <= 892.);
-        }
-        // Near the screen's right edge it moves left to stay on screen.
-        let right = r(1200., 40., 220., 90.);
-        let at = placement(size, pill, Some(right), screen, 8.);
-        assert_eq!(at.origin.x + at.size.width, 1432.);
+        let window = r(100., 50., 1200., 800.);
+        let part = r(900., 80., 140., 24.);
+        let size = NSSize::new(364., 300.);
+        // Above the part, `offset` clear of it; the card (past a 44 pt rail)
+        // on the part's leading edge.
+        let at = placement(size, part, 44., window, 6.);
+        assert_eq!(at.origin.y, 80. + 24. + 6.);
+        assert_eq!(at.origin.x, 900. - 44.);
+        // The reasoning menu: its own leading edge on the part's.
+        assert_eq!(placement(size, part, 0., window, 6.).origin.x, 900.);
+        // Near the window's trailing edge it moves in, never out of it.
+        let edge = r(1250., 80., 40., 24.);
+        let at = placement(size, edge, 0., window, 6.);
+        assert_eq!(at.origin.x + at.size.width, 1300.);
+        // Near its leading edge, the rail stays inside too.
+        let lead = r(110., 80., 40., 24.);
+        assert_eq!(placement(size, lead, 44., window, 6.).origin.x, 100.);
+        // No room above (a part at the window's top): below it.
+        let high = r(900., 760., 140., 24.);
+        let at = placement(size, high, 0., window, 6.);
+        assert_eq!(at.origin.y + at.size.height, 760. - 6.);
+        // Room neither above nor below: as high as the window allows.
+        let short = r(100., 50., 1200., 320.);
+        let at = placement(size, r(900., 200., 140., 24.), 0., short, 6.);
+        assert_eq!(at.origin.y + at.size.height, 370.);
+        assert!(at.origin.y >= 50.);
     }
     #[test]
-    fn a_request_becomes_rows_and_the_panel_title() {
+    fn a_request_becomes_rows_and_the_usage_monitor() {
         let spec = Spec::from_request(&serde_json::json!({
             "placeholder": "Search models…",
-            "chooser": {"title": "GPT Sol", "icon": "provider.chatgpt", "facts": [["Context", "272K"]],
-                "usage": [["Credits", "812 of 1,000 left"], ["Plan", "Aerolite"]], "note": ""},
+            "usage": [["Credits", "812 of 1,000 left"], ["Plan", "Aerolite"]],
             "options": [
                 {"kind": "harness", "label": "Codex", "icon": "provider.chatgpt", "checked": true, "stays": true},
-                {"kind": "model", "label": "GPT Sol", "checked": true, "stays": true},
-                {"kind": "effort", "label": "High", "default": true},
-                {"kind": "action", "label": "Add a provider…"},
+                {"kind": "model", "label": "GPT Sol", "checked": true},
+                {"kind": "add", "label": "Providers…"},
                 {"kind": "unknown", "label": "?"}
             ]
         }));
-        assert_eq!(
-            spec.title,
-            Some(("GPT Sol".into(), Some("provider.chatgpt".into())))
-        );
-        assert_eq!(spec.facts, vec![("Context".to_owned(), "272K".to_owned())]);
+        assert_eq!(spec.menu, Menu::Models);
         assert_eq!(
             spec.usage,
             vec![
@@ -1755,9 +1748,25 @@ mod tests {
         );
         assert_eq!(spec.rows[0].part, Some(Part::Harness));
         assert!(spec.rows[0].checked && spec.rows[0].stays);
-        assert!(spec.rows[2].default);
-        assert_eq!(spec.rows[3].part, Some(Part::Action));
-        assert_eq!(spec.rows[4].part, None);
+        assert!(!spec.rows[1].stays);
+        assert_eq!(spec.rows[2].part, Some(Part::Add));
+        assert_eq!(spec.rows[3].part, None);
         assert_eq!(spec.placeholder, "Search models…");
+    }
+    #[test]
+    fn the_reasoning_menu_lists_every_level_in_order_with_no_shortcuts() {
+        let options: Vec<_> = ["Low", "Medium", "High", "Extra high", "Max"]
+            .iter()
+            .enumerate()
+            .map(|(n, l)| serde_json::json!({"kind": "effort", "label": l, "checked": n == 2}))
+            .collect();
+        let spec = Spec::from_request(&serde_json::json!({"menu": "effort", "options": options}));
+        assert_eq!(spec.menu, Menu::Effort);
+        assert_eq!(spec.listed(""), vec![0, 1, 2, 3, 4]);
+        // A query never hides a level (the menu has no search).
+        assert_eq!(spec.listed("max"), vec![0, 1, 2, 3, 4]);
+        assert!(spec.numbered("").is_empty());
+        assert!(spec.listed("").iter().all(|&i| choosable(&spec.rows[i])));
+        assert!(spec.rows[2].checked);
     }
 }

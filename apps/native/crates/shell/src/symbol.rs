@@ -15,7 +15,7 @@ pub enum Weight {
     Semibold,
 }
 
-type Key = (String, u32, Weight, u32, u32);
+type Key = (String, u32, Weight, u32, u32, u32);
 thread_local! {
     static CACHE: RefCell<HashMap<Key, Option<Arc<RenderImage>>>> = RefCell::new(HashMap::new());
 }
@@ -48,17 +48,31 @@ pub fn rasterize(
     color: u32,
     scale: f32,
 ) -> Option<Arc<RenderImage>> {
+    rasterize_turned(name, points, weight, color, scale, 0.)
+}
+
+/// [`rasterize`], turned `degrees` clockwise about its centre. Only a
+/// vendored glyph turns; an SF Symbol is drawn upright.
+pub fn rasterize_turned(
+    name: &str,
+    points: f32,
+    weight: Weight,
+    color: u32,
+    scale: f32,
+    degrees: f32,
+) -> Option<Arc<RenderImage>> {
     let key = (
         name.to_string(),
         points.to_bits(),
         weight,
         color,
         scale.to_bits(),
+        degrees.to_bits(),
     );
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
-    let image = draw(name, points, weight, color, scale);
+    let image = draw(name, points, weight, color, scale, degrees);
     CACHE.with(|c| c.borrow_mut().insert(key, image.clone()));
     image
 }
@@ -69,12 +83,13 @@ fn draw(
     weight: Weight,
     color: u32,
     scale: f32,
+    degrees: f32,
 ) -> Option<Arc<RenderImage>> {
     // A vendored glyph that stands for this symbol (`crate::icons`): drawn
     // from its SVG on the same square, in the same tint.
     if let Some(glyph) = crate::icons::glyph(name) {
         let side = (points * scale).ceil().max(1.) as u32;
-        let pixels = crate::icons::tinted_bgra(glyph, side, color)?;
+        let pixels = crate::icons::tinted_bgra(glyph, side, color, degrees)?;
         let buffer = image::RgbaImage::from_raw(side, side, pixels)?;
         return Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
     }
@@ -157,7 +172,19 @@ fn draw(
 /// An SF Symbol element `points` square, tinted `color`. Draws nothing (but
 /// keeps its size) when the symbol is unavailable.
 pub fn symbol(name: &str, points: f32, weight: Weight, color: u32, window: &Window) -> AnyElement {
-    match rasterize(name, points, weight, color, window.scale_factor()) {
+    symbol_turned(name, points, weight, color, 0., window)
+}
+
+/// [`symbol`] turned `degrees` clockwise (a chevron whose menu is open).
+pub fn symbol_turned(
+    name: &str,
+    points: f32,
+    weight: Weight,
+    color: u32,
+    degrees: f32,
+    window: &Window,
+) -> AnyElement {
+    match rasterize_turned(name, points, weight, color, window.scale_factor(), degrees) {
         Some(image) => img(ImageSource::Render(image))
             .flex_none()
             .size(px(points))

@@ -1,8 +1,11 @@
-//! The Settings window, the sign-in sheet, the welcome window and the visual
-//! pickers name no colour and no text size of their own: every one comes from
-//! pm-design (`Colors`, `Settings`, `Welcome`, `TextSize`, `Ink`). This fails
-//! on a raw hex colour, an RGB literal, an ink alpha written as a byte, or a
-//! numeric font size in those files.
+//! The Settings window, the sign-in sheet, the welcome window, the visual
+//! pickers, and the Agent composer (its field, its pill, the model picker
+//! and the reasoning menu) and panel name no colour and no text size of
+//! their own: every one comes from pm-design (`Colors`, `Settings`,
+//! `Welcome`, `TextSize`, `Ink`, the token table). This fails on a raw hex
+//! colour, an RGB literal, an ink alpha written as a byte, or a numeric font
+//! size in those files; in the panel's TypeScript, on a style or metric
+//! written as a number or a colour rather than a token.
 use std::path::Path;
 
 const VIEWS: &[&str] = &[
@@ -12,7 +15,79 @@ const VIEWS: &[&str] = &[
     "../app/src/settings_window/form/previews.rs",
     "../app/src/settings_window/form/agent_app_icons.rs",
     "../app/src/sign_in.rs",
+    "../shell/src/agent_chooser.rs",
+    "../shell/src/pill.rs",
+    "../shell/src/text.rs",
 ];
+
+/// The Agent panel's TypeScript views (the composer, the pill, the empty
+/// state and the thread).
+const PANELS: &[&str] = &["../../js/v4/panels/agent/view.tsx"];
+
+/// Style keys whose value is a size, a space, a radius, a colour or type.
+const VISUAL: &[&str] = &[
+    "fontSize",
+    "fontWeight",
+    "lineHeight",
+    "symbolSize",
+    "color",
+    "background",
+    "borderColor",
+    "borderRadius",
+    "borderWidth",
+    "width",
+    "height",
+    "minWidth",
+    "minHeight",
+    "maxWidth",
+    "maxHeight",
+    "gap",
+    "padding",
+    "paddingLeft",
+    "paddingRight",
+    "paddingTop",
+    "paddingBottom",
+    "margin",
+    "marginLeft",
+    "marginRight",
+    "marginTop",
+    "marginBottom",
+];
+
+/// What on a TypeScript `line` is a style written as a literal: a visual key
+/// set to a number other than zero, or to a colour string.
+fn panel_violation(line: &str) -> Option<String> {
+    let code = line.trim_start();
+    if code.starts_with("//") || code.starts_with('*') || code.starts_with("/*") {
+        return None;
+    }
+    for key in VISUAL {
+        let mut rest = line;
+        while let Some(at) = rest.find(key) {
+            let before = rest[..at].chars().next_back();
+            let after = rest[at + key.len()..].trim_start();
+            rest = &rest[at + key.len()..];
+            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let Some(value) = after.strip_prefix(':') else {
+                continue;
+            };
+            let value = value.trim_start();
+            let number: String = value
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if !number.is_empty() && number.parse::<f64>().is_ok_and(|n| n != 0.) {
+                return Some(format!("{key} written as {number}"));
+            }
+            if value.starts_with("\"#") || value.starts_with("\"rgb") || value.starts_with("'#") {
+                return Some(format!("{key} written as a colour"));
+            }
+        }
+    }
+    None
+}
 
 /// Calls whose size or colour argument must be a token, never a number.
 const SIZED: &[&str] = &[
@@ -92,11 +167,41 @@ fn views_take_colours_and_text_sizes_from_tokens() {
             }
         }
     }
+    for file in PANELS {
+        let text = std::fs::read_to_string(root.join(file)).expect(file);
+        for (n, line) in text.lines().enumerate() {
+            if let Some(what) = panel_violation(line) {
+                found.push(format!("{file}:{}: {what}: {}", n + 1, line.trim()));
+            }
+        }
+    }
     assert!(
         found.is_empty(),
         "colours and text sizes come from pm-design tokens:\n{}",
         found.join("\n")
     );
+}
+
+#[test]
+fn the_panel_lint_catches_what_it_should() {
+    for bad in [
+        "fontSize: 15,",
+        "style={{ gap: 6, color: t(\"colors.text\") }}",
+        "background: \"#2E2E2E\",",
+        "borderRadius: 8",
+    ] {
+        assert!(panel_violation(bad).is_some(), "{bad}");
+    }
+    for good in [
+        "fontSize: t(\"typography.body\"),",
+        "left: 0, right: 0, bottom: 0,",
+        "marginLeft: t(\"space.xs\"),",
+        "// fontSize: 15 was the old composer size",
+        "const latency = { tokenWidth: 4 };",
+        "width: 0,",
+    ] {
+        assert!(panel_violation(good).is_none(), "{good}");
+    }
 }
 
 #[test]

@@ -850,6 +850,17 @@ export function harnessModel(s: Snapshot, n?: NativeFacts): string {
   const group = n?.modelGroups?.[s.settings.provider];
   return group?.find(([, , on]) => on)?.[0] ?? s.catalog.models[0]?.[0] ?? "";
 }
+/** The reasoning level the model runs at: the chosen one when the model
+ * offers it, else the model's default. */
+export function currentEffort(s: Snapshot, efforts: string[]): string {
+  const chosen = s.settings.effort;
+  if (chosen && efforts.includes(chosen)) return chosen;
+  const fallback = s.catalog.defaultEffort;
+  return fallback && efforts.includes(fallback) ? fallback : chosen;
+}
+/** How long a picked model or level shows in the pill without the kernel
+ * confirming it, before the pill reads the kernel's again. */
+const PICK_SETTLE_MS = 2000;
 /** The mark the chooser and the pill show for a harness's model: Claude
  * Code's own, Codex's OpenAI blossom, and the Powermove mark for Aero. */
 function providerMark(harness: string, group: string): string {
@@ -886,17 +897,6 @@ function headingIcon(heading: string): string {
   if (heading === "ChatGPT" || heading === "OpenAI API key") return "provider.chatgpt";
   if (heading === "Claude" || heading === "Anthropic API key") return "provider.claude";
   return heading === "Powermove" ? "provider.powermove" : "provider.compatible";
-}
-/** The chooser's card: the chosen model (or, signed out, the harness). */
-export interface ChooserCard {
-  title: string;
-  icon: string;
-  /** Facts the provider reports, as [label, value]. */
-  facts?: [string, string][];
-  /** The usage monitor at the card's foot (Aero's credits, plan, reset day). */
-  usage?: [string, string][];
-  /** A quiet line (where to sign in). */
-  note?: string;
 }
 /** Each harness's own mark in the chooser's rail. */
 function harnessMark(harness: string): string {
@@ -953,12 +953,14 @@ export type Menu = (request: {
   anchor: number;
   placeholder: string;
   options: MenuOption[];
-  /** Composer pop-ups track their button rather than the legacy field menu. */
-  picker?: "model" | "effort" | "access" | "add" | "chooser";
-  /** The chooser's card. */
-  chooser?: ChooserCard;
-  /** The `id` of the element the chooser stands clear of (the composer). */
-  avoid?: string;
+  /** Composer pop-ups track their button rather than the legacy field menu.
+   * `chooser`: one of the pill's own menus (the model picker, or with
+   * `menu: "effort"` the reasoning menu). */
+  picker?: "model" | "access" | "add" | "chooser";
+  /** Which of the pill's menus a `chooser` request opens. */
+  menu?: "effort";
+  /** The model picker's usage monitor (Aero's credits, plan, reset day). */
+  usage?: [string, string][];
   search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
@@ -1028,10 +1030,15 @@ function Trigger({
     </UI.ToolbarItem>
   );
 }
-/** The composer's model chooser: the provider's mark, the model's name, its
- * reasoning effort in the secondary ink and one chevron, read as one
- * control. The name opens the model menu and the effort its own menu (the
- * window's composer menus); a model with no effort levels shows none. */
+/** The composer's pill: `[mark] Model  Effort ⌄`, the model picker and the
+ * reasoning menu in one quiet control (w110: Aside's interaction, our look).
+ * At rest it is text, the model in the secondary ink and its effort in the
+ * muted one, at body size; its width is its text's, whatever the harness.
+ * The part under the pointer, or whose menu is open, gets the pill (the
+ * host draws it: `metadata.pill`), which glides between the two parts;
+ * while it shows, the model's own chevron opens beside its name and pushes
+ * the effort along, so the two read as separate. The open part's chevron
+ * turns to point up. A model with no effort levels is the model part alone. */
 function ModelChooser({
   mark,
   model,
@@ -1050,61 +1057,47 @@ function ModelChooser({
   disabled: boolean;
   opened: string | null;
   openModels: (anchor: number) => void;
-  /** Absent: the pill is one hit target (the Powermove harness's chooser
-   * holds the effort). */
-  openEffort?: (anchor: number) => void;
-  /** The Powermove harness has no account: the name half reads "Connect a
-   * provider" and its menu offers the harnesses and Settings › Providers. */
+  openEffort: (anchor: number) => void;
+  /** The Powermove harness has no account: the name reads "Sign in to
+   * Powermove" (or "Connect a provider") and its menu leads to Settings ›
+   * Providers. */
   signedOut?: boolean;
 }) {
-  const name = t(disabled ? "colors.faint" : "colors.secondary");
+  const ink = t(disabled ? "colors.faint" : "colors.secondary");
   const quietInk = t(disabled ? "colors.faint" : "colors.muted");
-  const single = !openEffort;
-  const effortText = (
-    <text
-      style={{
-        flexShrink: 0,
-        fontSize: t("typography.reading"),
-        color: quietInk,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {effort}
-    </text>
-  );
-  const chevron = (
+  const split = effort !== null;
+  const chevron = (open: boolean, reveal: boolean) => (
     <div
-      metadata={{ symbol: "composer.chevron" }}
+      metadata={{ symbol: "composer.chevron", turn: open, ...(reveal ? { pill: "reveal" } : {}) }}
       style={{
         flexShrink: 0,
         width: t("metrics.composer_symbol"),
         height: t("metrics.composer_symbol"),
         symbolSize: t("metrics.composer_symbol"),
+        marginLeft: t("space.xs"),
         color: quietInk,
       }}
     />
   );
+  // No tooltips: the part's own text names it, and a tooltip would stand
+  // over the composer under the pointer.
   const part = (
-    id: string,
+    which: "model" | "effort",
     label: string,
-    title: string,
     open: (anchor: number) => void,
-    first: boolean,
-    last: boolean,
     flexible: boolean,
     children: ComponentChildren,
   ) => (
     <button
-      id={id}
+      id={`agent-${which}`}
       role="button"
       tabIndex={0}
       label={label}
-      title={title}
       disabled={disabled}
-      open={opened === id.slice("agent-".length)}
+      open={opened === which}
       aria-haspopup="menu"
-      aria-expanded={opened === id.slice("agent-".length)}
-      metadata={{ menuAnchor: true }}
+      aria-expanded={opened === which}
+      metadata={{ menuAnchor: true, pill: "part" }}
       preventDefault={{ keydown: ["Enter", " "] }}
       onClick={(e) => {
         if (!disabled) open(Number(e.currentTarget));
@@ -1117,12 +1110,9 @@ function ModelChooser({
         ...target,
         ...row,
         ...(flexible ? shrink : { flexShrink: 0 }),
-        gap: t("space.sm"),
         height: t("metrics.hit"),
-        // The two halves meet without a seam: each pads only its outer side.
-        paddingLeft: t(first ? "space.md" : "space.xs"),
-        paddingRight: t(last ? "space.md" : "space.hair"),
-        ...(opened === id.slice("agent-".length) ? { background: t("colors.selected_fill") } : {}),
+        paddingLeft: t("space.sm"),
+        paddingRight: t("space.sm"),
         borderRadius: t("metrics.inner_radius"),
       }}
     >
@@ -1130,14 +1120,11 @@ function ModelChooser({
     </button>
   );
   return (
-    <div id="agent-chooser" style={{ ...row, ...shrink }}>
+    <div id="agent-chooser" metadata={{ pill: "group" }} style={{ ...row, ...shrink }}>
       {part(
-        "agent-model",
-        signedOut ? model : `Model, ${model}${single && effort ? `, ${effort}` : ""}`,
-        signedOut ? "Harness and providers" : single ? "Harness, model and reasoning" : "Model",
+        "model",
+        signedOut ? model : `Model, ${model}`,
         openModels,
-        true,
-        single || effort === null,
         true,
         <>
           {mark !== null && (
@@ -1148,39 +1135,43 @@ function ModelChooser({
                 width: t("metrics.symbol_panel"),
                 height: t("metrics.symbol_panel"),
                 symbolSize: t("metrics.symbol_panel"),
-                color: name,
+                marginRight: t("space.sm"),
+                color: ink,
               }}
             />
           )}
           <text
             style={{
               ...shrink,
-              fontSize: t("typography.reading"),
-              color: name,
+              fontSize: t("typography.body"),
+              color: ink,
               whiteSpace: "nowrap",
               textOverflow: "ellipsis",
             }}
           >
-            {model.replace(/\s*\([^)]*context[^)]*\)/i, "")}
+            {modelBase(model)}
           </text>
-          {single && effort !== null && effortText}
-          {(single || effort === null) && chevron}
+          {chevron(opened === "model", split)}
         </>,
       )}
-      {!single &&
-        effort !== null &&
-        openEffort &&
+      {split &&
         part(
-          "agent-effort",
+          "effort",
           `Reasoning effort, ${effort}`,
-          "Reasoning effort",
           openEffort,
           false,
-          true,
-          false,
           <>
-            {effortText}
-            {chevron}
+            <text
+              style={{
+                flexShrink: 0,
+                fontSize: t("typography.body"),
+                color: quietInk,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {effort}
+            </text>
+            {chevron(opened === "effort", false)}
           </>,
         )}
     </div>
@@ -2922,16 +2913,28 @@ function Composer({
       if (openModelMenu.current === open) openModelMenu.current = null;
     }
   };
+  // A model or level just picked shows in the pill at once, before the
+  // kernel's next publication carries it (nothing flickers back); a choice
+  // the kernel refused falls back when its answer comes, or after a beat.
+  const [picked, setPicked] = useState<{ model?: string; effort?: string } | null>(null);
+  useLayoutEffect(() => setPicked(null), [s.settings.provider, s.settings.model, s.settings.effort]);
+  useLayoutEffect(() => {
+    if (!picked) return;
+    const timer = setTimeout(() => setPicked(null), PICK_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [picked]);
+  const now = picked ? { ...s, settings: { ...s.settings, ...picked } } : s;
   const modelName = named(
-    s.catalog.models,
-    s.settings.model,
-    named(s.catalog.providers, s.settings.provider),
+    now.catalog.models,
+    now.settings.model,
+    named(now.catalog.providers, now.settings.provider),
   );
-  const shownModel = harnessModel(s, n);
-  // The model's reasoning effort is its own picker beside the model's; a
-  // model with no effort levels lists none, and the picker is not shown.
+  const shownModel = harnessModel(now, n);
+  // The model's reasoning effort is its own menu beside the model's; a
+  // model with no effort levels lists none, and the pill has no effort part.
   const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
-  const effortName = s.settings.effort ? effortLabel(s.settings.effort) : "";
+  const effortNow = currentEffort(now, efforts);
+  const effortName = effortNow ? effortLabel(effortNow) : "";
   const choicesLocked = working || s.composerDisabled;
   const [openPicker, setOpenPicker] = useState<string | null>(null);
   const menuEpoch = useRef(0);
@@ -2947,13 +2950,12 @@ function Composer({
     provider: string;
     epoch: number;
   } | null>(null);
-  // With the Powermove harness (the development switch), the pill opens the
-  // chooser popover (PM-727, Capy's layout): the harnesses as a rail, the
-  // models the chosen one runs under their account headings, and a card for
-  // the chosen model (its context when the label names it, Reasoning as a
-  // track, Add a provider…). Signed out, the list and the card lead to
+  // With the harnesses, the pill's model part opens the model picker
+  // (PM-727, Capy's layout): the harnesses as a rail attached to the card of
+  // the models the chosen one runs, under their account headings, with
+  // Aero's usage monitor at its foot. Signed out, the card leads to
   // Settings › Providers.
-  const chooserRequest = (s: Snapshot): { options: MenuOption[]; chooser?: ChooserCard } => {
+  const chooserRequest = (s: Snapshot): { options: MenuOption[]; usage?: [string, string][] } => {
     const n = native.current;
     const harness = s.settings.provider;
     const harnessName = named(s.catalog.providers, harness);
@@ -3005,7 +3007,6 @@ function Composer({
         value: `model:${v}`,
         checked: v === shown,
         icon: `provider.${harness === "aero" ? aeroModelMark(v) : providerMark(harness, providerGroup(harness, v))}`,
-        stays: true,
       });
       groups.set(heading, rows);
     }
@@ -3013,36 +3014,11 @@ function Composer({
     const rank = (heading: string) => order.indexOf(heading) >>> 0;
     for (const heading of [...groups.keys()].sort((a, b) => rank(a) - rank(b)))
       options.push({ kind: "heading", label: heading, value: "", icon: headingIcon(heading) }, ...groups.get(heading)!);
-    const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
-    options.push(
-      ...efforts.map((value) => ({
-        kind: "effort",
-        label: effortLabel(value),
-        value: `effort:${value}`,
-        checked: value === s.settings.effort || (!efforts.includes(s.settings.effort) && value === s.catalog.defaultEffort),
-        default: value === s.catalog.defaultEffort || undefined,
-        stays: true,
-      })),
-    );
     options.push({ kind: "add", label: "Providers…", value: "providers:" });
-    const label = named(s.catalog.models, shown, harnessName);
-    const context = modelContext(label);
-    // What the provider reports about this model and its account. Aero's
-    // card ends with its usage monitor (credits, plan, reset day) once the
-    // backend has answered; Claude Code and Codex report none.
-    const facts: [string, string][] = [];
-    if (context) facts.push(["Context", context]);
-    if (harness !== "aero") facts.push(["Account", accountHeading(harness, shown, n)]);
+    // Aero's usage monitor (credits, plan, reset day) once the backend has
+    // answered; Claude Code and Codex report none.
     const usage = harness === "aero" && n.aero?.usage.length ? n.aero.usage : undefined;
-    return {
-      options,
-      chooser: {
-        title: modelBase(label),
-        icon: `provider.${harness === "aero" ? aeroModelMark(shown) : providerMark(harness, providerGroup(harness, shown))}`,
-        facts,
-        ...(usage ? { usage } : {}),
-      },
-    };
+    return { options, ...(usage ? { usage } : {}) };
   };
   const modelRows = (s: Snapshot): MenuOption[] =>
     harnessMode(s) ? chooserRequest(s).options : s.catalog.providers.flatMap(([provider, providerName]) => {
@@ -3075,8 +3051,7 @@ function Composer({
   const modelRequest = (s: Snapshot) => {
     if (!harnessMode(s))
       return { picker: "model" as const, search: modelSearch(s), placeholder: "Search models", options: modelRows(s) };
-    const { options, chooser } = chooserRequest(s);
-    return { picker: "chooser" as const, placeholder: "Search models", avoid: "agent-composer", options, chooser };
+    return { picker: "chooser" as const, placeholder: "Search models", ...chooserRequest(s) };
   };
   const modelMenu = (
     anchor: number,
@@ -3102,10 +3077,6 @@ function Composer({
       } else if (kind === "retry") {
         setOpenPicker(null);
         send({ type: "retryConnection" });
-      } else if (kind === "effort") {
-        // The chooser stays open on its Reasoning track.
-        if (value !== now.settings.effort) send({ type: "setModel", model: now.settings.model, effort: value });
-        modelMenu(anchor, true);
       } else if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
         awaiting.current = { anchor, provider: value, epoch };
@@ -3126,14 +3097,13 @@ function Composer({
       // The effort shown goes along: the new model keeps it when it
       // takes it, else runs at its own default.
       else if (kind === "model") {
+        setOpenPicker(null);
+        if (value !== now.settings.model) setPicked({ model: value });
         send({
           type: "setModel",
           model: value,
           effort: now.settings.effort,
         });
-        // The chooser stays open: its card follows the chosen model.
-        if (harnessMode(now)) modelMenu(anchor, true);
-        else setOpenPicker(null);
       } else if (kind === "other") {
         const colon = value.indexOf(":");
         setOpenPicker(null);
@@ -3257,25 +3227,30 @@ function Composer({
         send({ type: "setAccess", access: choice as Access });
     });
   };
+  // The pill's effort part opens the reasoning menu: the model's levels in
+  // order, ✓ on the one in use, on the model picker's card and rows.
+  // Choosing one closes it and the pill reads the new level at once.
   const openEffort = (anchor: number) => {
     awaiting.current = null;
     const epoch = ++menuEpoch.current;
     setOpenPicker("effort");
     void menu?.({
       anchor,
-      picker: "effort",
-      search: false,
+      picker: "chooser",
+      menu: "effort",
       placeholder: "",
       options: efforts.map((value) => ({
+        kind: "effort",
         label: effortLabel(value),
         value,
-        checked: value === s.settings.effort,
+        checked: value === effortNow,
       })),
     }).then((choice) => {
       if (menuEpoch.current !== epoch) return;
       setOpenPicker(null);
-      if (typeof choice === "string" && choice !== s.settings.effort)
-        send({ type: "setModel", model: s.settings.model, effort: choice });
+      if (typeof choice !== "string" || choice === effortNow) return;
+      setPicked((p) => ({ ...p, effort: choice }));
+      send({ type: "setModel", model: latest.current.settings.model, effort: choice });
     });
   };
   const ready = !disabled && !submitting && s.sendable;
@@ -3421,7 +3396,7 @@ function Composer({
           }
         }}
         style={{
-          fontSize: t("typography.composer"),
+          fontSize: t("typography.body"),
           color: t("colors.text"),
           background: surface,
           minWidth: t("metrics.hit"),
@@ -3494,7 +3469,7 @@ function Composer({
           disabled={!menu || choicesLocked}
           opened={openPicker}
           openModels={openModels}
-          openEffort={harness ? undefined : openEffort}
+          openEffort={openEffort}
           signedOut={signedOut}
         />
         <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
