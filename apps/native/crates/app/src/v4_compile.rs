@@ -589,10 +589,14 @@ fn compile(
             // Quiet source-list rows: selection and hover inset from the panel
             // edge by `gap`, text a further `gap` in (language §9 Lists).
             Some(Component::ListItem | Component::TreeItem) if variant(node) != Some("band") => {
+                // Each row keeps its pitch (`row`), its highlight `list_gap`
+                // shorter and centred in it: a hovered row and a selected one
+                // never touch.
                 sheet
                     .flex_row()
                     .items_center()
-                    .min_h(px(t.metrics.row))
+                    .min_h(px(t.metrics.row - t.metrics.list_gap))
+                    .my(px(t.metrics.list_gap / 2.))
                     .mx(px(t.metrics.gap))
                     .px(px(t.metrics.gap))
                     .gap(px(t.metrics.gap))

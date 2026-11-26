@@ -15,12 +15,14 @@ pub mod corner;
 pub mod dots;
 pub mod motion;
 mod recipe;
+pub mod settings;
 pub mod sketch;
 mod strip;
 pub use color::mix;
 use color::oklch;
 pub use recipe::{Elevation, Shadow, Text, TextStyle};
 use serde::{Deserialize, Serialize};
+pub use settings::{Ink, PickerPalette, Settings, TextSize, TilePalette, Welcome, css, with_alpha};
 pub use strip::{GLOW_REACH, GRID_FADE, Playhead, Strip, StripState, TrimGrip};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
@@ -110,6 +112,17 @@ pub struct Colors {
     pub channel_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
+    /// The welcome window's stage art: the ground left of the window and
+    /// the orange field's light and deep ends (the same in both appearances).
+    pub welcome_ground: u32,
+    pub welcome_field_light: u32,
+    pub welcome_field_deep: u32,
+    /// Anthropic's mark colour, for the Claude Code mark.
+    pub brand_claude: u32,
+    /// Pure white: marks drawn over the welcome field.
+    pub white: u32,
+    /// Pure black: veils and a clear window's backing.
+    pub black: u32,
 }
 /// Eight label colours, in menu order. Fills are muted so artwork stays the loudest thing on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +521,12 @@ pub struct Metrics {
     pub channel_strip: f32,
     /// Mixer fader knob height.
     pub fader_knob: f32,
+    /// Space between adjacent rows of any list with hover or selection
+    /// (sidebars, the Project panel, Effects, pickers, the panel library):
+    /// two highlights never touch.
+    pub list_gap: f32,
+    /// A source-list row's pitch in Home and utility windows' sidebars.
+    pub nav_row: f32,
     /// Welcome window width.
     pub welcome_width: f32,
     /// Welcome window height.
@@ -636,6 +655,14 @@ pub struct Tokens {
     pub typography: TypeScale,
     pub motion: Motion,
     pub translucency: Translucency,
+    /// Settings, the sign-in sheet and the pickers ([`Settings`]).
+    pub settings: Settings,
+    /// Text size steps ([`TextSize`]).
+    pub text_size: TextSize,
+    /// Ink alpha steps ([`Ink`]).
+    pub ink: Ink,
+    /// The welcome window and the sign-in sheet ([`Welcome`]).
+    pub welcome: Welcome,
 }
 /// Layer colours, dark then light: the body of a kind badge and the hue a
 /// strip takes. Text on them is `text`.
@@ -787,6 +814,12 @@ impl Colors {
                 oklch(0.52, 0.16, 262.)
             },
             labels: LABELS[usize::from(!dark)],
+            welcome_ground: 0x131212,
+            welcome_field_light: 0xff7a2e,
+            welcome_field_deep: 0xa3301a,
+            brand_claude: 0xd97757,
+            white: 0xffffff,
+            black: 0x000000,
         }
     }
 }
@@ -1045,6 +1078,8 @@ impl Tokens {
                 message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
+                list_gap: 2.,
+                nav_row: 32.,
                 welcome_width: 900.,
                 welcome_height: 640.,
                 mark_bracket: 6.,
@@ -1087,6 +1122,10 @@ impl Tokens {
                 note_hold: 2.2,
                 menu_fade: 0.1,
             },
+            settings: Settings::of(scheme),
+            text_size: TextSize::new(),
+            ink: Ink::new(),
+            welcome: Welcome::new(),
             translucency: {
                 // The translucent shell is a heavy tint of the window colour
                 // over a behind-window blur; Reduce Transparency makes it solid.
@@ -1313,7 +1352,10 @@ pub mod workspace {
 pub const DOCK_SCROLL_FADE: f32 = 28.;
 
 pub fn dock_scroll_edges(offset: f32, maximum: f32) -> (bool, bool) {
-    (maximum > 1. && offset > 1., maximum > 1. && maximum - offset > 1.)
+    (
+        maximum > 1. && offset > 1.,
+        maximum > 1. && maximum - offset > 1.,
+    )
 }
 
 #[cfg(test)]

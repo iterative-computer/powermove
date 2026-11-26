@@ -712,9 +712,9 @@ fn capture_agent_states() {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let (w, h) = if panel == "settings" {
                     (
-                        (pm_shell::settings_window::MIN_SIZE.0
-                            - pm_shell::settings_window::SIDEBAR_WIDTH) as f32,
-                        pm_shell::settings_window::MIN_SIZE.1 as f32,
+                        (pm_shell::settings_window::min_size().0
+                            - pm_shell::settings_window::sidebar_width()) as f32,
+                        pm_shell::settings_window::min_size().1 as f32,
                     )
                 } else if timeline {
                     (900., 200.)

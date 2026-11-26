@@ -9,7 +9,7 @@ use gpui::{AnyWindowHandle, App, AppContext as _, Bounds, Entity, WindowBounds, 
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
 use pm_shell::welcome::{Button, Frame, SignIn as SignInFrame, SignInStage};
-use pm_shell::welcome_view::{OnAction, SHEET_SIZE, WelcomeView};
+use pm_shell::welcome_view::{OnAction, WelcomeView, sheet_size};
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -379,7 +379,7 @@ pub fn open(parent: Retained<NSWindow>, cx: &mut App) {
     };
     let frame = sheet_frame(&sheet.borrow().flow);
     let tokens = pm_shell::tokens();
-    let (w, h) = SHEET_SIZE;
+    let (w, h) = sheet_size();
     let mut options = gpui::WindowOptions::new().kind(WindowKind::Dialog);
     options.parent = Some(owner);
     options.is_resizable = false;

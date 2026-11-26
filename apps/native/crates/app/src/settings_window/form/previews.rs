@@ -1,171 +1,234 @@
-//! Settings' visual pickers: each option a small picture of Powermove's own
-//! editor (its panels, viewer and timeline in the design tokens' colours of
-//! the appearance it shows), never a drawing of the system's window chrome.
-//! The selected option is ringed in the accent, concentric with the picture.
+//! Settings' visual pickers: each option a rounded tile on a wallpaper in
+//! Powermove's dusk, with a crisp mini window inside (traffic lights, clean
+//! panes) in the appearance it shows. The selected option is ringed in the
+//! accent around the whole tile, concentric with it. Every size and colour is
+//! a token (`pm_design::Settings`, its `PickerPalette`, `Colors`).
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSImage};
 use objc2_foundation::{NSArray, NSRect, NSSize};
-use pm_design::{Colors, Scheme};
+use pm_design::{Colors, Scheme, Settings, css};
 
-/// The picture's size in points, and the ring's room around it.
-pub(super) const SIZE: (f64, f64) = (120., 75.);
-const RING: f64 = 4.;
-const RADIUS: f64 = 7.;
+fn tokens(scheme: Scheme) -> Settings {
+    Settings::of(scheme)
+}
+
+/// The room around the tile for its ring.
+fn margin(s: &Settings) -> f64 {
+    (s.picker_ring_gap + s.picker_ring) as f64
+}
 
 pub(super) fn image_size() -> NSSize {
-    NSSize::new(SIZE.0 + 2. * RING, SIZE.1 + 2. * RING)
+    let s = tokens(Scheme::Dark);
+    let m = margin(&s);
+    NSSize::new(
+        s.picker_width as f64 + 2. * m,
+        s.picker_height as f64 + 2. * m,
+    )
 }
 
-fn hex(c: u32) -> String {
-    format!("#{:06x}", c & 0xff_ffff)
-}
-
-/// One editor window at (x, y) of `w`×`h`, in `scheme`'s colours; `tabs`
-/// project tabs in its title row (the first selected).
-fn editor(x: f64, y: f64, w: f64, h: f64, scheme: Scheme, tabs: usize) -> String {
+/// One mini window at (x, y) of `w`×`h` in `scheme`'s colours: a title row
+/// with traffic lights (and `tabs` project tabs after them), a sidebar pane
+/// and two content panes over a wide one.
+fn window(s: &Settings, x: f64, y: f64, w: f64, h: f64, scheme: Scheme, tabs: usize) -> String {
     let c = Colors::of(scheme);
-    let ink = hex(c.text);
-    let line = |x: f64, y: f64, w: f64, o: f64| {
+    let p = s.picker;
+    let r = s.picker_window_radius as f64;
+    let ink = css(c.text);
+    // Proportions: a title row, then panes with a hairline of window between.
+    let top = h * 0.2;
+    let pad = (w * 0.035).max(1.5);
+    let dot = (h * 0.045).max(1.1);
+    let side = w * 0.26;
+    let (px, py) = (x + pad, y + top);
+    let pw = w - 2. * pad;
+    let ph = h - top - pad;
+    let cx = px + side + pad;
+    let cw = pw - side - pad;
+    let upper = ph * 0.58;
+    let lower = ph - upper - pad;
+    let half = (cw - pad) / 2.;
+    let pane = |x: f64, y: f64, w: f64, h: f64, fill: u32| {
         format!(
-            r#"<rect x="{x}" y="{y}" width="{w}" height="1.6" rx="0.8" fill="{ink}" fill-opacity="{o}"/>"#
+            r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{pr}" fill="{f}"/>"#,
+            pr = (r - pad).max(1.),
+            f = css(fill)
         )
     };
-    // Proportions of the editor: a title row, project | viewer | inspector
-    // over the timeline.
-    let top = 9.;
-    let pad = 3.;
-    let col = w * 0.22;
-    let insp = w * 0.2;
-    let mid = h * 0.58;
-    let (px, py) = (x + pad, y + top);
-    let vx = px + col + 2.;
-    let vw = w - 2. * pad - col - insp - 4.;
-    let ix = vx + vw + 2.;
-    let ty = py + mid + 2.;
-    let th = h - top - mid - 2. - pad;
-    let tw = w - 2. * pad - col - 2.;
-    let labels = c.labels;
-    let mut s = format!(
-        r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{RADIUS}" fill="{window}"/>
-<rect x="{px}" y="{py}" width="{col}" height="{ph}" rx="2.5" fill="{panel}"/>
-<rect x="{vx}" y="{py}" width="{vw}" height="{mid}" rx="2.5" fill="{viewer}"/>
-<rect x="{fx}" y="{fy}" width="{fw}" height="{fh}" rx="1" fill="{frame}"/>
-<rect x="{ix}" y="{py}" width="{insp}" height="{mid}" rx="2.5" fill="{panel}"/>
-<rect x="{vx}" y="{ty}" width="{tw}" height="{th}" rx="2.5" fill="{panel}"/>
-<rect x="{c1x}" y="{r1}" width="{c1w}" height="3" rx="1" fill="{l1}"/>
-<rect x="{c2x}" y="{r2}" width="{c2w}" height="3" rx="1" fill="{l2}"/>
-<rect x="{c3x}" y="{r3}" width="{c3w}" height="3" rx="1" fill="{l3}"/>
-<rect x="{phx}" y="{ty}" width="0.8" height="{th}" fill="{accent}"/>"#,
-        window = hex(c.window),
-        panel = hex(c.panel),
-        viewer = hex(c.viewer),
-        ph = h - top - pad,
-        frame = hex(if scheme == Scheme::Dark {
-            c.panel_secondary
-        } else {
-            c.floating
-        }),
-        fw = vw * 0.7,
-        fh = vw * 0.7 * 9. / 16.,
-        fx = vx + vw * 0.15,
-        fy = py + (mid - vw * 0.7 * 9. / 16.) / 2.,
-        c1x = vx + 3.,
-        c1w = tw * 0.45,
-        r1 = ty + 3.,
-        l1 = hex(labels.orange),
-        c2x = vx + 3. + tw * 0.2,
-        c2w = tw * 0.5,
-        r2 = ty + 7.5,
-        l2 = hex(labels.blue),
-        c3x = vx + 3. + tw * 0.08,
-        c3w = tw * 0.3,
-        r3 = ty + 12.,
-        l3 = hex(labels.violet),
-        phx = vx + tw * 0.38,
-        accent = hex(c.accent),
+    let mut out = format!(
+        r#"<g filter="url(#shadow)"><rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{r}" fill="{win}"/></g>"#,
+        win = css(c.window),
     );
-    for i in 0..3 {
-        s += &line(
-            px + 2.5,
-            py + 4. + 4. * i as f64,
-            col * [0.7, 0.5, 0.6][i],
-            0.28,
+    // Panes a clear step off the window: raised in the dark, paper in the
+    // light; the wide one a step apart from the small ones.
+    let dark = scheme == Scheme::Dark;
+    let (small, wide) = if dark {
+        (c.floating, c.panel)
+    } else {
+        (c.panel, c.panel_secondary)
+    };
+    out += &pane(px, py, side, ph, small);
+    out += &pane(cx, py, cw, upper, wide);
+    out += &pane(cx, py + upper + pad, half, lower, small);
+    out += &pane(cx + half + pad, py + upper + pad, half, lower, small);
+    // The traffic lights, then the project tabs after them.
+    let cy = y + top / 2.;
+    for (i, colour) in [p.close, p.minimize, p.zoom].into_iter().enumerate() {
+        out += &format!(
+            r#"<circle cx="{}" cy="{cy}" r="{dot}" fill="{}"/>"#,
+            x + pad + dot + i as f64 * dot * 2.8,
+            css(colour)
         );
     }
-    for i in 0..2 {
-        s += &line(
-            ix + 2.5,
-            py + 4. + 4. * i as f64,
-            insp * [0.6, 0.45][i],
-            0.28,
-        );
-    }
+    let tab_w = w * 0.2;
     for i in 0..tabs {
-        let tx = x + 6. + i as f64 * 19.;
-        let fill = if i == 0 {
-            format!(r#"fill="{ink}" fill-opacity="0.16""#)
+        let tx = x + pad + dot * 8.6 + i as f64 * (tab_w + pad);
+        let opacity = if i == 0 {
+            s.picker.window_edge * 1.6
         } else {
-            String::new()
+            s.picker.window_edge * 0.8
         };
-        s += &format!(
-            r#"<rect x="{tx}" y="{ty}" width="17" height="5" rx="2.5" {fill}/>"#,
-            ty = y + 2.
+        out += &format!(
+            r#"<rect x="{tx}" y="{ty}" width="{tab_w}" height="{th}" rx="{tr}" fill="{ink}" fill-opacity="{opacity}"/>"#,
+            ty = cy - dot * 1.4,
+            th = dot * 2.8,
+            tr = dot * 1.4,
         );
-        s += &line(tx + 3.5, y + 3.7, 10., if i == 0 { 0.6 } else { 0.32 });
     }
-    s
+    out += &format!(
+        r#"<rect x="{ex}" y="{ey}" width="{ew}" height="{eh}" rx="{r}" fill="none" stroke="{ink}" stroke-opacity="{eo}" stroke-width="0.5"/>"#,
+        ex = x + 0.25,
+        ey = y + 0.25,
+        ew = w - 0.5,
+        eh = h - 0.5,
+        eo = p.window_edge,
+    );
+    out
+}
+
+/// The wallpaper: a dusk sky, a dark fold across it and a warm glow low down.
+fn wallpaper(s: &Settings, w: f64, h: f64) -> String {
+    let p = s.picker;
+    format!(
+        r#"<rect width="{w}" height="{h}" fill="url(#sky)"/>
+<path d="M{a} {h} C{b} {c} {d} {e} {w} {f} L{w} {h} Z" fill="{fold}" fill-opacity="{fo}" filter="url(#soft)"/>
+<path d="M0 {g} C{i} {j} {k} {l} {w} {m} L{w} {h} L0 {h} Z" fill="{fold}" fill-opacity="{fo2}" filter="url(#soft)"/>
+<path d="M{sa} {h} C{sb} {sc} {sd} {se} {w} {sf}" fill="none" stroke="{sheen}" stroke-opacity="{so}" stroke-width="{sw}" filter="url(#soft)"/>
+<ellipse cx="{gx}" cy="{gy}" rx="{grx}" ry="{gry}" fill="{glow}" fill-opacity="{go}" filter="url(#soft)"/>"#,
+        sa = w * 0.05,
+        sb = w * 0.35,
+        sc = h * 0.45,
+        sd = w * 0.65,
+        se = h * 0.3,
+        sf = h * 0.12,
+        sheen = css(p.sheen),
+        so = p.sheen_opacity,
+        sw = h * 0.08,
+        a = -w * 0.1,
+        b = w * 0.3,
+        c = h * 0.35,
+        d = w * 0.6,
+        e = h * 0.15,
+        f = h * 0.05,
+        g = h * 0.7,
+        i = w * 0.35,
+        j = h * 0.55,
+        k = w * 0.7,
+        l = h * 0.95,
+        m = h * 0.75,
+        fold = css(p.fold),
+        fo = p.fold_opacity,
+        fo2 = p.fold_opacity * 0.8,
+        gx = w * 0.7,
+        gy = h * 1.05,
+        grx = w * 0.45,
+        gry = h * 0.25,
+        glow = css(p.glow),
+        go = p.glow_opacity,
+    )
 }
 
 /// The picture of `option` in a picker of `kind` ("appearance": system,
 /// light, dark; "projects": tabs, windows), for an appearance that is
 /// `dark`; ringed when `selected`.
 pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> String {
-    let (w, h) = SIZE;
     let here = if dark { Scheme::Dark } else { Scheme::Light };
+    let s = tokens(here);
     let ours = Colors::of(here);
+    let p = s.picker;
+    let (w, h) = (s.picker_width as f64, s.picker_height as f64);
+    let radius = s.picker_radius as f64;
+    // The mini window: centred, most of the tile.
+    let (ww, wh) = (w * 0.64, h * 0.66);
+    let (wx, wy) = ((w - ww) / 2., (h - wh) / 2. + h * 0.04);
     let body = match (kind, option) {
-        ("appearance", "light") => editor(0., 0., w, h, Scheme::Light, 0),
-        ("appearance", "dark") => editor(0., 0., w, h, Scheme::Dark, 0),
+        ("appearance", "light") => window(&s, wx, wy, ww, wh, Scheme::Light, 0),
+        ("appearance", "dark") => window(&s, wx, wy, ww, wh, Scheme::Dark, 0),
+        // Match System: light on the left, dark on the right, split on a
+        // diagonal through the window.
         ("appearance", _) => format!(
-            r#"<clipPath id="half"><path d="M0 0H{a}L{b} {h}H0Z"/></clipPath>{dark}<g clip-path="url(#half)">{light}</g>"#,
-            a = w * 0.62,
-            b = w * 0.38,
-            dark = editor(0., 0., w, h, Scheme::Dark, 0),
-            light = editor(0., 0., w, h, Scheme::Light, 0),
+            r#"{dark}<g clip-path="url(#half)">{light}</g>"#,
+            dark = window(&s, wx, wy, ww, wh, Scheme::Dark, 0),
+            light = window(&s, wx, wy, ww, wh, Scheme::Light, 0),
         ),
-        ("projects", "tabs") => editor(0., 0., w, h, here, 2),
-        ("projects", _) => format!(
-            r#"<g opacity="0.55">{back}</g>{front}"#,
-            back = editor(0., 0., w * 0.78, h * 0.78, here, 0),
-            front = editor(w * 0.22, h * 0.22, w * 0.78, h * 0.78, here, 0),
-        ),
+        ("projects", "tabs") => window(&s, wx, wy, ww, wh, here, 2),
+        // Separate windows: one behind another.
+        ("projects", _) => {
+            let (bw, bh) = (ww * 0.86, wh * 0.86);
+            format!(
+                r#"{back}{front}"#,
+                back = window(&s, wx - w * 0.06, wy - h * 0.08, bw, bh, here, 0),
+                front = window(&s, wx + w * 0.08, wy + h * 0.06, bw, bh, here, 0),
+            )
+        }
         _ => String::new(),
     };
-    // The ring is concentric with the picture: its radius is the picture's
-    // plus the gap between them.
+    let gap = s.picker_ring_gap as f64;
+    let ring_w = s.picker_ring as f64;
     let ring = if selected {
+        // Concentric with the tile: its radius plus the gap to its centre line.
+        let o = gap + ring_w / 2.;
         format!(
-            r#"<rect x="-3" y="-3" width="{rw}" height="{rh}" rx="{rr}" fill="none" stroke="{accent}" stroke-width="2"/>"#,
-            rw = w + 6.,
-            rh = h + 6.,
-            rr = RADIUS + 3.,
-            accent = hex(ours.accent),
+            r#"<rect x="{x}" y="{x}" width="{rw}" height="{rh}" rx="{rr}" fill="none" stroke="{accent}" stroke-width="{ring_w}"/>"#,
+            x = -o,
+            rw = w + 2. * o,
+            rh = h + 2. * o,
+            rr = radius + o,
+            accent = css(ours.accent),
         )
     } else {
-        format!(
-            // A 1 pt edge at 10 % ink, so a light picture holds its shape on
-            // a light card.
-            r#"<rect x="0.5" y="0.5" width="{rw}" height="{rh}" rx="{RADIUS}" fill="none" stroke="{ink}" stroke-opacity="0.1" stroke-width="1"/>"#,
-            rw = w - 1.,
-            rh = h - 1.,
-            ink = hex(ours.text),
-        )
+        String::new()
     };
+    let m = margin(&s);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{iw}" height="{ih}" viewBox="{m} {m} {iw} {ih}"><clipPath id="pic"><rect width="{w}" height="{h}" rx="{RADIUS}"/></clipPath><g clip-path="url(#pic)">{body}</g>{ring}</svg>"#,
-        iw = w + 2. * RING,
-        ih = h + 2. * RING,
-        m = -RING,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{iw}" height="{ih}" viewBox="{nm} {nm} {iw} {ih}">
+<defs>
+<linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1"><stop offset="0" stop-color="{s0}"/><stop offset="0.55" stop-color="{s1}"/><stop offset="1" stop-color="{s2}"/></linearGradient>
+<filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="{blur}"/></filter>
+<filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="{shade}" flood-opacity="{so}"/></filter>
+<clipPath id="tile"><rect width="{w}" height="{h}" rx="{radius}"/></clipPath>
+<clipPath id="half"><path d="M0 0H{ha}L{hb} {h}H0Z"/></clipPath>
+</defs>
+<g clip-path="url(#tile)">{paper}{body}</g>
+<rect x="0.25" y="0.25" width="{ew}" height="{eh}" rx="{radius}" fill="none" stroke="{ink}" stroke-opacity="{eo}" stroke-width="0.5"/>
+{ring}</svg>"#,
+        iw = w + 2. * m,
+        ih = h + 2. * m,
+        nm = -m,
+        s0 = css(p.sky_top),
+        s1 = css(p.sky_mid),
+        s2 = css(p.sky_bottom),
+        blur = h * 0.06,
+        sd = h * 0.03,
+        sb = h * 0.05,
+        shade = css(s.tile.shadow),
+        so = p.window_shadow,
+        ha = w * 0.58,
+        hb = w * 0.42,
+        paper = wallpaper(&s, w, h),
+        ew = w - 0.5,
+        eh = h - 0.5,
+        ink = css(ours.text),
+        eo = p.tile_edge,
     )
 }
 
@@ -186,4 +249,39 @@ pub(super) fn image(kind: &str, option: &str, selected: bool) -> Option<Retained
     Some(NSImage::imageWithSize_flipped_drawingHandler(
         size, false, &draw,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every picture is well-formed SVG; with `PM_PREVIEW_DIR` set, each is
+    /// written there to look at.
+    #[test]
+    fn every_picture_is_an_svg() {
+        let out = std::env::var_os("PM_PREVIEW_DIR");
+        for (kind, option) in [
+            ("appearance", "system"),
+            ("appearance", "light"),
+            ("appearance", "dark"),
+            ("projects", "tabs"),
+            ("projects", "windows"),
+        ] {
+            for dark in [true, false] {
+                for selected in [true, false] {
+                    let svg = super::svg(kind, option, selected, dark);
+                    assert!(
+                        svg.starts_with("<svg") && svg.ends_with("</svg>"),
+                        "{kind} {option}"
+                    );
+                    if let Some(dir) = &out {
+                        let name = format!(
+                            "{kind}-{option}-{}-{}.svg",
+                            if dark { "dark" } else { "light" },
+                            selected as u8
+                        );
+                        std::fs::write(std::path::Path::new(dir).join(name), &svg).unwrap();
+                    }
+                }
+            }
+        }
+    }
 }

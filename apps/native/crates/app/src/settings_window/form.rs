@@ -24,23 +24,61 @@ use std::{
     rc::Rc,
 };
 
+// Every size here is a token (`pm_design::Settings`, `TextSize`, `Space`).
+fn st() -> pm_design::Settings {
+    pm_shell::scale().settings
+}
+fn text_size() -> pm_design::TextSize {
+    pm_shell::scale().text_size
+}
 /// The page's side inset (the header's tile starts on the same line).
-const PAGE_INSET: f64 = pm_shell::settings_window::PAGE_INSET;
+fn page_inset() -> f64 {
+    st().page_inset as f64
+}
 /// Air above the first card (the header sits in the title bar's band) and
 /// under the last.
-const PAGE_TOP: f64 = 4.;
-const PAGE_BOTTOM: f64 = 24.;
-const PAGE_MAX_WIDTH: f64 = 640.;
-const SECTION_SPACING: f64 = 18.;
-const ROW_INSET: f64 = 16.;
-const ROW_PADDING: f64 = 8.;
-const ROW_HEIGHT: f64 = 42.;
-const GROUP_RADIUS: f64 = 14.;
+fn page_top() -> f64 {
+    st().page_top as f64
+}
+fn page_bottom() -> f64 {
+    st().page_bottom as f64
+}
+fn page_max_width() -> f64 {
+    st().column as f64
+}
+fn section_spacing() -> f64 {
+    st().section_gap as f64
+}
+fn row_inset() -> f64 {
+    st().row_inset as f64
+}
+fn row_padding() -> f64 {
+    st().row_padding as f64
+}
+fn row_height() -> f64 {
+    st().row as f64
+}
+fn group_radius() -> f64 {
+    st().group_radius as f64
+}
 /// The air a title's line leaves above its text: (line − text) / 2.
-const TITLE_AIR: f64 = 5.;
-const LABEL_SIZE: f64 = 14.;
-const FOOTER_SIZE: f64 = 12.;
-const LIST_ROW_HEIGHT: f64 = ROW_HEIGHT + 1.;
+fn title_air() -> f64 {
+    st().title_air as f64
+}
+/// A list's rows stand `metrics.list_gap` apart.
+fn list_row_height() -> f64 {
+    row_height() + pm_shell::scale().metrics.list_gap as f64
+}
+fn font(size: f32, weight: f32) -> Retained<NSFont> {
+    pm_shell::settings_window::font(size, weight)
+}
+/// A `Space` step in points.
+fn space() -> pm_design::Space {
+    pm_shell::scale().space
+}
+fn regular() -> f32 {
+    pm_shell::scale().typography.regular_weight
+}
 const LIST_ROWS: usize = 40;
 
 pub(crate) struct Form {
@@ -61,15 +99,15 @@ impl Form {
             unsafe { msg_send![SettingsDocument::alloc(mtm), init] };
         wrapper.setTranslatesAutoresizingMaskIntoConstraints(false);
         set_document(scroll, &wrapper);
-        let document = Pile::new(mtm, false, SECTION_SPACING, 0., 0.);
+        let document = Pile::new(mtm, false, section_spacing(), 0., 0.);
         document.stack.setEdgeInsets(NSEdgeInsets {
-            top: PAGE_TOP,
+            top: page_top(),
             left: 0.,
-            bottom: PAGE_BOTTOM,
+            bottom: page_bottom(),
             right: 0.,
         });
         wrapper.addSubview(&document.stack);
-        let available = -2. * PAGE_INSET;
+        let available = -2. * page_inset();
         let fill = document
             .stack
             .widthAnchor()
@@ -97,7 +135,7 @@ impl Form {
             document
                 .stack
                 .widthAnchor()
-                .constraintLessThanOrEqualToConstant(PAGE_MAX_WIDTH),
+                .constraintLessThanOrEqualToConstant(page_max_width()),
         ]);
         Self {
             scroll: scroll.retain(),
@@ -258,7 +296,7 @@ impl Form {
         self.document.stack.layoutSubtreeIfNeeded();
         let clip = self.scroll.contentView();
         let rect = view.convertRect_toView(view.bounds(), Some(&clip));
-        clip.scrollToPoint(NSPoint::new(0., (rect.origin.y - PAGE_TOP).max(0.)));
+        clip.scrollToPoint(NSPoint::new(0., (rect.origin.y - page_top()).max(0.)));
         self.scroll.reflectScrolledClipView(&clip);
         self.reveal = None;
     }
@@ -304,7 +342,7 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                     .context("Settings capture appearance")?;
                 let bounds = NSRect::new(
                     NSPoint::new(0., 0.),
-                    NSSize::new(PAGE_MAX_WIDTH + 2. * PAGE_INSET, 870.),
+                    NSSize::new(page_max_width() + 2. * page_inset(), 870.),
                 );
                 let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), bounds);
                 scroll.setAppearance(Some(&appearance));
@@ -609,7 +647,7 @@ impl Group {
         // A hairline edge keeps the card crisp on either ground.
         box_view.setBorderWidth(0.5);
         box_view.setBorderColor(&NSColor::separatorColor());
-        box_view.setCornerRadius(GROUP_RADIUS);
+        box_view.setCornerRadius(group_radius());
         box_view.setFillColor(&pm_shell::settings_window::form_background(true));
         box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
         let rows = Pile::new(mtm, false, 0., 0., 0.);
@@ -663,9 +701,9 @@ fn separator(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
     view.addSubview(&line);
     constraints(&[
         line.leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_INSET),
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), row_inset()),
         line.trailingAnchor()
-            .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_INSET),
+            .constraintEqualToAnchor_constant(&view.trailingAnchor(), -row_inset()),
         line.topAnchor().constraintEqualToAnchor(&view.topAnchor()),
         line.bottomAnchor()
             .constraintEqualToAnchor(&view.bottomAnchor()),
@@ -702,19 +740,32 @@ impl Row {
         let (padding, gap, line_height) = if agent_app.is_some() {
             // AppKit's button alignment rect excludes part of its frame.
             // Leave room for that inset so the text clears the button by 12 pt.
-            (10., 16., agent_app_icons::SIZE)
+            let space = pm_shell::scale().space;
+            (space.md as f64, space.xl as f64, agent_app_icons::size())
         } else {
-            (ROW_PADDING, 8., ROW_HEIGHT - 2. * ROW_PADDING)
+            let space = pm_shell::scale().space;
+            (
+                row_padding(),
+                space.md as f64,
+                row_height() - 2. * row_padding(),
+            )
         };
-        let body = Pile::new(mtm, false, 2., ROW_INSET, padding);
+        let body = Pile::new(
+            mtm,
+            false,
+            pm_shell::scale().space.hair as f64,
+            row_inset(),
+            padding,
+        );
         let line = Pile::new(mtm, true, gap, 0., 0.);
         line.stack
             .heightAnchor()
             .constraintGreaterThanOrEqualToConstant(line_height)
             .setActive(true);
-        let app = agent_app
-            .map(|id| agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, ROW_INSET));
-        let title_line = Pile::new(mtm, true, 5., 0., 0.);
+        let app = agent_app.map(|id| {
+            agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, row_inset())
+        });
+        let title_line = Pile::new(mtm, true, space().xs as f64, 0., 0.);
         // The title truncates before the row's controls give way (a stack
         // view refuses to clip by default and would widen the window).
         title_line
@@ -736,7 +787,7 @@ impl Row {
             title_space: flexible_space(mtm),
             space: flexible_space(mtm),
             app,
-            app_copy: agent_app.map(|_| Pile::new(mtm, false, 2., 0., 0.)),
+            app_copy: agent_app.map(|_| Pile::new(mtm, false, space().hair as f64, 0., 0.)),
         }
     }
 
@@ -792,7 +843,7 @@ impl Row {
         insets.bottom = if footers.is_empty() {
             insets.top
         } else {
-            insets.top + TITLE_AIR
+            insets.top + title_air()
         };
         self.body.stack.setEdgeInsets(insets);
         self.body.set(
@@ -854,7 +905,7 @@ impl VirtualList {
                 return;
             }
             let bounds = clip.bounds();
-            let row = (bounds.origin.y.max(0.) / LIST_ROW_HEIGHT) as usize;
+            let row = (bounds.origin.y.max(0.) / list_row_height()) as usize;
             let end = (row + LIST_ROWS).min(count);
             let range = (row.min(end), end);
             if sent.replace(Some(range)) != Some(range) {
@@ -890,12 +941,12 @@ impl VirtualList {
             .and_then(|v| v[0].as_u64())
             .unwrap_or(0) as usize;
         self.height
-            .setConstant(count.min(LIST_ROWS) as f64 * LIST_ROW_HEIGHT - 1.);
+            .setConstant(count.min(LIST_ROWS) as f64 * list_row_height() - 1.);
         let after = count.saturating_sub(start + views.len());
         self.before_height
-            .setConstant(start as f64 * LIST_ROW_HEIGHT);
+            .setConstant(start as f64 * list_row_height());
         self.after_height
-            .setConstant(after as f64 * LIST_ROW_HEIGHT);
+            .setConstant(after as f64 * list_row_height());
         self.scroll.setHasVerticalScroller(count > LIST_ROWS);
         self.rows.set(views);
 
@@ -916,7 +967,7 @@ impl VirtualList {
             {
                 Some(
                     clip.bounds().origin.y
-                        + (*new_index as f64 - *old_index as f64) * LIST_ROW_HEIGHT,
+                        + (*new_index as f64 - *old_index as f64) * list_row_height(),
                 )
             }
             (Some(_), None) => Some(0.),
@@ -1204,12 +1255,12 @@ impl Render<'_, '_> {
                 let field = NSSecureTextField::new(mtm);
                 field.setControlSize(NSControlSize::Regular);
                 field.setFocusRingType(NSFocusRingType::None);
-                field.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
+                field.setFont(Some(&font(text_size().base, regular())));
                 field.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 field.setTranslatesAutoresizingMaskIntoConstraints(false);
                 field
                     .widthAnchor()
-                    .constraintEqualToConstant(160.)
+                    .constraintEqualToConstant(st().secure_width as f64)
                     .setActive(true);
                 return Widget::Secure(field);
             }
@@ -1223,7 +1274,7 @@ impl Render<'_, '_> {
                 progress.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 progress
                     .widthAnchor()
-                    .constraintEqualToConstant(96.)
+                    .constraintEqualToConstant(st().progress_width as f64)
                     .setActive(true);
                 return Widget::Progress(progress);
             }
@@ -1240,19 +1291,25 @@ impl Render<'_, '_> {
                 self.app_icon,
             )),
             "header" => Widget::Header(
-                Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET),
+                Pile::new(mtm, true, row_inset(), row_inset(), row_inset()),
                 flexible_space(mtm),
                 2,
             ),
             "headingLine" => Widget::Header(
-                Pile::new(mtm, true, ROW_INSET, ROW_INSET, 0.),
+                Pile::new(mtm, true, row_inset(), row_inset(), 0.),
                 flexible_space(mtm),
                 1,
             ),
-            "line" => Widget::Pile(Pile::new(mtm, true, 6., 0., 0.)),
-            "group" => Widget::Pile(Pile::new(mtm, false, 8., 0., 0.)),
-            "section" => Widget::Pile(Pile::new(mtm, false, SECTION_SPACING, 0., 0.)),
-            "note" => Widget::Pile(Pile::new(mtm, false, 3., ROW_INSET, 8.)),
+            "line" => Widget::Pile(Pile::new(mtm, true, space().sm as f64, 0., 0.)),
+            "group" => Widget::Pile(Pile::new(mtm, false, space().md as f64, 0., 0.)),
+            "section" => Widget::Pile(Pile::new(mtm, false, section_spacing(), 0., 0.)),
+            "note" => Widget::Pile(Pile::new(
+                mtm,
+                false,
+                space().hair as f64,
+                row_inset(),
+                space().md as f64,
+            )),
             "path" => {
                 let path = NSPathControl::new(mtm);
                 path.setFocusRingType(NSFocusRingType::None);
@@ -1262,7 +1319,7 @@ impl Render<'_, '_> {
                 path.setControlSize(NSControlSize::Regular);
                 path.setAccessibilityLabel(Some(&NSString::from_str("Location")));
                 path.widthAnchor()
-                    .constraintLessThanOrEqualToConstant(210.)
+                    .constraintLessThanOrEqualToConstant(st().path_width as f64)
                     .setActive(true);
                 Widget::Path(path)
             }
@@ -1277,11 +1334,11 @@ impl Render<'_, '_> {
             }
             _ => {
                 let inset = if component == Some(Component::EmptyState) {
-                    ROW_INSET
+                    row_inset()
                 } else {
                     0.
                 };
-                Widget::Pile(Pile::new(mtm, false, 4., inset, inset))
+                Widget::Pile(Pile::new(mtm, false, space().xs as f64, inset, inset))
             }
         }
     }
@@ -1341,7 +1398,7 @@ impl Render<'_, '_> {
         }
         if layout(node) == "filterField" {
             view.widthAnchor()
-                .constraintGreaterThanOrEqualToConstant(175.)
+                .constraintGreaterThanOrEqualToConstant(st().filter_width as f64)
                 .setActive(true);
             view.setContentHuggingPriority_forOrientation(
                 NSLayoutPriorityDefaultLow - 1.,
@@ -1349,11 +1406,11 @@ impl Render<'_, '_> {
             );
         } else if matches!(kind, Kind::Search | Kind::Slider) {
             view.widthAnchor()
-                .constraintEqualToConstant(175.)
+                .constraintEqualToConstant(st().filter_width as f64)
                 .setActive(true);
         } else if matches!(layout(node), "shortcutButton" | "shortcutRecorder") {
             view.widthAnchor()
-                .constraintGreaterThanOrEqualToConstant(88.)
+                .constraintGreaterThanOrEqualToConstant(st().value_least as f64)
                 .setActive(true);
         }
         let (id, generation) = (node.id, self.generation);
@@ -1419,9 +1476,9 @@ impl Render<'_, '_> {
         let container = if let Some(unit) = node.props.get("unit").and_then(Value::as_str) {
             let label = NSTextField::labelWithString(&NSString::from_str(unit), field.mtm());
             label.setTranslatesAutoresizingMaskIntoConstraints(false);
-            label.setFont(Some(&NSFont::systemFontOfSize(FOOTER_SIZE)));
+            label.setFont(Some(&font(text_size().xs, regular())));
             label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            let with_unit = Pile::new(field.mtm(), true, 5., 0., 0.);
+            let with_unit = Pile::new(field.mtm(), true, space().xs as f64, 0., 0.);
             with_unit.set(&[field.retain(), (label.as_ref() as &NSView).retain()]);
             Retained::into_super(with_unit.stack)
         } else {
@@ -1529,28 +1586,30 @@ fn text_label(
     let field = if nowrap || row_title {
         let field = NSTextField::labelWithString(&title, mtm);
         field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        if style == "error" {
-            field.setContentCompressionResistancePriority_forOrientation(
-                NSLayoutPriorityDefaultHigh + 1.,
-                NSLayoutConstraintOrientation::Horizontal,
-            );
-        }
+        // An error keeps its words; a row's title gives way to its control
+        // (truncating) instead of running under it in a narrow column.
+        field.setContentCompressionResistancePriority_forOrientation(
+            if style == "error" {
+                NSLayoutPriorityDefaultHigh + 1.
+            } else {
+                NSLayoutPriorityDefaultLow
+            },
+            NSLayoutConstraintOrientation::Horizontal,
+        );
         field
     } else {
         NSTextField::wrappingLabelWithString(&title, mtm)
     };
     field.setTranslatesAutoresizingMaskIntoConstraints(false);
     if heading {
-        field.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {
-            NSFontWeightSemibold
-        })));
+        field.setFont(Some(&font(text_size().base, st().heading_weight)));
     } else {
         let size = if matches!(style, "footer" | "secondary" | "error") {
-            FOOTER_SIZE
+            text_size().xs
         } else {
-            LABEL_SIZE
+            text_size().base
         };
-        field.setFont(Some(&NSFont::systemFontOfSize(size)));
+        field.setFont(Some(&font(size, regular())));
     }
     if style == "error" {
         field.setTextColor(Some(&NSColor::systemRedColor()));
@@ -1579,10 +1638,10 @@ fn settings_image(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImage
     constraints(&[
         image_view
             .widthAnchor()
-            .constraintEqualToConstant(if glyph { LABEL_SIZE } else { 100. }),
+            .constraintEqualToConstant(if glyph { text_size().base as f64 } else { 100. }),
         image_view
             .heightAnchor()
-            .constraintEqualToConstant(if glyph { LABEL_SIZE } else { 56. }),
+            .constraintEqualToConstant(if glyph { text_size().base as f64 } else { 56. }),
     ]);
     image_view
 }
@@ -1876,7 +1935,7 @@ fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
     .and_then(|image| {
         image.imageWithSymbolConfiguration(
             &NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
-                12.,
+                text_size().sm as f64,
                 unsafe { NSFontWeightRegular },
                 NSImageSymbolScale::Medium,
             ),
@@ -1917,29 +1976,26 @@ fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
 /// measured at its width up front (a wrapping label has no size of its own
 /// until it is laid out, and the popover would open empty).
 fn show_help(anchor: &NSButton, text: &NSString) -> Retained<NSPopover> {
-    const WIDTH: f64 = 260.;
-    const PAD: (f64, f64) = (14., 12.);
+    let width = st().help_width as f64;
+    let pad = pm_shell::scale().space.lg as f64;
     let mtm = anchor.mtm();
     let label = NSTextField::wrappingLabelWithString(text, mtm);
-    label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE - 1.)));
-    let size = label.cell().map_or(NSSize::new(WIDTH, 20.), |cell| {
+    label.setFont(Some(&font(text_size().sm, regular())));
+    let size = label.cell().map_or(NSSize::new(width, 20.), |cell| {
         cell.cellSizeForBounds(objc2_foundation::NSRect::new(
             NSPoint::new(0., 0.),
-            NSSize::new(WIDTH, 10_000.),
+            NSSize::new(width, 10_000.),
         ))
     });
-    let size = NSSize::new(size.width.min(WIDTH).ceil(), size.height.ceil());
-    label.setFrame(objc2_foundation::NSRect::new(
-        NSPoint::new(PAD.0, PAD.1),
-        size,
-    ));
+    let size = NSSize::new(size.width.min(width).ceil(), size.height.ceil());
+    label.setFrame(objc2_foundation::NSRect::new(NSPoint::new(pad, pad), size));
     // The system's popover material under the text: the glass alone lets
     // the row beneath read through it.
     let content = NSVisualEffectView::initWithFrame(
         NSVisualEffectView::alloc(mtm),
         objc2_foundation::NSRect::new(
             NSPoint::new(0., 0.),
-            NSSize::new(size.width + 2. * PAD.0, size.height + 2. * PAD.1),
+            NSSize::new(size.width + 2. * pad, size.height + 2. * pad),
         ),
     );
     content.setMaterial(NSVisualEffectMaterial::Popover);
@@ -2001,9 +2057,9 @@ impl Picker {
             let on = selected == Some(i);
             button.setImage(previews::image(&self.kind, &self.options[i], on).as_deref());
             let font = if on {
-                NSFont::systemFontOfSize_weight(FOOTER_SIZE + 1., unsafe { NSFontWeightSemibold })
+                font(text_size().xs, st().heading_weight)
             } else {
-                NSFont::systemFontOfSize(FOOTER_SIZE + 1.)
+                font(text_size().xs, regular())
             };
             let colour = if on {
                 NSColor::labelColor()
@@ -2042,13 +2098,13 @@ impl Render<'_, '_> {
         let stack = NSStackView::new(mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setAlignment(NSLayoutAttribute::Top);
-        // The options share the card's width evenly, 12 pt apart.
+        // The options share the card's width evenly, `space.lg` apart.
         stack.setDistribution(NSStackViewDistribution::FillEqually);
-        stack.setSpacing(12.);
+        stack.setSpacing(space().lg as f64);
         stack.setEdgeInsets(NSEdgeInsets {
-            top: 6.,
+            top: space().sm as f64,
             left: 0.,
-            bottom: 2.,
+            bottom: space().hair as f64,
             right: 0.,
         });
         stack.setTranslatesAutoresizingMaskIntoConstraints(false);

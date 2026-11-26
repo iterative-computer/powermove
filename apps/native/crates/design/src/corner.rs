@@ -7,7 +7,9 @@ pub const CONTINUOUS_REACH: f64 = 1.528_665;
 
 /// A radius that fits a `width` × `height` rectangle: its reach is at most half the shorter side.
 pub fn fit(radius: f64, width: f64, height: f64) -> f64 {
-    radius.min(width.min(height) / 2. / CONTINUOUS_REACH).max(0.)
+    radius
+        .min(width.min(height) / 2. / CONTINUOUS_REACH)
+        .max(0.)
 }
 
 /// The corner at `corner` of radius `radius`, from `corner + a·reach` to `corner + b·reach` (`a`, `b`
@@ -28,9 +30,21 @@ pub fn continuous_corner(
     (
         at(CONTINUOUS_REACH, 0.),
         [
-            [at(1.088_493, 0.), at(0.868_407, 0.), at(0.669_934, 0.064_413)],
-            [at(0.372_824, 0.188_345), at(0.188_345, 0.372_824), at(0.064_413, 0.669_934)],
-            [at(0., 0.868_407), at(0., 1.088_493), at(0., CONTINUOUS_REACH)],
+            [
+                at(1.088_493, 0.),
+                at(0.868_407, 0.),
+                at(0.669_934, 0.064_413),
+            ],
+            [
+                at(0.372_824, 0.188_345),
+                at(0.188_345, 0.372_824),
+                at(0.064_413, 0.669_934),
+            ],
+            [
+                at(0., 0.868_407),
+                at(0., 1.088_493),
+                at(0., CONTINUOUS_REACH),
+            ],
         ],
     )
 }

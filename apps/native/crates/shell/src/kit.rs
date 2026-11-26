@@ -598,7 +598,10 @@ impl Kit {
             .flex_none()
             .items_center()
             .gap(px(t.space.md))
-            .h(px(m.row))
+            // The row's pitch stays `row`; its highlight is `list_gap`
+            // shorter, centred, so two highlights never touch.
+            .h(px(m.row - m.list_gap))
+            .my(px(m.list_gap / 2.))
             .px(px(t.space.md))
             .rounded(px(m.inner_radius))
             .text_role(t, Text::Body)
@@ -822,17 +825,21 @@ impl Kit {
         let t = &self.t;
         let id = id.into();
         let key = key(&id);
-        let radius = 8.;
+        let radius = t.space.md;
+        let gap = t.metrics.list_gap;
         let row = div()
             .id(id)
             .flex()
             .flex_none()
             .items_center()
-            .h(px(32.))
-            .px(px(8.))
-            .gap(px(8.))
+            // A 32 pt pitch; the highlight `list_gap` shorter and centred,
+            // so Recents and Trash never touch.
+            .h(px(t.metrics.nav_row - gap))
+            .my(px(gap / 2.))
+            .px(px(t.space.md))
+            .gap(px(t.space.md))
             .rounded(px(radius))
-            .text_size(px(13.))
+            .text_size(px(t.text_size.base))
             .font_weight(FontWeight::NORMAL)
             .line_height(px(16.))
             .text_color(rgb(t.colors.text))

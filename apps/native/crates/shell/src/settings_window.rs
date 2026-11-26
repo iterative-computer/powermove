@@ -22,38 +22,100 @@ use objc2_foundation::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::cell::{Cell, RefCell};
 
+// Every size and colour here is a token (`pm_design::Settings`, `TextSize`):
+// the window, its sidebar rows and tiles, the page header, the veil.
+fn st() -> pm_design::Settings {
+    crate::scale().settings
+}
 /// The sidebar's width (fixed; the sidebar does not collapse).
-pub const SIDEBAR_WIDTH: f64 = 224.;
+pub fn sidebar_width() -> f64 {
+    st().sidebar as f64
+}
 /// The window's default and minimum content sizes. The width is fixed (the
 /// maximum width is the minimum): the page fills it, never a centred column
 /// in a gutter. The height is the person's, and remembered.
-pub const DEFAULT_SIZE: (f64, f64) = (780., 700.);
-pub const MIN_SIZE: (f64, f64) = (780., 520.);
-/// A section row: its tile with an equal inset on all four sides inside the
-/// selection (Radian's 38 pt row holds a 22 pt tile 8 pt in on every side).
-const ROW_HEIGHT: f64 = 38.;
+pub fn default_size() -> (f64, f64) {
+    let s = st();
+    (s.window_width as f64, s.window_default_height as f64)
+}
+pub fn min_size() -> (f64, f64) {
+    let s = st();
+    (s.window_width as f64, s.window_height as f64)
+}
+/// A section row's highlight: its tile with an equal inset on all four
+/// sides. Rows stand `metrics.list_gap` apart, so two highlights (hover and
+/// selection) never touch.
+fn row_height() -> f64 {
+    st().sidebar_row as f64
+}
+fn list_gap() -> f64 {
+    crate::scale().metrics.list_gap as f64
+}
 /// The tile's side in a sidebar row.
-const TILE: f64 = 22.;
+fn tile_side() -> f64 {
+    st().sidebar_tile as f64
+}
 /// The inset around a tile inside the selected row, on every side.
-const TILE_INSET: f64 = (ROW_HEIGHT - TILE) / 2.;
-/// The tile's corner (the squircle's equivalent radius), and the selection's
-/// corner concentric with it (`Outer R = Inner R + Padding`).
-const TILE_RADIUS: f64 = 6.;
-const SELECTION_RADIUS: f64 = TILE_RADIUS + TILE_INSET;
+fn tile_inset() -> f64 {
+    st().tile_inset() as f64
+}
+/// The selection's corner, concentric with the tile's
+/// (`Outer R = Inner R + Padding`).
+fn selection_radius() -> f64 {
+    st().selection_radius() as f64
+}
 /// The selection's inset from the sidebar's sides.
-const SIDEBAR_INSET: f64 = 10.;
-const LABEL_SIZE: f64 = 14.;
+fn sidebar_inset() -> f64 {
+    st().sidebar_inset as f64
+}
+/// The system font at a `TextSize` step and a token weight (CSS number).
+pub fn font(size: f32, weight: f32) -> Retained<NSFont> {
+    let weight = unsafe {
+        match weight as u32 {
+            0..=449 => NSFontWeightRegular,
+            450..=549 => NSFontWeightMedium,
+            550..=649 => NSFontWeightSemibold,
+            _ => NSFontWeightBold,
+        }
+    };
+    NSFont::systemFontOfSize_weight(size as f64, weight)
+}
 /// The account row: its avatar with the same equal inset as a tile's.
-const AVATAR: f64 = 32.;
-const ACCOUNT_HEIGHT: f64 = 52.;
-const AVATAR_INSET: f64 = (ACCOUNT_HEIGHT - AVATAR) / 2.;
+fn avatar_side() -> f64 {
+    st().avatar as f64
+}
+fn account_height() -> f64 {
+    st().account_row as f64
+}
+fn avatar_inset() -> f64 {
+    (account_height() - avatar_side()) / 2.
+}
 /// A group's header row ("Agents & Providers"): air above, its name low.
-const HEADER_HEIGHT: f64 = 32.;
+fn header_height() -> f64 {
+    st().header_height as f64
+}
 /// The page header's tile, on the traffic lights' line.
-const HEADER_TILE: f64 = 24.;
-/// Dark mode's black veil over the sidebar material (#4A over the material
-/// alone lands near #2E).
-const DARK_VEIL: f64 = 0.37;
+fn header_tile_side() -> f64 {
+    st().header_tile as f64
+}
+/// Dark mode's black veil over the sidebar material.
+/// A row's highlight inside its row: the sidebar's side insets, and half
+/// the list gap off the top and the bottom.
+fn band(row: NSRect, width: f64) -> NSRect {
+    let gap = list_gap();
+    NSRect::new(
+        NSPoint::new(sidebar_inset(), row.origin.y + gap / 2.),
+        NSSize::new(width - 2. * sidebar_inset(), row.size.height - gap),
+    )
+}
+/// A token colour (0xRRGGBB) at `alpha`.
+fn ns_colour(rgb: u32, alpha: f64) -> Retained<NSColor> {
+    let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
+    NSColor::colorWithSRGBRed_green_blue_alpha(channel(16), channel(8), channel(0), alpha)
+}
+fn dark_veil() -> f64 {
+    st().dark_veil as f64
+}
 /// The selection's glide, measured from Radian's (critically damped,
 /// settles in about 0.2 s): unit mass, stiffness and damping.
 const GLIDE: (f64, f64) = (900., 57.);
@@ -219,8 +281,6 @@ struct Hover {
 const HOVER_IN: (f64, f64) = (1100., 66.);
 const HOVER_OUT: (f64, f64) = (300., 35.);
 const HOVER_SWITCH: (f64, f64) = (2500., 100.);
-/// The hover wash's opacity over the selection's colour.
-const HOVER_OPACITY: f32 = 0.5;
 
 impl Sidebar {
     /// The pointer is on `row`: the wash goes under it, unless the row is
@@ -251,22 +311,17 @@ impl Sidebar {
         let Some(layer) = wash.layer() else { return };
         let shown = unsafe { layer.presentationLayer() };
         let mut from = shown.as_deref().unwrap_or(&layer).opacity();
-        let to = if target >= 0 { HOVER_OPACITY } else { 0. };
+        let to = if target >= 0 { st().hover_opacity } else { 0. };
         if target >= 0 {
             let rect = self.rectOfRow(target);
             CATransaction::begin();
             CATransaction::setDisableActions(true);
-            wash.setFrame(NSRect::new(
-                NSPoint::new(SIDEBAR_INSET, rect.origin.y),
-                NSSize::new(
-                    self.bounds().size.width - 2. * SIDEBAR_INSET,
-                    rect.size.height,
-                ),
-            ));
-            layer.setCornerRadius(if rect.size.height > ROW_HEIGHT {
+            let rect = band(rect, self.bounds().size.width);
+            wash.setFrame(rect);
+            layer.setCornerRadius(if rect.size.height > row_height() {
                 rect.size.height / 2.
             } else {
-                SELECTION_RADIUS
+                selection_radius()
             });
             CATransaction::commit();
             // A new row's wash arrives from nothing (two rows never share one).
@@ -347,10 +402,10 @@ define_class!(
         #[unsafe(method(tableView:heightOfRow:))]
         fn height(&self, _: &NSTableView, row: NSInteger) -> f64 {
             match self.ivars().rows.borrow().get(row as usize) {
-                Some(Row::Gap) => 8.,
-                Some(Row::Header(_)) => HEADER_HEIGHT,
-                Some(Row::Section(s)) if s.id == "account" => ACCOUNT_HEIGHT,
-                _ => ROW_HEIGHT,
+                Some(Row::Gap) => crate::scale().space.md as f64,
+                Some(Row::Header(_)) => header_height(),
+                Some(Row::Section(s)) if s.id == "account" => account_height() + list_gap(),
+                _ => row_height() + list_gap(),
             }
         }
         #[unsafe(method(tableView:shouldSelectRow:))]
@@ -444,19 +499,12 @@ impl Chrome {
             fill.setHidden(true);
             return;
         };
-        let rect = table.rectOfRow(row);
-        let target = NSRect::new(
-            NSPoint::new(SIDEBAR_INSET, rect.origin.y),
-            NSSize::new(
-                table.bounds().size.width - 2. * SIDEBAR_INSET,
-                rect.size.height,
-            ),
-        );
+        let target = band(table.rectOfRow(row), table.bounds().size.width);
         // The avatar is round: its selection is a capsule around it.
         let radius = if account {
-            ACCOUNT_HEIGHT / 2.
+            account_height() / 2.
         } else {
-            SELECTION_RADIUS
+            selection_radius()
         };
         let appeared = fill.isHidden();
         fill.setHidden(false);
@@ -478,7 +526,7 @@ impl Chrome {
         layer.setCornerRadius(radius);
         CATransaction::commit();
         let to_y = layer.position().y;
-        let moved = (from_y - to_y).abs() > 0.25 || (from_h - rect.size.height).abs() > 0.25;
+        let moved = (from_y - to_y).abs() > 0.25 || (from_h - target.size.height).abs() > 0.25;
         if !animate || appeared || !moved {
             layer.removeAllAnimations();
             state.glide.set(None);
@@ -517,7 +565,7 @@ impl Chrome {
         )));
         for (path, from, to, speed) in [
             ("position.y", from_y, to_y, velocity),
-            ("bounds.size.height", from_h, rect.size.height, 0.),
+            ("bounds.size.height", from_h, target.size.height, 0.),
             ("cornerRadius", from_r, radius, 0.),
         ] {
             if (from - to).abs() < 0.01 {
@@ -712,7 +760,7 @@ impl SettingsChrome {
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         let mut frame = window.frame();
-        frame.size.width = frame.size.width.max(DEFAULT_SIZE.0);
+        frame.size.width = frame.size.width.max(default_size().0);
 
         // The sidebar: the search field over the list.
         let sidebar = NSView::new(mtm);
@@ -760,7 +808,7 @@ impl SettingsChrome {
         let selection: Retained<NSView> = Retained::into_super(selection);
         selection.setWantsLayer(true);
         if let Some(layer) = selection.layer() {
-            layer.setCornerRadius(SELECTION_RADIUS);
+            layer.setCornerRadius(selection_radius());
             layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
         }
         selection.setHidden(true);
@@ -808,7 +856,7 @@ impl SettingsChrome {
         material.setState(NSVisualEffectState::FollowsWindowActiveState);
         material.setTranslatesAutoresizingMaskIntoConstraints(false);
         sidebar.addSubview(&material);
-        // Dark mode's sidebar is held near #2E2E2E (Raycast's depth): the
+        // Dark mode's sidebar is held near Raycast's depth (a dark grey): the
         // material alone lifts to a washed-out grey when the window takes
         // focus. A black veil over it, and the material held active, so
         // focus changes nothing. Light mode keeps the material as it is.
@@ -845,10 +893,10 @@ impl SettingsChrome {
                 .constraintEqualToAnchor(&guide.topAnchor()),
             search
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), SIDEBAR_INSET),
+                .constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), sidebar_inset()),
             search
                 .trailingAnchor()
-                .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -SIDEBAR_INSET),
+                .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -sidebar_inset()),
             scroll
                 .topAnchor()
                 .constraintEqualToAnchor_constant(&search.bottomAnchor(), 10.),
@@ -884,17 +932,15 @@ impl SettingsChrome {
         header_tile.setImageScaling(NSImageScaling::ScaleNone);
         header_tile.setTranslatesAutoresizingMaskIntoConstraints(false);
         let header_title = NSTextField::labelWithString(ns_string!(""), mtm);
-        header_title.setFont(Some(&NSFont::systemFontOfSize_weight(16., unsafe {
-            NSFontWeightBold
-        })));
+        header_title.setFont(Some(&font(crate::scale().text_size.lg, st().header_weight)));
         header_title.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&header_tile);
         content.addSubview(&header_title);
         let safe = content.safeAreaLayoutGuide();
         let band = NSLayoutGuide::new();
         content.addLayoutGuide(&band);
-        let (tile_w, tile_h) = tile_size(HEADER_TILE);
-        let margin = tile_margin(HEADER_TILE);
+        let (tile_w, tile_h) = tile_size(header_tile_side());
+        let margin = tile_margin(header_tile_side());
         activate(&[
             ground
                 .topAnchor()
@@ -925,18 +971,18 @@ impl SettingsChrome {
             // the band's (the image carries the shadow's margin below).
             header_tile
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&safe.leadingAnchor(), PAGE_INSET - margin),
+                .constraintEqualToAnchor_constant(&safe.leadingAnchor(), page_inset() - margin),
             header_tile
                 .centerYAnchor()
                 .constraintEqualToAnchor_constant(
                     &band.centerYAnchor(),
-                    tile_centre_offset(HEADER_TILE),
+                    tile_centre_offset(header_tile_side()),
                 ),
             header_title
                 .leadingAnchor()
                 .constraintEqualToAnchor_constant(
                     &header_tile.leadingAnchor(),
-                    margin + HEADER_TILE + 8.,
+                    margin + header_tile_side() + crate::scale().space.md as f64,
                 ),
             header_title
                 .centerYAnchor()
@@ -947,9 +993,8 @@ impl SettingsChrome {
         // background (the window server then has nothing behind it to show),
         // so the window is clear and only the page's ground is painted.
         window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            0., 0., 0., 0.0001, // not clearColor: that drops the window's shadow
-        )));
+        // Not clearColor: that drops the window's shadow.
+        window.setBackgroundColor(Some(&ns_colour(crate::scale().colors.black, 0.0001)));
 
         // The split view: the content view leaves the window for the detail
         // item (the window holds a stand-in meanwhile).
@@ -959,8 +1004,8 @@ impl SettingsChrome {
         side.setView(&sidebar);
         let side = NSSplitViewItem::sidebarWithViewController(&side);
         side.setCanCollapse(false);
-        side.setMinimumThickness(SIDEBAR_WIDTH);
-        side.setMaximumThickness(SIDEBAR_WIDTH);
+        side.setMinimumThickness(sidebar_width());
+        side.setMaximumThickness(sidebar_width());
         side.setAllowsFullHeightLayout(true);
         let detail = NSViewController::new(mtm);
         detail.setView(&content);
@@ -988,8 +1033,8 @@ impl SettingsChrome {
         window.setToolbarStyle(NSWindowToolbarStyle::Unified);
 
         // Standard window behaviour: the size it was left at, its limits.
-        window.setContentMinSize(NSSize::new(MIN_SIZE.0, MIN_SIZE.1));
-        window.setContentMaxSize(NSSize::new(MIN_SIZE.0, f64::MAX));
+        window.setContentMinSize(NSSize::new(min_size().0, min_size().1));
+        window.setContentMaxSize(NSSize::new(min_size().0, f64::MAX));
         window.setFrame_display(frame, true);
         window.setFrameAutosaveName(&NSString::from_str(FRAME_NAME));
         window.setAutorecalculatesKeyViewLoop(true);
@@ -1066,7 +1111,7 @@ impl SettingsChrome {
             self.header_title.setStringValue(&NSString::from_str(title));
             *self.header_id.borrow_mut() = active.to_owned();
             self.header_tile
-                .setImage(tile_image(active, state.dark.get(), HEADER_TILE).as_deref());
+                .setImage(tile_image(active, state.dark.get(), header_tile_side()).as_deref());
         }
     }
 
@@ -1121,12 +1166,12 @@ impl SettingsChrome {
                 .find_map(|v| v.downcast::<NSImageView>().ok())?;
             let f = fill.frame();
             let t = tile.convertRect_toView(tile.bounds(), Some(table));
-            let m = tile_margin(TILE);
-            let (tx, ty) = (t.origin.x + m, t.origin.y + tile_top_margin(TILE));
+            let m = tile_margin(tile_side());
+            let (tx, ty) = (t.origin.x + m, t.origin.y + tile_top_margin(tile_side()));
             Some([
                 tx - f.origin.x,
                 ty - f.origin.y,
-                f.origin.y + f.size.height - (ty + TILE),
+                f.origin.y + f.size.height - (ty + tile_side()),
             ])
         });
         serde_json::json!({
@@ -1136,7 +1181,7 @@ impl SettingsChrome {
             "glassAvailable": objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some(),
             "detailPainted": detail_painted,
             "groundX": ground.origin.x,
-            "sidebarWidth": SIDEBAR_WIDTH,
+            "sidebarWidth": sidebar_width(),
             "searchHeight": self.chrome.ivars().search.borrow().as_ref().map(|search| search.frame().size.height),
             "selectionInsets": insets,
             "header": self.header_title.stringValue().to_string(),
@@ -1155,7 +1200,7 @@ impl SettingsChrome {
             veil.setHidden(!dark);
             if let Some(layer) = veil.layer() {
                 layer.setBackgroundColor(Some(
-                    &NSColor::colorWithSRGBRed_green_blue_alpha(0., 0., 0., DARK_VEIL).CGColor(),
+                    &ns_colour(crate::scale().colors.black, dark_veil()).CGColor(),
                 ));
             }
         }
@@ -1170,7 +1215,7 @@ impl SettingsChrome {
             state.quiet.set(false);
             let id = self.header_id.borrow().clone();
             self.header_tile
-                .setImage(tile_image(&id, dark, HEADER_TILE).as_deref());
+                .setImage(tile_image(&id, dark, header_tile_side()).as_deref());
         }
     }
 
@@ -1196,7 +1241,9 @@ impl SettingsChrome {
 }
 
 /// The page's side inset: the header's tile and the cards start here.
-pub const PAGE_INSET: f64 = 20.;
+pub fn page_inset() -> f64 {
+    st().page_inset as f64
+}
 
 /// GPUI's view of window `w`.
 pub fn gpui_view(w: &gpui::Window) -> Option<Retained<NSView>> {
@@ -1211,17 +1258,20 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
 }
 
 /// A sidebar row: the section's tile and its name. Rows run the table's
-/// full width; the tile sits `TILE_INSET` inside the selection on every side.
+/// full width; the tile sits `tile_inset()` inside the selection on every side.
 fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView> {
     if section.id == "account" {
         return account_cell(mtm, section, dark);
     }
     let view = NSTableCellView::new(mtm);
     let icon = NSImageView::new(mtm);
-    icon.setImage(tile_image(&section.id, dark, TILE).as_deref());
+    icon.setImage(tile_image(&section.id, dark, tile_side()).as_deref());
     icon.setImageScaling(NSImageScaling::ScaleNone);
     let label = NSTextField::labelWithString(&NSString::from_str(&section.title), mtm);
-    label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
+    label.setFont(Some(&font(
+        crate::scale().text_size.base,
+        crate::scale().typography.regular_weight,
+    )));
     label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     if section.dim {
         label.setTextColor(Some(&NSColor::tertiaryLabelColor()));
@@ -1231,23 +1281,28 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     label.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.addSubview(&icon);
     view.addSubview(&label);
-    let (w, h) = tile_size(TILE);
-    let tile_x = SIDEBAR_INSET + TILE_INSET;
+    let (w, h) = tile_size(tile_side());
+    let tile_x = sidebar_inset() + tile_inset();
     activate(&[
         icon.widthAnchor().constraintEqualToConstant(w),
         icon.heightAnchor().constraintEqualToConstant(h),
-        icon.leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), tile_x - tile_margin(TILE)),
-        icon.centerYAnchor()
-            .constraintEqualToAnchor_constant(&view.centerYAnchor(), tile_centre_offset(TILE)),
-        label
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), tile_x + TILE + 9.),
+        icon.leadingAnchor().constraintEqualToAnchor_constant(
+            &view.leadingAnchor(),
+            tile_x - tile_margin(tile_side()),
+        ),
+        icon.centerYAnchor().constraintEqualToAnchor_constant(
+            &view.centerYAnchor(),
+            tile_centre_offset(tile_side()),
+        ),
+        label.leadingAnchor().constraintEqualToAnchor_constant(
+            &view.leadingAnchor(),
+            tile_x + tile_side() + crate::scale().space.md as f64,
+        ),
         label
             .trailingAnchor()
             .constraintLessThanOrEqualToAnchor_constant(
                 &view.trailingAnchor(),
-                -SIDEBAR_INSET - 6.,
+                -sidebar_inset() - crate::scale().space.sm as f64,
             ),
         label
             .centerYAnchor()
@@ -1264,19 +1319,19 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
 fn header_cell(mtm: MainThreadMarker, name: &str) -> Retained<NSView> {
     let view = NSTableCellView::new(mtm);
     let label = NSTextField::labelWithString(&NSString::from_str(name), mtm);
-    label.setFont(Some(&NSFont::systemFontOfSize_weight(12., unsafe {
-        NSFontWeightSemibold
-    })));
+    label.setFont(Some(&font(crate::scale().text_size.xs, st().group_weight)));
     label.setTextColor(Some(&NSColor::secondaryLabelColor()));
     label.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.addSubview(&label);
     activate(&[
-        label
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), SIDEBAR_INSET + TILE_INSET),
-        label
-            .bottomAnchor()
-            .constraintEqualToAnchor_constant(&view.bottomAnchor(), -5.),
+        label.leadingAnchor().constraintEqualToAnchor_constant(
+            &view.leadingAnchor(),
+            sidebar_inset() + tile_inset(),
+        ),
+        label.bottomAnchor().constraintEqualToAnchor_constant(
+            &view.bottomAnchor(),
+            -(crate::scale().space.xs as f64),
+        ),
     ]);
     unsafe { view.setTextField(Some(&label)) };
     Retained::into_super(view)
@@ -1288,9 +1343,10 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
     let view = NSTableCellView::new(mtm);
     let name = section.account_name.as_deref().unwrap_or("Sign In");
     let title = NSTextField::labelWithString(&NSString::from_str(name), mtm);
-    title.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {
-        NSFontWeightSemibold
-    })));
+    title.setFont(Some(&font(
+        crate::scale().text_size.base,
+        st().account_weight,
+    )));
     title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     // Under the name, the account's email (a name that is the email says
     // "Account").
@@ -1301,8 +1357,9 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
     let subtitle =
         NSTextField::labelWithString(&NSString::from_str(email.unwrap_or("Account")), mtm);
     subtitle.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-    subtitle.setFont(Some(&NSFont::systemFontOfSize(
-        NSFont::smallSystemFontSize(),
+    subtitle.setFont(Some(&font(
+        crate::scale().text_size.xs,
+        crate::scale().typography.regular_weight,
     )));
     subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
     let labels = NSStackView::new(mtm);
@@ -1329,9 +1386,10 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
             &NSString::from_str(&initial.to_uppercase().to_string()),
             mtm,
         );
-        letter.setFont(Some(&NSFont::systemFontOfSize_weight(15., unsafe {
-            NSFontWeightSemibold
-        })));
+        letter.setFont(Some(&font(
+            crate::scale().text_size.sm,
+            st().account_weight,
+        )));
         letter.setTextColor(Some(&NSColor::labelColor()));
         letter.setTranslatesAutoresizingMaskIntoConstraints(false);
         view.addSubview(&letter);
@@ -1346,22 +1404,28 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
     }
     view.addSubview(&labels);
     activate(&[
-        avatar
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), SIDEBAR_INSET + AVATAR_INSET),
+        avatar.leadingAnchor().constraintEqualToAnchor_constant(
+            &view.leadingAnchor(),
+            sidebar_inset() + avatar_inset(),
+        ),
         avatar
             .centerYAnchor()
             .constraintEqualToAnchor(&view.centerYAnchor()),
-        avatar.widthAnchor().constraintEqualToConstant(AVATAR),
-        avatar.heightAnchor().constraintEqualToConstant(AVATAR),
-        labels
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&avatar.trailingAnchor(), 9.),
+        avatar
+            .widthAnchor()
+            .constraintEqualToConstant(avatar_side()),
+        avatar
+            .heightAnchor()
+            .constraintEqualToConstant(avatar_side()),
+        labels.leadingAnchor().constraintEqualToAnchor_constant(
+            &avatar.trailingAnchor(),
+            crate::scale().space.md as f64,
+        ),
         labels
             .trailingAnchor()
             .constraintLessThanOrEqualToAnchor_constant(
                 &view.trailingAnchor(),
-                -SIDEBAR_INSET - 6.,
+                -sidebar_inset() - crate::scale().space.sm as f64,
             ),
         labels
             .centerYAnchor()
@@ -1477,40 +1541,15 @@ fn squircle(s: f64, inset: f64) -> String {
 }
 
 /// The colours of one tile family in one appearance.
-struct Look {
-    body: (&'static str, &'static str),
-    /// The inner edge: its colour and opacity at top and bottom.
-    edge: (&'static str, f64, f64),
-    /// The soft top light's opacity.
-    light: f64,
-    glyph: (&'static str, &'static str),
-    /// The tile's drop shadow: offset, blur, opacity.
-    shadow: (f64, f64, f64),
-    /// The glyph's own offset shadow (pressed in): colour and opacity.
-    press: (&'static str, f64),
-}
 /// The tile: a dark (light in Aqua) squircle with a soft top light, an
-/// inner edge and a monochrome glyph pressed into it.
-fn look(dark: bool) -> Look {
-    if dark {
-        Look {
-            body: ("#55555c", "#26262b"),
-            edge: ("#ffffff", 0.42, 0.06),
-            light: 0.24,
-            glyph: ("#ffffff", "#d4d4da"),
-            shadow: (0.6, 0.7, 0.6),
-            press: ("#000000", 0.5),
-        }
+/// inner edge and a monochrome glyph pressed into it (`TilePalette`).
+fn look(dark: bool) -> pm_design::TilePalette {
+    let scheme = if dark {
+        pm_design::Scheme::Dark
     } else {
-        Look {
-            body: ("#ffffff", "#e2e2e6"),
-            edge: ("#000000", 0.08, 0.2),
-            light: 0.9,
-            glyph: ("#55555b", "#232327"),
-            shadow: (0.6, 0.7, 0.2),
-            press: ("#ffffff", 0.9),
-        }
-    }
+        pm_design::Scheme::Light
+    };
+    pm_design::Settings::of(scheme).tile
 }
 
 /// An SVG's view box size (width, height).
@@ -1527,14 +1566,7 @@ fn view_box(svg: &str) -> Option<(f64, f64)> {
 fn tile_svg(id: &str, dark: bool) -> Option<String> {
     let source = glyph(id)?;
     let glyph = glyph_body(source, "url(#g)");
-    let Look {
-        body,
-        edge,
-        light,
-        glyph: ink,
-        shadow,
-        press,
-    } = look(dark);
+    let t = look(dark);
     let s = TILE_UNITS;
     let m = MARGIN_UNITS;
     let full = s + 2. * m;
@@ -1548,9 +1580,9 @@ fn tile_svg(id: &str, dark: bool) -> Option<String> {
 <defs>
 <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{b0}"/><stop offset="1" stop-color="{b1}"/></linearGradient>
 <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{ec}" stop-opacity="{e0}"/><stop offset="1" stop-color="{ec}" stop-opacity="{e1}"/></linearGradient>
-<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#ffffff" stop-opacity="{light}"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="{lc}" stop-opacity="{light}"/><stop offset="1" stop-color="{lc}" stop-opacity="0"/></radialGradient>
 <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="{gh}"><stop offset="0" stop-color="{g0}"/><stop offset="1" stop-color="{g1}"/></linearGradient>
-<filter id="drop" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="#000000" flood-opacity="{so}"/></filter>
+<filter id="drop" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="{shc}" flood-opacity="{so}"/></filter>
 <filter id="press" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0.55" stdDeviation="0.3" flood-color="{pc}" flood-opacity="{po}"/></filter>
 </defs>
 <path d="{outer}" fill="url(#body)" filter="url(#drop)"/>
@@ -1559,18 +1591,21 @@ fn tile_svg(id: &str, dark: bool) -> Option<String> {
 <g filter="url(#press)"><g transform="translate({ax} {ay}) scale({k})">{glyph}</g></g>
 </svg>"##,
         nm = -m,
-        b0 = body.0,
-        b1 = body.1,
-        ec = edge.0,
-        e0 = edge.1,
-        e1 = edge.2,
-        g0 = ink.0,
-        g1 = ink.1,
-        sd = shadow.0,
-        sb = shadow.1,
-        so = shadow.2,
-        pc = press.0,
-        po = press.1,
+        b0 = pm_design::css(t.body_top),
+        b1 = pm_design::css(t.body_bottom),
+        ec = pm_design::css(t.edge),
+        e0 = t.edge_top,
+        e1 = t.edge_bottom,
+        lc = pm_design::css(t.light),
+        light = t.light_opacity,
+        g0 = pm_design::css(t.glyph_top),
+        g1 = pm_design::css(t.glyph_bottom),
+        shc = pm_design::css(t.shadow),
+        sd = t.shadow_offset,
+        sb = t.shadow_blur,
+        so = t.shadow_opacity,
+        pc = pm_design::css(t.press),
+        po = t.press_opacity,
         outer = squircle(s, 0.),
         inner = squircle(s, 0.25),
     ))
@@ -1597,29 +1632,32 @@ pub fn tile_image(id: &str, dark: bool, side: f64) -> Option<Retained<NSImage>> 
 /// The account's avatar: the tile's material as a disc (the initial is a
 /// label over it), or, signed out, the account glyph in the secondary grey.
 fn avatar_image(signed_in: bool, dark: bool) -> Option<Retained<NSImage>> {
-    let size = NSSize::new(AVATAR, AVATAR);
+    let size = NSSize::new(avatar_side(), avatar_side());
     if !signed_in {
-        let grey = if dark { "#98989f" } else { "#6a6a70" };
+        let grey = pm_design::css(look(dark).account_glyph);
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">{}</svg>"#,
-            glyph_body(glyph("account")?, grey)
+            glyph_body(glyph("account")?, &grey)
         );
         return svg_image(&svg, size);
     }
-    let Look {
-        body, edge, light, ..
-    } = look(dark);
+    let t = look(dark);
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
 <defs>
-<linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{}"/><stop offset="1" stop-color="{}"/></linearGradient>
-<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#ffffff" stop-opacity="{light}"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+<linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{b0}"/><stop offset="1" stop-color="{b1}"/></linearGradient>
+<radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="{lc}" stop-opacity="{light}"/><stop offset="1" stop-color="{lc}" stop-opacity="0"/></radialGradient>
 </defs>
 <circle cx="16" cy="16" r="15.5" fill="url(#body)"/>
 <circle cx="16" cy="16" r="15.5" fill="url(#light)"/>
-<circle cx="16" cy="16" r="15.25" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="0.5"/>
+<circle cx="16" cy="16" r="15.25" fill="none" stroke="{ec}" stroke-opacity="{e0}" stroke-width="0.5"/>
 </svg>"##,
-        body.0, body.1, edge.0, edge.1
+        b0 = pm_design::css(t.body_top),
+        b1 = pm_design::css(t.body_bottom),
+        lc = pm_design::css(t.light),
+        light = t.light_opacity,
+        ec = pm_design::css(t.edge),
+        e0 = t.edge_top,
     );
     svg_image(&svg, size)
 }

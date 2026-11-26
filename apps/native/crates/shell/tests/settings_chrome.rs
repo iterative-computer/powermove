@@ -94,7 +94,7 @@ fn main() {
             .page()
             .convertRect_toView(chrome.page().bounds(), None);
         assert!(
-            page.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+            page.origin.x >= pm_shell::settings_window::sidebar_width() - 1.,
             "the page starts beside the sidebar, at {}",
             page.origin.x
         );
@@ -132,7 +132,7 @@ fn main() {
     let at = ground.convertRect_toView(ground.bounds(), None);
     let top = window.contentView().map_or(0., |c| c.bounds().size.height);
     assert!(
-        at.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+        at.origin.x >= pm_shell::settings_window::sidebar_width() - 1.,
         "the ground starts beside the sidebar, at {}",
         at.origin.x
     );
@@ -159,7 +159,7 @@ fn main() {
     assert_eq!(report["opaque"], false, "{report}");
     assert!(report["backgroundAlpha"].as_f64().unwrap() < 0.01, "{report}");
     assert_eq!(report["detailPainted"], false, "{report}");
-    assert!(report["groundX"].as_f64().unwrap() >= pm_shell::settings_window::SIDEBAR_WIDTH - 1., "{report}");
+    assert!(report["groundX"].as_f64().unwrap() >= pm_shell::settings_window::sidebar_width() - 1., "{report}");
     if report["glassAvailable"] == true {
         assert_eq!(report["sidebarInGlass"], true, "{report}");
     }

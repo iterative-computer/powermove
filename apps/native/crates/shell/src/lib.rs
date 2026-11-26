@@ -29,6 +29,12 @@ pub mod kit;
 pub mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
+/// The tokens that do not change with the appearance (sizes, text steps,
+/// ink steps, fixed art colours): readable on any thread, without AppKit.
+pub fn scale() -> &'static pm_design::Tokens {
+    static SCALE: std::sync::OnceLock<pm_design::Tokens> = std::sync::OnceLock::new();
+    SCALE.get_or_init(|| pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()))
+}
 pub mod menu;
 pub mod menu_input;
 #[cfg(target_os = "macos")]

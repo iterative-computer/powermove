@@ -2267,8 +2267,8 @@ impl Controller {
                 WindowKind::PopUp,
             ),
             "settings" => (
-                pm_shell::settings_window::DEFAULT_SIZE.0 as f32,
-                pm_shell::settings_window::DEFAULT_SIZE.1 as f32,
+                pm_shell::settings_window::default_size().0 as f32,
+                pm_shell::settings_window::default_size().1 as f32,
                 WindowKind::Normal,
             ),
             _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),

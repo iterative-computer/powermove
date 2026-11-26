@@ -449,7 +449,10 @@ impl Tokens {
                 oklch(l.wave, (chroma * 1.25).min(0.15), hue),
                 if disabled { 0.35 } else { 0.8 },
             ),
-            level: (oklch(l.level, (chroma * 1.5).min(0.15), hue), if disabled { 0.4 } else { 0.9 }),
+            level: (
+                oklch(l.level, (chroma * 1.5).min(0.15), hue),
+                if disabled { 0.4 } else { 0.9 },
+            ),
         }
     }
     /// A graph curve's ink for channel `path`, the `index`th curve shown:

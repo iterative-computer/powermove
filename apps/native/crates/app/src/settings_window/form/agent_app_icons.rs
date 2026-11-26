@@ -8,8 +8,13 @@ use objc2_app_kit::{
 use objc2_foundation::{NSBundle, NSData, NSPoint, NSRect, NSSize, NSString};
 
 /// Every mark sits in one 24 pt squircle (a row is 44 pt, as on every page).
-pub(super) const SIZE: f64 = 24.;
-const GAP: f64 = 12.;
+/// The mark's side and the space after it (`Settings.app_icon`, `app_icon_gap`).
+pub(super) fn size() -> f64 {
+    pm_shell::scale().settings.app_icon as f64
+}
+fn gap() -> f64 {
+    pm_shell::scale().settings.app_icon_gap as f64
+}
 
 struct Mark {
     svg: &'static [u8],
@@ -88,7 +93,7 @@ fn app_squircle(icon: Retained<NSImage>) -> Retained<NSImage> {
         icon.drawInRect(NSRect::new(origin, size));
         Bool::YES
     });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(SIZE, SIZE), false, &draw)
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size(), size()), false, &draw)
 }
 
 /// An app with no mark of its own: Settings' lit tile with a glyph standing
@@ -99,8 +104,8 @@ fn lit_tile(symbol: &str) -> Option<Retained<NSImage>> {
         "desktopcomputer" => "window",
         _ => "extensions",
     };
-    let light = pm_shell::settings_window::tile_image(glyph, false, SIZE)?;
-    let dark = pm_shell::settings_window::tile_image(glyph, true, SIZE)?;
+    let light = pm_shell::settings_window::tile_image(glyph, false, size())?;
+    let dark = pm_shell::settings_window::tile_image(glyph, true, size())?;
     let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
         let names = unsafe {
             [
@@ -122,7 +127,7 @@ fn lit_tile(symbol: &str) -> Option<Retained<NSImage>> {
         Bool::YES
     });
     Some(NSImage::imageWithSize_flipped_drawingHandler(
-        NSSize::new(SIZE, SIZE),
+        NSSize::new(size(), size()),
         false,
         &draw,
     ))
@@ -144,7 +149,7 @@ fn bundled_mark(mark: &Mark) -> Option<Retained<NSImage>> {
         Bool::YES
     });
     Some(NSImage::imageWithSize_flipped_drawingHandler(
-        NSSize::new(SIZE, SIZE),
+        NSSize::new(size(), size()),
         false,
         &draw,
     ))
@@ -153,7 +158,7 @@ fn bundled_mark(mark: &Mark) -> Option<Retained<NSImage>> {
 fn image_view(mtm: MainThreadMarker, id: &str, app: AppIcon) -> Retained<NSImageView> {
     let image = resolve(id, app, bundled_mark, lit_tile);
     let view = NSImageView::new(mtm);
-    view.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(SIZE, SIZE)));
+    view.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(size(), size())));
     view.setImage(image.as_deref());
     view.setImageScaling(NSImageScaling::ScaleNone);
     view.setAccessibilityElement(false);
@@ -183,12 +188,12 @@ impl LeadingIcon {
         super::constraints(&[
             icon.leadingAnchor()
                 .constraintEqualToAnchor_constant(&container.leadingAnchor(), inset),
-            icon.widthAnchor().constraintEqualToConstant(SIZE),
-            icon.heightAnchor().constraintEqualToConstant(SIZE),
+            icon.widthAnchor().constraintEqualToConstant(size()),
+            icon.heightAnchor().constraintEqualToConstant(size()),
             icon.centerYAnchor()
                 .constraintEqualToAnchor(&container.centerYAnchor()),
             body.leadingAnchor()
-                .constraintEqualToAnchor_constant(&container.leadingAnchor(), SIZE + GAP),
+                .constraintEqualToAnchor_constant(&container.leadingAnchor(), size() + gap()),
             body.trailingAnchor()
                 .constraintEqualToAnchor(&container.trailingAnchor()),
             body.topAnchor()

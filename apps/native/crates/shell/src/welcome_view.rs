@@ -174,8 +174,8 @@ impl WelcomeView {
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
             control.set_busy(busy);
             match size {
-                Size::Primary | Size::Wide if self.sheet => control.wide(SHEET_INNER),
-                Size::Primary if self.stage => control.prominent(PRIMARY_WIDTH),
+                Size::Primary | Size::Wide if self.sheet => control.wide(wt().sheet_inner()),
+                Size::Primary if self.stage => control.prominent(wt().primary_width),
                 Size::Pill => control.small(),
                 _ => {}
             }
@@ -291,10 +291,10 @@ impl WelcomeView {
         // Headless (no AppKit): the stage's accent button, drawn.
         element = if self.stage && primary {
             element
-                .w(px(PRIMARY_WIDTH))
-                .h(px(PRIMARY_HEIGHT))
+                .w(px(wt().primary_width))
+                .h(px(wt().primary_height))
                 .rounded_full()
-                .text_size(px(13.))
+                .text_size(px(ts().base))
                 .font_weight(FontWeight::MEDIUM)
         } else {
             element
@@ -458,10 +458,10 @@ impl WelcomeView {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(LIST_RADIUS))
+            .rounded(px(wt().list_radius))
             .rounded_smoothing(t.radius.smoothing)
             .overflow_hidden()
-            .bg(rgba((c.text << 8) | 0x0c));
+            .bg(rgba(alpha(c.text, ink().well)));
         // More rows than the column holds over the pinned actions (the
         // speech models): the card keeps its height and its rows scroll in
         // it, an edge fading where there is more to see. Nothing else moves.
@@ -473,14 +473,14 @@ impl WelcomeView {
             if room == 0. && self.clock.is_none() && !self.list_scroll.bounds().is_empty() {
                 window.request_animation_frame();
             }
-            let fade = |on: bool| px(if on { LIST_FADE } else { 0. }).into();
+            let fade = |on: bool| px(if on { wt().list_fade } else { 0. }).into();
             group = group
                 // Each row's name, tag and meta on their two lines: the
                 // card takes some of the column's margin (still well inside
                 // the half).
-                .w(px(COLUMN + 2. * LIST_WIDEN))
-                .ml(px(-LIST_WIDEN))
-                .max_h(px(LIST_MAX_HEIGHT))
+                .w(px(wt().column + 2. * wt().list_widen))
+                .ml(px(-wt().list_widen))
+                .max_h(px(wt().list_max_height))
                 .overflow_y_scroll()
                 .track_scroll(&self.list_scroll)
                 .overflow_fade(Edges::<AbsoluteLength> {
@@ -500,9 +500,9 @@ impl WelcomeView {
                 group = group.child(
                     div()
                         .flex_none()
-                        .ml(px(LIST_INSET))
+                        .ml(px(wt().list_inset))
                         .h(px(0.5))
-                        .bg(rgba((c.text << 8) | 0x1f)),
+                        .bg(rgba(alpha(c.text, ink().edge))),
                 );
             }
             let mark = choice.mark.clone().map(|name| {
@@ -512,7 +512,7 @@ impl WelcomeView {
                     // A mark in its own colour (Claude's orange); others in
                     // the text's ink.
                     let ink = if name == "provider.claude" {
-                        CLAUDE_ORANGE
+                        crate::scale().colors.brand_claude
                     } else {
                         c.text
                     };
@@ -521,9 +521,9 @@ impl WelcomeView {
                 };
                 div()
                     .flex_none()
-                    .size(px(ICON_TILE))
-                    .rounded(px(t.radius.nested(LIST_RADIUS, 6.)))
-                    .bg(rgba((c.text << 8) | 0x0f))
+                    .size(px(wt().icon_tile))
+                    .rounded(px(t.radius.nested(wt().list_radius, 6.)))
+                    .bg(rgba(alpha(c.text, ink().well)))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -545,7 +545,7 @@ impl WelcomeView {
                     .flex_none()
                     .px(px(5.))
                     .rounded(px(4.))
-                    .bg(rgba((c.accent << 8) | 0x26))
+                    .bg(rgba(alpha(c.accent, ink().tint)))
                     .text_size(px(size))
                     .line_height(px(14.))
                     .text_color(rgb(c.accent))
@@ -558,7 +558,7 @@ impl WelcomeView {
                 .flex_wrap()
                 .items_center()
                 .gap(px(6.))
-                .text_size(px(11.))
+                .text_size(px(ts().xs))
                 .line_height(px(14.))
                 .text_color(rgb(c.secondary))
                 .children(
@@ -585,14 +585,14 @@ impl WelcomeView {
                 .aria_selected(selected)
                 .tab_index(0)
                 .flex_none()
-                .min_h(px(LIST_ROW))
-                .when(long, |d| d.h(px(LIST_ROW)))
-                .px(px(LIST_INSET))
+                .min_h(px(wt().list_row))
+                .when(long, |d| d.h(px(wt().list_row)))
+                .px(px(wt().list_inset))
                 .py(px(8.))
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .hover_style(|s| s.bg(rgba((c.text << 8) | 0x08)))
+                .hover_style(|s| s.bg(rgba(alpha(c.text, ink().wash))))
                 .children(mark)
                 .child(
                     div()
@@ -614,7 +614,7 @@ impl WelcomeView {
                                     div()
                                         .min_w(px(0.))
                                         .truncate()
-                                        .text_size(px(13.))
+                                        .text_size(px(ts().base))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(rgb(c.text))
                                         .child(choice.label.clone()),
@@ -633,7 +633,7 @@ impl WelcomeView {
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .text_size(px(11.))
+                        .text_size(px(ts().xs))
                         .text_color(rgb(c.secondary))
                         .child(status)
                 }))
@@ -679,8 +679,8 @@ impl WelcomeView {
             .flex()
             .items_center()
             .rounded_full()
-            .bg(rgba((t.colors.text << 8) | 0x1f))
-            .text_size(px(12.))
+            .bg(rgba(alpha(t.colors.text, ink().edge)))
+            .text_size(px(ts().sm))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(t.colors.text))
             .child(label.to_owned())
@@ -740,8 +740,8 @@ impl WelcomeView {
         // The mark, title, line and content, from the mark's height down to
         // where the actions start.
         let mut column = div()
-            .w(px(COLUMN))
-            .h(px(CONTENT_BOTTOM - LOGO_TOP))
+            .w(px(wt().column))
+            .h(px((wt().actions_top - wt().actions_room) - wt().logo_top))
             .flex()
             .flex_col()
             .items_center()
@@ -755,7 +755,7 @@ impl WelcomeView {
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
                     .mt(px(24.))
-                    .text_size(px(TITLE_SIZE))
+                    .text_size(px(ts().x4l))
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(relative(1.15))
                     .letter_spacing(px(-0.4))
@@ -771,7 +771,7 @@ impl WelcomeView {
                     .role(Role::Label)
                     .aria_label(frame.line.replace('\n', " "))
                     .mt(px(8.))
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .line_height(px(18.))
                     .text_color(rgb(c.secondary))
                     .relative()
@@ -794,7 +794,7 @@ impl WelcomeView {
                 .items_center()
                 .justify_center()
                 .gap(px(8.))
-                .text_size(px(13.))
+                .text_size(px(ts().base))
                 .text_color(rgb(c.secondary));
             if frame.spinner {
                 row = row.child(spinner(if spin { self.time() } else { 0. }, &t));
@@ -824,7 +824,7 @@ impl WelcomeView {
                     .role(Role::Label)
                     .aria_label(line.clone())
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .text_color(rgb(c.secondary))
                     .child(line),
             );
@@ -857,7 +857,7 @@ impl WelcomeView {
         if let Some(error) = frame.error.as_ref().filter(|_| frame.sign_in.is_none()) {
             controls = controls.child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .text_color(rgb(c.danger))
                     .text_center()
                     .child(error.clone()),
@@ -866,7 +866,7 @@ impl WelcomeView {
         if let Some(note) = &frame.note {
             controls = controls.child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(ts().sm))
                     .text_color(rgb(c.secondary))
                     .text_center()
                     .child(note.clone()),
@@ -881,7 +881,7 @@ impl WelcomeView {
                     .aria_label("Details")
                     .aria_expanded(self.details_open)
                     .tab_index(0)
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .text_color(rgb(c.secondary))
                     .text_center()
                     .child("Details")
@@ -922,9 +922,9 @@ impl WelcomeView {
                     .debug_selector(|| "welcome-content".into())
                     // The column's width, and room either side for a long
                     // list's wider card (its scroll clips what overhangs).
-                    .w(px(COLUMN + 2. * LIST_WIDEN))
+                    .w(px(wt().column + 2. * wt().list_widen))
                     .flex_none()
-                    .px(px(LIST_WIDEN))
+                    .px(px(wt().list_widen))
                     .mt(px(22.))
                     .flex_1()
                     .min_h(px(0.))
@@ -946,8 +946,8 @@ impl WelcomeView {
             .debug_selector(|| "welcome-actions".into())
             .absolute()
             .left_0()
-            .w(px(HALF))
-            .top(px(ACTIONS_TOP))
+            .w(px(wt().half))
+            .top(px(wt().actions_top))
             .flex()
             .flex_col()
             .items_center();
@@ -955,7 +955,7 @@ impl WelcomeView {
             div()
                 .id("welcome-primary")
                 .debug_selector(|| "welcome-primary".into())
-                .h(px(PRIMARY_HEIGHT))
+                .h(px(wt().primary_height))
                 .flex()
                 .justify_center()
                 .children(
@@ -990,7 +990,7 @@ impl WelcomeView {
                             .role(Role::Link)
                             .aria_label(label.clone())
                             .tab_index(0)
-                            .text_size(px(13.))
+                            .text_size(px(ts().base))
                             .text_color(rgb(c.secondary))
                             .hover_style(|s| s.text_color(rgb(c.text)))
                             .child(label)
@@ -1003,19 +1003,19 @@ impl WelcomeView {
             .left_0()
             .top_0()
             .bottom_0()
-            .w(px(HALF))
+            .w(px(wt().half))
             .flex()
             .flex_col()
             .items_center()
             // The mark at one height on every step; the step under it.
-            .pt(px(LOGO_TOP))
+            .pt(px(wt().logo_top))
             .child(column);
         let right = div()
             .absolute()
             .top_0()
             .bottom_0()
             .right_0()
-            .left(px(HALF))
+            .left(px(wt().half))
             .overflow_hidden()
             .children(frame.preview.as_deref().and_then(|id| preview(id, window)));
         div()
@@ -1047,18 +1047,17 @@ impl WelcomeView {
         let frame = self.frame.clone();
         let dark = t.scheme == pm_design::Scheme::Dark;
         if self.sheet_tile.as_ref().is_none_or(|(d, _)| *d != dark) {
-            self.sheet_tile = crate::settings_window::tile_png(
-                "powermove",
-                dark,
-                SHEET_TILE as f64,
-                2.,
-            )
-            .map(|png| {
-                (
-                    dark,
-                    std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)),
-                )
-            });
+            self.sheet_tile =
+                crate::settings_window::tile_png("powermove", dark, wt().sheet_tile as f64, 2.)
+                    .map(|png| {
+                        (
+                            dark,
+                            std::sync::Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Png,
+                                png,
+                            )),
+                        )
+                    });
         }
         let stage = frame.sign_in.as_ref().map(|s| s.stage);
         let title_p = match stage {
@@ -1086,7 +1085,7 @@ impl WelcomeView {
             .clone()
             .map(|s| self.sign_in_block(&s, window, cx));
         let spoken = frame.title.replace('\n', " ");
-        let (tile_w, _) = crate::settings_window::tile_image_size(SHEET_TILE as f64);
+        let (tile_w, _) = crate::settings_window::tile_image_size(wt().sheet_tile as f64);
         let find = |id: &str| frame.buttons.iter().find(|b| b.id == id).cloned();
         let google = find("google");
         let primary = frame
@@ -1107,7 +1106,7 @@ impl WelcomeView {
             .map(|b| (b.id.clone(), b.label.clone()))
             .collect();
         let mut column = div()
-            .w(px(SHEET_INNER))
+            .w(px(wt().sheet_inner()))
             .flex()
             .flex_col()
             .items_center()
@@ -1127,7 +1126,7 @@ impl WelcomeView {
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
                     .mt(px(10.))
-                    .text_size(px(SHEET_TITLE))
+                    .text_size(px(ts().x2l))
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(relative(1.2))
                     .letter_spacing(px(-0.2))
@@ -1143,7 +1142,7 @@ impl WelcomeView {
                     .role(Role::Label)
                     .aria_label(frame.line.replace('\n', " "))
                     .mt(px(6.))
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .line_height(px(18.))
                     .text_color(rgb(c.secondary))
                     .relative()
@@ -1153,13 +1152,13 @@ impl WelcomeView {
             );
         // Google first, then "or" between hairlines, on the email step.
         if let Some(button) = google {
-            let hairline = || div().flex_1().h(px(1.)).bg(rgba((c.text << 8) | 0x1f));
+            let hairline = || div().flex_1().h(px(1.)).bg(rgba(alpha(c.text, ink().edge)));
             column = column
                 .child(
                     div()
                         .id("welcome-google")
                         .mt(px(24.))
-                        .h(px(SHEET_CONTROL))
+                        .h(px(wt().sheet_control))
                         .flex()
                         .justify_center()
                         .child(self.native_control(&button, Size::Wide, window, cx)),
@@ -1174,7 +1173,7 @@ impl WelcomeView {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .text_size(px(12.))
+                        .text_size(px(ts().sm))
                         .text_color(rgb(c.secondary))
                         .child(hairline())
                         .child("or")
@@ -1202,7 +1201,7 @@ impl WelcomeView {
                     .id("welcome-primary")
                     .debug_selector(|| "welcome-primary".into())
                     .mt(px(12.))
-                    .h(px(SHEET_CONTROL))
+                    .h(px(wt().sheet_control))
                     .flex()
                     .justify_center()
                     .child(self.native_control(&button, size, window, cx)),
@@ -1211,7 +1210,7 @@ impl WelcomeView {
         let foot = div()
             .id("welcome-links")
             .debug_selector(|| "welcome-links".into())
-            .mt(px(SHEET_FOOT_GAP))
+            .mt(px(wt().sheet_foot_gap))
             .h(px(18.))
             .flex()
             .justify_center()
@@ -1224,7 +1223,7 @@ impl WelcomeView {
                     .role(Role::Link)
                     .aria_label(label.clone())
                     .tab_index(0)
-                    .text_size(px(13.))
+                    .text_size(px(ts().base))
                     .text_color(rgb(c.secondary))
                     .hover_style(|s| s.text_color(rgb(c.text)))
                     .child(label)
@@ -1261,7 +1260,7 @@ impl WelcomeView {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(SHEET_PADDING))
+            .pt(px(wt().sheet_padding))
             .child(
                 div()
                     .relative()
@@ -1281,7 +1280,7 @@ impl WelcomeView {
         if content <= 0. {
             return;
         }
-        let height = (SHEET_PADDING + content + SHEET_FOOT).round();
+        let height = (wt().sheet_padding + content + wt().sheet_foot).round();
         if (height - self.sheet_height).abs() < 0.5 {
             return;
         }
@@ -1380,7 +1379,7 @@ impl WelcomeView {
                 // The cells are drawn here; the field under them keeps the
                 // keyboard, a pasted code and VoiceOver.
                 field.alpha = 0.;
-                field.set_height(CELL_HEIGHT);
+                field.set_height(wt().cell_height);
                 field.describe("6-digit code");
             } else {
                 field.borderless();
@@ -1426,9 +1425,9 @@ impl WelcomeView {
     ) -> AnyElement {
         // The sheet's fields run its column's width at its buttons' height.
         let (well_w, well_h) = if self.sheet {
-            (SHEET_INNER, SHEET_CONTROL)
+            (wt().sheet_inner(), wt().sheet_control)
         } else {
-            (PRIMARY_WIDTH, FIELD_HEIGHT)
+            (wt().primary_width, wt().field_height)
         };
         let t = self.tokens.clone();
         let c = &t.colors;
@@ -1506,7 +1505,7 @@ impl WelcomeView {
             .flex_col()
             .items_center()
             .gap(px(14.))
-            .text_size(px(13.));
+            .text_size(px(ts().base));
         match s.stage {
             SignInStage::Email => {
                 let field = self.text_field("email", window, cx);
@@ -1530,13 +1529,13 @@ impl WelcomeView {
                         .px(px(12.))
                         .flex()
                         .items_center()
-                        .rounded(px(FIELD_RADIUS))
-                        .bg(rgba((c.text << 8) | 0x0d))
+                        .rounded(px(wt().field_radius))
+                        .bg(rgba(alpha(c.text, ink().well)))
                         .border_1()
                         .border_color(if focused {
                             rgb(c.focus)
                         } else {
-                            rgba((c.text << 8) | 0x1c)
+                            rgba(alpha(c.text, ink().edge))
                         })
                         .relative()
                         .top(px((1. - email_p) * 10.))
@@ -1581,22 +1580,22 @@ impl WelcomeView {
                     let digit = digits.get(i).copied();
                     let current = focused && i == active;
                     div()
-                        .w(px(CELL_WIDTH))
-                        .h(px(CELL_HEIGHT))
+                        .w(px(wt().cell_width))
+                        .h(px(wt().cell_height))
                         // The middle of the code: "123 456".
                         .when(i == CELLS / 2, |d| d.ml(px(8.)))
-                        .rounded(px(FIELD_RADIUS))
-                        .bg(rgba((c.text << 8) | 0x0d))
+                        .rounded(px(wt().field_radius))
+                        .bg(rgba(alpha(c.text, ink().well)))
                         .border_1()
                         .border_color(if current {
                             rgb(c.focus)
                         } else {
-                            rgba((c.text << 8) | 0x1c)
+                            rgba(alpha(c.text, ink().edge))
                         })
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(22.))
+                        .text_size(px(ts().x3l))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(c.text))
                         .children(digit.map(|d| d.to_string()))
@@ -1638,13 +1637,13 @@ impl WelcomeView {
                         .flex()
                         .items_center()
                         .gap(px(2.))
-                        .rounded(px(FIELD_RADIUS))
-                        .bg(rgba((c.text << 8) | 0x0d))
+                        .rounded(px(wt().field_radius))
+                        .bg(rgba(alpha(c.text, ink().well)))
                         .border_1()
                         .border_color(if focused {
                             rgb(c.focus)
                         } else {
-                            rgba((c.text << 8) | 0x1c)
+                            rgba(alpha(c.text, ink().edge))
                         })
                         .relative()
                         .top(px((1. - handle_p) * 10.))
@@ -1664,7 +1663,7 @@ impl WelcomeView {
                         .debug_selector(|| "welcome-browser".into())
                         .role(Role::Label)
                         .aria_label("Waiting for your browser")
-                        .h(px(FIELD_HEIGHT))
+                        .h(px(wt().field_height))
                         .flex()
                         .items_center()
                         .gap(px(8.))
@@ -2164,8 +2163,8 @@ impl Render for WelcomeView {
                 window.request_animation_frame();
             }
             let more = max > px(1.) && -self.body_scroll.offset().y < max - px(1.);
-            let window_colour = rgba((c.window << 8) | 0xff);
-            let clear = rgba(c.window << 8);
+            let window_colour = rgba(alpha(c.window, 1.));
+            let clear = rgba(alpha(c.window, 0.));
             let mut wrapper = div()
                 .relative()
                 .flex()
@@ -2334,68 +2333,35 @@ enum Size {
     /// The sign-in sheet's other full-width button (Continue with Google).
     Wide,
 }
-/// The stage's window: each half's width, the left half's ground, the
-/// field's two colours (orange to ember), the column's width and the title's
-/// size, and the preview's place in the field.
-const HALF: f32 = 450.;
-const LEFT_GROUND: u32 = 0x131212;
-const FIELD_LIGHT: u32 = 0xff7a2e;
-const FIELD_DEEP: u32 = 0xa3301a;
-const COLUMN: f32 = 330.;
-const TITLE_SIZE: f32 = 26.;
-/// The window picture on the field: its scale (of the app's own size) and
-/// its corner on the field; it runs off the right and bottom edges.
-const WINDOW_SCALE: f32 = 0.88;
-const WINDOW_LEFT: f32 = 32.;
-const WINDOW_TOP: f32 = 104.;
-/// The stage's grouped list: its corner (continuous), the row's least
-/// height and side inset (where the hairlines start), the icons' tile.
-const LIST_RADIUS: f32 = 12.;
-const LIST_ROW: f32 = 50.;
-/// A list longer than this scrolls in its card (`LIST_MAX_HEIGHT`, four
-/// rows and the top of a fifth), its edges fading.
+// Every place, size and colour the stage and the sheet draw at is a token
+// (`pm_design::Welcome`, `TextSize`, `Ink`, `Colors`).
+fn wt() -> pm_design::Welcome {
+    crate::scale().welcome
+}
+fn ts() -> pm_design::TextSize {
+    crate::scale().text_size
+}
+fn ink() -> pm_design::Ink {
+    crate::scale().ink
+}
+/// `rgb` with an `Ink` step's alpha, for `rgba`.
+fn alpha(rgb: u32, a: f32) -> u32 {
+    pm_design::with_alpha(rgb, a)
+}
+/// A list longer than this scrolls in its card (`list_max_height`).
 const LIST_ROWS_SHOWN: usize = 4;
-const LIST_MAX_HEIGHT: f32 = 224.;
-const LIST_FADE: f32 = 18.;
-const LIST_WIDEN: f32 = 20.;
-const LIST_INSET: f32 = 16.;
-const ICON_TILE: f32 = 32.;
-/// The Claude logo's own colour.
-const CLAUDE_ORANGE: u32 = 0xd97757;
-/// The stage's one primary action: an orange capsule, its width and
-/// (drawn, headless) height; the mark's height from the window's top.
-const PRIMARY_WIDTH: f32 = 280.;
-const PRIMARY_HEIGHT: f32 = 36.;
-const LOGO_TOP: f32 = 104.;
-/// Where the content's room ends, and where the actions start: the primary
-/// at one height on every frame, its links 12 under it, 64 above the bottom.
-const ACTIONS_TOP: f32 = 510.;
-/// The sign-in sheet: its size, the column 32 pt in from its edges, its
-/// controls' height (Google, the field, Continue), its tile and title.
-pub const SHEET_SIZE: (f32, f32) = (400., 428.);
-const SHEET_PADDING: f32 = 32.;
-/// Cancel's line sits this far above the sheet's bottom edge.
-const SHEET_FOOT: f32 = 22.;
+/// The sign-in sheet's size (its height follows its step).
+pub fn sheet_size() -> (f32, f32) {
+    (wt().sheet_width, wt().sheet_height)
+}
 /// How long a step's field keeps asking for the keyboard after it arrives.
 const FIELD_FOCUS_SECONDS: f64 = 0.5;
-/// Cancel's line sits this far under the step's last control.
-const SHEET_FOOT_GAP: f32 = 20.;
-const SHEET_INNER: f32 = 400. - 2. * SHEET_PADDING;
-const SHEET_CONTROL: f32 = 36.;
-const SHEET_TILE: f32 = 48.;
-const SHEET_TITLE: f32 = 20.;
 /// The sign-in's six code cells, as wide together as the primary action.
 const CELLS: usize = 6;
-const CELL_WIDTH: f32 = 38.;
-const CELL_HEIGHT: f32 = 48.;
 const SHAKE_SECONDS: f32 = 0.45;
-/// The email's well; its corners and the cells' are one radius.
-const FIELD_HEIGHT: f32 = 40.;
-const FIELD_RADIUS: f32 = 10.;
 /// `Motion::values` keys: the sign-in's title by stage, and its parts.
 const TITLE_KEY: u64 = 0x5160_0000;
 const SIGN_IN_KEY: u64 = 0x5160_0010;
-const CONTENT_BOTTOM: f32 = ACTIONS_TOP - 20.;
 
 /// Three quarters of a ring, one turn a second (`time` in turns). Still
 /// under Reduce Motion. Also the kit's indeterminate progress row.
@@ -2415,7 +2381,7 @@ fn check(size: f32, p: f32) -> impl IntoElement + use<> {
                 builder.line_to(points[1] + (points[2] - points[1]) * (drawn - 1.));
             }
             if let Ok(path) = builder.build() {
-                window.paint_path(path, rgb(0xffffff));
+                window.paint_path(path, rgb(crate::scale().colors.white));
             }
         },
     )
@@ -2465,8 +2431,8 @@ pub fn stage_ground() -> Div {
                 .left_0()
                 .top_0()
                 .bottom_0()
-                .w(px(HALF))
-                .bg(rgb(LEFT_GROUND)),
+                .w(px(wt().half))
+                .bg(rgb(crate::scale().colors.welcome_ground)),
         )
         .child(field())
 }
@@ -2490,7 +2456,7 @@ fn field() -> Div {
     let mut grain = div().absolute().inset_0().opacity(0.07).overflow_hidden();
     if let Some((image, (w, h))) = picture("grain") {
         let (w, h) = (w as f32 / 2., h as f32 / 2.);
-        let (columns, rows) = ((HALF / w).ceil() as usize, (900. / h).ceil() as usize);
+        let (columns, rows) = ((wt().half / w).ceil() as usize, (900. / h).ceil() as usize);
         for row in 0..rows {
             for column in 0..columns {
                 grain = grain.child(
@@ -2509,12 +2475,12 @@ fn field() -> Div {
         .top_0()
         .bottom_0()
         .right_0()
-        .left(px(HALF))
+        .left(px(wt().half))
         .overflow_hidden()
         .bg(linear_gradient(
             160.,
-            linear_color_stop(rgb(FIELD_LIGHT), 0.),
-            linear_color_stop(rgb(FIELD_DEEP), 1.),
+            linear_color_stop(rgb(crate::scale().colors.welcome_field_light), 0.),
+            linear_color_stop(rgb(crate::scale().colors.welcome_field_deep), 1.),
         ))
         .child(div().absolute().inset_0().bg(linear_gradient(
             180.,
@@ -2571,14 +2537,17 @@ fn picture(name: &str) -> Option<(std::sync::Arc<RenderImage>, (u32, u32))> {
 fn preview(id: &str, window: &Window) -> Option<AnyElement> {
     let _ = window;
     let (image, (w, h)) = picture(id)?;
-    // The captures are two pixels a point; shown at `WINDOW_SCALE`.
-    let (w, h) = (w as f32 / 2. * WINDOW_SCALE, h as f32 / 2. * WINDOW_SCALE);
-    let radius = 16. * WINDOW_SCALE;
+    // The captures are two pixels a point; shown at `wt().window_scale`.
+    let (w, h) = (
+        w as f32 / 2. * wt().window_scale,
+        h as f32 / 2. * wt().window_scale,
+    );
+    let radius = 16. * wt().window_scale;
     Some(
         div()
             .absolute()
-            .left(px(WINDOW_LEFT))
-            .top(px(WINDOW_TOP))
+            .left(px(wt().window_left))
+            .top(px(wt().window_top))
             .w(px(w))
             .h(px(h))
             .rounded(px(radius))
