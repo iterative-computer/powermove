@@ -8,7 +8,7 @@ const STOP_COUNT: usize = 24;
 thread_local! {static PREFERENCES: std::cell::Cell<(bool, &'static str, u8)> = const { std::cell::Cell::new((false,"Hex",0)) };}
 use gpui::{prelude::*, *};
 use pm_shell::{
-    kit::{Button, Kit, Recipes, dismiss_menu_on_press},
+    kit::{Button, Kit, Recipes},
     text::{TextEvent, TextField, TextKind},
 };
 
@@ -48,7 +48,6 @@ pub struct Picker {
     window: AnyWindowHandle,
     menu: Option<bool>,
     menu_anchors: std::rc::Rc<std::cell::RefCell<[Option<Bounds<Pixels>>; 2]>>,
-    menu_index: usize,
     active: bool,
     p3: bool,
     notation: &'static str,
@@ -93,7 +92,6 @@ impl Picker {
             window: window.window_handle(),
             menu: None,
             menu_anchors: Default::default(),
-            menu_index: 0,
             active: false,
             p3,
             notation,
@@ -336,11 +334,44 @@ impl Picker {
             &["OKLCH", "HSL", "RGB", "Hex"]
         }
     }
-    fn toggle_menu(&mut self, settings: bool, cx: &mut Context<Self>) {
+    /// The notation menu (opening upward from its button) or the picker
+    /// settings menu (below its button): the system's, the current choice
+    /// checked.
+    fn open_menu(&mut self, settings: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_active(cx);
-        self.menu = (self.menu != Some(settings)).then_some(settings);
-        self.menu_index = 0;
+        let Some(control) = self.menu_anchors.borrow()[usize::from(settings)] else {
+            return;
+        };
+        self.menu = Some(settings);
+        let options: Vec<serde_json::Value> = self
+            .modes()
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let checked = if settings {
+                    self.hue_mode == i as u8
+                } else {
+                    self.notation == name
+                };
+                serde_json::json!({"label": name, "checked": checked})
+            })
+            .collect();
         cx.notify();
+        let place = if settings {
+            crate::v4_native::Place::Below(control)
+        } else {
+            crate::v4_native::Place::Above(control)
+        };
+        let this = cx.entity();
+        crate::v4_native::menu_at(window, &options, place, cx, move |index, cx| {
+            this.update(cx, |p, cx| match index {
+                Some(index) => p.choose_menu(index, cx),
+                None => {
+                    p.menu = None;
+                    cx.notify();
+                }
+            });
+        });
     }
     fn choose_menu(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.menu == Some(true) {
@@ -892,6 +923,7 @@ impl Render for Picker {
                 |_, _, _, _| {},
             )
             .absolute()
+            .inset_0()
             .size_full()
         };
         let weak = cx.entity().downgrade();
@@ -1080,7 +1112,7 @@ impl Render for Picker {
                         })
                         .relative()
                         .child(menu_anchor(false))
-                        .on_click(cx.listener(|p, _, _, cx| p.toggle_menu(false, cx))),
+                        .on_click(cx.listener(|p, _, window, cx| p.open_menu(false, window, cx))),
                 )
                 .child(
                     div()
@@ -1154,25 +1186,12 @@ impl Render for Picker {
                         p.navigate(if e.keystroke.modifiers.shift { -1 } else { 1 }, cx);
                     }
                     "escape" => {
-                        if let Some(settings) = p.menu.take() {
-                            let stop = if settings { SETTINGS_STOP } else { NOTATION_STOP };
-                            p.stops[stop].focus(window, cx);
-                            cx.notify();
-                        } else if p.sampling {
+                        if p.sampling {
                             p.cancel_sample(cx);
                         } else {
                             p.finish(false, cx);
                         }
                     }
-                    "up" | "down" if p.menu.is_some() => {
-                        p.focus.focus(window, cx);
-                        let n = p.modes().len();
-                        p.menu_index =
-                            (p.menu_index + n + if e.keystroke.key == "up" { n - 1 } else { 1 })
-                                % n;
-                        cx.notify();
-                    }
-                    "enter" | "space" if p.menu.is_some() => p.choose_menu(p.menu_index, cx),
                     "enter" if p.focus_index == VALUE_COPY_STOP => p.copy_value(cx),
                     "enter" if matches!(p.focus_index, 12 | 16 | 20) => {
                         p.copy_row((p.focus_index - 12) / 4, cx)
@@ -1279,7 +1298,7 @@ impl Render for Picker {
                         })
                         .relative()
                         .child(menu_anchor(true))
-                        .on_click(cx.listener(|p, _, _, cx| p.toggle_menu(true, cx))),
+                        .on_click(cx.listener(|p, _, window, cx| p.open_menu(true, window, cx))),
                     )
                     .child(
                         kit.icon_button("close-color", "xmark", "Close", false)
@@ -1303,55 +1322,6 @@ impl Render for Picker {
                     .child(details),
             )
             .when(!self.status.is_empty(), |d| d.child(self.status.clone()))
-            .when_some(self.menu, |d, settings| {
-                let modes: &[&str] = if settings {
-                    &[
-                        "Find closest color",
-                        "Maintain chroma",
-                        "Maintain lightness",
-                    ]
-                } else if self.p3 {
-                    &["OKLCH", "Display P3"]
-                } else {
-                    &["OKLCH", "HSL", "RGB", "Hex"]
-                };
-                let anchors = self.menu_anchors.borrow();
-                let view = cx.entity().downgrade();
-                let mut menu = dismiss_menu_on_press(
-                    kit.menu().id("colour-picker-menu"),
-                    anchors[usize::from(settings)],
-                    anchors[usize::from(!settings)].into_iter().collect(),
-                    move |_, cx| {
-                        let _ = view.update(cx, |p, cx| {
-                            p.menu = None;
-                            cx.notify();
-                        });
-                    },
-                )
-                .absolute()
-                .right(px(t.space.md));
-                menu = if settings {
-                    menu.top(px(t.metrics.control + t.space.md))
-                } else {
-                    menu.bottom(px(t.metrics.control + t.space.md))
-                };
-                for (i, &name) in modes.iter().enumerate() {
-                    menu = menu.child(
-                        kit.menu_row(
-                            format!("picker-menu-{i}"),
-                            name,
-                            Some(if settings {
-                                self.hue_mode == i as u8
-                            } else {
-                                self.notation == name
-                            }),
-                            None,
-                        )
-                        .on_click(cx.listener(move |p, _, _, cx| p.choose_menu(i, cx))),
-                    );
-                }
-                d.child(menu)
-            })
             .child(tracking)
     }
 }

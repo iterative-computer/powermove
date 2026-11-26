@@ -711,3 +711,157 @@ fn agent_apps_get_powermove_added_and_removed_in_their_own_settings_only() {
     assert!(!again.fresh);
     assert_eq!(again.answer, Answer::Added);
 }
+
+/// Signs in at the fixture registry with an emailed code; the sealed session.
+fn fixture_session(origin: &'static str) -> Vec<u8> {
+    let vault = Memory::default();
+    let profile = tempfile::tempdir().unwrap();
+    let mut host = Http::new(origin, Box::new(vault.clone()), profile.path().to_owned());
+    let mut run = |work| {
+        CloudTask::new(Flight::default().start(), origin, work)
+            .unwrap()
+            .run(&mut host)
+            .result
+            .unwrap()
+    };
+    run(CloudWork::SendEmail {
+        email: "person@example.com".into(),
+    });
+    run(CloudWork::VerifyEmail {
+        email: "person@example.com".into(),
+        code: Secret::new(CODE.into()),
+    });
+    vault.read().unwrap().unwrap()
+}
+
+/// Runs the app's tasks until `done` holds of it (the account worker is a
+/// real thread; the app polls it on timers).
+fn settle(cx: &mut gpui::TestAppContext, done: impl Fn(&gpui::App) -> bool) {
+    for _ in 0..600 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+        if cx.update(|cx| done(cx)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the account never settled");
+}
+fn signed_in(cx: &gpui::App) -> bool {
+    crate::cloud::fact(cx)["signedIn"] == true
+}
+/// What Aero runs on: the session the account's worker holds now.
+fn aero_session(cx: &mut gpui::TestAppContext) -> bool {
+    cx.update(|cx| crate::cloud::aero_account(cx))
+        .and_then(|account| account.session())
+        .is_some()
+}
+
+/// The owner's Sandbox on a local stack: the session `PM_CLOUD_SESSION`
+/// gave at launch. Sign Out (Home's menu and Settings both run
+/// `cloud::sign_out`) leaves the app signed out everywhere (the account
+/// fact Home and Settings read, Aero's session), tells the registry, and the
+/// env session never comes back in this process.
+#[gpui::test]
+fn sign_out_drops_the_env_session_for_the_life_of_the_process(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let token = serde_json::from_slice::<serde_json::Value>(&sealed).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The worker's host, as `init` makes it for `PM_CLOUD_SESSION`.
+    let env = crate::cloud::local_session_from(origin, Some(token)).expect("a local stack");
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(env))), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["email"],
+        "person@example.com"
+    );
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    let fact = cx.update(|cx| crate::cloud::fact(cx));
+    assert_eq!(fact["identity"], serde_json::Value::Null);
+    assert_eq!(fact["email"], serde_json::Value::Null);
+    assert_eq!(fact["billing"], serde_json::Value::Null);
+    assert!(!aero_session(cx), "Aero still had the env session");
+    // The registry was told: the old token no longer works there.
+    let mut old = Http::new(
+        origin,
+        Box::new(Memory(Arc::new(Mutex::new(Some(sealed))))),
+        profile.path().to_owned(),
+    );
+    assert!(matches!(
+        pm_services::surfaces::agent_auth::CloudHost::refresh_account(&mut old),
+        Ok(None)
+    ));
+    // Still signed out after the account is read again.
+    cx.update(crate::cloud::refresh_billing);
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| signed_in(cx)));
+    assert!(!aero_session(cx));
+}
+
+/// A release build's own sign-in, in the Keychain (here a fake that never
+/// touches the login Keychain): Sign Out deletes it, the app is signed out
+/// everywhere, and a relaunch over the same Keychain finds nothing.
+#[gpui::test]
+fn sign_out_deletes_a_keychain_session(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let items = Items::default();
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items.map.lock().unwrap().insert(key.clone(), sealed);
+    let keychain = {
+        let items = items.clone();
+        move || {
+            Box::new(crate::cloud::Keychain::with_items(
+                key.0.clone(),
+                key.1.clone(),
+                None,
+                Box::new(items.clone()),
+            ))
+        }
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let vault = keychain.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, vault(), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert!(!aero_session(cx));
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the Keychain item stayed"
+    );
+    let relaunched = Http::new(origin, keychain(), profile.path().to_owned());
+    assert!(!relaunched.signed_in());
+}

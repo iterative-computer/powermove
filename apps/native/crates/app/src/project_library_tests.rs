@@ -1,6 +1,6 @@
 //! The Project Library under real input events, over a real kernel and library.
 use super::*;
-use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use pm_design::{Accessibility, Scheme};
 use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::ShellCall};
 use std::{
@@ -170,8 +170,11 @@ fn header_buttons_run_the_window_commands_and_sort_reorders() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+/// Home's button menus are the system's (NSMenu): none is drawn in the
+/// window, a press elsewhere goes where it lands, and the account menu's
+/// items run their commands (its separator runs nothing).
 #[::core::prelude::v1::test]
-fn a_projects_menu_consumes_its_trigger_and_outside_presses() {
+fn home_menus_are_system_menus_whose_items_run_their_commands() {
     let fixture = fixture();
     let mut cx = TestAppContext::single();
     let (view, cx, log) = open(&mut cx, &fixture);
@@ -179,20 +182,26 @@ fn a_projects_menu_consumes_its_trigger_and_outside_presses() {
     let open = cx.debug_bounds("home-open").unwrap().center();
     let modifiers = Modifiers::none();
     cx.simulate_click(sort, modifiers);
-    assert!(view.read_with(cx, |v, _| v.menu.is_some()));
-
-    cx.simulate_mouse_down(sort, MouseButton::Left, modifiers);
+    cx.run_until_parked();
+    // No AppKit window here: the system menu closed unchosen.
     assert!(view.read_with(cx, |v, _| v.menu.is_none()));
-    cx.simulate_mouse_up(sort, MouseButton::Left, modifiers);
-    assert!(view.read_with(cx, |v, _| v.menu.is_none()));
-
-    cx.simulate_click(sort, modifiers);
-    cx.simulate_click(open, modifiers);
-    assert!(view.read_with(cx, |v, _| v.menu.is_none()));
-    assert!(log.borrow().is_empty());
-
+    let sorts = crate::v4_native::last_menu();
+    assert_eq!(
+        sorts.iter().filter(|(_, checked)| *checked).count(),
+        1,
+        "{sorts:?}"
+    );
+    assert!(cx.debug_bounds("home-menu").is_none());
     cx.simulate_click(open, modifiers);
     assert_eq!(*log.borrow(), ["command open"]);
+    log.borrow_mut().clear();
+    for index in 0..4 {
+        view.update(cx, |v, cx| v.choose(super::Menu::Account, index, cx));
+    }
+    assert_eq!(
+        *log.borrow(),
+        ["command store", "command settings", "command cloudSignOut"]
+    );
 }
 #[::core::prelude::v1::test]
 fn newer_work_in_the_original_app_is_one_line_that_offers_to_bring_it_in() {

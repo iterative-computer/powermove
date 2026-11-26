@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# The Sandbox against a local cloud stack: the account registry may be plain
+# HTTP on this Mac (see pm-native-app). Never in a shipped release.
+dev-cloud-origin = []
+
 [dependencies]
 pm-update-policy = { path = "../update-policy" }
 anyhow = "1"

@@ -302,6 +302,11 @@ fn now_ms() -> u64 {
 
 // ---- The registry ----
 
+/// How long a registry request may take.
+const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Telling the registry about a sign-out the Mac has already done.
+const REVOKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The registry for the account: the Store's origin.
 pub struct Http {
     origin: &'static str,
@@ -337,6 +342,27 @@ impl Http {
         kind: Option<String>,
         auth: bool,
     ) -> pm_services::Result<Value> {
+        let bearer = if auth {
+            Some(
+                stored_token(self.vault.as_ref(), self.origin).ok_or_else(|| {
+                    ServiceError::message(ServiceErrorCode::PermissionDenied, "api:unauthorized")
+                })?,
+            )
+        } else {
+            None
+        };
+        self.send_as(method, path, body, kind, bearer, REQUEST_DEADLINE)
+    }
+    /// One request with `bearer` (or none), given up after `deadline`.
+    fn send_as(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        kind: Option<String>,
+        bearer: Option<Secret>,
+        deadline: std::time::Duration,
+    ) -> pm_services::Result<Value> {
         #[cfg(debug_assertions)]
         if review_cloud() {
             return review::answer(method, path, &body);
@@ -348,10 +374,7 @@ impl Http {
         if let Some(kind) = kind {
             headers.push(("Content-Type".into(), kind));
         }
-        if auth {
-            let token = stored_token(self.vault.as_ref(), self.origin).ok_or_else(|| {
-                ServiceError::message(ServiceErrorCode::PermissionDenied, "api:unauthorized")
-            })?;
+        if let Some(token) = bearer {
             headers.push(("Authorization".into(), format!("Bearer {}", token.expose())));
         }
         let response = pm_compat_runner::net::send(
@@ -361,7 +384,7 @@ impl Http {
                 headers,
                 body,
                 max_response_bytes: 1024 * 1024,
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                deadline: std::time::Instant::now() + deadline,
             },
             pm_compat_runner::net::Reach::Origin(self.origin),
         )
@@ -576,10 +599,23 @@ impl CloudHost for Http {
         )
         .map(drop)
     }
+    /// This Mac forgets the session first, so Sign Out never waits on the
+    /// network; then the registry is told, best effort, with the token it
+    /// held (an env session's too: it is gone for the life of the process).
     fn sign_out(&mut self) -> pm_services::Result<()> {
-        // Best effort at the registry; this Mac forgets the session either way.
-        let _ = self.call("POST", "/v1/auth/sign-out", None, true);
-        self.forget()
+        let token = stored_token(self.vault.as_ref(), self.origin);
+        let forgotten = self.forget();
+        if let Some(token) = token {
+            let _ = self.send_as(
+                "POST",
+                "/v1/auth/sign-out",
+                Vec::new(),
+                None,
+                Some(token),
+                REVOKE_DEADLINE,
+            );
+        }
+        forgotten
     }
 }
 /// The account cached for offline display, when it belongs to `origin`.
@@ -623,36 +659,47 @@ struct Billed {
 
 /// Starts the account service for this profile and refreshes a stored session.
 pub fn init(profile: PathBuf, cx: &mut App) {
+    let origin = store_install::origin();
+    let worker_profile = profile.clone();
+    init_with(
+        profile,
+        origin,
+        move || {
+            // A local development stack's session, given at launch
+            // (`PM_CLOUD_SESSION`), lives in memory, never the Keychain. The
+            // worker reads it once: after Sign Out it is gone for good.
+            if let Some(sealed) = local_session(origin) {
+                return Http::new(origin, Box::new(Memory(Some(sealed))), worker_profile);
+            }
+            // A development review's account lives in memory, never the Keychain.
+            #[cfg(debug_assertions)]
+            if review_cloud() {
+                return Http::new(
+                    origin,
+                    Box::new(review::Memory::seeded(origin)),
+                    worker_profile,
+                );
+            }
+            Http::new(
+                origin,
+                Box::new(Keychain::for_app(&worker_profile)),
+                worker_profile,
+            )
+        },
+        cx,
+    );
+}
+/// `init` on the host `host` makes (on the worker) for `origin`.
+pub(crate) fn init_with(
+    profile: PathBuf,
+    origin: &'static str,
+    host: impl FnOnce() -> Http + Send + 'static,
+    cx: &mut App,
+) {
     if cx.has_global::<Cloud>() {
         return;
     }
-    let origin = store_install::origin();
-    let worker_profile = profile.clone();
-    let Ok(worker) = ServiceWorker::start(move || {
-        // A local development stack's session, given at launch
-        // (`PM_CLOUD_SESSION`), lives in memory, never the Keychain.
-        if let Some(sealed) = local_session(origin) {
-            return Ok(Http::new(
-                origin,
-                Box::new(Memory(Some(sealed))),
-                worker_profile,
-            ));
-        }
-        // A development review's account lives in memory, never the Keychain.
-        #[cfg(debug_assertions)]
-        if review_cloud() {
-            return Ok(Http::new(
-                origin,
-                Box::new(review::Memory::seeded(origin)),
-                worker_profile,
-            ));
-        }
-        Ok(Http::new(
-            origin,
-            Box::new(Keychain::for_app(&worker_profile)),
-            worker_profile,
-        ))
-    }) else {
+    let Ok(worker) = ServiceWorker::start(move || Ok(host())) else {
         return;
     };
     cx.set_global(Cloud {
@@ -705,7 +752,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
 }
 /// A session held in memory only (a local stack's, a review's).
 #[derive(Default)]
-pub(crate) struct Memory(Option<Vec<u8>>);
+pub(crate) struct Memory(pub(crate) Option<Vec<u8>>);
 impl Vault for Memory {
     fn read(&self) -> Result<Option<Vec<u8>>, String> {
         Ok(self.0.clone())
@@ -724,12 +771,14 @@ impl Vault for Memory {
 /// signed in as that stack's account from the start. Never on the real
 /// cloud, never in a shipped release.
 fn local_session(origin: &str) -> Option<Vec<u8>> {
+    local_session_from(origin, std::env::var("PM_CLOUD_SESSION").ok())
+}
+pub(crate) fn local_session_from(origin: &str, token: Option<String>) -> Option<Vec<u8>> {
     if !store_install::LOCAL_CLOUD || !pm_agents::inference::local_origin(origin) {
         return None;
     }
-    let token = std::env::var("PM_CLOUD_SESSION")
-        .ok()
-        .filter(|t| !t.is_empty() && t.len() <= 4096 && !t.chars().any(char::is_control))?;
+    let token =
+        token.filter(|t| !t.is_empty() && t.len() <= 4096 && !t.chars().any(char::is_control))?;
     Some(
         json!({"origin":origin,"token":token,"expiresAt":"2099-01-01T00:00:00.000Z"})
             .to_string()
@@ -1201,6 +1250,9 @@ fn submit(work: CloudWork, cx: &mut App) {
     let cloud = cx.global_mut::<Cloud>();
     let ticket = pm_services::surfaces::Flight::default().start();
     let Some(task) = CloudTask::new(ticket, cloud.origin, work) else {
+        // An origin this build can't reach for account changes: said, never
+        // a button that quietly does nothing.
+        crate::alert::note(&explain_settings("api:unknown"), "");
         return;
     };
     cloud.busy = true;
@@ -1461,11 +1513,36 @@ fn follow_activation(cx: &mut App) {
     .detach();
 }
 
-/// Settings › Account › Sign Out.
+/// Settings › Account › Sign Out, and Home's account menu. Signing out is
+/// this Mac forgetting the session: it never depends on the registry's
+/// origin or on the network (a development Sandbox on a local stack's
+/// `http://` origin signs out like any other build). A Google sign-in
+/// waiting for its return link is dropped with it.
 pub fn sign_out(cx: &mut App) {
-    if cx.has_global::<Cloud>() {
-        submit(CloudWork::SignOut, cx);
+    if !cx.has_global::<Cloud>() {
+        return;
     }
+    let cloud = cx.global_mut::<Cloud>();
+    cloud.google = None;
+    cloud.browser.cancel();
+    cloud.busy = true;
+    let ticket = pm_services::surfaces::Flight::default().start();
+    let Ok(pending) = cloud.worker.submit(move |host| {
+        Ok(pm_services::surfaces::agent_auth::CloudCompletion {
+            ticket,
+            result: host.sign_out().map(|()| CloudReply::SignedOut),
+        })
+    }) else {
+        cloud.busy = false;
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let Some(done) = wait(pending, cx).await else {
+            return;
+        };
+        cx.update(|cx| complete(done, cx));
+    })
+    .detach();
 }
 /// Settings › Account › Remember Installs on This Account.
 pub fn set_remember(remember: bool, cx: &mut App) {

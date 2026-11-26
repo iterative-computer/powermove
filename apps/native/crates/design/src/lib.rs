@@ -233,6 +233,12 @@ impl Radii {
     pub fn nested(&self, outer: f32, inset: f32) -> f32 {
         (outer - inset).max(self.sm)
     }
+    /// The corner of an edge standing `gap` outside a surface of radius
+    /// `inner` (a selection ring's inner edge): `nested` the other way, so
+    /// `nested(around(r, gap), gap) == r` for every `r` from `sm` up.
+    pub fn around(&self, inner: f32, gap: f32) -> f32 {
+        inner + gap
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
