@@ -52,6 +52,9 @@ pub(crate) struct Models {
         Value,
     )>,
     pub project: ProjectBridge,
+    project_catalog: Option<(u64, Catalog)>,
+    transition_registry:
+        Option<std::sync::Arc<BTreeMap<String, Vec<pm_kernel::state::Registration>>>>,
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
     pub platform: Vec<(String, Value)>,
@@ -121,6 +124,24 @@ fn retained_outline(rows: &[Row], track_headers: Option<usize>) -> Option<usize>
 }
 
 impl Models {
+    fn refresh_project(&mut self, published: &Published) -> Result<(), String> {
+        if self.project_catalog.as_ref().is_none_or(|(metadata, catalog)| {
+            catalog.stamp.document != published.snapshot.doc_id
+                || catalog.stamp.revision != published.revision()
+                || *metadata != published.metadata_revision
+        }) {
+            self.project_catalog = Some((
+                published.metadata_revision,
+                Catalog::published(published).map_err(|e| format!("{e:?}"))?,
+            ));
+        }
+        self.project.refresh(
+            &self.project_catalog.as_ref().expect("project catalog").1,
+            &self.media_runtime,
+        );
+        Ok(())
+    }
+
     /// The timeline client, made on first use ([`Models::timeline_source`]).
     pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
         if self.timeline.is_none()
@@ -166,6 +187,8 @@ impl Models {
             tab_switch: None,
             viewer_projection: None,
             project: ProjectBridge::default(),
+            project_catalog: None,
+            transition_registry: None,
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
             fields: BTreeMap::new(),
             platform: vec![],
@@ -272,58 +295,65 @@ impl Backend {
         self.native
             .properties
             .focus_part(&self.native.facts["focusPart"]);
-        let transitions = registered_transitions(&self.kernel.state());
-        if self.native.properties.transitions != transitions {
-            self.native.properties.transitions = transitions;
+        let state = self.kernel.state();
+        if self
+            .native
+            .transition_registry
+            .as_ref()
+            .is_none_or(|previous| !std::sync::Arc::ptr_eq(previous, &state.registries))
+        {
+            self.native.properties.transitions = registered_transitions(&state);
+            self.native.transition_registry = Some(state.registries.clone());
         }
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }
         let started = std::time::Instant::now();
-        let snapshot = self.native.properties.snapshot(
-            self.model.as_mut().ok_or("No open project")?,
-            time,
-            playing,
-        );
+        let model = self.model.as_mut().ok_or("No open project")?;
+        model.begin_readout();
+        let snapshot = self.native.properties.snapshot(model, time, playing);
+        // The Studio light readout can evaluate its target on a different layer.
+        self.properties_reads_time = model.reads_time()
+            || model.primary()
+                .and_then(|id| model.layer_node(id).ok())
+                .and_then(pm_eval::address::layer3d_role)
+                == Some(pm_eval::address::Layer3dRole::Light);
         crate::trace(json!({"properties": "sections", "ms": crate::ms(started.elapsed())}));
         snapshot
     }
     pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
         self.sync()?;
-        self.native.ensure_timeline()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         let p = self.published().ok_or("closed")?;
         let outline = self.native.timeline_outline.shared().clone();
-        let client = self
-            .native
-            .timeline
-            .as_mut()
-            .ok_or("timeline action in flight")?;
         let first = request["first"].as_u64().ok_or("first row")? as usize;
         let visible = request["visible"]
             .as_u64()
             .filter(|n| *n > 0 && *n <= 512)
             .ok_or("visible rows")? as usize;
-        self.model
-            .as_mut()
-            .ok_or("No open project")?
-            .sync(p.clone());
         let editing = match &self.native.timeline_editor {
             Some(TimelineEditor::Property(l, p)) => Some((l.clone(), p.clone())),
             _ => None,
         };
         // A hosted outline decorates the same immutable model as the canvas.
-        let timeline = if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
-            outline
-        } else {
-            client.model.sync(&p);
-            if client.model.editing_property != editing {
-                client.model.editing_property = editing;
-                client.model.rebuild_rows();
-            }
-            &client.model
-        };
+        let timeline =
+            if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
+                outline
+            } else {
+                self.native.ensure_timeline()?;
+                let client = self
+                    .native
+                    .timeline
+                    .as_mut()
+                    .ok_or("timeline action in flight")?;
+                client.model.sync(&p);
+                if client.model.editing_property != editing {
+                    client.model.editing_property = editing;
+                    client.model.rebuild_rows();
+                }
+                &client.model
+            };
         // Retain modest outlines across scrolls. Only the native host mounts rows;
         // wheel input must never wait for another JS publication. Property
         // rows carry more controls and readouts than ordinary layer rows.
@@ -672,16 +702,14 @@ impl Backend {
     }
     pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
         let p = self.published().ok_or("closed")?;
-        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
-        self.native
-            .project
-            .refresh(&catalog, &self.native.media_runtime);
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
         if let Some(request) = request {
             let reply = self
                 .native
                 .project
                 .request(
-                    &catalog,
+                    catalog,
                     &self.native.media_runtime,
                     serde_json::from_value(request).map_err(|e| e.to_string())?,
                 )
@@ -698,7 +726,7 @@ impl Backend {
             serde_json::to_value(
                 self.native
                     .project
-                    .view(&catalog, &self.native.media_runtime)
+                    .view(catalog, &self.native.media_runtime)
                     .map_err(|e| format!("{e:?}"))?,
             )
             .map_err(|e| e.to_string())
@@ -706,10 +734,8 @@ impl Backend {
     }
     fn project_command(&mut self, args: &Value) -> Result<NativeCommand, String> {
         let p = self.published().ok_or("closed")?;
-        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
-        self.native
-            .project
-            .refresh(&catalog, &self.native.media_runtime);
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
         if std::mem::take(&mut self.native.show_missing) {
             // Project-wide: from the top folder, every missing file, flat.
             let filter = pm_panel_media::Filter {
@@ -718,14 +744,14 @@ impl Backend {
             };
             self.native
                 .project
-                .apply_host_filter(&catalog, &self.native.media_runtime, filter)
+                .apply_host_filter(catalog, &self.native.media_runtime, filter)
                 .map_err(|e| format!("{e:?}"))?;
         }
         let mut reply = self
             .native
             .project
             .request(
-                &catalog,
+                catalog,
                 &self.native.media_runtime,
                 serde_json::from_value(args.clone()).map_err(|e| e.to_string())?,
             )

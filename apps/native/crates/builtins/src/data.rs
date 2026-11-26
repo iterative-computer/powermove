@@ -101,6 +101,9 @@ pub(crate) struct Backend {
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
     last_effects: BTreeMap<String, Value>,
+    pub(crate) last_publication: Option<super::publication::Inputs>,
+    pub(crate) properties_reads_time: bool,
+    effects_read_time: bool,
     pub(crate) presets: Vec<Value>,
     last_registries: Option<Arc<BTreeMap<String, Vec<state::Registration>>>>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
@@ -169,6 +172,9 @@ impl Backend {
             panel_id: panel.into(),
             service_revision: 0,
             last_effects: BTreeMap::new(),
+            last_publication: None,
+            properties_reads_time: true,
+            effects_read_time: true,
             presets: Vec::new(),
             last_registries: None,
             timeline_waiter: None,
@@ -213,39 +219,41 @@ impl Backend {
             return Ok(());
         }
         let published = published.ok_or("project closed")?;
-        let stamp = format!(
-            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}:{}:{}:{}",
-            published.snapshot.doc_id,
-            published.revision(),
-            published.metadata_revision,
-            self.kernel.state().revision,
-            published.selection.primary(),
-            self.native.agent_link.accounts_revision(),
-            self.native.facts["cloud"]["revision"],
-            self.native.facts["provider"]["revision"],
-            self.native.facts["agentClients"]["revision"],
-            crate::speech::revision(),
-            media_stamp(&self.native.facts),
-            self.native.facts["agentPopover"]
-        );
-        // A finished encoder check is news for the Export sheet.
-        let stamp = format!(
-            "{stamp}:{}",
-            self.native
-                .export_probe
-                .lock()
-                .unwrap()
-                .done
-                .as_ref()
-                .map_or("", |(key, _)| key.as_str())
-        );
-        if self.native.stamp != stamp {
-            self.native.stamp = stamp;
-            self.native.agent_link.touch();
-            self.native.settings_sequence += 1;
-            if !self.native.export.is_null() {
-                self.native.export["sequence"] =
-                    json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+        if matches!(self.panel_id.as_str(), "export" | "agent" | "settings") {
+            let stamp = format!(
+                "{}:{}:{}:{}:{:?}:{}:{}:{}:{}:{}:{}:{}",
+                published.snapshot.doc_id,
+                published.revision(),
+                published.metadata_revision,
+                self.kernel.state().revision,
+                published.selection.primary(),
+                self.native.agent_link.accounts_revision(),
+                self.native.facts["cloud"]["revision"],
+                self.native.facts["provider"]["revision"],
+                self.native.facts["agentClients"]["revision"],
+                crate::speech::revision(),
+                media_stamp(&self.native.facts),
+                self.native.facts["agentPopover"]
+            );
+            // A finished encoder check is news for the Export sheet.
+            let stamp = format!(
+                "{stamp}:{}",
+                self.native
+                    .export_probe
+                    .lock()
+                    .unwrap()
+                    .done
+                    .as_ref()
+                    .map_or("", |(key, _)| key.as_str())
+            );
+            if self.native.stamp != stamp {
+                self.native.stamp = stamp;
+                self.native.agent_link.touch();
+                self.native.settings_sequence += 1;
+                if !self.native.export.is_null() {
+                    self.native.export["sequence"] =
+                        json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                }
             }
         }
         self.model
@@ -407,13 +415,28 @@ impl Backend {
     }
     pub(crate) fn projection(&mut self) -> Result<Value, String> {
         self.sync()?;
-        self.panel
-            .project(
-                self.model.as_mut().ok_or("No open project")?,
-                self.native.facts["time"].as_f64().unwrap_or(0.),
-            )
-            .map(|v| wire(&v))
-            .map_err(|e| e.to_string())
+        let model = self.model.as_mut().ok_or("No open project")?;
+        model.begin_readout();
+        let projection = self
+            .panel
+            .project(model, self.native.facts["time"].as_f64().unwrap_or(0.));
+        self.effects_read_time = model.reads_time();
+        projection.map(|v| wire(&v)).map_err(|e| e.to_string())
+    }
+    pub(crate) fn reads_time(&self) -> bool {
+        match self.panel_id.as_str() {
+            "inspector" => self.properties_reads_time || self.effects_read_time,
+            "layer-effects" | "color" => self.effects_read_time,
+            "viewer" => self.native.facts["timelineShown"] != true,
+            "timeline" => true,
+            _ => false,
+        }
+    }
+    pub(crate) fn has_pending_publication_work(&self) -> bool {
+        !self.pending.is_empty()
+            || !self.states.is_empty()
+            || self.timeline_waiter.is_some()
+            || !self.native.platform.is_empty()
     }
     pub fn registry(&self) -> Value {
         let state = self.kernel.state();
@@ -529,21 +552,26 @@ impl Backend {
         if !self.model.as_ref().ok_or("No open project")?.editable(id) {
             return Ok(Value::Null);
         }
+        use pm_model::{Node, NodeKind};
         let layer = self
             .model
             .as_ref()
             .ok_or("No open project")?
-            .layer(id)
+            .layer_node(id)
             .map_err(|e| e.to_string())?;
-        if layer.get("type").and_then(pm_model::Value::as_str) == Some("audio") {
+        fn text(node: Option<&Node>) -> Option<&str> {
+            pm_eval::node::string(node).and_then(pm_model::JsString::as_str)
+        }
+        if text(layer.get("type")) == Some("audio") {
             return Ok(Value::Null);
         }
-        let fx = wire(&layer)["fx"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|f| f["type"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
+        let fx = match layer.get("fx").map(Node::kind) {
+            Some(NodeKind::Array(effects)) => effects
+                .iter()
+                .filter_map(|effect| text(effect.get("type")))
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        };
         Ok(json!({"id":id,"effects":fx}))
     }
     pub(crate) fn validate_binding_owner(&self, handle: &str) -> Result<(), String> {
@@ -784,6 +812,9 @@ impl KernelData for Data {
     }
     fn enqueue(&mut self, request: HostRequest, reply: SyncSender<HostAck>) -> Result<(), String> {
         let mut b = self.0.shared();
+        if matches!(&request.operation, HostOperation::Command { .. } | HostOperation::Edit { .. }) {
+            b.last_publication = None;
+        }
         if b.retired {
             return Err("built-in retired".into());
         }

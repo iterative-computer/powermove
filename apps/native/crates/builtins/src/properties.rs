@@ -1,6 +1,7 @@
 //! Properties presentation using model-issued, selection-fenced leases.
 use pm_kernel::commands::timing::{RetimeMode, TimingCommand};
 use pm_kernel::{Caller, Request};
+use pm_model::{Node, NodeKind};
 use pm_panel_inspector::{
     Binding, FieldType, Inspector, PropertyId,
     v4_properties::{V4Action, V4Adapter, V4Plan},
@@ -77,6 +78,52 @@ const TRANSITION_EDGES: [(&str, &str, pm_kernel::commands::effects::Edge); 2] = 
 ];
 /// What Add Expression… starts from, as the shipped editor did.
 pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
+fn node_string(node: &Node) -> Option<&str> {
+    match node.kind() {
+        NodeKind::String(value) => value.as_str(),
+        _ => None,
+    }
+}
+
+fn member(node: &Node, key: &str) -> Value {
+    node.get(key)
+        .map(|value| super::data::wire(&value.to_value()))
+        .unwrap_or_default()
+}
+
+// The studio and extrusion presenters consume a JSON record. Give them only
+// the fields they read, so paths, vertices and unrelated channels stay native.
+fn studio_record(layer: &Node) -> Value {
+    let mut data = serde_json::Map::new();
+    if let Some(content) = layer.get("d") {
+        let definition = content.get("definition").and_then(node_string);
+        for key in [
+            "definition",
+            "studio3d",
+            "extrusion",
+            "color",
+            "fill",
+            "size",
+            "w",
+            "h",
+        ] {
+            if content.get(key).is_some() {
+                data.insert(key.into(), member(content, key));
+            }
+        }
+        if matches!(
+            definition,
+            Some(
+                pm_scene3d::schema::OBJECT | pm_scene3d::schema::LIGHT | pm_scene3d::schema::CAMERA
+            )
+        ) {
+            data.insert("data".into(), member(content, "data"));
+        }
+    }
+    json!({"type":member(layer, "type"),"threeD":member(layer, "threeD"),
+        "separateDimensions":member(layer, "separateDimensions"),"d":data})
+}
+
 impl Properties {
     /// A row's expression field, when one of its channels has an expression:
     /// the source, what the parser says about it, and a lease that writes
@@ -183,35 +230,28 @@ impl Properties {
         }
         self.part_names.clear();
         let target = if let Some(id) = model.primary() {
-            let layer = model.layer(id).map_err(|e| e.to_string())?;
-            let kind = layer
-                .get("type")
-                .and_then(pm_model::Value::as_str)
-                .unwrap_or("");
-            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(pm_model::Value::as_str).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":if model.selected_layers().iter().all(|id|model.layer(id).ok().and_then(|l|l.get("type").and_then(pm_model::Value::as_str).map(str::to_owned)).as_deref()==Some(kind)) {Some(kind)} else {None}})
+            let layer = model.layer_node(id).map_err(|e| e.to_string())?;
+            let kind = layer.get("type").and_then(node_string).unwrap_or("");
+            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(node_string).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":if model.selected_layers().iter().all(|id|model.layer_node(id).ok().and_then(|l|l.get("type")).and_then(node_string)==Some(kind)) {Some(kind)} else {None}})
         } else {
             json!({"kind":"composition","key":self.key})
         };
         // A Studio 3D layer: its role, environment kind and the name it goes by.
-        let studio = model
+        let record = model
             .primary()
-            .and_then(|id| model.layer(id).ok())
-            .map(|l| super::data::wire(&l))
-            .and_then(|r| {
-                if let Some((role, _)) = pm_panel_studio3d::properties::fields(&r) {
-                    let data = &r["d"]["data"];
-                    let env = pm_panel_studio3d::properties::environment(data);
-                    return Some((role, env, studio_label(role, env, data)));
-                }
-                if r["type"] == "null" && r["threeD"] == true && r["d"]["studio3d"] == true {
-                    return Some((
-                        pm_panel_studio3d::properties::Role::Object,
-                        None,
-                        "3D Null",
-                    ));
-                }
-                None
-            });
+            .and_then(|id| model.layer_node(id).ok())
+            .map(studio_record);
+        let studio = record.as_ref().and_then(|r| {
+            if let Some((role, _)) = pm_panel_studio3d::properties::fields(r) {
+                let data = &r["d"]["data"];
+                let env = pm_panel_studio3d::properties::environment(data);
+                return Some((role, env, studio_label(role, env, data)));
+            }
+            if r["type"] == "null" && r["threeD"] == true && r["d"]["studio3d"] == true {
+                return Some((pm_panel_studio3d::properties::Role::Object, None, "3D Null"));
+            }
+            None
+        });
         let mut target = target;
         if let Some((role, _, label)) = &studio
             && model.selected_layers().len() == 1
@@ -240,12 +280,8 @@ impl Properties {
         }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
-            let audio = model
-                .layer(&layer)
-                .map_err(|e| e.to_string())?
-                .get("type")
-                .and_then(pm_model::Value::as_str)
-                == Some("audio");
+            let kind = target["first"]["type"].as_str().unwrap_or_default();
+            let audio = kind == "audio";
             if model.selected_layers().len() == 1 && !audio && studio.is_none() {
                 sections.extend(self.transition_sections(model, &layer, time)?);
             }
@@ -259,9 +295,10 @@ impl Properties {
             // A contributed layer type's definition, read once (not a copy of the
             // layer per field).
             let definition = model
-                .layer(&layer)
+                .layer_node(&layer)
                 .ok()
-                .and_then(|l| l.get("d")?.get("definition")?.as_str().map(str::to_owned))
+                .and_then(|l| l.get("d")?.get("definition").and_then(node_string))
+                .map(str::to_owned)
                 .unwrap_or_default();
             for field in fields {
                 let contributed = match &field.binding {
@@ -519,7 +556,7 @@ impl Properties {
             // remapping rows once a layer has a source time channel.
             if matches!(target["first"]["type"].as_str(), Some("video" | "precomp")) {
                 let remapped = model
-                    .layer(&layer)
+                    .layer_node(&layer)
                     .ok()
                     .is_some_and(|l| l.get("d").and_then(|d| d.get("sourceTime")).is_some());
                 if !remapped {
@@ -530,18 +567,19 @@ impl Properties {
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
             }
-            if model.selected_layers().len() == 1 {
+            if kind == "captions" && model.selected_layers().len() == 1 {
                 sections.extend(self.caption_sections(model, &layer)?);
             }
             // One 3D section after content, single selection only.
-            if model.selected_layers().len() == 1 {
-                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
-                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
-                    sections.extend(self.part_sections(model, &layer, &record, time)?);
+            if model.selected_layers().len() == 1
+                && let Some(record) = record.as_ref()
+            {
+                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(record) {
+                    sections.extend(self.part_sections(model, &layer, record, time)?);
                     sections
-                        .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                        .extend(self.scene_sections(model, &layer, record, role, fields, time)?);
                 } else if matches!(record["type"].as_str(), Some("text" | "shape")) {
-                    sections.extend(self.extrude_sections(model, &layer, &record, time)?);
+                    sections.extend(self.extrude_sections(model, &layer, record, time)?);
                 }
             }
             if let Some((role, env, _)) = &studio {
@@ -558,12 +596,7 @@ impl Properties {
                 }
             } else if !audio {
                 let mut rows = vec![];
-                let three_d = model
-                    .layer(&layer)
-                    .map_err(|e| e.to_string())?
-                    .get("threeD")
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true);
+                let three_d = record.as_ref().is_some_and(|r| r["threeD"] == true);
                 let mut groups = vec![
                     (
                         "position",
@@ -656,23 +689,15 @@ impl Properties {
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
                         if id == "position" {
                             row["separateDimensions"] = json!(
-                                model
-                                    .layer(&layer)
-                                    .map_err(|e| e.to_string())?
-                                    .get("separateDimensions")
-                                    .and_then(pm_model::Value::as_bool)
-                                    .unwrap_or(false)
+                                record
+                                    .as_ref()
+                                    .is_some_and(|r| r["separateDimensions"] == true)
                             );
                         }
                         if id == "scale" {
-                            row["linked"] = json!(
-                                model
-                                    .layer(&layer)
-                                    .map_err(|e| e.to_string())?
-                                    .get("scaleLinked")
-                                    .and_then(pm_model::Value::as_bool)
-                                    .unwrap_or(true)
-                            );
+                            let layer_node = model.layer_node(&layer).map_err(|e| e.to_string())?;
+                            row["linked"] =
+                                json!(member(layer_node, "scaleLinked").as_bool().unwrap_or(true));
                         }
                         if let Some(expression) =
                             self.expression(model, id, bound, expression, time)?
@@ -758,9 +783,15 @@ impl Properties {
                 }
             }
             if target["first"]["type"] == "text" {
-                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let source = model.layer_node(&layer).map_err(|e| e.to_string())?;
+                let animators_value = source.get("d").map(|d| member(d, "animators"));
                 let mut animators = vec![];
-                for animator in record["d"]["animators"].as_array().into_iter().flatten() {
+                for animator in animators_value
+                    .as_ref()
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     let Some(id) = animator["id"].as_str() else {
                         continue;
                     };
@@ -988,7 +1019,9 @@ impl Properties {
         use pm_panel_studio3d::properties::Role;
         let mut rows = vec![];
         let camera = if role == Role::Camera {
-            Some(super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?))
+            Some(studio_record(
+                model.layer_node(layer).map_err(|e| e.to_string())?,
+            ))
         } else {
             None
         };
@@ -1138,11 +1171,45 @@ impl Properties {
     }
     /// The composition's sky control when it contains a Studio scene.
     fn scene_section(&mut self, model: &mut Inspector) -> Result<Option<Value>, String> {
-        use pm_panel_studio3d::properties::{SKIES, scene_summary};
-        let Some(summary) = scene_summary(model.published()).map_err(|e| e.to_string())? else {
+        use pm_panel_studio3d::properties::SKIES;
+        let snapshot = &model.published().snapshot;
+        let Some(comp) = snapshot
+            .root()
+            .and_then(|root| pm_kernel::model::comp_node(root, snapshot.open_comp().as_deref()))
+        else {
             return Ok(None);
         };
-        let sky = summary["sky"].as_str().unwrap_or("none");
+        let mut has_studio = false;
+        let mut world = None;
+        for layer in pm_kernel::model::layers_of(comp) {
+            has_studio |= pm_eval::address::layer3d_role(layer).is_some();
+            if world.is_none() {
+                world = layer
+                    .get("d")
+                    .and_then(|d| d.get("data"))
+                    .and_then(|data| data.get("object"))
+                    .and_then(|object| object.get("world"))
+                    .filter(|world| matches!(world.kind(), NodeKind::Object(_)));
+            }
+            if has_studio && world.is_some() {
+                break;
+            }
+        }
+        if !has_studio {
+            return Ok(None);
+        }
+        let sky = match world
+            .and_then(|world| world.get("mode"))
+            .and_then(node_string)
+        {
+            Some("sky") => world
+                .and_then(|world| world.get("preset"))
+                .and_then(node_string)
+                .unwrap_or("clear-noon"),
+            Some(mode) => mode,
+            None => "none",
+        }
+        .to_owned();
         let mut skies: Vec<Value> = vec![json!({"v":"none","label":"None"})];
         skies.extend(
             SKIES
@@ -2321,18 +2388,26 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Vec<Value>, String> {
-        let stored = model.layer(layer).map_err(|e| e.to_string())?;
-        let masks = stored
-            .get("masks")
-            .and_then(pm_model::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        let masks = match source.get("masks").map(Node::kind) {
+            Some(NodeKind::Array(masks)) => masks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mask)| {
+                    let id = mask.get("id").and_then(node_string)?.to_owned();
+                    let name = mask
+                        .get("name")
+                        .and_then(node_string)
+                        .filter(|name| !name.trim().is_empty())
+                        .map_or_else(|| format!("Mask {}", index + 1), str::to_owned);
+                    Some((id, name))
+                })
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        };
         let locked = !model.editable(layer);
         let mut out = vec![];
-        for (index, mask) in masks.iter().enumerate() {
-            let Some(mid) = mask.get("id").and_then(pm_model::Value::as_str) else {
-                continue;
-            };
+        for (mid, name) in masks {
             let mut rows = vec![];
             for (key, label, unit, step) in [
                 ("on", "Enabled", "", 0.),
@@ -2382,11 +2457,6 @@ impl Properties {
                 };
                 rows.push(json!({"id":path,"label":label,"locked":locked,"animation":animation,"control":control}));
             }
-            let name = mask
-                .get("name")
-                .and_then(pm_model::Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-                .map_or_else(|| format!("Mask {}", index + 1), str::to_owned);
             out.push(json!({"id":mid,"name":name,"rows":rows}));
         }
         Ok(out)
@@ -2406,13 +2476,13 @@ impl Properties {
     /// S088: a captions layer's style in the inspector's row grammar, each
     /// change one `Caption Style` step through `edit_captions` (op style).
     fn caption_sections(&mut self, model: &Inspector, layer: &str) -> Result<Vec<Value>, String> {
-        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
-        if record["type"] != "captions" {
-            return Ok(vec![]);
-        }
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        let style = source
+            .get("d")
+            .map(|d| member(d, "style"))
+            .unwrap_or_default();
         let style =
-            serde_json::to_value(pm_captions::normalize_caption_style(&record["d"]["style"]))
-                .unwrap_or_default();
+            serde_json::to_value(pm_captions::normalize_caption_style(&style)).unwrap_or_default();
         let locked = !model.editable(layer);
         let mut groups: Vec<(&str, &str, Vec<Value>)> = vec![
             ("captions", "Captions", vec![]),
@@ -2617,12 +2687,15 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Vec<Value>, String> {
-        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
         let locked = !model.editable(layer);
-        let span = record["dur"].as_f64().unwrap_or(600.).clamp(0.02, 600.);
+        let span = member(source, "dur")
+            .as_f64()
+            .unwrap_or(600.)
+            .clamp(0.02, 600.);
+        let transitions = TRANSITION_EDGES.map(|(field, _, _)| member(source, field));
         let mut sections = vec![];
-        for (field, slot, edge) in TRANSITION_EDGES {
-            let t = &record[field];
+        for ((field, slot, edge), t) in TRANSITION_EDGES.into_iter().zip(&transitions) {
             let Some(kind) = t["type"].as_str() else {
                 continue;
             };
@@ -2869,14 +2942,14 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Option<Value>, String> {
-        let source = model.layer(layer).map_err(|e| e.to_string())?;
-        if source.get("type").and_then(pm_model::Value::as_str) != Some("text") {
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        if source.get("type").and_then(node_string) != Some("text") {
             return Ok(None);
         }
         let family = source
             .get("d")
             .and_then(|d| d.get("font"))
-            .and_then(pm_model::Value::as_str)
+            .and_then(node_string)
             .unwrap_or_default()
             .to_owned();
         let facts = self
@@ -3895,3 +3968,7 @@ mod layer_drag_profile {
         fixture::assert_budget(&samples, [0, 1]);
     }
 }
+
+#[cfg(test)]
+#[path = "properties_performance.rs"]
+mod performance;

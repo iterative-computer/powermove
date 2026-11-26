@@ -614,8 +614,8 @@ impl EffectsPanel {
         let Some(layer) = layer else {
             return Ok(out);
         };
-        let value = model.layer(&layer)?;
-        let kind = text(&value, "type");
+        let layer_node = model.layer_node(&layer)?;
+        let kind = crate::view::node_text(layer_node, "type");
         let supported = !["audio", "camera"].contains(&kind);
         let map = out.as_object_mut().expect("object");
         map.insert(
@@ -623,7 +623,7 @@ impl EffectsPanel {
             if supported { "Layer" } else { "Unsupported" }.into(),
         );
         map.insert("layer", layer.clone().into());
-        map.insert("name", text(&value, "name").into());
+        map.insert("name", crate::view::node_text(layer_node, "name").into());
         map.insert(
             "typeLabel",
             self.presentation
@@ -637,7 +637,8 @@ impl EffectsPanel {
         if !supported {
             return Ok(out);
         }
-        let fx = array(value.get("fx"));
+        let effects = layer_node.get("fx").map(pm_model::Node::to_value);
+        let fx = array(effects.as_ref());
         self.rebuild(model, &layer, fx)?;
         let start = self.range.start.min(self.flat.len());
         let end = self.range.end.max(start).min(self.flat.len());

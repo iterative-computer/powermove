@@ -39,6 +39,7 @@ pub mod figma;
 pub mod media_import;
 mod models;
 mod properties;
+mod publication;
 mod settings;
 pub mod speech;
 mod timeline_easing;
@@ -2032,6 +2033,32 @@ impl Builtins {
     pub fn script_queue_stats(&self, panel: &str) -> Option<QueueStats> {
         self.realm_of(panel).ok().map(|realm| realm.queue_stats())
     }
+    fn needs_publication(&self, panel: &str) -> bool {
+        if panel == "fxbrowser" && self.broker.preset_sheet.shared().is_some() {
+            return true;
+        }
+        let Some(entry) = self.broker.entry(panel) else {
+            return true;
+        };
+        // A busy realm may be processing an edit or an earlier publication.
+        // Keep its queued wake without waiting for any V8-owned locks here.
+        let Ok(entry) = entry.try_lock() else {
+            return true;
+        };
+        let Ok(backend) = entry.backend.try_lock() else {
+            return true;
+        };
+        if backend.has_pending_publication_work() {
+            return true;
+        }
+        match (
+            &backend.last_publication,
+            publication::Inputs::read(&backend),
+        ) {
+            (Some(last), Some(current)) => !last.unchanged(&current, panel, backend.reads_time()),
+            _ => true,
+        }
+    }
     /// `publish` while a pointer gesture (a drag, a scrub) holds an edit
     /// open: a shipped built-in panel publishes only when `live(id)`; the
     /// others keep their last tree until the next full `publish`, which the
@@ -2050,9 +2077,13 @@ impl Builtins {
             realms
                 .iter()
                 .filter(|(id, _)| {
-                    let now = forked.contains(*id) || live(id);
-                    waited |= !now;
-                    now
+                    if forked.contains(*id) {
+                        return true;
+                    }
+                    let needed = self.needs_publication(id);
+                    let now = live(id);
+                    waited |= needed && !now;
+                    needed && now
                 })
                 .chain(extensions.iter())
                 .map(|(id, realm)| (id.clone(), realm.clone()))
@@ -2070,11 +2101,14 @@ impl Builtins {
         (tickets, waited)
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let forked: std::collections::BTreeSet<String> =
+            self.forks.shared().keys().cloned().collect();
         let realms: Vec<_> = {
             let extensions = self.extension_realms.shared();
             let realms = self.realms.shared();
             realms
                 .iter()
+                .filter(|(id, _)| forked.contains(*id) || self.needs_publication(id))
                 .chain(extensions.iter())
                 .map(|(id, realm)| (id.clone(), realm.clone()))
                 .collect()
@@ -2111,6 +2145,9 @@ impl Builtins {
             let mut backend = backend.shared();
             backend.native.facts["time"] = json!(time);
             backend.native.facts["playing"] = json!(playing);
+        }
+        if !self.forks.shared().contains_key(panel) && !self.needs_publication(panel) {
+            return None;
         }
         Some(realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"))
     }
@@ -2177,7 +2214,12 @@ impl Builtins {
         for entry in self.broker.all_entries() {
             let backend = entry.shared().backend.clone();
             let mut backend = backend.shared();
-            backend.native.originals = originals.clone();
+            if backend.native.originals != originals {
+                backend.native.originals.clone_from(&originals);
+                if backend.panel_id == "inspector" {
+                    backend.last_publication = None;
+                }
+            }
             let mut observed = observed.clone();
             observed.folders = backend.native.media_runtime.folders.clone();
             if backend.native.media_runtime != observed {
@@ -3147,8 +3189,17 @@ impl EngineProxy for Broker {
                 .map_err(|e| Error::Host(e.to_string()))
             }
             "host.publications" => {
-                entry.backend.shared().tick().map_err(Error::Host)?;
+                let before = {
+                    let mut backend = entry.backend.shared();
+                    backend.tick().map_err(Error::Host)?;
+                    publication::Inputs::read(&backend)
+                };
                 let publications = entry.router.publications().map_err(Error::Host)?;
+                if let Some(before) = before {
+                    let mut backend = entry.backend.shared();
+                    backend.last_publication = publication::Inputs::read(&backend)
+                        .filter(|after| before.same_publication(after));
+                }
                 // A snapshot may ask the host for something too (the Export
                 // sheet asks the viewer to measure again); it goes now, not
                 // at the panel's next command.
@@ -3489,7 +3540,11 @@ impl EngineProxy for Broker {
             }
             "overlay.commit" => {
                 let interactive = input["interactive"].as_bool().unwrap_or(false);
-                let commit = serde_json::from_value(input.clone())
+                let mut surface = input.clone();
+                if let Some(envelope) = surface.as_object_mut() {
+                    envelope.remove("interactive");
+                }
+                let commit = serde_json::from_value(surface)
                     .map_err(|e| Error::Host(e.to_string()))?;
                 match entry.overlay.apply(commit) {
                     Ok(_) => {

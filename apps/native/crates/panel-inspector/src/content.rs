@@ -1,11 +1,10 @@
 //! Nonvisual content behaviors. Services supply font/media facts; Linux tests
 //! supply synthetic facts. Inspection never writes data.
-use crate::view::{array, number, object, text};
+use crate::view::{number, object, text};
 use crate::{Binding, Inspector, InspectorError, PropertyId};
 use pm_kernel::commands::properties::{KeyMode, SetProperty};
 use pm_kernel::{Caller, ContentCommand, PropertyCommand, Request, TimingCommand};
 use pm_model::{Map, Value};
-use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontAxis {
@@ -63,31 +62,43 @@ pub fn smoothing_detent(value: f64) -> Result<f64, InspectorError> {
 }
 /// Cycle-safe tag behavior, including the shipped maximum nesting depth.
 pub fn precomp_carries_audio(comp: &str, comps: &Value) -> bool {
-    fn visit(id: &str, comps: &Value, depth: usize, seen: &HashSet<String>) -> bool {
-        if id.is_empty() || seen.contains(id) || depth > 8 {
+    let comps = pm_model::Node::from_value(comps.clone(), 0);
+    precomp_node_carries_audio(comp, Some(&comps))
+}
+
+pub(crate) fn precomp_node_carries_audio(comp: &str, comps: Option<&pm_model::Node>) -> bool {
+    use crate::view::{node_array, node_text};
+    use pm_model::{Node, NodeKind};
+
+    fn visit(id: &str, comps: &Node, depth: usize, ancestors: &mut Vec<String>) -> bool {
+        if id.is_empty() || depth > 8 || ancestors.iter().any(|ancestor| ancestor == id) {
             return false;
         }
         let Some(comp) = comps.get(id) else {
             return false;
         };
-        let mut seen = seen.clone();
-        seen.insert(id.into());
-        array(comp.get("layers")).iter().any(|layer| {
+        ancestors.push(id.into());
+        let audio = node_array(comp.get("layers")).iter().any(|layer| {
             let Some(d) = layer.get("d") else {
                 return false;
             };
-            match text(layer, "type") {
-                "audio" => !text(d, "asset").is_empty(),
+            match node_text(layer, "type") {
+                "audio" => !node_text(d, "asset").is_empty(),
                 "video" => {
-                    d.get("embeddedAudio").and_then(Value::as_bool) == Some(true)
-                        && !text(d, "asset").is_empty()
+                    matches!(
+                        d.get("embeddedAudio").map(Node::kind),
+                        Some(NodeKind::Bool(true))
+                    ) && !node_text(d, "asset").is_empty()
                 }
-                "precomp" => visit(text(d, "comp"), comps, depth + 1, &seen),
+                "precomp" => visit(node_text(d, "comp"), comps, depth + 1, ancestors),
                 _ => false,
             }
-        })
+        });
+        ancestors.pop();
+        audio
     }
-    visit(comp, comps, 0, &HashSet::new())
+
+    comps.is_some_and(|comps| visit(comp, comps, 0, &mut Vec::new()))
 }
 impl Inspector {
     pub fn set_content_patch(
