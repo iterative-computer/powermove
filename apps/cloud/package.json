@@ -23,13 +23,17 @@
     "types:emit": "bun run types && tsc -p tsconfig.types.json"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.106",
+    "@ai-sdk/openai": "4.0.121",
     "@hono/zod-validator": "0.9.1",
-    "@powermove/registry": "workspace:*",
     "@neondatabase/serverless": "1.1.0",
+    "@powermove/registry": "workspace:*",
+    "ai": "7.0.177",
     "better-auth": "1.7.5",
     "drizzle-orm": "0.45.3",
     "hono": "4.13.8",
     "pg": "8.23.0",
+    "stripe": "23.2.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
