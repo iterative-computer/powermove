@@ -109,7 +109,7 @@ export const aero = new Hono<Env>()
       })();
       return settled;
     };
-    const keepAlive = (promise: Promise<void>) => { try { c.executionCtx.waitUntil(promise); } catch { /* no execution context in tests */ } };
+    const keepAlive = (promise: Promise<void>) => { try { c.executionCtx.waitUntil(promise); } catch { /* no execution context in tests: the task just runs */ } };
 
     const result = streamText({
       model: languageModelFor,
@@ -125,39 +125,39 @@ export const aero = new Hono<Env>()
       abortSignal: abort.signal,
       onError: ({ error }) => { console.error('aero provider error', requestId, (error as Error)?.name ?? 'unknown'); },
     });
-    const parts = result.fullStream[Symbol.asyncIterator]();
-    const text = new TextEncoder();
-    let done = false;
-    const body = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        // Keep reading until a part yields a frame: a pull that enqueues nothing is not pulled again.
-        while (!done) {
-          const next = await parts.next().catch(() => ({ done: true as const, value: undefined }));
-          if (next.done) {
-            done = true;
-            await settle(encoder.usage);
-            const frames = encoder.usage && !encoder.failed ? encoder.close(encoder.usage) : [ChunkEncoder.error(abort.signal.aborted ? 'aborted' : 'upstream_error')];
-            for (const frame of frames) controller.enqueue(text.encode(frame));
-            controller.close();
-            return;
-          }
-          const frames = encoder.accept(next.value);
-          for (const frame of frames) controller.enqueue(text.encode(frame));
-          if (frames.length) return;
+    // The pump runs as its own task (waitUntil on Workers), so it outlives a client that goes away: a failed write
+    // is the disconnect, which stops the provider call, and the ledger row is settled either way.
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    const bytes = new TextEncoder();
+    let clientGone = false;
+    const gone = () => { if (clientGone) return; clientGone = true; abort.abort(); };
+    // Workers signal a client that disconnected on the request (enable_request_signal); a write can then hang
+    // instead of failing, so every write also gives way to that signal.
+    const requestSignal = c.req.raw.signal;
+    const disconnected = new Promise<void>(resolve => { if (requestSignal.aborted) resolve(); else requestSignal.addEventListener('abort', () => resolve(), { once: true }); });
+    void disconnected.then(gone);
+    const write = async (frame: string) => {
+      if (clientGone) return;
+      try { await Promise.race([writer.write(bytes.encode(frame)), disconnected]); } catch { gone(); }
+    };
+    keepAlive((async () => {
+      try {
+        for await (const part of result.fullStream) {
+          for (const frame of encoder.accept(part)) await write(frame);
+          if (clientGone) break;
         }
-      },
-      cancel() {
-        // The client went away: stop the provider call and settle with what is known.
-        done = true;
-        abort.abort();
-        void parts.return?.();
-        keepAlive(settle(encoder.usage));
-      },
-    });
+      } catch { encoder.failed = true; }
+      await settle(encoder.usage);
+      if (clientGone) return;
+      const frames = encoder.usage && !encoder.failed ? encoder.close(encoder.usage) : [ChunkEncoder.error('upstream_error')];
+      for (const frame of frames) await write(frame);
+      await writer.close().catch(() => {});
+    })());
     c.header('Content-Type', 'text/event-stream; charset=utf-8');
     c.header('Cache-Control', 'no-cache, no-transform');
     c.header('X-Accel-Buffering', 'no');
     c.header('X-Powermove-Request-Id', requestId);
-    return c.body(body);
+    return c.body(readable);
   });
 

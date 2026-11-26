@@ -22,8 +22,9 @@ async function limited(c: Context<Env>, userId: string) {
   if (!result.ok) throw new V2Error(429, 'rate_limited', result.retryAfterSeconds);
 }
 
-/** The return page Checkout and the Portal send the browser back to. */
-const returnUrl = (c: Context<Env>, status: 'success' | 'cancel' | 'portal') => `${new URL(c.req.url).origin}/v2/billing/return?status=${status}`;
+/** The return page Checkout and the Portal send the browser back to, on the Worker's own origin (APP_ORIGIN:
+    under wrangler dev the request's host is the production route, so it can't come from the request). */
+const returnUrl = (c: Context<Env>, status: 'success' | 'cancel' | 'portal') => `${c.env.APP_ORIGIN ?? new URL(c.req.url).origin}/v2/billing/return?status=${status}`;
 
 /** The account's Stripe customer, created once and keyed to the user. */
 async function customerFor(c: Context<Env>, stripe: Stripe, userId: string): Promise<string> {

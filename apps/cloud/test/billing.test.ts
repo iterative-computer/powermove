@@ -42,8 +42,8 @@ test('checkout to active: the webhooks grant the period’s 1,000 credits; a sec
       expect(session.billing_address_collection).toBe('required');
       expect(session.tax_id_collection).toEqual({ enabled: true });
       expect(session.client_reference_id).toBe(s.user.id);
-      expect(session.success_url).toBe('http://localhost/v2/billing/return?status=success');
-      expect(session.cancel_url).toBe('http://localhost/v2/billing/return?status=cancel');
+      expect(session.success_url).toBe('https://cloud.trypowermove.com/v2/billing/return?status=success');
+      expect(session.cancel_url).toBe('https://cloud.trypowermove.com/v2/billing/return?status=cancel');
       expect(success).toBe(session.success_url);
       expect(s.stripe.deliveries.map(d => [d.type, d.status])).toEqual([['customer.subscription.created', 200], ['invoice.paid', 200], ['checkout.session.completed', 200]]);
       const state = await billing(s);
@@ -61,7 +61,7 @@ test('checkout to active: the webhooks grant the period’s 1,000 credits; a sec
       expect(portal.status).toBe(200);
       const portalUrl = (await portal.json() as any).url as string;
       expect(portalUrl.startsWith(`${s.stripe.url}/portal/`)).toBe(true);
-      expect(s.stripe.state.sessions.get(portalUrl.split('/').at(-1)!)!.return_url).toBe('http://localhost/v2/billing/return?status=portal');
+      expect(s.stripe.state.sessions.get(portalUrl.split('/').at(-1)!)!.return_url).toBe('https://cloud.trypowermove.com/v2/billing/return?status=portal');
     } finally { await s.stop(); }
   }));
 

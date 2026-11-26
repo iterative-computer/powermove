@@ -20,7 +20,7 @@ export interface FakeStripe {
   deliveries: Array<{ type: string; id: string; status: number }>;
   state: { customers: Map<string, Obj>; prices: Map<string, Obj>; products: Map<string, Obj>; sessions: Map<string, Obj>; subscriptions: Map<string, Obj>; invoices: Map<string, Obj>; events: Obj[] };
   /** Completes a Checkout Session as if the Pay button was pressed. Returns the success URL. */
-  pay(sessionId: string): Promise<string>;
+  pay(sessionId: string, backdateDays?: number): Promise<string>;
   renew(subscriptionId: string): Promise<void>;
   failRenewal(subscriptionId: string): Promise<void>;
   /** The portal's actions, without the page. */
@@ -138,13 +138,14 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
     return invoice;
   }
 
-  async function pay(sessionId: string): Promise<string> {
+  /** `backdateDays` starts the period that many days ago (local seed data with a few days of history). */
+  async function pay(sessionId: string, backdateDays = 0): Promise<string> {
     const session = state.sessions.get(sessionId);
     if (!session) throw new Error('no such session');
     if (session.status === 'complete') return session.success_url;
     const price = state.prices.get(session.line_items[0].price);
     if (!price) throw new Error('no such price');
-    const start = now(), end = addMonth(start);
+    const start = now() - Math.round(backdateDays * 86_400), end = addMonth(start);
     const sub = {
       id: id('sub'), object: 'subscription', customer: session.customer, status: 'active', cancel_at_period_end: false, cancel_at: null, canceled_at: null,
       created: start, livemode: false, metadata: session.subscription_data?.metadata ?? {}, automatic_tax: { enabled: true },
