@@ -542,6 +542,20 @@ pub fn grouped(n: u64) -> String {
 /// The model edge for catalogue model `model` at `effort`, paid by the
 /// Powermove account signed in now, or why it can't run.
 pub fn live(env: &Environment, model: &str, effort: &str) -> Result<Live, String> {
+    live_in(env, model, effort, None)
+}
+/// [`live`] for Aero session `thread`: every request names it
+/// (`X-Powermove-Thread`, the backend's stable prompt-cache key) and carries
+/// its own id (`X-Powermove-Request-Id`, so a repeat is never billed twice).
+pub fn live_in(
+    env: &Environment,
+    model: &str,
+    effort: &str,
+    thread: Option<&str>,
+) -> Result<Live, String> {
+    let thread = thread
+        .filter(|t| request_header_value(t))
+        .map(|t| ("x-powermove-thread".to_owned(), t.to_owned()));
     let model = gateway_id(model).ok_or(CHOOSE)?;
     let account = env.powermove.clone().ok_or(SIGN_IN)?;
     let session = account.session().ok_or(SIGN_IN)?;
@@ -580,13 +594,13 @@ pub fn live(env: &Environment, model: &str, effort: &str) -> Result<Live, String
             if rejected.is_some_and(|r| r == bearer) {
                 return Err(SIGN_IN_AGAIN.into());
             }
-            Ok((
-                origin.clone(),
-                vec![
-                    ("authorization".into(), format!("Bearer {bearer}")),
-                    client.clone(),
-                ],
-            ))
+            let mut headers = vec![
+                ("authorization".into(), format!("Bearer {bearer}")),
+                client.clone(),
+                ("x-powermove-request-id".into(), request_id()),
+            ];
+            headers.extend(thread.clone());
+            Ok((origin.clone(), headers))
         }),
     })
 }
@@ -605,6 +619,32 @@ fn configured(base: &str, model: &str, effort: &str) -> String {
     json!({"aero": {"protocol":"openai-chat-completions","base_url":base,"auth":{"type":"none"},
         "tool_choice_mode":"omit","model_metadata":{model: entry}}})
     .to_string()
+}
+
+/// The contract's request and thread ids: 8–128 of `A-Za-z0-9._:-`.
+fn request_header_value(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+/// A fresh id for one request (`aero-` and 32 random hex digits).
+fn request_id() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    let random = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+    if random.is_err() {
+        // Never a repeat: the time and a counter stand in.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        bytes[..8].copy_from_slice(&now.to_le_bytes());
+        bytes[8..].copy_from_slice(&n.to_le_bytes());
+    }
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("aero-{hex}")
 }
 
 /// A session's identity for comparing, never the token itself.
@@ -817,6 +857,51 @@ mod tests {
         }
         let live = live(&env, "pm/openai/gpt-6-sol", "high").unwrap();
         assert_eq!(live.model, "openai/gpt-6-sol");
+    }
+
+    /// Every request names its Aero thread (the backend's prompt-cache key)
+    /// and carries an id of its own, never the same twice.
+    #[test]
+    fn each_request_names_its_thread_and_carries_a_fresh_request_id() {
+        #[derive(Debug)]
+        struct Signed;
+        impl PowermoveAccount for Signed {
+            fn session(&self) -> Option<Session> {
+                Some(Session {
+                    origin: "https://cloud.trypowermove.com".into(),
+                    token: "t".into(),
+                })
+            }
+        }
+        let env = Environment {
+            powermove: Some(Arc::new(Signed)),
+            net: Some(Arc::new(crate::edge::Loopback)),
+            ..Environment::default()
+        };
+        let thread = "4f2a9c0d1e3b5a7c";
+        let live = live_in(&env, "pm/openai/gpt-6.2-sol", "", Some(thread)).unwrap();
+        let header = |headers: &[(String, String)], name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        };
+        let (_, first) = (live.credentials)(None).unwrap();
+        let (_, second) = (live.credentials)(None).unwrap();
+        assert_eq!(
+            header(&first, "x-powermove-thread").as_deref(),
+            Some(thread)
+        );
+        let (a, b) = (
+            header(&first, "x-powermove-request-id").unwrap(),
+            header(&second, "x-powermove-request-id").unwrap(),
+        );
+        assert_ne!(a, b);
+        assert!(request_header_value(&a), "{a}");
+        // No thread, or one the contract would refuse: none is named.
+        let bare = live_in(&env, "pm/openai/gpt-6.2-sol", "", Some("bad id!")).unwrap();
+        let (_, headers) = (bare.credentials)(None).unwrap();
+        assert_eq!(header(&headers, "x-powermove-thread"), None);
     }
 
     /// P1 (Sol, PM-750): Aero's traffic never goes through the development

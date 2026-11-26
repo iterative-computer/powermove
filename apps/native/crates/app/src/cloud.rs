@@ -656,6 +656,15 @@ pub fn init(profile: PathBuf, cx: &mut App) {
     let origin = store_install::origin();
     let worker_profile = profile.clone();
     let Ok(worker) = ServiceWorker::start(move || {
+        // A local development stack's session, given at launch
+        // (`PM_CLOUD_SESSION`), lives in memory, never the Keychain.
+        if let Some(sealed) = local_session(origin) {
+            return Ok(Http::new(
+                origin,
+                Box::new(Memory(Some(sealed))),
+                worker_profile,
+            ));
+        }
         // A development review's account lives in memory, never the Keychain.
         #[cfg(debug_assertions)]
         if review_cloud() {
@@ -720,6 +729,39 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         })
         .detach();
     }
+}
+/// A session held in memory only (a local stack's, a review's).
+#[derive(Default)]
+pub(crate) struct Memory(Option<Vec<u8>>);
+impl Vault for Memory {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.clone())
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.0 = Some(bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self) -> Result<(), String> {
+        self.0 = None;
+        Ok(())
+    }
+}
+/// The session `PM_CLOUD_SESSION` gives a build on a local development
+/// stack (debug, or the Sandbox's `dev-cloud-origin`), sealed for `origin`:
+/// signed in as that stack's account from the start. Never on the real
+/// cloud, never in a shipped release.
+fn local_session(origin: &str) -> Option<Vec<u8>> {
+    if !store_install::LOCAL_CLOUD || !pm_agents::inference::local_origin(origin) {
+        return None;
+    }
+    let token = std::env::var("PM_CLOUD_SESSION")
+        .ok()
+        .filter(|t| !t.is_empty() && t.len() <= 4096 && !t.chars().any(char::is_control))?;
+    Some(
+        json!({"origin":origin,"token":token,"expiresAt":"2099-01-01T00:00:00.000Z"})
+            .to_string()
+            .into_bytes(),
+    )
 }
 async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) -> Option<T> {
     loop {
@@ -964,8 +1006,7 @@ mod review {
             "daily":daily,"plans":plans})
     }
     static HANDLE: Mutex<String> = Mutex::new(String::new());
-    #[derive(Default)]
-    pub struct Memory(Option<Vec<u8>>);
+    pub(super) use super::Memory;
     impl Memory {
         /// Signed in from the start as `PM_NATIVE_REVIEW_SIGNED_IN` (an
         /// email), when the review launch names one; else signed out.
@@ -979,19 +1020,6 @@ mod review {
                     .to_string()
                     .into_bytes(),
             ))
-        }
-    }
-    impl Vault for Memory {
-        fn read(&self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.0.clone())
-        }
-        fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-            self.0 = Some(bytes.to_vec());
-            Ok(())
-        }
-        fn delete(&mut self) -> Result<(), String> {
-            self.0 = None;
-            Ok(())
         }
     }
     pub fn answer(method: &str, path: &str, body: &[u8]) -> pm_services::Result<Value> {
@@ -1355,6 +1383,7 @@ fn billing_error(code: &str) -> &'static str {
     match code {
         "network" => "Can’t reach Powermove. Check your connection and try again.",
         "api:has_plan" => "You already have a plan. Manage it with Manage Billing.",
+        "api:no_billing_account" => "There’s no billing to manage yet. Choose a plan first.",
         "api:rate_limited" => "Too many tries. Wait a moment and try again.",
         _ => "Billing couldn’t open. Try again.",
     }
@@ -1384,9 +1413,9 @@ fn billing_url(raw: &str) -> Option<String> {
         && url.port().is_some();
     (plain && (stripe || local)).then(|| url.to_string())
 }
-/// `powermove://billing/return?status=success|cancel`: whether Checkout
-/// (or the Portal) finished, when the link is exactly that.
-pub fn billing_return(raw: &str) -> Option<bool> {
+/// `powermove://billing/return?status=success|cancel|portal`: Checkout
+/// paid or cancelled, or the Portal closed, when the link is exactly that.
+pub fn billing_return(raw: &str) -> Option<&'static str> {
     let url = url::Url::parse(raw).ok()?;
     if url.scheme() != "powermove"
         || url.host_str() != Some("billing")
@@ -1403,8 +1432,9 @@ pub fn billing_return(raw: &str) -> Option<bool> {
         return None;
     }
     match value.as_ref() {
-        "success" => Some(true),
-        "cancel" => Some(false),
+        "success" => Some("success"),
+        "cancel" => Some("cancel"),
+        "portal" => Some("portal"),
         _ => None,
     }
 }
@@ -1567,18 +1597,15 @@ mod billing_tests {
 
     #[test]
     fn the_billing_return_link_is_exactly_success_or_cancel() {
-        assert_eq!(
-            billing_return("powermove://billing/return?status=success"),
-            Some(true)
-        );
-        assert_eq!(
-            billing_return("powermove://billing/return?status=cancel"),
-            Some(false)
-        );
+        for status in ["success", "cancel", "portal"] {
+            let link = format!("powermove://billing/return?status={status}");
+            assert_eq!(billing_return(&link), Some(status));
+        }
         for other in [
             "powermove://billing/return",
             "powermove://billing/return?status=paid",
             "powermove://billing/return?status=success&x=1",
+            "powermove://billing/return?status=success&status=portal",
             "powermove://billing/elsewhere?status=success",
             "powermove://auth?state=s&token=t",
             "https://billing/return?status=success",
