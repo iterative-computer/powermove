@@ -232,9 +232,12 @@ pub(crate) fn resolve(
 
 /// `lockedIntent(layer, channel)`: a marker on the channel or its root.
 pub(crate) fn locked_intent(layer: &Value, channel: &str) -> bool {
-    let Some(intent) = layer.get("locked_intent") else {
-        return false;
-    };
+    layer
+        .get("locked_intent")
+        .is_some_and(|intent| has_locked_intent(intent, channel))
+}
+
+fn has_locked_intent(intent: &Value, channel: &str) -> bool {
     let root = channel.split('.').next().unwrap_or(channel);
     intent.get(channel).is_some_and(Value::is_truthy)
         || intent.get(root).is_some_and(Value::is_truthy)
@@ -354,12 +357,25 @@ impl Presets {
         &mut self,
         root: &pm_model::Node,
         origin: super::Origin,
+        layer_index: Option<&crate::model::LayerIndex>,
     ) -> Result<Vec<pm_model::Op>, CommandError> {
         if self.0.is_empty() {
             return Ok(Vec::new());
         }
         let mut cx = Cx::new(root, origin);
+        cx.layer_index = layer_index;
         for (layer_id, channel, edits) in self.0.drain(..) {
+            if is_core_track(&channel) {
+                let loc = cx.find(&layer_id)?;
+                cx.check_lock(&loc, &layer_id)?;
+                let mut path = loc.path();
+                path.extend(["p".into(), channel.as_str().into()]);
+                if let Some(mut prop) = cx.value_at(&path).filter(values::is_property) {
+                    track::apply_presets(track::keys_mut(&mut prop), &edits);
+                    cx.replace(path, prop)?;
+                    continue;
+                }
+            }
             let (loc, mut layer) = cx.layer_mut_checked(&layer_id)?;
             let path = channels::materialize(&mut layer, &channel).expect("written property");
             let prop = channels::get_mut(&mut layer, &path).expect("written property");
@@ -378,8 +394,10 @@ pub(crate) fn plan_set(
     selection: &crate::selection::Selection,
     state: Option<&crate::state::StateSnapshot>,
     project: Option<&str>,
+    layer_index: Option<&crate::model::LayerIndex>,
 ) -> Result<Vec<pm_model::Op>, CommandError> {
     let mut cx = Cx::new(root, origin);
+    cx.layer_index = layer_index;
     cx.state = state;
     cx.project = project;
     cx.selection = Some(selection);
@@ -403,7 +421,12 @@ fn set_property_inner(
     presets: Option<&mut Presets>,
     migrate_fog: bool,
 ) -> Result<(), CommandError> {
-    let (loc, mut layer, channel, path) = resolve(cx, &c.layer_id, &c.channel)?;
+    let direct = direct_property(cx, c)?;
+    let direct_channel = direct.is_some();
+    let (loc, mut layer, channel, path) = match direct {
+        Some(property) => property,
+        None => resolve(cx, &c.layer_id, &c.channel)?,
+    };
     if preserves(cx, c.preserve_hand_edits) && locked_intent(&layer, &channel) {
         return Err(hand_edit(&c.layer_id, &channel));
     }
@@ -513,7 +536,89 @@ fn set_property_inner(
     if c.mark_intent {
         mark_intent(&mut layer, &channel, local);
     }
-    cx.put_layer(&loc, layer)
+    if direct_channel {
+        let mut at = loc.path();
+        at.extend(["p".into(), channel.as_str().into()]);
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        cx.replace(at, std::mem::take(prop))?;
+        if c.mark_intent {
+            let mut at = loc.path();
+            at.push("locked_intent".into());
+            let intent = layer
+                .as_object_mut()
+                .and_then(|layer| layer.get_mut("locked_intent"))
+                .expect("marked intent");
+            cx.replace(at, std::mem::take(intent))?;
+        }
+        Ok(())
+    } else {
+        cx.put_layer(&loc, layer)
+    }
+}
+
+/// Core transform tracks already have a channel object. Only read the track
+/// and the layer-level fields used by Set, leaving vector geometry, masks,
+/// effects and the other tracks shared.
+fn direct_property(
+    cx: &Cx<'_>,
+    c: &SetProperty,
+) -> Result<Option<(LayerLoc, Value, String, Vec<Step>)>, CommandError> {
+    let channel = values::channel_key(&c.channel);
+    if !is_core_track(channel) {
+        return Ok(None);
+    }
+    let loc = cx.find(&c.layer_id)?;
+    let node = cx.layer_node(&loc)?;
+    let Some(track) = node.get("p").and_then(|p| p.get(channel)) else {
+        return Ok(None);
+    };
+    cx.check_lock(&loc, &c.layer_id)?;
+    let track = track.to_value();
+    if !values::is_property(&track) {
+        return Ok(None);
+    }
+    let mut fields = Map::new();
+    for field in ["from", "locked_intent"] {
+        if let Some(value) = node.get(field) {
+            fields.insert(field, value.to_value());
+        }
+    }
+    let mut props = Map::new();
+    props.insert(channel, track);
+    fields.insert("p", Value::Object(props));
+    let layer = Value::Object(fields);
+    if cx.origin().is_generated()
+        && super::scene3d::is_scene3d_layer(node)
+        && (locked_intent(&layer, channel) || locked_intent(&layer, "3d"))
+    {
+        return Err(hand_edit(&c.layer_id, channel));
+    }
+    Ok(Some((
+        loc,
+        layer,
+        channel.to_owned(),
+        vec![channels::key("p"), channels::key(channel)],
+    )))
+}
+
+fn is_core_track(channel: &str) -> bool {
+    matches!(
+        channel,
+        "position.x"
+            | "position.y"
+            | "position.z"
+            | "rotation"
+            | "rotation.x"
+            | "rotation.y"
+            | "rotation.z"
+            | "scale.x"
+            | "scale.y"
+            | "scale.z"
+            | "opacity"
+            | "anchor.x"
+            | "anchor.y"
+            | "anchor.z"
+    )
 }
 
 /// Never reinterpret active, animated, expression-driven or hand-shaped fog.

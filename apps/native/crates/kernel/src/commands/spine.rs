@@ -9,7 +9,7 @@
 use pm_model::patch::{Patch, PathPart};
 use pm_model::{JsString, Node, NodeKind, Op, Value};
 
-use super::{Command, Origin};
+use super::{Command, cx::Cx};
 use crate::error::CommandError;
 use crate::model::{self, LayerLoc, str_of};
 
@@ -37,16 +37,15 @@ pub(super) fn layer_id(command: &Command) -> &str {
     }
 }
 
-pub(super) fn plan(this: &Command, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
+pub(super) fn plan(this: &Command, cx: &Cx<'_>) -> Result<Vec<Op>, CommandError> {
     let id = layer_id(this);
-    let loc =
-        model::find_layer(root, id).ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
-    let layer =
-        model::layer_at(root, &loc).ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+    let loc = cx.find(id)?;
+    let layer = cx.layer_node(&loc)?;
+    let origin = cx.origin();
     let unlock_only =
         origin.is_human() && matches!(this, Command::SetLayerLocked { locked: false, .. });
     if !unlock_only {
-        check_lock(root, &loc, layer, id)?;
+        cx.check_lock(&loc, id)?;
     }
     let at = |tail: &[&str]| -> Vec<PathPart> {
         let mut path = loc.path();
@@ -188,7 +187,15 @@ pub fn check_lock(
     layer: &Node,
     layer_id: &str,
 ) -> Result<(), CommandError> {
-    if model::is_locked(root, loc) {
+    check_layer_lock(layer, layer_id, model::is_locked(root, loc))
+}
+
+pub(super) fn check_layer_lock(
+    layer: &Node,
+    layer_id: &str,
+    locked: bool,
+) -> Result<(), CommandError> {
+    if locked {
         Err(CommandError::Locked {
             layer_id: layer_id.to_owned(),
             name: layer_name(layer, layer_id),

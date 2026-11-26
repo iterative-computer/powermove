@@ -219,23 +219,29 @@ impl Prepared {
         if let (Destination::Library(slot), Some(store)) = (&self.destination, library) {
             paths.push(store.join(format!("project.{slot}.json")));
         }
-        for session in journals
-            .map(|d| crate::journal::sessions(&d))
-            .unwrap_or_default()
-        {
-            paths.push(session.clone());
-            paths.extend(
-                std::fs::read_dir(&session)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path()),
-            );
+        if let Some(journals) = journals {
+            paths.extend(journal_inputs(&journals));
         }
         paths.sort();
         paths
     }
 }
+fn journal_inputs(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for session in crate::journal::sessions(dir) {
+        paths.push(session.clone());
+        paths.extend(
+            std::fs::read_dir(&session)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path()),
+        );
+    }
+    paths.sort();
+    paths
+}
+
 enum RecoveryMode {
     Legacy,
     Ask,
@@ -443,6 +449,8 @@ pub struct OpenJob {
     /// the file's only if the file is there or a save of it was cut short.
     entry: bool,
     electron_profile: Option<PathBuf>,
+    barrier: Option<Box<dyn FnOnce() -> std::io::Result<()> + Send>>,
+    journal_dir: Option<PathBuf>,
     lock_root: PathBuf,
     host: OwnedHost,
 }
@@ -455,8 +463,17 @@ pub struct OpenPrelude {
     decision: OpenDecision,
     lock: Option<FileLock>,
     settled: project_io::Settled,
+    durability: Result<(), String>,
+    recovery: Option<FileRecovery>,
     opened: Option<Result<project_io::OpenedProject, crate::ProjectIoError>>,
 }
+struct FileRecovery {
+    dir: PathBuf,
+    inputs: Freshness,
+    workspace: Value,
+    result: Recovery,
+}
+
 impl OpenJob {
     pub fn path(&self) -> &std::path::Path {
         &self.path
@@ -471,7 +488,14 @@ impl OpenJob {
             lock: None,
             settled: project_io::Settled::default(),
             opened: None,
+            durability: self
+                .barrier
+                .map_or(Ok(()), |barrier| barrier().map_err(|e| e.to_string())),
+            recovery: None,
         };
+        if pre.durability.is_err() {
+            return pre;
+        }
         if self.entry && !(path.is_file() || project_io::pending(&path)) {
             pre.file_route = false;
             return pre;
@@ -504,6 +528,43 @@ impl OpenJob {
             && path.is_file()
         {
             pre.opened = Some(project_io::open_project(&path, OpenOptions::default()));
+            if let Some(Ok(opened)) = &pre.opened {
+                let hash = opened.document.canonical_hash().unwrap_or_default();
+                if let Some(dir) = self.journal_dir {
+                    let inputs = freshness(journal_inputs(&dir));
+                    if !inputs.is_empty() {
+                        let ws = opened
+                            .file
+                            .envelope
+                            .workspace
+                            .clone()
+                            .unwrap_or(Value::Null);
+                        let result = crate::journal::recover_from(
+                            &dir,
+                            Some(&hash),
+                            Some(crate::journal::Base {
+                                document: &opened.document,
+                                history: opened.history.as_ref(),
+                                workspace: Some(&ws),
+                            }),
+                        );
+                        if let Recovery::Recovered(found)
+                        | Recovery::Copy {
+                            recovered: found, ..
+                        } = &result
+                        {
+                            // The actor uses this to verify a recovery decision.
+                            found.document.canonical_hash();
+                        }
+                        pre.recovery = Some(FileRecovery {
+                            dir,
+                            inputs,
+                            workspace: ws,
+                            result,
+                        });
+                    }
+                }
+            }
         }
         pre
     }
@@ -547,11 +608,33 @@ pub struct SaveJob {
     /// here to be still that save's (a whole-file read when its times
     /// moved), for the save in place to adopt.
     ticket: Option<std::sync::Arc<project_io::FileVersion>>,
+    snapshot: Option<(
+        std::sync::Arc<pm_model::Document>,
+        crate::history::HistorySnapshot,
+    )>,
     warm: Box<dyn FnOnce() + Send>,
     host: OwnedHost,
 }
+/// Recovery information read from the same immutable state as the save.
+pub(crate) struct SaveRecoveryProof {
+    edition: u64,
+    history_steps: crate::history::SavedSteps,
+    pub(crate) stripped: std::sync::Arc<pm_model::Document>,
+    pub(crate) hash: String,
+    pub(crate) history: String,
+    pub(crate) rekeyed: bool,
+}
+
+impl SaveRecoveryProof {
+    pub(crate) fn matches(&self, store: &crate::DocumentStore) -> bool {
+        self.edition == store.current().edition()
+            && self.history_steps == store.history().saved_steps()
+    }
+}
+
 /// What a [`SaveJob`] found and did.
 pub struct SavePrelude {
+    pub(crate) proof: Option<SaveRecoveryProof>,
     pub(crate) project: String,
     path: Option<PathBuf>,
     settled: project_io::Settled,
@@ -595,7 +678,21 @@ impl SaveJob {
         }
         // Found once and kept where the save looks for it.
         (self.warm)();
+        let proof = self.snapshot.map(|(document, history)| {
+            let stripped = crate::model::without_derived_key_ids(&document);
+            let reopened = crate::model::hash_reopened_stripped(&stripped);
+            let actual = document.canonical_hash().unwrap_or_default();
+            SaveRecoveryProof {
+                edition: document.edition(),
+                history_steps: history.saved_steps(),
+                stripped,
+                rekeyed: reopened.as_ref().is_some_and(|hash| hash != &actual),
+                hash: reopened.unwrap_or(actual),
+                history: history.identity(),
+            }
+        });
         SavePrelude {
+            proof,
             project: self.project,
             path: self.path,
             settled,
@@ -1375,12 +1472,19 @@ impl Kernel {
                 replace,
             });
         let options = self.save_options(&session.project);
+        let stripped = self
+            .save_prelude
+            .as_ref()
+            .filter(|prelude| prelude.project == session.project)
+            .and_then(|prelude| prelude.proof.as_ref())
+            .filter(|proof| proof.matches(self.project(&session.project).unwrap().store()))
+            .map(|proof| proof.stripped.clone());
         let p = self.project_mut(&session.project).unwrap();
         let workspace = p.workspace().clone();
         p.store_mut().set_workspace(Some(workspace));
         let plan = p
             .store_mut()
-            .prepare_save(target, options)
+            .prepare_save_with_document(target, options, stripped)
             .map_err(failure)?;
         // Durable before the worker can replace the file the journal is
         // based on; edits while it runs are journalled after this point.
@@ -1680,7 +1784,12 @@ impl Kernel {
         if self.project(&id).is_some() {
             return Err(KernelFailure::AlreadyOpen(id));
         }
-        if let Some(d) = self.durability() {
+        let mut prelude = self.open_prelude.take();
+        if let Some(prelude) = &prelude {
+            if let Err(error) = &prelude.durability {
+                return Err(KernelFailure::Journal(error.clone()));
+            }
+        } else if let Some(d) = self.durability() {
             d.barrier()
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
         }
@@ -1688,7 +1797,6 @@ impl Kernel {
         // file route gives it the same journal base, lock and recovery as
         // opening the file itself, so recents never turns a recover into a copy.
         // The disk work of a file open, when a worker did it already.
-        let mut prelude = self.open_prelude.take();
         let source = match source {
             SessionSource::Library { profile, project }
                 if project == id && self.owns_library(&profile) =>
@@ -1716,6 +1824,7 @@ impl Kernel {
         let mut rejected_history = None;
         // A file entry whose unsaved work may be this file's (id, file name).
         let mut maybe_left: Option<(String, String)> = None;
+        let mut pre_recovered = None;
         let (source, destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
@@ -1938,6 +2047,8 @@ impl Kernel {
                     None => OpenJob {
                         path: path.clone(),
                         entry: false,
+                        barrier: None,
+                        journal_dir: None,
                         electron_profile: electron_profile.clone(),
                         lock_root: self.lock_root(),
                         host: self.owned_host(),
@@ -1948,6 +2059,7 @@ impl Kernel {
                 lock = pre.lock;
                 let left_aside = pre.settled;
                 let mut pre_opened = pre.opened;
+                pre_recovered = pre.recovery;
                 if decision == OpenDecision::Writable {
                     self.log_unrecorded(&left_aside);
                     if let Some(e) = &left_aside.unsynced {
@@ -2109,21 +2221,34 @@ impl Kernel {
             _ => id.as_str(),
         };
         // Only a journal left behind needs the base as a value.
-        let journaled = self
-            .project_dir(recovery_id)
-            .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty());
+        let journals = self.project_dir(recovery_id);
+        let journaled = journals
+            .as_ref()
+            .is_some_and(|dir| !crate::journal::sessions(dir).is_empty());
         let mut recovered = Recovery::Nothing;
         if journaled {
             let document = source_document(&source);
             let saved = saved_state(&source);
-            recovered = self.recover_from(
-                recovery_id,
-                Some(&base),
-                Some(crate::journal::Base {
-                    document: &document,
-                    history: saved.as_ref().map(|(h, _)| h),
-                    workspace: saved.as_ref().map(|(_, w)| w),
-                }),
+            let cached = pre_recovered.filter(|pre| {
+                journals.as_ref() == Some(&pre.dir)
+                    && saved
+                        .as_ref()
+                        .is_some_and(|(_, workspace)| *workspace == pre.workspace)
+                    && freshness(journal_inputs(&pre.dir)) == pre.inputs
+            });
+            recovered = cached.map_or_else(
+                || {
+                    self.recover_from(
+                        recovery_id,
+                        Some(&base),
+                        Some(crate::journal::Base {
+                            document: &document,
+                            history: saved.as_ref().map(|(h, _)| h),
+                            workspace: saved.as_ref().map(|(_, w)| w),
+                        }),
+                    )
+                },
+                |pre| pre.result,
             );
             // A journal of an older base can also end where the file is now
             // (a save that could not start a new journal before the kill).
@@ -3249,6 +3374,9 @@ impl Kernel {
         else {
             return Ok(None);
         };
+        if crate::library::parse_key(&format!("project.{id}")).is_none() {
+            return Err(failure("Invalid project id"));
+        }
         if self.project(id).is_some() {
             return Ok(None);
         }
@@ -3277,6 +3405,8 @@ impl Kernel {
         Ok(Some(OpenJob {
             path,
             entry,
+            barrier: self.durability().map(|d| Box::new(d.barrier_job()) as _),
+            journal_dir: self.project_dir(id),
             electron_profile: electron_profile.clone(),
             lock_root: self.lock_root(),
             host: self.owned_host(),
@@ -3374,6 +3504,12 @@ impl Kernel {
             }),
             ticket: ticket.map(|t| t.receipt.version.clone()),
             path: in_place,
+            snapshot: self.journal_dir(&session.project).map(|_| {
+                (
+                    project.store().current().clone(),
+                    project.store().history().snapshot(),
+                )
+            }),
             warm: Box::new(project.store().save_warmup()),
             host: self.owned_host(),
         }))

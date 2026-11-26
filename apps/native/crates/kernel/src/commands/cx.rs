@@ -58,6 +58,7 @@ pub struct Cx<'a> {
     pub(super) state: Option<&'a crate::state::StateSnapshot>,
     pub(super) text: Option<&'a crate::text_host::SharedTextHost>,
     origin: Origin,
+    pub(super) layer_index: Option<&'a model::LayerIndex>,
     doc: Document,
     ops: Vec<Op>,
     revision: u64,
@@ -76,6 +77,7 @@ impl<'a> Cx<'a> {
             state: None,
             text: None,
             origin,
+            layer_index: None,
             doc: Document::from_root(Some(root.clone()), revision),
             ops: Vec::new(),
             revision,
@@ -118,6 +120,10 @@ impl<'a> Cx<'a> {
 
     /// Applies one operation to the scratch tree and records it.
     pub fn write(&mut self, op: Op) -> Result<(), CommandError> {
+        if self.layer_index.is_some() && model::changes_layer_index(std::slice::from_ref(&op), true)
+        {
+            self.layer_index = None;
+        }
         self.revision += 1;
         self.doc
             .apply_ops_at(std::slice::from_ref(&op), self.revision)
@@ -161,8 +167,11 @@ impl<'a> Cx<'a> {
 
     /// Finds a layer (open composition first, then the others).
     pub fn find(&self, layer_id: &str) -> Result<LayerLoc, CommandError> {
-        model::find_layer(self.root(), layer_id)
-            .ok_or_else(|| CommandError::LayerNotFound(layer_id.to_owned()))
+        let loc = match self.layer_index {
+            Some(index) => index.find(layer_id).map(|(loc, _)| loc),
+            None => model::find_layer(self.root(), layer_id),
+        };
+        loc.ok_or_else(|| CommandError::LayerNotFound(layer_id.to_owned()))
     }
 
     pub fn layer_node(&self, loc: &LayerLoc) -> Result<&Node, CommandError> {
@@ -179,15 +188,21 @@ impl<'a> Cx<'a> {
 
     /// [`Cx::layer`] refusing a locked layer (or one inside a locked group).
     pub fn layer_mut_checked(&self, layer_id: &str) -> Result<(LayerLoc, Value), CommandError> {
-        let (loc, value) = self.layer(layer_id)?;
+        let loc = self.find(layer_id)?;
         self.check_lock(&loc, layer_id)?;
+        let value = self.layer_node(&loc)?.to_value();
         Ok((loc, value))
     }
 
     /// The old lock rule (`lockedMessage`).
     pub fn check_lock(&self, loc: &LayerLoc, layer_id: &str) -> Result<(), CommandError> {
         let layer = self.layer_node(loc)?;
-        super::spine::check_lock(self.root(), loc, layer, layer_id)
+        match self.layer_index.and_then(|index| index.find(layer_id)) {
+            Some((indexed, locked)) if indexed == *loc => {
+                super::spine::check_layer_lock(layer, layer_id, locked)
+            }
+            _ => super::spine::check_lock(self.root(), loc, layer, layer_id),
+        }
     }
 
     /// Every layer of every composition: the open one first.

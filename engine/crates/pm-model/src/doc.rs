@@ -201,11 +201,16 @@ impl Node {
     pub fn lookup(&self, path: &[PathPart]) -> Option<&Node> {
         let mut node = self;
         for part in path {
-            let key = part.property_key();
-            node = match node.kind() {
-                NodeKind::Object(map) => map.get(&key)?,
-                NodeKind::Array(items) => {
+            node = match (node.kind(), part) {
+                (NodeKind::Object(map), PathPart::Key(key)) => map.get(key)?,
+                (NodeKind::Object(map), PathPart::Index(_)) => map.get(&part.property_key())?,
+                (NodeKind::Array(items), PathPart::Key(key)) => {
                     items.get(crate::json::array_index(key.as_str()?)? as usize)?
+                }
+                (NodeKind::Array(items), PathPart::Index(index))
+                    if *index >= 0.0 && *index < f64::from(u32::MAX) && index.fract() == 0.0 =>
+                {
+                    items.get(*index as usize)?
                 }
                 _ => return None,
             };

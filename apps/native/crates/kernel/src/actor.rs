@@ -1338,6 +1338,8 @@ fn contain(
     scope: Scope,
     panic: &(dyn std::any::Any + Send),
 ) {
+    kernel.open_prelude = None;
+    kernel.save_prelude = None;
     shared.published.clear_poison();
     shared.state.clear_poison();
     shared.subscribers.clear_poison();
@@ -1647,7 +1649,11 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 },
                 Some(done) => {
                     kernel.preparing.retain(|p| *p != id);
-                    kernel.save_prelude = done;
+                    let Some(done) = done else {
+                        reply(Err(not_started()));
+                        return;
+                    };
+                    kernel.save_prelude = Some(done);
                 }
             }
             let result = if document.is_some_and(|expected| {
@@ -1661,6 +1667,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             } else {
                 kernel.prepare_session_save(session, path, replace)
             };
+            kernel.save_prelude = None;
             let revision = publish(kernel, shared, &id);
             reply(result);
             for message in kernel.take_log() {
@@ -1807,8 +1814,15 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply,
         } => {
             kernel.opening.retain(|p| *p != path);
-            kernel.open_prelude = prelude;
-            shell_step(kernel, shared, call, reply)
+            let Some(prelude) = prelude else {
+                reply(Err(KernelFailure::Storage(
+                    "The file open worker stopped unexpectedly".into(),
+                )));
+                return;
+            };
+            kernel.open_prelude = Some(prelude);
+            shell_step(kernel, shared, call, reply);
+            kernel.open_prelude = None;
         }
         Msg::Call {
             project,
@@ -1817,7 +1831,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply,
         } => {
             let actor_started = std::time::Instant::now();
-            let before_state = kernel.state().clone();
+            let before_state = shared.state.lock().expect("state").clone();
             let before_selection = kernel
                 .project(&project)
                 .map(|p| p.store().selection().clone());
@@ -1837,15 +1851,16 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             }
             let workspace_changed = kernel
                 .project(&project)
-                .map(|p| p.workspace().clone())
+                .map(|p| p.workspace())
                 .filter(|ws| {
                     shared
                         .published
                         .lock()
                         .expect("published")
                         .get(&project)
-                        .is_some_and(|p| &p.workspace != ws)
-                });
+                        .is_some_and(|p| &p.workspace != *ws)
+                })
+                .cloned();
             // Publication boundary: publish, then answer, then events.
             let revision = publish_timed(kernel, shared, &project, Some(actor_started));
             let (outbox, notices) = match kernel.project_mut(&project) {

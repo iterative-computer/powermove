@@ -276,7 +276,7 @@ impl Command {
     /// Validates against `root` (the scratch project tree) and returns the
     /// operations; empty when the document already says so.
     pub fn plan(&self, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
-        self.plan_with_state(root, origin, None, None, None)
+        self.plan_with_state(root, origin, None, None, None, None)
     }
 
     pub(crate) fn plan_with_state(
@@ -286,6 +286,7 @@ impl Command {
         state: Option<&crate::state::StateSnapshot>,
         project: Option<&str>,
         text: Option<&crate::text_host::SharedTextHost>,
+        layer_index: Option<&crate::model::LayerIndex>,
     ) -> Result<Vec<Op>, CommandError> {
         // Bar moves only change a scalar. Avoid materializing the layer and
         // running a scratch document write before the store applies that write.
@@ -305,11 +306,12 @@ impl Command {
         cx.state = state;
         cx.project = project;
         cx.text = text;
+        cx.layer_index = layer_index;
         match self {
             Command::SetStaticOpacity { .. }
             | Command::SetLayerName { .. }
             | Command::SetLayerVisible { .. }
-            | Command::SetLayerLocked { .. } => return spine::plan(self, root, origin),
+            | Command::SetLayerLocked { .. } => return spine::plan(self, &cx),
             Command::Layer(c) => c.plan(&mut cx)?,
             Command::Property(c) => c.plan(&mut cx)?,
             Command::Keyframe(c) => c.plan(&mut cx)?,

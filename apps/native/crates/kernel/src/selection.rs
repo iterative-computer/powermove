@@ -167,26 +167,26 @@ impl Selection {
     }
 
     /// History restores key ids and owners verbatim; only layer picks are filtered.
-    pub(crate) fn restore_live_layers(&mut self, layers: &HashSet<String>) {
-        self.layers.retain(|id| layers.contains(id));
+    pub(crate) fn restore_live_layers(&mut self, layer_exists: impl Fn(&str) -> bool) {
+        self.layers.retain(|id| layer_exists(id));
     }
 
     /// Drops layer ids not in `layers` and key ids not in `keys` (when
     /// given). Returns whether anything went.
     pub(crate) fn prune(
         &mut self,
-        layers: &HashSet<String>,
+        layer_exists: impl Fn(&str) -> bool,
         keys: Option<&HashSet<String>>,
     ) -> bool {
         let before = (self.layers.len(), self.keys.len(), self.key_layers.len());
-        self.layers.retain(|id| layers.contains(id));
+        self.layers.retain(|id| layer_exists(id));
         if let Some(keys) = keys {
             self.keys.retain(|id| keys.contains(id));
         }
         // A key picked on a layer that went is not selected on the others.
         let picked: HashSet<String> = self.key_layers.iter().map(|(_, k)| k.clone()).collect();
         self.key_layers
-            .retain(|(l, k)| layers.contains(l) && self.keys.contains(k));
+            .retain(|(l, k)| layer_exists(l) && self.keys.contains(k));
         let kept: HashSet<&String> = self.key_layers.iter().map(|(_, k)| k).collect();
         self.keys
             .retain(|k| !picked.contains(k) || kept.contains(k));
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(s.primary(), Some("c"));
         s.set_keys(["k1".into()]);
         let live: HashSet<String> = ["x".to_owned()].into();
-        assert!(s.prune(&live, Some(&HashSet::new())));
+        assert!(s.prune(|id| live.contains(id), Some(&HashSet::new())));
         assert!(s.is_empty());
     }
 
@@ -233,7 +233,7 @@ mod tests {
         s.set_layer_keys([("a".into(), "k".into()), ("b".into(), "j".into())]);
         let live: HashSet<String> = ["b".to_owned()].into();
         let keys: HashSet<String> = ["k".to_owned(), "j".to_owned()].into();
-        assert!(s.prune(&live, Some(&keys)));
+        assert!(s.prune(|id| live.contains(id), Some(&keys)));
         assert_eq!(s.keys(), ["j"], "k went with layer a");
         assert_eq!(s.key_layers(), [("b".to_owned(), "j".to_owned())]);
     }

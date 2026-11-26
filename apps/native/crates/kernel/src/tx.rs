@@ -877,8 +877,8 @@ impl Project {
                 | Call::History(HistoryCall::Mark)
         );
         let before_revision = self.revision();
-        let before_mark = self.store.history_mark();
-        let before_cursor = self.store.history().applied();
+        let before_history =
+            tracks_mutation.then(|| (self.store.history_mark(), self.store.history().applied()));
         let handled = match call {
             Call::Extension(call) => {
                 let reply = self.extension(caller, call);
@@ -997,7 +997,7 @@ impl Project {
             } => self.external_done(txid, ticket, ok, message),
             Call::QueryTx { .. } => unreachable!("answered above"),
         };
-        if tracks_mutation
+        if let Some((before_mark, before_cursor)) = before_history
             && (before_revision != self.revision()
                 || before_mark != self.store.history_mark()
                 || before_cursor != self.store.history().applied())
@@ -1122,16 +1122,14 @@ impl Project {
     }
 
     fn select(&mut self, call: SelectionCall) -> Reply {
-        let ids = match &call {
-            SelectionCall::Layers { ids, .. } => ids.clone(),
-            SelectionCall::ToggleLayer(id) => vec![id.clone()],
-            _ => vec![],
+        let missing = match &call {
+            SelectionCall::Layers { ids, .. } => {
+                ids.iter().any(|id| !self.store.has_open_layer(id))
+            }
+            SelectionCall::ToggleLayer(id) => !self.store.has_open_layer(id),
+            _ => false,
         };
-        let present = match self.store.root() {
-            Some(root) if !ids.is_empty() => crate::model::layer_ids(root, None),
-            _ => HashSet::new(),
-        };
-        if ids.iter().any(|id| !present.contains(id)) {
+        if missing {
             return Reply::Throw(KernelError::Guard(
                 "Select existing layer IDs; no selection was changed".into(),
             ));

@@ -807,12 +807,33 @@ impl Kernel {
         let Some(journal) = &mut slot.journal else {
             return Ok(());
         };
-        // The base a reopen reads: keys stored without ids named by place.
-        let hash = model::reopened_hash(document)
-            .or_else(|| document.canonical_hash())
-            .unwrap_or_default();
         let project = &slot.project;
-        let history = project.store().history().identity();
+        let store = project.store();
+        let current = store.current();
+        // Reuse the worker's proof only for the exact state it examined.
+        let proof = self
+            .save_prelude
+            .as_ref()
+            .filter(|prelude| prelude.project == id)
+            .and_then(|prelude| prelude.proof.as_ref())
+            .filter(|proof| proof.matches(store));
+        let (hash, history, rekeyed) = match proof {
+            Some(proof) => (proof.hash.clone(), proof.history.clone(), proof.rekeyed),
+            None => {
+                let reopened = if std::sync::Arc::ptr_eq(document, current) {
+                    model::reopened_hash(current)
+                } else {
+                    model::hash_reopened_stripped(document)
+                };
+                let actual = current.canonical_hash().unwrap_or_default();
+                let rekeyed = reopened.as_ref().is_some_and(|hash| hash != &actual);
+                (
+                    reopened.unwrap_or(actual),
+                    store.history().identity(),
+                    rekeyed,
+                )
+            }
+        };
         let state = || {
             let store = project.store();
             CheckpointState {
@@ -826,8 +847,7 @@ impl Kernel {
         // this session moved some, its ids differ, and recovery must replay
         // from a checkpoint holding this session's ids, durable before the
         // save can publish, never from the save point onto that reopen.
-        let current = project.store().current();
-        if model::reopened_hash(current).is_some_and(|h| Some(h) != current.canonical_hash()) {
+        if rekeyed {
             journal.checkpoint_now(durability, state()).map_err(|e| {
                 KernelFailure::Storage(format!(
                     "Not saved: the recovery journal could not record the save ({e}). \

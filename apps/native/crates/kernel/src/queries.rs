@@ -274,42 +274,12 @@ impl<'a, 'd> ViewportQueries<'a, 'd> {
 
 // Layer-panel locking uses the first group with a matching id.
 fn viewport_locks(layers: &[Node]) -> HashSet<&str> {
-    let mut groups = HashMap::new();
-    let mut has_locked_group = false;
-    for layer in layers {
-        if layer.get("type").and_then(model::str_of) == Some("group")
-            && let Some(id) = layer.get("id").and_then(model::str_of)
-        {
-            groups.entry(id).or_insert(layer);
-            has_locked_group |= layer.get("lock").and_then(model::bool_of) == Some(true);
-        }
-    }
+    let groups = model::GroupLocks::new(layers);
     layers
         .iter()
         .filter_map(|layer| {
             let id = layer.get("id").and_then(model::str_of)?;
-            if layer.get("lock").and_then(model::bool_of) == Some(true) {
-                return Some(id);
-            }
-            if has_locked_group {
-                let mut seen = vec![id];
-                let mut child = layer;
-                while let Some(group) = child
-                    .get("group")
-                    .and_then(model::str_of)
-                    .filter(|id| !id.is_empty())
-                {
-                    if seen.contains(&group) {
-                        break;
-                    }
-                    child = groups.get(group)?;
-                    if child.get("lock").and_then(model::bool_of) == Some(true) {
-                        return Some(id);
-                    }
-                    seen.push(group);
-                }
-            }
-            None
+            groups.locked(layer, id).then_some(id)
         })
         .collect()
 }
@@ -340,7 +310,9 @@ impl QueryContext {
                 .ok()
                 .is_some_and(|body| self.engine.apply(&body, base, revision).is_ok());
         if ok {
-            self.layer_indices.clear();
+            if model::changes_layer_index(ops, false) {
+                self.layer_indices.clear();
+            }
         } else {
             self.resync(current);
         }
@@ -432,14 +404,7 @@ impl QueryContext {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let node = model::comp_node(root, comp.as_deref())
                     .ok_or_else(|| QueryError::CompNotFound(comp.clone().unwrap_or_default()))?;
-                let mut indices = HashMap::new();
-                for (index, layer) in model::layers_of(node).enumerate() {
-                    if let Some(id) = layer.get("id").and_then(model::str_of) {
-                        // The first instance of an id is the query target.
-                        indices.entry(id.to_owned()).or_insert(index);
-                    }
-                }
-                entry.insert(indices)
+                entry.insert(model::layer_positions(node))
             }
         };
         let index = *indices
