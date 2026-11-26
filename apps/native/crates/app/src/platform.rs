@@ -238,10 +238,21 @@ impl Drop for Busy {
 
 /// Hands a web link to the default browser.
 pub fn open_url(url: &str) -> bool {
+    // A development or lane build never opens anything in the person's
+    // browser (or another app): it says what it would have opened.
+    if !opens_urls(cfg!(debug_assertions), pm_compat_runner::store_install::lane_launch()) {
+        eprintln!("Powermove (development build) would open: {url}");
+        return true;
+    }
     objc2::rc::autoreleasepool(|_| {
         objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
             .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
     })
+}
+
+/// Only a release build that no lane launched opens URLs.
+pub(crate) fn opens_urls(debug: bool, lane: bool) -> bool {
+    !debug && !lane
 }
 
 /// Import Media: several items at once, filtered to `extensions` when it has any.
@@ -1228,5 +1239,21 @@ mod export_start_tests {
         assert_eq!(start(Some(&file), Some(last.clone())), project.clone());
         assert_eq!(start(None, Some(last.clone())), last.clone());
         assert_eq!(start(None, None), movies.clone());
+    }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    /// Only a release build that no lane launched opens a URL; a development
+    /// or lane build says what it would have opened (the owner's browser
+    /// opened on the real cloud from a lane, 2026-11-25).
+    #[test]
+    fn a_lane_or_development_build_never_opens_a_url() {
+        assert!(!super::opens_urls(true, false));
+        assert!(!super::opens_urls(false, true));
+        assert!(!super::opens_urls(true, true));
+        assert!(super::opens_urls(false, false));
+        // This test binary is a development build: nothing opens.
+        assert!(super::open_url("https://example.com/never-opened"));
     }
 }

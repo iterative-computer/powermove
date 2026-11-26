@@ -80,6 +80,12 @@ struct Slot {
 pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 /// The browser hop, a parameter because it is the one step a test must not take.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
+    // A development or lane build never opens the person's browser (a
+    // provider's sign-in page included): it says what it would have opened.
+    if cfg!(debug_assertions) || std::env::var_os("PM_NATIVE_NO_ORIGINAL").is_some() {
+        eprintln!("Powermove (development build) would open: {url}");
+        return Ok(());
+    }
     Command::new("/usr/bin/open")
         .arg(url)
         .status()

@@ -20,11 +20,35 @@ const MAX_ARCHIVE: usize = 64 * 1024 * 1024;
 /// releases; extension or catalog input can never add to this list.
 const PINNED_KEYS: &[(&str, &str, [u8; 32])] = &[];
 
-/// The Store this build reads. Development builds started with
-/// `--dev-store-origin http://127.0.0.1:<port>/` read a fixture Store on this
-/// Mac instead; release builds always read [`ORIGIN`].
+/// Where Powermove Cloud is for a build that must never reach it: a
+/// loopback port nothing listens on (every request fails as offline).
+pub const OFFLINE_ORIGIN: &str = "http://127.0.0.1:9";
+
+/// The Powermove Cloud this build talks to (the Store, the account, its
+/// sessions and Aero's usage all use it). Development builds started with
+/// `--dev-store-origin http://127.0.0.1:<port>/` read a fixture on this Mac.
+/// Otherwise only a release build that is not a lane's reaches [`ORIGIN`]:
+/// a development build and any lane-launched bundle (`PM_NATIVE_NO_ORIGINAL`,
+/// which every lane launch sets) get [`OFFLINE_ORIGIN`], so testing never
+/// touches the real cloud (owner, 2026-11-25).
 pub fn origin() -> &'static str {
-    dev().map_or(ORIGIN, |dev| dev.origin)
+    choose_origin(
+        dev().map(|dev| dev.origin),
+        cfg!(debug_assertions),
+        lane_launch(),
+    )
+}
+/// Launched by a lane (`pm-gui` and the lane launchers set this on every
+/// lane app), whatever the build.
+pub fn lane_launch() -> bool {
+    std::env::var_os("PM_NATIVE_NO_ORIGINAL").is_some()
+}
+fn choose_origin(dev: Option<&'static str>, debug: bool, lane: bool) -> &'static str {
+    match dev {
+        Some(origin) => origin,
+        None if debug || lane => OFFLINE_ORIGIN,
+        None => ORIGIN,
+    }
 }
 /// Whether this development build reads a fixture Store (`--dev-store-origin`).
 pub fn is_dev() -> bool {
@@ -467,6 +491,23 @@ fn install_registered(
 
 #[cfg(test)]
 mod tests {
+    /// A development or lane build never resolves the production cloud: no
+    /// fixture means the offline loopback; only a plain release build of the
+    /// product reaches it.
+    #[test]
+    fn a_lane_or_development_build_never_resolves_the_production_origin() {
+        use super::{ORIGIN, OFFLINE_ORIGIN, choose_origin};
+        assert_eq!(choose_origin(None, true, false), OFFLINE_ORIGIN);
+        assert_eq!(choose_origin(None, false, true), OFFLINE_ORIGIN);
+        assert_eq!(choose_origin(None, true, true), OFFLINE_ORIGIN);
+        assert_eq!(choose_origin(Some("http://127.0.0.1:4100/"), true, true), "http://127.0.0.1:4100/");
+        assert_eq!(choose_origin(None, false, false), ORIGIN);
+        // This test binary is a development build.
+        assert_ne!(super::origin(), ORIGIN);
+        let host = url::Url::parse(super::origin()).unwrap();
+        assert_eq!(host.host_str(), Some("127.0.0.1"));
+    }
+
     use super::*;
     #[test]
     fn a_build_without_keys_installs_by_the_registry_hashes() {
