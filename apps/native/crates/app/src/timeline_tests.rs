@@ -1808,10 +1808,24 @@ fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
         t.command("graph.speed", 0., None, false, cx)
     });
     s.idle(cx);
-    // 50 to 51 over one second, linear: one unit per second at both keys.
+    // 50 to 51 over one second, linear: one unit per second at both keys,
+    // and the speed handle sits at speed (1.0/s) rather than value (~50.33).
     let (speeds, handles) = keys(&s);
     assert!(speeds.iter().all(|v| (v - 1.).abs() < 1e-3), "{speeds:?}");
-    assert_eq!(handles, 0, "speed handles are not value handles");
+    assert!(handles > 0, "speed graph exposes speed handles");
+    let handle_values: Vec<f64> = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.graph())
+        .unwrap()
+        .curves()[0]
+        .points
+        .iter()
+        .flat_map(|p| p.handles.iter().map(|(_, tip)| tip.value))
+        .collect();
+    assert!(
+        handle_values.iter().all(|v| (v - 1.).abs() < 1e-3),
+        "speed handles plot speed, not value: {handle_values:?}"
+    );
 }
 #[gpui::test]
 fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {

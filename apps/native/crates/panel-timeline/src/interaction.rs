@@ -1262,10 +1262,14 @@ pub struct Drag {
     /// the press. A vertical drag there changes speeds (as v1 does), never
     /// the keys' values.
     speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
-    /// A handle drag: each target key's id (expanded across linked scale axes),
-    /// its layer-local time, value, dragged-side neighbour span `dt`, and the
-    /// opposite side's ease (which follows the dragged tangent unless ⌥ splits).
-    handle_keys: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>)>,
+    /// A handle drag: each target key's id (expanded across linked scale /
+    /// combined position axes), its layer-local time, value, dragged-side
+    /// neighbour span `dt`, opposite side's ease, and normalized chord
+    /// directions `(side_dir, opp_dir)` for combined Speed Graph handle drags.
+    handle_keys: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>, f64, f64)>,
+    /// True when the active `DragKind::Handle` is in Speed Graph space
+    /// (explicit Speed Graph mode or combined Position Speed curve).
+    handle_speed: bool,
     /// Locked layers a move or trim left where they were (After Effects skips
     /// locked layers in a mixed selection instead of refusing the gesture).
     skipped_locked: usize,
@@ -1561,43 +1565,94 @@ impl Drag {
             None
         };
         let speed_eases = match &kind {
-            DragKind::GraphKeys { ids } if model.graph_mode == GraphMode::Speed => {
+            DragKind::GraphKeys { ids }
+                if model.graph_mode == GraphMode::Speed
+                    || ids.iter().all(|id| {
+                        index.key(id).is_some_and(|(l, c, _)| {
+                            model.is_combined_position_speed(&l.id, &c.path)
+                        })
+                    }) =>
+            {
                 Some(key_eases(index, ids))
             }
             _ => None,
         };
-        let handle_keys = match &kind {
+        let (handle_keys, handle_speed) = match &kind {
             DragKind::Handle { id, side } => {
                 let other = if *side == EaseSide::In {
                     EaseSide::Out
                 } else {
                     EaseSide::In
                 };
-                model
-                    .expand_scale_keys(std::slice::from_ref(id))
-                    .into_iter()
-                    .filter_map(|target_id| {
-                        let (_, channel, key) = index.key(&target_id)?;
-                        let value = key.value.as_f64()?;
-                        let idx = channel.keys.iter().position(|k| k.id == target_id)?;
-                        let neighbour_dt = match side {
-                            EaseSide::In => idx
-                                .checked_sub(1)
-                                .map(|i| (key.time - channel.keys[i].time).abs()),
-                            _ => channel
-                                .keys
-                                .get(idx + 1)
-                                .map(|n| (n.time - key.time).abs()),
+                let is_speed = model.graph_mode == GraphMode::Speed
+                    || index.key(id).is_some_and(|(l, c, _)| {
+                        model.is_combined_position_speed(&l.id, &c.path)
+                    });
+                let expanded = model.expand_graph_keys(std::slice::from_ref(id));
+                // Compute per-axis chord deltas on the dragged side and opposite
+                // side so a multi-axis Speed handle preserves the exact motion
+                // path direction.
+                let mut raw: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>, f64, f64)> =
+                    Vec::new();
+                for target_id in expanded {
+                    let Some((_, channel, key)) = index.key(&target_id) else {
+                        continue;
+                    };
+                    let Some(value) = key.value.as_f64() else {
+                        continue;
+                    };
+                    let Some(idx) = channel.keys.iter().position(|k| k.id == target_id) else {
+                        continue;
+                    };
+                    let neighbour_for = |s: EaseSide| -> Option<(f64, f64)> {
+                        let n = match s {
+                            EaseSide::In => idx.checked_sub(1).map(|i| &channel.keys[i]),
+                            _ => channel.keys.get(idx + 1),
+                        }?;
+                        let dt = (n.time - key.time).abs();
+                        let dv = match s {
+                            EaseSide::In => value - n.value.as_f64()?,
+                            _ => n.value.as_f64()? - value,
                         };
-                        let opposite = key_eases(index, std::slice::from_ref(&target_id))
-                            .into_iter()
-                            .find(|(_, s, _)| *s == other)
-                            .map(|(_, _, e)| e);
-                        Some((target_id, key.time, value, neighbour_dt, opposite))
-                    })
-                    .collect()
+                        (dt > 1e-6).then_some((dt, dv / dt))
+                    };
+                    let side_info = neighbour_for(*side);
+                    let opp_info = neighbour_for(other);
+                    let opposite = key_eases(index, std::slice::from_ref(&target_id))
+                        .into_iter()
+                        .find(|(_, s, _)| *s == other)
+                        .map(|(_, _, e)| e);
+                    raw.push((
+                        target_id,
+                        key.time,
+                        value,
+                        side_info.map(|(dt, _)| dt),
+                        opposite,
+                        side_info.map_or(0., |(_, slope)| slope),
+                        opp_info.map_or(0., |(_, slope)| slope),
+                    ));
+                }
+                if is_speed && raw.len() > 1 {
+                    let side_norm = raw.iter().map(|r| r.5 * r.5).sum::<f64>().sqrt();
+                    let opp_norm = raw.iter().map(|r| r.6 * r.6).sum::<f64>().sqrt();
+                    for r in &mut raw {
+                        r.5 = if side_norm > 1e-6 {
+                            r.5 / side_norm
+                        } else if opp_norm > 1e-6 {
+                            r.6 / opp_norm
+                        } else {
+                            0.
+                        };
+                        r.6 = if opp_norm > 1e-6 {
+                            r.6 / opp_norm
+                        } else {
+                            r.5
+                        };
+                    }
+                }
+                (raw, is_speed)
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), false),
         };
         let lanes = (model.mode == crate::TimelineMode::Tracks
             && matches!(
@@ -1611,6 +1666,7 @@ impl Drag {
         Ok(Self {
             lanes,
             handle_keys,
+            handle_speed,
             skipped_locked,
             trim_limit,
             speed_eases,
@@ -2091,13 +2147,73 @@ impl Drag {
                 let primary_value = self
                     .handle_keys
                     .first()
-                    .map(|(_, _, kv, _, _)| *kv);
+                    .map(|(_, _, kv, _, _, _, _)| *kv);
+                let multi_speed = self.handle_speed && self.handle_keys.len() > 1;
                 let targets: Vec<_> = if self.handle_keys.is_empty() {
-                    vec![(id.clone(), 0., raw_v, None, None)]
+                    vec![(id.clone(), 0., raw_v, None, None, 1., 1.)]
                 } else {
                     self.handle_keys.clone()
                 };
-                for (target_id, key_time, key_value, neighbour_dt, opposite) in targets {
+                for (target_id, key_time, key_value, neighbour_dt, opposite, side_dir, opp_dir) in
+                    targets
+                {
+                    if self.handle_speed {
+                        let Some(dt) = neighbour_dt.filter(|dt| *dt > 1e-6) else {
+                            continue;
+                        };
+                        let reach = match side {
+                            EaseSide::In => key_time - t,
+                            _ => t - key_time,
+                        };
+                        let influence = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                        let target_speed = if sample.modifiers.shift {
+                            0.
+                        } else if multi_speed {
+                            raw_v.max(0.) * side_dir
+                        } else {
+                            raw_v
+                        };
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: target_id.clone(),
+                                side: *side,
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: target_speed,
+                                    influence,
+                                }),
+                                split: sample.modifiers.alt,
+                            }
+                            .into(),
+                        );
+                        if let Some(opposite) = opposite
+                            && !sample.modifiers.alt
+                        {
+                            let opp_speed = if sample.modifiers.shift {
+                                0.
+                            } else if multi_speed {
+                                raw_v.max(0.) * opp_dir
+                            } else {
+                                raw_v
+                            };
+                            out.push(
+                                KeyframeCommand::SetHandle {
+                                    key_id: target_id,
+                                    side: if *side == EaseSide::In {
+                                        EaseSide::Out
+                                    } else {
+                                        EaseSide::In
+                                    },
+                                    value: HandleValue::Ease(TemporalEase {
+                                        speed: opp_speed,
+                                        influence: opposite.influence,
+                                    }),
+                                    split: false,
+                                }
+                                .into(),
+                            );
+                        }
+                        continue;
+                    }
                     // For linked scale axes with a different base value, apply
                     // the same value offset from the key rather than snapping
                     // both curves to one absolute y.

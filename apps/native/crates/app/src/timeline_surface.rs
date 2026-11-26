@@ -6097,12 +6097,14 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 None => DragKind::Keys { ids: keys },
             }
         }
-        Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
+        Spec::GraphKeys => DragKind::GraphKeys {
+            ids: model.expand_graph_keys(&keys),
+        },
         Spec::Transform {
             anchor_time,
             anchor_value,
         } => DragKind::TransformKeys {
-            ids: keys,
+            ids: model.expand_graph_keys(&keys),
             anchor_time,
             anchor_value,
         },

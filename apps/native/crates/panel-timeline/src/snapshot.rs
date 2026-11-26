@@ -86,7 +86,12 @@ pub struct Layer {
     pub group_collapsed: bool,
     pub preferred_track: usize,
     pub scale_linked: bool,
+    /// True only when `scaleLinked` is explicitly `false` (unlinked).
+    pub scale_unlinked: bool,
     pub separate_dimensions: bool,
+    /// True only when `separateDimensions` is explicitly `true` (Position X/Y
+    /// separated in the Graph Editor).
+    pub position_separated: bool,
     pub effects: Vec<(String, String)>,
     path_groups: HashMap<String, String>,
     /// The media asset an image, video or audio layer draws (`d.asset`).
@@ -857,9 +862,17 @@ impl TimelineIndex {
                 Some(NodeKind::Bool(false))
             ),
             scale_linked: boolean(layer.get("scaleLinked")),
+            scale_unlinked: matches!(
+                layer.get("scaleLinked").map(Node::kind),
+                Some(NodeKind::Bool(false))
+            ),
             separate_dimensions: !matches!(
                 layer.get("separateDimensions").map(Node::kind),
                 Some(NodeKind::Bool(false))
+            ),
+            position_separated: matches!(
+                layer.get("separateDimensions").map(Node::kind),
+                Some(NodeKind::Bool(true))
             ),
             effects,
             masks,
