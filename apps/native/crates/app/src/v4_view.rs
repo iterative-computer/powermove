@@ -515,6 +515,9 @@ pub struct SurfaceView {
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
     probing: bool,
+    /// How lit each node inside a split pill's part is this frame (0–1): its
+    /// text and glyphs blend toward the primary text ink by that much.
+    pill_ink: RefCell<HashMap<Id, f32>>,
     targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
@@ -745,6 +748,7 @@ impl SurfaceView {
             sheet_fit: Default::default(),
             follow: Default::default(),
             probing: false,
+            pill_ink: Default::default(),
             targets: Default::default(),
             capture: None,
             scrub: None,
@@ -4319,6 +4323,29 @@ impl SurfaceView {
         let target = if lit.is_some() { 1. } else { 0. };
         let amount =
             pm_shell::motion::animate(&self.motion.values, node.id, target, spring).clamp(0., 1.);
+        // The lit part's text and glyphs brighten to the primary ink and fade
+        // back, each part on its own hover spring.
+        let mut ink = self.pill_ink.borrow_mut();
+        for &part in &node.children {
+            if self.prepared.node(part).and_then(|p| p.pill) != Some(pm_shell::pill::Role::Part) {
+                continue;
+            }
+            let on = lit == Some(part);
+            let spring = t.spring(if on { Preset::HoverIn } else { Preset::HoverOut });
+            let lit_amount = pm_shell::motion::animate(
+                &self.motion.values,
+                part | LIT_KEY,
+                if on { 1. } else { 0. },
+                spring,
+            )
+            .clamp(0., 1.);
+            let mut stack = vec![part];
+            while let Some(at) = stack.pop() {
+                ink.insert(at, lit_amount);
+                stack.extend(self.prepared.node(at).map_or(&[][..], |n| &n.children[..]));
+            }
+        }
+        drop(ink);
         let (group, anchors, glides) = (node.id, self.anchors.clone(), self.motion.glides.clone());
         canvas(
             |_, _, _| (),
@@ -4663,6 +4690,12 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if let Some(color) = node.style.text.color
+            && let Some(lit) = self.pill_ink.borrow().get(&id).copied().filter(|a| *a > 0.)
+        {
+            let ink = pm_design::color::mix(ink_of(color), self.table.tokens.colors.text, lit);
+            element = element.text_color(rgb(ink));
+        }
         if node.hover_group
             && self.hovered_groups.contains(&id)
             && let Some(background) = &node.hover_background
@@ -6465,11 +6498,10 @@ impl SurfaceView {
             let ink = if node.disabled {
                 t.colors.muted
             } else {
-                node.style.text.color.map_or(t.colors.secondary, |c| {
-                    let c = hsla_to_rgba(c);
-                    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
-                    (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
-                })
+                let own = node.style.text.color.map_or(t.colors.secondary, ink_of);
+                // Inside a split pill's lit part it brightens with the text.
+                let lit = self.pill_ink.borrow().get(&node.id).copied().unwrap_or(0.);
+                pm_design::color::mix(own, t.colors.text, lit)
             };
             // A chevron whose menu is open turns to point up, on a spring
             // a second press interrupts.
@@ -6771,9 +6803,20 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 /// Marks a node's chevron-turn value in the shared motion values, apart from
 /// any other value the same node animates (a pill's reveal).
 const TURN_KEY: Id = 1 << 62;
+/// Marks a split pill part's lit (brightening) value in the motion values.
+const LIT_KEY: Id = 1 << 61;
+
+/// A token colour as GPUI holds it, back to 0xRRGGBB.
+fn ink_of(color: Hsla) -> u32 {
+    let c = hsla_to_rgba(color);
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+}
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Split pills set their parts' ink again as they are built.
+        self.pill_ink.borrow_mut().clear();
         let painted = std::mem::take(&mut *self.painted_groups.borrow_mut());
         self.hovered_groups = painted
             .into_iter()

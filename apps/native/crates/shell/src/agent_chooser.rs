@@ -1049,27 +1049,13 @@ fn build_models(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadM
         }
         search = Some(field);
     }
-    // The usage monitor (Aero's credits), under a hairline at the card's foot.
-    if !spec.usage.is_empty() {
-        push(
-            &mut views,
-            &rule(
-                NSRect::new(
-                    NSPoint::new(list_x, pad + list_h),
-                    NSSize::new(shape.list, shape.line),
-                ),
-                &t,
-                mtm,
-            ),
-        );
-        let inner = shape.list - 2. * shape.inset;
-        list_h += shape.line + shape.lane;
-        for (key, value) in &spec.usage {
-            row(&mut views, list_x + shape.inset, list_h, inner, key, value);
-            list_h += shape.fact;
-        }
-        list_h += shape.lane;
-    }
+    // The usage monitor's height (Aero's credits), under a hairline.
+    let footer = if spec.usage.is_empty() {
+        0.
+    } else {
+        shape.line + 2. * shape.lane + spec.usage.len() as f64 * shape.fact
+    };
+    list_h += footer;
 
     // The rail: a mark per harness on its tile, then "+" at its foot.
     let tile_inset = ((shape.rail - shape.tile) / 2.).floor();
@@ -1079,8 +1065,35 @@ fn build_models(state: &Rc<RefCell<State>>, root: &ChooserView, mtm: MainThreadM
     let rail_content = 2. * tile_inset + (harnesses + if add.is_some() { 1. } else { 0. }) * step
         - shape.tile_gap
         + if add.is_some() { shape.gap } else { 0. };
-    // The rail and the card share one height.
+    // The rail and the card share one height: a card shorter than its rail
+    // (one model) grows its list area, so both corners line up.
     let rail_h = rail_content.max(list_h);
+    if let Some(scroll) = state.borrow().scroll.clone().filter(|_| !empty) {
+        let mut frame = scroll.frame();
+        frame.size.height = rail_h - footer - (shape.search + shape.line);
+        scroll.setFrame(frame);
+    }
+    // The usage monitor at the card's foot.
+    if footer > 0. {
+        let mut y = rail_h - footer;
+        push(
+            &mut views,
+            &rule(
+                NSRect::new(
+                    NSPoint::new(list_x, pad + y),
+                    NSSize::new(shape.list, shape.line),
+                ),
+                &t,
+                mtm,
+            ),
+        );
+        let inner = shape.list - 2. * shape.inset;
+        y += shape.line + shape.lane;
+        for (key, value) in &spec.usage {
+            row(&mut views, list_x + shape.inset, y, inner, key, value);
+            y += shape.fact;
+        }
+    }
     let rail_tile = |views: &mut Vec<Retained<NSView>>, i: usize, row: &Row, top: f64| {
         let frame = NSRect::new(
             NSPoint::new(rail_x + tile_inset, top),
