@@ -88,6 +88,10 @@ harness = false
 [[test]]
 name = "close_guard_gpui"
 harness = false
+# AppKit text views live on the main thread: this binary keeps it (PM-749).
+[[test]]
+name = "composer_undo"
+harness = false
 
 [[example]]
 name = "pm-corpus"

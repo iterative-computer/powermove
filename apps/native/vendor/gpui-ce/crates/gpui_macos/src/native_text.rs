@@ -6,7 +6,9 @@ use objc2::{
     runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
 };
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSNotification, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSNotification, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager,
+};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -119,6 +121,10 @@ struct State {
     /// view it finds (Powermove: Space then typed instead of playing).
     armed: Cell<bool>,
     original: RefCell<String>,
+    /// A composer's own undo (PM-749): its typing undo names ranges of the
+    /// text typed, so a text the host sets (the field emptied after a send)
+    /// clears it. ⌘Z then never reaches text the field no longer holds.
+    undo: Option<Retained<NSUndoManager>>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
@@ -159,6 +165,7 @@ impl State {
         // Validate only the committed value. Intermediate IME/number strings stay untouched.
         if cancel || (self.kind.number() && !valid_number(&value)) {
             self.editor.set(&self.original.borrow());
+            self.forget_typing();
             self.emit(TextEvent::Cancelled);
         } else {
             *self.original.borrow_mut() = value.clone();
@@ -171,6 +178,13 @@ impl State {
     }
 }
 impl State {
+    /// A text set from outside: a composer's typing undo goes with the text
+    /// it named (PM-749).
+    fn forget_typing(&self) {
+        if let Some(undo) = &self.undo {
+            undo.removeAllActions();
+        }
+    }
     /// The selected UTF-16 range, start before end.
     fn selection(&self) -> (usize, usize) {
         match &self.editor {
@@ -304,6 +318,14 @@ define_class!(
                 s.paste.borrow().as_ref().is_some_and(|paste| paste())
             });
             if !claimed { unsafe { let _: () = msg_send![super(self), paste: sender]; } }
+        }
+        /// Its own undo, never the window's (`State::undo`).
+        #[unsafe(method(undoManager))]
+        fn undo_manager(&self) -> *mut NSUndoManager {
+            match self.ivars().borrow().upgrade().and_then(|s| s.undo.clone()) {
+                Some(undo) => Retained::autorelease_return(undo),
+                None => unsafe { msg_send![super(self), undoManager] },
+            }
         }
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
@@ -863,6 +885,7 @@ impl NativeTextSlot {
             selection_pending: Cell::new(None),
             armed: Cell::new(false),
             original: RefCell::new(initial.into()),
+            undo: (kind == TextKind::Composer).then(|| NSUndoManager::new(mtm)),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
             paste: RefCell::new(None),
@@ -1073,6 +1096,7 @@ impl NativeTextSlot {
     pub fn set_value(&self, value: &str) {
         if !self.is_editing() {
             self.state.editor.set(value);
+            self.state.forget_typing();
             *self.state.original.borrow_mut() = value.into();
         }
     }
@@ -1131,6 +1155,7 @@ impl NativeTextSlot {
         }
         let (start, end) = self.selection();
         self.state.editor.set(value);
+        self.state.forget_typing();
         *self.state.original.borrow_mut() = value.into();
         if self.state.kind == TextKind::Canvas {
             self.set_selection(start, end);
