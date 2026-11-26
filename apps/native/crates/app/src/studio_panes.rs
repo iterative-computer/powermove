@@ -22,6 +22,19 @@ pub(crate) struct PaneScenes {
     pending: bool,
 }
 
+impl PaneScenes {
+    /// Single view never enters the scene worker, including when one is
+    /// still winding down after the user closed the extra panes.
+    pub(crate) fn wants_scene(&mut self, views: usize) -> bool {
+        if views == 1 {
+            self.ready = None;
+            self.owner = None;
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 struct PaneScene {
     bounds: [Vec3; 2],
@@ -174,30 +187,6 @@ fn ortho(axis: Axis, [lo, hi]: [Vec3; 2]) -> ViewCamera {
     ViewCamera::Orthographic { axis, center, span }
 }
 
-/// The pane layout is the only consumer of this scene. In a single view
-/// the main viewer and its gizmos own their respective scene reads.
-pub(crate) fn pane_scene(
-    published: &pm_kernel::Published,
-    views: usize,
-    cached: &mut Option<(
-        u64,
-        Option<std::sync::Arc<pm_panel_studio3d::viewport::Scene>>,
-    )>,
-) -> Option<std::sync::Arc<pm_panel_studio3d::viewport::Scene>> {
-    if views == 1 {
-        *cached = None;
-        return None;
-    }
-    let edition = published.snapshot.document.edition();
-    if cached.as_ref().is_none_or(|(key, _)| *key != edition) {
-        let scene = pm_panel_studio3d::viewport::scene(published, 0.)
-            .ok()
-            .filter(|scene| !scene.items.is_empty())
-            .map(std::sync::Arc::new);
-        *cached = Some((edition, scene));
-    }
-    cached.as_ref().and_then(|(_, scene)| scene.clone())
-}
 
 impl Controller {
     /// Per display tick: panes follow `studioViews`, the shell's tiles, the
@@ -210,56 +199,39 @@ impl Controller {
         // View ▸ 3D checkmarks follow the same settings as the bar.
         // Only walk the macOS menu bar when one of the 5 values actually changes
         // (avoids 120 Hz NSMenu traversal on the main thread during playback).
-        {
-            let ui = |k: &str, d: &str| {
-                p.ui_state
-                    .viewer
-                    .get(k)
-                    .and_then(pm_model::Value::as_str)
-                    .unwrap_or(d)
-                    .to_owned()
-            };
-            let current = [
-                ("look", ui("studioLook", "camera")),
-                ("tool", ui("studioTool", "move")),
-                ("axes", ui("studioAxes", "scene")),
-                ("views", ui("studioViews", "1")),
-                ("tier", ui("studioTier", "fast")),
-            ];
-            thread_local! {
-                static LAST_VIEW3D: std::cell::RefCell<Option<[String; 5]>> =
-                    const { std::cell::RefCell::new(None) };
-            }
-            let key = [
-                current[0].1.clone(),
-                current[1].1.clone(),
-                current[2].1.clone(),
-                current[3].1.clone(),
-                current[4].1.clone(),
-            ];
-            let changed = LAST_VIEW3D.with(|slot| {
-                let mut slot = slot.borrow_mut();
-                if slot.as_ref() == Some(&key) {
-                    false
-                } else {
-                    *slot = Some(key);
-                    true
-                }
-            });
-            if changed {
-                pm_shell::check_view3d(&|group, value| {
-                    current.iter().any(|(g, v)| *g == group && v == value)
-                });
-            }
+        let ui = |key: &str, default: &'static str| {
+            p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str).unwrap_or(default)
+        };
+        let views = ui("studioViews", "1");
+        let current = [
+            ("look", ui("studioLook", "camera")),
+            ("tool", ui("studioTool", "move")),
+            ("axes", ui("studioAxes", "scene")),
+            ("views", views),
+            ("tier", ui("studioTier", "fast")),
+        ];
+        thread_local! {
+            static LAST_VIEW3D: std::cell::RefCell<Option<[String; 5]>> =
+                const { std::cell::RefCell::new(None) };
         }
-        let requested = match p
-            .ui_state
-            .viewer
-            .get("studioViews")
-            .and_then(pm_model::Value::as_str)
-        {
-            Some("2") => 2,
-            Some("4") => 4,
+        let values = current.map(|(_, value)| value);
+        let changed = LAST_VIEW3D.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|key| key.each_ref().map(String::as_str) == values) {
+                false
+            } else {
+                *slot = Some(values.map(str::to_owned));
+                true
+            }
+        });
+        if changed {
+            pm_shell::check_view3d(&|group, value| {
+                current.iter().any(|(g, v)| *g == group && *v == value)
+            });
+        }
+        let requested = match views {
+            "2" => 2,
+            "4" => 4,
             _ => 1,
         };
         let studio = self.cached_studio_scene(&p, requested, cx);
@@ -411,9 +383,7 @@ impl Controller {
         cx: &mut Context<Self>,
     ) -> Option<PaneScene> {
         let cache = &mut self.studio_pane_scenes;
-        if requested == 1 {
-            cache.ready = None;
-            cache.owner = None;
+        if !cache.wants_scene(requested) {
             return None;
         }
         let owner = (published.snapshot.doc_id, published.snapshot.render_comp());
@@ -429,7 +399,9 @@ impl Controller {
                 let scene = cx
                     .background_executor()
                     .spawn(async move {
-                        let scene = pane_scene(&published, requested, &mut None)?;
+                        let scene = pm_panel_studio3d::viewport::scene(&published, 0.)
+                            .ok()
+                            .filter(|scene| !scene.items.is_empty())?;
                         Some(PaneScene {
                             bounds: scene_bounds(&scene),
                             flat: flat_view_snapshot(&published),
@@ -668,26 +640,25 @@ pub(crate) fn flat_view_snapshot(p: &pm_kernel::Published) -> pm_kernel::documen
         return snapshot;
     };
     // A layer's group (or parent) chain, to find what sits inside what.
-    let up = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l["id"] == id)
-            .and_then(|l| l["group"].as_str())
-            .map(str::to_owned)
-    };
+    let by_id: std::collections::HashMap<_, _> = layers
+        .iter()
+        .rev()
+        .filter_map(|layer| Some((layer["id"].as_str()?, layer)))
+        .collect();
+    let up = |id: &str| by_id.get(id).and_then(|layer| layer["group"].as_str());
     let is_3d = |l: &serde_json::Value| {
         pm_scene3d::schema::role(l).is_some() || pm_scene3d::extrusion::enabled(l)
     };
     // Groups holding 3D layers stay on, so those layers do.
-    let mut holds_3d: std::collections::HashSet<String> = Default::default();
+    let mut holds_3d: std::collections::HashSet<&str> = Default::default();
     for l in layers.iter().filter(|l| is_3d(l)) {
-        let mut at = l["group"].as_str().map(str::to_owned);
+        let mut at = l["group"].as_str();
         let mut guard = 0;
         while let Some(g) = at {
-            if !holds_3d.insert(g.clone()) || guard > 64 {
+            if !holds_3d.insert(g) || guard > 64 {
                 break;
             }
-            at = up(&g);
+            at = up(g);
             guard += 1;
         }
     }
@@ -705,14 +676,14 @@ pub(crate) fn flat_view_snapshot(p: &pm_kernel::Published) -> pm_kernel::documen
             continue;
         }
         let mut inside_hidden = false;
-        let mut at = l["group"].as_str().map(str::to_owned);
+        let mut at = l["group"].as_str();
         let mut guard = 0;
         while let Some(g) = at {
-            if layers.iter().any(|x| x["id"] == g.as_str() && hidden(x)) || guard > 64 {
+            if by_id.get(g).is_some_and(|layer| hidden(layer)) || guard > 64 {
                 inside_hidden = true;
                 break;
             }
-            at = up(&g);
+            at = up(g);
             guard += 1;
         }
         if !inside_hidden {
@@ -755,5 +726,23 @@ fn framed(camera: ViewCamera, axis: Axis, pan: [f64; 2], zoom: f64) -> ViewCamer
         axis,
         center,
         span: (span * zoom).clamp(1e-3, 1e5),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_view_skips_scene_work_even_with_a_pending_read() {
+        let mut scenes = PaneScenes {
+            owner: Some((42, String::new())),
+            ready: Some((7, None)),
+            pending: true,
+        };
+        assert!(!scenes.wants_scene(1));
+        assert!(scenes.ready.is_none());
+        assert!(scenes.owner.is_none());
+        assert!(scenes.pending);
     }
 }

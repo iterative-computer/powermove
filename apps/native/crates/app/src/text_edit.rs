@@ -769,11 +769,18 @@ impl GizmoSurface {
     }
     /// Reads the edited layer after a write or a publication.
     pub(super) fn text_reread(&mut self, cx: &mut Context<Self>) {
+        self.text_reading += 1;
+        self.text_read_again = false;
         let Some(s) = self.text.as_mut().filter(|s| s.active()) else {
             return;
         };
-        s.reading += 1;
-        let ticket = s.reading;
+        let ticket = self.text_reading;
+        s.reading = ticket;
+        if self.text_read_out {
+            self.text_read_again = true;
+            return;
+        }
+        self.text_read_out = true;
         let (kernel, project, id, time) = (
             self.kernel.clone(),
             self.project.clone(),
@@ -786,10 +793,14 @@ impl GizmoSurface {
                 .spawn(async move { read_text(kernel.published(&project)?.as_ref(), &id, time) })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                s.text_read_out = false;
                 if let (Some(pose), Some(true)) =
                     (pose, s.text.as_ref().map(|t| t.reading == ticket))
                 {
                     s.adopt_text_pose(pose, cx);
+                }
+                if s.text_read_again {
+                    s.text_reread(cx);
                 }
             });
         })

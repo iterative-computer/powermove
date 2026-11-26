@@ -578,6 +578,8 @@ pub struct SurfaceView {
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
+    compile_out: bool,
+    compile_wanted: Option<(Publication, Arc<TokenTable>)>,
     /// Events sent to the script and not yet handled; an agent's action
     /// waits for its own (`wake_idle` asks for a notify when they finish).
     handling: usize,
@@ -791,6 +793,8 @@ impl SurfaceView {
             statuses: None,
             latest: 0,
             shown: 0,
+            compile_out: false,
+            compile_wanted: None,
             handling: 0,
             in_flight_inputs: HashMap::new(),
             wake_idle: false,
@@ -1025,15 +1029,45 @@ impl SurfaceView {
                 "revision": publication.surface.revision(), "host": gpui_macos::feel::now()}),
             );
         }
-        self.compile(publication, self.table.clone(), cx);
+        let table = self
+            .compile_wanted
+            .as_ref()
+            .map(|(_, table)| table)
+            .or_else(|| {
+                self.outline_waiting
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.table)
+            })
+            .or_else(|| {
+                self.parked
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.table)
+            })
+            .unwrap_or(&self.table)
+            .clone();
+        self.compile(publication, table, cx);
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
         let table = Arc::new(TokenTable::new(tokens));
         let publication = self
-            .outline_waiting
+            .compile_wanted
             .as_ref()
-            .filter(|c| c.ticket == self.latest)
-            .map_or(&self.publication, |c| &c.publication)
+            .map(|(publication, _)| publication)
+            .or_else(|| {
+                self.outline_waiting
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.publication)
+            })
+            .or_else(|| {
+                self.parked
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.publication)
+            })
+            .unwrap_or(&self.publication)
             .clone();
         self.compile(publication, table, cx);
     }
@@ -1044,6 +1078,18 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         self.latest += 1;
+        self.compile_wanted = Some((publication, table));
+        self.start_compile(cx);
+    }
+
+    fn start_compile(&mut self, cx: &mut Context<Self>) {
+        if self.compile_out {
+            return;
+        }
+        let Some((publication, table)) = self.compile_wanted.clone() else {
+            return;
+        };
+        self.compile_out = true;
         let ticket = self.latest;
         cx.spawn(async move |this, cx| {
             let source = publication.clone();
@@ -1069,7 +1115,15 @@ impl SurfaceView {
                 prepared,
             });
             // The window the view is in now: a reopened sheet has a new one.
-            let Ok(window) = this.update(cx, |v, _| v.window) else {
+            let Ok(Some(window)) = this.update(cx, |v, cx| {
+                v.compile_out = false;
+                if ticket != v.latest {
+                    v.start_compile(cx);
+                    return None;
+                }
+                v.compile_wanted = None;
+                Some(v.window)
+            }) else {
                 return;
             };
             let installed = cx.update_window(window, |_, window, cx| {

@@ -102,11 +102,11 @@ impl LayerRows {
         }
     }
 
-    pub fn plan(&mut self, latest: Key, count: usize) -> Plan {
+    pub fn plan(&mut self, latest: Key, count: impl FnOnce() -> usize) -> Plan {
         if self.key == Some(latest) || self.pending.is_some() {
             return Plan::Current;
         }
-        if count <= INLINE_LAYERS {
+        if count() <= INLINE_LAYERS {
             return Plan::Inline;
         }
         self.pending = Some(latest);
@@ -156,17 +156,17 @@ mod tests {
     #[test]
     fn small_compositions_list_inline_and_large_ones_use_one_worker() {
         let mut rows = LayerRows::default();
-        assert!(matches!(rows.plan((1, 1), 10), Plan::Inline));
+        assert!(matches!(rows.plan((1, 1), || 10), Plan::Inline));
         assert!(rows.accept((1, 1), vec![row("a")], Some((1, 1))));
-        assert!(matches!(rows.plan((1, 1), 10), Plan::Current));
-        assert!(matches!(rows.plan((1, 2), 60_001), Plan::Worker));
+        assert!(matches!(rows.plan((1, 1), || panic!("current rows need no layer count")), Plan::Current));
+        assert!(matches!(rows.plan((1, 2), || 60_001), Plan::Worker));
         // A second publication while the worker runs waits for re-planning.
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Current));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Current));
         assert!(rows.finish((1, 2), vec![row("b")], Some((1, 3))));
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Worker));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Worker));
         assert!(rows.finish((1, 3), vec![row("c")], Some((1, 3))));
         assert_eq!(rows.rows[0].id, "c");
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Current));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Current));
     }
     #[test]
     fn stale_or_foreign_rows_never_replace_newer_rows() {

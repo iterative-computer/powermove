@@ -291,6 +291,34 @@ fn a_new_generation_drops_what_the_old_tree_held(cx: &mut TestAppContext) {
     );
 }
 #[gpui::test]
+fn a_click_survives_a_burst_of_panel_publications(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |label: &str| {
+        let mut ops = node_ops(
+            1, 0, "button",
+            json!({"id":"target","style":{"width":100,"height":40}}),
+            &["click"],
+        );
+        ops.push(Op::SetText { id: 1, text: label.into() });
+        synthetic(&rig, ops)
+    };
+    let (view, mut vcx) = window(cx, &rig, tree("Choose Folder"), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "target").center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    view.update(&mut vcx, |v, cx| {
+        for i in 0..20 {
+            v.publish(tree(&format!("Choose Folder {i}")), cx);
+        }
+        assert!(v.compiling());
+    });
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    assert_eq!(events(&view, &mut vcx), vec![(1, "click".to_owned())]);
+}
+
+#[gpui::test]
 fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);

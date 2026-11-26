@@ -206,7 +206,6 @@ pub struct Controller {
     pub(crate) waiting_folders: Vec<pm_first_launch::WaitingFolder>,
     pub session: Option<SessionHandle>,
     pub published: Option<Arc<Published>>,
-    pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
@@ -1460,7 +1459,6 @@ impl Controller {
             host,
             session: None,
             published: None,
-            mirror: None,
             viewer: None,
             viewer_shown: None,
             extensions_shown: None,
@@ -2040,14 +2038,6 @@ impl Controller {
         if document_changed {
             self.publish_studio_panes(&p);
         }
-        {
-            let _span = crate::diag::span("refresh.mirror");
-            if let Some(m) = &mut self.mirror {
-                m.sync(&p);
-            } else {
-                self.mirror = Some(QueryMirror::new(&p));
-            }
-        }
         self.sync_rows(&p, cx);
         if p.fault.is_some() && self.stop_offered != Some(p.snapshot.doc_id) {
             self.stop_offered = Some(p.snapshot.doc_id);
@@ -2071,7 +2061,14 @@ impl Controller {
                 viewer_changed = true;
             }
         }
-        let focus_group = pm_panel_timeline::focused_group_for_published(&p);
+        let focus_group = if document_changed || previous.as_ref().is_some_and(|old| {
+            pm_panel_timeline::focused_group_from_ui(&old.ui_state)
+                != pm_panel_timeline::focused_group_from_ui(&p.ui_state)
+        }) {
+            crate::gizmo::focused_group(&p)
+        } else {
+            self.focus_group.clone()
+        };
         if self.focus_group != focus_group {
             self.focus_group = focus_group;
             viewer_changed = true;
@@ -2177,7 +2174,7 @@ impl Controller {
         use crate::rows::{self, Plan};
         self.rows.follow_transform_values(p);
         let key = rows::key(&p.snapshot);
-        match self.rows.plan(key, rows::layer_count(&p.snapshot)) {
+        match self.rows.plan(key, || rows::layer_count(&p.snapshot)) {
             Plan::Current => {}
             Plan::Inline => {
                 let _span = crate::diag::span("refresh.rows");
@@ -2695,6 +2692,9 @@ impl Controller {
         let time = target.unwrap_or_else(|| self.time());
         if self.builtins.scrubbing {
             self.builtins.scrub_time = Some(time);
+            if let Some(wake) = &self.playback_wake {
+                let _ = wake.try_send(());
+            }
         } else {
             let _ = self.write_ui_at(time);
         }
@@ -3539,7 +3539,6 @@ impl Controller {
                 v.session = None;
                 v.published = None;
                 v.builtins.natives.published.replace(None);
-                v.mirror = None;
                 v.mcp.bind_window(v.window_key, None);
                 v.reopening_stopped = true;
                 v.open_named(source, Some(name), cx);
@@ -3796,7 +3795,6 @@ impl Controller {
         self.media = MediaCatalog::default();
         self.media_base = MediaCatalog::default();
         self.media_resolved = false;
-        self.mirror = None;
         self.selected = None;
         self.refresh(cx);
         // The status bar shows document state and counts; only exceptions get words.

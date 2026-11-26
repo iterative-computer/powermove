@@ -10,6 +10,7 @@ pub(super) struct Control {
     world: [f64; 6],
     values: BTreeMap<String, f64>,
     stops: Vec<Stop>,
+    visibility: Option<(String, bool)>,
 }
 pub(super) struct Drag {
     index: usize,
@@ -80,56 +81,72 @@ fn stop_rgba(color: [f64; 4]) -> Rgba {
     }))
 }
 
-impl GizmoSurface {
-    pub(super) fn effects_reread(&mut self, cx: &mut Context<Self>) {
-        // A user gesture owns its starting transform and local preview. A late
-        // publication (including an agent edit) must not pull the pointer back.
-        if self.effect_drag.is_some() {
-            return;
+type IndexKey = (u64, Option<String>, Option<u64>);
+
+pub(super) struct EffectIndex {
+    key: IndexKey,
+    layers: std::collections::HashMap<String, usize>,
+}
+
+fn effect_layers(p: &pm_kernel::Published) -> (IndexKey, Option<&pm_model::Node>) {
+    let comp = p.snapshot.open_comp();
+    let layers = p
+        .snapshot
+        .root()
+        .and_then(|root| pm_kernel::model::comp_node(root, comp.as_deref()))
+        .and_then(|comp| comp.get("layers"));
+    ((p.snapshot.doc_id, comp, layers.map(pm_model::Node::rev)), layers)
+}
+
+impl EffectIndex {
+    fn new(p: &pm_kernel::Published) -> Self {
+        let (key, layers) = effect_layers(p);
+        let mut candidates = std::collections::HashMap::new();
+        if let Some(pm_model::NodeKind::Array(layers)) = layers.map(pm_model::Node::kind) {
+            for (i, layer) in layers.iter().enumerate() {
+                let kind = layer.get("type").and_then(crate::node_string);
+                let has_effect = matches!(layer.get("fx").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Array(fx)) if fx.iter().any(|effect| {
+                        !matches!(effect.get("on").map(pm_model::Node::kind),
+                            Some(pm_model::NodeKind::Bool(false)))
+                    }));
+                if (has_effect || kind == Some("extension")
+                    || (kind == Some("shader")
+                        && layer.get("d").and_then(|d| d.get("viewerHandles")).is_some()))
+                    && let Some(id) = layer.get("id").and_then(crate::node_string)
+                {
+                    candidates.insert(id.to_owned(), i);
+                }
+            }
         }
-        let selection = self.effect_stop.and_then(|(i, j)| {
-            self.effect_controls
-                .get(i)
-                .map(|c| (c.layer.clone(), c.prefix.clone(), c.declaration.clone(), j))
-        });
-        self.effect_controls.clear();
-        if self.host.playing(cx) {
-            cx.notify();
-            return;
-        }
-        let Some(p) = self.kernel.published(&self.project) else {
-            return;
-        };
+        Self { key, layers: candidates }
+    }
+
+    fn may_have_controls(&self, selected: &[String]) -> bool {
+        !self.layers.is_empty() && selected.iter().any(|id| self.layers.contains_key(id))
+    }
+
+    fn read_controls(
+        &self,
+        p: &pm_kernel::Published,
+        kernel: &KernelHandle,
+        time: f64,
+    ) -> Vec<Control> {
         let Some(root) = p.snapshot.root() else {
-            return;
+            return vec![];
         };
-        let time = self.host.time(cx);
-        let state = self.kernel.state();
+        if !self.may_have_controls(p.selection.layers()) {
+            return vec![];
+        }
+        let state = kernel.state();
         let mut mirror = None;
         let comp_id = p.snapshot.open_comp();
-        let Some(comp) = pm_kernel::model::comp_node(root, comp_id.as_deref()) else {
-            return;
-        };
-        let selected = p.selection.layers();
-        let indices = if selected.len() > 1 {
-            pm_kernel::model::layers_of(comp)
-                .enumerate()
-                .filter_map(|(i, layer)| Some((crate::node_string(layer.get("id")?)?, i)))
-                .collect::<std::collections::HashMap<_, _>>()
-        } else {
-            Default::default()
-        };
-        for id in selected {
-            let loc = if selected.len() > 1 {
-                indices
-                    .get(id.as_str())
-                    .map(|&index| pm_kernel::model::LayerLoc {
-                        comp_id: comp_id.clone(),
-                        index,
-                    })
-            } else {
-                pm_kernel::model::find_layer(root, id)
-            };
+        let mut controls = Vec::new();
+        for id in p.selection.layers() {
+            let loc = self.layers.get(id).map(|&index| pm_kernel::model::LayerLoc {
+                comp_id: comp_id.clone(),
+                index,
+            });
             let Some(loc) = loc else { continue };
             let Some(layer) = pm_kernel::model::layer_at(root, &loc) else {
                 continue;
@@ -145,12 +162,10 @@ impl GizmoSurface {
                     let Some(eid) = effect.get("id").and_then(crate::node_string) else {
                         continue;
                     };
-                    if !self.host.effect_visible(id, eid, cx).unwrap_or(!matches!(
+                    let open = !matches!(
                         effect.get("open").map(pm_model::Node::kind),
                         Some(pm_model::NodeKind::Bool(false))
-                    )) {
-                        continue;
-                    }
+                    );
                     let Some(kind) = effect.get("type").and_then(crate::node_string) else {
                         continue;
                     };
@@ -181,7 +196,7 @@ impl GizmoSurface {
                             declarations.push((
                                 format!("{eid}."),
                                 handles,
-                                animated.then_some(eid),
+                                Some((eid, open, animated)),
                             ));
                         }
                     }
@@ -227,16 +242,17 @@ impl GizmoSurface {
             {
                 continue;
             }
-            let mirror = mirror.get_or_insert_with(|| QueryMirror::new(&p));
-            declarations.retain(|(_, handles, animated)| {
+            let mirror = mirror.get_or_insert_with(|| QueryMirror::new(p));
+            declarations.retain(|(_, handles, effect)| {
                 !handles.is_empty()
-                    && !animated.is_some_and(|eid| {
-                        mirror
-                            .queries()
-                            .evaluate_property(None, id, &format!("{eid}.$enabled"), time)
-                            .ok()
-                            .and_then(|value| value.as_bool())
-                            == Some(false)
+                    && !effect.is_some_and(|(eid, _, animated)| {
+                        animated
+                            && mirror
+                                .queries()
+                                .evaluate_property(None, id, &format!("{eid}.$enabled"), time)
+                                .ok()
+                                .and_then(|value| value.as_bool())
+                                == Some(false)
                     })
             });
             if declarations.is_empty() || !mirror.queries().active(None, id, time).unwrap_or(false)
@@ -246,26 +262,15 @@ impl GizmoSurface {
             let Ok(world) = mirror.queries().world_matrix(None, id, time) else {
                 continue;
             };
-            // Never wait for the font registry on the UI thread. Text bounds
-            // come from the pose worker; its completion rereads these controls.
-            let Some(origin) = mirror
-                .queries()
-                .bounds(None, id, time)
+            let Some(origin) = geometry_query(p, mirror, |q| q.bounds(None, id, time))
                 .ok()
                 .flatten()
                 .map(|b| [b.x0, b.y0])
-                .or_else(|| {
-                    self.poses
-                        .iter()
-                        .find(|p| p.id == *id)
-                        .map(|p| [p.bounds[0], p.bounds[1]])
-                })
             else {
                 continue;
             };
             let world = pm_fx_defs::handles::source_mapping(world, origin).0;
-            let mut controls = vec![];
-            for (prefix, declarations, _) in declarations {
+            for (prefix, declarations, effect) in declarations {
                 for declaration in declarations {
                     let mut keys: Vec<String> = declaration
                         .points()
@@ -314,14 +319,111 @@ impl GizmoSurface {
                         world,
                         values,
                         stops,
+                        visibility: effect.map(|(id, open, _)| (id.to_owned(), open)),
                     };
                     if control.points().len() >= control.declaration.points().len() {
                         controls.push(control);
                     }
                 }
             }
-            self.effect_controls.extend(controls);
         }
+        controls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn plain_layer_uses_the_same_effect_index_as_selection_changes() {
+        let layers: Vec<_> = (0..1655)
+            .map(|i| serde_json::json!({"id": format!("layer-{i}"), "type": "shape", "fx": []}))
+            .collect();
+        let p = pm_kernel::detached_publication(
+            "effect-index",
+            pm_model::json::parse(&serde_json::json!({"layers": layers}).to_string()).unwrap(),
+        );
+        let index = EffectIndex::new(&p);
+        assert!(index.layers.is_empty());
+        let mut selection = p.clone();
+        selection.selection = pm_kernel::selection::Selection::from_parts(
+            vec!["layer-1654".into()], vec![], None,
+        );
+        assert_eq!(index.key, effect_layers(&selection).0);
+        assert!(!index.may_have_controls(selection.selection.layers()));
+    }
+}
+
+impl GizmoSurface {
+    pub(super) fn effects_reread(&mut self, cx: &mut Context<Self>) {
+        if self.effect_drag.is_some() {
+            return;
+        }
+        self.effect_read += 1;
+        self.effect_again = false;
+        let published = self.kernel.published(&self.project);
+        let Some(p) = published.filter(|p| !p.selection.layers().is_empty() && !self.host.playing(cx)) else {
+            self.clear_effect_controls(cx);
+            return;
+        };
+        if self.effect_controls.iter().any(|c| !p.selection.layers().contains(&c.layer)) {
+            self.clear_effect_controls(cx);
+        }
+        let (key, _) = effect_layers(&p);
+        let cached = self.effect_index.as_ref().filter(|index| index.key == key);
+        if cached.is_some_and(|index| !index.may_have_controls(p.selection.layers())) {
+            self.clear_effect_controls(cx);
+            return;
+        }
+        if self.effect_out {
+            self.effect_again = true;
+            return;
+        }
+        self.effect_out = true;
+        let ticket = self.effect_read;
+        let index = cached.cloned();
+        let time = self.host.time(cx);
+        let kernel = self.kernel.clone();
+        let read = cx.background_spawn(async move {
+            let index = index.unwrap_or_else(|| Arc::new(EffectIndex::new(&p)));
+            let controls = index.read_controls(&p, &kernel, time);
+            (index, controls)
+        });
+        cx.spawn(async move |this, cx| {
+            let (index, controls) = read.await;
+            let _ = this.update(cx, |s, cx| {
+                s.effect_out = false;
+                s.effect_index = Some(index);
+                if s.effect_read == ticket && s.effect_drag.is_none() {
+                    s.adopt_effect_controls(controls, cx);
+                }
+                if s.effect_again {
+                    s.effects_reread(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn clear_effect_controls(&mut self, cx: &mut Context<Self>) {
+        if !self.effect_controls.is_empty() || self.effect_picker.is_some() {
+            self.adopt_effect_controls(vec![], cx);
+        }
+    }
+
+    fn adopt_effect_controls(&mut self, mut controls: Vec<Control>, cx: &mut Context<Self>) {
+        let selection = self.effect_stop.and_then(|(i, j)| {
+            self.effect_controls
+                .get(i)
+                .map(|c| (c.layer.clone(), c.prefix.clone(), c.declaration.clone(), j))
+        });
+        controls.retain(|c| {
+            c.visibility.as_ref().is_none_or(|(effect, open)| {
+                self.host.effect_visible(&c.layer, effect, cx).unwrap_or(*open)
+            })
+        });
+        self.effect_controls = controls;
         self.effect_stop = selection.and_then(|(layer, prefix, declaration, j)| {
             self.effect_controls
                 .iter()
@@ -341,6 +443,7 @@ impl GizmoSurface {
                 }
             }
         }
+        self.draw(cx);
         cx.notify();
     }
     #[cfg(test)]
@@ -1105,7 +1208,9 @@ mod captures {
                         );
                         // Capture controls resolved from the real selected layer and
                         // its evaluated parameters, through the production reader.
-                        g.effects_reread(cx);
+                        let p = g.kernel.published(&g.project).unwrap();
+                        let controls = EffectIndex::new(&p).read_controls(&p, &g.kernel, 0.);
+                        g.adopt_effect_controls(controls, cx);
                         assert_eq!(g.effect_points(), vec![[160., 100.], [460., 100.]]);
                         assert_eq!(g.effect_stop_values().len(), 3);
                         g.effect_stop = Some((0, 1));

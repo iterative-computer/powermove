@@ -472,11 +472,32 @@ struct StudioSceneCache {
 struct StudioFrame {
     scene: Option<Arc<Scene>>,
     layers: Vec<pm_kernel::LayerInfo>,
+    geometry: std::sync::Mutex<FrameGeometry>,
+}
+
+/// Selection can return to the same group while the document and time are
+/// unchanged. Reuse its projected bounds along with the scene and layer index.
+struct FrameGeometry {
+    query: QueryMirror,
+    groups: std::collections::HashMap<String, Option<Pose>>,
+}
+
+impl FrameGeometry {
+    fn new(query: QueryMirror) -> Self {
+        Self {
+            query,
+            groups: Default::default(),
+        }
+    }
 }
 
 pub struct GizmoSurface {
     zoom_input: ZoomInput,
     effect_controls: Vec<effect_handles::Control>,
+    effect_index: Option<Arc<effect_handles::EffectIndex>>,
+    effect_read: u64,
+    effect_out: bool,
+    effect_again: bool,
     effect_drag: Option<effect_handles::Drag>,
     effect_stop: Option<(usize, usize)>,
     effect_picker: Option<(usize, usize)>,
@@ -545,6 +566,11 @@ pub struct GizmoSurface {
     /// The Pen tool's view of the selected layer's paths.
     pen: Option<pen::PenPose>,
     pen_reading: u64,
+    pen_read_out: bool,
+    pen_read_again: bool,
+    text_reading: u64,
+    text_read_out: bool,
+    text_read_again: bool,
     /// The layer and open path new clicks extend.
     pen_active: Option<(String, String)>,
     /// A pen read that includes the Pen's own last press has landed.
@@ -808,41 +834,66 @@ impl Pose {
 fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let root = p.snapshot.root()?;
     let list = pm_kernel::model::list_layers(root, None);
-    Some(read_poses(p, time, root, &list, p.selection.layers()))
+    let mut geometry = FrameGeometry::new(QueryMirror::new(p));
+    Some(read_poses(p, time, root, &list, &mut geometry))
 }
 fn read_poses(
     p: &pm_kernel::Published,
     time: f64,
     root: &pm_model::Node,
     list: &[pm_kernel::LayerInfo],
-    selected: &[String],
+    geometry: &mut FrameGeometry,
 ) -> Vec<Pose> {
-    let roots = crate::layer_commands::transform_roots(list, selected);
-    let layers: std::collections::HashMap<&str, (bool, &str)> = list
-        .iter()
-        .map(|l| (l.id.as_str(), (l.effectively_locked, l.kind.as_str())))
-        .collect();
-    let mut mirror = QueryMirror::new(p);
+    let FrameGeometry { query: mirror, groups } = geometry;
+    let selected = p.selection.layers();
+    if selected.is_empty() {
+        return vec![];
+    }
+    let roots = (selected.len() > 1).then(|| crate::layer_commands::transform_roots(list, selected));
+    let layers: std::collections::HashMap<_, _> =
+        list.iter().map(|layer| (layer.id.as_str(), layer)).collect();
+    let comp = p.snapshot.open_comp();
+    let nodes = pm_kernel::model::comp_node(root, comp.as_deref()).and_then(|comp| comp.get("layers"));
+    let layer_node = |id: &str| nodes?.at(layers.get(id)?.index);
     let mut poses = vec![];
     for id in selected {
-        let (locked, kind) = layers.get(id.as_str()).copied().unwrap_or((true, ""));
+        let Some(row) = layers.get(id.as_str()) else { continue };
+        let (locked, kind) = (row.effectively_locked, row.kind.as_str());
+        let transform_root = roots.as_ref().is_none_or(|roots| roots.contains(id.as_str()));
+        if let Some(cached) = groups.get(id) {
+            if let Some(mut pose) = cached.clone() {
+                pose.root = transform_root;
+                poses.push(pose);
+            }
+            continue;
+        }
         let q = mirror.queries();
         // A selected layer the playhead is outside of has nothing on screen to
         // box (viewer.ts visibleSelectionLayers).
         if !q.active(None, id, time).unwrap_or(false) {
             continue;
         }
-        // Only text, captions, and groups (which may enclose text) need the
-        // shared font-registry mirror; other layer kinds resolve lock-free.
         let bounds = if matches!(kind, "text" | "captions" | "group") {
             crate::text_host::query(p, |q| q.bounds(None, id, time))
         } else {
             q.bounds(None, id, time)
         };
-        let (Ok(world), Ok(local), Ok(Some(bounds))) = (
+        if kind == "group"
+            && (matches!(bounds, Ok(None))
+                || (matches!(bounds, Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk))
+                    && crate::text_host::render_fonts().is_none()))
+        {
+            // The frame key includes font availability. Do not cache a
+            // measurement failure that could recover while a registry is live.
+            groups.insert(id.clone(), None);
+        }
+        let Ok(Some(bounds)) = bounds else {
+            continue;
+        };
+        let q = mirror.queries();
+        let (Ok(world), Ok(local)) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
-            bounds,
         ) else {
             continue;
         };
@@ -869,8 +920,7 @@ fn read_poses(
             number("anchor.x").unwrap_or(0.),
             number("anchor.y").unwrap_or(0.),
         ];
-        let layer = pm_kernel::model::find_layer(root, id)
-            .and_then(|at| pm_kernel::model::layer_at(root, &at));
+        let layer = layer_node(id);
         let data = layer.and_then(|layer| layer.get("d"));
         let parametric = kind == "shape"
             && data
@@ -947,7 +997,7 @@ fn read_poses(
                         || parent3d[6].abs() > 1e-4
                         || parent3d[8].abs() > 1e-4
                         || parent3d[9].abs() > 1e-4;
-                    let focal = comp_focal_length(root, list, id, &mut mirror, time);
+                    let focal = comp_focal_length(root, list, id, mirror, time);
                     let world3d = mirror.queries().world_3d(None, id, time, false).ok();
                     let wz = if let Some(w3) = &world3d {
                         w3[2] * local_anchor[0]
@@ -974,74 +1024,69 @@ fn read_poses(
             // enclose the descendants' projected 3D corners directly in screen space
             // so the box and handles never distort, detach, or disappear.
             if kind == "group" {
-                let descendants = group_descendants(list, id);
-                let mut child_has_depth = false;
-                let mut lo = [f64::INFINITY; 2];
-                let mut hi = [f64::NEG_INFINITY; 2];
-                let mut any_projected = false;
-                for child_id in &descendants {
-                    if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
-                        continue;
-                    }
-                    let child_own_3d = pm_kernel::model::find_layer(root, child_id)
-                        .and_then(|at| pm_kernel::model::layer_at(root, &at))
-                        .and_then(|l| l.get("threeD"))
-                        .and_then(|v| v.to_value().as_bool())
-                        == Some(true);
-                    if child_own_3d {
-                        let ch = |m: &mut QueryMirror, k: &str| {
-                            m.queries()
-                                .evaluate(None, child_id, k, time)
-                                .ok()
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0)
-                        };
-                        if ch(&mut mirror, "position.z").abs() > 1e-4
-                            || ch(&mut mirror, "rotation.x").abs() > 1e-4
-                            || ch(&mut mirror, "rotation.y").abs() > 1e-4
-                            || ch(&mut mirror, "orientation.x").abs() > 1e-4
-                            || ch(&mut mirror, "orientation.y").abs() > 1e-4
-                        {
-                            child_has_depth = true;
-                        }
-                    }
-                    let child_kind = layers.get(child_id.as_str()).map(|(_, k)| *k).unwrap_or("");
-                    let cb_res = if matches!(child_kind, "text" | "captions") {
-                        crate::text_host::query(p, |q| q.bounds(None, child_id, time))
-                    } else {
-                        mirror.queries().bounds(None, child_id, time)
-                    };
-                    let Ok(Some(cb)) = cb_res else {
-                        continue;
-                    };
-                    if let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false) {
-                        for local_pt in [
-                            [cb.x0, cb.y0],
-                            [cb.x1, cb.y0],
-                            [cb.x1, cb.y1],
-                            [cb.x0, cb.y1],
-                        ] {
-                            if let Some(pt) = project_plane(&cp, local_pt) {
-                                lo[0] = lo[0].min(pt[0]);
-                                lo[1] = lo[1].min(pt[1]);
-                                hi[0] = hi[0].max(pt[0]);
-                                hi[1] = hi[1].max(pt[1]);
-                                any_projected = true;
-                            }
-                        }
-                    }
-                }
                 let planar_corners = (
                     project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
                     project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
                     project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
                     project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
                 );
-                if (child_has_depth || planar_corners.0.is_none() || planar_corners.1.is_none() || planar_corners.2.is_none() || planar_corners.3.is_none())
-                    && any_projected
-                    && lo[0].is_finite()
-                    && hi[0].is_finite()
+                let descendants = group_descendants(list, id);
+                let child_has_depth = descendants.iter().any(|child| {
+                    layer_node(child)
+                        .and_then(|layer| layer.get("threeD"))
+                        .and_then(|value| value.to_value().as_bool())
+                        == Some(true)
+                        && mirror.queries().active(None, child, time).unwrap_or(false)
+                        && [
+                            "position.z",
+                            "rotation.x",
+                            "rotation.y",
+                            "orientation.x",
+                            "orientation.y",
+                        ]
+                        .iter()
+                        .any(|key| {
+                            mirror
+                                .queries()
+                                .evaluate(None, child, key, time)
+                                .ok()
+                                .and_then(|v| v.as_f64())
+                                .is_some_and(|v| v.abs() > 1e-4)
+                        })
+                });
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                if child_has_depth
+                    || planar_corners.0.is_none()
+                    || planar_corners.1.is_none()
+                    || planar_corners.2.is_none()
+                    || planar_corners.3.is_none()
                 {
+                    for child in descendants {
+                        if !mirror.queries().active(None, &child, time).unwrap_or(false) {
+                            continue;
+                        }
+                        let Ok(Some(bounds)) =
+                            geometry_query(p, mirror, |q| q.bounds(None, &child, time))
+                        else {
+                            continue;
+                        };
+                        if let Ok(matrix) = mirror.queries().plane_matrix(None, &child, time, false) {
+                            for point in [
+                                [bounds.x0, bounds.y0],
+                                [bounds.x1, bounds.y0],
+                                [bounds.x1, bounds.y1],
+                                [bounds.x0, bounds.y1],
+                            ] {
+                                if let Some([x, y]) = project_plane(&matrix, point) {
+                                    lo = [lo[0].min(x), lo[1].min(y)];
+                                    hi = [hi[0].max(x), hi[1].max(y)];
+                                }
+                            }
+                        }
+                    }
+                }
+                if lo[0].is_finite() && hi[0].is_finite() {
                     screen_box = true;
                     let corners = [
                         [lo[0], lo[1]],
@@ -1090,12 +1135,7 @@ fn read_poses(
                     if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
                         continue;
                     }
-                    let child_kind = layers.get(child_id.as_str()).map(|(_, k)| *k).unwrap_or("");
-                    let cb_res = if matches!(child_kind, "text" | "captions") {
-                        crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
-                    } else {
-                        mirror.queries().bounds(None, &child_id, time)
-                    };
+                    let cb_res = geometry_query(p, mirror, |q| q.bounds(None, &child_id, time));
                     let Ok(Some(cb)) = cb_res else {
                         continue;
                     };
@@ -1123,10 +1163,10 @@ fn read_poses(
             }
             (None, None, corners, transform(&world, local_anchor))
         };
-        poses.push(Pose {
+        let pose = Pose {
             id: id.clone(),
             locked,
-            root: roots.contains(id.as_str()),
+            root: transform_root,
             keeps_aspect: matches!(kind, "image" | "video"),
             world,
             plane,
@@ -1153,7 +1193,11 @@ fn read_poses(
             position: [px, py],
             scale: [sx, sy],
             rotation,
-        });
+        };
+        if kind == "group" {
+            groups.insert(id.clone(), Some(pose.clone()));
+        }
+        poses.push(pose);
     }
     poses
 }
@@ -1167,6 +1211,10 @@ impl GizmoSurface {
         Self {
             zoom_input: ZoomInput::default(),
             effect_controls: vec![],
+            effect_index: None,
+            effect_read: 0,
+            effect_out: false,
+            effect_again: false,
             effect_drag: None,
             effect_stop: None,
             effect_picker: None,
@@ -1217,6 +1265,11 @@ impl GizmoSurface {
             text: None,
             pen: None,
             pen_reading: 0,
+            pen_read_out: false,
+            pen_read_again: false,
+            text_reading: 0,
+            text_read_out: false,
+            text_read_again: false,
             pen_active: None,
             pen_ready: false,
             pen_waiting: VecDeque::new(),
@@ -1239,6 +1292,10 @@ impl GizmoSurface {
             this.update(cx, |s, cx| {
                 s.refreshing = false;
                 let live_outline = s.draws_live_outline();
+                if s.prune_selection_overlays() {
+                    s.draw(cx);
+                    cx.notify();
+                }
                 if !live_outline {
                     s.reread(cx);
                 }
@@ -1252,6 +1309,43 @@ impl GizmoSurface {
             });
         });
     }
+    /// The kernel prunes deleted IDs before publishing. Clear the old
+    /// overlays before the worker has a chance to return a replacement.
+    fn prune_selection_overlays(&mut self) -> bool {
+        if self.poses.is_empty() && self.studio.selected.is_empty() && self.studio.part.is_none() {
+            return false;
+        }
+        let published = self.kernel.published(&self.project);
+        let selected = published.as_ref().map_or(&[][..], |p| p.selection.layers());
+        let ids = (selected.len() > 1)
+            .then(|| selected.iter().map(String::as_str).collect::<std::collections::HashSet<_>>());
+        let keeps = |layer: &str| match &ids {
+            Some(ids) => ids.contains(layer),
+            None => selected.first().is_some_and(|id| layer == id),
+        };
+        let mut changed = false;
+        if !self.poses.iter().all(|pose| keeps(&pose.id)) {
+            if selected.is_empty() {
+                self.poses = Arc::default();
+            } else {
+                Arc::make_mut(&mut self.poses).retain(|pose| keeps(&pose.id));
+            }
+            changed = true;
+        }
+        let n = self.studio.selected.len();
+        self.studio.selected.retain(|id| keeps(id));
+        changed |= self.studio.selected.len() != n;
+        let part_layer = published
+            .as_ref()
+            .and_then(|p| pm_panel_studio3d::properties::active_part(&p.selection))
+            .map(|(layer, _)| layer);
+        if self.studio.part.is_some() && part_layer.is_none() {
+            self.studio.part = None;
+            changed = true;
+        }
+        changed
+    }
+
     /// Lines depend on the shown scale; repaint them from the current poses.
     pub fn redraw(&mut self, cx: &mut Context<Self>) {
         let this = cx.entity();
@@ -1345,10 +1439,17 @@ impl GizmoSurface {
                 })
                 .ok()
                 .map(Arc::new);
-                StudioFrame { scene, layers }
+                StudioFrame {
+                    scene,
+                    layers,
+                    geometry: std::sync::Mutex::new(FrameGeometry::new(local_mirror)),
+                }
             });
             let mut scene = frame.scene.clone();
-            let mut poses = read_poses(&p, time, root, &frame.layers, p.selection.layers());
+            let mut poses = {
+                let mut geometry = frame.geometry.lock().unwrap_or_else(|error| error.into_inner());
+                read_poses(&p, time, root, &frame.layers, &mut geometry)
+            };
             poses.retain(|pose| {
                 // Depth boxes are selection-specific. Only copy the
                 // base scene when a selected layer adds one.
@@ -1531,7 +1632,6 @@ impl GizmoSurface {
                     {
                         s.completed_read = ticket;
                     }
-                    s.effects_reread(cx);
                 }
                 if s.reread_again {
                     s.reread_again = false;
@@ -3031,7 +3131,7 @@ impl GizmoSurface {
     /// The latest pose read finished; an empty selection is a completed read too.
     #[cfg(test)]
     pub fn refresh_complete(&self) -> bool {
-        !self.refreshing && self.completed_read == self.latest
+        !self.refreshing && !self.effect_out && self.completed_read == self.latest
     }
     #[cfg(test)]
     pub fn idle(&self) -> bool {
@@ -3664,15 +3764,43 @@ fn resize_shape(
         ),
     ]
 }
+fn geometry_query<T>(
+    p: &pm_kernel::Published,
+    mirror: &mut QueryMirror,
+    mut read: impl FnMut(&mut pm_kernel::QueryContext) -> Result<T, pm_kernel::QueryError>,
+) -> Result<T, pm_kernel::QueryError> {
+    match read(mirror.queries()) {
+        Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk) => {
+            crate::text_host::query(p, read)
+        }
+        result => result,
+    }
+}
+
+fn viewer_pick(
+    p: &pm_kernel::Published,
+    press: Press,
+    options: &pm_kernel::PickOptions,
+) -> Option<pm_kernel::PickHit> {
+    geometry_query(p, &mut QueryMirror::new(p), |q| {
+        q.pick(None, press.at[0], press.at[1], press.time, options)
+    })
+    .ok()
+}
+
 /// A layer's box in the composition at `time`: its transformed bounds
 /// (perspective-projected through `planeMatrix` for 2.5D 3D layers, or
 /// screen-space union of projected descendants for 3D groups with 3D depth).
 fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
     let root = p.snapshot.root()?;
-    let list = pm_kernel::model::list_layers(root, None);
-    let is_group = list.iter().any(|l| l.id == id && l.kind == "group");
-    if is_group {
-        let mut mirror = QueryMirror::new(p);
+    let loc = pm_kernel::model::find_layer(root, id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
+    let mut mirror = QueryMirror::new(p);
+    if !mirror.queries().active(None, id, time).unwrap_or(false) {
+        return None;
+    }
+    if layer.get("type").and_then(crate::node_string) == Some("group") {
+        let list = pm_kernel::model::list_layers(root, None);
         let descendants = group_descendants(&list, id);
         let mut any_3d_child = false;
         let mut lo = [f64::INFINITY; 2];
@@ -3681,12 +3809,10 @@ fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4
             if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
                 continue;
             }
-            let Ok(Some(cb)) = crate::text_host::query(p, |q| q.bounds(None, child_id, time))
-            else {
-                continue;
-            };
             if let Ok(true) = mirror.queries().is_3d_layer(None, child_id, time)
                 && let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false)
+                && let Ok(Some(cb)) =
+                    geometry_query(p, &mut mirror, |q| q.bounds(None, child_id, time))
             {
                 any_3d_child = true;
                 for local_pt in [
@@ -3713,8 +3839,7 @@ fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4
             ]);
         }
     }
-    let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
-    let mut mirror = QueryMirror::new(p);
+    let b = geometry_query(p, &mut mirror, |q| q.bounds(None, id, time)).ok()??;
     project_box(mirror.queries(), id, time, b).map(|(corners, _)| corners)
 }
 /// What a Select-tool double-click does, in viewer.ts order (onDown's
@@ -3735,8 +3860,17 @@ enum DoubleClick {
     /// Open the precomp's composition.
     Open(String),
 }
-fn focused_group(p: &pm_kernel::Published) -> Option<String> {
-    pm_panel_timeline::focused_group_for_published(p)
+pub(crate) fn focused_group(p: &pm_kernel::Published) -> Option<String> {
+    let id = pm_panel_timeline::focused_group_from_ui(&p.ui_state)?;
+    let root = p.snapshot.root()?;
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    pm_kernel::model::layers_of(comp)
+        .any(|layer| {
+            layer.get("id").and_then(crate::node_string) == Some(id)
+                && layer.get("type").and_then(crate::node_string) == Some("group")
+        })
+        .then(|| id.to_owned())
 }
 fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
     let root = p.snapshot.root()?;
@@ -3745,10 +3879,7 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
         include_locked: false,
         focus_group: focus.clone(),
     };
-    let hit = crate::text_host::query(p, |q| {
-        q.pick(None, press.at[0], press.at[1], press.time, &pick_opts)
-    })
-    .ok()?
+    let hit = viewer_pick(p, press, &pick_opts)?
     .layer_id;
     let layers = pm_kernel::model::list_layers(root, None);
     let group_of = |id: &str| {
@@ -3819,10 +3950,7 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
         include_locked: false,
         focus_group: focus.clone(),
     };
-    let hit = crate::text_host::query(p, |q| {
-        q.pick(None, press.at[0], press.at[1], press.time, &pick_opts)
-    })
-    .ok()?;
+    let hit = viewer_pick(p, press, &pick_opts)?;
     let Some(id) = hit.layer_id else {
         return Some(None);
     };
@@ -3834,35 +3962,44 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
     if press.deep {
         return Some(Some(id));
     }
-    let layers = pm_kernel::model::list_layers(root, None);
-    let group_of = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l.id == id)
-            .and_then(|l| l.group.clone())
-    };
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    let parents: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
+        .filter_map(|layer| {
+            Some((
+                layer.get("id").and_then(crate::node_string)?,
+                layer.get("group").and_then(crate::node_string)?,
+            ))
+        })
+        .collect();
+    if parents.is_empty() {
+        return Some(Some(id));
+    }
     let chain = |from: &str| {
         let mut out = vec![];
-        let mut at = group_of(from);
-        while let Some(group) = at {
-            at = group_of(&group);
+        let mut at = from;
+        while let Some(&group) = parents.get(at) {
+            if out.contains(&group) {
+                break;
+            }
             out.push(group);
+            at = group;
         }
         out
     };
     let hit_chain = chain(&id);
     if let Some(gid) = &focus
-        && !hit_chain.contains(gid)
+        && !hit_chain.contains(&gid.as_str())
     {
         return Some(None);
     }
-    let mut entered: Vec<String> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
+    let mut entered: Vec<&str> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
     if let Some(gid) = &focus {
-        entered.push(gid.clone());
+        entered.push(gid.as_str());
         entered.extend(chain(gid));
     }
     let outermost = hit_chain.into_iter().rev().find(|g| !entered.contains(g));
-    Some(Some(outermost.unwrap_or(id)))
+    Some(Some(outermost.map(str::to_owned).unwrap_or(id)))
 }
 /// Accent box, handles and anchor as engine lines. Sizes follow the display,
 /// never the composition zoom.
@@ -4401,6 +4538,79 @@ mod layer_drag_profile {
     }
 
     #[gpui::test]
+    fn selection_overlays_clear_before_a_pose_read_can_finish(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let select = |id: &str| SelectionCall::Layers { ids: vec![id.into()], add: false };
+        let call = |call: Call| {
+            let ack = kernel
+                .call(fixture::PROJECT, Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let time = 11.9;
+        let viewer = Rc::new(Viewer::new(time));
+        let surface = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                viewer.clone(),
+            )
+        });
+        for delete in [false, true] {
+            call(select("solid").into());
+            let p = kernel.published(fixture::PROJECT).unwrap();
+            let poses = read_at(&p, time).unwrap();
+            assert!(poses.iter().any(|pose| pose.id == "solid"));
+            if delete {
+                call(Call::Transact {
+                    label: Some("Delete selected layer".into()),
+                    body: WriteBody::Commands(vec![LayerCommand::Delete {
+                        layer_ids: vec!["solid".into()],
+                    }.into()]),
+                    expected_revision: None,
+                });
+                assert!(kernel.published(fixture::PROJECT).unwrap().selection.layers().is_empty());
+            } else {
+                call(select(fixture::TEXT).into());
+            }
+            surface.update(cx, |g, cx| {
+                g.poses = Arc::new(poses);
+                g.reread_out = true;
+                g.refresh(cx);
+            });
+            cx.run_until_parked();
+            surface.read_with(cx, |g, _| {
+                assert!(g.reread_out);
+                assert!(g.poses.is_empty());
+                assert_eq!(viewer.lines.get(), 0);
+            });
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_text_pick_and_outline_skip_the_font_mirror() {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let p = kernel.published(fixture::PROJECT).unwrap();
+        let time = 0.5;
+        let corners = super::outline(&p, "solid", time).unwrap();
+        let at = [
+            (corners[0][0] + corners[2][0]) / 2.,
+            (corners[0][1] + corners[2][1]) / 2.,
+        ];
+        let press = super::Press { at, time, shift: false, deep: true, inside: false };
+        let before = crate::text_host::query_count();
+        assert_eq!(super::pick_target(&p, press), Some(Some("solid".into())));
+        assert_eq!(super::outline(&p, "solid", time), Some(corners));
+        assert_eq!(super::outline(&p, "solid", 102.), None);
+        assert_eq!(crate::text_host::query_count(), before);
+    }
+
+    #[gpui::test]
     fn profile_639_layer_gizmo_snap_and_rows(cx: &mut TestAppContext) {
         let journal = tempfile::tempdir().unwrap();
         let (_actor, kernel) = fixture::open(journal.path().to_owned());
@@ -4427,7 +4637,7 @@ mod layer_drag_profile {
                 copies: None,
             });
         });
-        let mut pane_cache = None;
+        let mut pane_cache = crate::studio_panes::PaneScenes::default();
         let mut rows = crate::rows::LayerRows::default();
         let key = crate::rows::key(&initial.snapshot);
         assert!(rows.accept(key, crate::rows::list(&initial.snapshot), Some(key)));
@@ -4437,7 +4647,7 @@ mod layer_drag_profile {
         let mut after = Vec::new();
         fixture::drag(&kernel, |p| {
             let start = Instant::now();
-            assert!(crate::studio_panes::pane_scene(&p, 1, &mut pane_cache).is_none());
+            assert!(!pane_cache.wants_scene(1));
             let panes = start.elapsed();
 
             let start = Instant::now();
@@ -4453,7 +4663,7 @@ mod layer_drag_profile {
             rows.follow_transform_values(&p);
             let key = crate::rows::key(&p.snapshot);
             assert!(matches!(
-                rows.plan(key, crate::rows::layer_count(&p.snapshot)),
+                rows.plan(key, || crate::rows::layer_count(&p.snapshot)),
                 crate::rows::Plan::Current
             ));
             assert!(Arc::ptr_eq(&kept, &rows.rows));
