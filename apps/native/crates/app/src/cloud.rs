@@ -1526,3 +1526,64 @@ pub fn remember_install(profile: &Path, repo: &str, release: Option<&str>) {
         let _ = http.record_install(repo, release);
     }
 }
+
+#[cfg(test)]
+mod billing_tests {
+    use super::{billing_return, billing_url};
+
+    /// Only Stripe's Checkout and Portal over https open; a local stack's
+    /// page only in a build that may use one.
+    #[test]
+    fn only_stripes_pages_open_from_billing() {
+        for ok in [
+            "https://checkout.stripe.com/c/pay/cs_test_1",
+            "https://billing.stripe.com/p/session/test_1",
+        ] {
+            assert_eq!(billing_url(ok).as_deref(), Some(ok));
+        }
+        for refused in [
+            "http://checkout.stripe.com/c/pay/cs_test_1",
+            "https://checkout.stripe.com.evil.example/c",
+            "https://evil.example/?u=https://checkout.stripe.com",
+            "https://user@checkout.stripe.com/c",
+            "https://checkout.stripe.com:8443/c",
+            "https://stripe.com/c",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(billing_url(refused), None, "{refused}");
+        }
+        let local = billing_url("http://127.0.0.1:8787/v2/dev/checkout?s=1");
+        assert_eq!(local.is_some(), pm_agents::inference::LOCAL_ORIGINS);
+    }
+
+    /// A shipped release never opens a local page from billing.
+    #[cfg(all(not(debug_assertions), not(feature = "dev-cloud-origin")))]
+    #[test]
+    fn a_shipped_release_opens_only_stripe() {
+        assert_eq!(billing_url("http://127.0.0.1:8787/checkout"), None);
+        assert_eq!(billing_url("http://localhost:8787/checkout"), None);
+    }
+
+    #[test]
+    fn the_billing_return_link_is_exactly_success_or_cancel() {
+        assert_eq!(
+            billing_return("powermove://billing/return?status=success"),
+            Some(true)
+        );
+        assert_eq!(
+            billing_return("powermove://billing/return?status=cancel"),
+            Some(false)
+        );
+        for other in [
+            "powermove://billing/return",
+            "powermove://billing/return?status=paid",
+            "powermove://billing/return?status=success&x=1",
+            "powermove://billing/elsewhere?status=success",
+            "powermove://auth?state=s&token=t",
+            "https://billing/return?status=success",
+        ] {
+            assert_eq!(billing_return(other), None, "{other}");
+        }
+    }
+}

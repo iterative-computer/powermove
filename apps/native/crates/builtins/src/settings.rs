@@ -1826,6 +1826,102 @@ mod cloud_tests {
         assert_eq!(out[1]["value"], true);
         assert_eq!(out[1]["disabled"], false);
         assert_eq!(out[2]["action"], "account.delete");
+        assert_eq!(out[2]["group"], "Delete Account");
+    }
+    fn ready(extra: serde_json::Value) -> serde_json::Value {
+        let mut billing = json!({"state":"ready","subscribed":true,
+            "plan":{"id":"aerolite","name":"Aerolite","priceCents":999},
+            "status":"active","cancelAtPeriodEnd":false,
+            "credits":{"included":1000,"used":188,"remaining":812},"resets":"Dec 25",
+            "periodDays":30,"daily":[["Nov 25",40],["Nov 26",0]],
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
+                     {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}],
+            "upgrade":{"id":"aero","name":"Aero","credits":2500},"waiting":null,"error":null});
+        for (k, v) in extra.as_object().unwrap() {
+            billing[k] = v.clone();
+        }
+        billing
+    }
+    /// Settings › Account in each billing state: what a person reads and
+    /// the one action each card offers.
+    #[test]
+    fn the_plan_card_and_credits_follow_the_accounts_billing() {
+        use super::billing_rows;
+        let ids = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Before it is read, or a backend without billing: nothing.
+        assert!(billing_rows(&json!({"state":"loading"}), false).is_empty());
+        assert!(billing_rows(&json!({"state":"missing"}), false).is_empty());
+        let error = billing_rows(&json!({"state":"error"}), false);
+        assert_eq!(error[0]["action"], "account.billing-refresh");
+        // Free: says Aero needs a plan, then the plans and Continue…; no chart.
+        let free = billing_rows(
+            &ready(
+                json!({"subscribed":false,"plan":null,"status":null,"resets":null,
+                "credits":{"included":0,"used":0,"remaining":0},"daily":[]}),
+            ),
+            false,
+        );
+        assert_eq!(ids(&free), ["account.plan", "account.choose"]);
+        assert_eq!(free[0]["value"], "Aero needs Aerolite or Aero.");
+        assert_eq!(free[1]["control"], "plans");
+        assert_eq!(free[1]["action"], "account.subscribe");
+        assert_eq!(free[1]["actionLabel"], "Continue…");
+        assert_eq!(free[1]["options"][0]["label"], "Aerolite · $9.99");
+        assert_eq!(free[1]["options"][1]["label"], "Aero · $19.99");
+        assert!(
+            free[1]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Aero has 2,500 credits a month")
+        );
+        // Waiting for Checkout: a quiet line with Cancel instead.
+        let waiting = billing_rows(
+            &ready(json!({"subscribed":false,"plan":null,"waiting":"checkout"})),
+            false,
+        );
+        assert_eq!(waiting[1]["label"], "Waiting for checkout in your browser…");
+        assert_eq!(waiting[1]["action"], "account.checkout-cancel");
+        // Aerolite mid-period: the plan, Manage Billing…, the meter and the days.
+        let lite = billing_rows(&ready(json!({})), false);
+        assert_eq!(
+            ids(&lite),
+            ["account.plan", "account.credits", "account.daily"]
+        );
+        assert_eq!(lite[0]["label"], "Aerolite");
+        assert_eq!(lite[0]["value"], "$9.99 a month");
+        assert_eq!(lite[0]["action"], "account.portal");
+        assert_eq!(lite[1]["label"], "812 of 1,000 left");
+        assert_eq!(lite[1]["value"], "Resets Dec 25");
+        assert_eq!(lite[1]["meter"], json!({"used":188,"included":1000}));
+        assert_eq!(lite[2]["value"], "188 used");
+        assert_eq!(lite[2]["slots"], 30);
+        // Cancelling, past due.
+        let cancelling = billing_rows(&ready(json!({"cancelAtPeriodEnd":true})), false);
+        assert_eq!(cancelling[0]["value"], "Cancels Dec 25");
+        let due = billing_rows(&ready(json!({"status":"past_due"})), false);
+        assert_eq!(due[0]["value"], "Payment failed");
+        assert!(due[0]["error"].as_str().unwrap().contains("payment method"));
+        // Out of credits on Aerolite: until when, and the bigger plan.
+        let out = billing_rows(
+            &ready(json!({"credits":{"included":1000,"used":1000,"remaining":0}})),
+            false,
+        );
+        assert_eq!(out[1]["error"], "You’re out of credits until Dec 25.");
+        assert_eq!(out[3]["id"], "account.upgrade");
+        assert_eq!(out[3]["action"], "account.portal");
+        // On Aero, out of credits has no bigger plan.
+        let top = billing_rows(
+            &ready(json!({"upgrade":null,"credits":{"included":2500,"used":2500,"remaining":0}})),
+            false,
+        );
+        assert_eq!(
+            ids(&top),
+            ["account.plan", "account.credits", "account.daily"]
+        );
     }
 }
 #[cfg(test)]
