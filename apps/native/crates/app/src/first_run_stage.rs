@@ -11,15 +11,22 @@ use pm_shell::{
     welcome::{Button, Frame},
     welcome_view::{OnAction, WelcomeView},
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 /// The stage, the card on it, and the real Welcome window once it is live.
 #[derive(Clone)]
 pub struct StageWindow {
     pub window: WindowHandle<Stage>,
+    stage: Entity<Stage>,
     card: Rc<RefCell<Entity<WelcomeView>>>,
     on_action: OnAction,
     native: Rc<RefCell<Option<AnyWindowHandle>>>,
+    /// Hand-off has started: no late `WindowLive` event may open a new native
+    /// Welcome window, and repeated hand-offs are ignored.
+    handed_off: Rc<Cell<bool>>,
     /// The window's close button quits (the first run); else it hands off
     /// (the intro replayed).
     quits: bool,
@@ -36,6 +43,9 @@ impl StageWindow {
     /// The wave has drawn the window: the Welcome moves into a real window
     /// on the same rectangle, with a card of its own.
     fn go_native(&self, stage: Entity<Stage>, cx: &mut gpui::App) {
+        if self.handed_off.get() || self.native.borrow().is_some() {
+            return;
+        }
         let Ok((bounds, stage_ns)) = self.window.update(cx, |s, window, _| {
             let screen = window.bounds();
             let rect = s.welcome_rect(screen.size);
@@ -113,23 +123,60 @@ impl StageWindow {
     /// The last step: the window eases out and the room's lights come up
     /// on the app's first window, opened behind the stage a moment before.
     pub fn hand_off(&self, cx: &mut gpui::App) {
-        let stage = self.window;
-        let native = self.native.borrow_mut().take();
+        if self.handed_off.replace(true) {
+            return;
+        }
+        let stage_window: AnyWindowHandle = self.window.into();
+        let stage_entity = self.stage.clone();
+        let native_slot = self.native.clone();
+        let native = native_slot.borrow_mut().take();
         cx.spawn(async move |cx| {
             // A few frames for the window to draw behind the stage.
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(120))
                 .await;
-            cx.update(|cx| {
-                if let Some(native) = native {
+            let (deadline, active_native) = cx.update(|cx| {
+                let active_native = native.or_else(|| native_slot.borrow_mut().take());
+                if let Some(native) = active_native {
                     native_window::ease_out(native, cx);
                 }
-                let _ = stage.update(cx, |stage, _, cx| {
+                // Update the `Stage` entity directly rather than through
+                // `WindowHandle::update`, which returns `Err` (and was
+                // silently ignored) if the stage window is mid-draw (e.g.
+                // spinning on S110) when the timer fires.
+                stage_entity.update(cx, |stage, cx| {
                     stage.hand_off(|window, _| window.remove_window(), cx);
                 });
+                (
+                    stage_entity.read(cx).sheet.dim_out.seconds + 0.45,
+                    active_native,
+                )
+            });
+            // Safety net: if a macOS fullscreen Space switch or window
+            // occlusion stops the stage display link before `veil_left` reaches
+            // 0, never leave the status-level veil or Welcome window stuck on
+            // screen forever.
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs_f64(deadline))
+                .await;
+            cx.update(|cx| {
+                if let Some(native) = active_native.or_else(|| native_slot.borrow_mut().take()) {
+                    remove_window_reliably(native, cx);
+                }
+                remove_window_reliably(stage_window, cx);
             });
         })
         .detach();
+    }
+}
+
+/// Removes `handle`, retrying once via `cx.defer` if the window is currently
+/// borrowed on GPUI's update stack.
+fn remove_window_reliably(handle: AnyWindowHandle, cx: &mut gpui::App) {
+    if handle.update(cx, |_, window, _| window.remove_window()).is_err() {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        });
     }
 }
 
@@ -171,14 +218,21 @@ pub fn open(
     let stage = window.root(cx)?;
     let staged = StageWindow {
         window,
+        stage: stage.clone(),
         card: Rc::new(RefCell::new(card)),
         on_action,
         native: Rc::default(),
+        handed_off: Rc::new(Cell::new(false)),
         quits,
     };
     let live = staged.clone();
     cx.subscribe(&stage, move |stage, event: &StageEvent, cx| match event {
-        StageEvent::WindowLive => live.go_native(stage, cx),
+        StageEvent::WindowLive => {
+            // Defer out of `Stage::render` so `self.window` is no longer
+            // borrowed on GPUI's update stack when `go_native` queries its bounds.
+            let live = live.clone();
+            cx.defer(move |cx| live.go_native(stage, cx));
+        }
     })
     .detach();
     Ok(staged)

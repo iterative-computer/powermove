@@ -241,7 +241,13 @@ pub fn ease_out(handle: AnyWindowHandle, cx: &mut App) {
         cx.background_executor()
             .timer(Duration::from_secs_f64(OUT_SECONDS + 0.04))
             .await;
-        let _ = cx.update(|cx| handle.update(cx, |_, window, _| window.remove_window()));
+        cx.update(|cx| {
+            if handle.update(cx, |_, window, _| window.remove_window()).is_err() {
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                });
+            }
+        });
     })
     .detach();
 }
