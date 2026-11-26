@@ -4916,12 +4916,33 @@ fn keyframe_reveal_opens_a_collapsed_layer_and_explicit_property_filter() {
     add_reveal_key(&mut c, "c", "opacity", "new", 0.);
     assert!(has_property(&c, "c", "opacity"));
     assert_eq!(
+        c.model.reveal.layers["c"].paths.as_ref().unwrap(),
+        &["rotation", "opacity"]
+    );
+    assert_eq!(
         c.model.reveal_target,
         Some(pm_panel_timeline::RevealTarget::Property {
             layer: "c".into(),
             path: "opacity".into()
         })
     );
+}
+#[test]
+fn keyframe_reveal_opens_a_collapsed_animated_only_filter() {
+    let (_actor, mut c) = client();
+    c.model.reveal.layers.insert(
+        "c".into(),
+        Disclosure {
+            collapsed: true,
+            ..Default::default()
+        },
+    );
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert!(!c.model.reveal.layers["c"].collapsed);
+    assert!(c.model.reveal.layers["c"].paths.is_none());
 }
 #[test]
 fn keyframe_reveal_does_not_reopen_a_user_collapse_until_the_next_edit() {
@@ -5284,32 +5305,52 @@ fn effect_add_does_not_reopen_a_layer_with_existing_keys() {
 }
 
 #[test]
-fn adding_a_key_replaces_the_static_reveal_with_keyframed_rows() {
-    let (_actor, mut c) = client();
-    c.model
-        .reveal_property('*', false, 100, &PropertyFacts::default())
-        .unwrap();
-    assert!(has_property(&c, "a", "position.x"));
-    // Use a layer whose old keys and static transforms coexist.
-    edit(
-        &mut c,
-        vec![
-            pm_kernel::LayerCommand::Set {
-                layer_id: "a".into(),
-                patch: pm_kernel::commands::layers::LayerPatch {
-                    three_d: Some(true),
-                    ..Default::default()
-                },
+fn adding_a_camera_position_key_preserves_the_open_property_rows() {
+    for shortcut in ['p', '*'] {
+        let (_actor, mut c) = client();
+        edit(
+            &mut c,
+            vec![pm_kernel::Scene3dCommand::Apply {
+                comp: None,
+                args: parse(r#"{"operation":"add_camera","id":"cam"}"#).unwrap(),
+                selection: vec![],
+                time: 0.,
+                autokey: false,
             }
-            .into(),
-        ],
-    );
-    assert!(has_property(&c, "a", "orientation.x"));
-    add_reveal_key(&mut c, "a", "opacity", "new-opacity", 2.);
-    assert!(!has_property(&c, "a", "orientation.x"));
-    assert!(has_property(&c, "a", "opacity"));
-    assert!(has_property(&c, "a", "position.x"));
-    assert!(c.model.reveal.layers["a"].paths.is_none());
+            .into()],
+        );
+        add_reveal_key(&mut c, "cam", "position.x", "x-key", 1.);
+        assert!(has_property(&c, "cam", "position.x"));
+        c.model.toggle_disclosure("cam").unwrap();
+        select(&mut c, &["cam"]);
+        c.model
+            .reveal_property(shortcut, false, 100, &PropertyFacts::default())
+            .unwrap();
+        let paths = c.model.reveal.layers["cam"].paths.clone();
+        assert!(paths.is_some());
+        assert!(has_property(&c, "cam", "position.y"));
+        assert!(has_property(&c, "cam", "position.z"));
+        let property_rows = |c: &TimelineClient| {
+            c.model
+                .rows()
+                .iter()
+                .filter(|row| matches!(&row.id, RowId::Property { layer_id, .. } if layer_id == "cam"))
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let before = property_rows(&c);
+        let plan = c
+            .model
+            .property_diamond(&[("cam".into(), "position.y".into())], 2.)
+            .unwrap();
+        run(&mut c, plan);
+        assert_eq!(property_rows(&c), before, "shortcut {shortcut}");
+        assert_eq!(c.model.reveal.layers["cam"].paths, paths);
+        assert_eq!(
+            c.model.index.channel("cam", "position.y").unwrap().keys.len(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -5429,4 +5470,54 @@ fn three_d_switch_applies_to_all_selected_eligible_layers() {
     assert!(c.model.index.layer("a").unwrap().three_d);
     assert!(c.model.index.layer("b").unwrap().three_d);
     assert!(!c.model.index.layer("c").unwrap().three_d);
+}
+
+#[test]
+fn standalone_camera_point_of_interest_keyframes_show_in_timeline() {
+    let (_actor, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":10,"comps":{},"assets":{},
+        "layers":[{
+            "id":"cam","name":"Camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,
+            "p":{"position.z":{"v":6,"kf":[],"expr":null}},
+            "d":{"definition":"powermove.3d.camera","data":{
+                "camera":{"autoOrient":"target","p":{
+                    "targetX":{"v":0,"kf":[{"i":"tx0","t":0,"v":0},{"i":"tx1","t":2,"v":3}],"expr":null},
+                    "targetY":{"v":0,"kf":[{"i":"ty0","t":0,"v":0},{"i":"ty1","t":2,"v":1}],"expr":null},
+                    "targetZ":{"v":0,"kf":[{"i":"tz0","t":0,"v":0},{"i":"tz1","t":2,"v":-2}],"expr":null},
+                    "fov":{"v":45,"kf":[],"expr":null}
+                }},
+                "environment":{"p":{"ambient":{"v":0.4,"kf":[],"expr":null}}}
+            }}
+        }]
+    }"#,
+        )
+        .unwrap(),
+    );
+    let layer = c.model.index.layer("cam").expect("camera layer");
+    assert!(layer.channels.iter().any(|ch| !ch.keys.is_empty()));
+    for (path, label) in [
+        ("camera.targetX", "Point of Interest X"),
+        ("camera.targetY", "Point of Interest Y"),
+        ("camera.targetZ", "Point of Interest Z"),
+    ] {
+        let ch = c.model.index.channel("cam", path).expect(path);
+        assert_eq!(ch.keys.len(), 2, "{path} keyframes");
+        assert_eq!(pm_panel_timeline::property_label(path), label);
+    }
+    // Expanding the camera layer reveals its keyframed Point of Interest rows.
+    c.model.toggle_disclosure("cam").unwrap();
+    let props: Vec<_> = c
+        .model
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { layer_id, channel } if layer_id == "cam" => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(props.contains(&"camera.targetX"), "rows={props:?}");
+    assert!(props.contains(&"camera.targetY"), "rows={props:?}");
+    assert!(props.contains(&"camera.targetZ"), "rows={props:?}");
 }

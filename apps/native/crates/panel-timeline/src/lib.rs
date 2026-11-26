@@ -434,7 +434,16 @@ impl TimelineModel {
                 if entry.is_some() && !self.reveal.revealed_in_entry.insert((layer.clone(), path.clone())) {
                     continue;
                 }
-                let _ = self.open_property_rows(&layer, None);
+                if self
+                    .reveal
+                    .layers
+                    .get(&layer)
+                    .is_some_and(|d| d.paths.is_some())
+                {
+                    let _ = self.include_paths(&layer, std::slice::from_ref(&path));
+                } else {
+                    let _ = self.open_property_rows(&layer, None);
+                }
                 self.reveal_serial += 1;
                 self.reveal_target = Some(RevealTarget::Property { layer, path });
             }
@@ -1252,6 +1261,17 @@ pub fn property_label(path: &str) -> String {
         "anchor.y" => "Anchor Point Y",
         "anchor.z" => "Anchor Point Z",
         "skew" => "Skew",
+        "camera.targetX" | "light.targetX" => "Point of Interest X",
+        "camera.targetY" | "light.targetY" => "Point of Interest Y",
+        "camera.targetZ" | "light.targetZ" => "Point of Interest Z",
+        "camera.fov" => "Field of View",
+        "camera.zoom" => "Zoom",
+        "camera.focusDistance" => "Focus Distance",
+        "camera.fStop" => "F-Stop",
+        "camera.blurLevel" => "Blur Level",
+        "light.intensity" => "Intensity",
+        "light.color" => "Light Color",
+        "environment.ambient" => "Ambient",
         _ => return pm_surface::humanize(path),
     }
     .to_owned()

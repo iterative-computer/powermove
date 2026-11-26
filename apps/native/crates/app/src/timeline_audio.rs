@@ -420,27 +420,103 @@ impl TimelineSurface {
                         );
                     }
                 } else {
-                    for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
-                        let local = ((x as f64 - view.layer_column) / view.pps
+                    // Coalesce consecutive pixels with the same drawn height
+                    // and opacity into horizontal runs instead of emitting one
+                    // `Op` + JSON map + query evaluation per pixel.
+                    let key_span = gain_channel
+                        .filter(|c| c.expression.is_none() && !c.keys.is_empty())
+                        .map(|c| {
+                            let mut lo = f64::INFINITY;
+                            let mut hi = f64::NEG_INFINITY;
+                            for k in &c.keys {
+                                lo = lo.min(k.time);
+                                hi = hi.max(k.time);
+                            }
+                            (lo, hi)
+                        });
+                    let mut xi = x0.ceil() as i64;
+                    let x_end = x1.ceil() as i64;
+                    // Run state: (start_x, width, y, gain, fade, opacity)
+                    let mut run: Option<(f64, f64, f64, f64, f64, f64)> = None;
+                    let mut flush = |run: &mut Option<(f64, f64, f64, f64, f64, f64)>| {
+                        if let Some((rx, rw, _, rg, rf, ro)) = run.take() {
+                            level(rx, rw, rg, rf, ro);
+                        }
+                    };
+                    while xi < x_end {
+                        let local = ((xi as f64 - view.layer_column) / view.pps
                             + view.scroll_time
                             - layer.from)
                             .clamp(0., layer.duration);
-                        let fade_in = if fade_in > 0. {
+                        // Jump across guaranteed-flat spans (outside fades and
+                        // outside the animated keyframe range) in O(1).
+                        let flat_until = if dragged.is_some()
+                            || !animated_gain
+                            || key_span.is_some_and(|(lo, hi)| local < lo || local > hi)
+                        {
+                            let mut next_break = layer.duration;
+                            if fade_in > 0. && local < fade_in {
+                                next_break = local;
+                            } else {
+                                if fade_out > 0. {
+                                    let out_start = (layer.duration - fade_out).max(0.);
+                                    if local < out_start {
+                                        next_break = next_break.min(out_start);
+                                    } else {
+                                        next_break = local;
+                                    }
+                                }
+                                if dragged.is_none()
+                                    && animated_gain
+                                    && let Some((lo, _)) = key_span
+                                    && local < lo
+                                {
+                                    next_break = next_break.min(lo);
+                                }
+                            }
+                            (next_break > local + 1. / view.pps).then_some(next_break)
+                        } else {
+                            None
+                        };
+                        let fade_in_k = if fade_in > 0. {
                             (local / fade_in).min(1.)
                         } else {
                             1.
                         };
-                        let fade_out = if fade_out > 0. {
+                        let fade_out_k = if fade_out > 0. {
                             ((layer.duration - local) / fade_out).min(1.)
                         } else {
                             1.
                         };
-                        let fade = fade_in.min(fade_out);
+                        let fade = fade_in_k.min(fade_out_k);
+                        let step = if let Some(until) = flat_until {
+                            let end_x = (view.layer_column
+                                + (layer.from + until - view.scroll_time) * view.pps)
+                                .floor() as i64;
+                            (end_x.min(x_end) - xi).max(1)
+                        } else {
+                            2.min(x_end - xi).max(1)
+                        };
                         if let Some(opacity) = resting.or_else(|| (fade < 1.).then_some(0.38)) {
                             let gain = dragged.unwrap_or_else(|| gain_at(layer.from + local));
-                            level(x as f64, 1., gain, fade, opacity);
+                            let y = gain_y(gain * fade.max(0.), r);
+                            match &mut run {
+                                Some((_, rw, ry, _, _, ro))
+                                    if (*ry - y).abs() < 0.35 && (*ro - opacity).abs() < 1e-6 =>
+                                {
+                                    *rw += step as f64;
+                                }
+                                _ => {
+                                    flush(&mut run);
+                                    run = Some((xi as f64, step as f64, y, gain, fade, opacity));
+                                }
+                            }
+                        } else {
+                            flush(&mut run);
                         }
+                        xi += step;
                     }
+                    flush(&mut run);
                 }
                 if interactive && let Some(channel) = gain_channel {
                     for key in &channel.keys {
@@ -570,39 +646,33 @@ impl TimelineSurface {
         if !self.audio.running {
             self.audio.running = true;
             cx.spawn(async move |this, cx| {
+                let mut active = true;
                 loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(33))
-                        .await;
-                    let alive = this
+                    let wait = if active {
+                        Duration::from_millis(33)
+                    } else {
+                        Duration::from_millis(120)
+                    };
+                    cx.background_executor().timer(wait).await;
+                    let next = this
                         .update(cx, |s, cx| {
-                            if s.audio
-                                .painted
-                                .is_none_or(|p| p.elapsed() > Duration::from_secs(1))
-                            {
-                                s.audio.running = false;
-                                return false;
-                            }
-                            let active = s.audio.tap.changed(s.delegate.audio_peaks(cx))
+                            let live = s.audio.tap.changed(s.delegate.audio_peaks(cx))
                                 || s.audio.drag.is_some()
                                 || s.audio
                                     .meters
                                     .iter()
                                     .any(|m| m.peak_db > -60. || m.hold_db > -60.);
-                            // Keep live/hold ballistics at 30 Hz. A quiet heartbeat
-                            // discovers a hidden panel without repainting idle graphs.
-                            if active
-                                || s.audio
-                                    .painted
-                                    .is_some_and(|p| p.elapsed() >= Duration::from_millis(500))
-                            {
+                            // Keep live/hold ballistics at 30 Hz, but never
+                            // repaint an idle silent timeline on a heartbeat.
+                            if live {
                                 cx.notify();
                             }
-                            true
+                            live
                         })
-                        .unwrap_or(false);
-                    if !alive {
-                        break;
+                        .ok();
+                    match next {
+                        Some(live) => active = live,
+                        None => break,
                     }
                 }
             })

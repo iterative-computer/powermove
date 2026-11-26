@@ -689,13 +689,21 @@ impl GizmoSurface {
         self.studio.free = Some(start);
         let this = cx.entity().downgrade();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if !window.is_window_active() {
+                return;
+            }
             if let Some(this) = this.upgrade()
-                && this
-                    .read(cx)
-                    .focus
-                    .as_ref()
-                    .is_some_and(|focus| focus.is_focused(window))
+                && this.read(cx).studio_flying()
             {
+                // Fly mode is modal: even if GPUI focus moved to another panel
+                // or button (such as clicking the Fly toggle), keep delivering
+                // WASD / Q / E / Esc / Enter to the flight controller and pull
+                // focus back onto `#viewer-gizmos` so KeyUp stops motion cleanly.
+                if let Some(focus) = this.read(cx).focus.clone()
+                    && !focus.is_focused(window)
+                {
+                    window.focus(&focus, cx);
+                }
                 this.update(cx, |s, cx| s.studio_fly_key(&event.keystroke, true, cx));
                 cx.stop_propagation();
             }
@@ -749,7 +757,6 @@ impl GizmoSurface {
         if run.fly.tick(dt) {
             self.studio.free = Some(run.fly.pose());
             self.studio_push_view(cx);
-            self.draw(cx);
         }
         true
     }
@@ -790,7 +797,6 @@ impl GizmoSurface {
                 run.fly.look(dx, dy);
                 self.studio.free = Some(run.fly.pose());
                 self.studio_push_view(cx);
-                self.draw(cx);
             }
         }
     }

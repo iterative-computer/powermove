@@ -4461,6 +4461,20 @@ impl Host {
                         return event.as_ptr();
                     }
                     if host.borrow().studio_flying.get() {
+                        // Fly mode is modal for the editor window: if an AppKit
+                        // control (slider, button, text field) still holds first
+                        // responder, restore keyboard delivery to GPUI so WASD
+                        // and navigation keys always reach the viewer.
+                        let gpui = host.borrow().gpui.clone();
+                        let responder = window.firstResponder();
+                        if responder.as_deref().is_none_or(|r| {
+                            !std::ptr::eq(
+                                r as *const _ as *const NSResponder,
+                                &*gpui as *const _ as *const NSResponder,
+                            )
+                        }) {
+                            window.makeFirstResponder(Some(&gpui));
+                        }
                         return event.as_ptr();
                     }
                     let mut responder = window.firstResponder();

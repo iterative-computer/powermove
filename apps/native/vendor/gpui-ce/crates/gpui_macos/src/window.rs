@@ -898,6 +898,11 @@ struct MacWindowState {
     /// frame moved a hosted view; when the last one did.
     #[cfg(not(feature = "wgpu"))]
     direct_moved: Option<std::time::Instant>,
+    /// Last time a hosted AppKit view moved on a non-MetalDisplayLink window,
+    /// used to keep transactional present steady during continuous moves
+    /// without stalling idle/non-moving frames on synchronous Metal waits.
+    #[cfg(not(feature = "wgpu"))]
+    sync_linger: Option<std::time::Instant>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1509,6 +1514,8 @@ impl MacWindow {
                 direct_source: None,
                 #[cfg(not(feature = "wgpu"))]
                 direct_moved: None,
+                #[cfg(not(feature = "wgpu"))]
+                sync_linger: None,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -2603,12 +2610,15 @@ impl PlatformWindow for MacWindow {
         let has_host = crate::composition::has_host(view);
         let will_move = crate::composition::pending(view, this.painted);
         let async_override = std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_some();
+        let lingering = this
+            .sync_linger
+            .is_some_and(|t| now.duration_since(t) < crate::composition::DIRECT_LINGER);
         let sync = direct
             || forced
             || will_move
-            || (!this.renderer.display_link_bound() && has_host && !async_override)
+            || (lingering && has_host && !async_override)
             || (continuous && !async_override && this.ca_display_link.is_none());
-        let transaction = (has_host || sync).then(crate::composition::begin_transaction);
+        let transaction = (has_host && (will_move || sync)).then(crate::composition::begin_transaction);
         this.renderer.set_presents_with_transaction(sync);
         let Some(prepared) = this.renderer.prepare_draw(scene) else {
             // No drawable or encoding error: leave `this.painted` intact and
@@ -2627,6 +2637,11 @@ impl PlatformWindow for MacWindow {
         } else {
             false
         };
+        if will_move || moved {
+            this.sync_linger = Some(now);
+        } else if !lingering {
+            this.sync_linger = None;
+        }
         this.last_draw = Some(now);
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) has moved its views by now, under a
@@ -3989,9 +4004,9 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
                 lock.request_frame_callback = Some(callback);
                 #[cfg(not(feature = "wgpu"))]
                 let keep_sync = lock.direct_moved.is_some()
-                    || (!lock.renderer.display_link_bound()
-                        && crate::composition::has_host(lock.native_view.as_ptr() as usize)
-                        && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
+                    || lock.sync_linger.is_some_and(|t| {
+                        t.elapsed() < crate::composition::DIRECT_LINGER
+                    });
                 #[cfg(feature = "wgpu")]
                 let keep_sync = false;
                 lock.renderer.set_presents_with_transaction(keep_sync);
@@ -4130,9 +4145,9 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         lock.request_frame_callback = Some(callback);
         #[cfg(not(feature = "wgpu"))]
         let keep_sync = lock.direct_moved.is_some()
-            || (!lock.renderer.display_link_bound()
-                && crate::composition::has_host(lock.native_view.as_ptr() as usize)
-                && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
+            || lock.sync_linger.is_some_and(|t| {
+                t.elapsed() < crate::composition::DIRECT_LINGER
+            });
         #[cfg(feature = "wgpu")]
         let keep_sync = false;
         lock.renderer.set_presents_with_transaction(keep_sync);

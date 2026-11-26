@@ -2260,6 +2260,157 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
     assert!(!selected.contains("l61"), "{selected:?}");
     assert!(selected.keys().is_empty(), "{selected:?}");
 }
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
+/// PM-310: a sideways wheel step moves the tracks and the ruler as they were
+/// drawn (their scroll layers), with no render of the panel, as the steps up
+/// and down do; the frame hit-testing reads is at the new time at once. The
+/// first step of a sideways scroll draws them past each side (other draws
+/// leave that out: it costs them); the panel renders once the steps stop and
+/// at once for a step past the tracks' width drawn. A skimmer showing stays
+/// under the pointer at the time there, drawn outside the panel.
+#[gpui::test]
+fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, delta: Point<Pixels>, modifiers: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let time = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    // Zoomed in, so the time has somewhere to scroll; the view it wrote
+    // is back from the worker.
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
+    let before = time(&s);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered, "the first sideways step draws past each side");
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 60. / pps)).abs() < 1e-9);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_time, time(&s));
+    // Shift with the wheel scrolls sideways too; then up and down.
+    wheel(&mut s, point(px(0.), px(-20.)), Modifiers::shift());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 80. / pps)).abs() < 1e-9);
+    wheel(&mut s, point(px(0.), px(-30.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    let after = renders(&s);
+    assert!(
+        (rendered + 1..=rendered + 4).contains(&after),
+        "{after} renders once the steps stopped, from {rendered}"
+    );
+    // Past the tracks' width drawn: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    // A zoom draws no further than the view again: the next sideways step
+    // draws.
+    wheel(&mut s, point(px(0.), px(-10.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    s.idle(cx);
+    // The skimmer showing (drawn with the playhead, outside the panel): a
+    // step moves the time under it with no panel draw, and the skim follows.
+    // Back at the start, zoomed in, the sideways layers recorded.
+    wheel(&mut s, point(px(5000.), px(0.)), Modifiers::none());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    wheel(&mut s, point(px(-10.), px(0.)), Modifiers::none());
+    settle(&mut s);
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let (pps, start, _) = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let over = s.at(2, start + 300. / pps);
+    s.vcx.simulate_mouse_move(over, None, Modifiers::none());
+    settle(&mut s);
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let (x, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
+    let rendered = renders(&s);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: over,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        ..Default::default()
+    });
+    s.vcx.run_until_parked();
+    assert_eq!(renders(&s), rendered);
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now > skimmed, "the time under the pointer: later after a scroll on");
+    // Still under the pointer (within the frame it snaps to).
+    let (moved, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    assert!((moved - x).abs() <= pps / 30. + 1., "{x} -> {moved}");
+    // Once the steps stop, the panel draws again.
+    settle(&mut s);
+    assert!(renders(&s) > rendered);
+}
+
 #[gpui::test]
 fn timeline_navigation_repaints_the_footer_with_every_wheel_step(cx: &mut TestAppContext) {
     let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
@@ -2291,11 +2442,10 @@ fn timeline_navigation_repaints_the_footer_with_every_wheel_step(cx: &mut TestAp
 
 /// Check the GPUI scene itself. A new hit-test frame alone used to hide
 /// stale primitives in the cached timeline view.
-fn assert_navigation_painted(s: &mut Stage, time: f64) {
-    let origin = s.origin();
+fn assert_navigation_painted(s: &mut Stage, origin: Point<Pixels>, time: f64) {
     let (frame, scene, bar, (pps, scroll_time, column)) = s.surface.read_with(&s.vcx, |t, _| {
         let frame = t.frame().unwrap();
-        assert!(std::sync::Arc::ptr_eq(&frame, t.painted_rows_for_test().unwrap()));
+        assert!(t.painted_rows_for_test().is_some());
         (frame, t.scene().unwrap(), t.bar().unwrap(), t.time_mapping())
     });
     let v = frame.viewport;
@@ -2309,8 +2459,19 @@ fn assert_navigation_painted(s: &mut Stage, time: f64) {
     let visible = scene.visible_range(v.scroll_y, height);
     let (row, top, _) = scene.span(visible.start + 1).unwrap();
     let selector: &'static str = Box::leak(format!("timeline:row:{}", row.id).into_boxed_str());
-    let name = s.vcx.debug_bounds(selector).expect("the visible row's name was painted");
-    assert!((f64::from(f32::from(name.origin.y - origin.y)) - (v.height - height + top - v.scroll_y)).abs() < 1.);
+    // Full renders record debug_bounds for every mounted outline row; driven
+    // scroll-layer replays shift the recorded outline layer without prepainting.
+    if let Some(name) = s.vcx.debug_bounds(selector) {
+        let outline_shift = s.view.read_with(&s.vcx, |view, _| {
+            view.outline_scroll_shift_for_test()
+        });
+        assert!(
+            (f64::from(f32::from(name.origin.y - origin.y) + outline_shift)
+                - (v.height - height + top - v.scroll_y))
+                .abs()
+                < 1.
+        );
+    }
     let clip = frame.ops.iter().find(|op| {
         op.id.starts_with("clip:") && (op.bounds.y - (v.height - height + top - v.scroll_y)).abs() < 5.
     }).expect("the same row's clip is present");
@@ -2324,14 +2485,32 @@ fn assert_navigation_painted(s: &mut Stage, time: f64) {
     s.vcx.update(|window, _| {
         let scale = window.scale_factor();
         let quads = window.painted_quads();
+        let tracks = gpui::Bounds::new(
+            (origin + point(px(column as f32), px(tokens().metrics.ruler))).scale(scale),
+            gpui::size(
+                px((v.width - column) as f32),
+                px((v.height - f64::from(tokens().metrics.ruler)) as f32),
+            )
+            .scale(scale),
+        );
         for op in [clip, ruler, grid].into_iter().chain(footer.iter().filter(|op| op.id.ends_with("-thumb"))) {
             let b = op.bounds;
-            let close = |actual: f32, expected: f32| (actual - expected * scale).abs() <= 1.;
+            let expected = gpui::Bounds::new(
+                (origin + point(px(b.x as f32), px(b.y as f32))).scale(scale),
+                gpui::size(px(b.width as f32), px(b.height as f32)).scale(scale),
+            );
+            let expected = if op.id.starts_with("clip:") || op.id.starts_with("grid:") {
+                expected.intersect(&tracks)
+            } else {
+                expected
+            };
+            let close = |actual: f32, expected: f32| (actual - expected).abs() <= 1.;
             assert!(quads.iter().any(|quad| {
-                close(quad.bounds.origin.x.0, f32::from(origin.x) + b.x as f32)
-                    && close(quad.bounds.origin.y.0, f32::from(origin.y) + b.y as f32)
-                    && close(quad.bounds.size.width.0, b.width as f32)
-                    && close(quad.bounds.size.height.0, b.height as f32)
+                let drawn = quad.bounds.intersect(&quad.content_mask.bounds);
+                close(drawn.origin.x.0, expected.origin.x.0)
+                    && close(drawn.origin.y.0, expected.origin.y.0)
+                    && close(drawn.size.width.0, expected.size.width.0)
+                    && close(drawn.size.height.0, expected.size.height.0)
             }), "{} did not paint at {:?}", op.id, b);
         }
     });
@@ -2360,7 +2539,8 @@ fn timeline_navigation_keeps_all_geometry_together_on_mixed_input(cx: &mut TestA
         });
         s.vcx.run_until_parked();
     };
-    assert_navigation_painted(&mut s, 5.);
+    let origin = s.origin();
+    assert_navigation_painted(&mut s, origin, 5.);
     let start_moved = s.recorder.moved.get();
     let mut time = 2.;
     let mut y = 0.;
@@ -2383,32 +2563,32 @@ fn timeline_navigation_keeps_all_geometry_together_on_mixed_input(cx: &mut TestA
             assert!((t.scroll_time() - time).abs() < 1e-9);
             assert_eq!(t.scroll_y(), y);
         });
-        assert_navigation_painted(&mut s, 5.);
+        assert_navigation_painted(&mut s, origin, 5.);
     }
     assert!(s.recorder.moved.get() > start_moved, "the paused native playhead was notified");
 
     wheel(&mut s, 0., 18., Modifiers::control());
-    assert_navigation_painted(&mut s, 5.);
+    assert_navigation_painted(&mut s, origin, 5.);
     let before_pinch = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
     s.vcx.simulate_event(gpui::PinchEvent { position: at, delta: 0.12, ..Default::default() });
     s.vcx.run_until_parked();
     let after_pinch = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
     assert!(after_pinch.0 > before_pinch.0);
-    let pointer_x = f64::from(f32::from(at.x - s.origin().x));
+    let pointer_x = f64::from(f32::from(at.x - origin.x));
     let anchor = |(pps, time, column)| (pointer_x - column) / pps + time;
     assert!((anchor(before_pinch) - anchor(after_pinch)).abs() < 1e-6);
-    assert_navigation_painted(&mut s, 5.);
+    assert_navigation_painted(&mut s, origin, 5.);
 
     // Crossing an entire recorded viewport used to be the path that finally
     // redrew the cached geometry. An immediate step and its idle write must agree.
     wheel(&mut s, 0., -1240., Modifiers::none());
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), y + 1240.);
-    assert_navigation_painted(&mut s, 5.);
+    assert_navigation_painted(&mut s, origin, 5.);
     let before_idle = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
     s.vcx.executor().advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.time_mapping()), before_idle);
-    assert_navigation_painted(&mut s, 5.);
+    assert_navigation_painted(&mut s, origin, 5.);
 
     let before_pan = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
     let to = at - point(px(24.), px(0.));
@@ -2417,12 +2597,11 @@ fn timeline_navigation_keeps_all_geometry_together_on_mixed_input(cx: &mut TestA
     s.vcx.run_until_parked();
     let after_pan = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
     assert!((after_pan.1 - before_pan.1 - 24. / before_pan.0).abs() < 1e-9);
-    assert_navigation_painted(&mut s, 5.);
+    assert_navigation_painted(&mut s, origin, 5.);
     s.vcx.simulate_mouse_up(to, MouseButton::Middle, Modifiers::none());
     s.vcx.run_until_parked();
 
     // Both scrollbar drags use the same clamped viewport as wheel navigation.
-    let origin = s.origin();
     for horizontal in [true, false] {
         let bar = s.surface.read_with(&s.vcx, |t, _| t.bar().unwrap());
         let op = bar.ops(None, &tokens()).into_iter()
@@ -2440,7 +2619,7 @@ fn timeline_navigation_keeps_all_geometry_together_on_mixed_input(cx: &mut TestA
             assert!(moved.scroll_y > bar.scroll_y);
             assert_eq!(moved.scroll_time, bar.scroll_time);
         }
-        assert_navigation_painted(&mut s, 5.);
+        assert_navigation_painted(&mut s, origin, 5.);
     }
 }
 

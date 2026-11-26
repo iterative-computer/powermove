@@ -1,6 +1,12 @@
 mod common;
-use pm_kernel::commands::{layers::LayerPatch, properties::SetProperty};
-use pm_kernel::{Command, DocumentStore, LayerCommand, Origin, PropertyCommand, Scene3dCommand};
+use pm_kernel::commands::{
+    keyframes::{CopiedKey, KeyframeSpec, ReplaceKeyframes},
+    layers::LayerPatch,
+    properties::SetProperty,
+};
+use pm_kernel::{
+    Command, DocumentStore, KeyframeCommand, LayerCommand, Origin, PropertyCommand, Scene3dCommand,
+};
 use pm_scene3d::{from_model, to_model};
 use serde_json::{Value, json};
 fn store() -> DocumentStore {
@@ -34,6 +40,168 @@ fn layer(s: &DocumentStore, id: &str) -> Value {
         .unwrap()
         .clone()
 }
+
+fn delayed_camera() -> DocumentStore {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"add_camera","id":"cam"}));
+    s.execute(
+        LayerCommand::Set {
+            layer_id: "cam".into(),
+            patch: LayerPatch {
+                from: Some(8.),
+                duration: Some(2.),
+                ..Default::default()
+            },
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(layer(&s, "cam")["from"].as_f64(), Some(8.));
+    s
+}
+
+fn camera_fov_keys(s: &DocumentStore) -> Value {
+    let channel = layer(s, "cam")["d"]["data"]["camera"]["p"]["fov"].clone();
+    pm_scene3d::schema::validate_channel("camera", "fov", channel).unwrap()["kf"].clone()
+}
+
+fn add_camera_key(s: &mut DocumentStore, time: f64, toggle: bool) {
+    let command = if toggle {
+        KeyframeCommand::Toggle {
+            layer_id: "cam".into(),
+            channel: "camera.fov".into(),
+            time,
+            key_id: "fov-key".into(),
+            value: Some(60.0.into()),
+        }
+    } else {
+        KeyframeCommand::Add {
+            layer_id: "cam".into(),
+            channel: "camera.fov".into(),
+            time,
+            key_id: "fov-key".into(),
+            value: Some(60.0.into()),
+        }
+    };
+    s.execute(command.into(), Origin::Interface).unwrap();
+}
+
+#[test]
+fn camera_keyframe_add_and_toggle_before_the_layer_start() {
+    let mut s = delayed_camera();
+    add_camera_key(&mut s, 4.5, false);
+    assert_eq!(camera_fov_keys(&s)[0]["t"].as_f64(), Some(-3.5));
+    add_camera_key(&mut s, 4.5, true);
+    assert_eq!(camera_fov_keys(&s), json!([]));
+    add_camera_key(&mut s, 4.5, true);
+    assert_eq!(camera_fov_keys(&s)[0]["t"].as_f64(), Some(-3.5));
+    s.execute(
+        KeyframeCommand::Add {
+            layer_id: "cam".into(),
+            channel: "camera.fov".into(),
+            time: 8.,
+            key_id: "fov-at-start".into(),
+            value: Some(45.0.into()),
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let resolved = pm_kernel::commands::scene3d::resolve_scene_with_camera(
+        &s.snapshot(),
+        None,
+        4.5,
+        Some("cam"),
+    )
+    .unwrap();
+    assert_eq!(resolved.scene["camera"]["p"]["fov"]["v"].as_f64(), Some(60.));
+}
+
+#[test]
+fn camera_keyframe_move_before_the_layer_start() {
+    let mut s = delayed_camera();
+    add_camera_key(&mut s, 8., false);
+    assert_eq!(camera_fov_keys(&s)[0]["t"].as_f64(), Some(0.));
+    for (delta, expected) in [(-3.5, -3.5), (-10., -8.)] {
+        s.execute(
+            KeyframeCommand::Move {
+                key_ids: vec!["fov-key".into()],
+                delta,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+        assert_eq!(camera_fov_keys(&s)[0]["t"].as_f64(), Some(expected));
+    }
+}
+
+#[test]
+fn camera_keyframe_edit_and_paste_before_the_layer_start() {
+    let mut s = delayed_camera();
+    add_camera_key(&mut s, 8., false);
+    s.execute(
+        KeyframeCommand::Edit {
+            key_id: "fov-key".into(),
+            time: Some(4.5),
+            value: None,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let edited = camera_fov_keys(&s);
+    assert_eq!(edited[0]["t"].as_f64(), Some(-3.5));
+
+    s.execute(
+        KeyframeCommand::Paste {
+            layer_id: "cam".into(),
+            channel: "camera.fov".into(),
+            time: 6.,
+            keys: vec![CopiedKey {
+                at: 0.,
+                key: to_model(&edited[0]),
+            }],
+            new_ids: vec!["pasted".into()],
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(camera_fov_keys(&s)[1]["t"].as_f64(), Some(-2.));
+}
+
+#[test]
+fn camera_keyframe_replace_preserves_negative_times_and_clamps_to_comp_start() {
+    let mut s = delayed_camera();
+    for native in [false, true] {
+        let mut early = KeyframeSpec::new(-9., 50.);
+        let mut later = KeyframeSpec::new(-3.5, 60.);
+        if native {
+            early.id = Some("early".into());
+            later.id = Some("later".into());
+        }
+        s.execute(
+            KeyframeCommand::Replace(Box::new(ReplaceKeyframes {
+                layer_id: "cam".into(),
+                channel: "camera.fov".into(),
+                keyframes: vec![early, later],
+                replace: true,
+                expression: None,
+                preserve_hand_edits: false,
+                time: 8.,
+            }))
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+        let keys = camera_fov_keys(&s);
+        assert_eq!(keys[0]["t"].as_f64(), Some(-8.), "native: {native}");
+        assert_eq!(keys[1]["t"].as_f64(), Some(-3.5), "native: {native}");
+    }
+}
+
 #[test]
 fn create_update_undo_redo_is_exact() {
     let mut s = store();

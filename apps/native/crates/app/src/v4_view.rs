@@ -47,10 +47,14 @@ impl Natives {
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
+/// The rows sit in a driven scroll layer (P-SCROLL-LAYER) the surface steps
+/// with its own: a wheel step inside the recorded rows replays them shifted.
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
+    recorded_scroll_y: Cell<f32>,
     pub column: Cell<f32>,
+    handle: ScrollHandle,
     rows: Cell<(usize, usize)>,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     layout: RefCell<Option<TimelineOutline>>,
@@ -261,6 +265,10 @@ impl Outline {
     }
     #[cfg(test)]
     pub fn scroll_for_test(&self) -> f32 { self.scroll_y.get() }
+    #[cfg(test)]
+    pub fn scroll_layer_shift_for_test(&self) -> f32 {
+        self.recorded_scroll_y.get() - self.scroll_y.get()
+    }
     /// A row's top in the rows' content, when the timeline's scene has it.
     fn row_top(&self, row: &str) -> Option<f32> {
         self.scene
@@ -282,6 +290,44 @@ impl Outline {
             .borrow()
             .as_ref()
             .map_or(0., |s| s.content_height()) as f32
+    }
+    /// A wheel step that moved only the rows: the outline's layer replays
+    /// them at `scroll_y` without its view rendering again. False when the
+    /// view has to render (the surface notifies it then, through
+    /// [`Self::scrolled`]).
+    pub fn step(
+        &self,
+        scroll_y: f32,
+        rows: Option<(usize, usize)>,
+        height: f64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        // Keep the mounted overscan while it still covers every visible row.
+        // A new suggested range alone must not redraw on each small wheel step.
+        if rows.is_some_and(|rows| rows != self.rows.get()) {
+            let (start, end) = self.rows.get();
+            let covered = self.scene.borrow().as_ref().is_some_and(|scene| {
+                let visible = scene.visible_range(scroll_y as f64, height.max(0.));
+                start <= visible.start && end >= visible.end
+            });
+            if !covered {
+                return false;
+            }
+        }
+        let stepped =
+            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
+        if stepped {
+            self.scroll_y.set(scroll_y);
+            // Rows past JS's window are asked for as before; they arrive as
+            // a publication and draw the view.
+            if let (Some(rows), Some(view)) =
+                (rows, self.view.borrow().as_ref().and_then(|v| v.upgrade()))
+            {
+                view.update(cx, |v, cx| v.outline_rows(rows, cx));
+            }
+        }
+        stepped
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
         let mounted = rows.unwrap_or((0, 0));
@@ -1058,6 +1104,17 @@ impl SurfaceView {
         {
             self.outline_waiting = Some(compiled);
             if let Some(rows) = timeline.read(cx).pending_outline_range() {
+                // Never let a stale `sent_ranges` entry silence the range
+                // request needed to unblock `outline_waiting` / `pending_scene`.
+                if let Some(node) = self
+                    .prepared
+                    .nodes
+                    .values()
+                    .find(|n| n.outline_window.is_some())
+                {
+                    let id = node.id;
+                    self.sent_ranges.remove(&id);
+                }
                 self.outline_rows(rows, cx);
             }
             return;
@@ -2095,6 +2152,10 @@ impl SurfaceView {
     }
     #[cfg(test)]
     pub fn outline_scroll_for_test(&self) -> f32 { self.natives.outline.scroll_for_test() }
+    #[cfg(test)]
+    pub fn outline_scroll_shift_for_test(&self) -> f32 {
+        self.natives.outline.scroll_layer_shift_for_test()
+    }
     /// A new tree can have a different window even though the scroll hasn't
     /// moved (e.g. expanding properties switches from a retained outline).
     pub(crate) fn sync_outline_window(&mut self, cx: &mut Context<Self>) {
@@ -5289,20 +5350,22 @@ impl SurfaceView {
     }
     fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
         let outline = &self.natives.outline;
+        outline.recorded_scroll_y.set(outline.scroll_y.get());
+        outline
+            .handle
+            .set_offset(point(px(0.), px(-outline.scroll_y.get())));
         div()
             .id(("v4-outline-rows", id))
             .absolute()
-            .inset_0()
-            .overflow_hidden()
-            .child(
-                div()
-                    .absolute()
-                    .top(px(-outline.scroll_y.get()))
-                    .left_0()
-                    .right_0()
-                    .h(px(outline.content_height()))
-                    .child(rows),
-            )
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .overflow_y_scroll()
+            .track_scroll(&outline.handle)
+            .scroll_layer_driven()
+            .child(div().w_full().h(px(outline.content_height())))
+            .child(rows)
             .into_any_element()
     }
     /// A sheet shown in its own window (Export) is the whole window.

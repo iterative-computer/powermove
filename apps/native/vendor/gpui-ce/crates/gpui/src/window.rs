@@ -4366,14 +4366,19 @@ impl Window {
                 .timer(crate::scroll_layer::SETTLE)
                 .await;
             cx.update(|window, cx| {
-                // Gone (drawn again since): the steps stopped too.
-                let settled = window
-                    .scroll_layers
-                    .get(&key)
-                    .is_none_or(|l| l.generation == generation);
-                if settled {
-                    window.scroll_layer_moving = false;
-                    cx.notify(view);
+                // Skip notifying again if this layer was already re-recorded
+                // when a sibling scroll layer in the same view settled.
+                match window.scroll_layers.get(&key) {
+                    None => {
+                        window.scroll_layer_moving = false;
+                    }
+                    Some(l) if l.generation == generation => {
+                        window.scroll_layer_moving = false;
+                        if l.recorded_at != generation {
+                            cx.notify(view);
+                        }
+                    }
+                    Some(_) => {}
                 }
             })
             .ok();

@@ -40,6 +40,20 @@ fn preserves_authored_key_metadata() {
     );
 }
 #[test]
+fn camera_keyframes_use_signed_layer_local_times() {
+    let channel = |t| json!({"v":45,"kf":[{"t":t,"v":60,"i":"fov-key"}],"expr":null});
+    for t in [-100000., -3.5, 100000.] {
+        let p = channel(t);
+        assert_eq!(
+            schema::validate_channel("camera", "fov", p.clone()).unwrap(),
+            p
+        );
+    }
+    for t in [-100001., 100001.] {
+        assert!(schema::validate_channel("camera", "fov", channel(t)).is_err());
+    }
+}
+#[test]
 fn rejects_graph_cycles_missing_parents_and_reserved_ids() {
     for objects in [
         json!([{"id":"a","source":{"primitive":"box"},"parent":"b"},{"id":"b","source":{"primitive":"box"},"parent":"a"}]),
@@ -287,4 +301,59 @@ fn scatter_keeps_hidden_prototype_resources_without_making_them_visible() {
         c["layers"][0]["on"], false,
         "evaluation cannot edit authored visibility"
     );
+}
+
+#[test]
+fn resolve_scene_applies_camera_rotation_on_top_of_point_of_interest() {
+    use pm_scene3d::service::{Evaluator, WorldEvaluator};
+
+    struct IdentityWorld;
+    impl Evaluator for IdentityWorld {
+        fn active(&mut self, l: &Value, time: f64) -> pm_scene3d::Result<bool> {
+            service::StaticEvaluator.active(l, time)
+        }
+        fn value(
+            &mut self,
+            l: &Value,
+            path: &str,
+            c: &Value,
+            time: f64,
+        ) -> pm_scene3d::Result<Value> {
+            service::StaticEvaluator.value(l, path, c, time)
+        }
+    }
+    impl WorldEvaluator for IdentityWorld {
+        fn world(&mut self, l: &Value, _: f64) -> pm_scene3d::Result<[f64; 16]> {
+            let x = l["p"]["position.x"]["v"].as_f64().unwrap_or(0.);
+            let y = l["p"]["position.y"]["v"].as_f64().unwrap_or(0.);
+            let z = l["p"]["position.z"]["v"].as_f64().unwrap_or(0.);
+            Ok([1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.])
+        }
+        fn parent(&mut self, _: &Value, _: f64) -> pm_scene3d::Result<[f64; 16]> {
+            Ok([1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.])
+        }
+        fn opacity(&mut self, _: &Value, _: f64) -> pm_scene3d::Result<f64> {
+            Ok(1.)
+        }
+    }
+
+    let mut c = comp();
+    let cam = service::new_layer(
+        &c,
+        "cam",
+        "Camera",
+        Role::Camera,
+        json!({"camera":{"autoOrient":"target","p":{"targetX":0,"targetY":0,"targetZ":0}}}),
+        json!({"position.x":0,"position.y":0,"position.z":6,"rotation.x":15,"rotation.y":-20,"rotation":10}),
+        true,
+        None,
+        0.,
+    )
+    .unwrap();
+    c["layers"] = json!([cam]);
+    let resolved = service::resolve(&c, 0., &mut IdentityWorld).unwrap();
+    let target = resolved.targets["cam"];
+    let up = resolved.camera_up.unwrap();
+    assert!(target[0].abs() > 1.0 && target[1].abs() > 1.0, "target={target:?}");
+    assert!(up[0].abs() > 0.1, "up={up:?}");
 }

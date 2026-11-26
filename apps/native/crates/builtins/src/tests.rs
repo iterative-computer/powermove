@@ -1942,8 +1942,8 @@ fn the_viewer_shows_transport_only_when_no_timeline_is_shown() {
 
 /// "When I adjust position of the camera, it rotates the view" (Chike,
 /// 2026-11-14): a camera aims at its point of interest, so moving it re-aims
-/// it. Properties now shows that point and an Auto-Orient choice; Off keeps
-/// the view exactly when switched, and from then on Position only slides it.
+/// it. Properties shows the point in target mode and rotation in both modes.
+/// The Studio command still switches modes without moving the view.
 #[test]
 fn camera_position_only_translates_once_auto_orient_is_off() {
     let actor = actor();
@@ -2031,6 +2031,22 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
             panic!("{value}: {e}");
         }
     };
+    let orient = |mode: &str| {
+        let published = kernel.published("synthetic").unwrap();
+        let (label, commands) =
+            pm_panel_studio3d::properties::command(&published, 0., "3d.autoOrient", json!(mode))
+                .unwrap();
+        let request = Request::new(
+            Caller::native(),
+            pm_kernel::Call::Transact {
+                label: Some(label),
+                expected_revision: None,
+                body: pm_kernel::WriteBody::Commands(commands),
+            },
+        );
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    };
     // Where the shot camera stands and which way it looks.
     let view = || {
         let p = kernel.published("synthetic").unwrap();
@@ -2051,11 +2067,20 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     // Aiming at its point of interest: Properties shows the point, and moving
     // the camera turns it (the reported behaviour, now explained).
     let (mut model, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
-    assert_eq!(
-        row(&p, "3d.autoOrient").unwrap()["control"]["value"],
-        "target"
-    );
+    assert_eq!(transform(&p), ["Position", "Point of Interest", "Rotation"]);
+    assert!(row(&p, "3d.autoOrient").is_none());
+    let rotation = row(&p, "rotation3d").unwrap();
+    let axes = rotation["control"]["axes"].as_array().unwrap();
+    assert_eq!(axes.len(), 3);
+    for (axis, (label, path)) in
+        axes.iter()
+            .zip([("X", "rotation.x"), ("Y", "rotation.y"), ("Z", "rotation")])
+    {
+        assert_eq!(axis["axis"], label);
+        assert_eq!(axis["binding"]["channels"], json!([path]));
+        assert_eq!(axis["unit"], "°");
+        assert_eq!(axis["precision"], 2);
+    }
     let (_, straight) = view();
     write(
         &presenter,
@@ -2070,21 +2095,15 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         "a two-node camera re-aims when it moves"
     );
 
-    // Auto-Orient Off keeps that turned view exactly (a real yaw, so the
-    // rotation it writes is checked), and shows Rotation instead.
+    // Turning Auto-Orient Off through Studio keeps the view exactly and
+    // hides Point of Interest in Properties.
     let before = view();
-    let (mut model, p) = publish(&mut presenter);
+    let (_, p) = publish(&mut presenter);
     let position = row(&p, "position").unwrap();
     assert_eq!(position["control"]["axes"][0]["value"], 8.25);
     assert_eq!(position["control"]["axes"][0]["precision"], 2);
     assert_eq!(position["control"]["axes"][2]["axis"], "Z");
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "3d.autoOrient").unwrap(),
-        0,
-        json!("off"),
-    );
+    orient("off");
     let after = view();
     assert!(
         close(before.0, after.0) && close(before.1, after.1),
@@ -2116,33 +2135,56 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     );
 
     // Back toward a point of interest, the view still doesn't jump.
-    let (mut model, p) = publish(&mut presenter);
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "3d.autoOrient").unwrap(),
-        0,
-        json!("target"),
-    );
+    orient("target");
     let back = view();
     assert!(
         close(back.0, moved.0) && close(back.1, moved.1),
         "{moved:?} -> {back:?}"
     );
     let (_, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+    assert_eq!(transform(&p), ["Position", "Point of Interest", "Rotation"]);
+
+    let (mut model, _) = publish(&mut presenter);
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"key","row":"rotation3d"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let (_, p) = publish(&mut presenter);
+    let rotation = row(&p, "rotation3d").unwrap();
+    assert_eq!(rotation["animation"], "key-at-playhead");
+    assert!(
+        rotation["control"]["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|axis| axis["animation"] == "key-at-playhead")
+    );
 
     let request = Request::new(
         Caller::native(),
         pm_kernel::Call::Transact {
             label: None,
             expected_revision: None,
-            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::PropertyCommand::SetExpression {
-                layer_id: "cam".into(),
-                channel: "camera.targetX".into(),
-                expression: Some("value + 0.25".into()),
-            }
-            .into()]),
+            body: pm_kernel::WriteBody::Commands(
+                ["camera.targetX", "rotation.y"]
+                    .into_iter()
+                    .map(|channel| {
+                        pm_kernel::PropertyCommand::SetExpression {
+                            layer_id: "cam".into(),
+                            channel: channel.into(),
+                            expression: Some("value + 0.25".into()),
+                        }
+                        .into()
+                    })
+                    .collect(),
+            ),
         },
     );
     let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
@@ -2152,10 +2194,9 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         ack.reply
     );
     let (mut model, p) = publish(&mut presenter);
-    assert_eq!(
-        row(&p, "target").unwrap()["expression"]["source"],
-        "value + 0.25"
-    );
+    for id in ["target", "rotation3d"] {
+        assert_eq!(row(&p, id).unwrap()["expression"]["source"], "value + 0.25");
+    }
     let request = presenter
         .intent(
             &mut model,
@@ -4350,6 +4391,35 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
     assert!(section("system", &mut presenter).0.is_none());
 }
 
+#[test]
+fn properties_omit_3d_scene_for_an_empty_composition() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(
+        r#"{"id":"synthetic","name":"Empty","w":640,"h":360,"fps":30,"dur":5,"layers":[],"assets":{},"comps":{}}"#,
+    )
+    .unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let p = properties::Properties::default()
+        .snapshot(&mut model, 0., false)
+        .unwrap();
+    assert!(
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != "3d.scene")
+    );
+}
+
 /// 3d-studio.md §8 through the Properties presenter: each role's sections,
 /// a channel row writing like any property, and pop-ups and checkboxes
 /// going through the Studio's typed edits.
@@ -4640,31 +4710,27 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
 
     let (mut model, p) = publish(&mut presenter, "cam");
     assert_eq!(p["target"]["first"]["typeLabel"], "Camera");
-    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment", "Shot"]);
+    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment"]);
     let sections = p["sections"].as_array().unwrap();
     assert_eq!(
         sections
             .iter()
-            .take(5)
-            .map(|s| (s["title"].as_str().unwrap(), s["collapsed"].as_bool().unwrap()))
+            .take(4)
+            .map(|s| (
+                s["title"].as_str().unwrap(),
+                s["collapsed"].as_bool().unwrap()
+            ))
             .collect::<Vec<_>>(),
         [
             ("Transform", false),
             ("Camera", false),
             ("Depth of Field", true),
             ("Environment", true),
-            ("Shot", true),
         ]
     );
     assert_eq!(
         labels(&p, "Camera"),
-        [
-            "Projection",
-            "Field of View",
-            "Auto-Orient",
-            "Clip Start",
-            "Clip End",
-        ]
+        ["Projection", "Field of View", "Clip Start", "Clip End",]
     );
     assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
     assert_eq!(
@@ -4727,7 +4793,6 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
     assert!(!collapsed(&p, "3d.depth-of-field"));
     assert!(!collapsed(&p, "3d.environment"));
-    assert!(collapsed(&p, "3d.shot"));
     assert!(presenter
         .intent(
             &mut model,
@@ -4749,14 +4814,11 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     let (_, p) = publish(&mut presenter, "cam");
     assert_eq!(labels(&p, "Camera")[1], "Zoom");
     assert!(labels(&p, "Depth of Field").is_empty());
-    // The camera shows the composition's Render Quality, not a second sampler.
     assert!(row(&p, "3d.samples").is_none());
-    assert_eq!(
-        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
-        "production"
-    );
-    // With nothing selected, the composition's 3D Scene section sets quality
-    // and sky for the whole scene.
+    assert!(row(&p, "3d.scene.quality").is_none());
+    assert!(labels(&p, "Shot").is_empty());
+
+    // With nothing selected, the composition's 3D Scene section controls the sky.
     kernel
         .call(
             "synthetic",
@@ -4776,14 +4838,16 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         Default::default(),
     );
     let p = presenter.snapshot(&mut model, 0., false).unwrap();
-    let scene = row(&p, "3d.scene.quality").unwrap();
-    write(&presenter, &mut model, &scene, json!("final"));
-    let p = presenter.snapshot(&mut model, 0., false).unwrap();
-    assert_eq!(
-        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
-        "final"
-    );
+    let scene = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "3d.scene")
+        .unwrap();
+    assert!(scene["action"].is_null());
+    assert_eq!(labels(&p, "3D Scene"), ["Sky"]);
     assert_eq!(row(&p, "3d.scene.sky").unwrap()["control"]["value"], "none");
+
     // A 2D shape has no 3D section, only Extrude, off.
     let (mut model, p) = publish(&mut presenter, "a");
     assert_eq!(titles(&p), ["Extrude"]);

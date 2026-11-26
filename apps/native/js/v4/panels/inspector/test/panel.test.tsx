@@ -305,6 +305,133 @@ test("selection identity, axes, order, unit actions and checkbox AX semantics", 
   }
 });
 
+test("camera Transform presents Position, Point of Interest and one editable Rotation", async () => {
+  const s = snapshot();
+  if (s.target.kind !== "layers") throw new Error("expected layer selection");
+  s.target.first = {
+    ...s.target.first,
+    name: "Camera",
+    type: "extension",
+    typeLabel: "Camera",
+  };
+  const vector = (
+    id: string,
+    label: string,
+    paths: string[],
+    unit = "",
+  ): Row => ({
+    id,
+    label,
+    animation: "static",
+    control: {
+      kind: "number",
+      axes: ["X", "Y", "Z"].map((axis, i) => ({
+        axis,
+        binding: binding(paths[i]),
+        value: 0,
+        step: 1,
+        precision: 2,
+        unit,
+      })),
+    },
+  });
+  s.sections[0].rows = [
+    vector("position", "Position", ["position.x", "position.y", "position.z"]),
+    vector("target", "Point of Interest", [
+      "camera.targetX",
+      "camera.targetY",
+      "camera.targetZ",
+    ]),
+    vector(
+      "rotation3d",
+      "Rotation",
+      ["rotation.x", "rotation.y", "rotation"],
+      "°",
+    ),
+  ];
+  s.sections.push({
+    id: "3d.camera",
+    title: "Camera",
+    collapsed: false,
+    rows: [numberRow("camera.fov", "Field of View")],
+  });
+  const f = fixture(s);
+  const p = new Probe();
+  await f.session.start();
+  try {
+    await p.render(<InspectorPanel session={f.session} />);
+    const numbers = p.result.accessibility
+      .filter((node) => node.role === "NumberInput")
+      .map((node) => node.label);
+    expect(numbers).toEqual([
+      "Position X",
+      "Position Y",
+      "Position Z",
+      "Point of Interest X",
+      "Point of Interest Y",
+      "Point of Interest Z",
+      "Rotation X",
+      "Rotation Y",
+      "Rotation Z",
+      "Field of View",
+    ]);
+    const labels = p.result.accessibility.map((node) => node.label);
+    expect(labels).not.toContain("Auto-Orient");
+    expect(labels).not.toContain("Shot");
+    expect(labels).not.toContain("Render Quality");
+    await p.drive("key:rotation3d", "click");
+    await p.drive("key:rotation3d", "click", { altKey: true });
+    await f.session.settled();
+    expect(f.model.intents).toEqual([
+      { type: "key", row: "rotation3d", removeAnimation: false },
+      { type: "row-action", row: "rotation3d", action: "edit-expression" },
+    ]);
+  } finally {
+    await p.dispose();
+    await f.session.dispose();
+  }
+});
+
+test("3D Scene shows Sky and ignores the legacy Set Up Studio action", async () => {
+  const s = snapshot();
+  s.target = { kind: "composition", key: "c" };
+  s.sections = [
+    {
+      id: "3d.scene",
+      title: "3D Scene",
+      collapsed: false,
+      action: "set-up-studio",
+      rows: [
+        {
+          id: "3d.scene.sky",
+          label: "Sky",
+          control: {
+            kind: "choice",
+            value: "none",
+            binding: binding("3d.scene.sky"),
+            options: [{ v: "none", label: "None" }],
+          },
+        },
+      ],
+    },
+  ];
+  const f = fixture(s);
+  const p = new Probe();
+  await f.session.start();
+  try {
+    await p.render(<InspectorPanel session={f.session} />);
+    expect(p.node("value:3d.scene.sky").props.label).toBe("Sky");
+    const labels = p.result.accessibility.map((node) => node.label);
+    for (const label of ["Set Up Studio", "Shot", "Add Shot…", "Render Quality"]) {
+      expect(labels).not.toContain(label);
+    }
+    expect(() => p.node("section-action:3d.scene")).toThrow();
+  } finally {
+    await p.dispose();
+    await f.session.dispose();
+  }
+});
+
 test("header/menu anchors, alignment roving focus and exact effect destination", async () => {
   const f = fixture(),
     p = new Probe();

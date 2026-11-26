@@ -1473,7 +1473,7 @@ impl Engine {
             moment: spec.moment,
             scale: spec.scale.to_bits(),
             sampling: self.frame_sampling(scene, spec),
-            finished: spec.final_picture(scene),
+            finished: !self.camera_motion && spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
             tone: tone_id(self.output_tone),
             fonts: self.font_generation,
@@ -1736,9 +1736,9 @@ impl Engine {
     pub(crate) fn camera_motion(&mut self, moving: bool) {
         self.camera_motion = moving;
     }
-    fn frame_sampling(&self, scene: &Scene, spec: &FrameSpec) -> pm_render::sampling::Sampling {
+    fn frame_sampling(&self, _scene: &Scene, spec: &FrameSpec) -> pm_render::sampling::Sampling {
         if self.camera_motion
-            && !spec.final_picture(scene)
+            && !spec.exact
             && matches!(
                 self.studio_view,
                 crate::studio::ViewCamera::Custom { .. }
@@ -2338,6 +2338,16 @@ impl Engine {
                 } else {
                     spec.request(scene)?
                 };
+                if self.camera_motion
+                    && !spec.exact
+                    && matches!(
+                        self.studio_view,
+                        crate::studio::ViewCamera::Custom { .. }
+                            | crate::studio::ViewCamera::Orthographic { .. }
+                    )
+                {
+                    request.output_kind = pm_render::OutputKind::Preview;
+                }
                 request.sampling = self.frame_sampling(scene, &spec);
                 request.output_tone = self.output_tone;
                 request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
@@ -6517,5 +6527,61 @@ mod layer_drag_profile {
             assert_eq!(engine.effects_registered, effects_registered + 1);
             assert_ne!(engine.studio_content, studio_content);
         }
+    }
+
+    #[test]
+    fn camera_motion_uses_playback_sampling_even_when_paused_full() {
+        let doc = Arc::new(pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r##"{"id":"p","compId":"c","w":1920,"h":1080,"fps":30,"dur":4,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+                )
+                .unwrap(),
+            ),
+            1,
+        ));
+        let scene = Scene {
+            doc,
+            comp: "c".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("camera-motion-sampling").unwrap()).unwrap();
+        engine.studio_camera(
+            Some(crate::studio::FreeView {
+                eye: [0., 0., 6.],
+                target: [0., 0., 0.],
+                zoom: 1.,
+                ortho: false,
+                roll: 0.,
+            })
+            .into(),
+        );
+        let spec = FrameSpec {
+            exact: false,
+            settled: true,
+            scale: 1.,
+            ..FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 1920,
+                    height: 1080,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        assert!(spec.final_picture(&scene));
+        engine.camera_motion(true);
+        assert_eq!(
+            engine.frame_sampling(&scene, &spec),
+            pm_render::sampling::Sampling::Playback
+        );
+        engine.camera_motion(false);
+        assert_eq!(
+            engine.frame_sampling(&scene, &spec),
+            pm_render::sampling::Sampling::Final
+        );
     }
 }

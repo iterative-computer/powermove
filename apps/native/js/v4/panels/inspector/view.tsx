@@ -77,12 +77,11 @@ const horizontal = {
   flexDirection: "row",
   alignItems: "center",
 };
-const sectionActions: Record<SectionAction, string> = {
+const sectionActions: Partial<Record<SectionAction, string>> = {
   mask: "Add Mask",
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
-  "set-up-studio": "Set Up Studio",
   "time-remap": "Time Remap",
   "freeze-frame": "Freeze Frame",
   reverse: "Reverse",
@@ -90,7 +89,6 @@ const sectionActions: Record<SectionAction, string> = {
 };
 const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "refresh-fonts": "arrow.clockwise",
-  "set-up-studio": "light.max",
   // Time's three share the heading row: short words, no glyph, so they fit
   // beside "Time" in a narrow panel (their labels keep the full names).
   "time-remap": "",
@@ -1060,41 +1058,45 @@ export function InspectorPanel({
     section: (typeof snapshot.sections)[number],
     action: SectionAction,
     several: boolean,
-  ) => (
-    <Action
-      key={action}
-      id={
-        several
-          ? `section-action:${section.id}:${action}`
-          : `section-action:${section.id}`
-      }
-      label={sectionActions[action]}
-      symbol={sectionSymbols[action] ?? "plus"}
-      children={sectionShort[action] ?? sectionActions[action]}
-      style={{
-        gap: token("metrics.border"),
-        paddingLeft: token("metrics.gap"),
-        paddingRight: token("metrics.gap"),
-        color: token("colors.muted"),
-        fontSize: token("typography.label"),
-        symbolSize: token("metrics.symbol_inline"),
-      }}
-      disabled={target.kind === "layers" && target.first.locked}
-      onActivate={(event) =>
-        action === "animator"
-          ? session.nativeRequest({
-              type: "animator-menu",
-              anchor: event.currentTarget,
-              items: section.presets ?? [],
-            })
-          : session.send({
-              type: "section-action",
-              section: section.id,
-              action,
-            })
-      }
-    />
-  );
+  ) => {
+    const label = sectionActions[action];
+    if (!label) return null;
+    return (
+      <Action
+        key={action}
+        id={
+          several
+            ? `section-action:${section.id}:${action}`
+            : `section-action:${section.id}`
+        }
+        label={label}
+        symbol={sectionSymbols[action] ?? "plus"}
+        children={sectionShort[action] ?? label}
+        style={{
+          gap: token("metrics.border"),
+          paddingLeft: token("metrics.gap"),
+          paddingRight: token("metrics.gap"),
+          color: token("colors.muted"),
+          fontSize: token("typography.label"),
+          symbolSize: token("metrics.symbol_inline"),
+        }}
+        disabled={target.kind === "layers" && target.first.locked}
+        onActivate={(event) =>
+          action === "animator"
+            ? session.nativeRequest({
+                type: "animator-menu",
+                anchor: event.currentTarget,
+                items: section.presets ?? [],
+              })
+            : session.send({
+                type: "section-action",
+                section: section.id,
+                action,
+              })
+        }
+      />
+    );
+  };
   const [drop, setDrop] = useState(false);
   const canDrop =
     target.kind === "layers" &&

@@ -511,9 +511,8 @@ impl TimelineIndex {
                 }
             }
         }
-        let scene = content
-            .and_then(|d| d.get("data"))
-            .and_then(|d| d.get("scene"));
+        let data = content.and_then(|d| d.get("data"));
+        let scene = data.and_then(|d| d.get("scene"));
         for (field, prefix) in [("objects", "o"), ("lights", "light")] {
             for item in array(scene.and_then(|s| s.get(field))) {
                 if let Some(id) = string(item.get("id")) {
@@ -532,6 +531,27 @@ impl TimelineIndex {
             collect_direct(
                 scene.and_then(|s| s.get(field)).and_then(|n| n.get("p")),
                 field,
+                &mut channels,
+            );
+        }
+        // Standalone 3D layers (`powermove.3d.camera`, `powermove.3d.light`,
+        // `powermove.3d.object`) store animated channels directly under `d.data`
+        // (e.g. `camera.targetX/Y/Z`, `camera.fov`, `light.targetX/Y/Z`, `m.*`).
+        if scene.is_none()
+            && let Some(data) = data
+        {
+            for field in ["camera", "environment", "light"] {
+                collect_direct(
+                    data.get(field).and_then(|n| n.get("p")),
+                    field,
+                    &mut channels,
+                );
+            }
+            collect_direct(
+                data.get("object")
+                    .and_then(|o| o.get("material"))
+                    .and_then(|m| m.get("p")),
+                "m",
                 &mut channels,
             );
         }

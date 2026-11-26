@@ -1055,6 +1055,9 @@ impl Placement {
         pyramid: &Pyramid,
     ) -> Option<ResampleUniform> {
         let bounds = self.bounds_matrix(frame.0, frame.1)?;
+        // Near-plane intersections can project billions of pixels away.
+        // Use the frame-clamped origin so f32 retains subpixel distances.
+        let (ox, oy) = (bounds[4], bounds[5]);
         let i = &self.inverse;
         let mut u = ResampleUniform {
             inv: [
@@ -1085,8 +1088,8 @@ impl Placement {
                 frame.1 as f32,
             ],
             origin: [
-                self.bounds[0] as f32,
-                self.bounds[1] as f32,
+                ox as f32,
+                oy as f32,
                 f32::from(pyramid.inline_first),
                 f32::from(u8::from(self.texel_aligned(uv, from_fbo, pyramid))),
             ],
@@ -1098,8 +1101,7 @@ impl Placement {
                 bounds[3] as f32,
             ],
         };
-        // Unit normals, relative to the bounds' (integer) origin.
-        let (ox, oy) = (self.bounds[0], self.bounds[1]);
+        // Normalize and rebase the edges in f64 before uploading them.
         for (k, e) in self.edges.iter().take(MAX_EDGES).enumerate() {
             let len = e[0].hypot(e[1]);
             let (a, b) = (e[0] / len, e[1] / len);
@@ -1309,6 +1311,52 @@ mod tests {
         // Entirely behind: nothing.
         let m = [100.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, -1.0];
         assert!(placement(m, [0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn near_plane_edge_distances_resolve_each_row() {
+        // w = 2v - 1 puts the top two corners behind the eye. The left
+        // edge projects to x = 40 + y/2, even at the near-plane intersection.
+        let matrix = [
+            300.0, 0.0, 0.0, 20_220.0, 40_280.0, 2.0, -20_110.0, -40_140.0, -1.0,
+        ];
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        let placement = placement(matrix, uv).unwrap();
+        assert_eq!(placement.polygon.iter().filter(|p| p[1] < -1e9).count(), 2);
+
+        let gpu = pm_gpu::Gpu::new("near-plane coverage uniform").expect("GPU device");
+        let source = pm_gpu::Target::new(
+            &gpu.device,
+            "near-plane source",
+            1,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            pm_gpu::target::working_usage(),
+        );
+        let pyramid = Pyramid::base(&source.texture, Some(&source.view));
+        let uniform = placement
+            .uniform(
+                uv,
+                1.0,
+                false,
+                Sampling::Final,
+                (0, 0),
+                160,
+                (240, 160),
+                &pyramid,
+            )
+            .unwrap();
+
+        let [a, b, c, _] = uniform.edges[2]; // Left edge, from v = 1 to the near plane.
+        for row in 60..=140 {
+            let (x, y) = (100.5, row as f32 + 0.5);
+            let actual = c + (a * (x - uniform.origin[0]) + b * (y - uniform.origin[1]));
+            let expected = (x - 40.0 - y * 0.5) / 1.0_f32.hypot(0.5);
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "row {row}: {actual} vs {expected}"
+            );
+        }
     }
 
     #[test]

@@ -1863,11 +1863,19 @@ fn layer_draw_with_padding<'d>(
         } => {
             let plane = project(w, h, ax, ay)?;
             // Moving the camera projects the prepared layer-space raster
-            // directly. Building a new mip pyramid per visible text or
-            // vector quad would spend most of the preview on GPU setup.
+            // directly. Building a new mip pyramid per visible quad would
+            // spend most of the preview on GPU setup.
             let local_preview = camera_preview
                 && plane.is_some()
-                && matches!(&source, Source::Text(_) | Source::Vector(_) | Source::Shader(_));
+                && matches!(
+                    &source,
+                    Source::Text(_)
+                        | Source::Vector(_)
+                        | Source::Shader(_)
+                        | Source::Image { .. }
+                        | Source::Video { .. }
+                        | Source::Comp(_)
+                );
             // Settled level-2 planes and media use the output-density sampler.
             let sampling = (!local_preview
                 && (matches!(

@@ -446,6 +446,26 @@ impl<'d> Scope<'_, 'd> {
         let y = self.value3d(layer, "position.y", time, 0.0)?;
         let z = self.value3d(layer, "position.z", time, 0.0)?;
         let mut m = translation(x, y, z);
+        self.apply_local_rotation3d(layer, time, &mut m)?;
+        let mut scale = IDENTITY4;
+        scale[0] = self.value3d(layer, "scale.x", time, 100.0)? / 100.0;
+        scale[5] = self.value3d(layer, "scale.y", time, 100.0)? / 100.0;
+        scale[10] = self.value3d(layer, "scale.z", time, 100.0)? / 100.0;
+        scale[4] = math::tan(math::deg_to_rad(self.value3d(layer, "skew", time, 0.0)?)) * scale[5];
+        let ax = self.value3d(layer, "anchor.x", time, 0.0)?;
+        let ay = self.value3d(layer, "anchor.y", time, 0.0)?;
+        let az = self.value3d(layer, "anchor.z", time, 0.0)?;
+        Ok(multiply(&multiply(&m, &scale), &translation(-ax, -ay, -az)))
+    }
+
+    /// Apply the layer's Rotation and Orientation in world3d's local order.
+    fn apply_local_rotation3d(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        m: &mut Mat4,
+    ) -> JsResult<bool> {
+        let mut rotated = false;
         for (axis, key) in [
             (2, "rotation"),
             (1, "rotation.y"),
@@ -456,18 +476,11 @@ impl<'d> Scope<'_, 'd> {
         ] {
             let degrees = self.value3d(layer, key, time, 0.0)?;
             if degrees != 0.0 {
-                m = multiply(&m, &rotation(axis, degrees));
+                *m = multiply(m, &rotation(axis, degrees));
+                rotated = true;
             }
         }
-        let mut scale = IDENTITY4;
-        scale[0] = self.value3d(layer, "scale.x", time, 100.0)? / 100.0;
-        scale[5] = self.value3d(layer, "scale.y", time, 100.0)? / 100.0;
-        scale[10] = self.value3d(layer, "scale.z", time, 100.0)? / 100.0;
-        scale[4] = math::tan(math::deg_to_rad(self.value3d(layer, "skew", time, 0.0)?)) * scale[5];
-        let ax = self.value3d(layer, "anchor.x", time, 0.0)?;
-        let ay = self.value3d(layer, "anchor.y", time, 0.0)?;
-        let az = self.value3d(layer, "anchor.z", time, 0.0)?;
-        Ok(multiply(&multiply(&m, &scale), &translation(-ax, -ay, -az)))
+        Ok(rotated)
     }
 
     /// `parent3D(PM, L, T, parent = L.parent ? PM.L(L.parent) : null)`: the
@@ -587,6 +600,16 @@ impl<'d> Scope<'_, 'd> {
 
     /// A Studio Camera at this time, using the same parented eye/aim as meshes.
     pub fn camera_3d(&mut self, layer: &'d Node, time: f64) -> JsResult<Camera3d> {
+        self.camera_3d_with_up(layer, time)
+            .map(|(camera, _)| camera)
+    }
+
+    /// The evaluated camera and its world-space up vector before normalization.
+    pub fn camera_3d_with_up(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+    ) -> JsResult<(Camera3d, [f64; 3])> {
         let node = camera_data(layer);
         let mut channel = |key: &str, fallback: f64| -> JsResult<f64> {
             let Some(prop) = node.and_then(|n| n.get("p")).and_then(|p| p.get(key)) else {
@@ -610,7 +633,8 @@ impl<'d> Scope<'_, 'd> {
         let mut target = transform_aim(&parent, &aim);
         let delta: [f64; 3] = std::array::from_fn(|i| target[i] - position[i]);
         let distance = js_hypot(&delta);
-        if node::is_str(node.and_then(|n| n.get("autoOrient")), "off") || distance < 1e-6 {
+        let free_rotation = node::is_str(node.and_then(|n| n.get("autoOrient")), "off");
+        if free_rotation || distance < 1e-6 {
             let forward = normalized([-world[8], -world[9], -world[10]]);
             let distance = if distance > 1e-6 { distance } else { 10.0 };
             target = std::array::from_fn(|i| position[i] + forward[i] * distance);
@@ -624,8 +648,34 @@ impl<'d> Scope<'_, 'd> {
             ortho: node::is_str(node.and_then(|n| n.get("projection")), "orthographic"),
             ortho_height: 6.0,
         };
-        camera.roll = camera.roll_from_up([world[4], world[5], world[6]]);
-        Ok(camera)
+        let mut up = [world[4], world[5], world[6]];
+        let mut local_rotation = IDENTITY4;
+        if !free_rotation
+            && distance >= 1e-6
+            && flag(layer, "threeD")
+            && self.apply_local_rotation3d(layer, time, &mut local_rotation)?
+        {
+            // Start with the legacy look-at framing, including any roll from
+            // the parented Y axis before the camera's own rotation.
+            let sy = self.value3d(layer, "scale.y", time, 100.0)? / 100.0;
+            let skew_y = math::tan(math::deg_to_rad(self.value3d(layer, "skew", time, 0.0)?)) * sy;
+            let base_up = std::array::from_fn(|i| parent[i] * skew_y + parent[4 + i] * sy);
+            camera.roll = camera.roll_from_up(base_up);
+            let [forward, right, up_base] = camera.basis();
+            // The look-at basis maps local +X, +Y, and +Z to right, up,
+            // and backward. Rotate local -Z and +Y within that basis.
+            let to_world = |v: [f64; 3]| {
+                std::array::from_fn(|i| right[i] * v[0] + up_base[i] * v[1] - forward[i] * v[2])
+            };
+            let [rx, ry, rz] = [local_rotation[8], local_rotation[9], local_rotation[10]];
+            if [rx, ry, rz] != [0.0, 0.0, 1.0] {
+                let forward = normalized(to_world([-rx, -ry, -rz]));
+                camera.target = std::array::from_fn(|i| position[i] + forward[i] * distance);
+            }
+            up = to_world([local_rotation[4], local_rotation[5], local_rotation[6]]);
+        }
+        camera.roll = camera.roll_from_up(up);
+        Ok((camera, up))
     }
 
     pub fn projection_camera_3d(&mut self, time: f64) -> JsResult<Option<Camera3d>> {
@@ -1143,6 +1193,102 @@ mod tests {
             assert!(visible.iter().zip(&cached).all(|(a, b)| same(a, b)));
             assert!(same(cached[2], layers[2]));
         }
+    }
+
+    #[test]
+    fn camera_rotation_offsets_its_point_of_interest() {
+        let [s, c] = [0.5, 3.0_f64.sqrt() / 2.0];
+        let d = std::f64::consts::FRAC_1_SQRT_2;
+        for (channel, expected_forward, expected_up) in [
+            ("rotation.x", [-d * c, s, -d * c], [d * s, c, d * s]),
+            ("rotation.y", [-d * (c + s), 0., -d * (c - s)], [0., 1., 0.]),
+            ("rotation", [-d, 0., -d], [-d * s, c, d * s]),
+            ("orientation.x", [-d * c, s, -d * c], [d * s, c, d * s]),
+        ] {
+            let root = root(serde_json::json!([
+                {"id":"camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,
+                 "p":{"position.x":{"v":6},"position.z":{"v":6},(channel):{"v":30}},
+                 "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"perspective","p":{}}}}}
+            ]));
+            let comp = Comp::at_node(&root, &root, "c", 1);
+            let mut ev = Evaluator::new();
+            let mut scope = Scope::open(&mut ev, &comp);
+            let camera = scope.active_camera_3d(0.).unwrap().unwrap();
+            let [forward, _, up] = camera.basis();
+            let pose = scope.scene_camera(0.).unwrap();
+            assert_eq!(pose.position, camera.position);
+            assert_eq!(pose.target, camera.target);
+            for i in 0..3 {
+                assert!(
+                    (forward[i] - expected_forward[i]).abs() < 1e-12,
+                    "{channel}: {forward:?}"
+                );
+                assert!((up[i] - expected_up[i]).abs() < 1e-12, "{channel}: {up:?}");
+                assert!((pose.up[i] - expected_up[i]).abs() < 1e-12, "{channel}: {pose:?}");
+            }
+            assert_eq!(camera.position, [6., 0., 6.]);
+        }
+    }
+
+    #[test]
+    fn free_rotation_and_coincident_aim_keep_the_world_transform() {
+        for (mode, target, distance) in [("off", 0., 6.), ("target", 6., 10.)] {
+            let root = root(serde_json::json!([
+                {"id":"camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,
+                 "p":{"position.z":{"v":6},"rotation.x":{"v":25},"rotation.y":{"v":31},
+                      "rotation":{"v":17},"orientation.y":{"v":15}},
+                 "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"perspective",
+                     "autoOrient":mode,"p":{"targetZ":{"v":target}}}}}}
+            ]));
+            let comp = Comp::at_node(&root, &root, "c", 1);
+            let mut ev = Evaluator::new();
+            let mut scope = Scope::open(&mut ev, &comp);
+            let world = scope.world3d(&comp.layers()[0], 0., false).unwrap();
+            let forward = normalized([-world[8], -world[9], -world[10]]);
+            let camera = scope.active_camera_3d(0.).unwrap().unwrap();
+            assert_eq!(camera.position, [0., 0., 6.]);
+            assert_eq!(
+                camera.target,
+                std::array::from_fn(|i| camera.position[i] + forward[i] * distance)
+            );
+            assert_eq!(camera.roll, camera.roll_from_up([world[4], world[5], world[6]]));
+            assert_eq!(scope.scene_camera(0.).unwrap().target, camera.target);
+        }
+    }
+
+    #[test]
+    fn zero_local_camera_rotation_preserves_legacy_look_at_bits() {
+        let root = root(serde_json::json!([
+            {"id":"rig","type":"null","threeD":true,"on":true,"from":0,"dur":10,
+             "p":{"position.x":{"v":2.3},"rotation.x":{"v":23},"rotation":{"v":37}}},
+            {"id":"camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,"parent":"rig",
+             "p":{"position.z":{"v":6.4},"scale.y":{"v":73},"skew":{"v":12}},
+             "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"perspective",
+                 "p":{"targetX":{"v":1.3},"targetY":{"v":-0.5},"targetZ":{"v":0.9}}}}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let layer = &comp.layers()[1];
+        let world = scope.world3d(layer, 0., false).unwrap();
+        let parent = scope.parent3d(layer, 0., None).unwrap();
+        let position = [world[12], world[13], world[14]];
+        let target = transform_aim(&parent, &[1.3, -0.5, 0.9]);
+        let prior = Camera3d {
+            position,
+            target,
+            ..default_camera_25d(800., 500.)
+        };
+        let roll = prior.roll_from_up([world[4], world[5], world[6]]);
+        assert!(roll.abs() > 1.0);
+
+        let camera = scope.active_camera_3d(0.).unwrap().unwrap();
+        assert_eq!(
+            camera.position.map(f64::to_bits),
+            position.map(f64::to_bits)
+        );
+        assert_eq!(camera.target.map(f64::to_bits), target.map(f64::to_bits));
+        assert_eq!(camera.roll.to_bits(), roll.to_bits());
     }
 
     #[test]

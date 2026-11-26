@@ -1458,7 +1458,7 @@ impl Scene {
                     },
                 };
             }
-            if visible.contains(&i) {
+            if waveforms.is_none() && visible.contains(&i) {
                 ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":self.row_selected(row),"depth":row.depth,"focusable":false}));
             }
         }

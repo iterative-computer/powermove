@@ -907,21 +907,104 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
                 } else if result.camera_id.is_none() {
                     let position = math::apply(&world, [0.; 3]);
                     let mut target = math::apply(&parent, aim);
+                    let distance = (0..3)
+                        .map(|i| (target[i] - position[i]).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    let free_rotation = l["d"]["data"]["camera"]["autoOrient"] == "off";
                     // Auto-Orient Off (a one-node camera): it looks down its own
                     // −Z, turned by its rotation, and moving it never re-aims it.
                     // The aim point keeps the point of interest's distance, so
                     // focus and depth of field read the same.
-                    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
-                        let d = (0..3)
-                            .map(|i| (target[i] - position[i]).powi(2))
-                            .sum::<f64>()
-                            .sqrt();
+                    if free_rotation || !(distance.is_finite() && distance > 1e-6) {
                         let forward = normalize([-world[8], -world[9], -world[10]]);
-                        let d = if d.is_finite() && d > 1e-6 { d } else { 10. };
+                        let d = if distance.is_finite() && distance > 1e-6 {
+                            distance
+                        } else {
+                            10.
+                        };
                         target = [0, 1, 2].map(|i| position[i] + forward[i] * d);
                     }
+                    let mut up = [world[4], world[5], world[6]];
+                    // Match `pm_eval::space3d::Scope::camera_3d_with_up`: apply
+                    // local pitch/yaw/roll on top of the look-at frame so 3D
+                    // Studio models, picking, and 2.5D layers rotate identically.
+                    if !free_rotation && distance.is_finite() && distance >= 1e-6 && l["threeD"] == true {
+                        let mut channel = |path: &str, default: f64| -> Result<f64> {
+                            let Some(prop) = l["p"].get(path) else {
+                                return Ok(default);
+                            };
+                            let n = ev.value(l, path, prop, time)?.as_f64().unwrap_or(default);
+                            Ok(if n.is_finite() { n } else { default })
+                        };
+                        let mut local_rotation = [
+                            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+                        ];
+                        let mut rotated = false;
+                        for (axis, key) in [
+                            (2usize, "rotation"),
+                            (1, "rotation.y"),
+                            (0, "rotation.x"),
+                            (2, "orientation.z"),
+                            (1, "orientation.y"),
+                            (0, "orientation.x"),
+                        ] {
+                            let degrees = channel(key, 0.)?;
+                            if degrees != 0. {
+                                let rad = degrees.to_radians();
+                                let (s, c) = (rad.sin(), rad.cos());
+                                let r = match axis {
+                                    0 => [1., 0., 0., 0., 0., c, s, 0., 0., -s, c, 0., 0., 0., 0., 1.],
+                                    1 => [c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., 0., 0., 0., 1.],
+                                    _ => [c, s, 0., 0., -s, c, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
+                                };
+                                let mut prod = [0.; 16];
+                                for col in 0..4 {
+                                    for row in 0..4 {
+                                        prod[col * 4 + row] = (0..4)
+                                            .map(|k| local_rotation[k * 4 + row] * r[col * 4 + k])
+                                            .sum();
+                                    }
+                                }
+                                local_rotation = prod;
+                                rotated = true;
+                            }
+                        }
+                        if rotated {
+                            let sy = channel("scale.y", 100.)? / 100.;
+                            let skew_y = channel("skew", 0.)?.to_radians().tan() * sy;
+                            let base_up = [0, 1, 2].map(|i| parent[i] * skew_y + parent[4 + i] * sy);
+                            let forward = normalize([0, 1, 2].map(|i| target[i] - position[i]));
+                            let right0 = cross(forward, [0., 1., 0.]);
+                            let right0 = if dot(right0, right0) < 1e-12 {
+                                [1., 0., 0.]
+                            } else {
+                                normalize(right0)
+                            };
+                            let up0 = cross(right0, forward);
+                            let roll_x = -dot(base_up, right0);
+                            let roll_y = dot(base_up, up0);
+                            let roll = if roll_x.hypot(roll_y) < 1e-6 {
+                                0.
+                            } else {
+                                roll_x.atan2(roll_y)
+                            };
+                            let (rs, rc) = roll.sin_cos();
+                            let right = [0, 1, 2].map(|i| right0[i] * rc + up0[i] * rs);
+                            let up_base = [0, 1, 2].map(|i| up0[i] * rc - right0[i] * rs);
+                            let to_world = |v: [f64; 3]| {
+                                [0, 1, 2].map(|i| right[i] * v[0] + up_base[i] * v[1] - forward[i] * v[2])
+                            };
+                            let [rx, ry, rz] = [local_rotation[8], local_rotation[9], local_rotation[10]];
+                            if [rx, ry, rz] != [0., 0., 1.] {
+                                let forward = normalize(to_world([-rx, -ry, -rz]));
+                                target = [0, 1, 2].map(|i| position[i] + forward[i] * distance);
+                            }
+                            up = to_world([local_rotation[4], local_rotation[5], local_rotation[6]]);
+                        }
+                    }
                     result.camera_position = Some(position);
-                    result.camera_up = Some(normalize([world[4], world[5], world[6]]));
+                    result.camera_up = Some(normalize(up));
                     result.targets.insert(id.clone(), target);
                     result.camera_id = Some(id);
                 }

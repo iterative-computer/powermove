@@ -352,7 +352,7 @@ fn normalize_channel(v: Value, k: Kind) -> Result<Value> {
         .filter(|a| a.len() <= 2400)
         .ok_or_else(|| Error("Invalid keyframes (maximum 2400)".into()))?;
     for f in a {
-        number(&f["t"], 0., 100000., false)?;
+        number(&f["t"], -100000., 100000., false)?;
         check(&f["v"], k)?;
     }
     if !v["expr"].is_null() {

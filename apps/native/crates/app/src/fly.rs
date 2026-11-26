@@ -21,7 +21,7 @@ pub struct Held {
 
 impl Held {
     pub fn set(&mut self, key: &str, pressed: bool) {
-        let bit = match key {
+        let bit = match key.to_ascii_lowercase().as_str() {
             "a" => 0,
             "left" => 1,
             "d" => 2,
@@ -256,5 +256,14 @@ mod tests {
         assert!(moved(&b) > moved(&a) * 2.5);
         assert!(moved(&c) < moved(&a) * 0.3);
         assert!(moved(&d) > moved(&a) * 1.5);
+    }
+    #[test]
+    fn uppercase_wasd_keys_still_move_and_release() {
+        let mut f = Fly::new(start());
+        f.held.set("W", true);
+        assert!(f.tick(0.1));
+        assert!(f.position[2] < 10.);
+        f.held.set("W", false);
+        assert!(!f.tick(0.1));
     }
 }

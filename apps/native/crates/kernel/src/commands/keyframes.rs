@@ -108,7 +108,7 @@ pub struct CopiedKey {
 /// One key of `replace_keyframes`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyframeSpec {
-    /// Layer-local seconds (negative becomes 0).
+    /// Layer-local seconds, bounded by the composition start for delayed layers.
     pub time: f64,
     pub value: Value,
     /// Named ease (default linear); ignored when `temporal` is given.
@@ -723,6 +723,32 @@ fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(
     Ok(())
 }
 
+/// Write at a snapped layer-local time, including frames before a delayed layer.
+fn set_snapped_key(
+    prop: &mut Value,
+    time: f64,
+    value: Value,
+    ease: &str,
+    fps: f64,
+    new_id: impl FnOnce() -> String,
+) -> (String, bool) {
+    if time >= 0.0 {
+        return track::set_key_on(prop, time, value, ease, fps, false, new_id);
+    }
+    let keys = track::keys_mut(prop);
+    if let Some(key) = keys.iter_mut().find(|key| {
+        key.get("t")
+            .is_some_and(|t| (track::js_number(t) - time).abs() < 0.5 / fps)
+    }) {
+        values::obj(key).insert("v", value);
+        return (track::key_id(key), false);
+    }
+    let id = new_id();
+    keys.push(track::legacy_key(time, value, ease, id.clone()));
+    track::sort_keys(keys);
+    (id, true)
+}
+
 /// Add Keyframe at Playhead and the diamond.
 fn add_key(
     cx: &mut Cx<'_>,
@@ -735,7 +761,9 @@ fn add_key(
 ) -> Result<(), CommandError> {
     let (loc, mut layer, channel, path) = properties::resolve(cx, layer_id, channel)?;
     let fps = track::safe_fps(cx.fps(loc.comp_id.as_deref()));
-    let local = track::local_time(&layer, values::finite(time, "time")?);
+    let min_time = track::local_time(&layer, 0.0).min(0.0);
+    let local = track::local_time(&layer, values::finite(time, "time")?.max(0.0));
+    let snapped = values::snap(local, fps).max(min_time);
     let prop = channels::get_mut(&mut layer, &path).expect("resolved");
     let existing = track::keys_of(prop).iter().position(|k| {
         (track::js_number(k.get("t").unwrap_or(&Value::Null)) - local).abs() < 0.5 / fps
@@ -753,9 +781,11 @@ fn add_key(
                 None => value_at(prop, local, &channel),
             };
             let (id, created) =
-                track::set_key_on(prop, local, v, "linear", fps, true, || key_id.to_owned());
+                set_snapped_key(prop, snapped, v, "linear", fps, || key_id.to_owned());
             if created {
                 track::apply_presets(track::keys_mut(prop), &[(id, "linear".into(), None)]);
+            } else {
+                track::temporal_keys(track::keys_mut(prop));
             }
         }
     }
@@ -1020,13 +1050,14 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
             channel,
         });
     }
-    let fps = cx.fps(loc.comp_id.as_deref());
+    let fps = track::safe_fps(cx.fps(loc.comp_id.as_deref()));
+    let min_time = track::local_time(&layer, 0.0).min(0.0);
     let local_now = track::local_time(&layer, c.time);
     let prop = channels::get_mut(&mut layer, &path).expect("resolved");
     let numeric = prop.get("v").and_then(Value::as_f64).is_some();
     let mut next = Vec::with_capacity(c.keyframes.len());
     for (index, key) in c.keyframes.iter().enumerate() {
-        let time = values::finite(key.time, &format!("keyframe {} time", index + 1))?.max(0.0);
+        let time = values::finite(key.time, &format!("keyframe {} time", index + 1))?.max(min_time);
         let value = if numeric {
             Value::Number(values::finite(
                 track::js_number(&key.value),
@@ -1136,7 +1167,9 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
         };
         list.extend(out);
         let fallback = prop.get("v").cloned().unwrap_or(Value::Null);
-        let list = normalize_keyframes(list, &fallback);
+        // Treat authored times as-is when merging, including existing keys
+        // before composition start.
+        let list = normalize_keyframes_from(list, &fallback, f64::NEG_INFINITY);
         values::obj(prop).insert("kf", Value::Array(list));
         track::temporal_keys(track::keys_mut(prop));
     } else {
@@ -1153,9 +1186,8 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
                 Some(EaseSpec::Preset(p)) => p.clone(),
                 _ => "linear".to_owned(),
             };
-            let (id, _) = track::set_key_on(prop, *time, value.clone(), &ease, fps, false, || {
-                new_id("k")
-            });
+            let time = values::snap(*time, fps).max(min_time);
+            let (id, _) = set_snapped_key(prop, time, value.clone(), &ease, fps, || new_id("k"));
             edits.push((id, ease, Some(key.hold)));
         }
         track::apply_presets(track::keys_mut(prop), &edits);
@@ -1171,6 +1203,10 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
 /// time (stable), duplicate ids renewed, keys within 1e-6 s collapsed (the
 /// later wins).
 pub(crate) fn normalize_keyframes(raw: Vec<Value>, fallback: &Value) -> Vec<Value> {
+    normalize_keyframes_from(raw, fallback, 0.0)
+}
+
+fn normalize_keyframes_from(raw: Vec<Value>, fallback: &Value, min_time: f64) -> Vec<Value> {
     let expected = match fallback {
         Value::Number(_) => "number",
         Value::String(_) => "string",
@@ -1201,7 +1237,7 @@ pub(crate) fn normalize_keyframes(raw: Vec<Value>, fallback: &Value) -> Vec<Valu
         .into_iter()
         .filter_map(|key| {
             let t = track::js_number(key.get("t")?);
-            (key.as_object().is_some() && t.is_finite() && t >= 0.0 && valid(key.get("v")))
+            (key.as_object().is_some() && t.is_finite() && t >= min_time && valid(key.get("v")))
                 .then_some((t, key))
         })
         .map(|(t, mut key)| {

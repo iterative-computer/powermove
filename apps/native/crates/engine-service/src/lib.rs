@@ -3765,13 +3765,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             cursor = id;
             let budget = frame.max(interval);
+            let camera_motion = !capture && v.camera_rest_at.is_some();
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             let settling = r.full_for == Some(v.stamp);
             let quality = if capture {
                 1.
             } else {
                 // A layer being dragged is drawn as sharp as at rest (v1's,
-                // PM-395); only a playhead scrub adapts.
+                // PM-395); only a playhead scrub adapts. Active 3D camera
+                // flight keeps full scale while switching to interactive
+                // playback sampling and preview reuse (`resting = false`).
                 v.quality.scale(
                     &r.auto,
                     if moment == Moment::Scrub && (!v.adapt_drags || v.editing) {
@@ -3786,9 +3789,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // whole composition at its own size once the viewer has rested
             // (a capture reads that picture directly); playing and dragged
             // frames keep their policy. (A play waiting for its audio start
-            // draws as it is.)
-            let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
-            let text_grid = (quality == 1. && (moment != Moment::Scrub || v.editing))
+            // draws as it is.) Active 3D camera flight/orbit stays in preview
+            // mode and auto-settles via `camera_rest_at`.
+            let resting =
+                !camera_motion && quality == 1. && moment == Moment::Paused && !r.transport.running();
+            let text_grid = (!camera_motion && quality == 1. && (moment != Moment::Scrub || v.editing))
                 .then(|| engine.text_grid_scale(&scene, &v.config.output))
                 .flatten();
             let (scale, settled) = if capture {

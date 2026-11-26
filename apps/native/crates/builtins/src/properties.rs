@@ -1029,15 +1029,13 @@ impl Properties {
                 0.1,
             ));
         }
-        if role != Role::Camera || one_node {
-            groups.push((
-                "rotation3d",
-                "Rotation",
-                vec![("rotation.x", "X"), ("rotation.y", "Y"), ("rotation", "Z")],
-                "°",
-                1.,
-            ));
-        }
+        groups.push((
+            "rotation3d",
+            "Rotation",
+            vec![("rotation.x", "X"), ("rotation.y", "Y"), ("rotation", "Z")],
+            "°",
+            1.,
+        ));
         // A light aims at its target (the renderer ignores its rotation): the
         // target sits under its position, and is what the ◆ in the viewer drags.
         if role == Role::Light {
@@ -1145,49 +1143,12 @@ impl Properties {
         }
         Ok(rows)
     }
-    /// The composition's 3D summary: its render quality and sky, so a scene
-    /// looks right in a few clicks without selecting a camera or World.
+    /// The composition's sky control when it contains a Studio scene.
     fn scene_section(&mut self, model: &mut Inspector) -> Result<Option<Value>, String> {
-        use pm_panel_studio3d::properties::{QUALITY, SKIES, scene_summary};
+        use pm_panel_studio3d::properties::{SKIES, scene_summary};
         let Some(summary) = scene_summary(model.published()).map_err(|e| e.to_string())? else {
-            // An empty composition says where 3D starts, with the one-click
-            // lit set beside it.
-            let empty = model
-                .published()
-                .snapshot
-                .root()
-                .and_then(|root| {
-                    pm_kernel::model::comp_node(
-                        root,
-                        model.published().snapshot.open_comp().as_deref(),
-                    )
-                    .and_then(|c| c.get("layers"))
-                    .map(|l| matches!(l.kind(), pm_model::NodeKind::Array(a) if a.is_empty()))
-                })
-                .unwrap_or(false);
-            if !empty {
-                return Ok(None);
-            }
-            return Ok(Some(
-                json!({"id":"3d.scene","title":"3D Scene","collapsed":false,"rows":[],
-                "note":"Add a model, text or light from Layer ▸ Add 3D Layer, or start from a lit studio set.",
-                "action":"set-up-studio"}),
-            ));
+            return Ok(None);
         };
-        let quality = summary["quality"]["preset"]
-            .as_str()
-            .unwrap_or("production");
-        let mut options: Vec<Value> = QUALITY
-            .iter()
-            .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
-            .collect();
-        if quality == "custom" {
-            options.push(json!({"v":"custom","label":"Custom","disabled":true}));
-        }
-        let lease = self.control_lease("3d.scene.quality");
-        let mut rows = vec![
-            json!({"id":"3d.scene.quality","label":"Render Quality","control":{"kind":"choice","binding":lease,"value":quality,"options":options}}),
-        ];
         let sky = summary["sky"].as_str().unwrap_or("none");
         let mut skies: Vec<Value> = vec![json!({"v":"none","label":"None"})];
         skies.extend(
@@ -1199,23 +1160,9 @@ impl Properties {
             skies.push(json!({"v":"hdri","label":"HDRI Image","disabled":true}));
         }
         let lease = self.control_lease("3d.scene.sky");
-        rows.insert(0, json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}}));
-        // Add Shot (§8): a command pull-down, so it always shows its title.
-        // Every row is explicitly unchecked: the title row is the control's
-        // value, and a pop-up would otherwise mark it as a current choice.
-        let mut shots =
-            vec![json!({"v":"add","label":"Add Shot…","disabled":true,"checked":false})];
-        shots.extend(
-            pm_panel_studio3d::properties::shots()
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|s| json!({"v":s["id"],"label":s["label"],"detail":s["detail"],"checked":false})),
-        );
-        let lease = self.control_lease("3d.scene.shot");
-        rows.push(json!({"id":"3d.scene.shot","label":"Shot","control":{"kind":"choice","binding":lease,"value":"add","options":shots}}));
+        let sky_row = json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}});
         Ok(Some(
-            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"action":"set-up-studio"}),
+            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":[sky_row]}),
         ))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
@@ -2074,24 +2021,6 @@ impl Properties {
                         json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
                     ),
                 );
-                // Off moves the camera without re-aiming it; switching keeps the view.
-                let lease = self.control_lease("3d.autoOrient");
-                let value = if data["camera"]["autoOrient"] == "off" {
-                    "off"
-                } else {
-                    "target"
-                };
-                push(
-                    &mut groups,
-                    "Camera",
-                    row(
-                        "3d.autoOrient",
-                        "Auto-Orient",
-                        json!({"kind":"choice","binding":lease,"value":value,"options":[
-                            {"v":"target","label":"Toward Point of Interest","detail":"Moving the camera turns it to keep looking at the point of interest."},
-                            {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
-                    ),
-                );
                 if perspective_camera {
                     push(
                         &mut groups,
@@ -2321,30 +2250,6 @@ impl Properties {
             }
             Role::Camera => {
                 let environment = &data["environment"];
-                // Samples per frame come from the composition's Render
-                // Quality; the camera shows that same control, not a second one.
-                let preset = pm_panel_studio3d::properties::scene_summary(model.published())
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s["quality"]["preset"].as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "production".into());
-                let mut options: Vec<Value> = pm_panel_studio3d::properties::QUALITY
-                    .iter()
-                    .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
-                    .collect();
-                if preset == "custom" {
-                    options.push(json!({"v":"custom","label":"Custom","disabled":true}));
-                }
-                let lease = self.control_lease("3d.scene.quality");
-                push(
-                    &mut groups,
-                    "Shot",
-                    row(
-                        "3d.scene.quality",
-                        "Render Quality",
-                        json!({"kind":"choice","binding":lease,"value":preset,"options":options}),
-                    ),
-                );
                 push(
                     &mut groups,
                     "Environment",
@@ -2390,18 +2295,18 @@ impl Properties {
                     rows.sort_by_key(|row| match row["id"].as_str() {
                         Some("3d.projection") => 0,
                         Some("camera.fov" | "camera.zoom") => 1,
-                        Some("3d.autoOrient") => 2,
-                        _ => 3,
+                        _ => 2,
                     });
                 }
                 // Disclosure groups start closed unless a row inside is animated.
                 let closed = match title {
                     "Depth of Field" => !camera_dof_on && !camera_dof_animated,
-                    "Environment" | "Shot" | "Material Details" | "Material Options"
-                    | "Texture Maps" | "Atmosphere" | "Size" | "Ground" | "Variation"
-                    | "Placement" => rows
-                        .iter()
-                        .all(|r| r["animation"] != "animated" && r["animation"] != "key-at-playhead"),
+                    "Environment" | "Material Details" | "Material Options" | "Texture Maps"
+                    | "Atmosphere" | "Size" | "Ground" | "Variation" | "Placement" => {
+                        rows.iter().all(|r| {
+                            r["animation"] != "animated" && r["animation"] != "key-at-playhead"
+                        })
+                    }
                     _ => false,
                 };
                 let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);

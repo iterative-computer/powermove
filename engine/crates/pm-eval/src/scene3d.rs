@@ -679,18 +679,14 @@ impl<'d> Scope<'_, 'd> {
     }
 
     /// The camera `compositionRuntime` renders with: the topmost active
-    /// camera layer at its world position, aimed at its stored target mapped
-    /// through its parent space, with the layer's world Y as up; or the
-    /// studio camera.
+    /// camera layer with the same position, aim and roll as the plane
+    /// renderer; or the studio camera.
     pub fn scene_camera(&mut self, time: f64) -> JsResult<CameraPose> {
         for (layer, role) in self.scene_layers() {
             if role != Role3d::Camera || !self.active(layer, time)? {
                 continue;
             }
-            let world = self.world3d(layer, time, false)?;
-            let target = self.world_aim3d(layer, time)?.unwrap_or([0.0; 3]);
-            // `up.set(0, 1, 0).transformDirection(world)`.
-            let up = [world[4], world[5], world[6]];
+            let (camera, up) = self.camera_3d_with_up(layer, time)?;
             let len = (up[0] * up[0] + up[1] * up[1] + up[2] * up[2]).sqrt();
             let up = if len > 0.0 {
                 [up[0] / len, up[1] / len, up[2] / len]
@@ -698,8 +694,8 @@ impl<'d> Scope<'_, 'd> {
                 up
             };
             return Ok(CameraPose {
-                position: [world[12], world[13], world[14]],
-                target,
+                position: camera.position,
+                target: camera.target,
                 up,
             });
         }
