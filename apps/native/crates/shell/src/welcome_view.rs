@@ -38,6 +38,11 @@ pub struct WelcomeView {
     /// The two-column window outside the stage (a later launch's extension
     /// offer, recent work, a failure): it paints its own ground.
     pub ground: bool,
+    /// The sign-in sheet (Settings, Home, the Store): one column in a
+    /// small sheet in the app's appearance, the same sign-in as the stage's.
+    pub sheet: bool,
+    /// The sheet's Powermove tile, drawn once per appearance.
+    sheet_tile: Option<(bool, std::sync::Arc<gpui::Image>)>,
     /// The stage card's AppKit buttons, by id and label.
     natives: std::collections::HashMap<(String, String), Entity<NativeControl>>,
     /// While a wave carries the card: the snapshot its buttons paint.
@@ -46,6 +51,7 @@ pub struct WelcomeView {
     /// The account step's email and code fields (`Frame::sign_in`).
     email_field: Option<Entity<NativeControl>>,
     code_field: Option<Entity<NativeControl>>,
+    handle_field: Option<Entity<NativeControl>>,
     /// The sign-in's stage as last drawn: a new one gives its field the keyboard.
     sign_in_stage: Option<SignInStage>,
     /// The last wrong code's shake, and when it started.
@@ -73,11 +79,14 @@ impl WelcomeView {
             clock: None,
             stage: false,
             ground: false,
+            sheet: false,
+            sheet_tile: None,
             natives: Default::default(),
             snapshot: None,
             snapshots: 0,
             email_field: None,
             code_field: None,
+            handle_field: None,
             sign_in_stage: None,
             shake: (0, 0.),
             list_scroll: ScrollHandle::new(),
@@ -232,7 +241,7 @@ impl WelcomeView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let primary = self.frame.default.as_deref() == Some(&button.id);
-        if self.stage && crate::text::available(window) {
+        if (self.stage || self.sheet) && crate::text::available(window) {
             return self
                 .native_control(
                     button,
@@ -674,7 +683,13 @@ impl WelcomeView {
         let title_p = match &sign_in {
             Some(s) => {
                 let mut p = 1.;
-                for stage in [SignInStage::Email, SignInStage::Code, SignInStage::Done] {
+                for stage in [
+                    SignInStage::Email,
+                    SignInStage::Code,
+                    SignInStage::Done,
+                    SignInStage::Handle,
+                    SignInStage::Browser,
+                ] {
                     let shown = self.shown(
                         TITLE_KEY + stage as u64,
                         s.stage == stage,
@@ -1002,6 +1017,150 @@ impl WelcomeView {
             .child(right)
             .child(actions)
     }
+    /// The sign-in sheet: the Powermove tile, the title and line, the
+    /// stage's sign-in (the same block, fields and motion), one primary
+    /// action and the quiet links under it, in one column on the app's
+    /// ground in its appearance.
+    fn sheet_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.motion.frame(window);
+        let t = self.tokens.clone();
+        let c = &t.colors;
+        let frame = self.frame.clone();
+        let dark = t.scheme == pm_design::Scheme::Dark;
+        if self.sheet_tile.as_ref().is_none_or(|(d, _)| *d != dark) {
+            self.sheet_tile = crate::settings_window::tile_png("powermove", dark, SHEET_TILE as f64, 2.)
+                .map(|png| (dark, std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
+        }
+        let title_p = match &frame.sign_in {
+            Some(s) => {
+                let mut p = 1.;
+                for stage in [
+                    SignInStage::Email,
+                    SignInStage::Code,
+                    SignInStage::Done,
+                    SignInStage::Handle,
+                    SignInStage::Browser,
+                ] {
+                    let shown = self.shown(TITLE_KEY + stage as u64, s.stage == stage, Preset::Show, window);
+                    if s.stage == stage {
+                        p = shown;
+                    }
+                }
+                p
+            }
+            None => 1.,
+        };
+        let sign_in = frame.sign_in.clone().map(|s| self.sign_in_block(&s, window, cx));
+        let spoken = frame.title.replace('\n', " ");
+        let (tile_w, _) = crate::settings_window::tile_image_size(SHEET_TILE as f64);
+        let primary = frame
+            .default
+            .as_ref()
+            .and_then(|id| frame.buttons.iter().find(|b| &b.id == id))
+            .cloned();
+        let links: Vec<(String, String)> = frame
+            .buttons
+            .iter()
+            .filter(|b| Some(&b.id) != primary.as_ref().map(|p| &p.id))
+            .map(|b| (b.id.clone(), b.label.clone()))
+            .collect();
+        let mut column = div()
+            .w(px(COLUMN))
+            .flex()
+            .flex_col()
+            .items_center()
+            .text_center()
+            .children(self.sheet_tile.as_ref().map(|(_, image)| {
+                div()
+                    .id("sign-in-tile")
+                    .role(Role::Image)
+                    .aria_label("Powermove")
+                    .size(px(tile_w as f32))
+                    .child(gpui::img(image.clone()).size(px(tile_w as f32)))
+            }))
+            .child(
+                div()
+                    .id("welcome-title")
+                    .debug_selector(|| "welcome-title".into())
+                    .role(Role::Heading)
+                    .aria_label(spoken.clone())
+                    .mt(px(12.))
+                    .text_size(px(SHEET_TITLE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(relative(1.2))
+                    .letter_spacing(px(-0.2))
+                    .text_color(rgb(c.text))
+                    .relative()
+                    .top(px((1. - title_p) * 6.))
+                    .opacity(title_p.clamp(0., 1.))
+                    .child(frame.title.clone()),
+            )
+            .child(
+                div()
+                    .id("welcome-line")
+                    .role(Role::Label)
+                    .aria_label(frame.line.replace('\n', " "))
+                    .mt(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(rgb(c.secondary))
+                    .relative()
+                    .top(px((1. - title_p) * 10.))
+                    .opacity(title_p.clamp(0., 1.))
+                    .child(frame.line.clone()),
+            )
+            .children(sign_in.map(|block| div().w_full().mt(px(22.)).child(block)));
+        column = column.child(
+            div()
+                .id("welcome-primary")
+                .debug_selector(|| "welcome-primary".into())
+                .mt(px(22.))
+                .h(px(PRIMARY_HEIGHT))
+                .flex()
+                .justify_center()
+                .children(primary.map(|button| self.button(&button, window, cx))),
+        );
+        if !links.is_empty() {
+            column = column.child(
+                div()
+                    .id("welcome-links")
+                    .debug_selector(|| "welcome-links".into())
+                    .mt(px(12.))
+                    .flex()
+                    .justify_center()
+                    .gap(px(18.))
+                    .children(links.into_iter().map(|(id, label)| {
+                        let act = id.clone();
+                        div()
+                            .id(SharedString::from(format!("welcome-{id}")))
+                            .debug_selector(move || format!("welcome-{id}"))
+                            .role(Role::Link)
+                            .aria_label(label.clone())
+                            .tab_index(0)
+                            .text_size(px(13.))
+                            .text_color(rgb(c.secondary))
+                            .hover_style(|s| s.text_color(rgb(c.text)))
+                            .child(label)
+                            .on_click(cx.listener(move |v, _, _, cx| v.act(&act, cx)))
+                    })),
+            );
+        }
+        div()
+            .id("welcome")
+            .role(Role::Dialog)
+            .accessibility_id("shell.sign-in")
+            .aria_label(spoken)
+            .size_full()
+            .bg(rgb(c.window))
+            .font_family(pm_design::TEXT_FONT)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(SHEET_TOP))
+            .child(column)
+    }
     /// How far `key` has sprung in (0–1, or past it on an overshoot): from
     /// 0 the first time it is shown, back towards 0 while it is not, so a
     /// stage that comes back mid-way carries on from where it was.
@@ -1032,10 +1191,10 @@ impl WelcomeView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<NativeControl> {
-        let held = if which == "code" {
-            &self.code_field
-        } else {
-            &self.email_field
+        let held = match which {
+            "code" => &self.code_field,
+            "handle" => &self.handle_field,
+            _ => &self.email_field,
         };
         if let Some(field) = held {
             return field.clone();
@@ -1047,7 +1206,11 @@ impl WelcomeView {
             let mut field = NativeControl::new(
                 ControlSpec {
                     kind: Kind::Text,
-                    label: if code { "" } else { "name@example.com" },
+                    label: match which {
+                        "code" => "",
+                        "handle" => "your-name",
+                        _ => "name@example.com",
+                    },
                     identifier: &identifier,
                     value: &serde_json::Value::String(String::new()),
                     options: vec![],
@@ -1074,7 +1237,7 @@ impl WelcomeView {
                 field.describe("6-digit code");
             } else {
                 field.borderless();
-                field.describe("Email");
+                field.describe(if which == "handle" { "Handle" } else { "Email" });
             }
             field
         });
@@ -1098,10 +1261,10 @@ impl WelcomeView {
             },
         )
         .detach();
-        if code {
-            self.code_field = Some(field.clone());
-        } else {
-            self.email_field = Some(field.clone());
+        match which {
+            "code" => self.code_field = Some(field.clone()),
+            "handle" => self.handle_field = Some(field.clone()),
+            _ => self.email_field = Some(field.clone()),
         }
         field
     }
@@ -1148,6 +1311,18 @@ impl WelcomeView {
             SIGN_IN_KEY + 2,
             s.stage == SignInStage::Done,
             Preset::Pop,
+            window,
+        );
+        let handle_p = self.shown(
+            SIGN_IN_KEY + 3,
+            s.stage == SignInStage::Handle,
+            Preset::Show,
+            window,
+        );
+        let browser_p = self.shown(
+            SIGN_IN_KEY + 4,
+            s.stage == SignInStage::Browser,
+            Preset::Show,
             window,
         );
         let link = |id: &'static str, label: &str, cx: &mut Context<Self>| {
@@ -1278,6 +1453,64 @@ impl WelcomeView {
                         .opacity(code_p.clamp(0., 1.))
                         .child(div().flex().gap(px(8.)).children(cells))
                         .child(div().absolute().inset_0().child(field)),
+                );
+            }
+            SignInStage::Handle => {
+                let field = self.text_field("handle", window, cx);
+                let focused = field.update(cx, |f, cx| {
+                    f.host_text(&s.handle, s.revision);
+                    f.alpha = handle_p.clamp(0., 1.);
+                    if arrived {
+                        f.focus_on_paint();
+                    }
+                    cx.notify();
+                    f.focused()
+                });
+                // The email's well, an @ before the name.
+                block = block.child(
+                    div()
+                        .id("welcome-handle-well")
+                        .debug_selector(|| "welcome-handle-well".into())
+                        .w(px(PRIMARY_WIDTH))
+                        .h(px(FIELD_HEIGHT))
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .rounded(px(FIELD_RADIUS))
+                        .bg(rgba((c.text << 8) | 0x0d))
+                        .border_1()
+                        .border_color(if focused {
+                            rgb(c.focus)
+                        } else {
+                            rgba((c.text << 8) | 0x1c)
+                        })
+                        .relative()
+                        .top(px((1. - handle_p) * 10.))
+                        .opacity(handle_p.clamp(0., 1.))
+                        .child(div().text_color(rgb(c.secondary)).child("@"))
+                        .child(div().flex_1().child(field)),
+                );
+            }
+            SignInStage::Browser => {
+                let spin = !t.accessibility.reduce_motion;
+                if spin && self.clock.is_none() {
+                    window.request_animation_frame();
+                }
+                block = block.child(
+                    div()
+                        .id("welcome-browser")
+                        .debug_selector(|| "welcome-browser".into())
+                        .role(Role::Label)
+                        .aria_label("Waiting for your browser")
+                        .h(px(FIELD_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_color(rgb(c.secondary))
+                        .opacity(browser_p.clamp(0., 1.))
+                        .child(spinner(if spin { self.time() } else { 0. }, &t))
+                        .child("Finish in your browser"),
                 );
             }
             SignInStage::Done => {
@@ -1631,6 +1864,9 @@ impl Render for WelcomeView {
         if self.stage {
             return self.stage_window(window, cx);
         }
+        if self.sheet {
+            return self.sheet_window(window, cx);
+        }
         self.motion.frame(window);
         let kit = Kit::new(&self.tokens, &self.motion, Self::motion, window, cx);
         let t = self.tokens.clone();
@@ -1971,6 +2207,11 @@ const LOGO_TOP: f32 = 104.;
 /// Where the content's room ends, and where the actions start: the primary
 /// at one height on every frame, its links 12 under it, 64 above the bottom.
 const ACTIONS_TOP: f32 = 510.;
+/// The sign-in sheet: its size, its tile, its title and the air above.
+pub const SHEET_SIZE: (f32, f32) = (400., 452.);
+const SHEET_TILE: f32 = 52.;
+const SHEET_TITLE: f32 = 20.;
+const SHEET_TOP: f32 = 24.;
 /// The sign-in's six code cells, as wide together as the primary action.
 const CELLS: usize = 6;
 const CELL_WIDTH: f32 = 38.;

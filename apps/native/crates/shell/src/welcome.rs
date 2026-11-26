@@ -156,6 +156,10 @@ pub enum SignInStage {
     Code,
     /// Signed in: a check, then the next step.
     Done,
+    /// A new account picks its publisher handle.
+    Handle,
+    /// Signing in with Google in the browser; the return link continues.
+    Browser,
 }
 /// The account step's email and code. The fields send what is typed as
 /// `field:email:<text>` and `field:code:<digits>`; Return, Escape and Tab
@@ -165,6 +169,8 @@ pub struct SignIn {
     pub stage: SignInStage,
     pub email: String,
     pub code: String,
+    /// The handle typed on the handle stage (`field:handle:<text>`).
+    pub handle: String,
     /// A new revision puts `email` and `code` into the fields even while
     /// they are typed in (a wrong code cleared, the email back on Change).
     pub revision: u64,

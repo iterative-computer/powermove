@@ -48,6 +48,7 @@ mod extensions;
 mod figma_paste;
 mod file_coordination;
 mod first_run;
+mod sign_in;
 mod first_run_stage;
 // Development builds only (it draws with `pm_shell::capture_app`); the
 // stage tests run in them.

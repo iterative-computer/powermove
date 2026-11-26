@@ -387,6 +387,9 @@ impl Controller {
                     account_name: (s["id"] == "account")
                         .then(|| input["accountName"].as_str().map(str::to_owned))
                         .flatten(),
+                    account_email: (s["id"] == "account")
+                        .then(|| input["accountEmail"].as_str().map(str::to_owned))
+                        .flatten(),
                     dim: s["dim"].as_bool().unwrap_or(false),
                 })
             })

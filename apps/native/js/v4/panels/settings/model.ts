@@ -109,6 +109,7 @@ export interface Shortcuts {
 export interface Publication {
   revision: number;
   accountName?: string | null;
+  accountEmail?: string | null;
   shortcuts?: Shortcuts;
   project?: { id: string; name: string };
   /** Settings › Project's header: the project's poster (a host picture

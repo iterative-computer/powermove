@@ -98,6 +98,8 @@ pub struct Section {
     pub id: String,
     pub title: String,
     pub account_name: Option<String>,
+    /// The signed-in account's email, under its name on the account row.
+    pub account_email: Option<String>,
     /// A search is on and nothing in this section matches it.
     pub dim: bool,
 }
@@ -1290,7 +1292,14 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
         NSFontWeightSemibold
     })));
     title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-    let subtitle = NSTextField::labelWithString(ns_string!("Account"), mtm);
+    // Under the name, the account's email (a name that is the email says
+    // "Account").
+    let email = section
+        .account_email
+        .as_deref()
+        .filter(|email| !email.is_empty() && Some(*email) != section.account_name.as_deref());
+    let subtitle = NSTextField::labelWithString(&NSString::from_str(email.unwrap_or("Account")), mtm);
+    subtitle.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
     subtitle.setFont(Some(&NSFont::systemFontOfSize(
         NSFont::smallSystemFontSize(),
     )));
@@ -1410,6 +1419,8 @@ fn glyph(id: &str) -> Option<&'static str> {
         "privacy" => pierre!("ShieldFill"),
         "about" => pierre!("InfoFill"),
         "account" => drawn!("account"),
+        // The sign-in sheet's tile.
+        "powermove" => drawn!("powermove"),
         // Settings › Agents' apps with no mark of their own.
         "terminal" => drawn!("prompt"),
         "window" => drawn!("window"),
@@ -1596,6 +1607,37 @@ fn avatar_image(signed_in: bool, dark: bool) -> Option<Retained<NSImage>> {
         body.0, body.1, edge.0, edge.1
     );
     svg_image(&svg, size)
+}
+
+/// A section's tile as PNG bytes at `side` points drawn at `scale` (for a
+/// GPUI view: the sign-in sheet's Powermove tile), its shadow margin around it.
+pub fn tile_png(id: &str, dark: bool, side: f64, scale: f64) -> Option<Vec<u8>> {
+    use resvg::{tiny_skia, usvg};
+    let svg = tile_svg(id, dark)?;
+    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
+    let (w, h) = tile_size(side);
+    let (w, h) = ((w * scale).round() as u32, (h * scale).round() as u32);
+    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+    let view = tree.size();
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(w as f32 / view.width(), h as f32 / view.height()),
+        &mut pixmap.as_mut(),
+    );
+    // tiny-skia's pixels are premultiplied; PNG's are not.
+    let mut rgba = Vec::with_capacity(pixmap.data().len());
+    for px in pixmap.pixels() {
+        let c = px.demultiply();
+        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    let image = image::RgbaImage::from_raw(w, h, rgba)?;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
+    Some(bytes.into_inner())
+}
+/// The room a tile's image keeps around the tile, in points.
+pub fn tile_image_size(side: f64) -> (f64, f64) {
+    tile_size(side)
 }
 
 /// `svg` rasterised at 1× and 2× into one image of `size` points.

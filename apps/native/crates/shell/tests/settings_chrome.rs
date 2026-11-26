@@ -170,6 +170,7 @@ fn main() {
         id: id.into(),
         title: title.into(),
         account_name: None,
+        account_email: None,
         dim: false,
     };
     chrome.show(

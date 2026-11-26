@@ -105,6 +105,16 @@ impl Backend {
             .agent_link
             .environment()
             .is_some_and(|env| env.aero.is_some());
+        // The account's plan and its credits, once Powermove has said them
+        // (PM-750's usage).
+        if self.native.facts["cloud"]["signedIn"] == true
+            && let Some(pm_agents::inference::Standing::Ready { usage, .. }) =
+                self.native.agent_link.accounts().map(|a| a.aero())
+        {
+            let credits = &usage.facts()[0].1;
+            rows.push(json!({"id":"account.plan","section":"account","group":"Powermove Account",
+                "label":"Plan","control":"status","value":format!("{} · {credits}", usage.plan.name)}));
+        }
         if powermove {
             // Settings › Providers replaces the agent account rows.
             rows.extend(self.providers_rows());

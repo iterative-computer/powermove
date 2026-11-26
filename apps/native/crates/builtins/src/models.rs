@@ -968,6 +968,7 @@ impl Backend {
         }
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
             "accountName":self.native.facts["cloud"]["identity"],
+            "accountEmail":self.native.facts["cloud"]["email"],
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.
             "shortcuts":self.native.facts["shortcuts"],

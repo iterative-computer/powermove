@@ -1,5 +1,7 @@
 //! Every first-launch path on synthetic profiles, through the real coordinator.
 use super::*;
+use crate::sign_in::SIGNED_IN_PAUSE;
+use std::time::Instant;
 use pm_shell::welcome::Frame;
 use serde_json::json;
 use std::{fs, sync::Arc};

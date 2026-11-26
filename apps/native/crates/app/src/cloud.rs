@@ -7,7 +7,6 @@
 //! Keychain, AppKit sheets for the steps, and Settings › Account rows through
 //! the built-in facts. Every request runs on one service worker, so an
 //! exchange, its save and the refresh never interleave.
-use crate::sheets::{OpenSheet, from_surface};
 use gpui::{App, AsyncApp, Global};
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
@@ -17,7 +16,7 @@ use pm_services::{
     surfaces::{
         agent_auth::{
             Account, BrowserAuth, CloudHost, CloudReply, CloudTask, CloudWork, Exchange, Secret,
-            SessionPayload, SignIn, SignInStep, otp, valid_handle,
+            SessionPayload, valid_handle,
         },
         copy::{self, AuthError},
     },
@@ -594,15 +593,9 @@ fn cached(profile: &Path, origin: &str) -> Option<Account> {
 
 // ---- App state ----
 
-struct Flow {
-    signin: SignIn,
-    email: String,
-    error: Option<String>,
-    sheet: Option<OpenSheet>,
-    window: Retained<NSWindow>,
-    /// The handle the person typed, for a "taken" message.
-    handle: String,
-}
+/// A sign-in with Google, waiting for its `powermove://auth` return link:
+/// told the account's email, or the error.
+type Google = Box<dyn FnOnce(Result<String, String>, &mut App)>;
 struct Cloud {
     profile: PathBuf,
     origin: &'static str,
@@ -611,7 +604,7 @@ struct Cloud {
     revision: u64,
     worker: ServiceWorker<Http>,
     browser: BrowserAuth,
-    flow: Option<Flow>,
+    google: Option<Google>,
     busy: bool,
 }
 impl Global for Cloud {}
@@ -649,7 +642,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         revision: 1,
         worker,
         browser: BrowserAuth::default(),
-        flow: None,
+        google: None,
         busy: false,
     });
     // Whether a session is stored, and who it is, off the main thread.
@@ -838,13 +831,14 @@ fn review_cloud() -> bool {
     std::env::var_os("PM_NATIVE_REVIEW_CLOUD").is_some()
 }
 /// The review backend: code 123456 signs in, 000000 is wrong, 111111 has
-/// expired; an address at `offline.example` can't be reached. The session
-/// stays in memory.
+/// expired; an address at `offline.example` can't be reached; the handle
+/// `taken` is someone else's. The session stays in memory.
 #[cfg(debug_assertions)]
 mod review {
     use super::*;
     use std::sync::Mutex;
     static EMAIL: Mutex<String> = Mutex::new(String::new());
+    static HANDLE: Mutex<String> = Mutex::new(String::new());
     #[derive(Default)]
     pub struct Memory(Option<Vec<u8>>);
     impl Memory {
@@ -897,8 +891,19 @@ mod review {
                 _ => fail(ServiceErrorCode::PermissionDenied, "api:unauthorized"),
             },
             ("GET", "/v1/me") => {
-                Ok(json!({"user":{"id":"review","email":EMAIL.lock().unwrap().clone()}}))
+                let handle = HANDLE.lock().unwrap().clone();
+                Ok(json!({"user":{"id":"review","email":EMAIL.lock().unwrap().clone()},
+                    "publisher":{"handle":(!handle.is_empty()).then_some(handle)}}))
             }
+            // A new account's handle; "taken" is someone else's.
+            ("POST", "/v1/me/handle") => match body["handle"].as_str() {
+                Some("taken") => fail(ServiceErrorCode::InvalidInput, "api:handle_taken"),
+                Some(handle) => {
+                    *HANDLE.lock().unwrap() = handle.to_owned();
+                    Ok(json!({ "ok": true }))
+                }
+                None => fail(ServiceErrorCode::InvalidInput, "api:handle_invalid"),
+            },
             _ => Ok(json!({ "ok": true })),
         }
     }
@@ -923,221 +928,81 @@ pub(crate) fn sign_in_available(cx: &App) -> bool {
     cx.has_global::<Cloud>()
 }
 
-/// Settings › Account › Sign In…: the first step's sheet on `window`.
+/// Settings › Account › Sign In…, Home's and the Store's: the sign-in sheet
+/// on `window` (`sign_in`, the first run's sign-in in a sheet).
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
-    if !cx.has_global::<Cloud>() {
-        return;
+    if cx.has_global::<Cloud>() {
+        crate::sign_in::open(window, cx);
     }
-    let cloud = cx.global_mut::<Cloud>();
-    if cloud.flow.is_some() {
-        return;
-    }
-    let account = cloud.account.clone().filter(|_| cloud.signed_in);
-    cloud.flow = Some(Flow {
-        signin: SignIn::new(account.as_ref()),
-        email: account.map(|a| a.email).unwrap_or_default(),
-        error: None,
-        sheet: None,
-        window,
-        handle: String::new(),
+}
+/// Who is signed in has no publisher handle yet (a new account).
+pub(crate) fn needs_handle(cx: &App) -> bool {
+    cx.try_global::<Cloud>()
+        .and_then(|c| c.account.as_ref().filter(|_| c.signed_in))
+        .is_some_and(|a| a.handle.as_deref().is_none_or(str::is_empty))
+}
+/// The sign-in sheet's handle step: claim `handle` for the account.
+/// `done` gets the registry's error code on a failure.
+pub(crate) fn claim_handle(
+    handle: String,
+    cx: &mut App,
+    done: impl FnOnce(Result<(), String>, &mut App) + 'static,
+) {
+    run_code(CloudWork::ClaimHandle { handle }, cx, move |result, cx| {
+        done(result.map(drop), cx)
     });
-    present(cx);
 }
-fn surface(flow: &Flow) -> Option<crate::dialogs::Surface> {
-    use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
-    let message = copy::sign_in(flow.signin.step, false, "Google", &flow.email)?;
-    let button = |id: &'static str, label: &'static str, default: bool| Button {
-        id,
-        label,
-        default,
-        destructive: false,
-        enabled: true,
+/// The handle step's sentence for a failure.
+pub(crate) fn handle_error(code: &str, handle: &str) -> String {
+    let error = match code {
+        "api:rate_limited" => AuthError::RateLimited,
+        "api:client_too_old" => AuthError::OldClient,
+        "api:handle_taken" => AuthError::HandleTaken,
+        "api:handle_reserved" => AuthError::HandleReserved,
+        "api:handle_invalid" => AuthError::InvalidHandle,
+        _ => AuthError::SaveHandle,
     };
-    let field = |id: &str, label: &str, value: &str, placeholder: &'static str| Field {
-        placeholder: Some(placeholder),
-        ..Field::new(id, label, NativePiece::TextField, vec![value.into()])
-    };
-    let (fields, buttons) = match flow.signin.step {
-        SignInStep::Start => (
-            vec![field("email", "Email", &flow.email, "name@example.com")],
-            vec![
-                Button::cancel(false),
-                button("google", "Continue with Google", false),
-                button("apply", "Continue with Email", true),
-            ],
-        ),
-        SignInStep::Browser => (vec![], vec![Button::cancel(true)]),
-        SignInStep::Code => (
-            vec![field("code", "Code", "", "6-digit code")],
-            vec![
-                button("back", "Back", false),
-                button("resend", "Resend Code", false),
-                button("apply", "Continue", true),
-            ],
-        ),
-        SignInStep::Handle => (
-            vec![field("handle", "Handle", &flow.handle, "your-name")],
-            vec![
-                button("cancel", "Not Now", false),
-                button("apply", "Choose Handle", true),
-            ],
-        ),
-        SignInStep::Complete | SignInStep::Closed => return None,
-    };
-    let mut surface = Surface::sheet(
-        DialogId("cloud-sign-in".into()),
-        WindowId("cloud".into()),
-        &message.title,
-        fields,
-        "Continue",
-    );
-    surface.line = Some(message.line);
-    surface.buttons = buttons;
-    surface.warning = flow.error.clone();
-    Some(surface)
+    copy::auth_error(error, "Google", handle)
 }
-/// Shows the flow's current step, replacing the sheet of the last one.
-fn present(cx: &mut App) {
-    let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() else {
-        return;
-    };
-    if let Some(sheet) = flow.sheet.take() {
-        sheet.close();
-    }
-    let Some(surface) = surface(flow) else {
-        finish(cx);
-        return;
-    };
-    let window = flow.window.clone();
-    let tokens = pm_shell::tokens();
-    let open = OpenSheet::present(
-        from_surface(&surface, &tokens),
-        &window,
-        surface.first_selected.as_deref(),
-    );
-    let actions = open.actions.clone();
-    if let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() {
-        flow.sheet = Some(open);
-    }
-    cx.spawn(async move |cx| {
-        // Buttons only: a field also sends its id when editing ends. The
-        // loop ends when this step's sheet is replaced or closed.
-        while let Ok(action) = actions.recv().await {
-            if ["cancel", "apply", "google", "back", "resend"].contains(&action.as_str()) {
-                cx.update(|cx| act(&action, cx));
-            }
-        }
-    })
-    .detach();
+pub(crate) fn invalid_handle(handle: &str) -> Option<String> {
+    (!valid_handle(handle)).then(|| copy::auth_error(AuthError::InvalidHandle, "", handle))
 }
-fn finish(cx: &mut App) {
-    let cloud = cx.global_mut::<Cloud>();
-    if let Some(flow) = cloud.flow.take()
-        && let Some(sheet) = flow.sheet
-    {
-        sheet.close();
-    }
-    cloud.browser.cancel();
-    changed(cx);
-}
-/// A button of the current step.
-fn act(action: &str, cx: &mut App) {
-    let Some(flow) = cx.global_mut::<Cloud>().flow.as_mut() else {
-        return;
-    };
-    let text = |flow: &Flow, id: &str| {
-        flow.sheet
-            .as_ref()
-            .map(|s| s.text(id).trim().to_owned())
-            .unwrap_or_default()
-    };
-    match (flow.signin.step, action) {
-        (_, "cancel") => {
-            flow.signin.close();
-            finish(cx);
-        }
-        (SignInStep::Code, "back") => {
-            flow.signin.back();
-            flow.error = None;
-            present(cx);
-        }
-        (SignInStep::Start, "google") => {
-            flow.email = text(flow, "email");
-            browser(cx);
-        }
-        (SignInStep::Start, "apply") | (SignInStep::Code, "resend") => {
-            if flow.signin.step == SignInStep::Start {
-                flow.email = text(flow, "email");
-            }
-            let email = flow.email.clone();
-            if !email.contains('@') || email.len() > 254 {
-                flow.error = Some(copy::auth_error(AuthError::EmailRejected, "", ""));
-                present(cx);
-                return;
-            }
-            submit(CloudWork::SendEmail { email }, Step::Send, cx);
-        }
-        (SignInStep::Code, "apply") => {
-            let code = otp(&text(flow, "code"));
-            if code.len() != 6 {
-                flow.error = Some(copy::auth_error(AuthError::WrongCode, "", ""));
-                present(cx);
-                return;
-            }
-            let email = flow.email.clone();
-            submit(
-                CloudWork::VerifyEmail {
-                    email,
-                    code: Secret::new(code),
-                },
-                Step::Arrive,
-                cx,
-            );
-        }
-        (SignInStep::Handle, "apply") => {
-            let handle = text(flow, "handle").trim_start_matches('@').to_lowercase();
-            flow.handle = handle.clone();
-            if !valid_handle(&handle) {
-                flow.error = Some(copy::auth_error(AuthError::InvalidHandle, "", &handle));
-                present(cx);
-                return;
-            }
-            submit(CloudWork::ClaimHandle { handle }, Step::Arrive, cx);
-        }
-        _ => {}
-    }
-}
-/// Continue with Google: the registry's page opens in the browser and comes
-/// back through `powermove://auth`.
-fn browser(cx: &mut App) {
+/// Continue with Google: the registry's page opens in the browser and the
+/// `powermove://auth` return link finishes the sign-in, telling `done` the
+/// account's email or why not. `Err` here: the browser could not open.
+pub(crate) fn sign_in_with_google(
+    cx: &mut App,
+    done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+) -> Result<(), String> {
     let mut verifier = [0u8; 32];
     let mut state = [0u8; 16];
     if !random(&mut verifier) || !random(&mut state) {
-        return;
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     }
     let cloud = cx.global_mut::<Cloud>();
     let origin = cloud.origin;
     let Some(url) = cloud.browser.begin(origin, verifier, state, now_ms()) else {
-        return;
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     };
-    let profile = cloud.profile.clone();
-    let Some(flow) = cloud.flow.as_mut() else {
-        return;
-    };
-    let Some(ticket) = flow.signin.begin(SignInStep::Browser) else {
-        return;
-    };
-    // Nothing to wait for: the return link continues the flow.
-    let _ = ticket;
-    flow.error = None;
     // A development build reading a fixture Store never opens a browser over
     // the person's work: the review plays the browser from this file.
     if store_install::is_dev() {
-        let _ = std::fs::write(profile.join("dev-sign-in-url.txt"), url.as_str());
+        let _ = std::fs::write(cloud.profile.join("dev-sign-in-url.txt"), url.as_str());
     } else if !crate::platform::open_url(url.as_str()) {
-        flow.error = Some(copy::auth_error(AuthError::Browser, "Google", ""));
+        cloud.browser.cancel();
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     }
-    present(cx);
+    cloud.google = Some(Box::new(done));
+    Ok(())
+}
+/// The sheet closed or went back while Google was open: a late return link
+/// finds nothing waiting.
+pub(crate) fn cancel_google(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        let cloud = cx.global_mut::<Cloud>();
+        cloud.google = None;
+        cloud.browser.cancel();
+    }
 }
 fn random(bytes: &mut [u8]) -> bool {
     use std::io::Read;
@@ -1145,17 +1010,14 @@ fn random(bytes: &mut [u8]) -> bool {
         .and_then(|mut f| f.read_exact(bytes))
         .is_ok()
 }
-/// A `powermove://auth` return link (entrypoints). Only a sign-in waiting in
-/// its browser step takes it; anything else stays an Error Log line.
+/// A `powermove://auth` return link (entrypoints). Only a Google sign-in
+/// waiting for it takes it; anything else stays an Error Log line.
 pub fn receive_link(state: &str, token: &str, cx: &mut App) -> bool {
     if !cx.has_global::<Cloud>() {
         return false;
     }
     let cloud = cx.global_mut::<Cloud>();
-    let waiting = cloud
-        .flow
-        .as_ref()
-        .is_some_and(|f| f.signin.step == SignInStep::Browser);
+    let waiting = cloud.google.is_some();
     let raw = url::Url::parse_with_params("powermove://auth", [("state", state), ("token", token)])
         .map(String::from)
         .unwrap_or_default();
@@ -1166,33 +1028,26 @@ pub fn receive_link(state: &str, token: &str, cx: &mut App) -> bool {
     else {
         return false;
     };
-    submit(CloudWork::Exchange(exchange), Step::Arrive, cx);
+    let Some(done) = cloud.google.take() else {
+        return false;
+    };
+    run_code(CloudWork::Exchange(exchange), cx, move |result, cx| {
+        done(
+            result
+                .map(|reply| match reply {
+                    CloudReply::Account(Some(account)) => account.email,
+                    _ => String::new(),
+                })
+                .map_err(|_| copy::auth_error(AuthError::ReturnLink, "Google", "")),
+            cx,
+        )
+    });
     true
 }
-#[derive(Clone, Copy)]
-enum Step {
-    Send,
-    Arrive,
-    Settings,
-}
-/// Runs one account action on the worker and applies its reply.
-fn submit(work: CloudWork, step: Step, cx: &mut App) {
+/// Runs one Settings › Account action on the worker and applies its reply.
+fn submit(work: CloudWork, cx: &mut App) {
     let cloud = cx.global_mut::<Cloud>();
-    let ticket = match cloud.flow.as_mut() {
-        Some(flow) if !matches!(step, Step::Settings) => {
-            // The browser step already holds its flight; the exchange reuses
-            // a fresh one so a late reply of an older attempt is refused.
-            if flow.signin.step == SignInStep::Browser {
-                flow.signin.back();
-                flow.signin.step = SignInStep::Browser;
-            }
-            flow.signin.begin(SignInStep::Code)
-        }
-        _ => Some(pm_services::surfaces::Flight::default().start()),
-    };
-    let Some(ticket) = ticket else {
-        return;
-    };
+    let ticket = pm_services::surfaces::Flight::default().start();
     let Some(task) = CloudTask::new(ticket, cloud.origin, work) else {
         return;
     };
@@ -1205,68 +1060,28 @@ fn submit(work: CloudWork, step: Step, cx: &mut App) {
         let Some(done) = wait(pending, cx).await else {
             return;
         };
-        cx.update(|cx| complete(done, step, cx));
+        cx.update(|cx| complete(done, cx));
     })
     .detach();
 }
-fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, step: Step, cx: &mut App) {
+fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, cx: &mut App) {
     let cloud = cx.global_mut::<Cloud>();
     cloud.busy = false;
-    let error = done.result.as_ref().err().map(|e| e.to_string());
-    match (&done.result, cloud.flow.as_mut()) {
-        (Ok(CloudReply::Account(account)), _) => {
+    match &done.result {
+        Ok(CloudReply::Account(account)) => {
             cloud.signed_in = account.is_some();
             cloud.account = account.clone();
         }
-        (Ok(CloudReply::SignedOut), _) => {
+        Ok(CloudReply::SignedOut) => {
             cloud.signed_in = false;
             cloud.account = None;
         }
         _ => {}
     }
-    if let Some(flow) = cloud.flow.as_mut()
-        && !matches!(step, Step::Settings)
-    {
-        let applied = match (step, done.result) {
-            (Step::Send, result) => flow.signin.sent(
-                done.ticket,
-                now_ms(),
-                result.map(drop).map_err(|e| e.to_string()),
-            ),
-            (_, Ok(CloudReply::Account(Some(account)))) => {
-                flow.signin.arrived(done.ticket, Ok(account))
-            }
-            (_, result) => flow.signin.arrived(
-                done.ticket,
-                Err(result.err().map(|e| e.to_string()).unwrap_or_default()),
-            ),
-        };
-        if applied {
-            flow.error = error.map(|code| explain(&code, flow));
-            present(cx);
-        }
-    } else if let Some(code) = error {
-        crate::alert::note(&explain_settings(&code), "");
+    if let Err(error) = &done.result {
+        crate::alert::note(&explain_settings(&error.to_string()), "");
     }
     changed(cx);
-}
-/// The sheet's sentence for a failure, by step (v1.2.0 SignInSheet).
-fn explain(code: &str, flow: &Flow) -> String {
-    let error = match (flow.signin.step, code) {
-        (_, "api:rate_limited") => AuthError::RateLimited,
-        (_, "api:client_too_old") => AuthError::OldClient,
-        (SignInStep::Start, "network") => AuthError::Offline,
-        (SignInStep::Start, _) => AuthError::EmailRejected,
-        (SignInStep::Code, "api:unauthorized" | "api:bad_request") => AuthError::WrongCode,
-        (SignInStep::Code, "api:gone") => AuthError::ExpiredCode,
-        (SignInStep::Code, _) => AuthError::CheckCode,
-        (SignInStep::Handle, "api:handle_taken") => AuthError::HandleTaken,
-        (SignInStep::Handle, "api:handle_reserved") => AuthError::HandleReserved,
-        (SignInStep::Handle, "api:handle_invalid") => AuthError::InvalidHandle,
-        (SignInStep::Handle, _) => AuthError::SaveHandle,
-        _ => AuthError::ReturnLink,
-    };
-    copy::auth_error(error, "Google", &flow.handle)
 }
 fn explain_settings(code: &str) -> String {
     if code == "network" {
@@ -1281,13 +1096,13 @@ fn explain_settings(code: &str) -> String {
 /// Settings › Account › Sign Out.
 pub fn sign_out(cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        submit(CloudWork::SignOut, Step::Settings, cx);
+        submit(CloudWork::SignOut, cx);
     }
 }
 /// Settings › Account › Remember Installs on This Account.
 pub fn set_remember(remember: bool, cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        submit(CloudWork::RememberInstalls(remember), Step::Settings, cx);
+        submit(CloudWork::RememberInstalls(remember), cx);
     }
 }
 /// Settings › Account › Delete Account…, after its confirmation.
