@@ -51,6 +51,9 @@ const AVATAR_INSET: f64 = (ACCOUNT_HEIGHT - AVATAR) / 2.;
 const HEADER_HEIGHT: f64 = 32.;
 /// The page header's tile, on the traffic lights' line.
 const HEADER_TILE: f64 = 24.;
+/// Dark mode's black veil over the sidebar material (#4A over the material
+/// alone lands near #2E).
+const DARK_VEIL: f64 = 0.37;
 /// The selection's glide, measured from Radian's (critically damped,
 /// settles in about 0.2 s): unit mass, stiffness and damping.
 const GLIDE: (f64, f64) = (900., 57.);
@@ -321,6 +324,8 @@ pub struct State {
     /// may still say the old page once, and the selection must not glide
     /// back to it and out again.
     chosen: RefCell<Option<(String, std::time::Instant)>>,
+    /// The sidebar's material and dark mode's veil over it.
+    material: RefCell<Option<(Retained<NSVisualEffectView>, Retained<NSView>)>>,
 }
 
 define_class!(
@@ -684,6 +689,7 @@ impl SettingsChrome {
                 dark: Cell::new(true),
                 quiet: Cell::new(false),
                 chosen: RefCell::new(None),
+                material: RefCell::new(None),
             });
             unsafe { msg_send![super(this), init] }
         };
@@ -800,6 +806,14 @@ impl SettingsChrome {
         material.setState(NSVisualEffectState::FollowsWindowActiveState);
         material.setTranslatesAutoresizingMaskIntoConstraints(false);
         sidebar.addSubview(&material);
+        // Dark mode's sidebar is held near #2E2E2E (Raycast's depth): the
+        // material alone lifts to a washed-out grey when the window takes
+        // focus. A black veil over it, and the material held active, so
+        // focus changes nothing. Light mode keeps the material as it is.
+        let veil = NSView::new(mtm);
+        veil.setWantsLayer(true);
+        veil.setTranslatesAutoresizingMaskIntoConstraints(false);
+        sidebar.addSubview(&veil);
         sidebar.addSubview(&search);
         sidebar.addSubview(&scroll);
         let guide = sidebar.safeAreaLayoutGuide();
@@ -815,6 +829,14 @@ impl SettingsChrome {
                 .constraintEqualToAnchor(&sidebar.leadingAnchor()),
             material
                 .trailingAnchor()
+                .constraintEqualToAnchor(&sidebar.trailingAnchor()),
+            veil.topAnchor()
+                .constraintEqualToAnchor(&sidebar.topAnchor()),
+            veil.bottomAnchor()
+                .constraintEqualToAnchor(&sidebar.bottomAnchor()),
+            veil.leadingAnchor()
+                .constraintEqualToAnchor(&sidebar.leadingAnchor()),
+            veil.trailingAnchor()
                 .constraintEqualToAnchor(&sidebar.trailingAnchor()),
             search
                 .topAnchor()
@@ -975,6 +997,7 @@ impl SettingsChrome {
         *chrome.ivars().table.borrow_mut() = Some(table);
         *chrome.ivars().search.borrow_mut() = Some(search);
         *chrome.ivars().selection.borrow_mut() = Some(selection);
+        *chrome.ivars().material.borrow_mut() = Some((material, veil));
         chrome.paint_selection(&window.effectiveAppearance());
         // GPUI's view takes its place in the detail now, so GPUI lays the
         // page out at the detail's size from the first frame.
@@ -1121,6 +1144,19 @@ impl SettingsChrome {
         let state = self.chrome.ivars();
         let appearance = self.window.effectiveAppearance();
         let dark = is_dark(&appearance);
+        if let Some((material, veil)) = state.material.borrow().as_ref() {
+            material.setState(if dark {
+                NSVisualEffectState::Active
+            } else {
+                NSVisualEffectState::FollowsWindowActiveState
+            });
+            veil.setHidden(!dark);
+            if let Some(layer) = veil.layer() {
+                layer.setBackgroundColor(Some(
+                    &NSColor::colorWithSRGBRed_green_blue_alpha(0., 0., 0., DARK_VEIL).CGColor(),
+                ));
+            }
+        }
         self.chrome.paint_selection(&appearance);
         if state.dark.replace(dark) != dark
             && let Some(table) = state.table.borrow().as_ref()
