@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """A fake `codex` for Settings › Providers tests and on-screen passes: the
-App Server account methods Powermove calls, with Codex 0.169's keyring store
-(one item, in the lane's fake keychain file PM_AGENT_FAKE_KEYCHAIN, service
-PM_CODEX_KEYRING_SERVICE, account
-`cli|<first 16 hex of sha256(realpath(CODEX_HOME))>`, Codex's auth.json
-document). Sign-in follows the Codex ChatGPT route against the fake issuer
-PM_FAKE_AUTH (authorize, loopback /auth/callback, code exchange with PKCE);
-`account/read` with `refreshToken` refreshes when the access token is within
-five minutes of expiring, the only refresher, as Codex is. It never runs
-`security` and never touches a real keychain."""
-import base64, fcntl, hashlib, json, os, secrets, sys, threading, time, urllib.parse, urllib.request
+App Server account methods Powermove calls, with Codex 0.169's file store
+(`$CODEX_HOME/auth.json`, 0600, Codex's auth.json document). It refuses a
+home whose config.toml asks for any other store: Powermove's Codex never
+uses the Keychain. Sign-in follows the Codex ChatGPT route against the fake
+issuer PM_FAKE_AUTH (authorize, loopback /auth/callback, code exchange with
+PKCE); `account/read` with `refreshToken` refreshes when the access token is
+within five minutes of expiring, the only refresher, as Codex is. It never
+runs `security` and never touches a keychain."""
+import base64, fcntl, hashlib, json, os, re, secrets, sys, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 if os.environ.get("PM_FAKE_CODEX_LOG"):
     sys.stderr = open(os.environ["PM_FAKE_CODEX_LOG"], "a")
-SERVICE = os.environ.get("PM_CODEX_KEYRING_SERVICE", "")
 ISSUER = os.environ.get("PM_FAKE_AUTH", "")
-if not SERVICE or SERVICE == "Codex Auth":
-    sys.exit("fake codex: set a lane-only PM_CODEX_KEYRING_SERVICE")
 HOME = os.path.realpath(os.environ["CODEX_HOME"])
-KEY = "cli|" + hashlib.sha256(HOME.encode()).hexdigest()[:16]
+AUTH = os.path.join(HOME, "auth.json")
 out_lock = threading.Lock()
-# The Keychain is the lane's fake store (PM_AGENT_FAKE_KEYCHAIN, a JSON file
-# in pm_agents::edge::FakeKeychain's format): never a real keychain. Like the
-# real Codex item, only this process opens it; Powermove asks `account/read`.
-STORE = os.environ.get("PM_AGENT_FAKE_KEYCHAIN", "")
-if not STORE.endswith(".json"):
-    sys.exit("fake codex: set PM_AGENT_FAKE_KEYCHAIN to the lane's fake keychain file")
-ITEM = f"{SERVICE}\t{KEY}"
+
+
+def file_store():
+    try:
+        config = open(os.path.join(HOME, "config.toml")).read()
+    except FileNotFoundError:
+        config = ""
+    top = config.split("\n[", 1)[0]
+    found = re.search(r'^cli_auth_credentials_store\s*=\s*"([^"]*)"', top, re.M)
+    if not found or found.group(1) != "file":
+        sys.exit("fake codex: config.toml must set cli_auth_credentials_store = \"file\"")
 
 
 def store(change=None):
-    """Reads the store under its lock (two seconds at most); `change` edits it."""
-    with open(STORE[:-len(".json")] + ".json.lock", "a") as lock:
+    """Reads auth.json under Codex's credential lock (two seconds at most);
+    `change` returns the new document, or None to remove it."""
+    with open(os.path.join(HOME, "auth.lock"), "a") as lock:
         deadline = time.time() + 2
         while True:
             try:
@@ -40,19 +41,25 @@ def store(change=None):
                 break
             except BlockingIOError:
                 if time.time() > deadline:
-                    raise RuntimeError("the fake keychain is busy")
+                    raise RuntimeError("the fake auth.json is busy")
                 time.sleep(0.005)
         try:
-            with open(STORE) as f:
-                items = json.load(f)
+            with open(AUTH) as f:
+                document = json.load(f)
         except FileNotFoundError:
-            items = {}
+            document = None
         if change:
-            change(items)
-            with open(STORE + ".tmp", "w") as f:
-                json.dump(items, f)
-            os.replace(STORE + ".tmp", STORE)
-        return items
+            document = change(document)
+            if document is None:
+                if os.path.exists(AUTH):
+                    os.remove(AUTH)
+            else:
+                part = AUTH + ".tmp"
+                fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    json.dump(document, f)
+                os.replace(part, AUTH)
+        return document
 
 
 def send(value):
@@ -62,16 +69,15 @@ def send(value):
 
 
 def item():
-    found = store().get(ITEM)
-    return json.loads(found) if found else None
+    return store()
 
 
 def save(document):
-    store(lambda items: items.__setitem__(ITEM, json.dumps(document, separators=(",", ":"))))
+    store(lambda _: document)
 
 
 def delete():
-    store(lambda items: items.pop(ITEM, None))
+    store(lambda _: None)
 
 
 def claims(token):
@@ -159,6 +165,7 @@ def main():
         return
     if sys.argv[1:2] != ["app-server"]:
         sys.exit("fake codex: only app-server")
+    file_store()
     for line in sys.stdin:
         message = json.loads(line)
         method, params, ident = message.get("method"), message.get("params") or {}, message.get("id")

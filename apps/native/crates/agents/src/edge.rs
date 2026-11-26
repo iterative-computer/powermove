@@ -45,19 +45,18 @@ impl Secrets for MemorySecrets {
 }
 
 /// A stand-in for the Keychain in one JSON file, for development builds and
-/// tests against the local fakes (`PM_AGENT_FAKE_KEYCHAIN`): Codex's fake and
-/// Powermove share it across processes, as they share one Keychain item for
-/// real. It never touches a real keychain and never shows a dialog. Writers
+/// tests against the local fakes (`PM_AGENT_FAKE_KEYCHAIN`), for Powermove's
+/// own items (the Anthropic key, the Cloud session). It never touches a real
+/// keychain and never shows a dialog. Writers
 /// hold an exclusive lock on `<file>.lock`, taken within two seconds or the
 /// call fails; the file is replaced whole, so a reader never sees half a write.
 #[derive(Debug)]
 pub struct FakeKeychain(pub std::path::PathBuf);
 type Items = serde_json::Map<String, serde_json::Value>;
 /// Which Keychain a process may use. A development build launched against the
-/// local fakes (any of `PM_AGENT_FAKE_KEYCHAIN`, `PM_AGENT_FAKES`,
-/// `PM_CODEX_KEYRING_SERVICE`) uses only its fake store, and a missing or
-/// invalid store setting refuses every Keychain call: it never falls through
-/// to the real Keychain.
+/// local fakes (`PM_AGENT_FAKE_KEYCHAIN` or `PM_AGENT_FAKES`) uses only its
+/// fake store, and a missing or invalid store setting refuses every Keychain
+/// call: it never falls through to the real Keychain.
 #[derive(Debug)]
 pub enum KeychainMode {
     Real,
@@ -68,13 +67,9 @@ pub fn keychain_mode(vars: &BTreeMap<String, String>) -> KeychainMode {
     if !cfg!(debug_assertions) {
         return KeychainMode::Real;
     }
-    let lane = [
-        "PM_AGENT_FAKE_KEYCHAIN",
-        "PM_AGENT_FAKES",
-        "PM_CODEX_KEYRING_SERVICE",
-    ]
-    .iter()
-    .any(|name| vars.contains_key(*name));
+    let lane = ["PM_AGENT_FAKE_KEYCHAIN", "PM_AGENT_FAKES"]
+        .iter()
+        .any(|name| vars.contains_key(*name));
     if !lane {
         return KeychainMode::Real;
     }
@@ -534,10 +529,6 @@ mod tests {
         assert!(refused(vars(&[(
             "PM_AGENT_FAKES",
             "https://chatgpt.com=http://127.0.0.1:9".into()
-        )])));
-        assert!(refused(vars(&[(
-            "PM_CODEX_KEYRING_SERVICE",
-            "lane Codex Auth".into()
         )])));
         let ok = dir.join("store.json").display().to_string();
         assert!(matches!(

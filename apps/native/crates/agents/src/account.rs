@@ -1471,24 +1471,31 @@ for line in sys.stdin:
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn an_existing_login_is_copied_once_and_a_sign_out_stays_signed_out() {
+    fn codex_keeps_its_own_file_login_and_never_reads_the_persons() {
+        use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("pm-account-{}", std::process::id()));
         let shared = root.join("home/.codex");
         std::fs::create_dir_all(&shared).unwrap();
         std::fs::write(shared.join("auth.json"), "{}").unwrap();
         let environment = Environment {
             profile: root.join("profile"),
-            vars: BTreeMap::from([("HOME".into(), root.join("home").display().to_string())]),
+            vars: BTreeMap::from([
+                ("HOME".into(), root.join("home").display().to_string()),
+                ("CODEX_HOME".into(), shared.display().to_string()),
+            ]),
             ..Default::default()
         };
         let vars = environment.codex_vars().unwrap();
         let home = PathBuf::from(&vars["CODEX_HOME"]);
-        assert!(home.join("auth.json").exists());
+        assert_eq!(home, root.join("profile/codex-runtime"));
+        assert_eq!(
+            std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // The person's own login is never copied in: they sign in inside Powermove.
+        assert!(!home.join("auth.json").exists());
         let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains("cli_auth_credentials_store = \"file\""));
-        std::fs::remove_file(home.join("auth.json")).unwrap();
-        environment.codex_vars().unwrap();
-        assert!(!home.join("auth.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

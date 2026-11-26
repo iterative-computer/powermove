@@ -1,6 +1,7 @@
 //! Settings › Providers against local fakes (tests/fakes): Codex's ChatGPT
-//! sign-in or API key fills Codex's own Keychain item, which Powermove never
-//! opens (it asks Codex's App Server), Codex alone refreshes
+//! sign-in or API key fills Codex's own file login in Powermove's Codex home
+//! (never the Keychain), which Powermove never reads (it asks Codex's App
+//! Server), Codex alone refreshes
 //! and two Codex processes never spend a refresh token twice; Claude Code's
 //! Anthropic key lists its models; Aero runs only on the Powermove account's
 //! session (Powermove inference), never on those keys or a custom endpoint.
@@ -100,10 +101,6 @@ fn fakes(ttl: u64) -> Fakes {
         (
             "HOME".to_owned(),
             profile.join("home").display().to_string(),
-        ),
-        (
-            "PM_CODEX_KEYRING_SERVICE".to_owned(),
-            format!("pm-aero-picker-test Codex Auth {}", std::process::id()),
         ),
         ("PM_FAKE_AUTH".to_owned(), format!("{base}/auth")),
         (
@@ -316,8 +313,9 @@ fn powermove_says(env: &Environment, model: &str, effort: &str) -> Result<String
 }
 
 #[test]
-fn chatgpt_sign_in_is_codexs_own_item_and_signed_out_from_it() {
+fn chatgpt_sign_in_is_codexs_own_file_login_and_signed_out_from_it() {
     let _serial = serial();
+    use std::os::unix::fs::PermissionsExt as _;
     if !pm_aero_core::available() {
         return;
     }
@@ -336,17 +334,21 @@ fn chatgpt_sign_in_is_codexs_own_item_and_signed_out_from_it() {
     until("Codex's models", || {
         !accounts.models(Provider::Chatgpt).is_empty()
     });
-    // 2. One Keychain item, Codex's own; no auth.json.
-    let auth = codex_item(&f).expect("Codex's item");
+    // 2. Codex's own file login (0600) in Powermove's Codex home.
+    let auth = codex_item(&f).expect("Codex's login");
     assert_eq!(auth["tokens"]["account_id"], "acct-fake-1");
-    assert!(!codex_auth::codex_home(env).join("auth.json").exists());
+    let file = codex_auth::codex_home(env).join("auth.json");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     let config = std::fs::read_to_string(codex_auth::codex_home(env).join("config.toml")).unwrap();
     assert!(
-        config.contains("cli_auth_credentials_store = \"keyring\""),
+        config.contains("cli_auth_credentials_store = \"file\""),
         "{config}"
     );
 
-    // 3. Sign out: the item is gone.
+    // 3. Sign out: the login is gone.
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
     assert!(codex_item(&f).is_none());
@@ -361,8 +363,8 @@ fn an_openai_key_is_codexs_and_an_anthropic_key_lists_claude_codes_models() {
     let env = &f.env;
     let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
 
-    // OpenAI API key: Codex saves it in its item and says it signed in with
-    // a key; the key itself never comes back to Powermove.
+    // OpenAI API key: Codex saves it in its login and says it signed in
+    // with a key; the key itself never comes back to Powermove.
     accounts.connect_openai_key("sk-fake-openai-123456".into());
     wait(&accounts, Provider::Chatgpt, State::Connected);
     assert!(accounts.status(Provider::Chatgpt).api_key);
@@ -498,16 +500,11 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
 fn read_store(f: &Fakes) -> String {
     std::fs::read_to_string(&f.keychain).unwrap_or_default()
 }
-/// The fake Codex's own login item, looked at by the test (Powermove never
-/// reads it): service `PM_CODEX_KEYRING_SERVICE`, any account.
+/// The fake Codex's own login, looked at by the test (Powermove never reads
+/// it): `auth.json` in Powermove's Codex home.
 fn codex_item(f: &Fakes) -> Option<Value> {
-    let service = format!("{}\t", f.env.vars["PM_CODEX_KEYRING_SERVICE"]);
-    let store: Value = serde_json::from_str(&read_store(f)).ok()?;
-    let (_, item) = store
-        .as_object()?
-        .iter()
-        .find(|(key, _)| key.starts_with(&service))?;
-    serde_json::from_str(item.as_str()?).ok()
+    let file = codex_auth::codex_home(&f.env).join("auth.json");
+    serde_json::from_slice(&std::fs::read(file).ok()?).ok()
 }
 fn signed_in(f: &Fakes) -> Arc<Accounts> {
     let accounts = Accounts::new(f.env.clone(), browser(), Arc::new(|| {}));
@@ -608,99 +605,39 @@ fn with_the_switch_on_the_owners_codex_login_is_never_opened_or_used() {
     accounts.close();
 }
 
-fn switched_off(env: &Environment) -> Environment {
-    Environment {
-        aero: None,
-        ..env.clone()
-    }
-}
-
-/// Item 2: a file login this profile already had is parked, never moved into
-/// the Keychain or deleted, and is back as it was when the switch is off.
+/// A file login an earlier build parked beside `auth.json` (while it kept
+/// Codex's login in the Keychain) is back as it was; a login under the old
+/// Keychain setting is never read: the person signs in again.
 #[test]
-fn a_profile_file_login_is_parked_unchanged_and_back_when_the_switch_is_off() {
+fn a_login_an_earlier_build_parked_comes_back_and_the_store_is_codexs_file() {
     let _serial = serial();
     let f = fakes(3600);
     let home = codex_auth::codex_home(&f.env);
     std::fs::create_dir_all(&home).unwrap();
-    let login = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"file-a","refresh_token":"file-r","id_token":"x","account_id":"acct-file"}}"#;
-    std::fs::write(home.join("auth.json"), login).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "cli_auth_credentials_store = \"keyring\"\n",
+    )
+    .unwrap();
+    let login = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-file"}"#;
+    std::fs::write(home.join("auth.json.powermove-file-store"), login).unwrap();
     f.env.codex_vars().unwrap();
-    assert!(
-        !home.join("auth.json").exists(),
-        "Codex's Keychain store would delete it"
-    );
-    assert!(codex_item(&f).is_none(), "nothing is migrated");
-    assert!(!read_store(&f).contains("file-r"));
-    switched_off(&f.env).codex_vars().unwrap();
     assert_eq!(
         std::fs::read_to_string(home.join("auth.json")).unwrap(),
         login
     );
+    assert!(!home.join("auth.json.powermove-file-store").exists());
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
     assert!(
         config.contains("cli_auth_credentials_store = \"file\""),
         "{config}"
     );
-}
-
-/// Item 2: an existing (here unreadable) store item is never overwritten or
-/// trusted, and the file login still comes back.
-#[test]
-fn an_existing_store_item_is_never_overwritten_and_the_file_login_still_comes_back() {
-    let _serial = serial();
-    let f = fakes(3600);
-    let home = codex_auth::codex_home(&f.env);
-    std::fs::create_dir_all(&home).unwrap();
-    let secrets = f.env.secrets.as_deref().unwrap();
-    let service = &f.env.vars["PM_CODEX_KEYRING_SERVICE"];
-    secrets
-        .write(service, "cli|existing", b"not a login")
-        .unwrap();
-    std::fs::write(
-        home.join("auth.json"),
-        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-file"}"#,
-    )
-    .unwrap();
+    // A newer login is never replaced by a parked one.
+    std::fs::write(home.join("auth.json.powermove-file-store"), "older").unwrap();
     f.env.codex_vars().unwrap();
     assert_eq!(
-        secrets.read(service, "cli|existing").unwrap().unwrap(),
-        b"not a login"
-    );
-    switched_off(&f.env).codex_vars().unwrap();
-    assert!(
-        std::fs::read_to_string(home.join("auth.json"))
-            .unwrap()
-            .contains("sk-file")
-    );
-}
-
-/// Item 2: a file-store process that writes its login while the switch is on
-/// (the concurrent write) wins: that login is the one that comes back.
-#[test]
-fn a_file_login_written_while_the_switch_is_on_is_the_one_that_comes_back() {
-    let _serial = serial();
-    let f = fakes(3600);
-    let home = codex_auth::codex_home(&f.env);
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"OPENAI_API_KEY":"sk-older"}"#).unwrap();
-    f.env.codex_vars().unwrap();
-    std::fs::write(home.join("auth.json"), r#"{"OPENAI_API_KEY":"sk-newer"}"#).unwrap();
-    // Launches race the writer: every store change holds the store lock.
-    let launches: Vec<_> = (0..6)
-        .map(|_| {
-            let env = f.env.clone();
-            std::thread::spawn(move || env.codex_vars().map(|_| ()))
-        })
-        .collect();
-    for launch in launches {
-        launch.join().unwrap().unwrap();
-    }
-    switched_off(&f.env).codex_vars().unwrap();
-    assert!(
-        std::fs::read_to_string(home.join("auth.json"))
-            .unwrap()
-            .contains("sk-newer")
+        std::fs::read_to_string(home.join("auth.json")).unwrap(),
+        login
     );
 }
 

@@ -1,10 +1,9 @@
-//! Codex's own OpenAI sign-in. With Settings › Providers on, Codex keeps its
-//! login in the system keyring (`cli_auth_credentials_store = "keyring"`,
-//! item `Codex Auth`). Codex is its only reader and writer: it signs in,
-//! signs out, saves the API key and refreshes the token. Powermove never
-//! opens that item (macOS would ask the person for their password, since the
-//! item trusts only Codex); it asks Codex through the App Server
-//! (`account/read`) who is signed in and how. Aero never uses it.
+//! Codex's own OpenAI sign-in. Powermove's bundled Codex keeps its login in
+//! Powermove's private Codex home with Codex's file store (`auth.json`,
+//! 0600; never the Keychain). Codex is its only reader and writer: it signs
+//! in, signs out, saves the API key and refreshes the token. Powermove never
+//! reads the login; it asks Codex through the App Server (`account/read`)
+//! who is signed in and how. Aero never uses it.
 use crate::launch::Environment;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
