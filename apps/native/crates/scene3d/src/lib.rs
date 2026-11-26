@@ -34,3 +34,17 @@ pub fn to_model(v: &Value) -> pm_model::Value {
 pub fn from_model(v: &pm_model::Value) -> Result<Value> {
     serde_json::from_str(&pm_model::json::to_canonical_string(v)).map_err(|e| Error(e.to_string()))
 }
+
+/// Reads a Studio layer's authored role without materializing its content.
+pub fn layer_role(layer: &pm_model::Node) -> Option<schema::Role> {
+    let definition = layer.get("d")?.get("definition")?;
+    let pm_model::NodeKind::String(definition) = definition.kind() else {
+        return None;
+    };
+    match definition.as_str()? {
+        schema::OBJECT => Some(schema::Role::Object),
+        schema::LIGHT => Some(schema::Role::Light),
+        schema::CAMERA => Some(schema::Role::Camera),
+        _ => None,
+    }
+}

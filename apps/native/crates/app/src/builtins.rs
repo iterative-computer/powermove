@@ -422,7 +422,8 @@ pub struct Host {
     /// offline count is kept by (`FrameFacts::offline`).
     pub media_observed: u64,
     updating: bool,
-    again: bool,
+    // A queued full update takes precedence over a view or clock update.
+    again: Option<bool>,
     /// The panels on screen (`shown_panels`), and the built-ins that waited
     /// while a pointer gesture was under way (`crate::gesture_publish`).
     pub(crate) shown: BTreeSet<String>,
@@ -1025,7 +1026,7 @@ impl Controller {
         if let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
-        self.update_builtins(cx);
+        self.update_view_builtins(cx);
     }
     /// Playing, Properties shows the values of each frame the viewer shows
     /// (v1's inspector refreshed at 15 Hz): only that panel publishes, once
@@ -1091,8 +1092,8 @@ impl Controller {
                 crate::diag::line(
                     json!({"follow": PANEL, "ms": started.elapsed().as_secs_f64() * 1000.}),
                 );
-                if std::mem::take(&mut v.builtins.again) {
-                    v.update_builtins(cx);
+                if let Some(full) = v.builtins.again.take() {
+                    v.update_builtins_scoped(full, cx);
                 }
             });
         })
@@ -1475,34 +1476,47 @@ impl Controller {
         }
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
-        self.sync_keymap();
-        if crate::first_run::take_workspace_request() {
-            self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        self.update_builtins_scoped(true, cx);
+    }
+
+    pub(crate) fn update_view_builtins(&mut self, cx: &mut Context<Self>) {
+        self.update_builtins_scoped(false, cx);
+    }
+
+    fn update_builtins_scoped(&mut self, full: bool, cx: &mut Context<Self>) {
+        let gesture = self.gesture_open();
+        let full = full
+            || self.builtins.runtime.is_none()
+            || self.builtins.show_missing
+            || self.builtins.deferral.owed(gesture);
+        if full {
+            self.sync_keymap();
+            if crate::first_run::take_workspace_request() {
+                self.host.borrow().send_command("firstRunWorkspace", vec![]);
+            }
         }
-        // A restored tab behind the front one starts its panels, media probes
-        // and thumbnails with its project's open: its turn comes once the
-        // front tab shows its first frame and the person is idle, or when it
-        // is selected (`Controller::restore_waiting`).
+        // Background restored tabs wait for the front tab's first frame.
         if self.restore_waiting() {
             return;
         }
-        self.start_builtins(cx);
-        self.probe_builtin_media(cx);
-        self.want_thumbnails(cx);
+        if full {
+            self.start_builtins(cx);
+            self.probe_builtin_media(cx);
+            self.want_thumbnails(cx);
+        }
         if self.builtins.updating {
-            self.builtins.again = true;
+            self.builtins.again = Some(full || self.builtins.again == Some(true));
             return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
         let (facts, io) = self.facts_deferred(cx);
-        let originals = self.media.originals.clone();
-        let observed = self.rendition_runtime();
+        let media = full.then(|| (self.media.originals.clone(), self.rendition_runtime()));
         let show_missing = std::mem::take(&mut self.builtins.show_missing);
         // During a drag or scrub only the panels on screen that show the
         // edited layers publish; the others wait for its end (N2).
-        let gesture = self.gesture_open();
+        let selected = follows_selection(self.published.as_deref());
         let scope = self.builtins.deferral.scope(gesture, &self.builtins.shown);
         if matches!(scope, crate::gesture_publish::Scope::Live(_)) {
             self.watch_gesture_end(cx);
@@ -1516,14 +1530,23 @@ impl Controller {
                     let mut facts = facts;
                     io.resolve(&mut facts);
                     runtime.update_facts(facts);
-                    runtime.update_media(originals, observed);
+                    if let Some((originals, observed)) = media {
+                        runtime.update_media(originals, observed);
+                    }
                     if show_missing {
                         runtime.show_missing_media();
                     }
                     match scope {
-                        crate::gesture_publish::Scope::All => runtime.publish(),
+                        crate::gesture_publish::Scope::All if full => runtime.publish(),
+                        crate::gesture_publish::Scope::All => {
+                            runtime.publish_live(|id| follows_view(id, selected)).0
+                        }
                         crate::gesture_publish::Scope::Live(live) => {
-                            runtime.publish_live(|id| live.contains(id)).0
+                            runtime
+                                .publish_live(|id| {
+                                    live.contains(id) && (full || follows_view(id, selected))
+                                })
+                                .0
                         }
                     }
                 })
@@ -1553,8 +1576,9 @@ impl Controller {
                 // A gesture that ended while this ran: the panels that waited
                 // publish now, whether or not its end brought a publication.
                 let owed = v.builtins.deferral.owed(v.gesture_open());
-                if std::mem::take(&mut v.builtins.again) || owed {
-                    v.update_builtins(cx);
+                let queued = v.builtins.again.take();
+                if owed || queued.is_some() {
+                    v.update_builtins_scoped(owed || queued == Some(true), cx);
                 }
             });
         })
@@ -5067,6 +5091,15 @@ pub fn timeline_chrome(
     t
 }
 
+/// Panels with transport, evaluated values, viewer chrome or live runs.
+fn follows_view(panel: &str, selected: bool) -> bool {
+    match panel {
+        "viewer" | "timeline" | "agent" | "export" => true,
+        "inspector" | "layer-effects" | "color" => selected,
+        _ => false,
+    }
+}
+
 /// Whether Properties has anything to follow while playing: a selected layer's
 /// values move with time. With nothing selected it shows the composition's
 /// fields, which don't, and republishing them every frame repainted the window
@@ -5105,6 +5138,20 @@ mod follow_selection_tests {
     use crate::v4_view_tests::{PROJECT, rig_project};
     use pm_kernel::{Caller, Request, SelectionCall};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn view_updates_wake_only_panels_with_live_inputs() {
+        for panel in ["easing", "assets", "fxbrowser", "settings"] {
+            assert!(!super::follows_view(panel, true), "{panel}");
+        }
+        for panel in ["inspector", "layer-effects", "color"] {
+            assert!(super::follows_view(panel, true), "{panel}");
+            assert!(!super::follows_view(panel, false), "{panel}");
+        }
+        for panel in ["viewer", "timeline", "agent", "export"] {
+            assert!(super::follows_view(panel, false), "{panel}");
+        }
+    }
 
     /// Plays 60 content frames through the gate `follow_playback` uses and the
     /// production Properties realm, and counts the publications that reach the

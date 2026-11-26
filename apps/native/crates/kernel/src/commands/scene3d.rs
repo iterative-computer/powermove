@@ -576,13 +576,8 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
 /// 3D object, light and camera layers do. Read on the tree, so a transaction's
 /// validation never copies the other layers of a large composition.
 pub(crate) fn is_scene3d_layer(layer: &pm_model::Node) -> bool {
-    layer.get("d").and_then(|d|d.get("extrusion")).is_some() || matches!(
-        layer
-            .get("d")
-            .and_then(|d| d.get("definition"))
-            .and_then(crate::model::str_of),
-        Some(schema::OBJECT | schema::LIGHT | schema::CAMERA)
-    )
+    layer.get("d").and_then(|d| d.get("extrusion")).is_some()
+        || pm_scene3d::layer_role(layer).is_some()
 }
 
 pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
@@ -1315,13 +1310,13 @@ pub fn resolve_scene_with_camera(
     time: f64,
     camera: Option<&str>,
 ) -> Result<pm_scene3d::service::ResolvedScene, CommandError> {
-    struct Evaluator {
+    struct Evaluator<'a> {
         queries: crate::queries::QueryContext,
         comp: String,
         camera: Option<String>,
-        layer_indices: std::collections::HashMap<String, usize>,
+        layer_indices: std::collections::HashMap<&'a str, usize>,
     }
-    impl Evaluator {
+    impl Evaluator<'_> {
         fn query(
             &mut self,
             op: &str,
@@ -1345,7 +1340,7 @@ pub fn resolve_scene_with_camera(
             pm_scene3d::from_model(&value)
         }
     }
-    impl pm_scene3d::service::Evaluator for Evaluator {
+    impl pm_scene3d::service::Evaluator for Evaluator<'_> {
         fn value(
             &mut self,
             l: &serde_json::Value,
@@ -1356,10 +1351,14 @@ pub fn resolve_scene_with_camera(
             // QueryContext has no channel overrides. Mirror evP's constant case
             // without a WASM/JSON round trip for every default material/control.
             // Animated, expressed and malformed channels retain the evaluator.
-            if c.get("expr").is_none_or(|e|e.is_null() || e.as_str()==Some(""))
-                && c.get("kf").is_none_or(|k|k.as_array().is_some_and(Vec::is_empty))
-                && let Some(value)=c.get("v")
-            { return Ok(value.clone()); }
+            if c.get("expr")
+                .is_none_or(|e| e.is_null() || e.as_str() == Some(""))
+                && c.get("kf")
+                    .is_none_or(|k| k.as_array().is_some_and(Vec::is_empty))
+                && let Some(value) = c.get("v")
+            {
+                return Ok(value.clone());
+            }
             self.query("evP", l, t, serde_json::json!({"key":path,"prop":c}))
         }
         fn active(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<bool> {
@@ -1372,7 +1371,7 @@ pub fn resolve_scene_with_camera(
                 .map(|v| v == true)
         }
     }
-    impl pm_scene3d::service::WorldEvaluator for Evaluator {
+    impl pm_scene3d::service::WorldEvaluator for Evaluator<'_> {
         fn world(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<[f64; 16]> {
             pm_scene3d::geometry::matrix(&self.query("world3D", l, t, serde_json::json!({}))?)
         }
@@ -1389,20 +1388,31 @@ pub fn resolve_scene_with_camera(
     let comp = comp.map(str::to_owned).or_else(|| snapshot.open_comp());
     let c =
         crate::model::comp_node(root, comp.as_deref()).ok_or_else(|| invalid("No composition"))?;
-    // Studio's renderer reads the layer stack and the composition quality.
-    // The evaluator still queries the complete original snapshot.
-    let Some(pm_model::NodeKind::Array(layers)) = c.get("layers").map(pm_model::Node::kind) else {
+    // The resolver consumes Studio roles, 3D nulls, and extrusion settings.
+    // Their evaluator still sees the full stack through the original indices,
+    // including flat parents and groups that are absent from this projection.
+    let Some(pm_model::NodeKind::Array(source_layers)) = c.get("layers").map(pm_model::Node::kind)
+    else {
         return Err(invalid("No layers"));
     };
-    let layers = layers.iter().map(|layer| match layer.kind() {
-        pm_model::NodeKind::Object(fields) => Value::Object(
-            fields.iter()
-                .filter(|(key, _)| key.as_str() != Some("native3dArchive"))
-                .map(|(key, value)| (key.clone(), value.to_value()))
-                .collect(),
-        ),
-        _ => layer.to_value(),
-    }).collect();
+    let layers: Vec<_> = source_layers
+        .iter()
+        .filter(|layer| {
+            is_scene3d_layer(layer)
+                || (layer.get("type").and_then(crate::model::str_of) == Some("null")
+                    && layer.get("threeD").and_then(crate::model::bool_of) == Some(true))
+        })
+        .map(|layer| match layer.kind() {
+            pm_model::NodeKind::Object(fields) => Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != Some("native3dArchive"))
+                    .map(|(key, value)| (key.clone(), value.to_value()))
+                    .collect(),
+            ),
+            _ => layer.to_value(),
+        })
+        .collect();
     let mut evaluated = pm_model::Map::new();
     evaluated.insert("layers", Value::Array(layers));
     if let Some(quality) = c.get("studioQuality") {
@@ -1425,10 +1435,12 @@ pub fn resolve_scene_with_camera(
     {
         return Err(invalid("View camera layer is missing"));
     }
-    let mut layer_indices = std::collections::HashMap::with_capacity(layers.len());
-    for (index, layer) in layers.iter().enumerate() {
-        if let Some(id) = layer["id"].as_str() {
-            layer_indices.entry(id.to_owned()).or_insert(index);
+    let mut layer_indices = std::collections::HashMap::new();
+    if !layers.is_empty() {
+        for (index, layer) in source_layers.iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(crate::model::str_of) {
+                layer_indices.entry(id).or_insert(index);
+            }
         }
     }
     pm_scene3d::service::resolve(

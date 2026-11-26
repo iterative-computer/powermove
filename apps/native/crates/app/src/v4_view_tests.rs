@@ -2002,7 +2002,15 @@ fn a_tabbed_panel_header_leaves_out_its_title(cx: &mut TestAppContext) {
     assert_eq!(title, Some(3), "the title is its first text, not a control");
     view.read_with(&vcx, |v, _| {
         assert_eq!(v.fallback_header_title(title, false), None);
-        assert_eq!(v.fallback_header_title(None, false), Some("Timeline"));
+        assert_eq!(v.fallback_header_title(None, false), None);
+        assert_eq!(v.fallback_header_title(None, true), None);
+    });
+    let mut agent_pub = synthetic(&rig, vec![]);
+    agent_pub.panel = "agent".into();
+    let (agent_view, agent_vcx) = window(cx, &rig, agent_pub, Default::default());
+    agent_vcx.run_until_parked();
+    agent_view.read_with(&agent_vcx, |v, _| {
+        assert_eq!(v.fallback_header_title(None, false), Some("Agent"));
         assert_eq!(v.fallback_header_title(None, true), None);
     });
 }

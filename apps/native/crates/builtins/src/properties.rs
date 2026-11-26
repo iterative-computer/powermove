@@ -220,13 +220,19 @@ impl Properties {
                 None
             });
         let mut target = target;
-        if let Some((_, _, label)) = &studio
+        if let Some((role, _, label)) = &studio
             && model.selected_layers().len() == 1
         {
-            // `Terrain · Terrain` says nothing twice: a layer named for its
-            // kind shows the generic 3D kind instead.
+            // Layers named for their kind usually show the generic 3D label.
+            // The inspector uses the Camera label to format camera headings.
             let named = target["first"]["name"].as_str().unwrap_or("") == *label;
-            target["first"]["typeLabel"] = json!(if named { "3D Layer" } else { label });
+            target["first"]["typeLabel"] = json!(
+                if named && *role != pm_panel_studio3d::properties::Role::Camera {
+                    "3D Layer"
+                } else {
+                    label
+                }
+            );
             target["first"]["acceptsEffects"] = json!(false);
             target["first"]["studio"] = json!(true);
         }
@@ -549,7 +555,12 @@ impl Properties {
                 if *env != Some("world") {
                     let rows = self.transform_3d(model, &layer, *role, time)?;
                     if !rows.is_empty() {
-                        sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                        let transform = json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows});
+                        if *role == pm_panel_studio3d::properties::Role::Camera {
+                            sections.insert(0, transform);
+                        } else {
+                            sections.push(transform);
+                        }
                     }
                 }
             } else if !audio {
@@ -972,8 +983,8 @@ impl Properties {
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
     }
     /// Position, rotation and scale with depth, in scene units and degrees.
-    /// Lights and cameras move but don't scale; a camera never needs X/Y tilt
-    /// here because it aims at its target.
+    /// Lights and cameras move without scale. A camera's aim comes from its
+    /// point of interest or its rotation, depending on Auto-Orient.
     fn transform_3d(
         &mut self,
         model: &mut Inspector,
@@ -983,11 +994,15 @@ impl Properties {
     ) -> Result<Vec<Value>, String> {
         use pm_panel_studio3d::properties::Role;
         let mut rows = vec![];
+        let camera = if role == Role::Camera {
+            Some(super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?))
+        } else {
+            None
+        };
         // A camera aims at its point of interest unless Auto-Orient is Off.
-        let one_node = role == Role::Camera
-            && super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?)["d"]["data"]["camera"]
-                ["autoOrient"]
-                == "off";
+        let one_node = camera
+            .as_ref()
+            .is_some_and(|record| record["d"]["data"]["camera"]["autoOrient"] == "off");
         let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
             "position",
             "Position",
@@ -1053,6 +1068,7 @@ impl Properties {
             let mut all_keyed = true;
             let mut any_animated = false;
             let mut active_paths = vec![];
+            let (mut bound, mut expression) = (vec![], None);
             for (path, axis) in paths {
                 let binding = Binding::Property(PropertyId::new(layer, path));
                 let state = match model.binding_state(&binding, time) {
@@ -1077,9 +1093,15 @@ impl Properties {
                     any_animated = true;
                 }
                 active_paths.push(path.to_owned());
-                // Three narrow wells hold four characters: one place below
-                // ten (-1.7), none above (-12). Typing still sets exact values.
-                let shown = if value.abs() >= 10. {
+                if camera.is_some() {
+                    bound.push(binding.clone());
+                    expression = expression.or(state.expression);
+                }
+                // Use the shared field's precision for camera framing. Keep
+                // the compact values used by the other Studio transforms.
+                let shown = if camera.is_some() {
+                    value
+                } else if value.abs() >= 10. {
                     value.round()
                 } else {
                     (value * 10.).round() / 10.
@@ -1108,8 +1130,17 @@ impl Properties {
                 } else {
                     self.row_channels.remove(id);
                 }
-                // Three axes fill the value column; no room for a link button.
-                rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
+                let mut row = json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                if let Some(record) = &camera {
+                    if id == "position" {
+                        row["separateDimensions"] =
+                            json!(record["separateDimensions"].as_bool().unwrap_or(false));
+                    }
+                    if let Some(expression) = self.expression(model, id, bound, expression, time)? {
+                        row["expression"] = expression;
+                    }
+                }
+                rows.push(row);
             }
         }
         Ok(rows)
@@ -1736,6 +1767,35 @@ impl Properties {
             )
         };
         let status = |id: &str, label: &str, value: String| json!({"id":id,"label":label,"control":{"kind":"status","value":value}});
+        let perspective_camera =
+            role == Role::Camera && data["camera"]["projection"] != "orthographic";
+        let camera_state = |model: &mut Inspector, path: &str| {
+            model.binding_state(&Binding::Property(PropertyId::new(layer, path)), time)
+        };
+        let camera_dof_on = perspective_camera
+            && camera_state(model, "camera.fStop")
+                .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.);
+        let camera_iris_blades = if camera_dof_on {
+            camera_state(model, "camera.irisShape")
+                .ok()
+                .and_then(|state| state.value.as_f64())
+                .unwrap_or(0.)
+        } else {
+            0.
+        };
+        // Hidden DOF rows only need their stored keyframe metadata.
+        let camera_dof_animated = perspective_camera
+            && !camera_dof_on
+            && fields
+                .iter()
+                .filter(|field| field.group == "Depth of Field")
+                .filter_map(|field| field.id.strip_prefix("camera."))
+                .chain(std::iter::once("irisShape"))
+                .any(|key| {
+                    data["camera"]["p"][key]["kf"]
+                        .as_array()
+                        .is_some_and(|keys| !keys.is_empty())
+                });
         match (role, env) {
             (Role::Object, Some("world")) => {
                 let world = &data["object"]["world"];
@@ -2032,27 +2092,14 @@ impl Properties {
                             {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
                     ),
                 );
-                if data["camera"]["projection"] != "orthographic" {
-                    let fstop = model
-                        .binding_state(
-                            &Binding::Property(PropertyId::new(layer, "camera.fStop")),
-                            time,
-                        )
-                        .ok()
-                        .and_then(|s| s.value.as_f64())
-                        .unwrap_or(0.);
-                    let dof_on = fstop > 0.;
+                if perspective_camera {
                     push(
                         &mut groups,
                         "Depth of Field",
-                        toggle(self, "3d.dof.enabled", "Depth of Field", dof_on),
+                        toggle(self, "3d.dof.enabled", "Enabled", camera_dof_on),
                     );
-                    if dof_on {
-                        let focus_dist = model
-                            .binding_state(
-                                &Binding::Property(PropertyId::new(layer, "camera.focusDistance")),
-                                time,
-                            )
+                    if camera_dof_on {
+                        let focus_dist = camera_state(model, "camera.focusDistance")
                             .ok()
                             .and_then(|s| s.value.as_f64())
                             .unwrap_or(0.);
@@ -2075,15 +2122,7 @@ impl Properties {
                                 ),
                             );
                         }
-                        let iris_blades = model
-                            .binding_state(
-                                &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
-                                time,
-                            )
-                            .ok()
-                            .and_then(|s| s.value.as_f64())
-                            .map(|v| v.round() as i64)
-                            .unwrap_or(0);
+                        let iris_blades = camera_iris_blades.round() as i64;
                         let iris_val = match iris_blades {
                             5 | 6 | 7 | 8 => iris_blades.to_string(),
                             _ => "0".to_owned(),
@@ -2107,29 +2146,6 @@ impl Properties {
                 }
             }
         }
-        let camera_dof_on = role == Role::Camera
-            && data["camera"]["projection"] != "orthographic"
-            && model
-                .binding_state(
-                    &Binding::Property(PropertyId::new(layer, "camera.fStop")),
-                    time,
-                )
-                .ok()
-                .and_then(|s| s.value.as_f64())
-                .unwrap_or(0.)
-                > 0.;
-        let camera_iris_blades = if camera_dof_on {
-            model
-                .binding_state(
-                    &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
-                    time,
-                )
-                .ok()
-                .and_then(|s| s.value.as_f64())
-                .unwrap_or(0.)
-        } else {
-            0.
-        };
         for field in fields {
             if field.group == "Depth of Field" && !camera_dof_on {
                 continue;
@@ -2368,22 +2384,26 @@ impl Properties {
         });
         Ok(groups
             .into_iter()
-            .map(|(title, rows)| {
+            .map(|(title, mut rows)| {
                 let id = format!("3d.{}", title.to_ascii_lowercase().replace(' ', "-"));
+                if title == "Camera" {
+                    rows.sort_by_key(|row| match row["id"].as_str() {
+                        Some("3d.projection") => 0,
+                        Some("camera.fov" | "camera.zoom") => 1,
+                        Some("3d.autoOrient") => 2,
+                        _ => 3,
+                    });
+                }
                 // Disclosure groups start closed unless a row inside is animated.
-                let closed = matches!(
-                    title,
-                    "Material Details"
-                        | "Material Options"
-                        | "Texture Maps"
-                        | "Atmosphere"
-                        | "Size"
-                        | "Ground"
-                        | "Variation"
-                        | "Placement"
-                ) && rows
-                    .iter()
-                    .all(|r| r["animation"] != "animated" && r["animation"] != "key-at-playhead");
+                let closed = match title {
+                    "Depth of Field" => !camera_dof_on && !camera_dof_animated,
+                    "Environment" | "Shot" | "Material Details" | "Material Options"
+                    | "Texture Maps" | "Atmosphere" | "Size" | "Ground" | "Variation"
+                    | "Placement" => rows
+                        .iter()
+                        .all(|r| r["animation"] != "animated" && r["animation"] != "key-at-playhead"),
+                    _ => false,
+                };
                 let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
                 let mut section = json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows});
                 if title == "Material"

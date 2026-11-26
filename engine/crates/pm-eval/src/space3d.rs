@@ -344,6 +344,64 @@ fn camera_data(layer: &Node) -> Option<&Node> {
     layer.get("d")?.get("data")?.get("camera")
 }
 
+/// A pass's coplanar runs, independent of the camera used to sort them.
+#[derive(Default)]
+pub struct PlaneOrder {
+    runs: Vec<(usize, Vec<PlaneSurface>)>,
+}
+
+struct PlaneSurface {
+    plane: Option<[f64; 4]>,
+    members: Vec<usize>,
+    depth: f64,
+    anchor: [f64; 3],
+}
+
+impl PlaneOrder {
+    /// Order the same layer slice used to prepare the surfaces.
+    pub fn project<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layers: &[&'d Node],
+        time: f64,
+    ) -> JsResult<Vec<&'d Node>> {
+        let mut result = layers.to_vec();
+        if self.runs.is_empty() {
+            return Ok(result);
+        }
+        let camera = scope.projection_camera_3d(time)?;
+        let forward = camera.map(|camera| camera.forward());
+        for (start, surfaces) in &self.runs {
+            if surfaces.len() == 1 {
+                continue;
+            }
+            let mut depths: Vec<_> = surfaces
+                .iter()
+                .map(|surface| {
+                    let depth = match (camera, forward) {
+                        (Some(camera), Some(forward)) => dot(
+                            std::array::from_fn(|i| surface.anchor[i] - camera.position[i]),
+                            forward,
+                        ),
+                        _ => surface.depth,
+                    };
+                    (depth, surface)
+                })
+                .collect();
+            // Stable, including NaN comparisons (Array.prototype.sort).
+            depths.sort_by(|a, b| {
+                (a.0 - b.0)
+                    .partial_cmp(&0.0)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            });
+            for (slot, &i) in (*start..).zip(depths.into_iter().flat_map(|(_, s)| &s.members)) {
+                result[slot] = layers[i];
+            }
+        }
+        Ok(result)
+    }
+}
+
 impl<'d> Scope<'_, 'd> {
     /// `value(PM, L, key, T, fallback)`: the channel as a finite number, or
     /// `fallback` when the channel is missing (`L.p?.[key] == null`) or not
@@ -644,9 +702,8 @@ impl<'d> Scope<'_, 'd> {
         self.depth_ordered_layers_inner(layers, time, false)
     }
 
-    /// Renderer-only ordering. When no plane can draw, the matrices and
-    /// order of those planes do not affect the picture. Retain their slots
-    /// and use full ordering for a pass containing any potentially active plane.
+    /// Renderer-only ordering. Retain the slots of inactive runs and tails
+    /// that cannot affect the depth order of a visible surface.
     pub fn depth_ordered_draw_layers(
         &mut self,
         layers: &[&'d Node],
@@ -661,47 +718,61 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         skip_inactive: bool,
     ) -> JsResult<Vec<&'d Node>> {
+        let order = self.prepare_plane_order(layers, time, skip_inactive)?;
+        order.project(self, layers, time)
+    }
+
+    /// Camera-independent coplanar surfaces of a drawing pass.
+    #[doc(hidden)]
+    pub fn prepare_plane_order(
+        &mut self,
+        layers: &[&'d Node],
+        time: f64,
+        skip_inactive: bool,
+    ) -> JsResult<PlaneOrder> {
+        let possible =
+            |layer: &Node| !skip_inactive || !crate::evaluator::outside_layer_span(layer, time);
+        let mut order = PlaneOrder::default();
         if skip_inactive {
-            // Most planes on a large timeline may be out of time. Check
-            // the span before walking their group ancestry, too.
             let mut active_plane = false;
             for &layer in layers {
-                if !crate::evaluator::outside_layer_span(layer, time) && self.is_3d_layer(layer)? {
+                if possible(layer) && self.is_3d_layer(layer)? {
                     active_plane = true;
                     break;
                 }
             }
             if !active_plane {
-                return Ok(layers.to_vec());
+                return Ok(order);
             }
         }
         let mut flags = Vec::with_capacity(layers.len());
-        for l in layers {
-            flags.push(self.is_3d_layer(l)?);
+        for layer in layers {
+            flags.push(self.is_3d_layer(layer)?);
         }
-        let mut result: Vec<&'d Node> = layers.to_vec();
-        if !flags.iter().any(|f| *f) {
-            return Ok(result);
-        }
-        let camera = self.projection_camera_3d(time)?;
         let (width, height) = self.comp_size();
+        let to_scene = pixel_to_scene(width, height);
         let mut start = 0;
-        while start < result.len() {
+        while start < layers.len() {
             if !flags[start] {
                 start += 1;
                 continue;
             }
             let mut end = start + 1;
-            while end < result.len() && flags[end] {
+            while end < layers.len() && flags[end] {
                 end += 1;
             }
-            struct Surface<'d> {
-                plane: Option<[f64; 4]>,
-                layers: Vec<&'d Node>,
-                depth: f64,
-            }
-            let mut surfaces: Vec<Surface<'d>> = Vec::new();
-            for &layer in &result[start..end] {
+            // Keep earlier inactive planes: one can still be the first
+            // member of a surface shared by a visible layer, and its anchor
+            // is the depth used to order that surface. An inactive suffix
+            // cannot contribute an anchor or change drawable order.
+            let Some(last) = layers[start..end].iter().rposition(|layer| possible(layer)) else {
+                start = end;
+                continue;
+            };
+            let used = start..start + last + 1;
+            let mut surfaces: Vec<PlaneSurface> = Vec::new();
+            for i in used.clone() {
+                let layer = layers[i];
                 let m = self.world3d(layer, time, false)?;
                 let normal = [
                     m[1] * m[6] - m[2] * m[5],
@@ -728,7 +799,7 @@ impl<'d> Scope<'_, 'd> {
                         })
                     })
                 {
-                    existing.layers.push(layer);
+                    existing.members.push(i);
                     continue;
                 }
                 let ax = self.value3d(layer, "anchor.x", time, 0.0)?;
@@ -739,36 +810,18 @@ impl<'d> Scope<'_, 'd> {
                     0.0
                 };
                 let depth = m[2] * ax + m[6] * ay + m[10] * az + m[14];
-                let depth = camera.map_or(depth, |camera| {
-                    let anchor = transform_aim(&m, &[ax, ay, az]);
-                    let p = transform_aim(&pixel_to_scene(width, height), &anchor);
-                    dot(
-                        std::array::from_fn(|i| p[i] - camera.position[i]),
-                        camera.forward(),
-                    )
-                });
-                surfaces.push(Surface {
+                let anchor = transform_aim(&m, &[ax, ay, az]);
+                surfaces.push(PlaneSurface {
                     plane,
-                    layers: vec![layer],
+                    members: vec![i],
                     depth,
+                    anchor: transform_aim(&to_scene, &anchor),
                 });
             }
-            // `Array.prototype.sort` is stable; a NaN comparison counts as equal.
-            surfaces.sort_by(|a, b| {
-                let d = a.depth - b.depth;
-                if d < 0.0 {
-                    core::cmp::Ordering::Less
-                } else if d > 0.0 {
-                    core::cmp::Ordering::Greater
-                } else {
-                    core::cmp::Ordering::Equal
-                }
-            });
-            let ordered: Vec<&'d Node> = surfaces.into_iter().flat_map(|s| s.layers).collect();
-            result.splice(start..end, ordered);
+            order.runs.push((start, surfaces));
             start = end;
         }
-        Ok(result)
+        Ok(order)
     }
 
     /// `poseValues3D(PM, L, world, T, parent)`: decompose a world matrix into
@@ -1061,6 +1114,35 @@ mod tests {
         assert!(same(scope.depth_ordered_draw_layers(&pass, 2.).unwrap()[0], b));
         // At four seconds neither plane can draw. Keep their stored order.
         assert!(same(scope.depth_ordered_draw_layers(&pass, 4.).unwrap()[0], a));
+    }
+
+    #[test]
+    fn prepared_surfaces_keep_drawable_order_for_each_camera() {
+        let root = root(serde_json::json!([
+            {"id":"a","type":"shape","threeD":true,"from":0,"dur":3,"p":{}},
+            {"id":"b","type":"shape","threeD":true,"from":0,"dur":3,
+                "p":{"position.z":{"v":30}}},
+            {"id":"expired","type":"shape","threeD":true,"from":0,"dur":1,
+                "p":{"position.z":{"v":-50}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let layers: Vec<_> = comp.layers().iter().collect();
+        let prepared = scope.prepare_plane_order(&layers, 2., true).unwrap();
+        let mut camera = default_camera_25d(1000., 500.);
+        for z in [6., -6.] {
+            camera.position = [0., 0., z];
+            scope.view_camera = Some(camera);
+            let full = scope.depth_ordered_layers(&layers, 2.).unwrap();
+            let visible = full
+                .into_iter()
+                .filter(|l| !same(l, layers[2]))
+                .collect::<Vec<_>>();
+            let cached = prepared.project(&mut scope, &layers, 2.).unwrap();
+            assert!(visible.iter().zip(&cached).all(|(a, b)| same(a, b)));
+            assert!(same(cached[2], layers[2]));
+        }
     }
 
     #[test]

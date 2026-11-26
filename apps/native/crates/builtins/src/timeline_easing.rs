@@ -182,12 +182,56 @@ fn interpolation(key: &pm_model::Node) -> &str {
     }
 }
 
+#[derive(Default)]
+struct LayerLookup {
+    layers: Option<pm_model::Node>,
+    indices: std::collections::HashMap<pm_model::JsString, usize>,
+}
+
+impl LayerLookup {
+    fn positions(
+        &mut self,
+        stack: &pm_model::Node,
+        ids: &std::collections::HashSet<&str>,
+    ) -> Vec<usize> {
+        use pm_model::NodeKind;
+        let NodeKind::Array(layers) = stack.kind() else {
+            return Vec::new();
+        };
+        let current = self.layers.as_ref().is_some_and(|previous| {
+            matches!(previous.kind(), NodeKind::Array(previous) if std::sync::Arc::ptr_eq(previous, layers))
+        });
+        if !current {
+            self.indices.clear();
+            self.indices.reserve(layers.len());
+            for (i, layer) in layers.iter().enumerate() {
+                if let Some(NodeKind::String(id)) = layer.get("id").map(pm_model::Node::kind) {
+                    self.indices.entry(id.clone()).or_insert(i);
+                }
+            }
+            self.layers = Some(stack.clone());
+        }
+        let mut positions: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_bytes()).copied())
+            .collect();
+        positions.sort_unstable();
+        positions
+    }
+}
+
+thread_local! {
+    // The easing realm keeps one immutable stack and reuses its index across
+    // selection and transport publications. A changed stack replaces it.
+    static LAYER_LOOKUP: std::cell::RefCell<LayerLookup> = Default::default();
+}
+
 /// Read the selected keys directly from layers in the open composition.
 pub(crate) fn selected_ease<'a>(
     root: &'a pm_model::Node,
     selection: &pm_kernel::selection::Selection,
 ) -> SelectedEase<'a> {
-    use pm_kernel::model::{comp_node, layers_of, open_comp_id};
+    use pm_kernel::model::{comp_node, open_comp_id};
     use pm_model::{Node, NodeKind};
     use std::collections::{HashMap, HashSet};
 
@@ -196,6 +240,12 @@ pub(crate) fn selected_ease<'a>(
         return selected;
     }
     let Some(comp) = comp_node(root, open_comp_id(root).as_deref()) else {
+        return selected;
+    };
+    let Some(stack) = comp.get("layers") else {
+        return selected;
+    };
+    let NodeKind::Array(layers) = stack.kind() else {
         return selected;
     };
     let ranks: HashMap<_, _> = selection
@@ -247,11 +297,16 @@ pub(crate) fn selected_ease<'a>(
     let mut curve_rank = usize::MAX;
     let mut first_curve = None;
     let mut interpolation_rank = usize::MAX;
-    for layer in layers_of(comp) {
+    // A key selected by ID alone and without a layer can be on any layer.
+    let positions = if all_layers {
+        Vec::new()
+    } else {
+        LAYER_LOOKUP.with_borrow_mut(|index| index.positions(stack, &layer_ids))
+    };
+    let unknown = (0..layers.len()).take(if all_layers { layers.len() } else { 0 });
+    for i in unknown.chain(positions) {
+        let layer = &layers[i];
         let layer_id = string(layer.get("id"));
-        if !all_layers && !layer_id.is_some_and(|id| layer_ids.remove(id)) {
-            continue;
-        }
         visit(layer, &mut |keys, i| {
             let key = &keys[i];
             let Some(id) = string(key.get("i")) else {
@@ -280,9 +335,6 @@ pub(crate) fn selected_ease<'a>(
                 }
             }
         });
-        if !all_layers && layer_ids.is_empty() {
-            break;
-        }
     }
     selected
 }
@@ -356,6 +408,53 @@ fn key_curve(keys: &[pm_model::Node], index: usize) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod panel_tests {
     use super::*;
+    #[test]
+    fn easing_short_circuits_and_indexes_key_owners_on_639_layers() {
+        let stack: Vec<_> = (0..639)
+            .map(|i| {
+                json!({
+                    "id": format!("l{i}"),
+                    "p": {"x":{"kf":[{"i":"selected","t":0,"v":0,"hold":i != 638,
+                        "eo":[0.25,0],"ei":[0.75,1]}]}}
+                })
+            })
+            .collect();
+        let root = pm_model::Node::from_value(model(&json!({"layers":stack})).unwrap(), 1);
+        let empty = pm_kernel::selection::Selection::default();
+        let owner = pm_kernel::selection::Selection::from_parts(
+            vec!["l638".into()],
+            vec!["selected".into()],
+            None,
+        );
+        let time = |selection: &pm_kernel::selection::Selection, expected: Option<&str>, cold: bool| {
+            let mut samples = Vec::new();
+            for _ in 0..21 {
+                if cold {
+                    LAYER_LOOKUP.with_borrow_mut(|index| *index = LayerLookup::default());
+                }
+                let start = std::time::Instant::now();
+                let state = selected_ease(&root, selection);
+                samples.push(start.elapsed());
+                assert_eq!(state.interpolation, expected);
+                assert_eq!(state.curve, expected.map(|_| [0.25, 0., 0.75, 1.]));
+            }
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        };
+        let empty = time(&empty, None, false);
+        let cold = time(&owner, Some("linear"), true);
+        let cached = time(&owner, Some("linear"), false);
+        eprintln!(
+            "639-layer Easing median: empty {:.6} ms, indexed {:.6} ms; cold {:.6} ms",
+            empty.as_secs_f64() * 1e3,
+            cached.as_secs_f64() * 1e3,
+            cold.as_secs_f64() * 1e3
+        );
+        assert!(empty < std::time::Duration::from_micros(500), "{empty:?}");
+        assert!(cached < std::time::Duration::from_micros(500), "{cached:?}");
+        assert!(cold < std::time::Duration::from_micros(500), "{cold:?}");
+    }
+
     #[test]
     fn selected_curve_reads_stored_temporal_handles_and_mixed_tracks() {
         let project = crate::data::model(&json!({"layers":[{"p":{"x":{"kf":[

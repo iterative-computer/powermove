@@ -30,7 +30,7 @@ use std::sync::Arc;
 use pm_eval::{JsResult, Scope, node};
 use pm_model::{JsString, Node, NodeKind};
 
-use crate::plan::{Build, Draw};
+use crate::plan::{Build, Draw, Quad};
 
 /// Counters of the reuse (tests and `compose_bench`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,6 @@ pub(crate) struct BuildKey {
     pub sampling: crate::sampling::Sampling,
     pub blur: Option<crate::motion::Blur>,
     pub view: Option<crate::scene3d::View3d>,
-    pub plane_camera: Option<pm_eval::space3d::Camera3d>,
     pub text: Option<u64>,
     pub preview: Option<crate::compat_crop::PreviewWindow>,
     pub keep_empty_groups: bool,
@@ -126,6 +125,93 @@ pub struct DrawReuse {
     next_fields: HashMap<(JsString, bool), Fields>,
     stats: ReuseStats,
     facts: crate::pass_facts::FactsCache,
+    pub(crate) geometry: FrameGeometry,
+    pub(crate) geometry_active: bool,
+}
+
+/// Only contains camera-independent work for one immutable document and time.
+#[derive(Default)]
+pub(crate) struct FrameGeometry {
+    root: Option<Node>,
+    facts: HashMap<usize, Arc<crate::pass_facts::PassFacts>>,
+    memberships: HashMap<(ScopeKey, usize, bool), Box<[usize]>>,
+    orders: HashMap<(ScopeKey, bool, Vec<usize>), pm_eval::space3d::PlaneOrder>,
+    pub(crate) quads: HashMap<(ScopeKey, usize, [u64; 6]), LayerGeometry>,
+}
+
+pub(crate) type ScopeKey = (usize, usize, u64);
+
+pub(crate) fn scope_key(scope: &Scope<'_, '_>, time: f64) -> ScopeKey {
+    (
+        address(scope.comp.node()),
+        address(scope.project.node()),
+        time.to_bits(),
+    )
+}
+
+pub(crate) fn address(node: &Node) -> usize {
+    std::ptr::from_ref(node) as usize
+}
+
+pub(crate) struct LayerGeometry {
+    pub quad: Quad,
+    pub affine: pm_eval::transform::Mat2d,
+    pub world: pm_eval::space3d::Mat4,
+}
+
+impl FrameGeometry {
+    pub(crate) fn membership<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        parent: Option<&Node>,
+        time: f64,
+        blur: bool,
+        compute: impl FnOnce(&mut Scope<'_, 'd>) -> JsResult<Vec<&'d Node>>,
+    ) -> JsResult<Vec<&'d Node>> {
+        let key = (scope_key(scope, time), parent.map_or(0, address), blur);
+        if let Some(indices) = self.memberships.get(&key) {
+            return Ok(indices.iter().map(|&i| &scope.layers()[i]).collect());
+        }
+        let pass = compute(scope)?;
+        let indices = layer_indices(scope.layers());
+        if let Some(members) = pass
+            .iter()
+            .map(|layer| indices.get(&address(layer)).copied())
+            .collect::<Option<Vec<_>>>()
+        {
+            self.memberships.insert(key, members.into());
+        }
+        Ok(pass)
+    }
+
+    pub(crate) fn order<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layers: &[&'d Node],
+        time: f64,
+        skip_inactive: bool,
+    ) -> JsResult<Vec<&'d Node>> {
+        let key = (
+            scope_key(scope, time),
+            skip_inactive,
+            layers.iter().map(|l| address(l)).collect(),
+        );
+        let order = match self.orders.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(scope.prepare_plane_order(layers, time, skip_inactive)?)
+            }
+        };
+        order.project(scope, layers, time)
+    }
+}
+
+pub(crate) fn layer_indices(layers: &[Node]) -> HashMap<usize, usize> {
+    layers
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (address(node), i))
+        .collect()
 }
 
 impl DrawReuse {
@@ -144,6 +230,8 @@ impl DrawReuse {
     /// Drops every entry (the next build at the same time stores again).
     pub fn clear(&mut self) {
         self.passes.clear();
+        self.geometry = FrameGeometry::default();
+        self.geometry_active = false;
         self.facts.clear();
         self.project = None;
         self.fields.clear();
@@ -153,7 +241,14 @@ impl DrawReuse {
     }
 
     /// Starts a build of `root` at revision `revision`, time `time`.
-    pub(crate) fn begin(&mut self, root: &Node, revision: u64, time: f64, build: BuildKey) {
+    pub(crate) fn begin(
+        &mut self,
+        root: &Node,
+        revision: u64,
+        time: f64,
+        build: BuildKey,
+        camera_preview: bool,
+    ) {
         self.builds += 1;
         self.fields_unchanged.clear();
         self.next_fields.clear();
@@ -165,11 +260,24 @@ impl DrawReuse {
         }
         let time = time.to_bits();
         let same_time = same_doc && self.time == Some(time);
+        // Frame geometry holds the immutable root so the stored layer
+        // addresses stay valid. Retain it only for an unchanged snapshot.
+        let same_snapshot = same_time
+            && revision == self.stamp
+            && self.geometry.root.as_ref().is_some_and(|old| same_field(old, root));
         if !same_time || self.build.as_ref() != Some(&build) {
             self.passes.clear();
+            self.geometry = FrameGeometry::default();
         }
-        // The first build at a time stores nothing: playback never pays
-        // for entries it would not use.
+        if !same_snapshot || self.geometry.root.is_none() {
+            self.geometry = FrameGeometry {
+                root: Some(root.clone()),
+                ..Default::default()
+            };
+        }
+        // Moving the viewer can use the first pose's geometry immediately
+        // on the next frame. Other cold builds can move to another time.
+        self.geometry_active = same_snapshot || camera_preview;
         self.active = same_time;
         if !self.active {
             self.stats.cold_builds += 1;
@@ -203,6 +311,11 @@ impl DrawReuse {
         comp: &pm_eval::Comp<'_>,
         all: &[&Node],
     ) -> std::sync::Arc<crate::pass_facts::PassFacts> {
+        if self.geometry_active {
+            return self.geometry.facts.entry(address(comp.node()))
+                .or_insert_with(|| self.facts.get(comp, all, self.revision))
+                .clone();
+        }
         self.facts.get(comp, all, self.revision)
     }
 
@@ -386,11 +499,22 @@ pub(crate) fn draw<'d>(
     ) {
         return plan(scope, b);
     }
+    let Ok(plane) = scope.is_3d_layer(layer) else {
+        return plan(scope, b);
+    };
+    if plane && !group && b.camera_preview() {
+        return plan(scope, b);
+    }
     let Some(nodes) = closure(scope, layer) else {
         return plan(scope, b);
     };
-    let Ok(camera) = scope.projection_camera_3d(time) else {
-        return plan(scope, b);
+    let camera = if group || plane {
+        let Ok(camera) = scope.projection_camera_3d(time) else {
+            return plan(scope, b);
+        };
+        camera
+    } else {
+        None
     };
     let pass = (
         scope.comp.id().clone(),

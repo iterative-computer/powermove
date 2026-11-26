@@ -47,13 +47,10 @@ impl Natives {
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
-/// The rows sit in a driven scroll layer (P-SCROLL-LAYER) the surface steps
-/// with its own: a wheel step inside the recorded rows replays them shifted.
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
     pub column: Cell<f32>,
-    handle: ScrollHandle,
     rows: Cell<(usize, usize)>,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     layout: RefCell<Option<TimelineOutline>>,
@@ -285,42 +282,6 @@ impl Outline {
             .borrow()
             .as_ref()
             .map_or(0., |s| s.content_height()) as f32
-    }
-    /// A wheel step that moved only the rows: the outline's layer replays
-    /// them at `scroll_y` without its view rendering again. False when the
-    /// view has to render (the surface notifies it then, through
-    /// [`Self::scrolled`]).
-    pub fn step(
-        &self,
-        scroll_y: f32,
-        rows: Option<(usize, usize)>,
-        height: f64,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> bool {
-        // Keep the mounted overscan while it still covers every visible row.
-        // A new suggested range alone must not redraw on each small wheel step.
-        if rows.is_some_and(|rows| rows != self.rows.get()) {
-            let (start, end) = self.rows.get();
-            let covered = self.scene.borrow().as_ref().is_some_and(|scene| {
-                let visible = scene.visible_range(scroll_y as f64, height.max(0.));
-                start <= visible.start && end >= visible.end
-            });
-            if !covered { return false; }
-        }
-        let stepped =
-            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
-        if stepped {
-            self.scroll_y.set(scroll_y);
-            // Rows past JS's window are asked for as before; they arrive as
-            // a publication and draw the view.
-            if let (Some(rows), Some(view)) =
-                (rows, self.view.borrow().as_ref().and_then(|v| v.upgrade()))
-            {
-                view.update(cx, |v, cx| v.outline_rows(rows, cx));
-            }
-        }
-        stepped
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
         let mounted = rows.unwrap_or((0, 0));
@@ -5284,7 +5245,7 @@ impl SurfaceView {
         }
         placed
     }
-    /// The timeline outline's rows in a layer the surface scrolls: all
+    /// The timeline outline's scroll area uses the surface's row positions: all
     /// rows' height of content at the surface's offset, JS's window of rows
     /// placed at its first row's top.
     /// Each row of the outline stands at its own row's top in the timeline's
@@ -5328,21 +5289,20 @@ impl SurfaceView {
     }
     fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
         let outline = &self.natives.outline;
-        outline
-            .handle
-            .set_offset(point(px(0.), px(-outline.scroll_y.get())));
         div()
             .id(("v4-outline-rows", id))
             .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .overflow_y_scroll()
-            .track_scroll(&outline.handle)
-            .scroll_layer_driven()
-            .child(div().w_full().h(px(outline.content_height())))
-            .child(rows)
+            .inset_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-outline.scroll_y.get()))
+                    .left_0()
+                    .right_0()
+                    .h(px(outline.content_height()))
+                    .child(rows),
+            )
             .into_any_element()
     }
     /// A sheet shown in its own window (Export) is the whole window.
@@ -7181,14 +7141,15 @@ impl SurfaceView {
                 .is_some_and(|n| n.component.is_none() && words(n))
         })
     }
-    /// Tool-only headers still need the panel's name when there is no dock tab.
+    /// Tool-only headers still need the panel's name when there is no dock tab,
+    /// except for the Viewer and Timeline (whose headers are their own tabs/controls).
     pub(crate) fn fallback_header_title(
         &self,
         title: Option<Id>,
         tabbed: bool,
     ) -> Option<&'static str> {
         let panel = &self.publication.panel;
-        if tabbed || title.is_some() || panel == "viewer" {
+        if tabbed || title.is_some() || matches!(panel.as_str(), "viewer" | "timeline") {
             return None;
         }
         pm_builtins::builtin_panel(panel).map(|panel| panel.title.as_str())

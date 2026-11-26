@@ -645,6 +645,7 @@ struct View {
     quality: Quality,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    camera_rest_at: Option<f64>,
     focus_group: Option<String>,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
@@ -1193,6 +1194,11 @@ impl Viewer {
         camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
             if v.studio_view != camera {
+                v.camera_rest_at = matches!(
+                    camera,
+                    studio::ViewCamera::Custom { .. } | studio::ViewCamera::Orthographic { .. },
+                )
+                .then(|| trace::now() + policy::SETTLE_IDLE_SECONDS);
                 v.studio_view = camera;
                 v.stamp.sequence += 1;
                 v.dirty = true;
@@ -1212,6 +1218,7 @@ impl Viewer {
         pane.camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
             if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                v.camera_rest_at = None;
                 v.studio_view = pane.camera;
                 v.studio_preview = pane.tier;
                 v.stamp.sequence += 1;
@@ -2051,6 +2058,7 @@ impl EngineService {
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 studio_view: studio::ViewCamera::Active,
+                camera_rest_at: None,
                 focus_group: None,
                 adapt_drags: false,
                 editing: false,
@@ -2296,6 +2304,7 @@ struct Work {
     spec: FrameSpec,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    camera_motion: bool,
     focus_group: Option<String>,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
@@ -3669,6 +3678,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     });
                 }
             }
+            if v.camera_rest_at.is_some_and(|at| now >= at) {
+                v.camera_rest_at = None;
+                v.dirty = true;
+            }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
             }
@@ -3831,6 +3844,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     v.studio_preview
                 },
                 studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
+                camera_motion: !capture && v.camera_rest_at.is_some(),
                 focus_group: if capture { None } else { v.focus_group.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
@@ -3966,6 +3980,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             spec,
             studio_preview,
             studio_view,
+            camera_motion,
             focus_group,
             layer,
             overlays,
@@ -3994,6 +4009,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }));
             engine.studio_preview(studio_preview);
             engine.studio_camera(studio_view);
+            engine.camera_motion(camera_motion);
             engine.focus_group(focus_group);
             engine.mastering = mastering;
             engine.set_resources(resources);
@@ -4442,6 +4458,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .values()
                 .flat_map(|r| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
+                .chain(state.views.values().filter_map(|v| v.camera_rest_at))
                 .map(|at| (at - now).max(0.001))
                 .fold((scrub_present_retry - now).max(0.001), f64::min);
             let busy =

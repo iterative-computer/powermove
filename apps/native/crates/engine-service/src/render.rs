@@ -587,6 +587,11 @@ pub struct Engine {
     pub cache_enabled: bool,
     /// Document edition and the equivalent edition for setup-only reads.
     setup_edition: Option<(u64, u64)>,
+    camera_motion: bool,
+    #[cfg(feature = "kernel")]
+    studio_source: Option<Arc<crate::studio::ViewerSource>>,
+    #[cfg(feature = "kernel")]
+    studio_source_view: crate::studio::ViewCamera,
     studio_presence: Option<((u64, u64, String), bool)>,
     studio_content: Option<(
         u64,
@@ -894,7 +899,10 @@ impl Engine {
         self.resources = Arc::default();
         self.studio_content = None;
         #[cfg(feature = "kernel")]
-        self.studio_resources.clear();
+        {
+            self.studio_source = None;
+            self.studio_resources.clear();
+        }
         self.font_generation = None;
         self.hdr = None;
         self.missing_effects.clear();
@@ -1316,6 +1324,11 @@ impl Engine {
             capture_target: None,
             cache_enabled: true,
             setup_edition: None,
+            camera_motion: false,
+            #[cfg(feature = "kernel")]
+            studio_source: None,
+            #[cfg(feature = "kernel")]
+            studio_source_view: Default::default(),
             studio_presence: None,
             studio_content: None,
             visual_media: Default::default(),
@@ -1459,7 +1472,7 @@ impl Engine {
             crop: spec.output.crop,
             moment: spec.moment,
             scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
+            sampling: self.frame_sampling(scene, spec),
             finished: spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
             tone: tone_id(self.output_tone),
@@ -1720,6 +1733,23 @@ impl Engine {
     pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
         self.studio_preview = preview;
     }
+    pub(crate) fn camera_motion(&mut self, moving: bool) {
+        self.camera_motion = moving;
+    }
+    fn frame_sampling(&self, scene: &Scene, spec: &FrameSpec) -> pm_render::sampling::Sampling {
+        if self.camera_motion
+            && !spec.final_picture(scene)
+            && matches!(
+                self.studio_view,
+                crate::studio::ViewCamera::Custom { .. }
+                    | crate::studio::ViewCamera::Orthographic { .. }
+            )
+        {
+            pm_render::sampling::Sampling::Playback
+        } else {
+            spec.sampling()
+        }
+    }
     pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
         self.studio_view = camera;
     }
@@ -1774,9 +1804,9 @@ impl Engine {
             scene.content,
             scene.comp.clone(),
             self.studio_preview,
-            // The frame cache still keys on every view. A flat composition's
-            // custom camera changes only its projected layer vertices.
-            if studio {
+            // Selecting a named camera changes document evaluation. Free View
+            // and orthographic poses only change projection.
+            if studio && matches!(self.studio_view, crate::studio::ViewCamera::Layer { .. }) {
                 self.studio_view.key()
             } else {
                 crate::studio::ViewCamera::Active.key()
@@ -1839,27 +1869,35 @@ impl Engine {
         }
         if self.studio_content.as_ref() != Some(&key) {
             #[cfg(feature = "kernel")]
-            if studio {
-                crate::studio::attach_with_camera_fonts_progress(
-                    &mut self.renderer,
-                    scene.doc.clone(),
-                    scene.media.as_ref(),
-                    &crate::studio::SceneRequest {
-                        composition: scene.comp.clone(),
-                        revision: scene.doc.revision(),
-                        ticks: time.get(),
-                        width: 1,
-                        height: 1,
-                    },
-                    self.studio_preview,
-                    self.studio_view.clone(),
-                    self.fonts.as_ref(),
-                    self.studio_progress.clone(),
-                    Some(self.studio_resources.clone()),
-                )
-                .map_err(anyhow::Error::msg)?;
-            } else {
-                self.renderer.set_studio_source(None, Default::default());
+            {
+                self.studio_source = if studio {
+                    crate::studio::ViewerSource::new(
+                        &self.renderer,
+                        scene.doc.clone(),
+                        scene.media.as_ref(),
+                        &crate::studio::SceneRequest {
+                            composition: scene.comp.clone(),
+                            revision: scene.doc.revision(),
+                            ticks: time.get(),
+                            width: 1,
+                            height: 1,
+                        },
+                        self.studio_preview,
+                        self.studio_view.clone(),
+                        self.fonts.as_ref(),
+                        self.studio_progress.clone(),
+                        self.studio_resources.clone(),
+                    )
+                    .map_err(anyhow::Error::msg)?
+                } else {
+                    None
+                };
+                if let Some(source) = &self.studio_source {
+                    source.attach(&mut self.renderer);
+                } else {
+                    self.renderer.set_studio_source(None, Default::default());
+                }
+                self.studio_source_view = self.studio_view.clone();
             }
             // A document's first frame compiles the frame and text pipelines
             // it draws with, so no frame met while playing does (built ones
@@ -1887,6 +1925,16 @@ impl Engine {
                     .prewarm_studio(&scene.doc, &scene.comp, time.get());
             }
             self.studio_content = Some(key);
+        }
+        #[cfg(feature = "kernel")]
+        if self.studio_source_view != self.studio_view
+            && let Some(source) = &self.studio_source
+        {
+            source
+                .set_camera(&scene.comp, self.studio_view.clone())
+                .map_err(anyhow::Error::msg)?;
+            source.attach(&mut self.renderer);
+            self.studio_source_view = self.studio_view.clone();
         }
         Ok(())
     }
@@ -2027,7 +2075,8 @@ impl Engine {
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
         let comp_size = composition_size(scene);
-        let zoom_whole_size = (!spec.exact
+        let zoom_whole_size = (!self.camera_motion
+            && !spec.exact
             && spec.moment == Moment::Paused
             && spec.scale >= 1.
             && output.crop.is_some()
@@ -2067,6 +2116,8 @@ impl Engine {
         // any zoomed/panned viewer crop in the display pass without re-rendering.
         let whole_match = |c: &CachedFrame| {
             c.whole
+                && (self.studio_view == crate::studio::ViewCamera::Active
+                    || c.key.sampling == key.sampling)
                 && c.composition == scene.comp
                 && c.key.same_scene_content(key)
                 && c.key.time == key.time
@@ -2287,6 +2338,7 @@ impl Engine {
                 } else {
                     spec.request(scene)?
                 };
+                request.sampling = self.frame_sampling(scene, &spec);
                 request.output_tone = self.output_tone;
                 request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
                 // An exact read never takes a stand-in, whatever the moment,
@@ -6137,6 +6189,224 @@ mod layer_drag_profile {
             }
             profile_drag(fonts, true);
         });
+    }
+
+    #[test]
+    fn studio_camera_motion_keeps_the_document_source() {
+        use crate::studio::SceneSource;
+        use pm_scene3d::{schema::Role, service::new_layer};
+        use serde_json::json;
+
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"layers":[]});
+        let object = new_layer(
+            &comp, "sphere", "Sphere", Role::Object,
+            json!({"object":{"source":{"primitive":"sphere"}}}), json!({}), true, None, 0.,
+        ).unwrap();
+        comp["layers"] = json!([object]);
+        let project = json!({"id":"studio-camera-cache","compId":"test","comps":{"test":comp},"assets":{}});
+        let scene = Scene {
+            doc: pm_kernel::DocumentStore::new_untitled(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            ).snapshot().document,
+            comp: "test".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("studio-camera-cache").unwrap()).unwrap();
+        engine.studio_preview(crate::studio::Preview::Fast);
+        engine.sync_studio(&scene, Ticks::ZERO).unwrap();
+        let source = engine.studio_source.clone().unwrap();
+        let effects_registered = engine.effects_registered;
+        let request = crate::studio::SceneRequest {
+            composition: scene.comp.clone(), revision: scene.doc.revision(),
+            ticks: 0, width: 64, height: 64,
+        };
+
+        for x in [1., 2.] {
+            engine.studio_camera(Some(crate::studio::FreeView {
+                eye: [x, 2., 5.], target: [0.; 3], zoom: 1., ortho: false, roll: 0.,
+            }).into());
+            engine.sync_studio(&scene, Ticks::ZERO).unwrap();
+            assert!(Arc::ptr_eq(engine.studio_source.as_ref().unwrap(), &source));
+            assert_eq!(engine.effects_registered, effects_registered);
+            let input = source.scene(&request).unwrap();
+            assert_eq!(input.scene.camera.position.x, x as f32);
+            assert!(!input.instances.is_empty());
+        }
+    }
+
+    #[test]
+    fn fly_camera_over_316_active_plane_layers() {
+        crate::font_warm::tests::with_test_fonts(fly_profile);
+    }
+
+    fn fly_profile(fonts: pm_render::text::host::RenderFonts) {
+        use serde_json::json;
+
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let published = kernel.published(fixture::PROJECT).unwrap();
+        let comp = published.snapshot.render_comp();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(
+                &published.snapshot.document.root().unwrap().to_value(),
+            ))
+            .unwrap();
+        let composition = if root["layers"].is_array() {
+            &mut root
+        } else {
+            &mut root["comps"][&comp]
+        };
+        let layers = composition["layers"].as_array_mut().unwrap();
+        assert_eq!(layers.len(), 639);
+        for (i, l) in layers
+            .iter_mut()
+            .filter(|l| l["group"] == "group0")
+            .enumerate()
+        {
+            l["p"]["position.x"]["v"] = json!(75 + (i % 17) * 105);
+            l["p"]["position.y"]["v"] = json!(55 + (i / 17) * 53);
+            l["compat"] = json!(2);
+            if l["type"] == "shader" {
+                l["d"]["code"] = json!("void main() { fragColor = vec4(1.); }");
+                l["d"]["w"] = json!(120);
+                l["d"]["h"] = json!(32);
+            }
+        }
+        layers.insert(0, json!({
+            "id":"fly-camera", "type":"extension", "threeD":true, "on":true,
+            "from":0, "dur":103, "p":{"position.z":{"v":7.}},
+            "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"perspective","p":{}}}}
+        }));
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::json::parse(&root.to_string()).unwrap()),
+                1,
+            )),
+            comp,
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("316-plane-fly-camera").unwrap()).unwrap();
+        engine.set_fonts(fonts);
+        let spec = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::new(pm_protocol::common::TICKS_PER_SECOND * 19 / 10).unwrap(),
+                Output {
+                    width: 1920,
+                    height: 1080,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        let draw = |engine: &mut Engine, spec, read: bool| {
+            let trace = Arc::new(Mutex::new(Trace::default()));
+            let start = Instant::now();
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), read, trace.clone())
+                .unwrap()
+                .expect("a render submission");
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            let encode = start.elapsed().as_secs_f64() * 1000.;
+            sub.commit();
+            sub.complete().unwrap();
+            let wall = start.elapsed().as_secs_f64() * 1000.;
+            let trace = trace.lock().unwrap();
+            let render = (trace.render_submitted - trace.render_start) * 1000.;
+            ([encode, render, wall], read.then(|| sub.pixels()))
+        };
+        for (name, scale) in [("Quarter", 0.25), ("Full", 1.)] {
+            let spec = FrameSpec { scale, ..spec };
+            let move_camera = |engine: &mut Engine, i| {
+                let x = f64::from(i) * 0.015;
+                engine.studio_camera(
+                    Some(crate::studio::FreeView {
+                        eye: [x, 0.2, 7.],
+                        target: [x * 0.6, 0., 0.],
+                        zoom: 1.,
+                        ortho: false,
+                        roll: 0.,
+                    })
+                    .into(),
+                );
+            };
+            engine.camera_motion(true);
+            move_camera(&mut engine, 0);
+            draw(&mut engine, spec, false);
+            let samples: Vec<_> = (1..=20)
+                .map(|i| {
+                    move_camera(&mut engine, i);
+                    draw(&mut engine, spec, false).0
+                })
+                .collect();
+            eprintln!("{name} Fly at 1.9 s");
+            fixture::report(
+                ["CPU encode", "pm-render", "through GPU completion"],
+                &samples,
+            );
+
+            engine.camera_motion(false);
+            let settled = FrameSpec {
+                settled: true,
+                ..spec
+            };
+            let (elapsed, pixels) = draw(&mut engine, settled, true);
+            let pixels = pixels.unwrap();
+            assert!(pixels.iter().filter(|p| p[0] > 0.1).count() > 100);
+            let mut digest = blake3::Hasher::new();
+            for pixel in &pixels {
+                for c in pixel {
+                    digest.update(&c.to_bits().to_le_bytes());
+                }
+            }
+            eprintln!(
+                "{name} settled {:.3} ms, pixel digest {}",
+                elapsed[2],
+                digest.finalize()
+            );
+            let exact = draw(
+                &mut engine,
+                FrameSpec {
+                    exact: true,
+                    ..settled
+                },
+                true,
+            )
+            .1
+            .unwrap();
+            assert!(
+                pixels == exact,
+                "{name} settled pixels differ from the exact frame"
+            );
+
+            engine.studio_camera(crate::studio::ViewCamera::Active);
+            let samples: Vec<_> = (0..20)
+                .map(|i| {
+                    let time = Ticks::new(
+                        spec.time.get() + i * pm_protocol::common::TICKS_PER_SECOND / 30,
+                    )
+                    .unwrap();
+                    draw(
+                        &mut engine,
+                        FrameSpec {
+                            time,
+                            moment: Moment::Scrub,
+                            ..spec
+                        },
+                        false,
+                    )
+                    .0
+                })
+                .collect();
+            eprintln!("{name} scrub with the authored camera");
+            fixture::report(
+                ["CPU encode", "pm-render", "through GPU completion"],
+                &samples,
+            );
+        }
     }
 
     fn profile_drag(fonts: pm_render::text::host::RenderFonts, reuse_setup: bool) {

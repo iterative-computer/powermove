@@ -179,6 +179,41 @@ for (const name of cases)
     }
   });
 
+test("Camera headings show the layer type when it adds context", async () => {
+  for (const name of ["Camera", "Main Cam"]) {
+    const s = snapshot();
+    if (s.target.kind !== "layers") throw new Error("Expected a layer");
+    Object.assign(s.target.first, {
+      name,
+      type: "extension",
+      typeLabel: "Camera",
+      acceptsEffects: false,
+      studio: true,
+    });
+    const f = fixture(s);
+    const p = new Probe();
+    await f.session.start();
+    try {
+      await p.render(<InspectorPanel session={f.session} />);
+      const heading = Object.values(p.result.nodes).find(
+        (node) => node.props.role === "heading",
+      )!;
+      const text = heading.children.flatMap((id) =>
+        p.result.nodes[id].children.map((child) => p.result.nodes[child].text),
+      );
+      expect(text).toEqual(
+        name === "Camera" ? ["Camera"] : ["Main Cam", "· Camera"],
+      );
+      expect(heading.props.label).toBe(
+        name === "Camera" ? "Camera layer" : "Main Cam, camera layer",
+      );
+    } finally {
+      await p.dispose();
+      await f.session.dispose();
+    }
+  }
+});
+
 test("selection identity, axes, order, unit actions and checkbox AX semantics", async () => {
   const s = snapshot();
   s.sections[0].rows = [

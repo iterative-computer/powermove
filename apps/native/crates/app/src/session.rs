@@ -42,18 +42,119 @@ pub(crate) fn defer_studio_view(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn project_disabled_commands(
     published: Option<&Published>,
     layers: &[LayerInfo],
 ) -> std::collections::BTreeSet<String> {
-    let mut disabled = crate::layer_commands::disabled(published, layers);
-    // Menus and the palette use the same layer eligibility as the viewport.
-    if published.is_some_and(pm_panel_studio3d::viewport::supports_navigation) {
-        disabled.remove("studio.view");
-    } else {
-        disabled.insert("studio.view".into());
+    crate::layer_commands::disabled(published, layers)
+}
+
+#[derive(Default)]
+struct StudioEligibility {
+    composition: Option<(u64, Option<String>, u64)>,
+    supported: bool,
+}
+
+impl StudioEligibility {
+    fn supported(&mut self, p: &Published) -> bool {
+        let comp = p.snapshot.open_comp();
+        let rev = p
+            .snapshot
+            .root()
+            .and_then(|root| pm_kernel::model::comp_node(root, comp.as_deref()))
+            .map_or(0, pm_model::Node::rev);
+        let key = (p.snapshot.doc_id, comp, rev);
+        if self.composition.as_ref() != Some(&key) {
+            self.supported = pm_panel_studio3d::viewport::supports_navigation(p);
+            self.composition = Some(key);
+        }
+        self.supported
     }
-    disabled
+}
+
+#[cfg(test)]
+mod layer_commands_latency_tests {
+    use super::StudioEligibility;
+    use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+    use std::sync::Arc;
+
+    #[test]
+    fn indexed_enablement_and_studio_eligibility_on_639_layers() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let stack: Vec<_> = (0..639)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("l{i}"), "type": if i == 637 { "text" } else { "solid" },
+                    "dur": 5, "lock": i == 638,
+                })
+            })
+            .collect();
+        let source = serde_json::json!({
+            "id": "project", "compId": "c", "w": 64, "h": 64, "fps": 30, "dur": 5,
+            "layers": stack,
+        });
+        let value = pm_model::json::parse(&source.to_string()).unwrap();
+        kernel
+            .open("test", OpenSource::Untitled(value))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("test").unwrap();
+        let rows = p.snapshot.layers(None);
+        assert_eq!(rows.len(), 639);
+        let index = crate::layer_commands::CommandRows::new(&rows);
+        let mut eligibility = StudioEligibility::default();
+        assert!(!eligibility.supported(&p));
+
+        let mut p = (*p).clone();
+        let mut updated = (*p.snapshot.document).clone();
+        let mut path = pm_kernel::model::comp_path(p.snapshot.open_comp().as_deref());
+        path.extend(["layers".into(), 638usize.into(), "threeD".into()]);
+        let change = updated
+            .apply(&[pm_model::Patch::set(path, true.into())])
+            .unwrap();
+        p.snapshot.revision = change.revision;
+        p.snapshot.document = Arc::new(updated);
+        let start = std::time::Instant::now();
+        assert!(eligibility.supported(&p));
+        let cold = start.elapsed();
+        assert_eq!(
+            eligibility.supported(&p),
+            pm_panel_studio3d::viewport::supports_navigation(&p)
+        );
+        let p = |id: &str| {
+            let mut p = p.clone();
+            p.selection =
+                pm_kernel::selection::Selection::from_parts(vec![id.into()], vec![], None);
+            p
+        };
+        let text = p("l637");
+        let locked = p("l638");
+        let mut times = Vec::new();
+        for i in 0..21 {
+            let p = if i % 2 == 0 { &text } else { &locked };
+            let start = std::time::Instant::now();
+            let studio = eligibility.supported(p);
+            let off = crate::layer_commands::disabled_indexed(Some(p), &rows, &index, studio);
+            times.push(start.elapsed());
+            assert!(!off.contains("studio.view"));
+            assert!(!off.contains("unlockAllLayers"));
+            assert!(!off.contains("copyLayers"));
+            assert_eq!(off.contains("text.editSelected"), i % 2 != 0);
+            assert_eq!(off.contains("duplicate"), i % 2 != 0);
+            assert_eq!(off.contains("unlockSelectedLayers"), i % 2 == 0);
+        }
+        times.sort_unstable();
+        let median = times[times.len() / 2];
+        eprintln!(
+            "639-layer command enablement and 3D eligibility: cached median {:.3} ms, cold 3D probe {:.3} ms",
+            median.as_secs_f64() * 1e3,
+            cold.as_secs_f64() * 1e3
+        );
+        assert!(median < std::time::Duration::from_millis(1), "{median:?}");
+    }
 }
 
 /// Cancellation wins even if the sheet's abort callback also sent an answer.
@@ -237,7 +338,7 @@ pub struct Controller {
     pub studio_panes: Vec<crate::studio_panes::Pane>,
     pub studio_pane_targets: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
     pub studio_pane_sender: Option<async_channel::Sender<(usize, isize)>>,
-    pub studio_pane_scene: Option<(u64, Option<Arc<pm_panel_studio3d::viewport::Scene>>)>,
+    pub(crate) studio_pane_scenes: crate::studio_panes::PaneScenes,
     /// The Render Selection waiting to start, by count: asking again
     /// replaces the one that waits.
     pub(crate) render_wait: u64,
@@ -325,6 +426,8 @@ pub struct Controller {
     pub(crate) view_write: Option<gpui::Task<()>>,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
+    command_rows: Option<(Arc<Vec<LayerInfo>>, crate::layer_commands::CommandRows)>,
+    studio_eligibility: StudioEligibility,
     transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
     pub save_pending: bool,
     /// A save panel is busy, but no document write has started.
@@ -1271,6 +1374,7 @@ impl Controller {
                 }
                 if this
                     .update(cx, |v, cx| {
+                        let mut force_panels = false;
                         for e in events {
                             match e {
                                 // A change acknowledged earlier could not be made
@@ -1298,13 +1402,16 @@ impl Controller {
                                 }
                                 // Settings › General › Appearance chosen (here or in
                                 // another window): the whole app takes it.
-                                KernelEvent::StateChanged { .. } => {
-                                    crate::appearance::follow(&v.kernel.state())
+                                KernelEvent::StateChanged { change, .. } => {
+                                    if !matches!(change, pm_kernel::state::StateChange::Ui { .. }) {
+                                        force_panels = true;
+                                        crate::appearance::follow(&v.kernel.state());
+                                    }
                                 }
                                 _ => {}
                             }
                         }
-                        v.refresh(cx);
+                        v.refresh_publication(force_panels, cx);
                     })
                     .is_err()
                 {
@@ -1410,7 +1517,7 @@ impl Controller {
             studio_panes: vec![],
             studio_pane_targets: vec![],
             studio_pane_sender: None,
-            studio_pane_scene: None,
+            studio_pane_scenes: Default::default(),
             render_wait: 0,
             resource_feed,
             main_output: Default::default(),
@@ -1456,7 +1563,14 @@ impl Controller {
             shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
-            disabled: crate::layer_commands::disabled(None, &[]),
+            disabled: crate::layer_commands::disabled_indexed(
+                None,
+                &[],
+                &Default::default(),
+                false,
+            ),
+            command_rows: None,
+            studio_eligibility: StudioEligibility::default(),
             transition_menu: Default::default(),
             save_pending: false,
             choosing_save_path: false,
@@ -1770,6 +1884,10 @@ impl Controller {
         .detach();
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_publication(true, cx);
+    }
+
+    fn refresh_publication(&mut self, force_panels: bool, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
         let Some(session) = &self.session else {
             self.linked_sync = Default::default();
@@ -1779,6 +1897,39 @@ impl Controller {
         let Some(mut p) = self.kernel.published(&session.project) else {
             return;
         };
+        let previous = self.published.clone();
+        let document_changed = previous.as_ref().is_none_or(|old| {
+            old.snapshot.doc_id != p.snapshot.doc_id || old.revision() != p.revision()
+        });
+        let view_only = !force_panels
+            && previous.as_ref().is_some_and(|old| {
+                !Arc::ptr_eq(old, &p)
+                    && !document_changed
+                    && old.selection == p.selection
+                    && old.workspace == p.workspace
+                    && old.entry == p.entry
+                    && old.history == p.history
+                    && old.metadata_revision == p.metadata_revision
+                    && old.saving == p.saving
+                    && old.dirty == p.dirty
+                    && old.fault == p.fault
+                    && old.media.shares_entries_with(&p.media)
+                    && old.ui_state.session == p.ui_state.session
+                    && old.ui_state != p.ui_state
+            });
+        let render_changed = document_changed
+            || previous.as_ref().is_none_or(|old| {
+                old.entry.is_some() != p.entry.is_some()
+                    || old.ui_state.viewer.get("studioTier") != p.ui_state.viewer.get("studioTier")
+            });
+        let timeline_changed = !view_only
+            || previous
+                .as_ref()
+                .is_some_and(|old| old.ui_state.timeline != p.ui_state.timeline);
+        let gizmos_changed = !view_only
+            || previous.as_ref().is_some_and(|old| {
+                old.ui_state.viewer != p.ui_state.viewer || old.ui_state.tool != p.ui_state.tool
+            });
         let switched = self.published.as_ref().is_some_and(|old| {
             old.snapshot.doc_id == p.snapshot.doc_id
                 && old.snapshot.open_comp() != p.snapshot.open_comp()
@@ -1859,20 +2010,25 @@ impl Controller {
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
-        crate::raster_overrides::published(&self.engine, &p);
-        if let Some(viewer) = &self.viewer {
+        if render_changed {
+            crate::raster_overrides::published(&self.engine, &p);
+        }
+        if render_changed && let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
                 self.message = e.to_string();
             }
         }
-        if let Some(popout) = &self.popout
+        if render_changed
+            && let Some(popout) = &self.popout
             && let Some(viewer) = &*popout.viewer.borrow()
             && let Err(e) = viewer.publish(&p)
         {
             self.message = format!("Popout viewer: {e}");
         }
-        self.publish_studio_panes(&p);
+        if document_changed {
+            self.publish_studio_panes(&p);
+        }
         {
             let _span = crate::diag::span("refresh.mirror");
             if let Some(m) = &mut self.mirror {
@@ -1943,7 +2099,7 @@ impl Controller {
         // The menu bar is the app's: only the editor last in front names
         // its Undo and Redo (a tab behind publishing its own history left
         // a bare "Undo" over the front project's, PM-396).
-        if menu_editor_is(cx.entity_id()) {
+        if !view_only && menu_editor_is(cx.entity_id()) {
             history_menu(&p.history);
         }
         self.builtins.natives.published.replace(Some(p.clone()));
@@ -1961,14 +2117,20 @@ impl Controller {
         // A changed Views setting splits the viewer now, not at the next
         // frame (a paused viewer has none): read from the publication just stored.
         self.sync_studio_panes(cx);
-        self.update_builtins(cx);
-        if let Some(timeline) = &self.builtins.timeline {
+        if view_only {
+            self.update_view_builtins(cx);
+        } else {
+            self.update_builtins(cx);
+        }
+        if timeline_changed && let Some(timeline) = &self.builtins.timeline {
             timeline.update(cx, |t, cx| t.published(cx));
         }
-        if let Some(gizmos) = &self.builtins.gizmos {
+        if (gizmos_changed || viewer_changed) && let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
-        self.update_disabled();
+        if !view_only {
+            self.update_disabled();
+        }
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {
@@ -2246,7 +2408,24 @@ impl Controller {
     }
     /// Menus, palette and toolbar enablement for the current document state.
     pub fn update_disabled(&mut self) {
-        self.disabled = project_disabled_commands(self.published.as_deref(), self.layers());
+        let rows = &self.rows.rows;
+        if self
+            .command_rows
+            .as_ref()
+            .is_none_or(|(cached, _)| !Arc::ptr_eq(cached, rows))
+        {
+            self.command_rows = Some((rows.clone(), crate::layer_commands::CommandRows::new(rows)));
+        }
+        let studio = self
+            .published
+            .as_ref()
+            .is_some_and(|p| self.studio_eligibility.supported(p));
+        self.disabled = crate::layer_commands::disabled_indexed(
+            self.published.as_deref(),
+            rows,
+            &self.command_rows.as_ref().unwrap().1,
+            studio,
+        );
     }
     /// One Undo step, then the selection it leads to.
     /// Project items as layers at the playhead, the first on top, in one

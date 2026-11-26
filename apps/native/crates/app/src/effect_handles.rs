@@ -105,20 +105,142 @@ impl GizmoSurface {
         };
         let time = self.host.time(cx);
         let state = self.kernel.state();
-        let mut mirror = QueryMirror::new(&p);
-        let layers = pm_kernel::model::list_layers(root, None);
-        for id in p.selection.layers() {
-            let Some(loc) = pm_kernel::model::find_layer(root, id) else {
-                continue;
+        let mut mirror = None;
+        let comp_id = p.snapshot.open_comp();
+        let Some(comp) = pm_kernel::model::comp_node(root, comp_id.as_deref()) else {
+            return;
+        };
+        let selected = p.selection.layers();
+        let indices = if selected.len() > 1 {
+            pm_kernel::model::layers_of(comp)
+                .enumerate()
+                .filter_map(|(i, layer)| Some((crate::node_string(layer.get("id")?)?, i)))
+                .collect::<std::collections::HashMap<_, _>>()
+        } else {
+            Default::default()
+        };
+        for id in selected {
+            let loc = if selected.len() > 1 {
+                indices
+                    .get(id.as_str())
+                    .map(|&index| pm_kernel::model::LayerLoc {
+                        comp_id: comp_id.clone(),
+                        index,
+                    })
+            } else {
+                pm_kernel::model::find_layer(root, id)
             };
+            let Some(loc) = loc else { continue };
             let Some(layer) = pm_kernel::model::layer_at(root, &loc) else {
                 continue;
             };
-            let layer = layer.to_value();
-            if layers.iter().any(|l| l.id == *id && l.effectively_locked) {
+            let string = |key| layer.get(key).and_then(crate::node_string);
+            let mut declarations = Vec::new();
+            if let Some(pm_model::NodeKind::Array(fx)) = layer.get("fx").map(pm_model::Node::kind) {
+                for effect in fx.iter() {
+                    let enabled = effect.get("on").map(pm_model::Node::kind);
+                    if matches!(enabled, Some(pm_model::NodeKind::Bool(false))) {
+                        continue;
+                    }
+                    let Some(eid) = effect.get("id").and_then(crate::node_string) else {
+                        continue;
+                    };
+                    if !self.host.effect_visible(id, eid, cx).unwrap_or(!matches!(
+                        effect.get("open").map(pm_model::Node::kind),
+                        Some(pm_model::NodeKind::Bool(false))
+                    )) {
+                        continue;
+                    }
+                    let Some(kind) = effect.get("type").and_then(crate::node_string) else {
+                        continue;
+                    };
+                    let Some(registration) = state.provider("effects", kind) else {
+                        continue;
+                    };
+                    let Ok(definition) = serde_json::from_str::<pm_fx_defs::Definition>(
+                        &pm_model::json::to_canonical_string(&registration.definition),
+                    ) else {
+                        continue;
+                    };
+                    // Resolve the saved revision, never bind today's keys to an old implementation.
+                    let catalog = pm_fx_defs::catalog::EffectCatalog::new(vec![definition]);
+                    let Ok(catalog) = catalog else { continue };
+                    let version = effect.get("version").and_then(|node| {
+                        serde_json::from_str(&pm_model::json::to_canonical_string(&node.to_value()))
+                            .ok()
+                    });
+                    let Ok(definition) = catalog.instance(kind, version.as_ref()) else {
+                        continue;
+                    };
+                    if let Ok(handles) = pm_fx_defs::handles::parse(
+                        definition.metadata.get("viewerHandles"),
+                        &definition.params,
+                    ) {
+                        if !handles.is_empty() {
+                            let animated = matches!(enabled, Some(pm_model::NodeKind::Object(_)));
+                            declarations.push((
+                                format!("{eid}."),
+                                handles,
+                                animated.then_some(eid),
+                            ));
+                        }
+                    }
+                }
+            }
+            if string("type") == Some("extension") {
+                if let Some(registration) = layer
+                    .get("d")
+                    .and_then(|d| d.get("definition"))
+                    .and_then(crate::node_string)
+                    .and_then(|id| state.provider("layerTypes", id))
+                {
+                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(
+                        &pm_model::json::to_canonical_string(&registration.definition),
+                    ) {
+                        if let Ok(params) = serde_json::from_value::<Vec<pm_fx_defs::Parameter>>(
+                            raw["params"].clone(),
+                        ) {
+                            if let Ok(handles) =
+                                pm_fx_defs::handles::parse(raw.get("viewerHandles"), &params)
+                            {
+                                declarations.push(("x.".into(), handles, None));
+                            }
+                        }
+                    }
+                }
+            }
+            // Shader-layer declarations live beside uniforms. They use exactly
+            // the same bindings and gesture path as registered effects.
+            if string("type") == Some("shader") {
+                if let Some(raw) = layer.get("d").and_then(|d| d.get("viewerHandles")) {
+                    if let Ok(handles) = serde_json::from_str::<Vec<Handle>>(
+                        &pm_model::json::to_canonical_string(&raw.to_value()),
+                    ) {
+                        declarations.push(("u.".into(), handles, None));
+                    }
+                }
+            }
+            if declarations
+                .iter()
+                .all(|(_, handles, _)| handles.is_empty())
+                || pm_kernel::model::is_locked(root, &loc)
+            {
                 continue;
             }
-            if !mirror.queries().active(None, id, time).unwrap_or(false) {
+            let mirror = mirror.get_or_insert_with(|| QueryMirror::new(&p));
+            declarations.retain(|(_, handles, animated)| {
+                !handles.is_empty()
+                    && !animated.is_some_and(|eid| {
+                        mirror
+                            .queries()
+                            .evaluate_property(None, id, &format!("{eid}.$enabled"), time)
+                            .ok()
+                            .and_then(|value| value.as_bool())
+                            == Some(false)
+                    })
+            });
+            if declarations.is_empty() || !mirror.queries().active(None, id, time).unwrap_or(false)
+            {
                 continue;
             }
             let Ok(world) = mirror.queries().world_matrix(None, id, time) else {
@@ -143,7 +265,7 @@ impl GizmoSurface {
             };
             let world = pm_fx_defs::handles::source_mapping(world, origin).0;
             let mut controls = vec![];
-            let mut add = |prefix: String, declarations: Vec<Handle>| {
+            for (prefix, declarations, _) in declarations {
                 for declaration in declarations {
                     let mut keys: Vec<String> = declaration
                         .points()
@@ -195,79 +317,6 @@ impl GizmoSurface {
                     };
                     if control.points().len() >= control.declaration.points().len() {
                         controls.push(control);
-                    }
-                }
-            };
-            if let Some(fx) = layer.get("fx").and_then(Value::as_array) {
-                for effect in fx {
-                    let Some(eid) = effect.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if !self
-                        .host
-                        .effect_visible(id, eid, cx)
-                        .unwrap_or(effect.get("open").and_then(Value::as_bool) != Some(false))
-                    {
-                        continue;
-                    }
-                    let Some(kind) = effect.get("type").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(registration) = state.provider("effects", kind) else {
-                        continue;
-                    };
-                    let Ok(definition) = serde_json::from_str::<pm_fx_defs::Definition>(
-                        &pm_model::json::to_canonical_string(&registration.definition),
-                    ) else {
-                        continue;
-                    };
-                    // Resolve the saved revision, never bind today's keys to an old implementation.
-                    let catalog = pm_fx_defs::catalog::EffectCatalog::new(vec![definition]);
-                    let Ok(catalog) = catalog else { continue };
-                    let raw: serde_json::Value =
-                        serde_json::from_str(&pm_model::json::to_canonical_string(effect))
-                            .unwrap_or_default();
-                    let Ok(definition) = catalog.instance(kind, raw.get("version")) else {
-                        continue;
-                    };
-                    if let Ok(handles) = pm_fx_defs::handles::parse(
-                        definition.metadata.get("viewerHandles"),
-                        &definition.params,
-                    ) {
-                        add(format!("{eid}."), handles);
-                    }
-                }
-            }
-            if layer.get("type").and_then(Value::as_str) == Some("extension") {
-                if let Some(registration) = layer
-                    .get("d")
-                    .and_then(|d| d.get("definition"))
-                    .and_then(Value::as_str)
-                    .and_then(|id| state.provider("layerTypes", id))
-                {
-                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(
-                        &pm_model::json::to_canonical_string(&registration.definition),
-                    ) {
-                        if let Ok(params) = serde_json::from_value::<Vec<pm_fx_defs::Parameter>>(
-                            raw["params"].clone(),
-                        ) {
-                            if let Ok(handles) =
-                                pm_fx_defs::handles::parse(raw.get("viewerHandles"), &params)
-                            {
-                                add("x.".into(), handles);
-                            }
-                        }
-                    }
-                }
-            }
-            // Shader-layer declarations live beside uniforms. They use exactly
-            // the same bindings and gesture path as registered effects.
-            if layer.get("type").and_then(Value::as_str) == Some("shader") {
-                if let Some(raw) = layer.get("d").and_then(|d| d.get("viewerHandles")) {
-                    if let Ok(handles) = serde_json::from_str::<Vec<Handle>>(
-                        &pm_model::json::to_canonical_string(raw),
-                    ) {
-                        add("u.".into(), handles);
                     }
                 }
             }

@@ -1049,6 +1049,11 @@ export function InspectorPanel({
   );
   const snapshot = session.inspect();
   const target = snapshot.target;
+  const cameraNamedForType =
+    target.kind === "layers" &&
+    target.count === 1 &&
+    target.first.typeLabel === "Camera" &&
+    target.first.name === "Camera";
   // A section's own action: a quiet text action at the trailing edge of its
   // heading (design language, Properties).
   const sectionAction = (
@@ -1116,7 +1121,9 @@ export function InspectorPanel({
               label={
                 target.count > 1
                   ? `${target.count} layers selected`
-                  : `${target.first.name}, ${target.first.typeLabel.toLowerCase().replace(/\b3d\b/g, "3D")} layer`
+                  : cameraNamedForType
+                    ? `${target.first.name} layer`
+                    : `${target.first.name}, ${target.first.typeLabel.toLowerCase().replace(/\b3d\b/g, "3D")} layer`
               }
               style={{
                 ...horizontal,
@@ -1144,15 +1151,17 @@ export function InspectorPanel({
                   ? `${target.count} Layers`
                   : target.first.name}
               </text>
-              <text
-                style={{
-                  color: token("colors.muted"),
-                  fontSize: token("typography.label"),
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {`· ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}
-              </text>
+              {cameraNamedForType ? null : (
+                <text
+                  style={{
+                    color: token("colors.muted"),
+                    fontSize: token("typography.label"),
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {`· ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}
+                </text>
+              )}
               {target.first.locked ? (
                 <text
                   attr={{ symbol: "lock" }}

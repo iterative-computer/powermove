@@ -419,6 +419,14 @@ impl Build<'_> {
             })
     }
 
+    pub(crate) fn camera_preview(&self) -> bool {
+        !self.final_output
+            && self.sampling == crate::sampling::Sampling::Playback
+            && self.options3d.plane_camera.is_some()
+            && self.source_raster.is_none()
+            && self.material.is_none()
+    }
+
     fn pass_facts(&mut self, comp: &Comp<'_>, all: &[&Node]) -> std::sync::Arc<PassFacts> {
         let layers = comp.layers();
         let key = (layers.as_ptr() as usize, layers.len());
@@ -611,7 +619,6 @@ pub(crate) fn build_reusing<'r>(
                 sampling: options.sampling,
                 blur: options.blur,
                 view: options3d.view.clone(),
-                plane_camera: options3d.plane_camera,
                 text: text.as_deref_mut().map(crate::text::TextContext::reuse_generation),
                 preview: options.preview,
                 keep_empty_groups: options.keep_empty_groups,
@@ -622,6 +629,8 @@ pub(crate) fn build_reusing<'r>(
                 read_ahead: options.read_ahead,
                 focus_group: options.focus_group.clone(),
             },
+            !options.final_output && options.sampling == crate::sampling::Sampling::Playback
+                && options3d.plane_camera.is_some(),
         );
     }
     let mut b = Build {
@@ -944,8 +953,19 @@ pub(crate) fn comp_pass<'d>(
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
             s.group_creates_compositing_boundary(l, time, blur_on, &known)
         };
-        match scope.compositing_layers_with(&all, &facts.owners, parent_id.as_ref(), &mut boundary)
+        let mut compute = |s: &mut Scope<'_, 'd>| {
+            s.compositing_layers_with(&all, &facts.owners, parent_id.as_ref(), &mut boundary)
+        };
+        let result = if b.material.is_none()
+            && let Some(reuse) = b.reuse.as_deref_mut().filter(|r| r.geometry_active)
         {
+            reuse
+                .geometry
+                .membership(scope, group_parent, time, blur_on, compute)
+        } else {
+            compute(scope)
+        };
+        match result {
             Ok(p) => p,
             Err(e) => {
                 b.failures.push(LayerFailure {
@@ -969,6 +989,10 @@ pub(crate) fn comp_pass<'d>(
         b.options3d.view.as_ref(),
         b.precomp_depth == 0,
         b.material.is_none(),
+        b.reuse
+            .as_deref_mut()
+            .filter(|r| r.geometry_active)
+            .map(|r| &mut r.geometry),
     ) {
         Ok((ordered, ctx)) => {
             b.pass3d.push(ctx);
@@ -1689,8 +1713,73 @@ fn layer_draw_with_padding<'d>(
     padding: composite::effects::Padding,
     text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Draw>> {
-    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
-        return Ok(None);
+    let mut geometry_key = None;
+    let ty = js::layer_type(layer);
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    if camera_preview
+        && matches!(ty.as_str(), "shape" | "text" | "solid" | "shader")
+        && b.compat
+            .is_none_or(|raster| !raster.producing(crate::compat::CompatSource::RasterOverride))
+        && !node::truthy(node::member(
+            node::member(node::member(Some(layer), "d"), "extrusion"),
+            "enabled",
+        ))
+        && text.is_none()
+        && b.matte_depth == 0
+        && b.forced_on.is_none()
+        && b.reuse.as_ref().is_some_and(|r| r.geometry_active)
+        && scope.is_3d_layer(layer)?
+    {
+        geometry_key = Some((
+            crate::reuse::scope_key(scope, time),
+            crate::reuse::address(layer),
+            [
+                u64::from(width),
+                u64::from(height),
+                scale.0.to_bits(),
+                scale.1.to_bits(),
+                b.origin.0.to_bits(),
+                b.origin.1.to_bits(),
+            ],
+        ));
+    }
+    let cached = geometry_key
+        .and_then(|key| b.reuse.as_ref()?.geometry.quads.get(&key))
+        .filter(|entry| entry.quad.reusable_local());
+    let (mut quad, world, plane_matrix) = if let Some(entry) = cached {
+        (entry.quad.clone(), entry.affine, Some(entry.world))
+    } else {
+        let failures = b.failures.len();
+        let unsupported = b.unsupported.len();
+        let Some(quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
+            return Ok(None);
+        };
+        let affine = b.world(scope, layer, time, scale)?;
+        let mut plane_matrix = None;
+        if let Some(key) = geometry_key
+            && quad.reusable_local()
+            && b.failures.len() == failures
+            && b.unsupported.len() == unsupported
+        {
+            let world = scope.world3d(layer, time, false)?;
+            b.reuse.as_mut().unwrap().geometry.quads.insert(
+                key,
+                crate::reuse::LayerGeometry {
+                    quad: quad.clone(),
+                    affine,
+                    world,
+                },
+            );
+            plane_matrix = Some(world);
+        }
+        (quad, affine, plane_matrix)
+    };
+    let plane_matrix = match (plane_matrix, scope.view_camera) {
+        (Some(matrix), Some(camera)) => {
+            let (w, h) = scope.comp_size();
+            Some(camera.project_plane(&matrix, w, h))
+        }
+        _ => None,
     };
     if matches!(quad, Quad::Screen { .. })
         && b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
@@ -1702,7 +1791,6 @@ fn layer_draw_with_padding<'d>(
             message: "Screen-space content cannot supply an unclipped source raster".into(),
         });
     }
-    let world = b.world(scope, layer, time, scale)?;
     // Clip the retained texels on the original local grid, after the size
     // anchor has been applied. Every shutter sample and intermediate pass
     // reaches here with its own transform and actual target dimensions.
@@ -1724,7 +1812,19 @@ fn layer_draw_with_padding<'d>(
     }
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
-    let ty = js::layer_type(layer);
+    let mut project = |w, h, ax, ay| -> JsResult<Option<crate::space25d::Plane>> {
+        if let Some(matrix) = plane_matrix {
+            Ok(Some(plane_at_origin(
+                crate::space25d::fold(&matrix, scale, w, h, ax, ay),
+                b.origin,
+            )))
+        } else {
+            Ok(
+                crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
+                    .map(|p| plane_at_origin(p, b.origin)),
+            )
+        }
+    };
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -1736,8 +1836,7 @@ fn layer_draw_with_padding<'d>(
             ay,
         } => {
             let alpha = alpha * a;
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
-                .map(|p| plane_at_origin(p, b.origin));
+            let plane = project(w, h, ax, ay)?;
             // `NaN > 0` is false: a missing radius is none.
             let radius = if radius > 0.0 { radius } else { 0.0 };
             Draw {
@@ -1762,15 +1861,19 @@ fn layer_draw_with_padding<'d>(
             ay,
             uv,
         } => {
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
-                .map(|p| plane_at_origin(p, b.origin));
-            // Electron projects legacy canvas sources through the same
-            // bilinear sampler in 2D and 3D. Native level-2 planes retain
-            // their output-density resampler.
-            let sampling = (matches!(
-                ty.as_str(),
-                "image" | "video" | "precomp" | "shader" | "extension"
-            ) || (plane.is_some() && crate::sampling::is_level2(layer)))
+            let plane = project(w, h, ax, ay)?;
+            // Moving the camera projects the prepared layer-space raster
+            // directly. Building a new mip pyramid per visible text or
+            // vector quad would spend most of the preview on GPU setup.
+            let local_preview = camera_preview
+                && plane.is_some()
+                && matches!(&source, Source::Text(_) | Source::Vector(_) | Source::Shader(_));
+            // Settled level-2 planes and media use the output-density sampler.
+            let sampling = (!local_preview
+                && (matches!(
+                    ty.as_str(),
+                    "image" | "video" | "precomp" | "shader" | "extension"
+                ) || (plane.is_some() && crate::sampling::is_level2(layer))))
             .then_some(b.sampling);
             Draw {
                 layer: id.clone(),
@@ -2030,7 +2133,8 @@ fn scaled_world<'d>(
     ))
 }
 
-enum Quad {
+#[derive(Clone)]
+pub(crate) enum Quad {
     Solid {
         rgb: [f64; 3],
         a: f64,
@@ -2079,6 +2183,25 @@ fn content_quad<'d>(
 }
 
 impl Quad {
+    fn reusable_local(&self) -> bool {
+        match self {
+            Self::Solid { .. } => true,
+            Self::Texture { source, .. } => match source {
+                Source::Text(_) | Source::Vector(_) => true,
+                Source::Shader(source) => {
+                    if let crate::shader_layers::ProgramRef::Code { key, .. } = &source.program {
+                        source.scene_error.is_none()
+                            && !crate::shader_layers::translate::native_failed(key)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn offset_anchor(&mut self, offset: pm_eval::anchor::Offset) {
         if offset.x != 0.0 || offset.y != 0.0 {
             match self {
@@ -2104,6 +2227,7 @@ fn native_content_quad<'d>(
     text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
     let comp_id = scope.comp.id().to_string_lossy();
     if let Some(settings) = b.options3d.studio {
         let extrusion = node::member(node::member(Some(layer), "d"), "extrusion");
@@ -2175,6 +2299,7 @@ fn native_content_quad<'d>(
                     b.origin,
                     pm_vector::render::scene::PixelRect::new(0, 0, width, height),
                     playback,
+                    camera_preview,
                     &mut plan,
                 );
             }
@@ -2318,6 +2443,7 @@ fn native_content_quad<'d>(
                             && !b.final_output
                             && b.source_raster.is_none()
                             && b.material.is_none(),
+                        camera_preview,
                         &mut plan,
                     );
                 }
@@ -3084,6 +3210,7 @@ fn offline_card<'d>(
             b.origin,
             target,
             (b.read_ahead || playback) && !b.final_output,
+            false,
             &mut plan,
         )
         .map(Some);
@@ -3174,6 +3301,7 @@ fn local_level2<'d>(
     origin: (f64, f64),
     target: pm_vector::render::scene::PixelRect,
     playback: bool,
+    camera_preview: bool,
     plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
     let clip = crate::space25d::local::unbounded();
@@ -3187,7 +3315,13 @@ fn local_level2<'d>(
         f64::from(r.width),
         f64::from(r.height),
     ];
-    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    // A moving viewer uses the output grid's density in layer space.
+    // Its texture can be retained while only the projected quad changes.
+    let (dx, dy) = if camera_preview {
+        scale
+    } else {
+        crate::space25d::local::density(scope, layer, time, scale, bounds)?
+    };
     if let crate::vector::VectorQuad::Device {
         source: crate::vector::VectorSource::Scene { scene, .. },
         ..
@@ -3296,6 +3430,7 @@ fn text_quad<'d>(
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         b.unsupported.push(Unsupported::layer(
             &comp_id,
@@ -3311,7 +3446,7 @@ fn text_quad<'d>(
     if level2 && let Some(defer) = deferred.take() {
         defer.paint.flush(text);
     }
-    if level2 && scope.is_3d_layer(layer)? {
+    if (level2 || camera_preview) && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
     }
     if level2 {
@@ -3436,6 +3571,7 @@ fn local_text<'d>(
 ) -> JsResult<Option<Quad>> {
     const MARGIN: f64 = 65536.0;
     let comp_id = scope.comp.id().to_string_lossy();
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         return Ok(None);
     };
@@ -3463,7 +3599,11 @@ fn local_text<'d>(
     };
     let [x0, y0, x1, y1] = first.crop.map(f64::from);
     let bounds = [x0 - MARGIN, y0 - MARGIN, x1 - x0, y1 - y0];
-    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    let (dx, dy) = if camera_preview {
+        scale
+    } else {
+        crate::space25d::local::density(scope, layer, time, scale, bounds)?
+    };
     let (dx, dy) = (
         crate::space25d::local::stepped(dx, bounds[2]),
         crate::space25d::local::stepped(dy, bounds[3]),

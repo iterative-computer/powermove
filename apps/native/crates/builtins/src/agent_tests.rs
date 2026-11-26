@@ -1110,7 +1110,7 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|o| o["checked"] == true)
+            .filter(|o| o["checked"] == true && o["stays"] != true)
             .map(|o| o["label"].as_str().unwrap().to_owned())
             .collect()
     };

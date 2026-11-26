@@ -66,7 +66,50 @@ async function fixture(count = 0) {
     settle: () => model.settled(),
   };
 }
-test("selection changes retain all nodes and layout styles with no nested scroll", async () => {
+test("all twelve toolbar buttons publish symbols the native renderer reads", async () => {
+  const f = await fixture();
+  const symbols = {
+    more: "ellipsis",
+    copy: "square.on.square",
+    paste: "point.topleft.down.to.point.bottomright.curvepath",
+    easy: "clock.fill",
+    undo: "arrow.uturn.backward",
+    redo: "arrow.uturn.forward",
+    coordinates: "slider.horizontal.3",
+    mirror: "arrow.clockwise",
+    "save-preset": "plus",
+    "auto-apply": "bolt.fill",
+    apply: "return",
+    "add-group": "plus",
+  };
+  for (const [id, symbol] of Object.entries(symbols)) {
+    const { metadata } = f.node(`easing:${id}`).props;
+    expect(metadata).toHaveProperty("symbol", symbol);
+    expect(metadata).not.toHaveProperty("pmKit.symbol");
+  }
+  expect(f.node("easing:auto-apply").props.style).toMatchObject({
+    color: { token: "colors.text" },
+    background: { token: "colors.selected_fill" },
+  });
+  await f.root.dispose();
+});
+
+test("preset group tabs center their label alongside the add button", async () => {
+  const f = await fixture();
+  const tab = f.node("easing:group:default");
+  const add = f.node("easing:add-group");
+  expect(tab.props.label).toBe("1");
+  expect(tab.parent).toBe(add.parent);
+  expect(tab.props.style).toMatchObject({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: add.props.style?.height,
+  });
+  await f.root.dispose();
+});
+
+test("the dock can scroll the full panel body as selection changes", async () => {
   const f = await fixture();
   const layout = () =>
     [...f.root.host.nodes.values()].map((n) => [
@@ -76,9 +119,18 @@ test("selection changes retain all nodes and layout styles with no nested scroll
       ),
     ]);
   const before = layout();
+  const body = f.node("easing:content");
+  expect(body.props.style).toMatchObject({
+    flexGrow: 1,
+    flexShrink: 0,
+    paddingBottom: { token: "metrics.inset" },
+  });
+  expect(body.props.style).not.toHaveProperty("overflowY");
   expect([...f.root.host.nodes.values()].some((n) => n.type === "scroll")).toBe(
     false,
   );
+  expect(f.node("easing:preset:easeOut").parent?.parent).toBe(body);
+  expect(body.children.at(-1)).toBe(f.node("easing:status"));
   expect(f.node("easing:apply").props.disabled).toBe(true);
   expect(f.node("easing:influence:outgoing")).toBeUndefined();
   await f.select(1);

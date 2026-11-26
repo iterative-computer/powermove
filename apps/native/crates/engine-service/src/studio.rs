@@ -252,7 +252,6 @@ pub(crate) fn attach_with_camera_fonts_progress(
         return Ok(());
     }
     camera.validate()?;
-    use pm_studio3d_engine::compositor::Source;
     let mut source = DocumentSource::new(doc, media.clone())
         .with_native_fonts(fonts)
         .with_camera_for(&request.composition, camera)
@@ -260,7 +259,21 @@ pub(crate) fn attach_with_camera_fonts_progress(
     if let Some(cache) = resource_cache {
         source = source.with_resource_cache(cache);
     }
-    let tier = match preview {
+    let tier = preview_tier(&source, request, preview)?;
+    let source = std::sync::Arc::new(source.with_capture_definitions(renderer.definitions()));
+    source.spawn_prewarm(&request.composition);
+    attach_arc_source(renderer, source, tier);
+    Ok(())
+}
+
+#[cfg(feature = "kernel")]
+fn preview_tier(
+    source: &DocumentSource,
+    request: &SceneRequest,
+    preview: Preview,
+) -> Result<Tier, String> {
+    use pm_studio3d_engine::compositor::Source;
+    Ok(match preview {
         Preview::Fast => Tier::Fast,
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },
@@ -269,13 +282,148 @@ pub(crate) fn attach_with_camera_fonts_progress(
             salt: 1,
             denoise: Denoise::Oidn,
         },
-    };
-    let source = std::sync::Arc::new(source.with_capture_definitions(renderer.definitions()));
-    source.spawn_prewarm(&request.composition);
-    attach_arc_source(renderer, source, tier);
-    Ok(())
+    })
 }
 
+/// Viewer pose can change while the document, its resolved scene, and
+/// resource and material caches stay valid. Selecting a different authored
+/// camera still creates a new source because it changes scene resolution.
+#[cfg(feature = "kernel")]
+pub(crate) struct ViewerSource {
+    document: std::sync::RwLock<Option<DocumentSource>>,
+    revision: u64,
+    tier: Tier,
+}
+
+#[cfg(feature = "kernel")]
+impl ViewerSource {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        renderer: &pm_render::Renderer,
+        doc: std::sync::Arc<pm_model::Document>,
+        media: &pm_export::render::MediaPaths,
+        request: &SceneRequest,
+        preview: Preview,
+        camera: ViewCamera,
+        fonts: Option<&pm_render::text::host::RenderFonts>,
+        observer: Option<RefineObserver>,
+        cache: StudioResourceCache,
+    ) -> Result<Option<std::sync::Arc<Self>>, String> {
+        if pm_eval::node::is_str(pm_eval::node::member(doc.root(), "render3d"), "electron") {
+            return Ok(None);
+        }
+        camera.validate()?;
+        let document = DocumentSource::new(doc.clone(), media.clone())
+            .with_native_fonts(fonts)
+            .with_camera_for(&request.composition, camera)
+            .with_refine_observer(observer)
+            .with_resource_cache(cache.clone())
+            .with_capture_definitions(renderer.definitions());
+        let tier = preview_tier(&document, request, preview)?;
+        // The background loader fills the same shared resource cache.
+        std::sync::Arc::new(DocumentSource::new(doc, media.clone()).with_resource_cache(cache))
+            .spawn_prewarm(&request.composition);
+        Ok(Some(std::sync::Arc::new(Self {
+            revision: document.revision(),
+            document: std::sync::RwLock::new(Some(document)),
+            tier,
+        })))
+    }
+
+    pub(crate) fn set_camera(&self, comp: &str, camera: ViewCamera) -> Result<(), String> {
+        camera.validate()?;
+        let mut document = self
+            .document
+            .write()
+            .map_err(|_| "Studio source lock poisoned")?;
+        *document = document
+            .take()
+            .map(|source| source.with_camera_for(comp, camera));
+        Ok(())
+    }
+
+    pub(crate) fn attach(self: &std::sync::Arc<Self>, renderer: &mut pm_render::Renderer) {
+        attach_provider(renderer, self.clone(), self.revision, self.tier);
+    }
+
+    fn read<T>(&self, f: impl FnOnce(&DocumentSource) -> Result<T, String>) -> Result<T, String> {
+        let document = self
+            .document
+            .read()
+            .map_err(|_| "Studio source lock poisoned")?;
+        f(document
+            .as_ref()
+            .expect("source is restored under the write lock"))
+    }
+}
+
+#[cfg(feature = "kernel")]
+impl SceneSource for ViewerSource {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        self.read(|s| s.scene(request))
+    }
+
+    fn refine_progress(&self, request: &SceneRequest, progress: RefineProgress) -> bool {
+        self.read(|s| Ok(s.refine_progress(request, progress)))
+            .unwrap_or(false)
+    }
+
+    fn layer_failures(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Vec<pm_render::LayerFailure>, String> {
+        self.read(|s| s.layer_failures(request))
+    }
+
+    fn auxiliary_layers(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
+        self.read(|s| s.auxiliary_layers(request))
+    }
+
+    fn final_quality(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Option<pm_studio3d_engine::extract::FinalQuality>, String> {
+        self.read(|s| s.final_quality(request))
+    }
+}
+
+#[cfg(feature = "kernel")]
+impl pm_studio3d_engine::compositor::Source for ViewerSource {
+    fn final_samples(&self, request: &SceneRequest) -> Result<u32, String> {
+        self.read(|s| s.final_samples(request))
+    }
+
+    fn splat_layers(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Vec<pm_studio3d_engine::splats::Layer>, String> {
+        self.read(|s| s.splat_layers(request))
+    }
+
+    fn needs_materials(&self, request: &SceneRequest) -> Result<bool, String> {
+        self.read(|s| s.needs_materials(request))
+    }
+
+    fn prewarm_materials(
+        &self,
+        renderer: &mut pm_render::Renderer,
+        request: &SceneRequest,
+    ) -> Result<(), String> {
+        self.read(|s| s.prewarm_materials(renderer, request))
+    }
+
+    fn prepare_materials(
+        &self,
+        renderer: &mut pm_render::Renderer,
+        request: &SceneRequest,
+        tier: Tier,
+    ) -> Result<bool, String> {
+        self.read(|s| s.prepare_materials(renderer, request, tier))
+    }
+}
 
 /// Native export command hook. Overrides affect this frozen job only.
 #[cfg(feature = "kernel")]
@@ -313,6 +461,16 @@ fn attach_arc_source(
     preview: Tier,
 ) {
     let revision = source.revision();
+    attach_provider(renderer, source, revision, preview);
+}
+
+#[cfg(feature = "kernel")]
+fn attach_provider(
+    renderer: &mut pm_render::Renderer,
+    source: std::sync::Arc<dyn pm_studio3d_engine::compositor::Source>,
+    revision: u64,
+    preview: Tier,
+) {
     renderer.set_studio_source(
         Some(std::sync::Arc::new(
             pm_studio3d_engine::compositor::Adapter(source),

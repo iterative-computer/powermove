@@ -1523,6 +1523,7 @@ impl Scene {
             viewport: v,
             fixed,
             rows_top: m.ruler as f64,
+            strip_gap: t.strip_gap() as f64,
             range: visible,
             total: self.total(),
             ops,
@@ -2920,6 +2921,7 @@ pub struct Marquee {
 #[derive(Clone, Debug)]
 pub struct Frame {
     rows_top: f64,
+    strip_gap: f64,
     pub viewport: Viewport,
     /// The ops before this index (the ground, the column's ground and the
     /// ruler with its grid) stand still while the rows scroll.
@@ -3183,8 +3185,14 @@ impl Frame {
         {
             return None;
         }
-        let hit = |o: &'a Op, inside: bool| {
+        let hit = |o: &'a Op, gap: f64, inside: bool| {
             if !o.id.starts_with("clip:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
+                return None;
+            }
+            let bounds = o.bounds;
+            let band = bounds.y - gap..bounds.y + bounds.height + gap;
+            let horizontal = bounds.x..=bounds.x + bounds.width;
+            if !band.contains(&y) || (inside && !horizontal.contains(&x)) {
                 return None;
             }
             let edges = o.detail["sourceEdges"].as_array()?;
@@ -3203,23 +3211,26 @@ impl Frame {
                 (false, true) => Some(Edge::Out),
                 _ => None,
             };
-            let b = o.bounds;
-            let level = y >= b.y && y < b.y + b.height;
-            let found = if inside {
-                b.contains(x, y)
-            } else {
-                level && edge.is_some()
-            };
-            found.then(|| (&o.id[5..], edge))
+            (inside || edge.is_some()).then(|| (&o.id[5..], edge))
         };
-        // The strip under the point first (two that meet: each trims its own
-        // end); else a trim zone, which reaches past a strip's drawn end to
-        // its layer's edge and beyond, over the strip's height.
+        // Prefer a painted body, then let each strip own the padding inside
+        // its row. Trim grips can reach past the drawn ends on that same row.
         self.ops
             .iter()
             .rev()
-            .find_map(|o| hit(o, true))
-            .or_else(|| self.ops.iter().rev().find_map(|o| hit(o, false)))
+            .find_map(|o| hit(o, 0., true))
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, true))
+            })
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, false))
+            })
     }
 }
 

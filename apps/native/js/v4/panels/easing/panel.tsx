@@ -71,7 +71,7 @@ function Tool({
       title={label}
       active={active}
       disabled={disabled}
-      metadata={{ pmKit: { symbol } }}
+      metadata={{ symbol }}
       onClick={() => {
         if (!disabled) action();
       }}
@@ -80,12 +80,6 @@ function Tool({
         flexGrow: expand ? 1 : 0,
         flexBasis: t("space.hair"),
         borderRadius: t("metrics.control_radius"),
-        ...(active
-          ? {
-              color: t("colors.accent"),
-              background: t("colors.selected_fill"),
-            }
-          : {}),
       }}
     />
   );
@@ -382,6 +376,9 @@ export function EasingPanel({ model, bindings }: EasingProps) {
         style={{
           display: "flex",
           flexDirection: "column",
+          // The dock scrolls this body at its full content height.
+          flexGrow: 1,
+          flexShrink: 0,
           gap: t("metrics.gap"),
           paddingLeft: t("metrics.inset"),
           paddingRight: t("metrics.inset"),
@@ -422,7 +419,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
           <Tool
             id="easy"
             label="Easy Ease"
-            symbol="clock"
+            symbol="clock.fill"
             action={() => easyEase("both")}
           />
         </div>
@@ -525,7 +522,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
           <Tool
             id="auto-apply"
             label="Auto apply"
-            symbol="textformat"
+            symbol="bolt.fill"
             active={autoApply}
             action={() => setAutoApply(!autoApply)}
           />
@@ -563,6 +560,9 @@ export function EasingPanel({ model, bindings }: EasingProps) {
                 preview(undefined);
               }}
               style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
                 height: t("metrics.control"),
                 minWidth: t("metrics.hit"),
                 minHeight: t("metrics.hit"),

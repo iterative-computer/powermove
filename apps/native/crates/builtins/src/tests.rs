@@ -2062,7 +2062,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         &mut model,
         &row(&p, "position").unwrap(),
         0,
-        json!(8.),
+        json!(8.25),
     );
     let (_, turned) = view();
     assert!(
@@ -2074,6 +2074,10 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     // rotation it writes is checked), and shows Rotation instead.
     let before = view();
     let (mut model, p) = publish(&mut presenter);
+    let position = row(&p, "position").unwrap();
+    assert_eq!(position["control"]["axes"][0]["value"], 8.25);
+    assert_eq!(position["control"]["axes"][0]["precision"], 2);
+    assert_eq!(position["control"]["axes"][2]["axis"], "Z");
     write(
         &presenter,
         &mut model,
@@ -2106,7 +2110,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         moved.1
     );
     assert!(
-        close(moved.0, [after.0[0] + 8., after.0[1], after.0[2]]),
+        close(moved.0, [after.0[0] + 7.75, after.0[1], after.0[2]]),
         "{:?}",
         moved.0
     );
@@ -2127,6 +2131,48 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     );
     let (_, p) = publish(&mut presenter);
     assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+
+    let request = Request::new(
+        Caller::native(),
+        pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::PropertyCommand::SetExpression {
+                layer_id: "cam".into(),
+                channel: "camera.targetX".into(),
+                expression: Some("value + 0.25".into()),
+            }
+            .into()]),
+        },
+    );
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(
+        !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+        "{:?}",
+        ack.reply
+    );
+    let (mut model, p) = publish(&mut presenter);
+    assert_eq!(
+        row(&p, "target").unwrap()["expression"]["source"],
+        "value + 0.25"
+    );
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"row-action","row":"position","action":"separate-dimensions"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(
+        !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+        "{:?}",
+        ack.reply
+    );
+    let (_, p) = publish(&mut presenter);
+    assert_eq!(row(&p, "position").unwrap()["separateDimensions"], true);
 }
 
 #[test]
@@ -4337,7 +4383,8 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     };
     run(json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
     run(json!({"operation":"add_light","id":"lamp","light":{"type":"area"}}));
-    run(json!({"operation":"add_camera","id":"cam"}));
+    // This saved camera has optional bokeh channels authored.
+    run(json!({"operation":"add_camera","id":"cam","camera":{"p":{"irisShape":0,"irisRoundness":0}}}));
     let mut presenter = properties::Properties::default();
     let publish = |presenter: &mut properties::Properties, id: &str| {
         select_layer(&kernel, id);
@@ -4592,21 +4639,34 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
 
     let (mut model, p) = publish(&mut presenter, "cam");
+    assert_eq!(p["target"]["first"]["typeLabel"], "Camera");
     assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment", "Shot"]);
+    let sections = p["sections"].as_array().unwrap();
+    assert_eq!(
+        sections
+            .iter()
+            .take(5)
+            .map(|s| (s["title"].as_str().unwrap(), s["collapsed"].as_bool().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("Transform", false),
+            ("Camera", false),
+            ("Depth of Field", true),
+            ("Environment", true),
+            ("Shot", true),
+        ]
+    );
     assert_eq!(
         labels(&p, "Camera"),
         [
             "Projection",
-            "Auto-Orient",
             "Field of View",
+            "Auto-Orient",
             "Clip Start",
             "Clip End",
         ]
     );
-    assert_eq!(
-        labels(&p, "Depth of Field"),
-        ["Depth of Field"]
-    );
+    assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
     assert_eq!(
         labels(&p, "Environment"),
         [
@@ -4617,6 +4677,69 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Background"
         ]
     );
+    let collapsed = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()["collapsed"]
+            .as_bool()
+            .unwrap()
+    };
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.dof.enabled").unwrap(),
+        json!(true),
+    );
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert!(!collapsed(&p, "3d.depth-of-field"));
+    assert!(row(&p, "3d.dof.focusTarget").is_some());
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.dof.irisShape").unwrap(),
+        json!("6"),
+    );
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert!(row(&p, "camera.irisRoundness").is_some());
+    for id in ["camera.focusDistance", "environment.exposure"] {
+        let request = presenter
+            .intent(&mut model, Caller::native(), &json!({"type":"key","row":id}), 0.)
+            .unwrap()
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+        model.sync(kernel.published("synthetic").unwrap());
+    }
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.dof.enabled").unwrap(),
+        json!(false),
+    );
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
+    assert!(!collapsed(&p, "3d.depth-of-field"));
+    assert!(!collapsed(&p, "3d.environment"));
+    assert!(collapsed(&p, "3d.shot"));
+    assert!(presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"collapse","section":"3d.environment","collapsed":true}),
+            0.,
+        )
+        .unwrap()
+        .is_none());
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert!(collapsed(&p, "3d.environment"));
+
     write(
         &presenter,
         &mut model,
@@ -4624,7 +4747,8 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         json!("orthographic"),
     );
     let (_, p) = publish(&mut presenter, "cam");
-    assert_eq!(labels(&p, "Camera")[2], "Zoom");
+    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert!(labels(&p, "Depth of Field").is_empty());
     // The camera shows the composition's Render Quality, not a second sampler.
     assert!(row(&p, "3d.samples").is_none());
     assert_eq!(

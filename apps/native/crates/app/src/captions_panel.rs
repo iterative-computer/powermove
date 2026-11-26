@@ -130,44 +130,76 @@ fn wire(node: &pm_model::Node) -> Option<Value> {
 pub fn read(published: &pm_kernel::Published) -> Option<Doc> {
     let root = published.snapshot.root()?;
     let open = published.snapshot.open_comp();
-    let comp = wire(pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root))?;
+    let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+    Some(read_composition(root, comp, wire))
+}
+
+fn read_composition(
+    root: &pm_model::Node,
+    comp: &pm_model::Node,
+    read_cues: impl Fn(&pm_model::Node) -> Option<Value>,
+) -> Doc {
+    let number = |node: &pm_model::Node| match node.kind() {
+        pm_model::NodeKind::Number(n) if n.is_finite() => Some(*n),
+        _ => None,
+    };
     let mut layers = vec![];
     let mut names = vec![];
     let mut on = vec![];
     let mut languages = vec![];
-    for layer in comp["layers"].as_array().into_iter().flatten() {
-        if layer["type"] != "captions" {
+    for layer in pm_kernel::model::layers_of(comp) {
+        let string = |key| layer.get(key).and_then(crate::node_string);
+        if string("type") != Some("captions") {
             continue;
         }
-        let cues: Vec<CaptionCue> =
-            serde_json::from_value(layer["d"]["cues"].clone()).unwrap_or_default();
+        let content = layer.get("d");
+        let cues = content
+            .and_then(|d| d.get("cues"))
+            .and_then(&read_cues)
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
         layers.push(Layer {
-            id: layer["id"].as_str().unwrap_or_default().into(),
-            from: layer["from"].as_f64().unwrap_or(0.),
-            locked: layer["lock"] == true,
+            id: string("id").unwrap_or_default().into(),
+            from: layer.get("from").and_then(number).unwrap_or(0.),
+            locked: matches!(
+                layer.get("lock").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true))
+            ),
             cues,
         });
-        names.push(layer["name"].as_str().unwrap_or("Captions").to_owned());
-        on.push(layer["on"] != false);
-        languages.push(layer["d"]["language"].as_str().map(str::to_owned));
+        names.push(string("name").unwrap_or("Captions").to_owned());
+        on.push(!matches!(
+            layer.get("on").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(false))
+        ));
+        languages.push(
+            content
+                .and_then(|d| d.get("language"))
+                .and_then(crate::node_string)
+                .map(str::to_owned),
+        );
     }
-    let work = comp["work"]
-        .as_array()
-        .and_then(|w| Some([w.first()?.as_f64()?, w.get(1)?.as_f64()?]));
-    Some(Doc {
+    let work = comp
+        .get("work")
+        .and_then(|w| Some([number(w.at(0)?)?, number(w.at(1)?)?]));
+    Doc {
         layers: layers.into(),
         names: names.into(),
         on: on.into(),
         languages: languages.into(),
-        fps: comp["fps"].as_f64().filter(|f| *f > 0.).unwrap_or(30.),
-        duration: comp["dur"].as_f64().unwrap_or(0.),
+        fps: comp
+            .get("fps")
+            .and_then(number)
+            .filter(|f| *f > 0.)
+            .unwrap_or(30.),
+        duration: comp.get("dur").and_then(number).unwrap_or(0.),
         work,
         project: root
             .get("name")
             .and_then(crate::node_string)
             .unwrap_or("Captions")
             .to_owned(),
-    })
+    }
 }
 
 fn model(value: Value) -> pm_model::Value {
@@ -1461,8 +1493,44 @@ fn render(
 mod tests {
     use super::{
         CaptionCue, CaptionFormat, Doc, Layer, add_span, decode_text, file_info, is_caption_file,
-        sidecars, slug, timecode,
+        model, read_composition, sidecars, slug, timecode, wire,
     };
+    use serde_json::json;
+
+    #[test]
+    fn captions_reads_only_caption_cues_on_639_layers() {
+        let stack: Vec<_> = (0..639).map(|i| {
+            if i == 628 {
+                json!({"id":"speech","name":"Interview","type":"captions","from":2,"lock":true,"on":false,
+                    "d":{"language":"en","cues":[]}})
+            } else {
+                json!({"id":format!("l{i}"),"type":"solid","d":{"cues":[{"unused":true}]}})
+            }
+        }).collect();
+        let project = json!({"name":"Film","fps":24,"dur":7,"work":[1,5],"layers":stack});
+        let root = pm_model::Node::from_value(model(project), 1);
+        let conversions = std::cell::Cell::new(0);
+        let start = std::time::Instant::now();
+        let doc = read_composition(&root, &root, |node| {
+            conversions.set(conversions.get() + 1);
+            wire(node)
+        });
+        eprintln!(
+            "639-layer captions read: {:.3} ms",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        assert_eq!(conversions.get(), 1);
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.layers[0].id, "speech");
+        assert!(doc.layers[0].locked);
+        assert_eq!(doc.layers[0].from, 2.);
+        assert_eq!(&*doc.names, ["Interview"]);
+        assert_eq!(&*doc.on, [false]);
+        assert_eq!(&*doc.languages, [Some("en".to_owned())]);
+        assert_eq!((doc.fps, doc.duration, doc.work), (24., 7., Some([1., 5.])));
+        assert_eq!(doc.project, "Film");
+    }
+
     fn layer() -> Layer {
         Layer {
             id: "L".into(),

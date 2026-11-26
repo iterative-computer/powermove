@@ -477,7 +477,6 @@ struct LayerDrop {
 }
 pub struct TimelineSurface {
     agent_ink: pm_panel_timeline::agent_ink::AgentInk,
-    agent_dot_groups: Vec<pm_panel_timeline::agent_ink::DotGroup>,
     agent_drag_touch: Option<String>,
     agent_ink_clock: std::time::Instant,
     agent_ink_task: Option<Task<()>>,
@@ -531,31 +530,13 @@ pub struct TimelineSurface {
     /// The drag readout's text and where the pointer is (surface points).
     readout: Option<(String, f64, f64)>,
     frame: Option<Arc<Frame>>,
-    frame_reach: f64,
     waveforms: WaveformCache,
     outline_geometry: Option<(f32, f32, Option<(usize, usize)>)>,
     service_dirty: bool,
     zooming: bool,
     transition_selected: Option<(String, String)>,
-    /// The rows a viewport past each edge, and while `sideways` the tracks
-    /// and the ruler the tracks' width past each side (`Scene::prepare_wide`,
-    /// that reach), prepared for the view of the `frame` they follow: what
-    /// the scroll layers record.
-    rows: Option<(Arc<Frame>, Arc<Frame>, f64)>,
-    /// A sideways scroll is under way (since a sideways wheel step, until a
-    /// zoom or a press): only then do the layers record past each side,
-    /// which costs every full draw (a drag, a pinch) more than half again.
-    sideways: bool,
-    /// The driven scroll layers (P-SCROLL-LAYER): the outline column's rows
-    /// move with the vertical scroll, the tracks with it and the time, the
-    /// ruler with the time; a wheel step replays what they drew, shifted.
-    rows_handle: ScrollHandle,
-    tracks_handle: ScrollHandle,
-    ruler_handle: ScrollHandle,
-    /// The tracks' and the ruler's x offset when they last drew and the time
-    /// then at their left edge: a step's offset is that less the time
-    /// scrolled since.
-    drawn: (f32, f64),
+    /// The rows' last painted frame. Audio changes can invalidate it.
+    rows: Option<Arc<Frame>>,
     /// The clip under the pointer and the pointer's x in the panel: its strip
     /// draws hovered, with the trim grip inside the nearer edge.
     hover_clip: Option<(String, f64)>,
@@ -567,8 +548,9 @@ pub struct TimelineSurface {
     lit: Option<Part>,
     view: Viewed,
     /// The native playhead's time mapping: pixels per second, first second and
-    /// time column of the frame last prepared.
+    /// time column of the frame last painted.
     shown: (f64, f64, f64),
+    shown_bounds: Bounds<Pixels>,
     fitted: bool,
     /// The composition length last shown: when it changes while the view
     /// shows all of it from 0, the view refits to the new length.
@@ -607,8 +589,6 @@ pub struct TimelineSurface {
     /// has not moved (a seek, a click, playback put the viewer back on the
     /// playhead's frame).
     skim_playhead: Option<f64>,
-    /// A wheel step moves the skimmer: no panel draw for it.
-    quiet_skim: bool,
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
@@ -624,11 +604,6 @@ pub struct TimelineSurface {
 const WHEEL_ZOOM: f64 = 0.01;
 /// How often a growing render bar is read again (PM-431).
 const RENDER_BAR_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
-/// The tracks and the ruler draw this many of their widths in from their
-/// layers' left edge, in content `2 × SIDEWAYS + 1` widths wide: a sideways
-/// step inside the width the layer records past each side replays it.
-const SIDEWAYS: f64 = 2.;
-
 /// The fewest letters of a clip's name worth showing before its ellipsis.
 const NAME_LEAST: usize = 3;
 const PPS: (f64, f64) = (4., 4000.);
@@ -659,7 +634,6 @@ impl TimelineSurface {
         outline.bind_surface(cx.entity().downgrade());
         let mut this = Self {
             agent_ink: Default::default(),
-            agent_dot_groups: Vec::new(),
             agent_drag_touch: None,
             agent_ink_clock: std::time::Instant::now(),
             agent_ink_task: None,
@@ -696,23 +670,18 @@ impl TimelineSurface {
             graph_axis: false,
             readout: None,
             frame: None,
-            frame_reach: 0.,
             waveforms: WaveformCache::default(),
             outline_geometry: None,
             service_dirty: true,
             zooming: false,
             transition_selected: None,
             rows: None,
-            rows_handle: ScrollHandle::new(),
-            tracks_handle: ScrollHandle::new(),
-            ruler_handle: ScrollHandle::new(),
-            sideways: false,
-            drawn: (0., view.scroll_time),
             bounds: Bounds::default(),
             body: Bounds::default(),
             lit: None,
             view,
             shown: (view.pps, view.scroll_time, view.layer_column),
+            shown_bounds: Bounds::default(),
             fitted: false,
             fit_duration: 0.,
             gesture: Gesture::Idle,
@@ -732,7 +701,6 @@ impl TimelineSurface {
             skimmer: None,
             pointer: None,
             skim_playhead: None,
-            quiet_skim: false,
             hover_clip: None,
             // As the scene and the panel's model start: the shell's first
             // word (unfocused, at the first layout) is then a change, and
@@ -826,7 +794,7 @@ impl TimelineSurface {
             self.fitted = true;
         }
         if let Some(time) = number("nativeScrollTime").filter(|t| t.is_finite()) {
-            self.view.scroll_time = time;
+            self.view.scroll_time = time.max(0.);
         }
         if let Some(y) = number("nativeScrollY").filter(|y| y.is_finite()) {
             self.view.scroll_y = y.max(0.);
@@ -1184,7 +1152,6 @@ impl TimelineSurface {
                     self.scene = drag.scene;
                 }
                 self.frame = None;
-                self.rows = None;
                 self.queue.push_back(Job::Sync);
             }
             Gesture::Marquee { .. } => {
@@ -1257,7 +1224,8 @@ impl TimelineSurface {
         let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 2. * ROOM;
         let frame = 1. / self.model.index.fps.max(1.);
         self.view.pps = (width.max(1.) / (last - first).max(frame)).clamp(PPS.0, PPS.1);
-        self.view.scroll_time = (first - ROOM / self.view.pps).max(self.model.index.minimum_time());
+        self.view.scroll_time = first - ROOM / self.view.pps;
+        self.clamp_time();
         // The values refit too: the curves fill the graph's height again.
         self.graph_view = None;
         if self.graph_fitted.is_some() {
@@ -1271,7 +1239,6 @@ impl TimelineSurface {
         if scale == self.view.pps || !scale.is_finite() {
             return;
         }
-        self.sideways = false;
         self.zooming = true;
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
         self.view.pps = scale;
@@ -1285,25 +1252,24 @@ impl TimelineSurface {
         let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column;
         (width > END_ROOM).then_some(width)
     }
-    /// The farthest a person can zoom out: the whole of the timeline's time
-    /// (`minimum_time` to `maximum_time`) fits the time area with a little
-    /// room at its end, never more.
+    /// The farthest a person can zoom out fits the timeline from zero with
+    /// room at its end.
     fn least_pps(&self) -> f64 {
         let index = &self.model.index;
-        let span = (index.maximum_time() - index.minimum_time()).max(1. / index.fps.max(1.));
+        let span = index.maximum_time().max(1. / index.fps.max(1.));
         self.time_width()
             .map_or(PPS.0, |w| ((w - END_ROOM) / span).clamp(PPS.0, PPS.1))
     }
-    /// Keeps the view on the timeline's time: from its earliest time to a
-    /// little past its end, so scrolling or zooming never leaves it on empty
-    /// time past the composition.
+    fn time_end(&self) -> f64 {
+        self.model.index.maximum_time() + END_ROOM / self.view.pps
+    }
+    /// Start the visible ruler at or after composition zero. Layers can still
+    /// start before zero and continue into the visible range.
     fn clamp_time(&mut self) {
-        let index = &self.model.index;
-        let least = index.minimum_time();
         let most = self.time_width().map_or(f64::INFINITY, |w| {
-            index.maximum_time() + END_ROOM / self.view.pps - w / self.view.pps
+            self.time_end() - w / self.view.pps
         });
-        self.view.scroll_time = self.view.scroll_time.min(most).max(least);
+        self.view.scroll_time = self.view.scroll_time.min(most).max(0.);
     }
     /// The ruler and the rows: the body less the bottom bar, which a body
     /// too short for both gives up.
@@ -1319,7 +1285,7 @@ impl TimelineSurface {
         Bounds::new(body.origin, size(body.size.width, body.size.height - bar))
     }
     /// The bottom bar's layout for the view as it stands.
-    fn bar(&self) -> Option<pm_panel_timeline::footer::Layout> {
+    pub(crate) fn bar(&self) -> Option<pm_panel_timeline::footer::Layout> {
         let scene = self.scene.as_ref()?;
         let (top, height) = (
             f32::from(self.bounds.size.height) as f64,
@@ -1333,7 +1299,7 @@ impl TimelineSurface {
             pps: self.view.pps,
             pps_range: PPS,
             scroll_time: self.view.scroll_time,
-            time: (self.model.index.minimum_time(), scene.duration),
+            time: (0., self.time_end()),
             rows_top: self.tokens.metrics.ruler as f64,
             scroll_y: self.view.scroll_y,
             // Under a graph the rows do not scroll.
@@ -1366,6 +1332,9 @@ impl TimelineSurface {
     fn over_bar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         let (x, y) = self.local(position);
         let inside = self.body.contains(&position);
+        if inside {
+            self.ensure_frame(cx);
+        }
         let part = self
             .bar()
             .filter(|_| inside)
@@ -1477,88 +1446,22 @@ impl TimelineSurface {
     /// Wheel and pinch move the view locally on every event; each write
     /// publishes to every panel, so it waits until the gesture rests.
     fn changed_while_hot(&mut self, cx: &mut Context<Self>) {
+        // The ruler, tracks and scrollbars are painted from the same view.
+        // Moving only the retained tracks would leave the overlays behind.
         self.changed(false, cx);
-        self.persist_when_idle(true, cx);
-    }
-    /// A wheel step: the layers replay what they drew at the new scroll when
-    /// they recorded that far, else the timeline draws again. Up and down
-    /// moves the rows, the tracks and the outline (the ruler, the bar and the
-    /// overlays stand still); `sideways` moves the tracks and the ruler.
-    fn scrolled_while_hot(&mut self, sideways: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.step_layers(sideways, window, cx) {
-            // The layers draw the view once the steps stop.
-            self.persist_when_idle(false, cx);
-        } else {
-            self.changed_while_hot(cx);
-        }
-    }
-    /// The tracks' and the ruler's x offset for the time now: as drawn, less
-    /// what scrolled since.
-    fn tracks_x(&self) -> f32 {
-        self.drawn.0 - ((self.view.scroll_time - self.drawn.1) * self.view.pps) as f32
-    }
-    /// The layers' step with no render: the frame hit-testing reads is
-    /// prepared for the new scroll; what they drew stays as recorded. False
-    /// when a layer has to draw (a step past its recording, a gesture or a
-    /// graph on screen, the skimmer showing on a sideways step, the layer off).
-    fn step_layers(&mut self, sideways: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.record_scroll_layers()
-            || !matches!(self.gesture, Gesture::Idle)
-            || self.graph_region().is_some()
-            || self.media_over.is_some()
-            || self.effect_over.is_some()
-            || self.tip.is_some()
-            // Recorded no further than the view.
-            || (sideways && !self.rows.as_ref().is_some_and(|(_, _, reach)| *reach > 0.))
-        {
-            return false;
-        }
-        let y = self.view.scroll_y as f32;
-        let x = self.tracks_x();
-        // Each layer at exactly the offset asked (a layer drawn for another
-        // width clamps it).
-        let step = |handle: &ScrollHandle, at: Point<Pixels>, window: &mut Window, cx: &mut App| {
-            let near = |a: Pixels, b: Pixels| f32::from(a - b).abs() < 0.5;
-            window.step_scroll_layer(handle, at, cx)
-                && near(handle.offset().x, at.x)
-                && near(handle.offset().y, at.y)
-        };
-        let stepped = if sideways {
-            step(&self.tracks_handle, point(px(x), px(-y)), window, cx)
-                && step(&self.ruler_handle, point(px(x), px(0.)), window, cx)
-        } else {
-            step(&self.tracks_handle, point(px(x), px(-y)), window, cx)
-                && step(&self.rows_handle, point(px(0.), px(-y)), window, cx)
-                && self.outline.step(y, self.visible_rows(), (f32::from(self.bounds.size.height) - self.tokens.metrics.ruler) as f64, window, cx)
-        };
-        if !stepped {
-            return false;
-        }
-        self.frame = None;
-        let bounds = self.bounds;
-        self.outline_geometry = Some((y, self.view.layer_column as f32, self.visible_rows()));
-        self.prepared(bounds, false, cx);
-        true
-    }
-    /// Writes the view once the gesture rests, drawing it again too unless
-    /// its scroll layers do (`draw`).
-    fn persist_when_idle(&mut self, draw: bool, cx: &mut Context<Self>) {
         self.idle_persist = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(crate::gizmo::NAVIGATION_IDLE)
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.idle_persist = None;
-                if std::mem::take(&mut s.zooming)
-                    && let Some(pointer) = s.pointer
-                {
-                    s.reskim(s.local(pointer).0, cx);
+                if std::mem::take(&mut s.zooming) {
+                    if let Some(pointer) = s.pointer {
+                        s.reskim(s.local(pointer).0, cx);
+                    }
+                    cx.notify();
                 }
-                if draw {
-                    s.changed(true, cx);
-                } else {
-                    s.persist(cx);
-                }
+                s.persist(cx);
             });
         }));
     }
@@ -1608,7 +1511,7 @@ impl TimelineSurface {
         );
         (self.outline_geometry.replace(geometry) != Some(geometry)).then_some(geometry)
     }
-    fn record_scroll_layers(&self) -> bool {
+    fn presentation_stable(&self) -> bool {
         !self.zooming
             && self.key_preview.is_none()
             && !matches!(
@@ -2190,14 +2093,18 @@ impl TimelineSurface {
             layer_column: self.view.layer_column,
         })
     }
+    /// Input can arrive before the paint that follows a selection or view change.
+    fn ensure_frame(&mut self, cx: &mut Context<Self>) {
+        if self.frame.is_none() && self.scene.is_some() && self.viewport().is_some() {
+            self.prepared(self.bounds, cx);
+        }
+    }
     fn prepared(
         &mut self,
         bounds: Bounds<Pixels>,
-        record: bool,
         cx: &mut Context<Self>,
     ) -> Option<Arc<Frame>> {
-        let mut moved = self.bounds != bounds;
-        if moved {
+        if self.bounds != bounds {
             self.bounds = bounds;
             self.frame = None;
             if !self.fitted && self.model.index.duration > 0. {
@@ -2214,16 +2121,8 @@ impl TimelineSurface {
                 cx.defer(move |cx| outline.scrolled(y, column, rows, cx));
             }
         }
-        let reach = if record && !self.sideways && self.graph_region().is_none() {
-            self.row_viewport_height()
-        } else {
-            0.
-        };
-        let rebuild_frame = self.frame.is_none() || self.frame_reach != reach;
+        let rebuild_frame = self.frame.is_none();
         if rebuild_frame {
-            let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
-            moved |= shown != self.shown;
-            self.shown = shown;
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             let preview = self.marquee_selection.as_ref().map(|selection| {
                 let mut scene = Scene::clone(scene);
@@ -2236,102 +2135,49 @@ impl TimelineSurface {
                 .prepare_native(
                     viewport,
                     &self.tokens,
-                    reach,
+                    0.,
                     0.,
                     &mut self.waveforms,
                     self.key_preview.as_deref(),
                 )
                 .ok()?;
             self.audio_rows(&mut frame);
+            self.waveforms.retain(&frame);
             self.frame = Some(Arc::new(frame));
-            self.frame_reach = reach;
             self.service_dirty = true;
         }
-        if self.service_dirty && self.record_scroll_layers() {
-            self.service_dirty = false;
-            self.tell_service(cx);
-        }
-        if moved {
-            // Paused, nothing else moves the playhead layer: it stayed put
-            // on screen while the ruler and clips scrolled under it.
-            let delegate = self.delegate.clone();
-            cx.defer(move |cx| delegate.view_moved(cx));
-        }
         let frame = self.frame.clone()?;
-        self.agent_dot_groups.clear();
-        if !self.agent_ink.empty() && matches!(self.gesture, Gesture::Idle) {
-            if let Some(scene) = &self.scene {
-                self.agent_dot_groups = self.agent_ink.groups(
-                    &frame,
-                    scene,
-                    &self.tokens,
-                    self.agent_ink_clock.elapsed().as_millis() as u64,
-                );
-            }
-        }
         if rebuild_frame || !matches!(self.gesture, Gesture::Marquee { .. }) {
             self.update_audio(&frame, cx);
         }
         Some(frame)
     }
-    /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
-    /// `keySelectionActive`, and each visible row's layer with its top and
-    /// bottom in window points (`layerAtPoint`).
-    /// What the scroll layers record: the rows a viewport past each edge
-    /// (none under a graph, where the rows do not scroll as a layer) and the
-    /// tracks and the ruler the tracks' width past each side, prepared again
-    /// only when the view's frame was. Clip painters are asked for these
-    /// clips, so rows and strips a step brings in arrive decorated.
-    fn rows_frame(&mut self, cx: &mut Context<Self>) -> Option<(Arc<Frame>, f64, Vec<pm_panel_timeline::agent_ink::DotGroup>, f64)> {
-        let base = self.frame.clone()?;
-        let v = base.viewport;
-        let record = self.record_scroll_layers();
-        let reach_x = if record && self.sideways {
-            (v.width - v.layer_column).max(0.)
-        } else {
-            0.
-        };
-        if let Some((of, rows, reach)) = &self.rows
-            && *reach == reach_x
-            && Arc::ptr_eq(of, &base)
-        {
-            let started = std::time::Instant::now();
-            let groups = self.row_dot_groups(rows);
-            return Some((rows.clone(), *reach, groups, started.elapsed().as_secs_f64() * 1000.));
+    fn prepare_for_paint(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) -> Option<Arc<Frame>> {
+        let frame = self.prepared(bounds, cx)?;
+        if self.presentation_stable() {
+            let service_dirty = std::mem::take(&mut self.service_dirty);
+            if service_dirty {
+                self.tell_service(cx);
+            }
+            if service_dirty || self.late.is_some()
+                || self.rows.as_ref().is_none_or(|rows| !Arc::ptr_eq(rows, &frame))
+            {
+                self.ask_painters(&frame, cx);
+            }
         }
-        let rows = if reach_x > 0. {
-            let reach = if self.graph_region().is_none() {
-                self.row_viewport_height()
-            } else {
-                0.
-            };
-            let mut rows = self
-                .scene
-                .as_ref()?
-                .prepare_native(
-                    v,
-                    &self.tokens,
-                    reach,
-                    reach_x,
-                    &mut self.waveforms,
-                    self.key_preview.as_deref(),
-                )
-                .ok()?;
-            self.audio_rows(&mut rows);
-            Arc::new(rows)
-        } else {
-            base.clone()
-        };
-        self.waveforms.retain(&rows);
-        if record {
-            self.ask_painters(&rows, cx);
+        Some(frame)
+    }
+    /// The native playhead gets the mapping of the frame that GPUI painted,
+    /// even if input has already prepared a newer frame for hit-testing.
+    fn publish_painted_view(&mut self, frame: &Frame, cx: &mut Context<Self>) {
+        let v = frame.viewport;
+        let shown = (v.pps, v.scroll_time, v.layer_column);
+        if shown != self.shown || self.shown_bounds != self.bounds {
+            self.shown = shown;
+            self.shown_bounds = self.bounds;
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.view_moved(cx));
         }
-        // What the layers record shows this time at their left edge.
-        self.drawn.1 = v.scroll_time;
-        self.rows = Some((base, rows.clone(), reach_x));
-        let started = std::time::Instant::now();
-        let groups = self.row_dot_groups(&rows);
-        Some((rows, reach_x, groups, started.elapsed().as_secs_f64() * 1000.))
     }
     fn row_dot_groups(&self, frame: &Frame) -> Vec<pm_panel_timeline::agent_ink::DotGroup> {
         if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) { return Vec::new(); }
@@ -2422,11 +2268,14 @@ impl TimelineSurface {
             self.fitted = true;
         }
         if let Some(time) = scroll_time.filter(|t| t.is_finite()) {
-            self.view.scroll_time = time;
+            self.view.scroll_time = time.max(0.);
         }
         if let Some(y) = scroll_y.filter(|y| y.is_finite()) {
             self.view.scroll_y = y.max(0.);
             self.clamp_scroll();
+        }
+        if self.scene.is_some() {
+            self.clamp_time();
         }
         self.changed(true, cx);
     }
@@ -2844,9 +2693,9 @@ impl TimelineSurface {
             return;
         }
         self.start_pointer_gesture(cx);
+        self.ensure_frame(cx);
         if self.audio_down(event, cx) { return; }
         self.pointer = Some(event.position);
-        self.sideways = false;
         let (x, y) = self.local(event.position);
         let capsule = self
             .frame
@@ -3012,6 +2861,8 @@ impl TimelineSurface {
             self.delegate.seek(at, cx);
         }
         self.set_skimmer(None, cx);
+        // Clearing the hovered clip's audio controls can invalidate the frame.
+        self.ensure_frame(cx);
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -3146,20 +2997,17 @@ impl TimelineSurface {
             return;
         }
         // v1 textStagger.hit runs before a clip body's slide.
-        if let Some(op) = frame.ops.iter().rev().find(|op| {
-            frame.hit_clip(x, y).is_none_or(|(_, edge)| edge.is_none())
-                && (op.shape == "stagger"
+        let clip_hit = frame.hit_clip(x, y);
+        if clip_hit.is_none_or(|(_, edge)| edge.is_none())
+            && let Some(op) = frame.ops.iter().rev().find(|op| {
+                let right = op.bounds.x + op.bounds.width;
+                op.shape == "stagger"
                     && op.detail["locked"] != true
                     && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
                     && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
-                    && (x - (op.bounds.x + op.bounds.width)).abs() < 5.
-                    || op.shape == "stagger"
-                        && op.detail["locked"] != true
-                        && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
-                        && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
-                        && x >= op.bounds.x - 2.
-                        && x <= op.bounds.x + op.bounds.width)
-        }) {
+                    && ((x - right).abs() < 5. || (op.bounds.x - 2. ..=right).contains(&x))
+            })
+        {
             if let Ok(band) = serde_json::from_value(op.detail["band"].clone()) {
                 let end = (x - (op.bounds.x + op.bounds.width)).abs() < 5.;
                 let band: pm_panel_timeline::stagger::Band = band;
@@ -3174,19 +3022,22 @@ impl TimelineSurface {
                 return;
             }
         }
-        if let Some((layer, edge)) = frame.hit_clip(x, y) {
+        if let Some((layer, edge)) = clip_hit {
             let layer = layer.to_owned();
-            self.focused_layer = Some((
+            let focus = (
                 self.model.index.doc_id,
                 self.model.index.comp_id.clone(),
                 layer.clone(),
-            ));
+            );
+            let same_layer = self.focused_layer.as_ref() == Some(&focus);
+            self.focused_layer = Some(focus);
             let lock = self
                 .model
                 .index
                 .locking_layer(&layer)
                 .map(|owner| owner.id.clone());
-            if event.click_count == 2 && lock.is_none() {
+            // Two close presses can straddle a row boundary.
+            if event.click_count == 2 && same_layer && lock.is_none() {
                 if let Some(l) = self.model.index.layer(&layer) {
                     if l.kind == "precomp" {
                         if let Some(id) = l.comp.clone() {
@@ -3871,7 +3722,6 @@ impl TimelineSurface {
             self.gesture = Gesture::Idle;
             self.transition_selected = None;
             self.frame = None;
-            self.rows = None;
             self.queue.push_back(Job::Sync);
             self.delegate.report(
                 "Timeline changed during the transition drag; try again".into(),
@@ -3888,7 +3738,6 @@ impl TimelineSurface {
                 drag.current = drag.intent;
                 self.scene = drag.scene.clone();
                 self.frame = None;
-                self.rows = None;
                 cx.notify();
                 return true;
             }
@@ -3955,8 +3804,7 @@ impl TimelineSurface {
                     );
                     self.scene = Some(Arc::new(scene));
                     self.frame = None;
-                    self.rows = None;
-                }
+                    }
             }
             cx.notify();
             return true;
@@ -4446,7 +4294,7 @@ impl TimelineSurface {
             return;
         }
         self.view.scroll_time = (self.view.scroll_time + over as f64 * 0.1 / self.view.pps)
-            .max(self.model.index.minimum_time());
+            .max(0.);
         self.changed(false, cx);
     }
     fn marquee(&mut self) {
@@ -4503,7 +4351,6 @@ impl TimelineSurface {
             Gesture::Idle => return false,
             Gesture::Transition(drag) => {
                 self.frame = None;
-                self.rows = None;
                 if self.model.index.doc_id != drag.document
                     || self.model.index.revision != drag.revision
                 {
@@ -4679,31 +4526,32 @@ impl TimelineSurface {
             self.changed_while_hot(cx);
             return;
         }
-        let horizontal = dx.abs() > dy.abs() || event.modifiers.shift;
-        if horizontal {
-            let travel = if dx.abs() > dy.abs() { dx } else { dy };
-            self.view.scroll_time -= travel / self.view.pps;
-            self.clamp_time();
-            self.sideways = true;
-            if self.step_layers(true, window, cx) {
-                // A skim showing stays under the pointer: the time there now,
-                // drawn with the playhead, not by a panel draw.
-                self.quiet_skim = true;
-                self.reskim(x, cx);
-                self.quiet_skim = false;
-                self.persist_when_idle(false, cx);
-                return;
-            }
-            self.reskim(x, cx);
+        let old_time = self.view.scroll_time;
+        let old_y = self.view.scroll_y;
+        let (dx, dy) = if event.modifiers.shift {
+            // Some mice report Shift+wheel as a vertical delta. A trackpad
+            // can already give us horizontal travel.
+            (if dx == 0. { dy } else { dx }, 0.)
         } else {
+            (dx, dy)
+        };
+        if dx != 0. {
+            self.view.scroll_time -= dx / self.view.pps;
+            self.clamp_time();
+        }
+        if dy != 0. {
             self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
             self.clamp_scroll();
-            self.scrolled_while_hot(false, window, cx);
-            return;
         }
-        self.changed_while_hot(cx);
+        if dx != 0. {
+            self.reskim(x, cx);
+        }
+        if self.view.scroll_time != old_time || self.view.scroll_y != old_y {
+            self.changed_while_hot(cx);
+        }
     }
     fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_frame(cx);
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -5067,11 +4915,8 @@ impl TimelineSurface {
         if at != self.skimmer {
             self.skimmer = at;
             self.delegate.skim(at, cx);
-            // The ruler leaves out the label under its timecode: drawn again,
-            // but not for a wheel step (the layers' settle draws it).
-            if !self.quiet_skim {
-                cx.notify();
-            }
+            // The ruler leaves out the label under its timecode.
+            cx.notify();
         }
     }
     /// Development builds' review sweep: the pointer over `seconds` on the
@@ -5208,7 +5053,9 @@ impl TimelineSurface {
         } else if self.skim_live(cx) {
             self.skim_to(x, cx);
         }
-        let hovered = self.clip_at(x, y).map(|(id, _)| (id.to_owned(), x));
+        self.ensure_frame(cx);
+        let clip = self.clip_at(x, y);
+        let hovered = clip.as_ref().map(|(id, _)| (id.clone(), x));
         // The grip only changes side at the strip's middle: repaint when the
         // clip or the side changes, not on every pointer move.
         let side = |h: &Option<(String, f64)>| {
@@ -5268,7 +5115,7 @@ impl TimelineSurface {
             } else {
                 CursorStyle::OpenHand
             }
-        } else if let Some((id, Some(_))) = self.clip_at(x, y)
+        } else if let Some((id, Some(_))) = &clip
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
                     f.ops.iter().any(|o| {
@@ -5277,11 +5124,11 @@ impl TimelineSurface {
                 })
         {
             CursorStyle::ResizeLeftRight
-        } else if self.clip_at(x, y).is_some_and(|(id, _)| {
+        } else if clip.as_ref().is_some_and(|(id, _)| {
             !self
                 .model
                 .index
-                .layer(&id)
+                .layer(id)
                 .is_some_and(|l| l.effectively_locked)
         }) {
             CursorStyle::OpenHand
@@ -5449,7 +5296,7 @@ impl TimelineSurface {
     }
     #[cfg(test)]
     pub(crate) fn painted_rows_for_test(&self) -> Option<&Arc<Frame>> {
-        self.rows.as_ref().map(|(_, rows, _)| rows)
+        self.rows.as_ref()
     }
     #[cfg(test)]
     pub(crate) fn audio_query_builds_for_test(&self) -> usize {
@@ -6581,36 +6428,17 @@ impl Render for TimelineSurface {
         let shown: Shown = Rc::default();
         let prepared = shown.clone();
         let ruler = self.tokens.metrics.ruler;
-        let rows_ruler = ruler;
         let layout_bar = Self::bar_of(self.body, &self.tokens);
         let fixed_tokens = self.tokens.clone();
-        let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
-        let scroll_y = self.view.scroll_y as f32;
-        self.rows_handle.set_offset(point(px(0.), px(-scroll_y)));
-        // A sideways scroll leaves room for the recorded tracks and ruler
-        // to replay either side of the viewport.
-        let track_w = (f32::from(self.body.size.width) - column as f32).max(0.);
-        let record = self.record_scroll_layers();
-        let horizontal_reach = record && self.sideways;
-        let tracks_x = if horizontal_reach {
-            -(SIDEWAYS as f32) * track_w
-        } else {
-            0.
-        };
-        self.drawn = (tracks_x, self.view.scroll_time);
-        let wide = track_w - 2. * tracks_x;
-        self.tracks_handle
-            .set_offset(point(px(tracks_x), px(-scroll_y)));
-        self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
-        let rows_weak = this.clone();
-        let tracks_weak = this.clone();
+        let fixed_weak = this.clone();
         let tracks_metrics = this.clone();
-        let ruler_weak = this.clone();
+        let tracks_paint_metrics = this.clone();
+        let rows_frame = shown.clone();
+        let tracks_frame = shown.clone();
+        let ruler_frame = shown.clone();
         let rows_tokens = self.tokens.clone();
         let tracks_tokens = self.tokens.clone();
         let ruler_tokens = self.tokens.clone();
-        let tracks_handle = self.tracks_handle.clone();
-        let ruler_handle = self.ruler_handle.clone();
         div()
             .id("native-timeline")
             .relative()
@@ -6756,13 +6584,13 @@ impl Render for TimelineSurface {
                             .update(cx, |s, cx| {
                                 s.body = bounds;
                                 if Self::bar_of(bounds, &s.tokens) != layout_bar {
-                                    // The rows' layer stood over another bar.
+                                    // Lay out the track clips with the new bar height.
                                     let again = cx.entity().downgrade();
                                     cx.defer(move |cx| {
                                         let _ = again.update(cx, |_, cx| cx.notify());
                                     });
                                 }
-                                s.prepared(Self::above_bar(bounds, &s.tokens), record, cx)
+                                s.prepare_for_paint(Self::above_bar(bounds, &s.tokens), cx)
                             })
                             .ok()
                             .flatten();
@@ -6773,6 +6601,7 @@ impl Render for TimelineSurface {
                         let Some(frame) = frame else {
                             return;
                         };
+                        let _ = fixed_weak.update(cx, |s, cx| s.publish_painted_view(&frame, cx));
                         // Under a graph, the tracks stop at its top: the graph
                         // gets the plain material with a hairline over it.
                         let above = region.map(|r| {
@@ -6809,9 +6638,7 @@ impl Render for TimelineSurface {
                 )
                 .size_full(),
             )
-            // The outline column's fills and the column's edge in a layer
-            // the wheel moves up and down; a step inside what it recorded
-            // replays it shifted, with no render (P-SCROLL-LAYER).
+            // Each canvas clips its part of the same prepared frame.
             .child(
                 div()
                     .id("timeline-rows")
@@ -6821,36 +6648,22 @@ impl Render for TimelineSurface {
                     .w(px(column as f32))
                     .bottom(px(layout_bar))
                     .overflow_hidden()
-                    .when(record, |layer| layer.overflow_y_scroll().track_scroll(&self.rows_handle).scroll_layer_driven())
                     .child(
                         canvas(
-                            move |_, _, cx| {
-                                rows_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
-                            },
-                            move |bounds, frame, window, cx| {
-                                let Some((frame, _, _, _)) = frame else {
+                            move |_, _, _| rows_frame.borrow().clone(),
+                            move |_, frame, window, cx| {
+                                let Some((origin, frame)) = frame else {
                                     return;
                                 };
-                                // The rows were prepared for their view: its
-                                // top is the ruler's above the content's
-                                // scroll; the column does not move sideways.
-                                let v = frame.viewport;
-                                let origin = point(
-                                    bounds.origin.x,
-                                    bounds.origin.y + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
-                                );
-                                let cull = Cull::reaching(column, v.height, v.height);
+                                let cull = Cull::tracks(0., column, frame.viewport.height);
                                 let ops = &frame.ops[frame.fixed..];
                                 paint_ops(ops, origin, column, None, &cull, None, &rows_tokens, window, cx);
                             },
                         )
-                        .w_full()
-                        .when(record, |canvas| canvas.h(px(content)))
-                        .when(!record, |canvas| canvas.h_full()),
+                        .size_full(),
                     ),
             )
-            // The tracks (strips, keys, lanes, the time grid) in a layer the
-            // wheel moves both ways, recorded the tracks' width past each side.
+            // The tracks (strips, keys, lanes, the time grid).
             .child(
                 div()
                     .id("timeline-tracks")
@@ -6860,25 +6673,19 @@ impl Render for TimelineSurface {
                     .right_0()
                     .bottom(px(layout_bar))
                     .overflow_hidden()
-                    .when(record, |layer| layer.overflow_scroll().track_scroll(&self.tracks_handle).scroll_layer_driven())
                     .child(
                         canvas(
                             move |_, _, cx| {
-                                tracks_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
+                                let (origin, frame) = tracks_frame.borrow().clone()?;
+                                let started = std::time::Instant::now();
+                                let groups = tracks_metrics.upgrade()?.read(cx).row_dot_groups(&frame);
+                                Some((origin, frame, groups, started.elapsed().as_secs_f64() * 1000.))
                             },
-                            move |bounds, frame, window, cx| {
-                                let Some((frame, reach, groups, plan_ms)) = frame else {
+                            move |_, frame, window, cx| {
+                                let Some((origin, frame, groups, plan_ms)) = frame else {
                                     return;
                                 };
-                                // The frame's x starts the reach before the
-                                // tracks' left edge (where the content is
-                                // offset from), less the layer column.
                                 let v = frame.viewport;
-                                let left = bounds.origin.x - if horizontal_reach { tracks_handle.offset().x } else { px(0.) };
-                                let origin = point(
-                                    left - px((column + reach) as f32),
-                                    bounds.origin.y + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
-                                );
                                 let above = region.map(|r| {
                                     Bounds::from_corners(
                                         origin,
@@ -6886,31 +6693,24 @@ impl Render for TimelineSurface {
                                     )
                                 });
                                 let started = crate::diag::enabled().then(std::time::Instant::now);
-                                let reach_y = if record && region.is_none() { (v.height - rows_ruler as f64).max(0.) } else { 0. };
-                                let cull = Cull::tracks(column, v.width, v.height, reach_y.max(v.height));
-                                // The grid and the markers' lines run the
-                                // rows' reach up and down too.
+                                let cull = Cull::tracks(column, v.width, v.height);
                                 let lines: Vec<Op> = frame.ops[..frame.fixed]
                                     .iter()
                                     .filter(|o| o.id.starts_with("grid:") || o.id.starts_with("marker-guide:"))
-                                    .map(|o| {
-                                        let mut o = o.clone();
-                                        o.bounds.y -= reach_y;
-                                        o.bounds.height += 2. * reach_y;
-                                        o
-                                    })
+                                    .cloned()
                                     .collect();
                                 paint_ops(&lines, origin, column, above, &cull, None, &tracks_tokens, window, cx);
                                 let ops = &frame.ops[frame.fixed..];
                                 let dot_started = std::time::Instant::now();
                                 paint_agent_tracks(&frame, &groups, origin, column, above, &cull, &tracks_tokens, window, cx);
-                                if !groups.is_empty() {
-                                    let elapsed = plan_ms + dot_started.elapsed().as_secs_f64() * 1000.;
-                                    let _ = tracks_metrics.update(cx, |s, _| {
+                                let _ = tracks_paint_metrics.update(cx, |s, _| {
+                                    s.rows = Some(frame.clone());
+                                    if !groups.is_empty() {
+                                        let elapsed = plan_ms + dot_started.elapsed().as_secs_f64() * 1000.;
                                         s.agent_ink_samples[s.agent_ink_sample_count % 64] = elapsed;
                                         s.agent_ink_sample_count += 1;
-                                    });
-                                }
+                                    }
+                                });
                                 if let Some(started) = started {
                                     let ms = started.elapsed().as_secs_f64() * 1000.;
                                     crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":ops.len()}));
@@ -6940,7 +6740,7 @@ impl Render for TimelineSurface {
                                             ..Default::default()
                                         }),
                                         |w| {
-                                            strip_hover(op, *x + reach, origin, &tracks_tokens, w);
+                                            strip_hover(op, *x, origin, &tracks_tokens, w);
                                         },
                                     );
                                 }
@@ -6951,13 +6751,10 @@ impl Render for TimelineSurface {
                                 }
                             },
                         )
-                        .w_full()
-                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
-                        .when(record, |canvas| canvas.h(px(content)))
-                        .when(!record, |canvas| canvas.h_full()),
+                        .size_full(),
                     ),
             )
-            // The ruler in a layer the wheel moves sideways, as the tracks.
+            // The ruler.
             .child(
                 div()
                     .id("timeline-ruler")
@@ -6967,19 +6764,13 @@ impl Render for TimelineSurface {
                     .right_0()
                     .h(px(ruler))
                     .overflow_hidden()
-                    .when(record, |layer| layer.overflow_x_scroll().track_scroll(&self.ruler_handle).scroll_layer_driven())
                     .child(
                         canvas(
-                            move |_, _, cx| {
-                                ruler_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
-                            },
-                            move |bounds, frame, window, cx| {
-                                let Some((frame, reach, _, _)) = frame else {
+                            move |_, _, _| ruler_frame.borrow().clone(),
+                            move |_, frame, window, cx| {
+                                let Some((origin, frame)) = frame else {
                                     return;
                                 };
-                                let v = frame.viewport;
-                                let left = bounds.origin.x - if horizontal_reach { ruler_handle.offset().x } else { px(0.) };
-                                let origin = point(left - px((column + reach) as f32), bounds.origin.y);
                                 // The skimmer's timecode stands in the ruler: a
                                 // time label it would cut through is left out,
                                 // not half-covered (it is the time under the
@@ -7000,10 +6791,10 @@ impl Render for TimelineSurface {
                                         px(ruler_tokens.typography.minimum),
                                         &[run],
                                     );
-                                    let left = x + reach + (m.border * 2.) as f64;
+                                    let left = x + (m.border * 2.) as f64;
                                     let gutter = (m.gap + m.border * 2.) as f64;
                                     (left, left + f32::from(text.width) as f64 + gutter)
-                                }).or_else(|| split_ruler_chip.map(|(left, right)| (left + reach, right + reach)));
+                                }).or(split_ruler_chip);
                                 let ops: Vec<Op> = frame.ops[..frame.fixed]
                                     .iter()
                                     .filter(|o| {
@@ -7013,12 +6804,11 @@ impl Render for TimelineSurface {
                                     })
                                     .cloned()
                                     .collect();
-                                let cull = Cull::tracks(column, v.width, ruler as f64, 0.);
+                                let cull = Cull::tracks(column, frame.viewport.width, ruler as f64);
                                 paint_ops(&ops, origin, column, None, &cull, chip, &ruler_tokens, window, cx);
                             },
                         )
                         .w_full()
-                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
                         .h(px(ruler)),
                     ),
             )
@@ -7473,28 +7263,14 @@ fn paint_agent_tracks(
 struct Cull {
     left: f64,
     width: f64,
-    top: f64,
-    bottom: f64,
+    height: f64,
 }
 impl Cull {
     fn new(size: Size<Pixels>) -> Self {
-        let (width, height) = (f64::from(f32::from(size.width)), f64::from(f32::from(size.height)));
-        Self::reaching(width, height, 0.)
+        Self::tracks(0., f32::from(size.width) as f64, f32::from(size.height) as f64)
     }
-    /// The canvas and `reach` above and below it (rows a scroll layer
-    /// records past its edges).
-    fn reaching(width: f64, height: f64, reach: f64) -> Self {
-        Self::tracks(0., width, height, reach)
-    }
-    /// [`Self::reaching`] right of `left` (the tracks' layer leaves the
-    /// layer column's ops out).
-    fn tracks(left: f64, width: f64, height: f64, reach: f64) -> Self {
-        Self {
-            left,
-            width,
-            top: -reach,
-            bottom: height + reach,
-        }
+    fn tracks(left: f64, width: f64, height: f64) -> Self {
+        Self { left, width, height }
     }
     fn skip(&self, op: &Op) -> bool {
         // Keylines and strokes reach a little past an op's box.
@@ -7502,9 +7278,9 @@ impl Cull {
         let b = op.bounds;
         op.covered
             || b.x >= self.width + MARGIN
-            || b.y >= self.bottom + MARGIN
+            || b.y >= self.height + MARGIN
             || b.x + b.width <= self.left - MARGIN
-            || b.y + b.height <= self.top - MARGIN
+            || b.y + b.height <= -MARGIN
     }
 }
 /// A strip's rim (pm-design `Strip`): a ring of light inside the edge,

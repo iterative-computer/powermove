@@ -19,7 +19,7 @@ pub struct Layout {
     pub pps: f64,
     pub pps_range: (f64, f64),
     pub scroll_time: f64,
-    /// The first and last second there is anything at.
+    /// The navigator's first and last second, including any end padding.
     pub time: (f64, f64),
     /// The rows' area (below the ruler) and what it scrolls.
     pub rows_top: f64,
@@ -390,6 +390,26 @@ mod tests {
         assert!((l.scroll_time_at(b, &t).unwrap() - 40.).abs() < 1e-6);
         assert_eq!(l.hit(from + 1., l.top + 12., &t), Some(Part::Time));
         assert_eq!(l.hit(from - 4., l.top + 12., &t), Some(Part::TimeTrack));
+    }
+    #[test]
+    fn scrolling_rows_does_not_change_the_time_thumbs_geometry() {
+        let mut l = layout();
+        // Wheel, pan and the navigator use the same padded scroll range.
+        l.time.1 += 48. / l.pps;
+        let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+        let (left, right) = l.time_track(&t);
+        l.scroll_time = 0.;
+        let start = l.time_thumb(&t).unwrap();
+        assert_eq!(start.0, left);
+        l.scroll_y = 1000.;
+        assert_eq!(l.time_thumb(&t), Some(start));
+        let end = l.scroll_time_at(right, &t).unwrap();
+        assert_eq!(end, l.time.1 - l.shown());
+        l.scroll_time = end;
+        let (x, width) = l.time_thumb(&t).unwrap();
+        assert!((x + width - right).abs() < 1e-9);
+        assert_eq!(width, start.1);
+        assert_eq!(l.scroll_time_at(left, &t), Some(0.));
     }
     #[test]
     fn a_view_that_shows_everything_has_no_thumbs() {
