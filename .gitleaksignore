@@ -43,18 +43,18 @@ c848300241fef98b3c369c73471d65610710f184:src/extensions/keymap-default/keymap.te
 # Synthetic values in upstream fx's own tests (vendored libfx core, fx 8fbe9b8,
 # apps/native/vendor/fx): sequential hex, 0011..eeff keys, a hand-built fake JWT,
 # a short gho_ sample. Reviewed 2026-11-24.
-apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2162
-apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2208
-apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:4578
-apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6167
-apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6304
-apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6400
-apps/native/vendor/fx/src/core/auth/credentials.zig:generic-api-key:1814
-apps/native/vendor/fx/src/core/mcp_host/owner_wire.zig:generic-api-key:812
-apps/native/vendor/fx/src/core/mcp_host/owner_core.zig:generic-api-key:678
-apps/native/vendor/fx/src/core/mcp_host/owner.zig:generic-api-key:1428
-apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1236
-apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1516
-apps/native/vendor/fx/src/gateway/host_stream_provider.zig:generic-api-key:862
-apps/native/vendor/fx/src/core/shared/text_utils.zig:generic-api-key:2492
-apps/native/vendor/fx/src/core/workspace/capture_store.zig:generic-api-key:5432
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2162
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/agent/runtime/execution_memory.zig:generic-api-key:2208
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:4578
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6167
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6304
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/app/trace_report.zig:generic-api-key:6400
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/auth/credentials.zig:generic-api-key:1814
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/mcp_host/owner_wire.zig:generic-api-key:812
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/mcp_host/owner_core.zig:generic-api-key:678
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/mcp_host/owner.zig:generic-api-key:1428
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1236
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/workspace/capture_retention.zig:generic-api-key:1516
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/gateway/host_stream_provider.zig:generic-api-key:862
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/shared/text_utils.zig:generic-api-key:2492
+375abe6b02844d4c179c40a32f7f652bb79cb509:apps/native/vendor/fx/src/core/workspace/capture_store.zig:generic-api-key:5432
