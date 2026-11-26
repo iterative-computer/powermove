@@ -13,7 +13,7 @@ const LIST_ITEMS: usize = 32;
 const FORKED_FROM_CHARS: usize = 160;
 const LINKS: usize = 5;
 const LINK_CHARS: usize = 200;
-const KINDS: [&str; 13] = [
+const KINDS: [&str; 16] = [
     "panels",
     "inspector",
     "media",
@@ -27,13 +27,19 @@ const KINDS: [&str; 13] = [
     "menus",
     "status",
     "hooks",
+    "toolbar",
+    "tools",
+    "slots",
 ];
-const PERMISSIONS: [&str; 5] = [
+const PERMISSIONS: [&str; 8] = [
     "network",
     "clipboard",
     "assets",
     "project:write",
     "full-access",
+    "filesystem",
+    "shell",
+    "storage",
 ];
 
 pub fn extension_id(id: &str) -> bool {

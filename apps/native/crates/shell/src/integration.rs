@@ -8,6 +8,17 @@ use std::{cell::RefCell, rc::Rc};
 /// Ids and names, shared: a list the shell keeps per frame and compares.
 pub type Names = std::sync::Arc<[(String, String)]>;
 
+/// A trailing action button contributed to a panel header by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelHeaderButton {
+    pub id: String,
+    pub label: Option<String>,
+    pub icon: Option<String>,
+    pub tooltip: String,
+    pub active: bool,
+    pub command: String,
+}
+
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
     fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
@@ -38,6 +49,10 @@ pub trait Integration {
         _cx: &mut App,
     ) -> Option<AnyElement> {
         None
+    }
+    /// Layer 1: trailing action buttons contributed to panel `id`'s header.
+    fn panel_header_actions(&self, _id: &str, _cx: &App) -> Vec<PanelHeaderButton> {
+        Vec::new()
     }
     /// Home (v1's Projects screen), drawn in place of the docks while the
     /// window shows it; `None` = the docks.

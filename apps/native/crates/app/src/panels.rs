@@ -42,11 +42,7 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
 
 impl Controller {
     pub fn playing(&self) -> bool {
-        self.viewer.as_ref().is_some_and(|v| {
-            v.status()
-                .clock
-                .is_some_and(|c| c.state != pm_protocol::clock::TransportState::Stopped)
-        })
+        self.viewer.as_ref().is_some_and(|v| v.desired_playing())
     }
 }
 /// Compatibility formatting retained by the native geometry checks.

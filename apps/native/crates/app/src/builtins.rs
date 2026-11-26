@@ -343,6 +343,10 @@ pub struct Host {
     pub runtime: Option<Arc<Builtins>>,
     pending: BTreeMap<String, Publication>,
     pub views: BTreeMap<String, Entity<SurfaceView>>,
+    /// Layer 3: live v4 extension UI slots embedded inside built-in panels
+    /// keyed by `<owner>@slot:<slotId>`.
+    pending_slots: BTreeMap<String, Publication>,
+    slots: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     /// Where the shell last placed the timeline panel, and its header height;
@@ -967,10 +971,7 @@ impl Controller {
             poster,
         };
         let status = self.viewer.as_ref().map(|v| v.status());
-        let playing = status.as_ref().is_some_and(|s| {
-            s.clock
-                .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
-        });
+        let playing = self.playing();
         // Auto's measured resolution; 0 until a frame has drawn.
         // Layers left out of the frame on screen, by ID, so Properties can say
         // so on that layer only (3d-studio.md §10).
@@ -1590,7 +1591,19 @@ impl Controller {
                 })
                 .await;
             let mut tickets = tickets;
-            tickets.sort_by_key(|(id, _)| if id == "inspector" { 0 } else { 1 });
+            if full {
+                tickets.sort_by_key(|(id, _)| if id == "inspector" { 0 } else { 1 });
+            } else {
+                // On transport/view updates, drain timeline and viewer first so
+                // Play/Pause button icons update immediately without waiting
+                // behind Inspector's V8 evaluation.
+                tickets.sort_by_key(|(id, _)| match id.as_str() {
+                    "timeline" => 0,
+                    "viewer" => 1,
+                    "inspector" => 2,
+                    _ => 3,
+                });
+            }
             for (id, ticket) in tickets {
                 let result = match ticket {
                     Ok(ticket) => ticket.await.map(|_| ()),
@@ -1938,6 +1951,11 @@ impl Controller {
                 overlays.update(cx, |o, cx| o.clear(&id, cx));
             }
         }
+        for id in runtime.take_cleared_slots() {
+            let removed = self.builtins.slots.remove(&id).is_some()
+                | self.builtins.pending_slots.remove(&id).is_some();
+            mounted |= removed;
+        }
         for p in runtime.take_publications() {
             if self.builtins.memory_recovery.get(&p.panel) == Some(&MemoryRecovery::Failed) {
                 continue;
@@ -1947,6 +1965,15 @@ impl Controller {
                 if let Some(overlays) = &self.builtins.overlays {
                     let runtime = runtime.clone();
                     overlays.update(cx, |o, cx| o.publish(runtime, p, cx));
+                }
+                continue;
+            }
+            if p.panel.contains(pm_builtins::SLOT_PREFIX) {
+                if let Some(view) = self.builtins.slots.get(&p.panel) {
+                    view.update(cx, |v, cx| v.publish(p, cx));
+                } else {
+                    self.builtins.pending_slots.insert(p.panel.clone(), p);
+                    mounted = true;
                 }
                 continue;
             }
@@ -2011,6 +2038,7 @@ impl Controller {
             timeline.update(cx, |t, cx| t.repaint_decorations(cx));
         }
         self.sync_v4_themes(&runtime, cx);
+        self.sync_v4_chrome(&runtime, cx);
         self.builtins
             .requests
             .extend(runtime.take_platform_requests());
@@ -2260,12 +2288,52 @@ impl Controller {
         // These panels lay out to their slot and own their scroll. In Threads,
         // the conversation scrolls while the composer stays in the slot.
         if matches!(id, "viewer" | "timeline" | "agent") {
+            let top_slot = match id {
+                "timeline" => self.slot_elements("timeline.toolbar", &t, window, cx),
+                "agent" => self.slot_elements("agent.toolbar", &t, window, cx),
+                _ => vec![],
+            };
+            let bottom_slot = match id {
+                "timeline" => self.slot_elements("timeline.footer", &t, window, cx),
+                _ => vec![],
+            };
+            let hud_slot = if id == "viewer" {
+                self.slot_elements("viewer.hud", &t, window, cx)
+            } else {
+                vec![]
+            };
             return Some(
                 div()
+                    .relative()
                     .w_full()
                     .h(px(body))
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
-                    .child(fixed_body_view(id, &view))
+                    .children(top_slot)
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .w_full()
+                            .overflow_hidden()
+                            .child(fixed_body_view(id, &view)),
+                    )
+                    .children(bottom_slot)
+                    .when(!hud_slot.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(8.))
+                                .left(px(8.))
+                                .right(px(8.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .children(hud_slot),
+                        )
+                    })
                     .child(keep)
                     .into_any_element(),
             );
@@ -2309,6 +2377,16 @@ impl Controller {
         // before: a cached body there drew its AppKit controls a row off their
         // labels for a frame now and then while scrolling (PM-389).
         if id != pm_builtins::PROJECT_PANEL {
+            let top_slots = if id == "inspector" {
+                self.slot_elements("inspector.top", &t, window, cx)
+            } else {
+                vec![]
+            };
+            let bottom_slots = if id == "inspector" {
+                self.slot_elements("inspector.bottom", &t, window, cx)
+            } else {
+                vec![]
+            };
             return Some(
                 div()
                     .relative()
@@ -2322,17 +2400,20 @@ impl Controller {
                             .track_scroll(&handle)
                             .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
                             .on_scroll_wheel(on_wheel)
+                            .children(top_slots)
                             // As tall as its content, at least its slot.
                             .child({
                                 let content = view.read(cx).in_body(body);
                                 view.clone().cached(content)
                             })
+                            .children(bottom_slots)
                             .child(keep),
                     )
                     .children(thumb)
                     .into_any_element(),
             );
         }
+        let assets_slots = self.slot_elements("assets.toolbar", &t, window, cx);
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self
@@ -2361,12 +2442,70 @@ impl Controller {
                 .relative()
                 .w_full()
                 .h(px(body))
+                .flex()
+                .flex_col()
                 .on_scroll_wheel(on_wheel)
-                .child(panel_body.cached(StyleRefinement::default().size_full()))
+                .children(assets_slots)
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .child(panel_body.cached(StyleRefinement::default().size_full())),
+                )
                 .child(keep)
                 .children(thumb)
                 .into_any_element(),
         )
+    }
+    /// Layer 3: instantiates and returns all live extension slot views targeting `slot_id`.
+    fn slot_elements(
+        &mut self,
+        slot_id: &str,
+        tokens: &pm_design::Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let suffix = format!("{}{slot_id}", pm_builtins::SLOT_PREFIX);
+        let ready_keys: Vec<String> = self
+            .builtins
+            .pending_slots
+            .keys()
+            .filter(|k| k.ends_with(&suffix))
+            .cloned()
+            .collect();
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            for key in ready_keys {
+                if let Some(publication) = self.builtins.pending_slots.remove(&key) {
+                    let natives = self.builtins.natives.clone();
+                    let t = tokens.clone();
+                    let rt = runtime.clone();
+                    let view = cx.new(|cx| SurfaceView::new(rt, publication, t, natives, window, cx));
+                    view.update(cx, |v, _| v.grows = true);
+                    self.builtins.slots.insert(key, view);
+                }
+            }
+        }
+        let matching: Vec<Entity<SurfaceView>> = self
+            .builtins
+            .slots
+            .iter()
+            .filter(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, v)| v.clone())
+            .collect();
+        matching
+            .into_iter()
+            .map(|view| {
+                view.update(cx, |v, cx| {
+                    v.attach(window, cx);
+                    if v.tokens() != tokens {
+                        v.retheme(tokens.clone(), cx);
+                    }
+                });
+                div().w_full().flex_none().child(view).into_any_element()
+            })
+            .collect()
     }
     pub fn builtin_header(
         &mut self,
@@ -3865,6 +4004,289 @@ impl Controller {
                     });
                     continue;
                 }
+                // ---- Layer 5: Workspace Control & Native Dialogs ----------------
+                "ext.workspace.openPanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:show:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.closePanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:close:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.focusPanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:activate:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.togglePanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        let cmd = if self.builtins.open.contains(id) {
+                            format!("panel:close:{id}")
+                        } else {
+                            format!("panel:show:{id}")
+                        };
+                        self.host.borrow().send_command(&cmd, vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.getLayout" => Ok(json!({
+                    "openPanels": self.builtins.open.iter().cloned().collect::<Vec<_>>(),
+                    "shownPanels": self.builtins.shown.iter().cloned().collect::<Vec<_>>(),
+                    "contributedPanels": self.extensions.contributed.iter().map(|(id, title)| json!({"id": id, "title": title})).collect::<Vec<_>>(),
+                    "tool": self.tool,
+                })),
+                "ext.workspace.runCommand" => {
+                    if let Some(name) = request.input["name"].as_str() {
+                        let args = request.input["args"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        self.host.borrow().send_command(name, args);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.notify" => {
+                    if let Some(msg) = request.input["message"].as_str() {
+                        self.note(msg.to_owned(), cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.setTool" => {
+                    let target = request.input["tool"].as_str();
+                    let next = match target {
+                        None | Some("") => "toolSelect".to_owned(),
+                        Some(id) if id.starts_with("tool") || id.starts_with(crate::extensions::V4_TOOL) => {
+                            id.to_owned()
+                        }
+                        Some(id) => format!("{}{}:{id}", crate::extensions::V4_TOOL, request.panel),
+                    };
+                    self.host.borrow().send_command(&next, vec![]);
+                    Ok(Value::Null)
+                }
+                "ext.dialogs.openFolder" | "ext.dialogs.openFiles" => {
+                    let folders_only = request.operation == "ext.dialogs.openFolder";
+                    let files = !folders_only;
+                    let folders = folders_only
+                        || request.input["canChooseDirectories"].as_bool().unwrap_or(false);
+                    let multiple = request.input["multiple"].as_bool().unwrap_or(!folders_only);
+                    let show_hidden = request.input["showHidden"].as_bool().unwrap_or(true);
+                    let extensions: Vec<String> = request.input["extensions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    let title = request.input["title"].as_str();
+                    let message = request.input["message"].as_str();
+                    let default_path = request.input["defaultPath"]
+                        .as_str()
+                        .and_then(|p| crate::ext_capabilities::expand_path(p).ok());
+                    let rx = crate::platform::ext_open_dialog(
+                        &self.host.borrow().window,
+                        files,
+                        folders,
+                        multiple,
+                        show_hidden,
+                        &extensions,
+                        title,
+                        message,
+                        default_path.as_deref(),
+                    );
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let chosen = rx.recv().await.ok().flatten();
+                        let reply = match chosen {
+                            Some(paths) => Value::Array(
+                                paths
+                                    .into_iter()
+                                    .map(|p| json!(p.to_string_lossy()))
+                                    .collect(),
+                            ),
+                            None => Value::Null,
+                        };
+                        runtime.platform_reply(request.id, Ok(reply));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.saveFile" => {
+                    let extensions: Vec<String> = request.input["extensions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    let title = request.input["title"].as_str();
+                    let message = request.input["message"].as_str();
+                    let default_name = request.input["defaultName"].as_str();
+                    let default_path = request.input["defaultPath"]
+                        .as_str()
+                        .and_then(|p| crate::ext_capabilities::expand_path(p).ok());
+                    let rx = crate::platform::ext_save_dialog(
+                        &self.host.borrow().window,
+                        title,
+                        message,
+                        default_path.as_deref(),
+                        default_name,
+                        &extensions,
+                    );
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let chosen = rx.recv().await.ok().flatten();
+                        let reply = chosen
+                            .map(|p| json!(p.to_string_lossy()))
+                            .unwrap_or(Value::Null);
+                        runtime.platform_reply(request.id, Ok(reply));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.confirm" => {
+                    use crate::alert::{Alert, Button};
+                    let title = request.input["title"]
+                        .as_str()
+                        .unwrap_or("Confirm")
+                        .to_owned();
+                    let message = request.input["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let confirm_label = request.input["confirmLabel"]
+                        .as_str()
+                        .unwrap_or("OK")
+                        .to_owned();
+                    let cancel_label = request.input["cancelLabel"]
+                        .as_str()
+                        .unwrap_or("Cancel")
+                        .to_owned();
+                    let mut confirm_btn = Button::new(confirm_label, true).default();
+                    if request.input["destructive"] == true {
+                        confirm_btn = confirm_btn.destructive();
+                    }
+                    let rx = Alert::new(
+                        title,
+                        message,
+                        vec![confirm_btn, Button::new(cancel_label, false).cancel()],
+                    )
+                    .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let accepted = rx.recv().await == Ok(Some(true));
+                        runtime.platform_reply(request.id, Ok(json!(accepted)));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.alert" => {
+                    use crate::alert::{Alert, Button};
+                    let title = request.input["title"]
+                        .as_str()
+                        .unwrap_or("Powermove")
+                        .to_owned();
+                    let message = request.input["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let ok_label = request.input["okLabel"].as_str().unwrap_or("OK").to_owned();
+                    let rx = Alert::new(title, message, vec![Button::new(ok_label, true).default()])
+                        .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let _ = rx.recv().await;
+                        runtime.platform_reply(request.id, Ok(Value::Null));
+                    })
+                    .detach();
+                    continue;
+                }
+                // ---- Layer 6: Clipboard, Media, Shell, FS, Storage, Net ---------
+                "ext.clipboard.readText" => {
+                    let clip = crate::platform::text_clipboard();
+                    clip(None).map(Value::String)
+                }
+                "ext.clipboard.writeText" => {
+                    let clip = crate::platform::text_clipboard();
+                    let text = request.input["text"].as_str().unwrap_or_default();
+                    clip(Some(text)).map(|_| Value::Null)
+                }
+                "ext.media.importFiles" => {
+                    let paths: Vec<std::path::PathBuf> = request.input["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                        .filter_map(|p| crate::ext_capabilities::expand_path(p).ok())
+                        .collect();
+                    let folder = request.input["folder"].as_str().map(str::to_owned);
+                    let add_to_timeline = request.input["addToTimeline"] == true;
+                    if !paths.is_empty() {
+                        if add_to_timeline {
+                            self.drop_on_viewer(paths, false, cx);
+                        } else {
+                            self.import_to_panel(paths, folder, false, cx);
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.shell.revealInFinder" => {
+                    crate::ext_capabilities::expand_path(
+                        request.input["path"].as_str().unwrap_or_default(),
+                    )
+                    .map(|path| {
+                        crate::platform::reveal(&path);
+                        Value::Null
+                    })
+                }
+                "ext.shell.openPath" => {
+                    crate::ext_capabilities::expand_path(
+                        request.input["path"].as_str().unwrap_or_default(),
+                    )
+                    .map(|path| json!(crate::platform::open_document(&path)))
+                }
+                "ext.shell.openUrl" => {
+                    let url = request.input["url"].as_str().unwrap_or_default();
+                    match url::Url::parse(url) {
+                        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                            Ok(json!(crate::platform::open_url(url)))
+                        }
+                        Ok(_) => Err("shell.openUrl only supports http:// and https:// URLs".into()),
+                        Err(e) => Err(format!("Invalid URL: {e}")),
+                    }
+                }
+                op if op.starts_with("ext.fs.")
+                    || op.starts_with("ext.storage.")
+                    || op == "ext.net.fetch"
+                    || op == "ext.shell.exec" =>
+                {
+                    let profile = self.profile.clone();
+                    let panel = request.panel.clone();
+                    let operation = request.operation.clone();
+                    let input = request.input.clone();
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, cx| {
+                        let reply = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::ext_capabilities::run_worker_op(
+                                    &profile, &panel, &operation, &input,
+                                )
+                            })
+                            .await;
+                        runtime.platform_reply(request.id, reply);
+                    })
+                    .detach();
+                    continue;
+                }
                 _ => Err(format!("Native service unavailable: {}", request.operation)),
             };
             runtime.platform_reply(request.id, result);
@@ -4338,6 +4760,23 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolPen" => Tool::Pen,
             _ => Tool::Other,
         }
+    }
+    fn custom_tool_event(&self, event: serde_json::Value, cx: &mut App) -> bool {
+        let Some(controller) = self.0.upgrade() else {
+            return false;
+        };
+        let c = controller.read(cx);
+        let Some(target) = c.tool.strip_prefix(crate::extensions::V4_TOOL) else {
+            return false;
+        };
+        let Some((panel, tool_id)) = target.split_once(':') else {
+            return false;
+        };
+        let Some(runtime) = c.builtins.runtime.clone() else {
+            return false;
+        };
+        let _ = runtime.tool_event(panel, tool_id, &event);
+        true
     }
     fn overlay(
         &self,
@@ -5365,10 +5804,14 @@ mod canvas_menu_tests {
 /// its first render (refused, its grid drew no thumbnails).
 fn answers_before_ready(operation: &str) -> bool {
     // Settings telling its window's sidebar what it lists edits nothing.
-    matches!(
-        operation,
-        "export.estimate" | "project.view" | "settings.sidebar"
-    )
+    // Layer 5/6 extension capabilities (`ext.*`) must work immediately during
+    // `activate()` and initial render (e.g. listing home folder or reading
+    // persistent storage before first surface commit).
+    operation.starts_with("ext.")
+        || matches!(
+            operation,
+            "export.estimate" | "project.view" | "settings.sidebar"
+        )
 }
 
 /// The Project panel's view for `project` in the per-project choices at

@@ -835,6 +835,16 @@ define_class!(
                 self.send(Command { name: name.to_string(), args: vec![], token: None });
             }
         }
+        /// Layer 1: extension-contributed toolbar buttons carry their command in `identifier`.
+        #[unsafe(method(extToolbarAct:))]
+        fn ext_toolbar_act(&self, sender: &NSButton) {
+            if let Some(id) = sender.identifier() {
+                let name = id.to_string();
+                if !name.is_empty() {
+                    self.send(Command { name, args: vec![], token: None });
+                }
+            }
+        }
         #[unsafe(method(showPendingMenu:))]
         fn show_pending_menu(&self, _: Option<&AnyObject>) {
             let pending = self.ivars().pending_menu.borrow_mut().take();
@@ -2819,6 +2829,7 @@ define_class!(
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
             let mut ids = toolbar_ids().to_vec();
             ids.push(NSString::from_str("agentPresence"));
+            ids.push(NSString::from_str("extToolbar"));
             NSArray::from_retained_slice(&ids)
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
@@ -3061,6 +3072,16 @@ impl ToolbarDelegate {
             item.setAutovalidates(false);
             return Some(item);
         }
+        if name == "extToolbar" {
+            let stack = NSStackView::new(mtm);
+            stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+            stack.setSpacing(4.0);
+            stack.setAlignment(NSLayoutAttribute::CenterY);
+            item.setView(Some(&stack));
+            item.setLabel(&NSString::from_str("Extensions"));
+            item.setAutovalidates(false);
+            return Some(item);
+        }
         if name == "add" {
             let item = objc2_app_kit::NSMenuToolbarItem::initWithItemIdentifier(
                 objc2_app_kit::NSMenuToolbarItem::alloc(mtm),
@@ -3194,6 +3215,263 @@ impl Host {
         );
         if let Some(item) = agent_launcher_item(&self._toolbar) {
             item.setHidden(!show);
+        }
+    }
+
+    /// Layer 1: updates the dynamic extension toolbar strip right beside Add.
+    pub fn set_extension_toolbar(&mut self, items: &[ExtensionToolbarItem]) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let toolbar = &self._toolbar;
+        let existing_idx = toolbar
+            .items()
+            .iter()
+            .position(|i| i.itemIdentifier().to_string() == "extToolbar");
+        if items.is_empty() {
+            if let Some(idx) = existing_idx {
+                toolbar.removeItemAtIndex(idx as isize);
+            }
+            return;
+        }
+        if existing_idx.is_none() {
+            let insert_at = toolbar
+                .items()
+                .iter()
+                .position(|i| i.itemIdentifier().to_string() == "add")
+                .map(|i| i + 1)
+                .unwrap_or(toolbar.items().len());
+            toolbar.insertItemWithItemIdentifier_atIndex(
+                &NSString::from_str("extToolbar"),
+                insert_at as isize,
+            );
+        }
+        let Some(tb_item) = toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "extToolbar")
+        else {
+            return;
+        };
+        let Some(stack) = tb_item.view().and_then(|v| v.downcast::<NSStackView>().ok()) else {
+            return;
+        };
+        for view in stack.arrangedSubviews().to_vec() {
+            stack.removeArrangedSubview(&view);
+            view.removeFromSuperview();
+        }
+        let target = &self._target;
+        let t = &self.tokens;
+        for entry in items {
+            let title = match &entry.badge {
+                Some(badge) if !badge.is_empty() => format!("{} ({badge})", entry.label),
+                _ => entry.label.clone(),
+            };
+            let btn = if let Some(icon) = &entry.icon
+                && let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(icon),
+                    Some(&NSString::from_str(&entry.label)),
+                ) {
+                let b = unsafe {
+                    NSButton::buttonWithTitle_image_target_action(
+                        &NSString::from_str(&title),
+                        &img,
+                        Some(target),
+                        Some(sel!(extToolbarAct:)),
+                        mtm,
+                    )
+                };
+                if entry.label.is_empty() {
+                    b.setImagePosition(NSCellImagePosition::ImageOnly);
+                } else {
+                    b.setImagePosition(NSCellImagePosition::ImageLeading);
+                }
+                b
+            } else {
+                unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        &NSString::from_str(&title),
+                        Some(target),
+                        Some(sel!(extToolbarAct:)),
+                        mtm,
+                    )
+                }
+            };
+            btn.setBezelStyle(NSBezelStyle::Toolbar);
+            btn.setControlSize(NSControlSize::Regular);
+            btn.setIdentifier(Some(&NSString::from_str(&entry.command)));
+            btn.setToolTip(Some(&NSString::from_str(&entry.tooltip)));
+            if entry.active {
+                btn.setContentTintColor(Some(&native_color(t.colors.accent)));
+            }
+            btn.sizeToFit();
+            stack.addArrangedSubview(&btn);
+        }
+        stack.setNeedsLayout(true);
+    }
+}
+
+/// Layer 1: a window toolbar item contributed by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionToolbarItem {
+    pub id: String,
+    pub label: String,
+    pub icon: Option<String>,
+    pub tooltip: String,
+    pub active: bool,
+    pub badge: Option<String>,
+    pub command: String,
+}
+
+/// Layer 1: a macOS menu bar item contributed by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionMenuItem {
+    pub separator: bool,
+    pub label: String,
+    pub key: Option<String>,
+    pub checked: bool,
+    pub disabled: bool,
+    pub command: Option<String>,
+    pub submenu: Vec<ExtensionMenuItem>,
+}
+
+/// Layer 1: a group of menu items targeting a top-level macOS menu name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionMenuSection {
+    pub menu_name: String,
+    pub items: Vec<ExtensionMenuItem>,
+}
+
+/// Tag used to identify extension-contributed menu bar items & custom top-level menus.
+const EXT_MENU_TAG: isize = 0x504D_4558;
+
+/// Layer 1: synchronizes v4 extension menu bar contributions into `NSApplication.mainMenu()`.
+/// Cleanly removes previous extension items on every update/unload without disturbing built-in menus.
+pub fn set_extension_menus(sections: &[ExtensionMenuSection]) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(root) = app.mainMenu() else {
+        return;
+    };
+    // 1. Remove all previously added extension top-level menus and submenu rows.
+    let top_items: Vec<_> = root.itemArray().to_vec();
+    for top in top_items {
+        if top.tag() == EXT_MENU_TAG {
+            root.removeItem(&top);
+            continue;
+        }
+        if let Some(sub) = top.submenu() {
+            let children: Vec<_> = sub.itemArray().to_vec();
+            for child in children {
+                if child.tag() == EXT_MENU_TAG {
+                    sub.removeItem(&child);
+                }
+            }
+        }
+    }
+    if sections.is_empty() {
+        return;
+    }
+    let target = MENU_TARGET.with(|t| t.borrow().clone());
+    let Some(target) = target else {
+        return;
+    };
+    fn build_item(
+        mtm: MainThreadMarker,
+        target: &Target,
+        spec: &ExtensionMenuItem,
+    ) -> Retained<NSMenuItem> {
+        if spec.separator {
+            let sep = NSMenuItem::separatorItem(mtm);
+            sep.setTag(EXT_MENU_TAG);
+            return sep;
+        }
+        let (key, flags) = spec
+            .key
+            .as_deref()
+            .map(menu::accelerator)
+            .unwrap_or_default();
+        let action = spec.command.as_ref().map(|_| sel!(actNamed:));
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(&spec.label),
+                action,
+                &NSString::from_str(&key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
+        item.setTag(EXT_MENU_TAG);
+        item.setState(if spec.checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        item.setEnabled(!spec.disabled);
+        if let Some(cmd) = &spec.command {
+            unsafe {
+                item.setRepresentedObject(Some(&NSString::from_str(cmd)));
+                item.setTarget(Some(target));
+            }
+        }
+        if !spec.submenu.is_empty() {
+            let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&spec.label));
+            sub.setAutoenablesItems(false);
+            for child in &spec.submenu {
+                sub.addItem(&build_item(mtm, target, child));
+            }
+            item.setSubmenu(Some(&sub));
+            unsafe {
+                item.setTarget(Some(&sub));
+                item.setAction(Some(sel!(submenuAction:)));
+            }
+        }
+        item
+    }
+
+    for section in sections {
+        if section.items.is_empty() {
+            continue;
+        }
+        let existing_sub = root
+            .itemArray()
+            .iter()
+            .find(|top| top.title().to_string().eq_ignore_ascii_case(&section.menu_name))
+            .and_then(|top| top.submenu());
+        let submenu = if let Some(sub) = existing_sub {
+            let sep = NSMenuItem::separatorItem(mtm);
+            sep.setTag(EXT_MENU_TAG);
+            sub.addItem(&sep);
+            sub
+        } else {
+            let sub = NSMenu::initWithTitle(
+                NSMenu::alloc(mtm),
+                &NSString::from_str(&section.menu_name),
+            );
+            sub.setAutoenablesItems(false);
+            let top = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(&section.menu_name),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            top.setTag(EXT_MENU_TAG);
+            top.setSubmenu(Some(&sub));
+            // Insert custom top-level menus right before Window/Help.
+            let insert_at = root
+                .itemArray()
+                .iter()
+                .position(|i| matches!(i.title().to_string().as_str(), "Window" | "Help"))
+                .unwrap_or(root.numberOfItems() as usize);
+            root.insertItem_atIndex(&top, insert_at as isize);
+            sub
+        };
+        for item in &section.items {
+            submenu.addItem(&build_item(mtm, &target, item));
         }
     }
 }

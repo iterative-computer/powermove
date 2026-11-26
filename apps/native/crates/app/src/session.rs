@@ -880,6 +880,10 @@ impl pm_shell::integration::Integration for Bridge {
             ) {
                 v.host.borrow().send_command("agent", vec![]);
             }
+            if let Some(runtime) = &v.builtins.runtime {
+                let open_list: Vec<String> = open.iter().map(|s| (*s).to_owned()).collect();
+                runtime.emit_event("layout", &serde_json::json!({ "open": open_list }));
+            }
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
@@ -951,6 +955,13 @@ impl pm_shell::integration::Integration for Bridge {
             }
             v.builtin_header(id, bounds, tabbed, w, cx)
         })
+    }
+    fn panel_header_actions(
+        &self,
+        id: &str,
+        cx: &App,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.0.read(cx).extension_panel_header_actions(id)
     }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
@@ -2108,7 +2119,32 @@ impl Controller {
             self.workspace_json
                 .follow(&mut self.panel_builds, &previous.workspace, &p.workspace);
         }
+        let selection_changed = previous
+            .as_ref()
+            .is_none_or(|old| old.selection != p.selection);
+        let selection_payload = selection_changed.then(|| {
+            serde_json::json!({
+                "layers": p.selection.layers(),
+                "primary": p.selection.primary(),
+                "keys": p.selection.keys(),
+            })
+        });
+        let doc_payload = document_changed.then(|| {
+            serde_json::json!({
+                "docId": p.snapshot.doc_id,
+                "revision": p.revision(),
+                "composition": p.snapshot.open_comp(),
+            })
+        });
         self.published = Some(p);
+        if let Some(runtime) = &self.builtins.runtime {
+            if let Some(payload) = doc_payload {
+                runtime.emit_event("document", &payload);
+            }
+            if let Some(payload) = selection_payload {
+                runtime.emit_event("selection", &payload);
+            }
+        }
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
         if shape != (self.duration(), self.work_area()) && self.running() {
@@ -4429,6 +4465,12 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(runtime) = &self.builtins.runtime {
+            runtime.emit_event(
+                "command",
+                &serde_json::json!({ "name": &cmd.name, "args": &cmd.args }),
+            );
+        }
         if cmd.name == crate::v4_quote::CITE_COMMAND {
             return self
                 .builtins
@@ -4630,6 +4672,10 @@ impl Controller {
         }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
+            if let Some(runtime) = &self.builtins.runtime {
+                runtime.set_active_tool(None);
+                runtime.emit_event("tool", &serde_json::json!({ "tool": self.tool }));
+            }
             // The Pen tool shows the selection's paths; others hide them.
             if let Some(gizmos) = self.builtins.gizmos.clone() {
                 gizmos.update(cx, |g, cx| g.refresh(cx));
@@ -5427,6 +5473,7 @@ impl Controller {
                 if cmd.name == "shuttleRelease" {
                     if let Some(command) = self.shuttle.release(key) {
                         self.transport(command);
+                        self.tick_builtins(cx);
                     }
                     return true;
                 }
@@ -5448,9 +5495,18 @@ impl Controller {
                         if key == ShuttleKey::K && acted {
                             self.end_run();
                         }
+                        if acted {
+                            self.tick_builtins(cx);
+                        }
                         acted || (from_pause && key == ShuttleKey::K)
                     }
-                    Press::Send(command) => self.transport(command),
+                    Press::Send(command) => {
+                        let accepted = self.transport(command);
+                        if accepted {
+                            self.tick_builtins(cx);
+                        }
+                        accepted
+                    }
                     Press::Held => true,
                 };
                 if handled
@@ -5595,6 +5651,7 @@ impl Controller {
                     }
                 }
                 self.transport(command);
+                self.tick_builtins(cx);
             }
             name => return self.surface_command(name, cx),
         }

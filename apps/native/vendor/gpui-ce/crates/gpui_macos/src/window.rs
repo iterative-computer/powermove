@@ -2586,58 +2586,69 @@ impl PlatformWindow for MacWindow {
                 }
             }
         }
-        // Keep `CAMetalLayer.presentsWithTransaction` steady on hosted
-        // CADisplayLink windows instead of flipping true <-> false per frame.
-        // Rapid runtime toggling between async `presentDrawable` and
-        // transactional `present` races inside macOS `CAMetalLayer` and can
-        // drop/revert the GPUI layer while AppKit subviews keep moving.
-        // Wrap `set_presents_with_transaction`, `nextDrawable`, hosted AppKit
-        // slot moves, and `drawable.present()` inside ONE explicit
-        // `CATransaction`, and still skip moving AppKit views if Metal cannot
-        // acquire a drawable or encode `scene`.
+        // P-SLOT-REGION: a frame presented outside a transaction reaches the
+        // layer when its GPU work completes. Were it still on its way, this
+        // frame's transaction could land first and the older picture then show
+        // under hosted views already moved for this one (controls a row off
+        // their labels for a frame). A frame that moves them waits for the next
+        // update instead; the main thread waits for nothing.
+        if crate::composition::waits_for_async_present(
+            forced,
+            this.renderer.async_presents_in_flight(),
+            this.renderer.async_presents_in_flight()
+                && crate::composition::pending(view, this.painted),
+        ) {
+            this.force_render_pending = true;
+            drop(this);
+            return trace("wait", false, 0.);
+        }
+        // P-SLOT-REGION: prepare the Metal frame first, and publish hosted
+        // AppKit views only when a drawable was acquired and encoded; a frame
+        // with no drawable or a failed encode leaves the picture and views
+        // together on screen and retries on the next update.
+        let prepared = this.renderer.prepare(scene);
+        let Some((prepared, transaction)) =
+            crate::composition::publish(view, &mut this.painted, prepared)
+        else {
+            this.force_render_pending = true;
+            let acquire = this.renderer.acquire_seconds * 1000.;
+            drop(this);
+            return trace("skip", false, acquire);
+        };
+        let moved = transaction.as_ref().is_some_and(|t| t.moved());
         let now = std::time::Instant::now();
         let continuous = this
             .last_draw
             .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
-        let direct = this.direct_moved.is_some();
-        let has_host = crate::composition::has_host(view);
-        let will_move = crate::composition::pending(view, this.painted);
-        let async_override = std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_some();
-        let sync = direct
-            || forced
-            || will_move
-            || (!this.renderer.display_link_bound() && has_host && !async_override)
-            || (continuous && !async_override && this.ca_display_link.is_none());
-        let transaction = (has_host || sync).then(crate::composition::begin_transaction);
-        this.renderer.set_presents_with_transaction(sync);
-        let Some(prepared) = this.renderer.prepare_draw(scene) else {
-            // No drawable or encoding error: leave `this.painted` intact and
-            // do not move hosted AppKit views; retry on the next update.
-            this.force_render_pending = true;
-            let acquire = this.renderer.acquire_seconds * 1000.;
-            drop(this);
-            drop(transaction);
-            return trace("skip", false, acquire);
-        };
-        // A scene shown again (GPUI keeps presenting for a moment after fast
-        // input) staged nothing new: hosted views stay as its paint put them.
-        let painted = std::mem::take(&mut this.painted);
-        let moved = if has_host {
-            crate::composition::present_in_transaction(view, painted).moved()
-        } else {
-            false
-        };
         this.last_draw = Some(now);
+        let direct = this.direct_moved.is_some();
+        // Only a frame that moves a hosted view (or AppKit's own synchronous
+        // paint) presents with the slot transaction and waits for its command
+        // buffer to be scheduled; frames that do not move hosted AppKit views
+        // (timeline zoom, playback meters, inspector updates) present
+        // asynchronously without blocking the main thread on the GPU.
+        let sync = crate::composition::presents_with_transaction(
+            forced,
+            transaction.as_ref(),
+            continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
+            this.ca_display_link.is_some() || direct,
+        );
         // A host that cannot say beforehand that it will move (it gave no
         // `composition::set_pending`) has moved its views by now, under a
         // link: switch to direct for subsequent frames.
         let late = !forced && !direct && moved && this.renderer.display_link_bound();
         if late {
             path = "late";
+            drop(prepared);
             this.renderer.set_display_link_drawable(None);
             this.release_display_link_for_sync_present();
+            this.renderer.set_presents_with_transaction(true);
+            if !this.renderer.draw(scene) {
+                this.force_render_pending = true;
+            }
+        } else {
+            this.renderer.submit(prepared, sync);
         }
-        prepared.present();
         if late {
             this.enter_direct();
         } else if direct {
@@ -2655,6 +2666,16 @@ impl PlatformWindow for MacWindow {
         // the lock first, or the main thread deadlocks on itself.
         drop(this);
         drop(transaction);
+        // A drawable presented with the transaction reaches the render server
+        // only when the outermost transaction does: flushed now, it shows with
+        // its slots this frame and returns to the layer immediately instead of
+        // waiting until run-loop end (where consecutive draws waited out the
+        // layer's 1 s nextDrawable timeout and triggered the macOS beachball).
+        if sync || late {
+            unsafe {
+                let _: () = msg_send![class!(CATransaction), flush];
+            }
+        }
         trace(path, moved, acquire);
     }
 
@@ -3988,13 +4009,10 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
                 #[cfg(not(feature = "wgpu"))]
-                let keep_sync = lock.direct_moved.is_some()
-                    || (!lock.renderer.display_link_bound()
-                        && crate::composition::has_host(lock.native_view.as_ptr() as usize)
-                        && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
+                let direct = lock.direct_moved.is_some();
                 #[cfg(feature = "wgpu")]
-                let keep_sync = false;
-                lock.renderer.set_presents_with_transaction(keep_sync);
+                let direct = false;
+                lock.renderer.set_presents_with_transaction(direct);
                 lock.sync_present_requested = false;
                 lock.start_display_link();
             }
@@ -4129,13 +4147,10 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
         #[cfg(not(feature = "wgpu"))]
-        let keep_sync = lock.direct_moved.is_some()
-            || (!lock.renderer.display_link_bound()
-                && crate::composition::has_host(lock.native_view.as_ptr() as usize)
-                && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none());
+        let direct = lock.direct_moved.is_some();
         #[cfg(feature = "wgpu")]
-        let keep_sync = false;
-        lock.renderer.set_presents_with_transaction(keep_sync);
+        let direct = false;
+        lock.renderer.set_presents_with_transaction(direct);
         lock.sync_present_requested = false;
         lock.start_display_link();
     }

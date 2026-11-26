@@ -221,6 +221,10 @@ pub trait Host: 'static {
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
+    /// Layer 2: forward pointer/wheel/key events to an active v4 extension tool.
+    fn custom_tool_event(&self, _event: serde_json::Value, _cx: &mut App) -> bool {
+        false
+    }
     /// A canvas press leaves field/control keyboard focus behind.
     fn focus_canvas(&self, _: &mut Window, _: &mut App) {}
     /// Publish engine-drawn lines, normalized to the composition frame.
@@ -1963,7 +1967,36 @@ impl GizmoSurface {
             inside: false,
         };
         let drag = match tool {
-            Tool::Other => return,
+            Tool::Other => {
+                let button = match event.button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => 0,
+                };
+                let _ = self.host.custom_tool_event(
+                    serde_json::json!({
+                        "type": "down",
+                        "x": f32::from(event.position.x - self.bounds.origin.x),
+                        "y": f32::from(event.position.y - self.bounds.origin.y),
+                        "compX": at[0],
+                        "compY": at[1],
+                        "scale": frame.scale,
+                        "width": frame.size[0],
+                        "height": frame.size[1],
+                        "button": button,
+                        "clickCount": event.click_count,
+                        "modifiers": {
+                            "shift": event.modifiers.shift,
+                            "alt": event.modifiers.alt,
+                            "ctrl": event.modifiers.control,
+                            "meta": event.modifiers.platform,
+                        }
+                    }),
+                    cx,
+                );
+                return;
+            }
             Tool::Pen => {
                 self.pen_down(event, at, frame.scale, cx);
                 return;
@@ -2279,6 +2312,37 @@ impl GizmoSurface {
         if self.studio_wheel(event, line, cx) {
             return;
         }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let delta = event.delta.pixel_delta(line);
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "wheel",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "deltaX": f32::from(delta.x),
+                    "deltaY": f32::from(delta.y),
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
+        }
         let delta = event.delta.pixel_delta(line);
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
@@ -2312,6 +2376,41 @@ impl GizmoSurface {
         }
         if self.studio_move(event, cx) {
             return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && self.bounds.contains(&event.position)
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let button = match event.pressed_button {
+                Some(MouseButton::Left) => 0,
+                Some(MouseButton::Middle) => 1,
+                Some(MouseButton::Right) => 2,
+                _ => -1,
+            };
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "move",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": button,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
         }
         if let Some((start, last)) = self.panning {
             self.panning = Some((start, event.position));
@@ -2513,6 +2612,35 @@ impl GizmoSurface {
         }
         if self.studio_up(commit, cx) {
             return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let pos = window
+                .as_ref()
+                .map_or(self.bounds.origin, |w| w.mouse_position());
+            let at = self.to_comp(pos, frame);
+            let _ = self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "up",
+                    "x": f32::from(pos.x - self.bounds.origin.x),
+                    "y": f32::from(pos.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": false,
+                        "alt": false,
+                        "ctrl": false,
+                        "meta": false,
+                    }
+                }),
+                cx,
+            );
         }
         if !self.guides.is_empty() {
             self.guides.clear();

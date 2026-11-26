@@ -208,6 +208,8 @@ impl Controller {
             return;
         };
         // View ▸ 3D checkmarks follow the same settings as the bar.
+        // Only walk the macOS menu bar when one of the 5 values actually changes
+        // (avoids 120 Hz NSMenu traversal on the main thread during playback).
         {
             let ui = |k: &str, d: &str| {
                 p.ui_state
@@ -224,9 +226,31 @@ impl Controller {
                 ("views", ui("studioViews", "1")),
                 ("tier", ui("studioTier", "fast")),
             ];
-            pm_shell::check_view3d(&|group, value| {
-                current.iter().any(|(g, v)| *g == group && v == value)
+            thread_local! {
+                static LAST_VIEW3D: std::cell::RefCell<Option<[String; 5]>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            let key = [
+                current[0].1.clone(),
+                current[1].1.clone(),
+                current[2].1.clone(),
+                current[3].1.clone(),
+                current[4].1.clone(),
+            ];
+            let changed = LAST_VIEW3D.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if slot.as_ref() == Some(&key) {
+                    false
+                } else {
+                    *slot = Some(key);
+                    true
+                }
             });
+            if changed {
+                pm_shell::check_view3d(&|group, value| {
+                    current.iter().any(|(g, v)| *g == group && v == value)
+                });
+            }
         }
         let requested = match p
             .ui_state

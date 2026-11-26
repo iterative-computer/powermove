@@ -107,10 +107,17 @@ impl Render for ViewerOverlays {
                 .absolute()
                 .inset_0(),
             )
-            .children(
-                self.views
-                    .values()
-                    .map(|view| div().absolute().inset_0().child(view.clone())),
-            )
+            .children(self.views.iter().map(|(id, view)| {
+                let interactive = self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| r.overlay_interactive(id));
+                let mut container = div().absolute().inset_0();
+                if interactive {
+                    // Interactive overlays receive pointer events directly on their controls.
+                    container = container.occlude();
+                }
+                container.child(view.clone())
+            }))
     }
 }

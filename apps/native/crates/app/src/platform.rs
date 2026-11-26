@@ -603,6 +603,127 @@ pub fn bundle_id() -> Option<String> {
         .bundleIdentifier()
         .map(|id| id.to_string())
 }
+
+/// Layer 5: native macOS open panel for v4 extensions (`dialogs.openFolder`,
+/// `dialogs.openFiles`) supporting custom title, message, default directory,
+/// hidden files, multiple selection, and file extension filters.
+#[allow(clippy::too_many_arguments)]
+pub fn ext_open_dialog(
+    window: &NSWindow,
+    files: bool,
+    folders: bool,
+    multiple: bool,
+    show_hidden: bool,
+    extensions: &[String],
+    title: Option<&str>,
+    message: Option<&str>,
+    default_path: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<Vec<PathBuf>>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(files);
+    panel.setCanChooseDirectories(folders);
+    panel.setAllowsMultipleSelection(multiple);
+    panel.setCanCreateDirectories(folders);
+    panel.setShowsHiddenFiles(show_hidden);
+    if let Some(title) = title.filter(|s| !s.is_empty()) {
+        panel.setTitle(Some(&NSString::from_str(title)));
+    }
+    if let Some(message) = message.filter(|s| !s.is_empty()) {
+        panel.setMessage(Some(&NSString::from_str(message)));
+    }
+    start_in(&panel, default_path);
+    let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let types: Vec<Retained<AnyObject>> = content_types(&ext_refs, folders)
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            match kind {
+                ContentType::Extension(extension) => {
+                    let extension = NSString::from_str(extension);
+                    msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+                }
+                ContentType::Identifier(identifier) => {
+                    let identifier = NSString::from_str(identifier);
+                    msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier]
+                }
+            }
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let paths = (result == NSModalResponseOK).then(|| {
+            retained
+                .URLs()
+                .iter()
+                .filter_map(|url| url.path())
+                .map(|path| PathBuf::from(path.to_string()))
+                .collect()
+        });
+        let _ = tx.try_send(paths);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+
+/// Layer 5: native macOS save panel for v4 extensions (`dialogs.saveFile`).
+pub fn ext_save_dialog(
+    window: &NSWindow,
+    title: Option<&str>,
+    message: Option<&str>,
+    default_path: Option<&std::path::Path>,
+    default_name: Option<&str>,
+    extensions: &[String],
+) -> async_channel::Receiver<Option<PathBuf>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setCanCreateDirectories(true);
+    if let Some(title) = title.filter(|s| !s.is_empty()) {
+        panel.setTitle(Some(&NSString::from_str(title)));
+    }
+    if let Some(message) = message.filter(|s| !s.is_empty()) {
+        panel.setMessage(Some(&NSString::from_str(message)));
+    }
+    if let Some(name) = default_name.filter(|s| !s.is_empty()) {
+        panel.setNameFieldStringValue(&NSString::from_str(name));
+    }
+    start_in(&panel, default_path);
+    let types: Vec<Retained<AnyObject>> = extensions
+        .iter()
+        .filter_map(|ext| unsafe {
+            let ext = NSString::from_str(ext);
+            msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*ext]
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|url| url.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let _ = tx.try_send(path);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
 /// The `UTType` of a file, read from the file itself.
 fn content_type(path: &std::path::Path) -> Option<Retained<objc2::runtime::AnyObject>> {
     use objc2_foundation::{NSArray, NSURL, NSURLContentTypeKey};

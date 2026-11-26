@@ -41,6 +41,14 @@ const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
 /// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
 const V4_THEME: &str = "extension.v4theme:";
+/// Layer 1: toolbar buttons `extension.v4toolbar:<panel>:<id>`.
+const V4_TOOLBAR: &str = "extension.v4toolbar:";
+/// Layer 1: panel header pills `extension.v4header:<owner>:<key>`.
+const V4_HEADER: &str = "extension.v4header:";
+/// Layer 1: menu bar items `extension.v4menubar:<panel>:<key>`.
+const V4_MENUBAR: &str = "extension.v4menubar:";
+/// Layer 2: interactive viewer tools `extension.v4tool:<panel>:<id>`.
+pub(crate) const V4_TOOL: &str = "extension.v4tool:";
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
@@ -225,6 +233,13 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    v4_tool_choices: Vec<Choice>,
+    v4_toolbar_seen: u64,
+    v4_headers_seen: u64,
+    v4_menubar_seen: u64,
+    v4_tools_seen: u64,
+    /// Layer 1: `(target_panel_id, button)` for `panelHeader.contribute`.
+    pub(crate) v4_panel_headers: Vec<(String, pm_shell::integration::PanelHeaderButton)>,
     /// The active v1–3 theme's timeline surface inputs, per scheme.
     pub v1_timeline: Value,
     /// The viewport last sent to the compat realm.
@@ -317,6 +332,12 @@ impl Default for Extensions {
             v4_choices: vec![],
             v4_seen: 0,
             v4_theme_choices: vec![],
+            v4_tool_choices: vec![],
+            v4_toolbar_seen: 0,
+            v4_headers_seen: 0,
+            v4_menubar_seen: 0,
+            v4_tools_seen: 0,
+            v4_panel_headers: vec![],
             v4_theme_requested: None,
             viewport: None,
             v1_timeline: Value::Null,
@@ -367,9 +388,15 @@ impl Extensions {
         self.forks.clear();
         self.v4_seen = u64::MAX;
         self.v4_themes_seen = u64::MAX;
+        self.v4_toolbar_seen = u64::MAX;
+        self.v4_headers_seen = u64::MAX;
+        self.v4_menubar_seen = u64::MAX;
+        self.v4_tools_seen = u64::MAX;
         self.v4_theme_requested = None;
         self.v4_choices.clear();
         self.v4_theme_choices.clear();
+        self.v4_tool_choices.clear();
+        self.v4_panel_headers.clear();
         self.seen = 0;
     }
     fn palette_choices(&self) -> Vec<Choice> {
@@ -377,6 +404,7 @@ impl Extensions {
             .iter()
             .chain(&self.v4_choices)
             .chain(&self.v4_theme_choices)
+            .chain(&self.v4_tool_choices)
             .cloned()
             .collect()
     }
@@ -779,6 +807,9 @@ impl Controller {
         shell.native_accessibility = vec![];
         drop(shell);
         self.reset_extensions();
+        // Automatically 3-way rebase any user built-in forks when the shipped
+        // built-ins changed across a software update (zero-breakage updates).
+        crate::fork_auto_rebase::ensure_rebased_async(self.profile.clone());
         let project_name = project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
@@ -1899,6 +1930,92 @@ impl Controller {
             }
             return true;
         }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOLBAR) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id) = (panel.to_owned(), id.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_toolbar(&panel, &id) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Toolbar action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_HEADER) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_panel_header(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Panel header action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENUBAR) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_menu_bar(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Menu action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOL) {
+            if let Some((panel, tool_id)) = target.split_once(':') {
+                self.tool = cmd.name.clone();
+                if let Some(runtime) = &self.builtins.runtime {
+                    runtime.set_active_tool(Some((panel, tool_id)));
+                    runtime.emit_event("tool", &json!({"tool": self.tool}));
+                }
+                cx.notify();
+            }
+            return true;
+        }
         if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
             if let (Some(runtime), Some((panel, id))) =
                 (self.builtins.runtime.clone(), target.split_once(':'))
@@ -2047,6 +2164,154 @@ impl Controller {
         let mut shell = self.host.borrow_mut();
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(V4_OWNER, bindings);
+    }
+    /// Layer 1 & Layer 2: synchronizes v4 extension toolbar items, panel header
+    /// actions, macOS menu bar items, and interactive viewer tools.
+    pub fn sync_v4_chrome(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        if let Some((rev, list)) = runtime.toolbar_items_since(self.extensions.v4_toolbar_seen) {
+            self.extensions.v4_toolbar_seen = rev;
+            let items: Vec<pm_shell::ExtensionToolbarItem> = list
+                .iter()
+                .filter_map(|item| {
+                    let panel = item["panel"].as_str()?;
+                    let id = item["id"].as_str()?;
+                    let label = item["label"].as_str().unwrap_or(id).to_owned();
+                    Some(pm_shell::ExtensionToolbarItem {
+                        id: id.to_owned(),
+                        tooltip: item["tooltip"].as_str().unwrap_or(&label).to_owned(),
+                        label,
+                        icon: item["icon"].as_str().map(str::to_owned),
+                        active: item["active"] == true,
+                        badge: item["badge"].as_str().map(str::to_owned),
+                        command: format!("{V4_TOOLBAR}{panel}:{id}"),
+                    })
+                })
+                .collect();
+            self.host.borrow_mut().set_extension_toolbar(&items);
+        }
+        if let Some((rev, list)) = runtime.panel_headers_since(self.extensions.v4_headers_seen) {
+            self.extensions.v4_headers_seen = rev;
+            self.extensions.v4_panel_headers = list
+                .iter()
+                .filter_map(|item| {
+                    let owner = item["owner"].as_str()?;
+                    let target_panel = item["panelId"].as_str()?.to_owned();
+                    let key = item["key"].as_str()?;
+                    let id = item["id"].as_str()?.to_owned();
+                    let label = item["label"].as_str().map(str::to_owned);
+                    let tooltip = item["tooltip"]
+                        .as_str()
+                        .or(label.as_deref())
+                        .unwrap_or(&id)
+                        .to_owned();
+                    Some((
+                        target_panel,
+                        pm_shell::integration::PanelHeaderButton {
+                            id,
+                            label,
+                            icon: item["icon"].as_str().map(str::to_owned),
+                            tooltip,
+                            active: item["active"] == true,
+                            command: format!("{V4_HEADER}{owner}:{key}"),
+                        },
+                    ))
+                })
+                .collect();
+            cx.notify();
+        }
+        if let Some((rev, list)) = runtime.menu_bar_since(self.extensions.v4_menubar_seen) {
+            self.extensions.v4_menubar_seen = rev;
+            fn parse_items(panel: &str, arr: &[Value]) -> Vec<pm_shell::ExtensionMenuItem> {
+                arr.iter()
+                    .map(|raw| {
+                        if raw == "-" {
+                            return pm_shell::ExtensionMenuItem {
+                                separator: true,
+                                label: String::new(),
+                                key: None,
+                                checked: false,
+                                disabled: false,
+                                command: None,
+                                submenu: vec![],
+                            };
+                        }
+                        let submenu = raw["submenu"]
+                            .as_array()
+                            .map(|sub| parse_items(panel, sub))
+                            .unwrap_or_default();
+                        pm_shell::ExtensionMenuItem {
+                            separator: false,
+                            label: raw["label"].as_str().unwrap_or_default().to_owned(),
+                            key: raw["key"].as_str().map(str::to_owned),
+                            checked: raw["checked"] == true,
+                            disabled: raw["disabled"] == true,
+                            command: raw["actionKey"]
+                                .as_str()
+                                .map(|k| format!("{V4_MENUBAR}{panel}:{k}")),
+                            submenu,
+                        }
+                    })
+                    .collect()
+            }
+            let sections: Vec<pm_shell::ExtensionMenuSection> = list
+                .iter()
+                .filter_map(|entry| {
+                    let panel = entry["panel"].as_str()?;
+                    let menu_name = entry["menuName"].as_str()?.to_owned();
+                    let items = parse_items(panel, entry["items"].as_array()?);
+                    Some(pm_shell::ExtensionMenuSection { menu_name, items })
+                })
+                .collect();
+            pm_shell::set_extension_menus(&sections);
+        }
+        if let Some((rev, list)) = runtime.tools_since(self.extensions.v4_tools_seen) {
+            self.extensions.v4_tools_seen = rev;
+            let mut choices = Vec::new();
+            let mut bindings = Vec::new();
+            for tool in &list {
+                let (Some(panel), Some(id), Some(title)) = (
+                    tool["panel"].as_str(),
+                    tool["id"].as_str(),
+                    tool["title"].as_str(),
+                ) else {
+                    continue;
+                };
+                let cmd = format!("{V4_TOOL}{panel}:{id}");
+                choices.push(Choice {
+                    label: format!("Tool: {title}"),
+                    command: cmd.clone(),
+                    ..Default::default()
+                });
+                if let Some(chord) = tool["shortcut"].as_str().filter(|s| !s.is_empty()) {
+                    bindings.push(Binding {
+                        id: format!("{V4_OWNER}tool:{panel}:{id}"),
+                        chord: chord.to_owned(),
+                        command: cmd,
+                        args: vec![],
+                        priority: 300,
+                        in_fields: false,
+                        repeat: false,
+                        loose: false,
+                    });
+                }
+            }
+            self.extensions.v4_tool_choices = choices;
+            let mut shell = self.host.borrow_mut();
+            shell.contributed_choices = self.extensions.palette_choices();
+            shell.set_contributed_bindings("v4-tools:", bindings);
+        }
+    }
+    /// Layer 1: trailing panel header action buttons contributed for `panel_id`.
+    pub fn extension_panel_header_actions(
+        &self,
+        panel_id: &str,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.extensions
+            .v4_panel_headers
+            .iter()
+            .filter(|(target, _)| target == panel_id || target == "*")
+            .map(|(_, btn)| btn.clone())
+            .collect()
     }
     /// Puts back what the newest agent extension change replaced, for this
     /// project or an app-wide run. Files move on a worker; windows reload.

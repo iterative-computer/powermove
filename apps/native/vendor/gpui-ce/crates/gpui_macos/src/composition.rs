@@ -411,6 +411,27 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     let change = present_in_transaction(view, painted);
     Some(Transaction { change })
 }
+/// Whether a frame waits for the next update rather than present: it would
+/// move hosted views (`pending`) while an earlier frame presented outside a
+/// transaction is still on its way to the layer. Landing after this frame's
+/// transaction, that older picture would show under views already moved.
+/// AppKit's own synchronous paints never wait.
+pub fn waits_for_async_present(forced: bool, async_in_flight: bool, pending: bool) -> bool {
+    !forced && async_in_flight && pending
+}
+/// Publishes a frame's hosted views only once its Metal frame is prepared
+/// (drawable in hand, commands encoded): a frame that cannot present leaves
+/// `painted` and every staged geometry for the next attempt, and the views
+/// where the picture on screen has them.
+pub(crate) fn publish<P>(
+    view: usize,
+    painted: &mut bool,
+    prepared: Option<P>,
+) -> Option<(P, Option<Transaction>)> {
+    let prepared = prepared?;
+    let transaction = present(view, std::mem::take(painted));
+    Some((prepared, transaction))
+}
 /// A frame drawn within this long after the previous one is "continuous".
 /// The legacy CVDisplayLink fallback couples frames within this interval.
 pub const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_micros(33_334);

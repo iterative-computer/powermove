@@ -1583,6 +1583,16 @@ impl Viewer {
             .get(&self.id)
             .is_some_and(|v| v.desired_rate.num != 0 || v.pause_requested_at.is_some())
     }
+    /// Whether playback is currently desired: flips immediately on Play,
+    /// Shuttle, PlayAround, and Pause without lagging behind audio device
+    /// warmup or stop drain, and clears when the transport stops at end.
+    pub fn desired_playing(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
+    }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
         let mut audio = None;

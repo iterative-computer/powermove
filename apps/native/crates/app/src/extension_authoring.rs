@@ -374,17 +374,18 @@ fn activate(
         if !collect_effects {
             return Ok(Vec::new());
         }
-        state
-            .registries
-            .get("effects")
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.definition.get("nativeSnapshot"))
-            .map(|snapshot| {
-                serde_json::from_str(&pm_model::json::to_canonical_string(snapshot))
-                    .map_err(|e| e.to_string())
-            })
-            .collect()
+        let mut snapshots = Vec::new();
+        for registry in ["effects", "transitions", "layers"] {
+            for entry in state.registries.get(registry).into_iter().flatten() {
+                if let Some(snapshot) = entry.definition.get("nativeSnapshot") {
+                    let parsed: DefinitionSnapshot =
+                        serde_json::from_str(&pm_model::json::to_canonical_string(snapshot))
+                            .map_err(|e| e.to_string())?;
+                    snapshots.push(parsed);
+                }
+            }
+        }
+        Ok(snapshots)
     })();
     actor.shutdown();
     result

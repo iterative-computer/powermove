@@ -257,11 +257,6 @@ pub struct MetalRenderer {
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
-    /// The last command buffer submitted on the async `present_drawable` path.
-    /// Before switching `CAMetalLayer.presentsWithTransaction` from `false` to
-    /// `true`, we wait for it to finish so its in-flight async presentation
-    /// cannot race with or overwrite the transactional `IOSurface` on macOS.
-    last_async_command_buffer: Option<metal::CommandBuffer>,
     display_link_drawable: Option<metal::MetalDrawable>,
     /// A CAMetalDisplayLink owns the layer, which forbids `nextDrawable`: every
     /// drawable then comes from a display-link update. Cleared when the window
@@ -317,6 +312,11 @@ pub struct MetalRenderer {
     pub acquire_seconds: f64,
     /// P-LAUNCH-TRACE: whether this window presented a drawable yet.
     presented_once: bool,
+    /// Frames presented outside a transaction whose command buffers have not
+    /// completed: their drawables reach the layer when they complete, and
+    /// one that completes after a later frame's transaction would show its
+    /// older picture under hosted views already moved for the later one.
+    async_in_flight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A link holds at most this many drawables of a previous size after a
@@ -669,7 +669,6 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
-            last_async_command_buffer: None,
             display_link_drawable: None,
             display_link_bound: false,
             stale_updates: 0,
@@ -709,6 +708,7 @@ impl MetalRenderer {
             last_draw: None,
             acquire_seconds: 0.,
             presented_once: false,
+            async_in_flight: Default::default(),
         }
     }
 
@@ -728,14 +728,6 @@ impl MetalRenderer {
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
-        if self.presents_with_transaction == presents_with_transaction {
-            return;
-        }
-        if presents_with_transaction
-            && let Some(prev) = self.last_async_command_buffer.take()
-        {
-            prev.wait_until_completed();
-        }
         self.presents_with_transaction = presents_with_transaction;
         if let Some(layer) = &self.layer {
             layer.set_presents_with_transaction(presents_with_transaction);
@@ -956,42 +948,53 @@ impl MetalRenderer {
 
 }
 
-/// A Metal frame already encoded into its drawable, ready to commit and present
-/// inside the same `CATransaction` as any AppKit slot geometry moves.
-pub struct PreparedDraw {
-    command_buffer: metal::CommandBuffer,
+/// A frame encoded into its drawable, not yet committed or presented
+/// ([`MetalRenderer::prepare`], [`MetalRenderer::submit`]).
+pub struct PreparedFrame {
     drawable: metal::MetalDrawable,
-    presents_with_transaction: bool,
-    supplied: bool,
+    command_buffer: metal::CommandBuffer,
+    from_link: bool,
 }
 
-impl PreparedDraw {
-    pub fn present(self) {
-        if self.presents_with_transaction {
-            self.command_buffer.commit();
-            measure_native("GPUI scheduled", || {
-                self.command_buffer.wait_until_scheduled()
-            });
-            self.drawable.present();
-        } else if self.supplied {
-            // CAMetalDisplayLink requires present() before targetTimestamp.
-            // Queuing present on the buffer defers that call until scheduling,
-            // which can miss the CPU deadline after timely encoding.
-            // Its update tracks the committed rendering; no scheduled wait is needed.
-            self.command_buffer.commit();
-            self.drawable.present();
-        } else {
-            self.command_buffer.present_drawable(&self.drawable);
-            self.command_buffer.commit();
-        }
+/// How a prepared frame reaches the layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    /// Committed, scheduled, then presented inside the current transaction.
+    Transaction,
+    /// A CAMetalDisplayLink's drawable: presented right after the commit.
+    Link,
+    /// Presented by its command buffer once scheduled.
+    Queued,
+}
+
+/// Whether a supplied drawable is a CAMetalDisplayLink's: only while a link
+/// owns the layer (`link_bound`). A direct window's drawables are supplied
+/// too, but the layer gave them.
+pub fn supplied_from_link(supplied: bool, link_bound: bool) -> bool {
+    supplied && link_bound
+}
+
+/// The present for a frame: with the transaction when it moves hosted views,
+/// at its link's update when a CAMetalDisplayLink supplied its drawable, and
+/// otherwise queued on its commands (a drawable the layer gave must never be
+/// presented before its rendering is scheduled).
+pub fn present_mode(with_transaction: bool, from_link: bool) -> PresentMode {
+    if with_transaction {
+        PresentMode::Transaction
+    } else if from_link {
+        PresentMode::Link
+    } else {
+        PresentMode::Queued
     }
 }
 
 impl MetalRenderer {
-    /// Acquires a drawable and encodes `scene` without presenting yet. Returns
-    /// `None` if no drawable is available or encoding failed, allowing callers
-    /// to avoid moving hosted AppKit views when the Metal layer cannot update.
-    pub fn prepare_draw(&mut self, scene: &Scene) -> Option<PreparedDraw> {
+    /// Acquires a drawable of the layer's size and encodes `scene` into it,
+    /// committing and presenting nothing (Powermove P-SLOT-REGION: hosted
+    /// views are published only once their frame is sure to present).
+    /// `None` when there is no drawable or encoding failed: nothing was shown
+    /// and nothing needs undoing.
+    pub fn prepare(&mut self, scene: &Scene) -> Option<PreparedFrame> {
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -1016,7 +1019,7 @@ impl MetalRenderer {
             return None;
         }
         let asked = present_trace().then(std::time::Instant::now);
-        let from_supplied = supplied.is_some();
+        let from_link = supplied_from_link(supplied.is_some(), self.display_link_bound);
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
             supplied.or_else(|| layer.next_drawable().map(|d| d.to_owned()))
         }) {
@@ -1055,24 +1058,6 @@ impl MetalRenderer {
                 drawable.add_presented_handler(&handler);
             }
         }
-        if let Some((input, kind)) = crate::feel::take() {
-            let draw = crate::feel::now();
-            let target = crate::feel::target();
-            let frame = crate::feel::frame_start();
-            let path = match (self.presents_with_transaction, from_supplied) {
-                (true, _) => "transaction",
-                (false, true) => "link",
-                (false, false) => "queued",
-            };
-            let handler = ConcreteBlock::new(move |d: &metal::DrawableRef| {
-                crate::feel::write(&format!(
-                    r#"{{"ui":"{kind}","path":"{path}","input":{input:.6},"frame":{frame:.6},"draw":{draw:.6},"target":{target:.6},"presented":{:.6}}}"#,
-                    d.presented_time()
-                ));
-            })
-            .copy();
-            drawable.add_presented_handler(&handler);
-        }
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer = match measure_native("GPUI encode", || {
             self.draw_primitives(scene, &mut instance_buffer, &drawable, viewport_size)
@@ -1084,18 +1069,84 @@ impl MetalRenderer {
             }
         };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
-        if self.presents_with_transaction || from_supplied {
-            self.last_async_command_buffer = None;
-        } else {
-            self.last_async_command_buffer = Some(command_buffer.clone());
-        }
 
-        Some(PreparedDraw {
-            command_buffer,
+        Some(PreparedFrame {
             drawable,
-            presents_with_transaction: self.presents_with_transaction,
-            supplied: from_supplied,
+            command_buffer,
+            from_link,
         })
+    }
+
+    /// Commits a prepared frame and presents it: inside the current
+    /// transaction (`with_transaction`, after its commands are scheduled),
+    /// at a CAMetalDisplayLink's update, or queued on its commands.
+    pub fn submit(&mut self, frame: PreparedFrame, with_transaction: bool) {
+        self.set_presents_with_transaction(with_transaction);
+        let PreparedFrame {
+            drawable,
+            command_buffer,
+            from_link,
+        } = frame;
+        let mode = present_mode(with_transaction, from_link);
+        if let Some((input, kind)) = crate::feel::take() {
+            let draw = crate::feel::now();
+            let target = crate::feel::target();
+            let frame = crate::feel::frame_start();
+            let path = match mode {
+                PresentMode::Transaction => "transaction",
+                PresentMode::Link => "link",
+                PresentMode::Queued => "queued",
+            };
+            let handler = ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                crate::feel::write(&format!(
+                    r#"{{"ui":"{kind}","path":"{path}","input":{input:.6},"frame":{frame:.6},"draw":{draw:.6},"target":{target:.6},"presented":{:.6}}}"#,
+                    d.presented_time()
+                ));
+            })
+            .copy();
+            drawable.add_presented_handler(&handler);
+        }
+        match mode {
+            PresentMode::Transaction => {
+                command_buffer.commit();
+                measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
+                drawable.present();
+            }
+            PresentMode::Link => {
+                // CAMetalDisplayLink requires present() before targetTimestamp.
+                // Queuing present on the buffer defers that call until scheduling,
+                // which can miss the CPU deadline after timely encoding.
+                // Its update tracks the committed rendering; no scheduled wait is needed.
+                self.track_async(&command_buffer);
+                command_buffer.commit();
+                drawable.present();
+            }
+            PresentMode::Queued => {
+                self.track_async(&command_buffer);
+                command_buffer.present_drawable(&drawable);
+                command_buffer.commit();
+            }
+        }
+    }
+
+    /// Counts a frame presented outside a transaction until its command
+    /// buffer completes ([`Self::async_presents_in_flight`]).
+    fn track_async(&self, command_buffer: &metal::CommandBufferRef) {
+        use std::sync::atomic::Ordering;
+        self.async_in_flight.fetch_add(1, Ordering::AcqRel);
+        let count = self.async_in_flight.clone();
+        let block = ConcreteBlock::new(move |_| {
+            count.fetch_sub(1, Ordering::AcqRel);
+        });
+        command_buffer.add_completed_handler(&block.copy());
+    }
+
+    /// Whether a frame presented outside a transaction has not completed yet
+    /// (P-SLOT-REGION: a frame that moves hosted views waits for it).
+    pub fn async_presents_in_flight(&self) -> bool {
+        self.async_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
     }
 
     /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
@@ -1104,11 +1155,14 @@ impl MetalRenderer {
     /// paints on the link's next update instead. Synchronous presents release
     /// the link first, so they may ask.
     pub fn draw(&mut self, scene: &Scene) -> bool {
-        let Some(prepared) = self.prepare_draw(scene) else {
-            return false;
-        };
-        prepared.present();
-        true
+        match self.prepare(scene) {
+            Some(frame) => {
+                let with_transaction = self.presents_with_transaction;
+                self.submit(frame, with_transaction);
+                true
+            }
+            None => false,
+        }
     }
 }
 

@@ -4353,6 +4353,12 @@ impl Editor {
                         })),
                 );
             }
+            let ext_actions = self
+                .integration
+                .as_ref()
+                .map(|i| i.panel_header_actions(&id, cx))
+                .unwrap_or_default();
+            let has_custom = custom.is_some();
             if let Some(custom) = custom {
                 header = header.child(
                     div()
@@ -4374,7 +4380,71 @@ impl Editor {
                         .h_full()
                         .child(custom),
                 );
-            } else if !is_viewer {
+            }
+            if !ext_actions.is_empty() {
+                let mut strip = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(t.space.hair))
+                    .when(!has_custom, |d| d.ml_auto());
+                for action in ext_actions {
+                    let cmd = action.command.clone();
+                    let tip = action.tooltip.clone();
+                    let active = action.active;
+                    let has_label = action.label.as_ref().is_some_and(|l| !l.is_empty());
+                    let mut btn = div()
+                        .id(SharedString::from(format!("ext-hdr-{}-{}", id, action.id)))
+                        .role(Role::Button)
+                        .aria_label(tip.clone())
+                        .h(px(m.hit))
+                        .when(!has_label, |d| d.w(px(m.hit)))
+                        .when(has_label, |d| d.px(px(t.space.sm)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(t.space.hair))
+                        .rounded(px(m.control_radius))
+                        .when(active, |d| {
+                            d.bg(rgb(c.selected_fill)).text_color(rgb(c.accent))
+                        })
+                        .when(!active, |d| d.text_color(rgb(c.secondary)))
+                        .when(!dragging, |d| {
+                            d.tooltip(tooltip(&t, &tip))
+                                .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if let Some(host) = &this.host {
+                                host.borrow().send_command(&cmd, vec![]);
+                            }
+                        }));
+                    if let Some(icon) = &action.icon {
+                        btn = btn.child(crate::symbol::symbol(
+                            icon,
+                            m.symbol_inline,
+                            crate::symbol::Weight::Medium,
+                            if active { c.accent } else { c.secondary },
+                            w,
+                        ));
+                    }
+                    if let Some(label) = &action.label
+                        && !label.is_empty()
+                    {
+                        btn = btn.child(
+                            div()
+                                .text_size(px(t.typography.label))
+                                .font_family(pm_design::TEXT_FONT)
+                                .font_weight(FontWeight::MEDIUM)
+                                .whitespace_nowrap()
+                                .child(label.clone()),
+                        );
+                    }
+                    strip = strip.child(btn);
+                }
+                header = header.child(strip);
+            }
+            if !has_custom && !is_viewer {
                 // The original app's “…” button: this panel's menu (Add Panel
                 // as Tab is in it).
                 let options_group: SharedString = format!("options-{}-{}", p.dock, p.group).into();

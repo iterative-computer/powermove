@@ -705,7 +705,25 @@ impl TimelineSurface {
         }
         let clock_width = self.audio.clock_width.unwrap().1 + m.border;
         let minimum_meter_left = m.inset + 3. * m.control + m.hit + 3. * m.gap + clock_width;
-        let x = frame.viewport.layer_column - 120.;
+        // Account for conditional trailing buttons beside `timeline:graph`:
+        // `timeline:graph-options` (•••) when the Graph Editor is open, and
+        // `timeline:hide-shy` when shy layers exist or Hide Shy is active.
+        let graph_open =
+            self.model.graph_display != pm_panel_timeline::GraphDisplay::DopeSheet;
+        let shy_shown = self.model.hide_shy
+            || self.model.index.layers.iter().any(|layer| layer.shy);
+        let trailing_count = 1 + usize::from(graph_open) + usize::from(shy_shown);
+        let x = if trailing_count > 1 {
+            let buttons_left = frame.viewport.layer_column
+                - f64::from(m.inset)
+                - (trailing_count as f64) * f64::from(m.hit)
+                - ((trailing_count - 1) as f64) * f64::from(m.gap);
+            // Meter panel spans `[x - 4, x + 88]`; leave a full `m.gap` clearance
+            // left of `timeline:graph-options` / `timeline:hide-shy`.
+            (buttons_left - f64::from(m.gap) - 88.).min(frame.viewport.layer_column - 120.)
+        } else {
+            frame.viewport.layer_column - 120.
+        };
         if x - 4. >= f64::from(minimum_meter_left) {
             let top = (self.tokens.metrics.ruler as f64 - 8.) / 2.;
             frame.ops.push(op(
@@ -1581,6 +1599,61 @@ mod gesture_tests {
                 ));
                 assert!(surface.audio.meters.iter().all(|m| !m.clipped));
             }
+        });
+    }
+    #[gpui::test]
+    fn meters_clear_graph_options_and_shy_buttons(cx: &mut TestAppContext) {
+        let mut s = stage_audio(cx);
+        s.surface.update(&mut s.vcx, |surface, cx| {
+            let m = surface.tokens.metrics;
+            let stride = f64::from(m.hit + m.gap);
+            let column = 480.;
+
+            let measure = |surface: &mut TimelineSurface, cx: &mut Context<TimelineSurface>| {
+                let mut frame = AudioFrame {
+                    viewport: surface.frame.as_ref().unwrap().viewport,
+                    ops: Vec::new(),
+                };
+                frame.viewport.layer_column = column;
+                surface.audio_frame(&mut frame, cx);
+                frame
+                    .ops
+                    .into_iter()
+                    .find(|o| o.id == "audio-meter-panel")
+                    .map(|o| o.bounds)
+            };
+
+            let closed = measure(surface, cx).expect("meter visible with graph closed");
+
+            let mut model = (*surface.model).clone();
+            model.graph_display = pm_panel_timeline::GraphDisplay::Graph;
+            surface.model = Arc::new(model);
+            let with_graph = measure(surface, cx).expect("meter visible with graph open");
+            assert!(
+                with_graph.x < closed.x,
+                "opening Graph Editor should shift meter left: closed={}, open={}",
+                closed.x,
+                with_graph.x
+            );
+            // The right edge of the meter panel must clear `timeline:graph-options`
+            // (2nd button from right edge) by a full `m.gap`.
+            let graph_options_left =
+                column - f64::from(m.inset) - 2. * f64::from(m.hit) - f64::from(m.gap);
+            assert!(
+                with_graph.x + with_graph.width <= graph_options_left - f64::from(m.gap) + 0.01,
+                "meter right edge {} did not leave gap before Graph Options left {}",
+                with_graph.x + with_graph.width,
+                graph_options_left
+            );
+
+            let mut model = (*surface.model).clone();
+            model.hide_shy = true;
+            surface.model = Arc::new(model);
+            let with_both = measure(surface, cx).expect("meter visible with graph + shy");
+            assert!(
+                (with_graph.x - with_both.x - stride).abs() < 0.01,
+                "showing Hide Shy should shift meter left by another button stride"
+            );
         });
     }
     fn gain_value(s: &crate::timeline_tests::Stage, path: &str) -> f64 {
