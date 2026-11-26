@@ -4,6 +4,7 @@ mod agent_app_icons;
 mod credits;
 mod plans;
 mod previews;
+mod ring;
 
 use crate::{session::Controller, v4_compile::number_facts};
 use gpui::Context;

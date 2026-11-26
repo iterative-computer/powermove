@@ -1445,9 +1445,10 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                 "account.subscribe",
                 "Continue…",
             );
-            // Each plan's card: its name, price and monthly credits, and for
-            // a plan that gives more per dollar than the smallest, how much
-            // more (the website's wording).
+            // Each plan's card, as the website's (its wording): name, price,
+            // period, who it is for, then its features with check marks: the
+            // monthly credits, and for a plan that gives more per dollar than
+            // the smallest, how much more.
             let price = |p: &Value| p["priceCents"].as_u64().unwrap_or(0);
             let credits = |p: &Value| p["credits"].as_u64().unwrap_or(0);
             let per_dollar = |p: &Value| credits(p) as f64 / price(p).max(1) as f64;
@@ -1455,18 +1456,27 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
             choose["options"] = plans
                 .iter()
                 .map(|p| {
-                    let mut lines = vec![
-                        p["name"].as_str().unwrap_or_default().to_owned(),
-                        format!("{} a month", dollars(price(p))),
-                        format!(
-                            "{} credits a month",
-                            pm_agents::inference::grouped(credits(p))
-                        ),
-                    ];
+                    let note = match p["id"].as_str() {
+                        Some("aerolite") => "Aero, our agent, with inference included.",
+                        Some("aero") => "For editors who lean on Aero every day.",
+                        _ => "",
+                    };
+                    // The credits, with how much more per dollar under them.
+                    let mut credits_line = format!(
+                        "{} credits a month",
+                        pm_agents::inference::grouped(credits(p))
+                    );
                     let more = ((per_dollar(p) / base - 1.) * 100.).round();
                     if more >= 1. {
-                        lines.push(format!("{more}% more credits per dollar"));
+                        credits_line.push_str(&format!("\t{more}% more credits per dollar"));
                     }
+                    let lines = [
+                        p["name"].as_str().unwrap_or_default().to_owned(),
+                        dollars(price(p)),
+                        "/ month".to_owned(),
+                        note.to_owned(),
+                        credits_line,
+                    ];
                     json!({"v": p["id"], "label": lines.join("\n")})
                 })
                 .collect();
@@ -1877,11 +1887,13 @@ mod cloud_tests {
         assert_eq!(free[1]["actionLabel"], "Continue…");
         assert_eq!(
             free[1]["options"][0]["label"],
-            "Aerolite\n$9.99 a month\n1,000 credits a month"
+            "Aerolite\n$9.99\n/ month\nAero, our agent, with inference included.\n\
+             1,000 credits a month"
         );
         assert_eq!(
             free[1]["options"][1]["label"],
-            "Aero\n$19.99 a month\n2,500 credits a month\n25% more credits per dollar"
+            "Aero\n$19.99\n/ month\nFor editors who lean on Aero every day.\n\
+             2,500 credits a month\t25% more credits per dollar"
         );
         // Waiting for Checkout: a quiet line with Cancel instead.
         let waiting = billing_rows(
