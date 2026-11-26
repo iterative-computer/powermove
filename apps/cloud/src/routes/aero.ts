@@ -130,21 +130,21 @@ export const aero = new Hono<Env>()
     let done = false;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
-        if (done) return;
-        const next = await parts.next().catch(() => ({ done: true as const, value: undefined }));
-        if (next.done) {
-          done = true;
-          if (encoder.usage && !encoder.failed) {
+        // Keep reading until a part yields a frame: a pull that enqueues nothing is not pulled again.
+        while (!done) {
+          const next = await parts.next().catch(() => ({ done: true as const, value: undefined }));
+          if (next.done) {
+            done = true;
             await settle(encoder.usage);
-            for (const frame of encoder.close(encoder.usage)) controller.enqueue(text.encode(frame));
-          } else {
-            await settle(encoder.usage);
-            controller.enqueue(text.encode(ChunkEncoder.error(abort.signal.aborted ? 'aborted' : 'upstream_error')));
+            const frames = encoder.usage && !encoder.failed ? encoder.close(encoder.usage) : [ChunkEncoder.error(abort.signal.aborted ? 'aborted' : 'upstream_error')];
+            for (const frame of frames) controller.enqueue(text.encode(frame));
+            controller.close();
+            return;
           }
-          controller.close();
-          return;
+          const frames = encoder.accept(next.value);
+          for (const frame of frames) controller.enqueue(text.encode(frame));
+          if (frames.length) return;
         }
-        for (const frame of encoder.accept(next.value)) controller.enqueue(text.encode(frame));
       },
       cancel() {
         // The client went away: stop the provider call and settle with what is known.

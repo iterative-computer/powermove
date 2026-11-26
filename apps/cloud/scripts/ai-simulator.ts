@@ -8,7 +8,7 @@
    AERO_OPENAI_BASE_URL=http://localhost:4010/openai/v1  AERO_ANTHROPIC_BASE_URL=http://localhost:4010/anthropic/v1 */
 
 export interface SimulatorRequest { provider: 'openai' | 'anthropic'; body: Record<string, any>; headers: Record<string, string> }
-export interface Simulator { url: string; requests: SimulatorRequest[]; stop(): Promise<void> }
+export interface Simulator { url: string; requests: SimulatorRequest[]; /** Streams the client cut off before the end. */ aborted: number; stop(): Promise<void> }
 
 const encoder = new TextEncoder();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -39,7 +39,8 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       if (request.method !== 'POST') return new Response('not found', { status: 404 });
       const body = await request.json().catch(() => null) as Record<string, any> | null;
       if (!body) return Response.json({ error: { message: 'bad json' } }, { status: 400 });
-      const headers = Object.fromEntries(request.headers);
+      const headers: Record<string, string> = {};
+      request.headers.forEach((value, key) => { headers[key] = value; });
       if (url.pathname === '/openai/v1/responses') {
         requests.push({ provider: 'openai', body, headers });
         return openai(body, request.signal);
@@ -69,7 +70,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
           if (signal.aborted) throw new Error('aborted');
           controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
         };
-        try { await run(send); controller.close(); } catch { try { controller.close(); } catch { /* cancelled */ } }
+        try { await run(send); controller.close(); } catch { simulator.aborted++; try { controller.close(); } catch { /* cancelled */ } }
       },
     });
     return new Response(body, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } });
@@ -174,7 +175,8 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
     });
   }
 
-  return { url: `http://localhost:${server.port}`, requests, stop: async () => { await server.stop(true); } };
+  const simulator: Simulator = { url: `http://localhost:${server.port}`, requests, aborted: 0, stop: async () => { await server.stop(true); } };
+  return simulator;
 }
 
 if (import.meta.main) {

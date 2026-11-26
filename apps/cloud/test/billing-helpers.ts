@@ -29,7 +29,7 @@ export async function stack(data: Data, email = 'jude@example.com'): Promise<Sta
   };
   deliver = async (payload, signature) => (await app.request('/v2/stripe/webhook', { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': signature }, body: payload }, env)).status;
   const user = await seedSession(data, env, email);
-  const request = (path: string, init: RequestInit & { json?: unknown } = {}, headers: Record<string, string> = user.headers) => {
+  const request = async (path: string, init: RequestInit & { json?: unknown } = {}, headers: Record<string, string> = user.headers): Promise<Response> => {
     const { json, ...rest } = init;
     return app.request(path, { ...rest, ...(json !== undefined && { method: rest.method ?? 'POST', body: JSON.stringify(json) }), headers: { 'content-type': 'application/json', ...headers, ...(rest.headers as Record<string, string>) } }, env);
   };

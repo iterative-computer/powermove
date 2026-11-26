@@ -11,7 +11,7 @@ test('signed out: every v2 billing and Aero route answers 401 with a code only',
       for (const [method, path] of [['GET', '/v2/billing'], ['POST', '/v2/billing/checkout'], ['POST', '/v2/billing/portal'], ['GET', '/v2/aero/models'], ['POST', '/v2/aero/chat/completions']] as const) {
         const r = await s.request(path, { method, ...(method === 'POST' && { body: '{}' }) }, {});
         expect(r.status).toBe(401);
-        expect(await r.json()).toEqual({ error: { code: 'unauthorized' } });
+        expect(await r.json() as unknown).toEqual({ error: { code: 'unauthorized' } });
       }
       const bad = await s.request('/v2/billing', {}, { Authorization: 'Bearer not-a-session' });
       expect(bad.status).toBe(401);
@@ -55,7 +55,7 @@ test('checkout to active: the webhooks grant the period’s 1,000 credits; a sec
       expect(state.daily).toEqual([{ date: new Date().toISOString().slice(0, 10), credits: 0 }]);
       const again = await s.request('/v2/billing/checkout', { json: { plan: 'aero' } });
       expect(again.status).toBe(409);
-      expect(await again.json()).toEqual({ error: { code: 'has_plan' } });
+      expect(await again.json() as unknown).toEqual({ error: { code: 'has_plan' } });
       expect(s.stripe.state.customers.size).toBe(1);
       const portal = await s.request('/v2/billing/portal', { method: 'POST' });
       expect(portal.status).toBe(200);
@@ -87,7 +87,7 @@ test('the webhook is verified and idempotent: replayed events grant nothing twic
     try {
       const forged = await s.app.request('/v2/stripe/webhook', { method: 'POST', headers: { 'stripe-signature': 't=1,v1=00' }, body: '{"id":"evt_x","type":"invoice.paid"}' }, s.env);
       expect(forged.status).toBe(400);
-      expect(await forged.json()).toEqual({ error: { code: 'invalid_signature' } });
+      expect(await forged.json() as unknown).toEqual({ error: { code: 'invalid_signature' } });
       await subscribe(s);
       const before = (await data.db.select().from(creditLedger)).length;
       for (const event of [...s.stripe.state.events]) expect(await s.stripe.redeliver(event.id)).toBe(200);
