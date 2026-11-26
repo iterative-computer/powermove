@@ -982,17 +982,23 @@ fn a_library_card_turns_its_extension_off_and_on_and_has_a_menu() {
     assert!(profile.join("extensions/soft-glow").exists(), "off without uninstalling");
     click(cx, "store-switch-soft-glow");
     settle(&view, cx, "on again", |_| running(&f));
+    // The "…" menu is the system's: Uninstall… after a separator.
     click(cx, "store-more-soft-glow");
-    let rows = view.read_with(cx, |v, _| v.card_menu_rows());
+    let rows: Vec<String> = crate::v4_native::last_menu()
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
     assert_eq!(rows[0], "Check for Updates", "{rows:?}");
-    assert_eq!(rows.last().map(String::as_str), Some("Uninstall…"), "{rows:?}");
-    assert!(!rows.iter().any(|r| r.starts_with("Turn")), "the switch is the corner: {rows:?}");
-    click(cx, "store-more-soft-glow");
-    assert!(view.read_with(cx, |v, _| v.card_menu_rows().is_empty()));
-    click(cx, "store-more-soft-glow");
-    click(cx, "store-switch-soft-glow");
-    assert!(view.read_with(cx, |v, _| v.card_menu_rows().is_empty()));
-    assert!(running(&f), "the outside press only dismissed the menu");
+    assert_eq!(rows[rows.len() - 2..], ["", "Uninstall…"], "{rows:?}");
+    assert!(
+        !rows.iter().any(|r| r.starts_with("Turn")),
+        "the switch is the corner: {rows:?}"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.card_menu.is_none()),
+        "closed unchosen"
+    );
+    assert!(running(&f));
 }
 
 /// PM-503: Turn Off / Turn On (the card menu's rows, the switch) never waits
