@@ -327,6 +327,7 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
                 inner: Arc::new(broken),
                 after: Duration::from_millis(300),
             }),
+            current: Arc::new(|| true),
             credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
         };
         let (turn, _notes) = fixture.start(Model::live(live), |tools| Box::new(tools));
@@ -411,7 +412,7 @@ fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
             net: Some(Arc::new(Erroring { mid })),
             ..Default::default()
         };
-        let model = "anthropic/claude-opus-5-5";
+        let model = "pm/anthropic/claude-opus-5-5";
         let live = pm_agents::inference::live(&env, model, "high").unwrap();
         let scope = fixture.profile.path().join("aero/sessions/leak");
         let (turn, notes) = fixture.start_choice(
@@ -2885,7 +2886,7 @@ mod routes {
     fn the_aero_route_sends_each_picker_level_as_reasoning_effort_on_the_powermove_session() {
         let Some(r) = routes(hello()) else { return };
         for level in ["low", "medium", "high", "xhigh", "max", ""] {
-            for request in r.turn("openai/gpt-6-sol", level) {
+            for request in r.turn("pm/openai/gpt-6-sol", level) {
                 assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"));
                 assert_eq!(request.body["model"], "openai/gpt-6-sol");
                 if level.is_empty() {
@@ -2922,12 +2923,20 @@ mod routes {
                 .to_string()
                 .as_bytes(),
         );
-        for id in [
+        // Ids saved on the old routes never run on Aero at all.
+        for saved in [
             "openai/gpt-6-sol",
             "anthropic/claude-opus-5-5",
             "custom/gpt-5.5",
             "chatgpt/gpt-6-sol",
         ] {
+            assert_eq!(
+                pm_agents::inference::live(&r.env, saved, "high").err().as_deref(),
+                Some(pm_agents::inference::CHOOSE),
+                "{saved}"
+            );
+        }
+        for id in ["pm/openai/gpt-6-sol", "pm/anthropic/claude-opus-5-5"] {
             for request in r.turn(id, "high") {
                 assert_eq!(
                     request.url,
@@ -2952,7 +2961,7 @@ mod routes {
             ..r.env.clone()
         };
         assert_eq!(
-            pm_agents::inference::live(&signed_out, "openai/gpt-6-sol", "high")
+            pm_agents::inference::live(&signed_out, "pm/openai/gpt-6-sol", "high")
                 .err()
                 .as_deref(),
             Some(pm_agents::inference::SIGN_IN)
@@ -2970,10 +2979,10 @@ mod routes {
             format!("{}/v1/aero", r.emulate.base),
         );
         // Switch off: the endpoint is not read.
-        assert!(!r.turn_in(&env, "openai/gpt-6-sol", "low").is_empty());
+        assert!(!r.turn_in(&env, "pm/openai/gpt-6-sol", "low").is_empty());
         env.aero = Some(aero::Launcher(Arc::new(|_, _, _| Err("unused".into()))));
         assert!(
-            r.turn_in(&env, "openai/gpt-6-sol", "low").is_empty(),
+            r.turn_in(&env, "pm/openai/gpt-6-sol", "low").is_empty(),
             "the turn went to the test endpoint, not the network"
         );
     }

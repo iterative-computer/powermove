@@ -13,7 +13,8 @@ Refresh tokens rotate; a reused one answers `refresh_token_reused`.
 POST /control merges test knobs: refresh_barrier (hold refreshes until that many
 arrived, 3 s at most), refresh_delay (seconds before a refresh answers),
 hold_seconds (before a Codex reply), account (the account a sign-in gets),
-aero (Aero's usage answer: plan, none, offer, missing (404), out (402 on chat)).
+aero (Aero's usage answer: plan, none, offer, missing (404), error (500), rejected (401), out (402 on chat),
+echo (chat repeats the request's credential in its error)).
 Every request's headers and body are kept in /stats "raw" for leak checks."""
 import base64, hashlib, json, os, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,12 +31,12 @@ RICH_ANTHROPIC = [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"},
                   {"id": "claude-opus-5-5-1m", "display_name": "Claude Opus 5.5 (1M context)"},
                   {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"}]
 ACCOUNT = "acct-fake-1"
-# A development review account signs in as "review-session" (PM_FAKE_AERO_SESSION for on-screen runs).
-AERO_SESSION = os.environ.get("PM_FAKE_AERO_SESSION", "pm-session-fake")
+# The development credential Aero sends a test endpoint (never the person's session).
+AERO_SESSION = os.environ.get("PM_FAKE_AERO_SESSION", "pm-aero-development")
 # On-screen runs: Aero's chat goes on to emulate at this base (its Chat Completions), the rest stays here.
 AERO_EMULATE = os.environ.get("PM_FAKE_AERO_EMULATE")
 AERO_MODELS = [{"id": "anthropic/claude-opus-5.5", "name": "Claude Opus 5.5", "efforts": ["low", "medium", "high", "xhigh", "max"],
-                "defaultEffort": "high", "default": True},
+                "defaultEffort": "high", "default": True, "provider": "anthropic", "context": 200000},
                {"id": "openai/gpt-6-sol", "name": "GPT-6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh"]},
                {"id": "google/gemini-3-pro", "name": "Gemini 3 Pro", "efforts": ["low", "high"]}]
 AERO_RICH = AERO_MODELS + [{"id": "anthropic/claude-sonnet-5.5", "name": "Claude Sonnet 5.5", "efforts": ["low", "medium", "high"]},
@@ -229,6 +230,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"error": "unauthorized"})
             state = control["aero"]
             if url.path.endswith("/usage"):
+                if state == "rejected":
+                    return self.reply(401, {"error": "unauthorized"})
+                if state == "error":
+                    return self.reply(500, {"error": "internal"})
                 if state == "missing":
                     return self.reply(404, {"error": "not found"})
                 if state == "none":
@@ -237,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, {"plan": None, "offer": {"label": "Get Aerolite", "url": "https://trypowermove.com/aero"}})
                 return self.reply(200, {"plan": {"id": "aerolite", "name": "Aerolite"},
                                         "credits": {"remaining": 812, "included": 1000}, "resetsAt": "2026-12-25T00:00:00Z"})
-            if url.path.endswith("/models") and state in ("plan", "out"):
+            if url.path.endswith("/models") and state in ("plan", "out", "echo"):
                 return self.reply(200, {"data": AERO_RICH if RICH else AERO_MODELS})
         if url.path == "/custom/v1/models":
             return self.reply(200, {"object": "list", "data": [{"id": "custom-fake-model"}]})
@@ -296,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}})
             return self.reply(200, messages_sse(demo(body), body), "text/event-stream")
         if path == "/aero/v1/aero/chat/completions":
-            if self.bearer().startswith("pm-session-echo-"):
+            if control["aero"] == "echo":
                 # A careless backend that repeats the request's credential in its error.
                 return self.reply(400, {"error": {"message": f"bad request with {self.headers.get('Authorization')}",
                                                   "code": "invalid_request"}})
@@ -304,7 +309,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"error": {"code": "unauthorized"}})
             if control["aero"] == "out":
                 return self.reply(402, {"error": {"code": "credits_exhausted"}})
-            if control["aero"] not in ("plan", "out"):
+            if control["aero"] not in ("plan", "out", "echo"):
                 return self.reply(403, {"error": {"code": "no_plan"}})
             time.sleep(control["hold_seconds"])
             if AERO_EMULATE:

@@ -835,6 +835,13 @@ export function providerGroup(harness: string, model: string): string {
 }
 /** The development switch's demo model. */
 const FAKE_MODEL = "fake/model";
+/** An Aero catalogue model's own mark, from its provider (`pm/<provider>/<model>`):
+ * Claude's for Anthropic, OpenAI's blossom, Pierre's neutral sparkle for the rest
+ * (Google's marks need its approval). */
+export function aeroModelMark(model: string): string {
+  const provider = model.startsWith("pm/") ? model.split("/")[1] : "";
+  return provider === "anthropic" ? "claude" : provider === "openai" ? "chatgpt" : "compatible";
+}
 /** The model the chooser shows: the chosen one, else the one that runs
  * when none is chosen (the provider's default, else the first listed). */
 export function harnessModel(s: Snapshot, n?: NativeFacts): string {
@@ -2997,7 +3004,7 @@ function Composer({
         label: chooserName(s.catalog.models, v, label),
         value: `model:${v}`,
         checked: v === shown,
-        icon: `provider.${providerMark(harness, providerGroup(harness, v))}`,
+        icon: `provider.${harness === "aero" ? aeroModelMark(v) : providerMark(harness, providerGroup(harness, v))}`,
         stays: true,
       });
       groups.set(heading, rows);
@@ -3031,7 +3038,7 @@ function Composer({
       options,
       chooser: {
         title: modelBase(label),
-        icon: `provider.${providerMark(harness, providerGroup(harness, shown))}`,
+        icon: `provider.${harness === "aero" ? aeroModelMark(shown) : providerMark(harness, providerGroup(harness, shown))}`,
         facts,
         ...(usage ? { usage } : {}),
       },

@@ -470,13 +470,16 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
         // Aero runs on Powermove inference only; the development switch's
         // demo runs on the fake model.
         let options = match request.model.as_deref() {
-            Some(crate::inference::FAKE_MODEL) => crate::aero::Options::development(),
+            // A debug build's demo only: a release build never runs it.
+            Some(model) if crate::inference::runs_fake(model) => {
+                crate::aero::Options::development()
+            }
             Some(model) => {
                 let effort = request.effort.as_deref().unwrap_or("");
                 let model = crate::inference::live(environment, model, effort)?;
                 crate::aero::Options::live(crate::aero::Model::live(model))
             }
-            None => return Err("Choose a model for Aero.".into()),
+            None => return Err(crate::inference::CHOOSE.into()),
         };
         let handle = crate::aero::start(request, id, scope, options, move |path| {
             open(&authority, path, &token)

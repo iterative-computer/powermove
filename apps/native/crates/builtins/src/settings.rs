@@ -139,28 +139,62 @@ impl Backend {
         let openai = accounts.as_ref().map(|a| a.status(Provider::Chatgpt));
         let both = "Used by Codex.";
         match openai.as_ref().map(|s| (s.state, s)) {
+            // Both ways in, as Anthropic (Claude Code) has them: Codex holds
+            // one sign-in, so the other row says it would replace it.
             Some((State::Connected, status)) => {
-                let (method, name) = match &status.key {
-                    Some(masked) => ("API key", masked.clone()),
-                    None => ("Sign in with ChatGPT", [status.email.clone(), status.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")),
+                let with_detail = |mut r: Value| {
+                    if let Some(detail) = &status.detail {
+                        r["detail"] = json!(format!(
+                            "{} {detail}",
+                            r["detail"].as_str().unwrap_or_default()
+                        ));
+                    }
+                    r
                 };
-                let label = if status.key.is_some() { "Remove" } else { "Sign Out" };
-                let detail = match (&status.key, name.is_empty()) {
-                    (Some(_), _) => format!("{name}. {both}"),
-                    (None, true) => format!("Signed in. {both}"),
-                    (None, false) => format!("Signed in as {name}. {both}"),
-                };
-                let mut r = action(
-                    row("openai", OPENAI, method),
-                    "providers.openai.sign-out",
-                    label,
-                    detail,
-                );
-                r["target"] = json!(name);
-                if let Some(detail) = &status.detail {
-                    r["detail"] = json!(format!("{} {detail}", r["detail"].as_str().unwrap_or_default()));
+                match &status.key {
+                    Some(masked) => {
+                        rows.push(action(
+                            row("openai", OPENAI, "Sign in with ChatGPT"),
+                            "providers.openai.sign-in",
+                            "Sign In…",
+                            format!("Signed out. Signing in replaces the API key. {both}"),
+                        ));
+                        let mut r = action(
+                            row("openai-key", OPENAI, "API key"),
+                            "providers.openai.sign-out",
+                            "Remove",
+                            format!("{masked}. {both}"),
+                        );
+                        r["target"] = json!(masked);
+                        rows.push(with_detail(r));
+                    }
+                    None => {
+                        let name = [status.email.clone(), status.plan.clone()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let detail = if name.is_empty() {
+                            format!("Signed in. {both}")
+                        } else {
+                            format!("Signed in as {name}. {both}")
+                        };
+                        let mut r = action(
+                            row("openai", OPENAI, "Sign in with ChatGPT"),
+                            "providers.openai.sign-out",
+                            "Sign Out",
+                            detail,
+                        );
+                        r["target"] = json!(name);
+                        rows.push(with_detail(r));
+                        rows.push(action(
+                            row("openai-key", OPENAI, "API key"),
+                            "providers.openai.key",
+                            "Add Key…",
+                            format!("Not added. Adding one replaces the ChatGPT sign-in. {both}"),
+                        ));
+                    }
                 }
-                rows.push(r);
             }
             Some((State::Connecting, status)) => rows.push(action(
                 row("openai", OPENAI, "Sign in with ChatGPT"),
@@ -285,7 +319,20 @@ impl Backend {
             Some(Standing::Unreachable(why)) => why.clone(),
             _ => "Aero runs on Powermove inference.".into(),
         };
-        let mut r = if cloud["signedIn"] == true {
+        // Signed in here, but Powermove refused the session (it ended or
+        // was revoked): the way back is Sign In, never only Sign Out.
+        let rejected = cloud["signedIn"] == true && matches!(standing, Some(Standing::SignedOut));
+        let mut r = if rejected {
+            let identity = cloud["identity"].as_str().unwrap_or_default();
+            let mut r = action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-in",
+                "Sign In…",
+                format!("Your session as {identity} ended. Sign in again to use Aero."),
+            );
+            r["target"] = json!(identity);
+            r
+        } else if cloud["signedIn"] == true {
             let identity = cloud["identity"].as_str().unwrap_or_default();
             let mut r = action(
                 row("powermove", GROUP, "Powermove Account"),

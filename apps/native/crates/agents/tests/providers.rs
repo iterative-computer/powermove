@@ -279,8 +279,11 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
-/// The fakes' Powermove session (`fake_backends.py` AERO_SESSION).
-const AERO_SESSION: &str = "pm-session-fake";
+/// The person's Powermove session in these tests: never sent to the fakes,
+/// which stand in for Aero through the test endpoint and are sent the
+/// development credential instead.
+const AERO_SESSION: &str = "pm-session-real-secret";
+const DEV: &str = pm_agents::inference::DEVELOPMENT_CREDENTIAL;
 /// The Powermove account: signed in with a session, which a test may
 /// replace (another account) or take away (a sign-out).
 #[derive(Debug)]
@@ -427,7 +430,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     };
     assert_eq!(usage.plan.name, "Aerolite");
     assert_eq!(usage.facts()[0].1, "812 of 1,000 left");
-    assert_eq!(models[0].id, "anthropic/claude-opus-5.5");
+    assert_eq!(models[0].id, "pm/anthropic/claude-opus-5.5");
     assert_eq!(models[0].default_effort.as_deref(), Some("high"));
     accounts.refresh_aero();
     until("Aero's standing", || {
@@ -435,11 +438,11 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     });
 
     let before = stats(&f.base)["requests"].as_array().unwrap().len();
-    for model in [
-        "anthropic/claude-opus-5.5",
-        "openai/gpt-fake-key",
-        "custom/custom-fake-model",
-    ] {
+    // Old route ids (an OpenAI key's, a Custom endpoint's) never run on Aero.
+    for model in ["openai/gpt-fake-key", "custom/custom-fake-model"] {
+        assert!(powermove_says(env, model, "high").is_err(), "{model}");
+    }
+    for model in ["pm/anthropic/claude-opus-5.5", "pm/openai/gpt-6-sol"] {
         let text = powermove_says(env, model, "high").unwrap_or_else(|e| panic!("{model}: {e}"));
         assert!(text.contains("Hello from the fake provider"), "{text}");
     }
@@ -454,7 +457,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
             request["path"], "/aero/v1/aero/chat/completions",
             "{request}"
         );
-        assert_eq!(request["authorization"], "Bearer pm-sessio", "{request}");
+        assert_eq!(request["authorization"], "Bearer pm-aero-d", "{request}");
         assert_eq!(request["x-api-key"], false, "{request}");
     }
     for sent in seen["raw"].as_array().unwrap() {
@@ -464,6 +467,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
                 "sk-fake-openai-123456",
                 "sk-ant-fake-abcdef12",
                 "custom-fake-key",
+                AERO_SESSION,
             ] {
                 assert!(!sent.contains(key), "{key} reached Aero's request");
             }
@@ -483,7 +487,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     // Out of credits: the turn ends in Aero's words.
     control(&f.base, serde_json::json!({"aero": "out"}));
     let model = aero::Model::live(
-        pm_agents::inference::live(env, "anthropic/claude-opus-5.5", "").unwrap(),
+        pm_agents::inference::live(env, "pm/anthropic/claude-opus-5.5", "").unwrap(),
     );
     let scope = env.profile.join("turn-spent");
     std::fs::create_dir_all(&scope).unwrap();
@@ -499,7 +503,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
         pm_agents::inference::standing(&signed_out),
         Standing::SignedOut
     );
-    assert!(powermove_says(&signed_out, "anthropic/claude-opus-5.5", "").is_err());
+    assert!(powermove_says(&signed_out, "pm/anthropic/claude-opus-5.5", "").is_err());
     accounts.close();
 }
 
@@ -781,13 +785,13 @@ fn an_aero_turn_never_continues_on_another_powermove_session() {
     let mut f = fakes(3600);
     let account = Arc::new(Signed::new(AERO_SESSION));
     f.env.powermove = Some(account.clone());
-    let live = pm_agents::inference::live(&f.env, "anthropic/claude-opus-5.5", "").unwrap();
+    let live = pm_agents::inference::live(&f.env, "pm/anthropic/claude-opus-5.5", "").unwrap();
     let (origin, first) = (live.credentials)(None).unwrap();
     assert_eq!(origin, f.base);
-    assert!(first.contains(&("authorization".into(), format!("Bearer {AERO_SESSION}"))));
+    assert!(first.contains(&("authorization".into(), format!("Bearer {DEV}"))));
     assert!(
-        (live.credentials)(Some(AERO_SESSION)).is_err(),
-        "a refused session is sent again"
+        (live.credentials)(Some(DEV)).is_err(),
+        "a refused credential is sent again"
     );
     account.set(Some("pm-session-other"));
     assert!(
@@ -938,8 +942,9 @@ fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
     }
     let _serial = serial();
     let mut f = fakes(3600);
-    f.env.powermove = Some(Arc::new(Signed::new("pm-session-echo-SENTINEL-77c3")));
-    let live = pm_agents::inference::live(&f.env, "anthropic/claude-opus-5.5", "").unwrap();
+    f.env.powermove = Some(Arc::new(Signed::new(AERO_SESSION)));
+    control(&f.base, serde_json::json!({"aero": "echo"}));
+    let live = pm_agents::inference::live(&f.env, "pm/anthropic/claude-opus-5.5", "").unwrap();
     let scope = f.env.profile.join("aero-session");
     std::fs::create_dir_all(&scope).unwrap();
     let handle = aero::start(
@@ -947,7 +952,7 @@ fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
             run: "echo-run".into(),
             prompt: "Say hello.".into(),
             provider: Provider::Aero,
-            model: Some("anthropic/claude-opus-5.5".into()),
+            model: Some("pm/anthropic/claude-opus-5.5".into()),
             effort: None,
             access: pm_agents::Access::Project,
             approval: Default::default(),
@@ -988,18 +993,88 @@ fn a_provider_error_that_echoes_the_key_never_reaches_the_core() {
         }
     }
     assert!(
-        stats(&f.base)["raw"].to_string().contains("SENTINEL-77c3"),
+        stats(&f.base)["raw"].to_string().contains(DEV),
         "the fake never saw the key"
     );
     assert!(
-        !events.contains("SENTINEL-77c3"),
+        !events.contains(DEV) && !events.contains(AERO_SESSION),
         "the key reached the run's events: {events}"
     );
     for (path, bytes) in every_file(&scope) {
         assert!(
-            !String::from_utf8_lossy(&bytes).contains("SENTINEL-77c3"),
+            !String::from_utf8_lossy(&bytes).contains(DEV),
             "the key reached the core's saved session: {}",
             path.display()
         );
     }
+}
+
+/// P1 (Sol, PM-750): the test endpoint is sent the development credential,
+/// never the person's Powermove session, on all three of Aero's calls.
+#[test]
+fn the_test_endpoint_is_sent_a_development_credential_never_the_session() {
+    let _serial = serial();
+    if !pm_aero_core::available() {
+        return;
+    }
+    let f = fakes(3600);
+    assert!(matches!(
+        pm_agents::inference::standing(&f.env),
+        Standing::Ready { .. }
+    ));
+    powermove_says(&f.env, "pm/anthropic/claude-opus-5.5", "high").unwrap();
+    let raw = stats(&f.base)["raw"].to_string();
+    assert!(raw.contains(&format!("Bearer {DEV}")), "the fakes saw no credential");
+    assert!(!raw.contains(AERO_SESSION), "the session reached the test endpoint");
+}
+
+/// P1 (Sol, PM-750): signing out while Aero's reply streams stops that
+/// stream at once, and its reply (and any tool call in it) is discarded.
+#[test]
+fn signing_out_mid_turn_stops_the_held_stream_and_runs_none_of_its_reply() {
+    let _serial = serial();
+    if !pm_aero_core::available() {
+        return;
+    }
+    let mut f = fakes(3600);
+    let account = Arc::new(Signed::new(AERO_SESSION));
+    f.env.powermove = Some(account.clone());
+    control(&f.base, serde_json::json!({"hold_seconds": 8}));
+    let env = f.env.clone();
+    let started = Instant::now();
+    let turn = std::thread::spawn(move || powermove_says(&env, "pm/anthropic/claude-opus-5.5", ""));
+    until("the held request", || {
+        stats(&f.base)["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["path"] == "/aero/v1/aero/chat/completions")
+    });
+    account.set(None);
+    let result = turn.join().unwrap();
+    control(&f.base, serde_json::json!({"hold_seconds": 0}));
+    assert!(result.is_err(), "the turn carried on after sign-out: {result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "it waited for the held reply"
+    );
+}
+
+/// P1 (Sol, PM-750): Aero's Try Again reads its plan and catalogue again,
+/// so a failed read followed by a good one makes Aero ready.
+#[test]
+fn aeros_try_again_reads_its_plan_and_models_again() {
+    let _serial = serial();
+    let f = fakes(3600);
+    control(&f.base, serde_json::json!({"aero": "error"}));
+    let accounts = Accounts::new(f.env.clone(), browser(), Arc::new(|| {}));
+    accounts.refresh_aero();
+    until("the failed read", || {
+        matches!(accounts.aero(), Standing::Unreachable(_))
+    });
+    control(&f.base, serde_json::json!({"aero": "plan"}));
+    // What the panel's Try Again asks for.
+    accounts.refresh(Provider::Aero);
+    until("the retry", || matches!(accounts.aero(), Standing::Ready { .. }));
+    accounts.close();
 }

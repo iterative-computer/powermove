@@ -118,7 +118,8 @@ export interface NativeFacts {
    * offers someone without one. */
   aero?: {
     usage: [label: string, value: string][];
-    offer: { label: string; url: string } | null;
+    /** The plan the backend offers (its label; the page opens natively). */
+    offer: { label: string } | null;
     /** Signed in, no plan yet: a quiet state, never a fault. */
     comingSoon?: boolean;
   };

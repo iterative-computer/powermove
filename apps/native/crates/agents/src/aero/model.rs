@@ -31,6 +31,10 @@ pub struct Live {
     pub configured: String,
     pub model: String,
     pub net: Arc<dyn crate::edge::Net>,
+    /// The turn's fence: false once the account it started on is signed
+    /// out or replaced. An open stream stops, its reply is discarded and no
+    /// tool runs after that.
+    pub current: Arc<dyn Fn() -> bool + Send + Sync>,
     #[allow(clippy::type_complexity)]
     pub credentials:
         Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
@@ -87,6 +91,14 @@ impl Model {
         }
     }
 
+    /// The account the turn started on is no longer signed in: nothing more
+    /// of it may run.
+    pub fn fenced(&self) -> bool {
+        match &self.transport {
+            Transport::Live(live) => !(live.current)(),
+            _ => false,
+        }
+    }
     /// Why the latest provider request failed, once.
     pub fn take_failure(&self) -> Option<String> {
         self.failure.lock().unwrap().take()
@@ -287,15 +299,19 @@ fn deliver_live(
             headers: &all,
             body,
         };
-        // Stops the request when the core retires it.
+        // Stops the request when the core retires it, or when the account
+        // the turn started on is signed out or replaced (read every 250 ms).
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let (stop, done) = (stop.clone(), done.clone());
+            let (stop, done, current) = (stop.clone(), done.clone(), live.current.clone());
             thread::spawn(move || {
                 use std::sync::atomic::Ordering::{Acquire, Release};
+                let mut tick = 0u32;
                 while !done.load(Acquire) {
-                    if remote.fetch_disposition(fetch) == Disposition::Retired {
+                    tick += 1;
+                    let gone = tick.is_multiple_of(5) && !current();
+                    if gone || remote.fetch_disposition(fetch) == Disposition::Retired {
                         stop.store(true, Release);
                         return;
                     }
@@ -338,6 +354,12 @@ fn deliver_live(
             }
         });
         done.store(true, std::sync::atomic::Ordering::Release);
+        // A reply that finished after the account changed is discarded:
+        // none of its tool calls may run.
+        if !(live.current)() {
+            *failed.lock().unwrap() = Some(crate::inference::CHANGED.into());
+            return Err(crate::inference::CHANGED.into());
+        }
         if let Err(error) = streamed {
             return Err(if error.starts_with("The model stopped responding") {
                 error

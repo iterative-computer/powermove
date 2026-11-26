@@ -171,7 +171,12 @@ impl Accounts {
             .get(provider.name())
             .is_some_and(|s| s.finding_models)
     }
+    /// Reads who is signed in again (Try Again): for Aero, its plan, credits
+    /// and catalogue.
     pub fn refresh(self: &Arc<Self>, provider: Provider) {
+        if provider == Provider::Aero {
+            return self.refresh_aero();
+        }
         self.start(provider, Job::Refresh);
     }
     pub fn connect(self: &Arc<Self>, provider: Provider) {

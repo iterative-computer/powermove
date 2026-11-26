@@ -4689,6 +4689,55 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     assert!(row(&p, "ms.front.roughness").is_none());
 }
 
+/// P1 (Sol, PM-750): Settings still says signed in, but Powermove refused
+/// the session (Aero reads it as signed out): the Powermove Account row's
+/// way back is Sign In, never only Sign Out.
+#[test]
+fn a_rejected_powermove_session_offers_sign_in_in_providers() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"cloud":{"revision":1,"signedIn":true,"identity":"@maker",
+        "email":"person@example.com","rememberInstalls":false}});
+    // No session Aero can use: what a refused (401) session reads as.
+    backend.native.agent_link.set_environment(
+        pm_agents::launch::Environment {
+            aero: Some(pm_agents::aero::Launcher(std::sync::Arc::new(|_, _, _| {
+                Err("unused".into())
+            }))),
+            ..Default::default()
+        },
+        std::sync::Arc::new(|_| Ok(())),
+    );
+    let accounts = backend.native.agent_link.accounts().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while accounts.aero() != pm_agents::inference::Standing::SignedOut {
+        assert!(std::time::Instant::now() < deadline, "Aero never read the session");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let rows = backend.account_rows();
+    let row = rows.iter().find(|r| r["id"] == "providers.powermove").unwrap();
+    assert_eq!(row["action"], "account.sign-in", "{row}");
+    assert_eq!(row["actionLabel"], "Sign In…");
+    assert!(row["detail"].as_str().unwrap().contains("ended"), "{row}");
+    backend.native.agent_link.close();
+}
+
+/// A Powermove account that is signed in (its session goes nowhere here).
+#[derive(Debug)]
+struct SignedIn;
+impl pm_agents::inference::PowermoveAccount for SignedIn {
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        Some(pm_agents::inference::Session {
+            origin: "https://cloud.trypowermove.com".into(),
+            token: "t".into(),
+        })
+    }
+}
 /// Settings › Providers with the development switch on: three providers,
 /// each for its harness (Powermove Account for Aero, OpenAI for Codex,
 /// Anthropic for Claude Code); no Custom endpoint and no Aerolite row.
@@ -4709,6 +4758,7 @@ fn providers_are_the_powermove_account_for_aero_openai_for_codex_and_anthropic_f
             aero: Some(pm_agents::aero::Launcher(std::sync::Arc::new(|_, _, _| {
                 Err("unused".into())
             }))),
+            powermove: Some(std::sync::Arc::new(SignedIn)),
             ..Default::default()
         },
         std::sync::Arc::new(|_| Ok(())),

@@ -44,8 +44,10 @@ The plan and its credits. Read when the account changes, after each turn, and wh
 - `plan.id`, `plan.name`: non-empty strings of at most 64 characters. Aerolite is $9.99 for 1,000 credits a month.
 - `credits.remaining`, `credits.included`: unsigned integers.
 - `resetsAt`: an RFC 3339 time in UTC. The app shows its calendar day.
-- `offer` (only with `plan: null`): `label` at most 40 characters, `url` an https page on `trypowermove.com` or one of
-  its subdomains. Any other offer isn't shown.
+- `plan` is required: no plan is `plan: null`, never a missing field.
+- `offer` (only with `plan: null`): `label` at most 40 plain characters (no control or bidi characters), `url` an https
+  page on `trypowermove.com` or one of its subdomains, with no userinfo and no other port. Any other offer, or one that
+  repeats the credential, isn't shown. Only its canonical form is opened, natively; the panel gets the label alone.
 
 The usage monitor, at the bottom of Aero's picker card: **Credits** `812 of 1,000 left`, **Plan** `Aerolite`,
 **Resets** `Dec 25`. It shows nothing until the backend answers.
@@ -64,9 +66,13 @@ The curated catalogue (Opus, GPT, Gemini and others; tens, not hundreds), read o
 ```
 
 - `id` (required): the gateway's model id (`provider/model`), at most 128 characters of `A-Za-z0-9._:/[]-`; the app
-  sends it back as `model`. Entries with an invalid id are skipped; a list with none is an error.
+  sends it back as `model`. Entries with an invalid id are skipped; a list with none is an error. The app keeps it as
+  `pm/<id>`: a thread saved before Aero ran only on Powermove (an OpenAI-key, Anthropic-key, ChatGPT or Custom model)
+  names no such id, so it sends nothing, queued or resumed, until the person picks a model from this catalogue.
 - `name`: the label (defaults to the id). `efforts`: the levels the picker offers, in order (lowercase words).
-  `defaultEffort`: one of them. `default`: the model chosen when none is (else the first).
+  `defaultEffort`: one of them. `default`: the model chosen when none is (else the first). `context`: the context
+  window in tokens (the card shows it). The picker marks each row by the id's provider (Claude's logo for
+  `anthropic/`, OpenAI's blossom for `openai/`, a neutral sparkle for the rest).
 
 ## `POST /v1/aero/chat/completions`
 
@@ -81,7 +87,9 @@ OpenAI Chat Completions with `stream: true`, the catalogue `id` as `model`, the 
 | `429` | The rate-limit words |
 | an `error` event in the stream | Powermove's own words for its category, never the backend's text |
 
-The backend's own error text never reaches the panel, the trace or the session's files.
+The backend's own error text never reaches the panel, the trace or the session's files. A turn is fenced to the
+account it started on: a sign-out or another account stops its open stream, discards that reply and runs no more of
+its tools.
 
 ## Before the backend exists
 
@@ -92,7 +100,10 @@ The backend's own error text never reaches the panel, the trace or the session's
 
 Debug builds with the development switch on (`PM_AERO_DEV=1` or the profile's `aero-dev` file) read
 `PM_AERO_ENDPOINT=http://127.0.0.1:<port>/<path>`: Aero's base, for emulate or the test fakes
-(`crates/agents/tests/fakes/fake_backends.py` serves `/aero/v1/aero/*`). Release builds never read it
+(`crates/agents/tests/fakes/fake_backends.py` serves `/aero/v1/aero/*`). It is sent a development credential
+(`pm-aero-development`), never the person's session; Aero's real traffic never goes through the development fakes
+that reroute other providers (`PM_AGENT_FAKES`). The fake model (`PM_AERO_FAKE_MODEL=1`) is listed and runs in debug
+builds only. Release builds never read the endpoint
 (`inference::tests::a_release_build_has_no_test_endpoint`, and in `cargo test --release`
 `this_release_build_sends_aero_only_to_the_account_origin`). A development review account
 (`PM_NATIVE_REVIEW_CLOUD=1`) has no inference origin of its own, so it needs the test endpoint.

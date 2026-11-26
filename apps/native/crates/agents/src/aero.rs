@@ -677,6 +677,10 @@ fn drive(
             let result = if halted.load(Ordering::Acquire) {
                 // Stop came after the call was dispatched: it never starts.
                 Err("The turn was stopped before this tool ran.".into())
+            } else if model.fenced() {
+                // The Powermove account changed: nothing more of this turn runs.
+                halted.store(true, Ordering::Release);
+                Err(crate::inference::CHANGED.into())
             } else if name == "review" {
                 if skip_review {
                     Err("Independent review is disabled for this run.".into())

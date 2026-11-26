@@ -2045,9 +2045,9 @@ const chooserRows = (r: Parameters<Menu>[0]) =>
 test("with Aero the composer is one row: \"+\", one pill (the Aero mark, model, effort, chevron) as one hit target, and Send; no segmented control", async () => {
   const { root } = mount();
   const p = fixture();
-  p.snapshot.catalog = harnessCatalog([["openai/gpt-6-sol", "GPT-6 Sol"]], ["low", "high"]);
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]], ["low", "high"]);
   p.snapshot.settings.provider = "aero";
-  p.snapshot.settings.model = "openai/gpt-6-sol";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
   p.snapshot.settings.effort = "high";
   await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
   expect(segmented(root)).toEqual([]);
@@ -2077,16 +2077,16 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
   p.snapshot.catalog = {
     ...harnessCatalog(
       [
-        ["openai/gpt-6-sol", "GPT-6 Sol (272K context)"],
-        ["anthropic/claude-opus-5.5", "Claude Opus 5.5"],
-        ["google/gemini-3-pro", "Gemini 3 Pro"],
+        ["pm/openai/gpt-6-sol", "GPT-6 Sol (272K context)"],
+        ["pm/anthropic/claude-opus-5.5", "Claude Opus 5.5"],
+        ["pm/google/gemini-3-pro", "Gemini 3 Pro"],
       ],
       ["low", "medium", "high"],
     ),
     defaultEffort: "medium",
   };
   p.snapshot.settings.provider = "aero";
-  p.snapshot.settings.model = "openai/gpt-6-sol";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
   p.snapshot.settings.effort = "high";
   p.native.aero = {
     usage: [
@@ -2097,7 +2097,7 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
     offer: null,
   };
   const asked: Parameters<Menu>[0][] = [];
-  const picks = ["model:anthropic/claude-opus-5.5", "effort:low", "providers:"];
+  const picks = ["model:pm/anthropic/claude-opus-5.5", "effort:low", "providers:"];
   const menu: Menu = async (r) => {
     asked.push(r);
     return r.refresh ? null : picks.shift();
@@ -2113,9 +2113,9 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
     ["harness", "Claude Code", false, "provider.claude", false, true],
     ["harness", "Codex", false, "provider.chatgpt", false, true],
     ["heading", "Powermove", null, "provider.powermove", false, false],
-    ["model", "GPT-6 Sol", true, "provider.powermove", false, true],
-    ["model", "Claude Opus 5.5", false, "provider.powermove", false, true],
-    ["model", "Gemini 3 Pro", false, "provider.powermove", false, true],
+    ["model", "GPT-6 Sol", true, "provider.chatgpt", false, true],
+    ["model", "Claude Opus 5.5", false, "provider.claude", false, true],
+    ["model", "Gemini 3 Pro", false, "provider.compatible", false, true],
     ["effort", "Low", false, null, false, true],
     ["effort", "Medium", false, null, false, true],
     ["effort", "High", true, null, false, true],
@@ -2125,7 +2125,7 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
   expect(first.options.find((o) => o.label === "Medium")!.default).toBe(true);
   expect(first.chooser).toEqual({
     title: "GPT-6 Sol",
-    icon: "provider.powermove",
+    icon: "provider.chatgpt",
     facts: [["Context", "272K"]],
     usage: [
       ["Credits", "812 of 1,000 left"],
@@ -2137,8 +2137,8 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
   // closes it for Settings › Providers.
   expect(asked.filter((r) => !r.refresh).map((r) => !!r.update)).toEqual([false, true, true]);
   expect(actions).toEqual([
-    { type: "setModel", model: "anthropic/claude-opus-5.5", effort: "high" },
-    { type: "setModel", model: "openai/gpt-6-sol", effort: "low" },
+    { type: "setModel", model: "pm/anthropic/claude-opus-5.5", effort: "high" },
+    { type: "setModel", model: "pm/openai/gpt-6-sol", effort: "low" },
     { type: "openSettings" },
   ]);
   root.dispose();
@@ -2146,9 +2146,9 @@ test("with Aero the pill opens the chooser: the rail (Aero, Claude Code, Codex),
 test("Aero's card shows no usage monitor until the backend has answered", async () => {
   const { root } = mount();
   const p = fixture();
-  p.snapshot.catalog = harnessCatalog([["openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
   p.snapshot.settings.provider = "aero";
-  p.snapshot.settings.model = "openai/gpt-6-sol";
+  p.snapshot.settings.model = "pm/openai/gpt-6-sol";
   const asked: Parameters<Menu>[0][] = [];
   await root.render(
     <AgentView
@@ -2161,14 +2161,14 @@ test("Aero's card shows no usage monitor until the backend has answered", async 
     />,
   );
   await root.drive(byId(root, "agent-model").id, "click");
-  expect(asked[0]!.chooser).toEqual({ title: "GPT-6 Sol", icon: "provider.powermove", facts: [] });
+  expect(asked[0]!.chooser).toEqual({ title: "GPT-6 Sol", icon: "provider.chatgpt", facts: [] });
   root.dispose();
 });
 test("Aero signed in without a plan says so honestly: coming soon, or the plan the backend offers", async () => {
   for (const [offer, rows] of [
     [null, [["status", "Aero inference is coming soon."]]],
     [
-      { label: "Get Aerolite", url: "https://trypowermove.com/aero" },
+      { label: "Get Aerolite" },
       [
         ["status", "Aero inference is coming soon."],
         ["action", "Get Aerolite…"],
@@ -2203,8 +2203,8 @@ test("Aero signed in without a plan says so honestly: coming soon, or the plan t
 test("the pill shows Claude Code's logo, OpenAI's for Codex, and the Aero (Powermove) mark for every Aero model", async () => {
   for (const [harness, model, mark] of [
     ["claude", "claude-opus-5-5", "provider.claude"],
-    ["aero", "anthropic/claude-opus-5.5", "provider.powermove"],
-    ["aero", "openai/gpt-6-sol", "provider.powermove"],
+    ["aero", "pm/anthropic/claude-opus-5.5", "provider.powermove"],
+    ["aero", "pm/openai/gpt-6-sol", "provider.powermove"],
     ["chatgpt", "gpt-6-sol", "provider.chatgpt"],
   ] as const) {
     const { root } = mount();
@@ -2323,7 +2323,7 @@ test("two context variants of one model never read alike, in the chooser or the 
 test("Stop is the same rounded rect as Send: the pill's highlight box (no circles)", async () => {
   const { root } = mount();
   const p = fixture();
-  p.snapshot.catalog = harnessCatalog([["openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
   p.snapshot.settings.provider = "aero";
   p.snapshot.runId = "run-1";
   await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
@@ -2337,7 +2337,7 @@ test("with Aero a rail harness keeps the chooser open and switches the harness",
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
-  p.snapshot.catalog = harnessCatalog([["openai/gpt-6-sol", "GPT-6 Sol"]]);
+  p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6-sol", "GPT-6 Sol"]]);
   p.snapshot.settings.provider = "aero";
   p.snapshot.settings.model = "";
   let answered = false;
