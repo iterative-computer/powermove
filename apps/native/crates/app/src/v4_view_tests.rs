@@ -3955,6 +3955,40 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     assert!(!layered(&vcx), "a pointer move ends the scroll");
 }
 
+/// PM-732: a list in a scroller of its own panel (`scrollOwner: "parent"`,
+/// Properties' Effects) is no scroller; one that owns its scroll is.
+#[gpui::test]
+fn a_list_whose_parent_scrolls_is_no_scroller(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"style":{"width":100,"height":100}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"parent"}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"self"}}),
+        &[],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    let scrolls = |id: u64| view.read_with(&vcx, |v, _| v.prepared.nodes[&id].scroll_y);
+    assert!(scrolls(1), "the panel's scroller");
+    assert!(!scrolls(2), "a list in it whose parent scrolls");
+    assert!(scrolls(3), "a list that owns its scroll");
+}
+
 /// PM-702: evaluating a transition at rest (the workspace's corner fades)
 /// does not tell its state it changed. A mutable borrow of the state did, on
 /// every render of every fade, and the workspace that evaluated them drew
