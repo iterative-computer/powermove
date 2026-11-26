@@ -277,6 +277,7 @@ impl DocumentSource {
         let _ = std::thread::Builder::new()
             .name("pm-studio-prewarm".into())
             .spawn(move || {
+                let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
                 for (asset_id, stamp) in to_warm {
                     if let Ok(resource) = source.resource(&asset_id) {
                         let mut warmed_meshes = Vec::new();

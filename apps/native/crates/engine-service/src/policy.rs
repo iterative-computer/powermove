@@ -278,6 +278,17 @@ impl AutoQuality {
             self.slower_stills = false;
         }
     }
+    /// Elapsed work on a cancelled frame is a lower bound. It can lower
+    /// interactive quality, but it cannot tell us a higher scale will fit.
+    pub(crate) fn record_interrupted(&mut self, cost_ms: f64, interval_ms: f64, scale: f64) {
+        if scale >= 1. && cost_ms > interval_ms {
+            self.record_still(cost_ms, interval_ms, scale);
+        } else if scale == AUTO_FLOOR && cost_ms > SLOW_REDUCED * interval_ms {
+            self.slow_stills = true;
+            self.slower_stills = true;
+            self.quick_stills = 0;
+        }
+    }
     /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done),
     /// `gpu_ms` of it the GPU's own work, against its content frame of
     /// `frame_ms`; drawn at `at_s` (seconds).

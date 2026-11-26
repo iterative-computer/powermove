@@ -424,6 +424,7 @@ fn warm(shared: &Shared, state: &mut Option<Warm>, job: Job, timeout: Duration) 
 }
 
 fn run(shared: Arc<Shared>, timeout: Duration) {
+    let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
     let mut state: Option<Warm> = None;
     loop {
         let job = {

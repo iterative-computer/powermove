@@ -501,7 +501,7 @@ fn held(renderer: &pm_render::Renderer, budget: u64, shared: &Shared) -> Held {
 }
 
 /// The document state whose effects the renderer has installed.
-type Installed = (usize, u64, usize);
+type Installed = (usize, u64, usize, bool);
 
 fn draw(
     renderer: &mut pm_render::Renderer,
@@ -526,10 +526,13 @@ fn draw(
             return Ok(Outcome::GaveWay);
         }
         let scene = &job.scene;
+        let activity = crate::frame_inputs::StudioActivity::new(&scene.doc, &scene.comp);
+        let draws_studio = activity.may_draw(job.spec.time.get());
         let state = (
             Arc::as_ptr(&scene.doc) as usize,
             scene.content,
             Arc::as_ptr(&job.resources) as usize,
+            draws_studio,
         );
         if *document != Some(state) {
             let busy = |e: &str| e.contains("compiler-busy");
@@ -546,9 +549,15 @@ fn draw(
                 return Err(anyhow::Error::new(crate::render::CompilerBusy));
             }
             #[cfg(feature = "kernel")]
-            crate::studio::attach(renderer, scene.doc.clone(), scene.media.as_ref());
-            renderer.prewarm(&scene.doc);
-            renderer.prewarm_programs(&scene.doc);
+            if draws_studio {
+                crate::studio::attach(renderer, scene.doc.clone(), scene.media.as_ref());
+            } else if document.is_some_and(|installed| installed.3) {
+                renderer.set_studio_source(None, Default::default());
+            }
+            if !crate::render::large_scene(scene) {
+                renderer.prewarm(&scene.doc);
+                renderer.prewarm_programs(&scene.doc);
+            }
             *document = Some(state);
         }
         if let Some(host) = &job.fonts {
