@@ -156,7 +156,9 @@ pub fn project_scene(
     for item in &scene.items {
         // The outline in content units at the finer tolerance: scale the
         // item up by the density, take its device outline, and scale back.
-        let up = Affine::scale(density.max(1e-6));
+        // Cap the flattening scale so a grazing 3D plane near w → 0 cannot
+        // generate millions of curve segments and stall polygon resolution.
+        let up = Affine::scale(density.clamp(1e-6, 64.0));
         let scaled = CoverageItem {
             transform: up * item.transform,
             ..item.clone()

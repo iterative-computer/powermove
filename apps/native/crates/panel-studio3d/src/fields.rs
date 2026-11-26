@@ -245,52 +245,22 @@ pub(crate) fn catalog(role: &str, data: &Value) -> Vec<Field> {
                 add(
                     "Depth of Field",
                     "camera",
-                    "fStop",
-                    "Aperture (f-Stop)",
-                    "number",
-                    Some(0.7),
-                    Some(32.),
-                    "",
-                );
-                add(
-                    "Depth of Field",
-                    "camera",
                     "focusDistance",
                     "Focus Distance",
                     "number",
-                    Some(0.),
+                    Some(0.05),
                     None,
                     "",
                 );
                 add(
                     "Depth of Field",
                     "camera",
-                    "irisRoundness",
-                    "Bokeh Roundness",
+                    "blur",
+                    "Blur",
                     "number",
-                    Some(0.),
                     Some(1.),
-                    "",
-                );
-                add(
-                    "Depth of Field",
-                    "camera",
-                    "irisAspect",
-                    "Anamorphic Aspect",
-                    "number",
-                    Some(0.25),
-                    Some(4.),
-                    "",
-                );
-                add(
-                    "Depth of Field",
-                    "camera",
-                    "irisRotation",
-                    "Bokeh Rotation",
-                    "number",
-                    Some(-180.),
-                    Some(180.),
-                    "°",
+                    Some(100.),
+                    "%",
                 );
             }
             add(

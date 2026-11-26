@@ -858,7 +858,12 @@ impl SceneSource for DocumentSource {
                 ) {
                     0.
                 } else {
-                    n(cp, "fStop", 0.)
+                    let blur = n(cp, "blur", 0.);
+                    if blur > 0. {
+                        (90.0 / blur).clamp(0.7, 32.0)
+                    } else {
+                        n(cp, "fStop", 0.)
+                    }
                 },
                 focus: (n(cp, "focusDistance", 0.) > 0.)
                     .then(|| eye + (target - eye).normalize() * n(cp, "focusDistance", 0.)),

@@ -153,6 +153,7 @@ fn fields(group: &str) -> Vec<Field> {
             n("near", 0.0001, 10000., 0.01),
             n("far", 0.01, 100000., 1000.),
             n("fStop", 0., 64., 0.),
+            n("blur", 0., 100., 0.),
             n("focusDistance", 0., 100000., 0.),
             n("irisShape", 0., 16., 0.),
             n("irisRotation", -360000., 360000., 0.),
@@ -373,7 +374,10 @@ pub fn properties(group: &str, raw: Option<&Value>) -> Result<Value> {
     for f in fs {
         // Preserve the old document's normalized shape when new optional
         // camera controls are absent; rendering supplies their defaults.
-        if group == "camera" && f.name.starts_with("iris") && raw.get(f.name).is_none() {
+        if group == "camera"
+            && (f.name == "blur" || f.name.starts_with("iris"))
+            && raw.get(f.name).is_none()
+        {
             continue;
         }
         let mut value=raw.get(f.name).cloned().unwrap_or(f.default);

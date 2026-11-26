@@ -395,7 +395,7 @@ impl Backend {
                 ));
                 row["canOpen"] = json!(timeline.layer_disclosable(&layer));
                 row["transformable"] = json!(l.kind != "audio");
-                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_else(|| "None".into()),"set":l.parent.is_some()});
                 if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
                     row["nameEditor"] = json!({
                         "value": l.name.to_string_lossy(),

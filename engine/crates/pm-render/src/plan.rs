@@ -1420,39 +1420,70 @@ fn draw_layer<'d>(
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
     let blur = if mblur.truthy() { b.blur } else { None };
     let matted = js::flag(layer, "matteSource");
-    let dof = if let Some((focus_z, blur_pct)) = scope.dof_25d(layer, time)? {
-        let h = scope.plane_matrix(layer, time, false)?;
-        let (sx, sy) = scale;
-        let h_out = plane_at_origin(
-            [
-                h[0] * sx,
-                h[1] * sy,
-                h[2],
-                h[3] * sx,
-                h[4] * sy,
-                h[5],
-                h[6] * sx,
-                h[7] * sy,
-                h[8],
-            ],
-            b.origin,
-        );
-        pm_eval::space3d::inverse_plane(&h_out).map(|inv| {
-            let (cw, _) = scope.comp_size();
-            let f = cw.max(1.0) * scope.perspective_amount(layer, time).unwrap_or(50.0) / 36.0;
-            let focus_w = (1.0 + focus_z / f).max(0.05);
-            let scale_px = sx.max(sy).max(0.01);
-            let blur_px = blur_pct * 0.65 * scale_px;
-            let max_radius = (blur_px * 1.5).clamp(1.0, 48.0 * scale_px);
-            composite::Dof25d {
-                inv_w: [inv[2], inv[5], inv[8]],
-                focus_w,
-                blur_px,
-                max_radius,
-            }
-        })
-    } else {
-        None
+    let dof = {
+        let is_3d = scope.is_3d_layer(layer)?;
+        let camera_dof = if is_3d {
+            scope.camera_dof_3d(time)?
+        } else {
+            None
+        };
+        let layer_dof = if camera_dof.is_none() {
+            scope.dof_25d(layer, time)?
+        } else {
+            None
+        };
+        if camera_dof.is_some() || layer_dof.is_some() {
+            let h = scope.plane_matrix(layer, time, false)?;
+            let (sx, sy) = scale;
+            let h_out = plane_at_origin(
+                [
+                    h[0] * sx,
+                    h[1] * sy,
+                    h[2],
+                    h[3] * sx,
+                    h[4] * sy,
+                    h[5],
+                    h[6] * sx,
+                    h[7] * sy,
+                    h[8],
+                ],
+                b.origin,
+            );
+            pm_eval::space3d::inverse_plane(&h_out).map(|inv| {
+                let scale_px = sx.max(sy).max(0.01);
+                let (focus_w, blur_px) = if let Some((focus_dist, blur_pct)) = camera_dof {
+                    // With a 3D camera, `plane_matrix`'s `w` IS the exact depth
+                    // from the camera in scene units.
+                    (focus_dist.max(0.05), blur_pct * 0.85 * scale_px)
+                } else {
+                    let (focus_z, blur_pct) = layer_dof.unwrap();
+                    let (cw, ch) = scope.comp_size();
+                    let focus_w = if let Some(cam) = scope.projection_camera_3d(time).ok().flatten() {
+                        let [fwd, _, _] = cam.basis();
+                        let origin_depth = (-cam.position[0] * fwd[0]
+                            - cam.position[1] * fwd[1]
+                            - cam.position[2] * fwd[2])
+                            .max(0.5);
+                        (origin_depth + focus_z * pm_eval::space3d::scene_units_per_pixel(ch))
+                            .max(0.05)
+                    } else {
+                        let f =
+                            cw.max(1.0) * scope.perspective_amount(layer, time).unwrap_or(50.0) / 36.0;
+                        (1.0 + focus_z / f).max(0.05)
+                    };
+                    (focus_w, blur_pct * 0.65 * scale_px)
+                };
+                let max_radius = (blur_px * 1.5).clamp(1.0, 48.0 * scale_px);
+                composite::Dof25d {
+                    inv_w: [inv[2], inv[5], inv[8]],
+                    focus_w,
+                    blur_px,
+                    max_radius,
+                }
+            })
+        } else {
+            None
+        }
     };
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
@@ -2639,7 +2670,7 @@ fn native_content_quad<'d>(
             let is_source_raster = b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
                 *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
             });
-            let (raw_dx, raw_dy) = if continuous && !is_source_raster {
+            let (raw_dx, raw_dy) = if continuous && !is_source_raster && !camera_preview {
                 let offset = scope.size_anchor_offset(layer, time)?;
                 let (ax, ay) = (-offset.x, -offset.y);
                 let d_xy = match crate::space25d::projected(scope, layer, time, scale, w, hh, ax, ay)? {
@@ -2869,7 +2900,7 @@ fn native_content_quad<'d>(
                 }));
             }
 
-            let (tw, th) = if continuous {
+            let (tw, th) = if continuous && !camera_preview {
                 let density = if is_source_raster {
                     scale
                 } else {
@@ -2894,9 +2925,18 @@ fn native_content_quad<'d>(
                 });
                 return Ok(None);
             }
+            // In interactive viewer frames (not final export), a grazing 3D
+            // precomp whose horizon crosses the viewport cannot use the
+            // sub-window fast path; cap its fallback target so corner_density
+            // near w -> 0 cannot allocate a 16384x16384 (2 GiB) working target.
+            let target_cap = if !b.final_output && scope.is_3d_layer(layer)? {
+                (f64::from(width.max(height)) * 2.0).clamp(2048.0, 4096.0)
+            } else {
+                crate::sampling::MAX_TARGET
+            };
             let (tw, th) = (
-                tw.min(crate::sampling::MAX_TARGET) as u32,
-                th.min(crate::sampling::MAX_TARGET) as u32,
+                tw.min(target_cap) as u32,
+                th.min(target_cap) as u32,
             );
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;

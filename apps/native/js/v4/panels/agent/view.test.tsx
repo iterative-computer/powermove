@@ -155,6 +155,7 @@ test("focus order follows the thread bar, conversation and the composer's one ro
     "agent-add",
     "agent-model",
     "agent-effort",
+    "agent-access",
     "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -179,11 +180,16 @@ test("the model's name gives way in the docked composer's one row; effort keeps 
   expect(effort.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.metadata).toBeUndefined();
-  // Every control sits in the composer's one row, on its one surface: "+",
-  // then the model chooser (the model and its effort, one control).
+  // Every control sits inside the composer's options row, on its one surface:
+  // "+", the model chooser (the model and its effort), and the access button.
   const options = byId(root, "agent-options");
-  for (const id of ["agent-add", "agent-chooser"])
-    expect(options.children).toContain(byId(root, id).id);
+  const isDescendant = (ancestorId: number, targetId: number): boolean => {
+    const node = nodes.find((n) => n.id === ancestorId);
+    if (!node) return false;
+    return node.children.includes(targetId) || node.children.some((c) => isDescendant(c, targetId));
+  };
+  for (const id of ["agent-add", "agent-chooser", "agent-access"])
+    expect(isDescendant(options.id, byId(root, id).id)).toBe(true);
   for (const id of ["agent-model", "agent-effort"])
     expect(byId(root, "agent-chooser").children).toContain(byId(root, id).id);
   expect(byId(root, "agent-composer").children).toContain(options.id);
@@ -1496,7 +1502,7 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
       .inspect()
       .nodes.filter((n) => n.props.metadata?.symbol === "composer.chevron")
       .map((n) => n.props.metadata.turn);
-  expect(turns()).toEqual([true, false]);
+  expect(turns()).toEqual([true, false, false]);
   expect(
     requests[0]!.options.find((o) => o.value === "model:opus"),
   ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
@@ -1504,7 +1510,23 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   for (let i = 0; i < 4; i++) await Promise.resolve();
   await root.flush();
   expect(byId(root, "agent-model").props.open).toBe(false);
-  expect(turns()).toEqual([false, false]);
+  expect(turns()).toEqual([false, false, false]);
+  // Clicking the access button opens the access picker and turns its chevron.
+  await root.drive(byId(root, "agent-access").id, "click");
+  expect(byId(root, "agent-access").props.open).toBe(true);
+  expect(turns()).toEqual([false, false, true]);
+  expect(requests.at(-1)!.picker).toBe("access");
+  expect(requests.at(-1)!.options.map((o) => o.value)).toEqual([
+    "editor",
+    "supervised",
+    "auto",
+    "full",
+  ]);
+  close(null);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  await root.flush();
+  expect(byId(root, "agent-access").props.open).toBe(false);
+  expect(turns()).toEqual([false, false, false]);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   for (const id of ["agent-model", "agent-effort"])
@@ -2064,8 +2086,14 @@ test("with Aero the composer is one row: \"+\", the split pill (the Aero mark an
   await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
   expect(segmented(root)).toEqual([]);
   const options = byId(root, "agent-options");
-  const kids = options.children.map((id: number) => root.inspect().nodes.find((n) => n.id === id)!);
-  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-chooser", null, "agent-send"]);
+  const allNodes = root.inspect().nodes;
+  const hasDescendant = (ancestorId: number, targetId: number): boolean => {
+    const node = allNodes.find((n) => n.id === ancestorId);
+    if (!node) return false;
+    return node.children.includes(targetId) || node.children.some((c) => hasDescendant(c, targetId));
+  };
+  for (const id of ["agent-add", "agent-chooser", "agent-access", "agent-send"])
+    expect(hasDescendant(options.id, byId(root, id).id)).toBe(true);
   expect(byId(root, "agent-chooser").props.metadata).toEqual({ pill: "group" });
   const inside = (id: string) => {
     const part = byId(root, id);

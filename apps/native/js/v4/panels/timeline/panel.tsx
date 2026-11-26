@@ -539,13 +539,13 @@ function Layer({
       tint={
         lit
           ? "colors.accent_text"
-          : item.name === "threeD"
+          : item.name === "threeD" || item.name === "parent"
             ? item.on
               ? "colors.accent"
               : "colors.muted"
             : undefined
       }
-      active={item.name === "threeD" ? item.on : undefined}
+      active={item.name === "threeD" || item.name === "parent" ? item.on : undefined}
       disabled={item.name === "threeD" && row.locked}
       tabIndex={-1}
       send={send}

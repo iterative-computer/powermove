@@ -185,9 +185,10 @@ pub(super) struct FlyRun {
     was_free: bool,
     prev_free: Option<View>,
     last: std::time::Instant,
-    /// Last pointer position in pixels so mouse-look uses direct deltas
-    /// without continuous center-offset drift.
+    /// Last pointer position in pixels for fallback mouse-look when hardware
+    /// pointer lock is inactive (e.g. headless tests).
     last_pointer: Option<[f64; 2]>,
+    pointer_lock: crate::infinite_drag::PointerLock,
     _keys: Option<Subscription>,
     _clock: Option<Task<()>>,
     window_activation: Option<Subscription>,
@@ -732,6 +733,14 @@ impl GizmoSurface {
                 }
             }
         });
+        let mut pointer_lock = crate::infinite_drag::PointerLock::new();
+        let center = (f32::from(self.bounds.size.width) > 1.
+            && f32::from(self.bounds.size.height) > 1.)
+            .then(|| {
+                let c = self.bounds.center();
+                (f32::from(c.x) as f64, f32::from(c.y) as f64)
+            });
+        pointer_lock.engage(center);
         self.studio.fly = Some(FlyRun {
             fly: super::fly::Fly::new(start),
             camera,
@@ -739,6 +748,7 @@ impl GizmoSurface {
             prev_free,
             last: std::time::Instant::now(),
             last_pointer: None,
+            pointer_lock,
             _keys: Some(keys),
             _clock: Some(clock),
             window_activation: None,
@@ -795,20 +805,27 @@ impl GizmoSurface {
             run.fly.slow = m.alt;
         }
     }
-    /// Direct mouse-look while flying: pointer deltas turn the camera and stop
-    /// turning the instant the pointer stops.
+    /// Direct mouse-look while flying: raw hardware deltas when pointer-locked
+    /// (so the actual OS cursor stays still), falling back to pointer position
+    /// deltas when unlocked (e.g. headless tests).
     pub(crate) fn studio_fly_pointer(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(run) = self.studio.fly.as_mut() else {
             return;
         };
-        let pos = [f32::from(at.x) as f64, f32::from(at.y) as f64];
-        if let Some(prev) = run.last_pointer.replace(pos) {
-            let (dx, dy) = (pos[0] - prev[0], pos[1] - prev[1]);
-            if dx.abs() > 0. || dy.abs() > 0. {
-                run.fly.look(dx, dy);
-                self.studio.free = Some(run.fly.pose());
-                self.studio_push_view(cx);
-            }
+        let delta = if run.pointer_lock.is_locked() {
+            run.pointer_lock.take_delta()
+        } else {
+            let pos = [f32::from(at.x) as f64, f32::from(at.y) as f64];
+            run.last_pointer
+                .replace(pos)
+                .map(|prev| (pos[0] - prev[0], pos[1] - prev[1]))
+        };
+        if let Some((dx, dy)) = delta
+            && (dx.abs() > 0. || dy.abs() > 0.)
+        {
+            run.fly.look(dx, dy);
+            self.studio.free = Some(run.fly.pose());
+            self.studio_push_view(cx);
         }
     }
     /// Scroll while flying: adjusts movement speed without imparting glide.

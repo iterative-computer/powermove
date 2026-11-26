@@ -571,9 +571,11 @@ pub fn app_appearance(t: &Tokens) {
         .setAppearance(NSAppearance::appearanceNamed(name).as_deref());
 }
 /// The window ground: clear over a behind-window blur while translucent,
-/// the solid `window` colour under Reduce Transparency.
-fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
-    let translucent = t.translucent();
+/// the solid `window` colour under Reduce Transparency or in macOS Full Screen
+/// (so AppKit's sliding fullscreen menu/toolbar overlay never composites
+/// transparently over the panel headers underneath).
+fn apply_ground(window: &NSWindow, backdrop: &NSView, t: &Tokens, fullscreen: bool) {
+    let translucent = t.translucent() && !fullscreen;
     backdrop.setHidden(!translucent);
     window.setOpaque(!translucent);
     let colour = if translucent {
@@ -582,6 +584,10 @@ fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
         native_color(t.colors.window)
     };
     window.setBackgroundColor(Some(&colour));
+}
+fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
+    let fullscreen = window.styleMask().contains(NSWindowStyleMask::FullScreen);
+    apply_ground(window, backdrop, t, fullscreen);
 }
 /// Behind-window blur under everything in the content view; GPUI tints it
 /// with `Tokens::ground`.
@@ -5147,24 +5153,34 @@ impl Host {
             host.borrow_mut().window_observers.push(observer);
         }
         // Full-screen chrome can move without a content-view resize.
-        let sender = host.borrow().sender.clone();
-        let fullscreen_changed = block2::RcBlock::new(
-            move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
-                let _ = sender.try_send(Command {
-                    name: "shellFullscreenChanged".into(),
-                    args: vec![],
-                    token: None,
-                });
-            },
-        );
-        for name in unsafe {
+        // Switch the window ground to opaque + non-transparent titlebar in
+        // fullscreen so macOS's sliding menu-bar/toolbar overlay covers the
+        // panel headers cleanly instead of bleeding through transparently.
+        for (name, fullscreen) in unsafe {
             [
-                NSWindowWillEnterFullScreenNotification,
-                NSWindowDidEnterFullScreenNotification,
-                NSWindowWillExitFullScreenNotification,
-                NSWindowDidExitFullScreenNotification,
+                (NSWindowWillEnterFullScreenNotification, true),
+                (NSWindowDidEnterFullScreenNotification, true),
+                (NSWindowWillExitFullScreenNotification, false),
+                (NSWindowDidExitFullScreenNotification, false),
             ]
         } {
+            let sender = host.borrow().sender.clone();
+            let weak_host = Rc::downgrade(&host);
+            let fullscreen_changed = block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    if let Some(host) = weak_host.upgrade()
+                        && let Ok(h) = host.try_borrow()
+                    {
+                        apply_ground(&h.window, &h.backdrop, &h.tokens, fullscreen);
+                        h.window.setTitlebarAppearsTransparent(!fullscreen);
+                    }
+                    let _ = sender.try_send(Command {
+                        name: "shellFullscreenChanged".into(),
+                        args: vec![],
+                        token: None,
+                    });
+                },
+            );
             let observer = unsafe {
                 objc2_foundation::NSNotificationCenter::defaultCenter()
                     .addObserverForName_object_queue_usingBlock(
@@ -8687,8 +8703,14 @@ fn style_popup_search(search: &NSTextField, t: &Tokens, surface: Surface) {
 /// leading icon aligned with the rows below) and the standard bezeled search
 /// field used by other searchable popups.
 fn configure_threads_search_field(search: &NSTextField, t: &Tokens, is_threads: bool) {
-    search.setBezeled(!is_threads);
+    // In AppKit, `setBordered(false)` also clears `isBezeled`, so clear
+    // bordered first and then restore the rounded search bezel for non-Threads
+    // searchable popups (font picker, parts picker, field menu).
     search.setBordered(false);
+    search.setBezeled(!is_threads);
+    if !is_threads {
+        search.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
+    }
     search.setDrawsBackground(!is_threads);
     search.setFont(Some(&NSFont::systemFontOfSize(if is_threads {
         t.typography.body as f64
@@ -9157,10 +9179,13 @@ impl Popup {
                 m.gap,
             )
             .h
-        } else if self.composer == Some(ComposerPicker::Add) {
-            // "+" lists its attachment rows above Approvals' described rows:
-            // all of it shows, up to the window's room, never scrolled past
-            // its first row to reach the checked one.
+        } else if matches!(
+            self.composer,
+            Some(ComposerPicker::Add | ComposerPicker::Access)
+        ) {
+            // "+" and Access list described rows: all of them show, up to the
+            // window's room, never scrolled past the first row to reach the
+            // checked one.
             interior.h
         } else if self.composer.is_some() {
             m.field_menu_height.min(interior.h)

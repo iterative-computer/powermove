@@ -2064,10 +2064,10 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     };
     let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
 
-    // Aiming at its point of interest: Properties shows the point, and moving
-    // the camera turns it (the reported behaviour, now explained).
+    // Cameras are rotation-only (no Point of Interest): Position only slides
+    // the camera without re-aiming it.
     let (mut model, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest", "Rotation"]);
+    assert_eq!(transform(&p), ["Position", "Rotation"]);
     assert!(row(&p, "3d.autoOrient").is_none());
     let rotation = row(&p, "rotation3d").unwrap();
     let axes = rotation["control"]["axes"].as_array().unwrap();
@@ -2081,7 +2081,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         assert_eq!(axis["unit"], "°");
         assert_eq!(axis["precision"], 2);
     }
-    let (_, straight) = view();
+    let before = view();
     write(
         &presenter,
         &mut model,
@@ -2089,52 +2089,27 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         0,
         json!(8.25),
     );
-    let (_, turned) = view();
+    let moved = view();
     assert!(
-        !close(straight, turned),
-        "a two-node camera re-aims when it moves"
+        close(moved.1, before.1),
+        "orientation unchanged when moving camera: {:?} -> {:?}",
+        before.1,
+        moved.1
+    );
+    assert!(
+        close(moved.0, [8.25, before.0[1], before.0[2]]),
+        "{:?}",
+        moved.0
     );
 
-    // Turning Auto-Orient Off through Studio keeps the view exactly and
-    // hides Point of Interest in Properties.
-    let before = view();
     let (_, p) = publish(&mut presenter);
     let position = row(&p, "position").unwrap();
     assert_eq!(position["control"]["axes"][0]["value"], 8.25);
     assert_eq!(position["control"]["axes"][0]["precision"], 2);
     assert_eq!(position["control"]["axes"][2]["axis"], "Z");
-    orient("off");
-    let after = view();
-    assert!(
-        close(before.0, after.0) && close(before.1, after.1),
-        "{before:?} -> {after:?}"
-    );
-    let (mut model, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Rotation"]);
 
-    // Now Position only slides the camera: the view direction is unchanged
-    // and the camera moved by exactly the edit.
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "position").unwrap(),
-        0,
-        json!(16.),
-    );
-    let moved = view();
-    assert!(
-        close(moved.1, after.1),
-        "orientation unchanged: {:?} -> {:?}",
-        after.1,
-        moved.1
-    );
-    assert!(
-        close(moved.0, [after.0[0] + 7.75, after.0[1], after.0[2]]),
-        "{:?}",
-        moved.0
-    );
-
-    // Back toward a point of interest, the view still doesn't jump.
+    // Legacy autoOrient command still keeps the view without jumping, while
+    // Properties stays rotation-only without Point of Interest.
     orient("target");
     let back = view();
     assert!(
@@ -2142,7 +2117,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         "{moved:?} -> {back:?}"
     );
     let (_, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest", "Rotation"]);
+    assert_eq!(transform(&p), ["Position", "Rotation"]);
 
     let (mut model, _) = publish(&mut presenter);
     let request = presenter
@@ -2173,7 +2148,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
             label: None,
             expected_revision: None,
             body: pm_kernel::WriteBody::Commands(
-                ["camera.targetX", "rotation.y"]
+                ["position.x", "rotation.y"]
                     .into_iter()
                     .map(|channel| {
                         pm_kernel::PropertyCommand::SetExpression {
@@ -2194,7 +2169,7 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
         ack.reply
     );
     let (mut model, p) = publish(&mut presenter);
-    for id in ["target", "rotation3d"] {
+    for id in ["position", "rotation3d"] {
         assert_eq!(row(&p, id).unwrap()["expression"]["source"], "value + 0.25");
     }
     let request = presenter
@@ -4761,16 +4736,13 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
     let (mut model, p) = publish(&mut presenter, "cam");
     assert!(!collapsed(&p, "3d.depth-of-field"));
-    assert!(row(&p, "3d.dof.focusTarget").is_some());
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "3d.dof.irisShape").unwrap(),
-        json!("6"),
+    assert_eq!(
+        labels(&p, "Depth of Field"),
+        ["Enabled", "Focus Distance", "Blur"]
     );
-    let (mut model, p) = publish(&mut presenter, "cam");
-    assert!(row(&p, "camera.irisRoundness").is_some());
-    for id in ["camera.focusDistance", "environment.exposure"] {
+    assert!(row(&p, "3d.dof.focusTarget").is_none());
+    assert!(row(&p, "3d.dof.irisShape").is_none());
+    for id in ["camera.focusDistance", "camera.blur", "environment.exposure"] {
         let request = presenter
             .intent(&mut model, Caller::native(), &json!({"type":"key","row":id}), 0.)
             .unwrap()
@@ -7636,7 +7608,7 @@ fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
             .find(|r| r["id"] == id)
             .unwrap()
     };
-    for id in ["position", "scale", "anchor", "orientation"] {
+    for id in ["position", "scale", "anchor", "rotation3d"] {
         let axes = row(id)["control"]["axes"].as_array().unwrap();
         assert_eq!(
             axes.iter()
@@ -7645,9 +7617,14 @@ fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
             ["X", "Y", "Z"]
         );
     }
-    assert_eq!(row("rotation.x")["label"], "X Rotation");
-    assert_eq!(row("rotation.y")["label"], "Y Rotation");
-    assert_eq!(row("rotation")["label"], "Z Rotation");
+    assert_eq!(row("rotation3d")["label"], "Rotation");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["id"] != "orientation"),
+        "untouched orientation row should be hidden in favor of unified Rotation"
+    );
     let perspective = &row("perspective")["control"]["axes"][0];
     assert_eq!(perspective["value"], 50.);
     assert_eq!(perspective["unit"], "mm");
@@ -7707,10 +7684,7 @@ fn properties_keyframing_3d_transform_rows_keys_all_three_axes() {
         ("position", ["position.x", "position.y", "position.z"]),
         ("scale", ["scale.x", "scale.y", "scale.z"]),
         ("anchor", ["anchor.x", "anchor.y", "anchor.z"]),
-        (
-            "orientation",
-            ["orientation.x", "orientation.y", "orientation.z"],
-        ),
+        ("rotation3d", ["rotation.x", "rotation.y", "rotation"]),
     ] {
         presenter.snapshot(&mut model, 1., false).unwrap();
         let req = presenter

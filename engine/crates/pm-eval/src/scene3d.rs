@@ -779,7 +779,7 @@ fn raster_defaults(scene: &mut Map) {
         .and_then(|camera| camera.get_mut("p"))
         .and_then(Value::as_object_mut)
     {
-        for key in ["fStop", "focusDistance"] {
+        for key in ["blur", "fStop", "focusDistance"] {
             if camera
                 .get(key)
                 .is_some_and(|v| raster_default_channel(v, 0.))

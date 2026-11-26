@@ -96,6 +96,7 @@ struct Entry {
     /// Group membership and layer dependencies, including inactive children.
     group: Option<Arc<crate::pass_facts::PassFacts>>,
     camera: Option<pm_eval::space3d::Camera3d>,
+    camera_dof: Option<(f64, f64)>,
     shaders: Vec<pm_glsl::Key>,
     /// An image's asset and the path its resolver answered.
     media: Option<(String, PathBuf)>,
@@ -602,13 +603,16 @@ pub(crate) fn draw<'d>(
     let Some(nodes) = closure(scope, layer) else {
         return plan(scope, b);
     };
-    let camera = if group || plane {
+    let (camera, camera_dof) = if group || plane {
         let Ok(camera) = scope.projection_camera_3d(time) else {
             return plan(scope, b);
         };
-        camera
+        let Ok(camera_dof) = scope.camera_dof_3d(time) else {
+            return plan(scope, b);
+        };
+        (camera, camera_dof)
     } else {
-        None
+        (None, None)
     };
     let pass = (
         scope.comp.id().clone(),
@@ -640,6 +644,7 @@ pub(crate) fn draw<'d>(
         && let Some(entry) = reuse.passes.get_mut(&pass).and_then(|p| p.get_mut(&id))
         && entry.media == media
         && entry.camera == camera
+        && entry.camera_dof == camera_dof
         && (entry.time.to_bits() == time.to_bits()
             || (reuse_across_time
                 && entry.static_time
@@ -707,6 +712,7 @@ pub(crate) fn draw<'d>(
                 closure,
                 group: group.then(|| facts.clone()),
                 camera,
+                camera_dof,
                 media,
                 used: build,
             },

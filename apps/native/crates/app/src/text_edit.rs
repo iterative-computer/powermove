@@ -521,6 +521,7 @@ enum Job {
         text: String,
         fresh: bool,
         rename: bool,
+        time: f64,
     },
 }
 pub struct TextSession {
@@ -945,6 +946,7 @@ impl GizmoSurface {
             text: s.written.clone(),
             fresh: s.fresh,
             rename,
+            time: s.time,
         });
         // Afterwards the tool returns to Select. Asked once the update that
         // ended the edit is over: Escape ends it inside the Controller's own
@@ -1242,6 +1244,13 @@ fn add_text(
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number(at[0]));
     properties.insert("position.y", Value::Number(at[1]));
+    // Paragraph drags keep the top edge pinned at the dragged box's top while
+    // typing; `Job::Finish` vertically centers the anchor on commit without
+    // shifting the text on screen. Point clicks omit `anchor.y` so `add_layer`
+    // vertically centers the anchor immediately.
+    if width.is_some() {
+        properties.insert("anchor.y", Value::Number(0.0));
+    }
     let duration = crate::layer_commands::text_layer_duration(published, time);
     let place = crate::layer_commands::place_on_top(published, "text", time, duration);
     let add = AddLayer {
@@ -1377,6 +1386,7 @@ async fn run_job(
             text,
             fresh,
             rename,
+            time,
         } => {
             let Some(gesture) = gesture else {
                 return Ok(None);
@@ -1398,16 +1408,39 @@ async fn run_job(
                 }
                 return Ok(None);
             }
+            if fresh {
+                // Best-effort exact vertical centering from measured text
+                // bounds; if fonts are unavailable (e.g. headless tests or a
+                // missing font), keep the size/2 anchor set at layer creation
+                // without aborting the commit or rename.
+                let _ = call(
+                    kernel,
+                    project,
+                    step(
+                        gesture,
+                        vec![
+                            pm_kernel::TransformCommand::CenterAnchorVertical {
+                                layer_ids: vec![layer.into()],
+                                time,
+                            }
+                            .into(),
+                        ],
+                        false,
+                    ),
+                )
+                .await;
+            }
             if rename {
                 let patch = LayerPatch {
                     name: Some(first_line(&text)),
                     ..Default::default()
                 };
-                let set = LayerCommand::Set {
+                let rename = LayerCommand::Set {
                     layer_id: layer.into(),
                     patch,
-                };
-                call(kernel, project, step(gesture, vec![set.into()], false)).await?;
+                }
+                .into();
+                call(kernel, project, step(gesture, vec![rename], false)).await?;
             }
             call(kernel, project, GestureCall::Commit { gesture }.into()).await?;
             Ok(None)

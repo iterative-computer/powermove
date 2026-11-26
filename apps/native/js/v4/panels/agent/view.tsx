@@ -1039,6 +1039,20 @@ function Trigger({
  * while it shows, the model's own chevron opens beside its name and pushes
  * the effort along, so the two read as separate. The open part's chevron
  * turns to point up. A model with no effort levels is the model part alone. */
+const ACCESS_META: Record<
+  Access,
+  { short: string; symbol: string; warn?: boolean }
+> = {
+  editor: { short: "Comp", symbol: "lock" },
+  supervised: { short: "Supervised", symbol: "shield.fill" },
+  auto: { short: "Auto", symbol: "shield.fill" },
+  full: {
+    short: "Full",
+    symbol: "exclamationmark.triangle.fill",
+    warn: true,
+  },
+};
+
 function ModelChooser({
   mark,
   model,
@@ -1071,10 +1085,10 @@ function ModelChooser({
       metadata={{ symbol: "composer.chevron", turn: open, ...(reveal ? { pill: "reveal" } : {}) }}
       style={{
         flexShrink: 0,
-        width: t("metrics.composer_symbol"),
-        height: t("metrics.composer_symbol"),
-        symbolSize: t("metrics.composer_symbol"),
-        marginLeft: t("space.xs"),
+        width: t("metrics.symbol_inline"),
+        height: t("metrics.symbol_inline"),
+        symbolSize: t("metrics.symbol_inline"),
+        marginLeft: t("space.hair"),
         color: quietInk,
       }}
     />
@@ -1111,8 +1125,8 @@ function ModelChooser({
         ...row,
         ...(flexible ? shrink : { flexShrink: 0 }),
         height: t("metrics.hit"),
-        paddingLeft: t("space.sm"),
-        paddingRight: t("space.sm"),
+        paddingLeft: t("space.xs"),
+        paddingRight: t("space.xs"),
         borderRadius: t("metrics.inner_radius"),
       }}
     >
@@ -1135,7 +1149,7 @@ function ModelChooser({
                 width: t("metrics.symbol_panel"),
                 height: t("metrics.symbol_panel"),
                 symbolSize: t("metrics.symbol_panel"),
-                marginRight: t("space.sm"),
+                marginRight: t("space.xs"),
                 color: ink,
               }}
             />
@@ -3237,6 +3251,40 @@ function Composer({
         send({ type: "setAccess", access: choice as Access });
     });
   };
+  const openAccess = (anchor: number) => {
+    awaiting.current = null;
+    const epoch = ++menuEpoch.current;
+    setOpenPicker("access");
+    const options: MenuOption[] = (Object.keys(ACCESS) as Access[]).map((value) => ({
+      label: ACCESS[value].label,
+      detail: ACCESS[value].detail,
+      value,
+      checked: value === s.settings.access,
+      category: "Access Mode",
+    }));
+    void menu?.({ anchor, picker: "access", search: false, placeholder: "", options }).then((choice) => {
+      if (menuEpoch.current !== epoch) return;
+      setOpenPicker(null);
+      if (typeof choice === "string" && choice in ACCESS && choice !== s.settings.access)
+        send({ type: "setAccess", access: choice as Access });
+    });
+  };
+  const accessInfo = ACCESS[s.settings.access];
+  const accessMeta = ACCESS_META[s.settings.access];
+  const accessInk = t(
+    !canApprove
+      ? "colors.faint"
+      : accessMeta.warn
+        ? "colors.warning"
+        : "colors.secondary",
+  );
+  const accessChevronInk = t(
+    !canApprove
+      ? "colors.faint"
+      : accessMeta.warn
+        ? "colors.warning"
+        : "colors.muted",
+  );
   // The pill's effort part opens the reasoning menu: the model's levels in
   // order, ✓ on the one in use, on the model picker's card and rows.
   // Choosing one closes it and the pill reads the new level at once.
@@ -3414,112 +3462,190 @@ function Composer({
       />
       <div
         id="agent-options"
-        // The row stands `space.xl` under the field (about 24 pt under the
-        // draft's last line). Send's circle, centred in its hit target,
-        // keeps 10 pt to the composer's trailing and bottom edges; "+"
-        // lines up under the draft.
+        // Compactly packed controls under the draft: "+" + Model/Effort stay
+        // together on the left, Access Mode sits beside them on wide panels
+        // and wraps onto a compact second row when the docked panel is narrow,
+        // while Stop/Send stay pinned at the bottom-right corner.
         style={{
           ...row,
-          height: t("metrics.hit"),
-          marginTop: t("space.xl"),
+          alignItems: "end",
+          minHeight: t("metrics.hit"),
+          marginTop: t("space.md"),
           marginBottom: t("space.md"),
-          paddingLeft: t("space.sm"),
+          paddingLeft: t("space.xs"),
           paddingRight: t("space.md"),
           gap: t("space.xs"),
         }}
       >
-        <button
-          id="agent-add"
-          role="button"
-          tabIndex={0}
-          label="Add"
-          title="Add files or part of the screen, or choose approvals"
-          disabled={!menu || !(canAttach || canApprove)}
-          open={openPicker === "add"}
-          aria-haspopup="menu"
-          aria-expanded={openPicker === "add"}
-          metadata={{ menuAnchor: true, symbol: "composer.add" }}
-          preventDefault={{ keydown: ["Enter", " "] }}
-          onClick={(e) => openAdd(Number(e.currentTarget))}
-          onKeyDown={(e) => {
-            if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-            if (e.key === "Enter" || e.key === " ") openAdd(Number(e.currentTarget));
-          }}
+        <div
           style={{
-            ...hitBox,
-            ...(openPicker === "add" ? { background: t("colors.selected_fill") } : {}),
-            color: t("colors.secondary"),
-            symbolSize: t("metrics.composer_add_symbol"),
+            ...row,
+            ...shrink,
+            flexGrow: 1,
+            flexWrap: "wrap",
+            gap: t("space.xs"),
           }}
-        />
-        <ModelChooser
-          mark={
-            signedOut
-              ? s.settings.provider === "aero"
-                ? "powermove"
-                : null
-              : harness
-                ? providerMark(s.settings.provider, providerGroup(s.settings.provider, shownModel))
-                : s.settings.provider
-          }
-          model={
-            signedOut
-              ? s.settings.provider === "aero"
-                ? "Sign in to Powermove"
-                : "Connect a provider"
-              : harness
-                ? chooserName(
-                    s.catalog.models,
-                    shownModel,
-                    named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
-                  )
-                : modelName
-          }
-          effort={!signedOut && efforts.length > 0 ? effortName : null}
-          disabled={!menu || choicesLocked}
-          opened={openPicker}
-          openModels={openModels}
-          openEffort={openEffort}
-          signedOut={signedOut}
-        />
-        <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
-        {working && (
-          <button
-            id="agent-stop"
-            role="button"
-            label="Stop current run"
-            title="Stop current run"
-            tabIndex={0}
-            disabled={s.stopping}
-            onClick={stop}
-            style={hitBox}
-          >
-            <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
-          </button>
-        )}
-        {(!working || hasDraft) && (
-          <button
-            id="agent-send"
-            role="button"
-            label={sendLabel}
-            title={sendLabel}
-            tabIndex={0}
-            disabled={disabled || submitting || !s.sendable}
-            onClick={(event) => {
-              const text = event.value;
-              const composerEpoch = event.composerEpoch ?? s.draft.sent;
-              if (!event.composing && !disabled && s.sendable)
-                submit({
-                  type: "submit",
-                  ...(typeof text === "string" ? { text } : {}),
-                  ...(composerEpoch === undefined ? {} : { composerEpoch }),
-                });
-            }}
-            style={hitBox}
-          >
-            <div metadata={{ symbol: "composer.send" }} style={sendFace(ready)} />
-          </button>
-        )}
+        >
+          <div style={{ ...row, ...shrink, gap: t("space.hair") }}>
+            <button
+              id="agent-add"
+              role="button"
+              tabIndex={0}
+              label="Add"
+              title="Add files or part of the screen, or choose approvals"
+              disabled={!menu || !(canAttach || canApprove)}
+              open={openPicker === "add"}
+              aria-haspopup="menu"
+              aria-expanded={openPicker === "add"}
+              metadata={{ menuAnchor: true, symbol: "composer.add" }}
+              preventDefault={{ keydown: ["Enter", " "] }}
+              onClick={(e) => openAdd(Number(e.currentTarget))}
+              onKeyDown={(e) => {
+                if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+                if (e.key === "Enter" || e.key === " ") openAdd(Number(e.currentTarget));
+              }}
+              style={{
+                ...hitBox,
+                ...(openPicker === "add" ? { background: t("colors.selected_fill") } : {}),
+                color: t("colors.secondary"),
+                symbolSize: t("metrics.composer_add_symbol"),
+              }}
+            />
+            <ModelChooser
+              mark={
+                signedOut
+                  ? s.settings.provider === "aero"
+                    ? "powermove"
+                    : null
+                  : harness
+                    ? providerMark(s.settings.provider, providerGroup(s.settings.provider, shownModel))
+                    : s.settings.provider
+              }
+              model={
+                signedOut
+                  ? s.settings.provider === "aero"
+                    ? "Sign in to Powermove"
+                    : "Connect a provider"
+                  : harness
+                    ? chooserName(
+                        s.catalog.models,
+                        shownModel,
+                        named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
+                      )
+                    : modelName
+              }
+              effort={!signedOut && efforts.length > 0 ? effortName : null}
+              disabled={!menu || choicesLocked}
+              opened={openPicker}
+              openModels={openModels}
+              openEffort={openEffort}
+              signedOut={signedOut}
+            />
+          </div>
+          <div id="agent-access-group" metadata={{ pill: "group" }} style={{ ...row, flexShrink: 0 }}>
+            <button
+              id="agent-access"
+              role="button"
+              tabIndex={0}
+              label={`Access mode, ${accessInfo.label}`}
+              title={`Access mode: ${accessInfo.label} — ${accessInfo.detail}`}
+              disabled={!canApprove}
+              open={openPicker === "access"}
+              aria-haspopup="menu"
+              aria-expanded={openPicker === "access"}
+              metadata={{ menuAnchor: true, pill: "part" }}
+              preventDefault={{ keydown: ["Enter", " "] }}
+              onClick={(e) => {
+                if (canApprove) openAccess(Number(e.currentTarget));
+              }}
+              onKeyDown={(e) => {
+                if (!canApprove || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+                if (e.key === "Enter" || e.key === " ") openAccess(Number(e.currentTarget));
+              }}
+              style={{
+                ...target,
+                ...row,
+                flexShrink: 0,
+                height: t("metrics.hit"),
+                paddingLeft: t("space.xs"),
+                paddingRight: t("space.xs"),
+                borderRadius: t("metrics.inner_radius"),
+              }}
+            >
+              <div
+                metadata={{ symbol: accessMeta.symbol }}
+                style={{
+                  flexShrink: 0,
+                  width: t("metrics.symbol_inline"),
+                  height: t("metrics.symbol_inline"),
+                  symbolSize: t("metrics.symbol_inline"),
+                  marginRight: t("space.xs"),
+                  color: accessInk,
+                }}
+              />
+              <text
+                style={{
+                  flexShrink: 0,
+                  fontSize: t("typography.body"),
+                  color: accessInk,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {accessMeta.short}
+              </text>
+              <div
+                metadata={{ symbol: "composer.chevron", turn: openPicker === "access" }}
+                style={{
+                  flexShrink: 0,
+                  width: t("metrics.symbol_inline"),
+                  height: t("metrics.symbol_inline"),
+                  symbolSize: t("metrics.symbol_inline"),
+                  marginLeft: t("space.hair"),
+                  color: accessChevronInk,
+                }}
+              />
+            </button>
+          </div>
+        </div>
+        <div style={{ ...row, flexShrink: 0, gap: t("space.xs") }}>
+          {working && (
+            <button
+              id="agent-stop"
+              role="button"
+              label="Stop current run"
+              title="Stop current run"
+              tabIndex={0}
+              disabled={s.stopping}
+              onClick={stop}
+              style={hitBox}
+            >
+              <div metadata={{ symbol: "composer.stop" }} style={sendFace(!hasDraft && !s.stopping)} />
+            </button>
+          )}
+          {(!working || hasDraft) && (
+            <button
+              id="agent-send"
+              role="button"
+              label={sendLabel}
+              title={sendLabel}
+              tabIndex={0}
+              disabled={disabled || submitting || !s.sendable}
+              onClick={(event) => {
+                const text = event.value;
+                const composerEpoch = event.composerEpoch ?? s.draft.sent;
+                if (!event.composing && !disabled && s.sendable)
+                  submit({
+                    type: "submit",
+                    ...(typeof text === "string" ? { text } : {}),
+                    ...(composerEpoch === undefined ? {} : { composerEpoch }),
+                  });
+              }}
+              style={hitBox}
+            >
+              <div metadata={{ symbol: "composer.send" }} style={sendFace(ready)} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

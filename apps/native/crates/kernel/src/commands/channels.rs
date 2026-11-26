@@ -181,6 +181,25 @@ pub(crate) fn materialize(layer: &mut Value, channel: &str) -> Option<Vec<Step>>
         prop.insert("kf", Value::Array(Vec::new()));
         p.insert(channel, Value::Object(prop));
     }
+    if channel == "camera.blur"
+        && let Some(p) = layer
+            .as_object_mut()
+            .and_then(|l| l.get_mut("d"))
+            .and_then(Value::as_object_mut)
+            .and_then(|d| d.get_mut("data"))
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.get_mut("camera"))
+            .and_then(Value::as_object_mut)
+            .and_then(|cam| cam.get_mut("p"))
+            .and_then(Value::as_object_mut)
+        && p.get("blur").is_none()
+    {
+        let mut prop = pm_model::Map::new();
+        prop.insert("v", Value::Number(0.0));
+        prop.insert("kf", Value::Array(Vec::new()));
+        prop.insert("expr", Value::Null);
+        p.insert("blur", Value::Object(prop));
+    }
     find(layer, channel)
 }
 

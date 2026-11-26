@@ -168,8 +168,10 @@ impl TimelineModel {
                                 ('r', false) => {
                                     p == "rotation"
                                         || p.starts_with("rotation.")
-                                        || p == "orientation"
-                                        || p.starts_with("orientation.")
+                                        || ((p == "orientation" || p.starts_with("orientation."))
+                                            && (!c.keys.is_empty()
+                                                || c.expression.is_some()
+                                                || facts.modified.contains(&pair)))
                                 }
                                 ('r', true) => p == "c.timeRemap" || p == "c.sourceTime",
                                 ('a', false) => p.starts_with("anchor."),

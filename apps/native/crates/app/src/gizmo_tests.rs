@@ -3524,10 +3524,17 @@ fn flying_through_the_camera_stores_the_flight_as_one_undo(cx: &mut TestAppConte
     let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
     // It flew forward, toward what it looked at (−Z from z = 6).
     assert!(num(&after["p"]["position.z"]) < num(&before["p"]["position.z"]), "{after}");
-    // The point of interest moved with it: the camera still looks straight ahead.
-    let dz_cam = num(&after["p"]["position.z"]) - num(&before["p"]["position.z"]);
-    let t = |l: &serde_json::Value| num(&l["d"]["data"]["camera"]["p"]["targetZ"]);
-    assert!((t(&after) - t(&before) - dz_cam).abs() < 1e-6, "{} {}", t(&after), dz_cam);
+    // Rotation-only camera: flying forward moves position.z while keeping
+    // rotation unchanged (no Point of Interest dependency).
+    assert_eq!(after["d"]["data"]["camera"]["autoOrient"], "off");
+    assert!(
+        (num(&after["p"]["rotation.x"]) - num(&before["p"]["rotation.x"])).abs() < 1e-6,
+        "{after}"
+    );
+    assert!(
+        (num(&after["p"]["rotation.y"]) - num(&before["p"]["rotation.y"])).abs() < 1e-6,
+        "{after}"
+    );
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "back to the shot");
     undo_3d(&mut s, cx);
     assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);

@@ -1379,7 +1379,42 @@ fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
         values::obj(&mut layer).insert("track", Value::Number(f64::from(track)));
     }
     let index = c.index.unwrap_or(0).min(layers.len());
-    cx.insert_layer(c.comp.as_deref(), index, layer)
+    let default_text_mid_y = (c.layer_type == "text" && !c.properties.contains_key("anchor.y"))
+        .then(|| {
+            layer
+                .get("d")
+                .and_then(|d| d.get("size"))
+                .and_then(|s| s.as_f64().or_else(|| s.get("v").and_then(Value::as_f64)))
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(128.0)
+                / 2.0
+        });
+    cx.insert_layer(c.comp.as_deref(), index, layer)?;
+    if let Some(fallback_mid_y) = default_text_mid_y {
+        let loc = cx.find(&c.id)?;
+        let idx = loc.index;
+        let measured = if cx.text.is_some() {
+            let mut measure = cx.measure(true)?;
+            let mid = cx.kernel(loc.comp_id.as_deref(), |edit| {
+                edit.read(|s| {
+                    let l = &s.layers()[idx];
+                    Ok(s
+                        .bounds(l, c.time, &mut *measure, &mut pm_eval::bounds::NoHost)?
+                        .map(|b| (b.y0 + b.y1) / 2.0))
+                })
+            })?;
+            mid.filter(|v| v.is_finite())
+        } else {
+            None
+        };
+        let mid_y = measured.unwrap_or(fallback_mid_y);
+        let mut path = loc.path();
+        path.push("p".into());
+        path.push("anchor.y".into());
+        path.push("v".into());
+        cx.set(path, Value::Number(mid_y))?;
+    }
+    Ok(())
 }
 
 /// The block's records at the top of the open composition, as one write.

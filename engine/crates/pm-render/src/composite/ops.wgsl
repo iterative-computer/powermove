@@ -284,7 +284,7 @@ fn fs_decode_source_value(in: VsOut) -> vec4<f32> {
 
 fn dof_coc_at(px: vec2<f32>) -> vec2<f32> {
     let inv_w = op.inv0.x * px.x + op.inv0.y * px.y + op.inv0.z;
-    let w = 1.0 / max(inv_w, 0.05);
+    let w = 1.0 / max(inv_w, 1e-4);
     let coc = clamp(op.f.y * abs(w - op.f.x) / max(w, 0.1), 0.0, op.f.z) * op.inv1.z;
     return vec2<f32>(w, coc);
 }

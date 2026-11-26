@@ -610,17 +610,41 @@ impl Properties {
                 if three_d {
                     groups[0].2.push("position.z");
                     groups[1].2.push("scale.z");
-                    groups.extend([
-                        (
+                    // Orientation and Rotation are unified into a single 3D
+                    // Rotation row; only show legacy Orientation when a layer
+                    // already carries non-zero, animated, or scripted values.
+                    let has_legacy_orientation = ["orientation.x", "orientation.y", "orientation.z"]
+                        .iter()
+                        .any(|path| {
+                            let binding = Binding::Property(PropertyId::new(&layer, *path));
+                            model.binding_state(&binding, time).is_ok_and(|state| {
+                                state.animated
+                                    || state.key_at_playhead
+                                    || state.mixed
+                                    || state.expression.is_some()
+                                    || state
+                                        .value
+                                        .as_f64()
+                                        .is_some_and(|v| v.abs() > 1e-6)
+                            })
+                        });
+                    if has_legacy_orientation {
+                        groups.push((
                             "orientation",
                             "Orientation",
                             vec!["orientation.x", "orientation.y", "orientation.z"],
                             "°",
                             1.,
+                        ));
+                    }
+                    groups.extend([
+                        (
+                            "rotation3d",
+                            "Rotation",
+                            vec!["rotation.x", "rotation.y", "rotation"],
+                            "°",
+                            1.,
                         ),
-                        ("rotation.x", "X Rotation", vec!["rotation.x"], "°", 1.),
-                        ("rotation.y", "Y Rotation", vec!["rotation.y"], "°", 1.),
-                        ("rotation", "Z Rotation", vec!["rotation"], "°", 1.),
                         ("perspective", "Perspective", vec!["perspective"], "mm", 1.),
                     ]);
                 } else {
@@ -1007,8 +1031,8 @@ impl Properties {
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
     }
     /// Position, rotation and scale with depth, in scene units and degrees.
-    /// Lights and cameras move without scale. A camera's aim comes from its
-    /// point of interest or its rotation, depending on Auto-Orient.
+    /// Lights and cameras move without scale. Cameras are rotation-only (no
+    /// Point of Interest).
     fn transform_3d(
         &mut self,
         model: &mut Inspector,
@@ -1025,10 +1049,6 @@ impl Properties {
         } else {
             None
         };
-        // A camera aims at its point of interest unless Auto-Orient is Off.
-        let one_node = camera
-            .as_ref()
-            .is_some_and(|record| record["d"]["data"]["camera"]["autoOrient"] == "off");
         let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
             "position",
             "Position",
@@ -1040,21 +1060,6 @@ impl Properties {
             "",
             0.1,
         )];
-        // The point of interest is what turns the view when the camera moves,
-        // so it sits under Position (After Effects' two-node camera).
-        if role == Role::Camera && !one_node {
-            groups.push((
-                "target",
-                "Point of Interest",
-                vec![
-                    ("camera.targetX", "X"),
-                    ("camera.targetY", "Y"),
-                    ("camera.targetZ", "Z"),
-                ],
-                "",
-                0.1,
-            ));
-        }
         groups.push((
             "rotation3d",
             "Rotation",
@@ -1117,13 +1122,13 @@ impl Properties {
                     any_animated = true;
                 }
                 active_paths.push(path.to_owned());
-                if camera.is_some() {
+                if role == Role::Camera {
                     bound.push(binding.clone());
                     expression = expression.or(state.expression);
                 }
                 // Use the shared field's precision for camera framing. Keep
                 // the compact values used by the other Studio transforms.
-                let shown = if camera.is_some() {
+                let shown = if role == Role::Camera {
                     value
                 } else if value.abs() >= 10. {
                     value.round()
@@ -1780,16 +1785,10 @@ impl Properties {
             model.binding_state(&Binding::Property(PropertyId::new(layer, path)), time)
         };
         let camera_dof_on = perspective_camera
-            && camera_state(model, "camera.fStop")
-                .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.);
-        let camera_iris_blades = if camera_dof_on {
-            camera_state(model, "camera.irisShape")
-                .ok()
-                .and_then(|state| state.value.as_f64())
-                .unwrap_or(0.)
-        } else {
-            0.
-        };
+            && (camera_state(model, "camera.blur")
+                .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.)
+                || camera_state(model, "camera.fStop")
+                    .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.));
         // Hidden DOF rows only need their stored keyframe metadata.
         let camera_dof_animated = perspective_camera
             && !camera_dof_on
@@ -1797,7 +1796,6 @@ impl Properties {
                 .iter()
                 .filter(|field| field.group == "Depth of Field")
                 .filter_map(|field| field.id.strip_prefix("camera."))
-                .chain(std::iter::once("irisShape"))
                 .any(|key| {
                     data["camera"]["p"][key]["kf"]
                         .as_array()
@@ -2087,59 +2085,11 @@ impl Properties {
                         "Depth of Field",
                         toggle(self, "3d.dof.enabled", "Enabled", camera_dof_on),
                     );
-                    if camera_dof_on {
-                        let focus_dist = camera_state(model, "camera.focusDistance")
-                            .ok()
-                            .and_then(|s| s.value.as_f64())
-                            .unwrap_or(0.);
-                        if let Ok((focus_val, focus_opts)) =
-                            pm_panel_studio3d::properties::dof_focus_options(
-                                model.published(),
-                                layer,
-                                time,
-                                focus_dist,
-                            )
-                        {
-                            let lease = self.control_lease("3d.dof.focusTarget");
-                            push(
-                                &mut groups,
-                                "Depth of Field",
-                                row(
-                                    "3d.dof.focusTarget",
-                                    "Focus On",
-                                    json!({"kind":"choice","binding":lease,"value":focus_val,"options":focus_opts}),
-                                ),
-                            );
-                        }
-                        let iris_blades = camera_iris_blades.round() as i64;
-                        let iris_val = match iris_blades {
-                            5 | 6 | 7 | 8 => iris_blades.to_string(),
-                            _ => "0".to_owned(),
-                        };
-                        let lease = self.control_lease("3d.dof.irisShape");
-                        push(
-                            &mut groups,
-                            "Depth of Field",
-                            row(
-                                "3d.dof.irisShape",
-                                "Bokeh Shape",
-                                json!({"kind":"choice","binding":lease,"value":iris_val,"options":[
-                                    {"v":"0","label":"Circular"},
-                                    {"v":"5","label":"Pentagon (5 Blades)"},
-                                    {"v":"6","label":"Hexagon (6 Blades)"},
-                                    {"v":"7","label":"Heptagon (7 Blades)"},
-                                    {"v":"8","label":"Octagon (8 Blades)"}]}),
-                            ),
-                        );
-                    }
                 }
             }
         }
         for field in fields {
             if field.group == "Depth of Field" && !camera_dof_on {
-                continue;
-            }
-            if field.id == "camera.irisRoundness" && camera_iris_blades < 3. {
                 continue;
             }
             let binding = Binding::Property(PropertyId::new(layer, &field.id));

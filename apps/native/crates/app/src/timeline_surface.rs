@@ -3576,6 +3576,11 @@ impl TimelineSurface {
         cx: &mut Context<Self>,
     ) {
         use pm_panel_timeline::LayerSwitch;
+        // Commit any prior switch-paint gesture that missed mouse-up instead of
+        // cancelling (reverting) it when starting the next switch click.
+        if matches!(self.gesture, Gesture::SwitchPaint { .. }) {
+            self.on_up(cx);
+        }
         self.start_pointer_gesture(cx);
         if let Some(p) = self.kernel.published(&self.project) {
             Arc::make_mut(&mut self.model).sync(&p);
@@ -3998,7 +4003,10 @@ impl TimelineSurface {
                 && !matches!(self.gesture, Gesture::Idle | Gesture::Pan { .. })
                 && !pm_shell::left_button_held());
         if button_up {
-            if matches!(self.gesture, Gesture::Marquee { .. } | Gesture::Scrub { .. }) {
+            if matches!(
+                self.gesture,
+                Gesture::Marquee { .. } | Gesture::Scrub { .. } | Gesture::SwitchPaint { .. }
+            ) {
                 self.on_up(cx);
                 return false;
             }

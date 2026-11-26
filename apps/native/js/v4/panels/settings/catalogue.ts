@@ -136,17 +136,6 @@ export function generalRows(multiWindow: boolean): Row[] {
       detail: "Follow your system setting, or pick a light or dark theme.",
     },
     {
-      id: "workspace",
-      section: "general",
-      group: "Workspace",
-      label: "After Effects Workspace",
-      control: "action",
-      action: "workspace.import",
-      actionLabel: "Bring My Workspace…",
-      detail:
-        "Bring your saved panels and tools into Powermove with your agent.",
-    },
-    {
       id: "preview-memory",
       section: "general",
       group: "Playback",

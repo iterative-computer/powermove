@@ -408,7 +408,7 @@ pub fn fly_camera(
     let id = l["id"]
         .as_str()
         .ok_or_else(|| invalid("Missing camera ID"))?;
-    let (position, rotation, _target) = camera_channels(p, time, &l)?;
+    let (position, _rotation, _target) = camera_channels(p, time, &l)?;
     let parent = resolved
         .as_ref()
         .and_then(|r| r.parent_worlds.get(id).copied())
@@ -448,38 +448,29 @@ pub fn fly_camera(
     {
         commands.push(set(path, new_pos[i]));
     }
-    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
-        let forward = parent_vec(sub(to.target, to.position));
-        let r = camera_rotation(forward);
-        commands.push(set("rotation.x", r[0]));
-        commands.push(set("rotation.y", r[1]));
-    } else {
-        let local_target = pm_scene3d::render::gltf::math::apply(&inv_parent, to.target);
-        for (i, key) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
-            commands.push(set(&format!("camera.{key}"), local_target[i]));
+    let forward = parent_vec(sub(to.target, to.position));
+    let r = camera_rotation(forward);
+    commands.push(set("rotation.x", r[0]));
+    commands.push(set("rotation.y", r[1]));
+    let mut mirror = QueryMirror::new(p);
+    for key in ["orientation.x", "orientation.y"] {
+        let v = mirror
+            .queries()
+            .evaluate(None, id, key, time)
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.);
+        if v.abs() > 1e-6 {
+            commands.push(set(key, 0.));
         }
-        // Clear any local pitch/yaw offset that would tilt the resolved aim
-        // away from the point of interest (`scene3d::service` look-at + local
-        // rotation), while preserving roll (`rotation`).
-        if rotation[0].abs() > 1e-6 {
-            commands.push(set("rotation.x", 0.));
-        }
-        if rotation[1].abs() > 1e-6 {
-            commands.push(set("rotation.y", 0.));
-        }
-        let mut mirror = QueryMirror::new(p);
-        for key in ["orientation.x", "orientation.y"] {
-            let v = mirror
-                .queries()
-                .evaluate(None, id, key, time)
-                .ok()
-                .and_then(|v| from_model(&v).ok())
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.);
-            if v.abs() > 1e-6 {
-                commands.push(set(key, 0.));
-            }
-        }
+    }
+    if l["d"]["data"]["camera"]["autoOrient"] != "off" {
+        commands.push(scene(
+            p,
+            time,
+            json!({"operation":"set_camera","target":id,"patch":{"autoOrient":"off"}}),
+        ));
     }
     Ok(("Fly Camera".into(), commands))
 }
@@ -935,16 +926,72 @@ pub(crate) fn commands(
         }
         (Role::Camera, "dof.enabled") => {
             let on = arg.as_bool().ok_or_else(|| invalid("Expected checkbox"))?;
-            let f_stop = if on { 2.8 } else { 0.0 };
-            let mut set = pm_kernel::commands::properties::SetProperty::new(
-                target,
-                "camera.fStop",
-                to_model(&json!(f_stop)),
-                time,
-            );
-            set.preserve_hand_edits = false;
-            set.mark_intent = true;
-            return Ok(("Depth of Field".into(), vec![pm_kernel::PropertyCommand::Set(set).into()]));
+            let set = |path: &str, v: f64| -> Command {
+                let mut set = pm_kernel::commands::properties::SetProperty::new(
+                    target,
+                    path,
+                    to_model(&json!(v)),
+                    time,
+                );
+                set.preserve_hand_edits = false;
+                set.mark_intent = true;
+                pm_kernel::PropertyCommand::Set(set).into()
+            };
+            let has_blur_channel = l["d"]["data"]["camera"]["p"].get("blur").is_some();
+            if on {
+                let existing_focus = l["d"]["data"]["camera"]["p"]["focusDistance"]["v"]
+                    .as_f64()
+                    .unwrap_or(0.);
+                let focus_dist = if existing_focus > 0.05 {
+                    existing_focus
+                } else {
+                    // Focus on the first visible 3D object or the composition
+                    // center (origin) so turning DoF on immediately lands near
+                    // the subject.
+                    let (cam_pos, _, _) =
+                        camera_channels(p, time, &l).unwrap_or(([0., 0., 6.], [0.; 3], [0.; 3]));
+                    let mut subject = [0., 0., 0.];
+                    if let Ok(comp) = composition(p) {
+                        for item in pm_kernel::model::layers_of(comp) {
+                            if pm_scene3d::layer_role(item) == Some(Role::Object)
+                                && environment_node(item).is_none()
+                                && let Some(oid) = item.get("id").and_then(node_str)
+                                && let Ok(op) = object_position(p, time, oid)
+                            {
+                                subject = op;
+                                break;
+                            }
+                        }
+                    }
+                    let d = ((subject[0] - cam_pos[0]).powi(2)
+                        + (subject[1] - cam_pos[1]).powi(2)
+                        + (subject[2] - cam_pos[2]).powi(2))
+                    .sqrt()
+                    .max(0.5);
+                    (d * 100.).round() / 100.
+                };
+                if !has_blur_channel {
+                    return Ok((
+                        "Depth of Field".into(),
+                        vec![scene(
+                            p,
+                            time,
+                            json!({"operation":"set_camera","target":target,"patch":{"p":{"blur":35.0,"fStop":0.0,"focusDistance":focus_dist}}}),
+                        )],
+                    ));
+                }
+                let mut cmds = vec![set("camera.blur", 35.0), set("camera.fStop", 0.0)];
+                if existing_focus <= 0.05 {
+                    cmds.push(set("camera.focusDistance", focus_dist));
+                }
+                return Ok(("Depth of Field".into(), cmds));
+            } else {
+                let mut cmds = vec![set("camera.fStop", 0.0)];
+                if has_blur_channel {
+                    cmds.push(set("camera.blur", 0.0));
+                }
+                return Ok(("Depth of Field".into(), cmds));
+            }
         }
         (Role::Camera, "dof.focusTarget") => {
             let choice = arg.as_str().ok_or_else(|| invalid("Choose a focus target"))?;
@@ -2215,9 +2262,16 @@ mod model_part_tests {
         .unwrap();
         let pos = resolved.camera_position.unwrap();
         let target = resolved.targets["cam"];
+        let unit = |a: [f64; 3], b: [f64; 3]| {
+            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            [d[0] / l, d[1] / l, d[2] / l]
+        };
+        let got_dir = unit(pos, target);
+        let want_dir = unit(to.position, to.target);
         for i in 0..3 {
             assert!((pos[i] - to.position[i]).abs() < 1e-6, "pos[{i}]: {pos:?} vs {:?}", to.position);
-            assert!((target[i] - to.target[i]).abs() < 1e-6, "target[{i}]: {target:?} vs {:?}", to.target);
+            assert!((got_dir[i] - want_dir[i]).abs() < 1e-6, "dir[{i}]: {got_dir:?} vs {want_dir:?}");
         }
     }
 

@@ -77,8 +77,12 @@ pub enum TransformCommand {
     /// (`centerAnchor`). Locked layers and layers without bounds are
     /// skipped. Label "Center Anchor Point".
     CenterAnchor { layer_ids: Vec<String>, time: f64 },
-    /// Align projected anchors to the comp for one editable layer, or to the
-    /// selected anchor extent for several. Position writes form one undo step.
+    /// Vertically center Anchor Point (`anchor.y`) in layer content without
+    /// moving the picture or changing `anchor.x` (e.g. keeping text alignment).
+    CenterAnchorVertical { layer_ids: Vec<String>, time: f64 },
+    /// Align the selected layers' projected anchor extent to the composition
+    /// frame (preserving relative spacing across multi-layer selections).
+    /// Position writes form one undo step.
     Align {
         layer_ids: Vec<String>,
         mode: AlignMode,
@@ -97,7 +101,8 @@ impl TransformCommand {
     pub fn label(&self) -> String {
         match self {
             TransformCommand::Nudge { .. } => "Nudge",
-            TransformCommand::CenterAnchor { .. } => "Center Anchor Point",
+            TransformCommand::CenterAnchor { .. }
+            | TransformCommand::CenterAnchorVertical { .. } => "Center Anchor Point",
             TransformCommand::Align { mode, .. } => mode.label(),
             TransformCommand::Distribute { spread, .. } => spread.label(),
         }
@@ -113,7 +118,10 @@ impl TransformCommand {
                 time,
             } => nudge(cx, layer_ids, *dx, *dy, *time),
             TransformCommand::CenterAnchor { layer_ids, time } => {
-                center_anchor(cx, layer_ids, *time)
+                center_anchor_axes(cx, layer_ids, *time, true, true)
+            }
+            TransformCommand::CenterAnchorVertical { layer_ids, time } => {
+                center_anchor_axes(cx, layer_ids, *time, false, true)
             }
             TransformCommand::Align {
                 layer_ids,
@@ -204,7 +212,13 @@ fn kernel_mode(m: AlignMode) -> pm_edit::align::Mode {
 
 /// `centerAnchor`: the anchor moves to the center of the layer's bounds and
 /// the position compensates through the layer matrix, so the picture stays.
-fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(), CommandError> {
+fn center_anchor_axes(
+    cx: &mut Cx<'_>,
+    layer_ids: &[String],
+    time: f64,
+    center_x: bool,
+    center_y: bool,
+) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
     for id in layer_ids {
         let loc = cx.find(id)?;
@@ -225,33 +239,50 @@ fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(),
                 else {
                     return Ok(None);
                 };
-                let (next_x, next_y) = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
-                let dx = next_x - s.channel(l, "anchor.x", time)?.to_number();
-                let dy = next_y - s.channel(l, "anchor.y", time)?.to_number();
+                let cur_ax = s.channel(l, "anchor.x", time)?.to_number();
+                let cur_ay = s.channel(l, "anchor.y", time)?.to_number();
+                let next_x = if center_x { (b.x0 + b.x1) / 2.0 } else { cur_ax };
+                let next_y = if center_y { (b.y0 + b.y1) / 2.0 } else { cur_ay };
+                let dx = next_x - cur_ax;
+                let dy = next_y - cur_ay;
                 let x = s.channel(l, "position.x", time)?.to_number();
                 let y = s.channel(l, "position.y", time)?.to_number();
                 if pm_eval::node::truthy(pm_eval::node::member(Some(l), "threeD")) {
                     let cur_az = s.value3d(l, "anchor.z", time, 0.0)?;
-                    let next_z = b.z.map_or(cur_az, |(z0, z1)| (z0 + z1) / 2.0);
+                    let next_z = if center_x && center_y {
+                        b.z.map_or(cur_az, |(z0, z1)| (z0 + z1) / 2.0)
+                    } else {
+                        cur_az
+                    };
                     let dz = next_z - cur_az;
                     let m = s.local3d(l, time)?;
                     let z = s.value3d(l, "position.z", time, 0.0)?;
-                    Ok(Some(vec![
-                        ("anchor.x", next_x),
-                        ("anchor.y", next_y),
-                        ("anchor.z", next_z),
-                        ("position.x", x + m[0] * dx + m[4] * dy + m[8] * dz),
-                        ("position.y", y + m[1] * dx + m[5] * dy + m[9] * dz),
-                        ("position.z", z + m[2] * dx + m[6] * dy + m[10] * dz),
-                    ]))
+                    let mut out = Vec::with_capacity(6);
+                    if center_x {
+                        out.push(("anchor.x", next_x));
+                    }
+                    if center_y {
+                        out.push(("anchor.y", next_y));
+                    }
+                    if center_x && center_y {
+                        out.push(("anchor.z", next_z));
+                    }
+                    out.push(("position.x", x + m[0] * dx + m[4] * dy + m[8] * dz));
+                    out.push(("position.y", y + m[1] * dx + m[5] * dy + m[9] * dz));
+                    out.push(("position.z", z + m[2] * dx + m[6] * dy + m[10] * dz));
+                    Ok(Some(out))
                 } else {
                     let m = s.local_matrix(l, time)?;
-                    Ok(Some(vec![
-                        ("anchor.x", next_x),
-                        ("anchor.y", next_y),
-                        ("position.x", x + m[0] * dx + m[2] * dy),
-                        ("position.y", y + m[1] * dx + m[3] * dy),
-                    ]))
+                    let mut out = Vec::with_capacity(4);
+                    if center_x {
+                        out.push(("anchor.x", next_x));
+                    }
+                    if center_y {
+                        out.push(("anchor.y", next_y));
+                    }
+                    out.push(("position.x", x + m[0] * dx + m[2] * dy));
+                    out.push(("position.y", y + m[1] * dx + m[3] * dy));
+                    Ok(Some(out))
                 }
             })
         })?;
@@ -362,21 +393,17 @@ fn align(
         .fold(f64::NEG_INFINITY, f64::max);
     let mut targets = Vec::new();
     if let Some(mode) = mode {
-        let (lo, hi) = if points.len() == 1 {
-            (0.0, if horizontal { size.0 } else { size.1 })
-        } else {
-            (lo, hi)
-        };
-        let target = match mode {
-            Mode::Left | Mode::Top => lo,
-            Mode::Right | Mode::Bottom => hi,
-            _ => (lo + hi) / 2.0,
+        let extent = if horizontal { size.0 } else { size.1 };
+        let delta = match mode {
+            Mode::Left | Mode::Top => 0.0 - lo,
+            Mode::Right | Mode::Bottom => extent - hi,
+            _ => extent / 2.0 - (lo + hi) / 2.0,
         };
         for &(i, x, y, depth) in &points {
             targets.push((
                 i,
-                if horizontal { target } else { x },
-                if horizontal { y } else { target },
+                if horizontal { x + delta } else { x },
+                if horizontal { y } else { y + delta },
                 depth,
             ));
         }

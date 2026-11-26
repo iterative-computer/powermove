@@ -775,10 +775,18 @@ impl Flow {
             "not_now" if onboarding.step == Onboard::Account => {
                 let _ = onboarding.advance();
             }
-            // The last step's Continue does what its chosen card says.
-            "continue" if onboarding.step == Onboard::Workspace => {
-                let chosen = self.choices.workspace.clone();
-                return self.onboarding_action(&chosen);
+            // The last step's Continue finishes onboarding (After Effects
+            // workspace import is scrapped for now).
+            "continue"
+                if matches!(
+                    onboarding.step,
+                    Onboard::Transcription | Onboard::Workspace
+                ) =>
+            {
+                if onboarding.step == Onboard::Transcription {
+                    let _ = onboarding.advance();
+                }
+                return self.onboarding_action("fresh");
             }
             "continue" => {
                 let _ = onboarding.advance();
@@ -805,9 +813,6 @@ impl Flow {
                 });
                 if !self.choices.speech.is_empty() {
                     raw["speechModels"] = self.choices.speech.clone().into();
-                }
-                if id == "import" {
-                    raw["workspaceImport"] = "after-effects".into();
                 }
                 match Chosen::parse(raw.clone()).and_then(|choice| onboarding.begin(choice)) {
                     Ok(_) => {
@@ -1198,25 +1203,10 @@ pub(crate) fn step_frame(
                 ..Frame::default()
             })
         }
-        Onboard::Workspace => continuing(Frame {
+        Onboard::Workspace | Onboard::Starting | Onboard::Complete => Frame {
             surface: "S110".into(),
-            back: Some("Back to Speech Model Choice".into()),
-            title: "Bring your workspace".into(),
+            title: "Opening Powermove".into(),
             outline: Some(steps_outline(Some(4))),
-            line: "Your panels and tools come along.".into(),
-            error,
-            choices: vec![
-                row("import", "Bring my workspace", "Your After Effects panels and tools."),
-                row("fresh", "Start fresh", "Powermove’s own layout."),
-            ],
-            chosen: Some(choices.workspace.clone()),
-            preview: Some("workspace".into()),
-            ..Frame::default()
-        }),
-        Onboard::Starting | Onboard::Complete => Frame {
-            surface: "S110".into(),
-            title: "Bring your workspace".into(),
-            outline: Some(steps_outline(Some(5))),
             status: Some("Opening Powermove…".into()),
             spinner: true,
             ..Frame::default()
@@ -1242,7 +1232,7 @@ fn account_line(status: &pm_agents::account::Status) -> Option<String> {
 /// The first run's four steps, the one under way (`None`: the Welcome).
 fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
     pm_shell::welcome::Outline {
-        steps: ["Timeline", "Account", "Agent", "Speech Model", "Workspace"]
+        steps: ["Timeline", "Account", "Agent", "Speech Model"]
             .map(str::to_owned)
             .to_vec(),
         // Each step's own line, shortened.
@@ -1251,7 +1241,6 @@ fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
             "Your Powermove account.",
             "It builds what you ask for, in the editor.",
             "Captions and transcripts, on this Mac.",
-            "Your panels and tools come along.",
         ]
         .map(str::to_owned)
         .to_vec(),

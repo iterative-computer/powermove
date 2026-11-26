@@ -1152,19 +1152,80 @@ fn anchor_align_selection_left_skips_locked_and_is_idempotent() {
     use pm_kernel::{TransformCommand, commands::transform::AlignMode};
     let mut s = store();
     let original = layer(&s, "locked");
+    let before_box = projected_anchor(&s, "box");
+    let before_top = projected_anchor(&s, "top");
+    let shift = 0.0 - before_box.0.min(before_top.0);
     let command = || TransformCommand::Align {
         layer_ids: vec!["box".into(), "locked".into(), "top".into()],
         mode: AlignMode::Left,
         time: 0.0,
     };
     run(&mut s, command());
-    close(projected_anchor(&s, "box").0, 10.0);
-    close(projected_anchor(&s, "top").0, 10.0);
+    close(projected_anchor(&s, "box").0, before_box.0 + shift);
+    close(projected_anchor(&s, "top").0, before_top.0 + shift);
     assert_eq!(layer(&s, "locked"), original);
     assert_eq!(s.history().len(), 1);
     let before = s.revision();
     run(&mut s, command());
     assert_eq!(s.revision(), before);
+}
+
+#[test]
+fn anchor_align_multi_selection_centers_selection_midpoint_preserving_spacing() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
+    let mut s = store();
+    let a = projected_anchor(&s, "top");
+    let b = projected_anchor(&s, "box");
+    let spacing_y = b.1 - a.1;
+    run(
+        &mut s,
+        TransformCommand::Align {
+            layer_ids: vec!["top".into(), "box".into()],
+            mode: AlignMode::VerticalCenter,
+            time: 0.0,
+        },
+    );
+    let a_after = projected_anchor(&s, "top");
+    let b_after = projected_anchor(&s, "box");
+    // Comp height is 100 -> midpoint of selection moves to 50 while relative spacing stays intact.
+    close((a_after.1 + b_after.1) / 2.0, 50.0);
+    close(b_after.1 - a_after.1, spacing_y);
+}
+
+#[test]
+fn new_text_centers_anchor_y_and_center_anchor_vertical_preserves_x() {
+    use pm_kernel::{LayerCommand, TransformCommand};
+    let mut s = store();
+    run(&mut s, LayerCommand::Add(Box::new(add("t1", "text"))));
+    let t1 = layer(&s, "t1");
+    // Default text size is 128 -> vertically centered anchor.y = 64.
+    close(num(&t1, &["p", "anchor.y", "v"]), 64.0);
+    close(num(&t1, &["p", "anchor.x", "v"]), 0.0);
+
+    // Explicit anchor.y (e.g. paragraph drag pinning top edge) is respected.
+    let mut add2 = add("t2", "text");
+    add2.properties.insert("anchor.y", Value::Number(0.0));
+    run(&mut s, LayerCommand::Add(Box::new(add2)));
+    close(num(&layer(&s, "t2"), &["p", "anchor.y", "v"]), 0.0);
+
+    // CenterAnchorVertical updates anchor.y while preserving anchor.x and visual position.
+    let mut solid = add("s1", "solid");
+    solid.properties.insert("anchor.x", Value::Number(12.0));
+    solid.properties.insert("anchor.y", Value::Number(0.0));
+    run(&mut s, LayerCommand::Add(Box::new(solid)));
+    let before_pos_y = num(&layer(&s, "s1"), &["p", "position.y", "v"]);
+    run(
+        &mut s,
+        TransformCommand::CenterAnchorVertical {
+            layer_ids: vec!["s1".into()],
+            time: 0.0,
+        },
+    );
+    let after = layer(&s, "s1");
+    let ay = num(&after, &["p", "anchor.y", "v"]);
+    close(ay, 50.0);
+    close(num(&after, &["p", "anchor.x", "v"]), 12.0);
+    close(num(&after, &["p", "position.y", "v"]), before_pos_y + ay);
 }
 
 #[test]
@@ -1196,7 +1257,7 @@ fn anchor_align_parent_and_child_3d_projection() {
         });
         let a = projected_anchor(&s, "top");
         let b = projected_anchor(&s, "box");
-        let target = (a.0 + b.0) / 2.0;
+        let shift = 100.0 - (a.0 + b.0) / 2.0;
         // Child first in selection deliberately exercises ancestor ordering.
         run(
             &mut s,
@@ -1206,8 +1267,8 @@ fn anchor_align_parent_and_child_3d_projection() {
                 time: 0.0,
             },
         );
-        close(projected_anchor(&s, "top").0, target);
-        close(projected_anchor(&s, "box").0, target);
+        close(projected_anchor(&s, "top").0, a.0 + shift);
+        close(projected_anchor(&s, "box").0, b.0 + shift);
         close(projected_anchor(&s, "top").1, a.1);
         close(projected_anchor(&s, "box").1, b.1);
         assert_eq!(s.history().len(), 1);

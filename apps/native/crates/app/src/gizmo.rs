@@ -4258,6 +4258,20 @@ impl Render for GizmoSurface {
                                 return;
                             }
                             let _ = pressed.update(cx, |s, cx| {
+                                if s.studio_flying() {
+                                    match e.button {
+                                        MouseButton::Left => {
+                                            s.studio_fly_end(true, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        MouseButton::Right => {
+                                            s.studio_fly_end(false, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
+                                    }
+                                    return;
+                                }
                                 if matches!(e.button, MouseButton::Left | MouseButton::Middle) {
                                     s.cancelled_press = None;
                                 } else if e.button == MouseButton::Right && !s.studio_flying()
@@ -4273,7 +4287,10 @@ impl Render for GizmoSurface {
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moved.update(cx, |s, cx| {
-                                    if s.cancelled_press.is_some() && e.pressed_button.is_some() {
+                                    if s.studio_flying() {
+                                        s.studio_fly_pointer(e.position, cx);
+                                        cx.stop_propagation();
+                                    } else if s.cancelled_press.is_some() && e.pressed_button.is_some() {
                                         cx.stop_propagation();
                                     } else {
                                         s.on_move(e, cx);

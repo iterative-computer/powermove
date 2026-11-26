@@ -163,6 +163,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "eye.slash" => g(pierre!("EyeSlash")),
         "lock" => g(pierre!("Lock")),
         "lock.open" => g(pierre!("LockOpen")),
+        "shield.fill" => g(pierre!("ShieldFill")),
         "speaker.wave.2" => g(drawn!("speaker")),
         "speaker.slash" => g(drawn!("speaker-off")),
         // Solo, as After Effects shows it: a dot, small while off (the
@@ -312,6 +313,7 @@ mod tests {
         "eye.slash",
         "lock",
         "lock.open",
+        "shield.fill",
         "speaker.wave.2",
         "speaker.slash",
         "s.circle.fill",

@@ -758,6 +758,20 @@ impl NativeTextSlot {
             v.setAutomaticSpellingCorrectionEnabled(false);
             v.setAutomaticQuoteSubstitutionEnabled(false);
             v.setAutomaticDashSubstitutionEnabled(false);
+            v.setAutomaticTextCompletionEnabled(false);
+            v.setAutomaticTextReplacementEnabled(false);
+            v.setSmartInsertDeleteEnabled(false);
+            // Disable macOS inline predictive text and Writing Tools on the
+            // invisible canvas editor so ghost completions never mutate the
+            // backing NSTextView string or jump the caret mid-word.
+            unsafe {
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setInlinePredictionType:)] {
+                    let _: () = msg_send![&*v, setInlinePredictionType: 1isize];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)] {
+                    let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                }
+            }
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(0., 0.));
