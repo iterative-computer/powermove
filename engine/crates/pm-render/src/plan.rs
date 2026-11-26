@@ -2585,14 +2585,247 @@ fn native_content_quad<'d>(
             let ch = node::to_number(scope.comp.member("h"));
             let w = js::max(1.0, or_chain(js::get(&d, "w"), cw, wf));
             let hh = js::max(1.0, or_chain(js::get(&d, "h"), ch, hf));
-            let (tw, th) = if crate::sampling::is_level2(layer)
-                || node::truthy(node::member(Some(layer), "continuousRaster"))
-            {
-                // Continuous rasterization (section 8): the child renders
-                // at the density it is drawn at, never below its own size.
-                let density = if b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
-                    *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
-                }) {
+            let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
+                Ok(c) => c,
+                Err(_) => return Ok(None),
+            };
+            let continuous = crate::sampling::is_level2(layer)
+                || node::truthy(node::member(Some(layer), "continuousRaster"));
+            let is_source_raster = b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
+                *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
+            });
+            let (raw_dx, raw_dy) = if continuous && !is_source_raster {
+                let offset = scope.size_anchor_offset(layer, time)?;
+                let (ax, ay) = (-offset.x, -offset.y);
+                let d_xy = match crate::space25d::projected(scope, layer, time, scale, w, hh, ax, ay)? {
+                    Some(plane) => match crate::space25d::corner_density(&plane) {
+                        Some((du, dv)) => (du / w.max(1e-9), dv / hh.max(1e-9)),
+                        None => scale,
+                    },
+                    None => {
+                        let m = scope.world_matrix(layer, time)?;
+                        (
+                            (m[0] * scale.0).hypot(m[1] * scale.1),
+                            (m[2] * scale.0).hypot(m[3] * scale.1),
+                        )
+                    }
+                };
+                (
+                    if d_xy.0.is_finite() { js::max(scale.0, d_xy.0) } else { scale.0 },
+                    if d_xy.1.is_finite() { js::max(scale.1, d_xy.1) } else { scale.1 },
+                )
+            } else {
+                scale
+            };
+
+            let full_tw_uncapped = js::max(2.0, js::round(w * raw_dx));
+            let full_th_uncapped = js::max(2.0, js::round(hh * raw_dy));
+            let oversize_w = (f64::from(width) * 1.15).max(2048.0);
+            let oversize_h = (f64::from(height) * 1.15).max(2048.0);
+
+            // When a continuously-rasterized precomp is zoomed far past the
+            // parent viewport (e.g. a 2425% scale-in), render only the visible
+            // sub-window instead of allocating a giant full-canvas texture.
+            let sub_has_screen3d = sub.layers().iter().any(|child| {
+                pm_eval::parenting::Role3d::of(child).is_some()
+                    || (js::layer_type(child) == "extension" && {
+                        let def = node::string(node::member(
+                            node::member(Some(child), "d"),
+                            "definition",
+                        ))
+                        .map(pm_model::JsString::to_string_lossy)
+                        .unwrap_or_default();
+                        def == crate::scene3d::legacy::SCENE3D_DEFINITION
+                            || b.options3d.mesh_definitions.contains_key(&def)
+                    })
+            });
+            let try_window = continuous
+                && !is_source_raster
+                && b.source_raster.is_none()
+                && b.material.is_none()
+                && !sub_has_screen3d
+                && (full_tw_uncapped > oversize_w || full_th_uncapped > oversize_h)
+                && !scope.has_renderable_effects(layer, time)?;
+
+            let windowed_rect = if try_window {
+                let offset = scope.size_anchor_offset(layer, time)?;
+                let sub_has_fx = sub.layers().iter().any(|child| {
+                    let is_source = node::string(node::member(Some(child), "effectSpace"))
+                        .is_some_and(|s| s.as_bytes() == b"source");
+                    !is_source
+                        && node::array(node::member(Some(child), "fx"))
+                            .is_some_and(|fx| !fx.is_empty())
+                });
+                let pad = 8.0 + if sub_has_fx { 128.0 } else { 0.0 };
+                let vw = f64::from(width);
+                let vh = f64::from(height);
+                let vp_corners = [
+                    [-pad, -pad],
+                    [vw + pad, -pad],
+                    [vw + pad, vh + pad],
+                    [-pad, vh + pad],
+                ];
+                let local_bounds = if scope.is_3d_layer(layer)? {
+                    crate::space25d::projected(scope, layer, time, scale, w, hh, -offset.x, -offset.y)?
+                        .map(|p| plane_at_origin(p, b.origin))
+                        .and_then(|p| pm_eval::space3d::inverse_plane(&p))
+                        .and_then(|inv| {
+                            let mut lo = [f64::INFINITY; 2];
+                            let mut hi = [f64::NEG_INFINITY; 2];
+                            for [px, py] in vp_corners {
+                                let denom = inv[2] * px + inv[5] * py + inv[8];
+                                if !denom.is_finite() || denom <= 1e-6 {
+                                    return None;
+                                }
+                                let lx = ((inv[0] * px + inv[3] * py + inv[6]) / denom) * w;
+                                let ly = ((inv[1] * px + inv[4] * py + inv[7]) / denom) * hh;
+                                if !(lx.is_finite() && ly.is_finite()) {
+                                    return None;
+                                }
+                                lo[0] = lo[0].min(lx);
+                                lo[1] = lo[1].min(ly);
+                                hi[0] = hi[0].max(lx);
+                                hi[1] = hi[1].max(ly);
+                            }
+                            Some((lo, hi))
+                        })
+                } else {
+                    let world = b.world(scope, layer, time, scale)?;
+                    let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
+                    let det = m[0] * m[3] - m[1] * m[2];
+                    if det.is_finite() && det.abs() > 1e-12 {
+                        let mut lo = [f64::INFINITY; 2];
+                        let mut hi = [f64::NEG_INFINITY; 2];
+                        for [px, py] in vp_corners {
+                            let dx = px - m[4];
+                            let dy = py - m[5];
+                            let lx = (m[3] * dx - m[2] * dy) / det;
+                            let ly = (-m[1] * dx + m[0] * dy) / det;
+                            lo[0] = lo[0].min(lx);
+                            lo[1] = lo[1].min(ly);
+                            hi[0] = hi[0].max(lx);
+                            hi[1] = hi[1].max(ly);
+                        }
+                        Some((lo, hi))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((lo, hi)) = local_bounds {
+                    let u0 = lo[0].clamp(0.0, w);
+                    let v0 = lo[1].clamp(0.0, hh);
+                    let u1 = hi[0].clamp(0.0, w);
+                    let v1 = hi[1].clamp(0.0, hh);
+                    if u1 <= u0 + 1e-6 || v1 <= v0 + 1e-6 {
+                        return Ok(None);
+                    }
+                    let playback = !b.final_output
+                        && (b.read_ahead || b.sampling == crate::sampling::Sampling::Playback);
+                    let max_edge = if playback {
+                        f64::from(width.max(height)).mul_add(1.25, 256.0).clamp(2048.0, 4096.0)
+                    } else {
+                        (f64::from(width.max(height)) * 2.0).clamp(8192.0, crate::sampling::MAX_TARGET)
+                    };
+                    let mut eff_dx = raw_dx;
+                    let mut eff_dy = raw_dy;
+                    let raw_win_w = (u1 - u0) * eff_dx;
+                    let raw_win_h = (v1 - v0) * eff_dy;
+                    let peak = raw_win_w.max(raw_win_h);
+                    if peak > max_edge && peak.is_finite() {
+                        let shrink = max_edge / peak;
+                        eff_dx *= shrink;
+                        eff_dy *= shrink;
+                    }
+                    let full_tw = (w * eff_dx).max(2.0);
+                    let full_th = (hh * eff_dy).max(2.0);
+                    let full_tw_lim = full_tw.floor().max(2.0);
+                    let full_th_lim = full_th.floor().max(2.0);
+                    let mut x0 = (u0 * eff_dx).floor().clamp(0.0, (full_tw_lim - 2.0).max(0.0));
+                    let mut y0 = (v0 * eff_dy).floor().clamp(0.0, (full_th_lim - 2.0).max(0.0));
+                    let mut x1 = (u1 * eff_dx).ceil().clamp(x0 + 2.0, full_tw_lim);
+                    let mut y1 = (v1 * eff_dy).ceil().clamp(y0 + 2.0, full_th_lim);
+                    // Snap playback window dimensions to 64px buckets so animated
+                    // scale-ins reuse the same GPU target in TargetPool every frame.
+                    if playback {
+                        let snap = |start: &mut f64, end: &mut f64, lim: f64| {
+                            let target_len = ((*end - *start) / 64.0).ceil() * 64.0;
+                            let len = target_len.clamp(2.0, lim.min(max_edge.floor()));
+                            if *start + len <= lim {
+                                *end = *start + len;
+                            } else {
+                                *end = lim;
+                                *start = (lim - len).max(0.0);
+                            }
+                        };
+                        snap(&mut x0, &mut x1, full_tw_lim);
+                        snap(&mut y0, &mut y1, full_th_lim);
+                    }
+                    let win_w = (x1 - x0).round().clamp(2.0, crate::sampling::MAX_TARGET) as u32;
+                    let win_h = (y1 - y0).round().clamp(2.0, crate::sampling::MAX_TARGET) as u32;
+                    Some((x0, y0, win_w, win_h, full_tw, full_th))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
+            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
+            // The child's video frames follow the center time of this level
+            // inside motion-blur samples.
+            let outer_center = b.video_center;
+            if let Some(center) = outer_center {
+                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
+                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
+            }
+
+            if let Some((ox, oy, win_w, win_h, full_tw, full_th)) = windowed_rect {
+                let cw_sub = node::to_number(sub.member("w"));
+                let ch_sub = node::to_number(sub.member("h"));
+                let or_dim = |v: f64, f: f64| if v.is_nan() || v == 0.0 { f } else { v };
+                let inner_scale = (
+                    full_tw / js::max(1.0, or_dim(cw_sub, w)),
+                    full_th / js::max(1.0, or_dim(ch_sub, hh)),
+                );
+                b.precomp_depth += 1;
+                let outer_origin = std::mem::replace(&mut b.origin, (ox, oy));
+                let outer_windowed = std::mem::replace(&mut b.windowed, true);
+                let project = scope.project;
+                let inner = {
+                    let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
+                    inner_scope.memoize_transforms();
+                    comp_pass(
+                        &mut inner_scope,
+                        b,
+                        child_time,
+                        win_w,
+                        win_h,
+                        inner_scale,
+                        true,
+                        None,
+                    )
+                };
+                b.precomp_depth -= 1;
+                b.origin = outer_origin;
+                b.windowed = outer_windowed;
+                b.video_center = outer_center;
+                let local_x0 = (ox / full_tw) * w;
+                let local_y0 = (oy / full_th) * hh;
+                let local_w = (f64::from(win_w) / full_tw) * w;
+                let local_h = (f64::from(win_h) / full_th) * hh;
+                return Ok(Some(Quad::Texture {
+                    source: Source::Comp(Arc::new(inner)),
+                    w: local_w,
+                    h: local_h,
+                    ax: -local_x0,
+                    ay: -local_y0,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                }));
+            }
+
+            let (tw, th) = if continuous {
+                let density = if is_source_raster {
                     scale
                 } else {
                     crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?
@@ -2607,7 +2840,8 @@ fn native_content_quad<'d>(
                     js::max(2.0, js::round(hh * scale.1)),
                 )
             };
-            if !(tw.is_finite() && th.is_finite()) || tw > 16384.0 || th > 16384.0 {
+            if !(tw.is_finite() && th.is_finite()) {
+                b.video_center = outer_center;
                 b.failures.push(LayerFailure {
                     composition: comp_id,
                     layer: js::layer_id(layer),
@@ -2615,20 +2849,10 @@ fn native_content_quad<'d>(
                 });
                 return Ok(None);
             }
-            let (tw, th) = (tw as u32, th as u32);
-            let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
-                Ok(c) => c,
-                Err(_) => return Ok(None),
-            };
-            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
-            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
-            // The child's video frames follow the center time of this level
-            // inside motion-blur samples.
-            let outer_center = b.video_center;
-            if let Some(center) = outer_center {
-                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
-                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
-            }
+            let (tw, th) = (
+                tw.min(crate::sampling::MAX_TARGET) as u32,
+                th.min(crate::sampling::MAX_TARGET) as u32,
+            );
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;
             // A precomp renders its own target from its own origin (today's

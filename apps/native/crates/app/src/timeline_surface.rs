@@ -3677,11 +3677,13 @@ impl TimelineSurface {
             return None;
         }
         let (_, y) = self.local(position);
-        let frame = self.frame.as_ref()?;
+        // Use the live scroll position (`self.viewport()`) rather than `self.frame` so
+        // driven-scroll offsets and in-flight frame rebuilds never miss a drop.
+        let viewport = self.viewport()?;
         let row = self
             .scene
             .as_ref()?
-            .layer_row_at(frame.viewport, &self.tokens, y)?;
+            .layer_row_at(viewport, &self.tokens, y)?;
         let RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&row.id).ok()? else {
             return None;
         };
@@ -7331,29 +7333,6 @@ impl Render for TimelineSurface {
                                 }
                             }
                         }
-                        if let Some(surface) = this.upgrade() {
-                            let surface = surface.read(cx);
-                            if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
-                                // v1 installParentPickwhip: the same cubic and target label.
-                                let mut line = PathBuilder::stroke(px(2.));
-                                line.move_to(*origin);
-                                line.cubic_bezier_to(*at, *origin + point(px(60.), px(0.)), *at - point(px(60.), px(0.)));
-                                if let Ok(line) = line.build() { window.paint_path(line, rgb(tokens.colors.accent)); }
-                                let label = target.as_ref().and_then(|id| surface.model.index.layer(id)).map(|l| format!("Parent to {}", l.name.to_string_lossy())).unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
-                                if target.is_some() {
-                                    if let (Some(scene), Some(frame)) = (&surface.scene, &surface.frame) {
-                                        let (_, y) = surface.local(*at);
-                                        if let Some(row) = scene.layer_row_at(frame.viewport, &tokens, y) {
-                                            window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(0.), px(row.top as f32)), size(bounds.size.width, px(row.height as f32)))).background(rgba((tokens.colors.accent << 8) | 0x29)));
-                                        }
-                                    }
-                                }
-                                let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
-                                let text = window.text_system().shape_line(label.into(), px(12.), &runs);
-                                let label_at = point((at.x + px(12.)).min(surface.bounds.right() - px(200.)), at.y - px(12.));
-                                let _ = text.paint(label_at, px(16.), TextAlign::Left, None, window, cx);
-                            }
-                        }
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
@@ -7419,11 +7398,15 @@ impl Render for TimelineSurface {
                                         *at = event.position;
                                         s.marquee();
                                     }
-                                    if let Gesture::ParentPick { ids, .. } = &s.gesture {
+                                    if let Gesture::ParentPick { ids, origin, .. } = &s.gesture {
                                         let next = s.parent_target(ids, event.position);
-                                        if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
+                                        let delta = event.position - *origin;
+                                        let travel = f32::from(delta.x).hypot(f32::from(delta.y));
+                                        let threshold = s.tokens.metrics.panel_drag_threshold;
+                                        if let Gesture::ParentPick { target, at, moved, .. } = &mut s.gesture {
                                             *target = next;
                                             *at = event.position;
+                                            *moved |= travel >= threshold || target.is_some();
                                         }
                                     }
                                     s.on_up(cx);
@@ -7554,10 +7537,140 @@ impl Render for TimelineSurface {
             .children(tip)
             .children(self.fallback_outline(cx))
             .children(self.graph_readout_element())
+            .children(self.parent_pick_overlay(cx))
             .child(self.audio_overlay(cx))
     }
 }
 impl TimelineSurface {
+    /// Deferred foreground overlay for the parent pickwhip so its target row
+    /// highlight, cubic connector, and floating pill badge always paint above
+    /// both the composited tracks and the JSX layer strip.
+    fn parent_pick_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Gesture::ParentPick {
+            origin,
+            at,
+            target,
+            moved: true,
+            ..
+        } = &self.gesture
+        else {
+            return None;
+        };
+        let origin = *origin;
+        let at = *at;
+        let target = target.clone();
+        let label = target
+            .as_ref()
+            .and_then(|id| self.model.index.layer(id))
+            .map(|l| format!("Parent to {}", l.name.to_string_lossy()))
+            .unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
+        let highlight_row = target.as_ref().and_then(|_| {
+            let (_, y) = self.local(at);
+            let viewport = self.viewport()?;
+            self.scene
+                .as_ref()?
+                .layer_row_at(viewport, &self.tokens, y)
+                .map(|r| (r.top as f32, r.height as f32))
+        });
+        let tokens = self.tokens.clone();
+        let surface_bounds = self.bounds;
+        let _ = cx;
+        Some(
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let paint_bounds = if f32::from(surface_bounds.size.width) > 0. {
+                                    surface_bounds
+                                } else {
+                                    bounds
+                                };
+                                window.paint_layer(paint_bounds, |window| {
+                                    if let Some((top, height)) = highlight_row {
+                                        window.paint_quad(
+                                            PaintQuad::new(Bounds::new(
+                                                paint_bounds.origin + point(px(0.), px(top)),
+                                                size(paint_bounds.size.width, px(height)),
+                                            ))
+                                            .background(rgba((tokens.colors.accent << 8) | 0x29)),
+                                        );
+                                    }
+                                    let mut line = PathBuilder::stroke(px(2.));
+                                    line.move_to(origin);
+                                    line.cubic_bezier_to(
+                                        at,
+                                        origin + point(px(60.), px(0.)),
+                                        at - point(px(60.), px(0.)),
+                                    );
+                                    if let Ok(line) = line.build() {
+                                        window.paint_path(line, rgb(tokens.colors.accent));
+                                    }
+                                    for pt in [origin, at] {
+                                        window.paint_quad(
+                                            PaintQuad::new(Bounds::new(
+                                                pt - point(px(3.5), px(3.5)),
+                                                size(px(7.), px(7.)),
+                                            ))
+                                            .background(rgb(tokens.colors.accent))
+                                            .corner_radii(px(3.5)),
+                                        );
+                                    }
+                                    let runs = [TextRun {
+                                        len: label.len(),
+                                        font: window.text_style().font(),
+                                        color: rgb_to_hsla(rgb(tokens.colors.text)),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                        letter_spacing: None,
+                                    }];
+                                    let text = window.text_system().shape_line(
+                                        label.clone().into(),
+                                        px(12.),
+                                        &runs,
+                                    );
+                                    let pad_x = px(8.);
+                                    let pill_w = text.width + pad_x * 2.;
+                                    let pill_h = px(22.);
+                                    let min_x = paint_bounds.origin.x + px(6.);
+                                    let max_x = (paint_bounds.right() - pill_w - px(6.)).max(min_x);
+                                    let min_y = paint_bounds.origin.y + px(4.);
+                                    let max_y = (paint_bounds.bottom() - pill_h - px(4.)).max(min_y);
+                                    let pill_x = (at.x + px(12.)).clamp(min_x, max_x);
+                                    let pill_y = (at.y - pill_h - px(6.)).clamp(min_y, max_y);
+                                    let pill = Bounds::new(point(pill_x, pill_y), size(pill_w, pill_h));
+                                    window.paint_quad(
+                                        PaintQuad::new(pill)
+                                            .background(rgb(tokens.colors.floating))
+                                            .border_widths(px(tokens.metrics.border))
+                                            .border_color(rgb(tokens.colors.separator))
+                                            .corner_radii(px(tokens.metrics.control_radius)),
+                                    );
+                                    let _ = text.paint(
+                                        point(pill_x + pad_x, pill_y + px(3.)),
+                                        px(16.),
+                                        TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+            .priority(10)
+            .into_any_element(),
+        )
+    }
+
     /// The graph's readout while keys are dragged (v1): one key reads where
     /// it is, value and time; several read the offset the whole group moved
     /// by. The Speed Graph's axis is a rate, so it reads the time alone.

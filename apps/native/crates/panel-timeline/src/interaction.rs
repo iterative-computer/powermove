@@ -1039,24 +1039,31 @@ impl TimelineModel {
         self.set_switch(&ids, switch, target)
     }
     pub fn parent(&self, ids: &[String], parent: Option<String>, time: f64) -> Plan {
-        Plan::edit(
-            ids.iter()
-                .map(|id| {
-                    LayerCommand::Set {
-                        layer_id: id.clone(),
-                        patch: LayerPatch {
-                            parent: Some(ParentChange {
-                                parent: parent.clone(),
-                                time,
-                            }),
-                            ..Default::default()
-                        },
-                    }
-                    .into()
-                })
-                .collect(),
-            self.index.revision,
-        )
+        let commands = ids
+            .iter()
+            .map(|id| {
+                LayerCommand::Set {
+                    layer_id: id.clone(),
+                    patch: LayerPatch {
+                        parent: Some(ParentChange {
+                            parent: parent.clone(),
+                            time,
+                        }),
+                        ..Default::default()
+                    },
+                }
+                .into()
+            })
+            .collect();
+        Plan {
+            calls: vec![Call::Transact {
+                label: Some("Set Parent".into()),
+                body: WriteBody::Commands(commands),
+                expected_revision: None,
+            }],
+            effects: Vec::new(),
+            ..Plan::default()
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

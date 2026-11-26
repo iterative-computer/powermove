@@ -1066,23 +1066,6 @@ fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), Comm
                     initialized = true;
                 }
             }
-            let layers = cx.layers(comp.as_deref());
-            let (w, h) = comp_dimensions(cx, comp.as_deref());
-            if layer_type == "null"
-                && comp_has_studio_3d(&layers)
-                && is_untouched_2d_null(&layer, &layers, w, h)
-            {
-                set_channel_number(&mut transform, "position.x", 0.0);
-                set_channel_number(&mut transform, "position.y", 0.0);
-                set_channel_number(&mut transform, "position.z", 0.0);
-                set_channel_number(&mut transform, "anchor.x", 0.0);
-                set_channel_number(&mut transform, "anchor.y", 0.0);
-                set_channel_number(&mut transform, "anchor.z", 0.0);
-                initialized = true;
-                let mut d_path = at("d");
-                d_path.push("studio3d".into());
-                cx.set(d_path, Value::Bool(true))?;
-            }
             if initialized {
                 cx.replace(at("p"), Value::Object(transform))?;
             }
@@ -1325,10 +1308,6 @@ fn is_studio_3d_layer(layer: &Value) -> bool {
         .and_then(|d| d.get("definition"))
         .and_then(Value::as_str)
         .is_some_and(|def| def.starts_with("powermove.3d."))
-}
-
-fn comp_has_studio_3d(layers: &[Value]) -> bool {
-    layers.iter().any(is_studio_3d_layer)
 }
 
 fn set_channel_number(transform: &mut Map, key: &str, value: f64) {

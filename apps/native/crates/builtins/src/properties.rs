@@ -203,14 +203,7 @@ impl Properties {
                     let env = pm_panel_studio3d::properties::environment(data);
                     return Some((role, env, studio_label(role, env, data)));
                 }
-                if r["type"] == "null"
-                    && r["threeD"] == true
-                    && (r["d"]["studio3d"] == true
-                        || pm_panel_studio3d::properties::scene_summary(model.published())
-                            .ok()
-                            .flatten()
-                            .is_some())
-                {
+                if r["type"] == "null" && r["threeD"] == true && r["d"]["studio3d"] == true {
                     return Some((
                         pm_panel_studio3d::properties::Role::Object,
                         None,

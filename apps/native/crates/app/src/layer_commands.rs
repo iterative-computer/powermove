@@ -1755,15 +1755,7 @@ pub fn command_plan(
             false,
             time,
         )),
-        // A null in a Studio 3D scene starts at 3D origin (0, 0, 0) with 3D on;
-        // in 2D compositions it starts at the composition's centre as before.
-        "newNull" => {
-            if layers.iter().any(|l| crate::gizmo::is_studio(published, &l.id)) {
-                command_plan("new3d", &[serde_json::json!("null")], published, time)
-            } else {
-                Some(new_layer(published, "null", "Null", true, time))
-            }
-        }
+        "newNull" => Some(new_layer(published, "null", "Null", true, time)),
         "selectAll" => Some(selection_plan(
             layers.iter().map(|l| l.id.clone()).collect(),
         )),

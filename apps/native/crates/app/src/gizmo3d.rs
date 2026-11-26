@@ -1237,6 +1237,9 @@ impl GizmoSurface {
         let drag_active = self.studio.drag.as_ref().is_some_and(|d| d.active);
         for (index, item) in scene.items.iter().enumerate() {
             if item.is_null {
+                if item.is_plane && !self.studio.free_look {
+                    continue;
+                }
                 let sel = self.studio.selected.contains(&item.id);
                 let out = if sel { &mut selected } else { &mut markers };
                 let mut color = if sel { accent } else { ink };
@@ -2068,7 +2071,7 @@ impl GizmoSurface {
             items: scene
                 .items
                 .iter()
-                .filter(|i| i.is_null)
+                .filter(|i| i.is_null && (free || !i.is_plane))
                 .cloned()
                 .collect(),
             ..(*scene).clone()

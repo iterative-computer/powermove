@@ -233,7 +233,7 @@ impl Scene {
             .iter()
             .filter(|item| include(item))
             .filter_map(|item| {
-                let (t, normal) = if item.is_plane {
+                let (t, normal) = if item.is_plane && !item.is_null {
                     let c = item.box_corners?;
                     let (x, y) = (sub(c[1], c[0]), sub(c[2], c[0]));
                     let normal = normalize(cross(x, y));
@@ -623,73 +623,142 @@ fn scene_items(
             if off {
                 continue;
             }
-            let id = id.unwrap_or_default().to_owned();
-            let Some(world) = r.null_worlds.get(&id) else {
+            let Some(id) = id else { continue };
+            let studio_null = flag(layer.get("d").and_then(|d| d.get("studio3d")));
+            let Some((source_index, evaluated_layer)) = q.layer(id) else {
                 continue;
             };
-            let parent_world = r.parent_worlds.get(&id).copied().unwrap_or(IDENTITY);
-            let Some((_, evaluated_layer)) = q.layer(&id) else {
-                continue;
-            };
-            let pivot = translation(world);
-            let local = Bounds {
-                min: [-0.25; 3],
-                max: [0.25; 3],
-            };
-            let transformed = pm_scene3d::geometry::transform(local, *world).unwrap_or(Bounds {
-                min: [pivot[0] - 0.25, pivot[1] - 0.25, pivot[2] - 0.25],
-                max: [pivot[0] + 0.25, pivot[1] + 0.25, pivot[2] + 0.25],
-            });
-            // Keep a minimum picking envelope even when a null is scaled tiny.
+            let position = q.channels(
+                evaluated_layer,
+                ["position.x", "position.y", "position.z"],
+                0.,
+            );
+            let rotation = q.channels(
+                evaluated_layer,
+                ["rotation.x", "rotation.y", "rotation"],
+                0.,
+            );
+            let scale = q.channels(evaluated_layer, ["scale.x", "scale.y", "scale.z"], 100.);
             let pad = 0.12;
-            let bounds = Bounds {
-                min: std::array::from_fn(|i| transformed.min[i].min(pivot[i] - pad)),
-                max: std::array::from_fn(|i| transformed.max[i].max(pivot[i] + pad)),
-            };
-            let box_corners = (0..8)
-                .map(|n| {
-                    let c: Vec3 = std::array::from_fn(|i| {
+            if studio_null {
+                let Some(world) = r.null_worlds.get(id) else {
+                    continue;
+                };
+                let parent_world = r.parent_worlds.get(id).copied().unwrap_or(IDENTITY);
+                let pivot = translation(world);
+                let local = Bounds {
+                    min: [-0.25; 3],
+                    max: [0.25; 3],
+                };
+                let transformed =
+                    pm_scene3d::geometry::transform(local, *world).unwrap_or(Bounds {
+                        min: [pivot[0] - 0.25, pivot[1] - 0.25, pivot[2] - 0.25],
+                        max: [pivot[0] + 0.25, pivot[1] + 0.25, pivot[2] + 0.25],
+                    });
+                let bounds = Bounds {
+                    min: std::array::from_fn(|i| transformed.min[i].min(pivot[i] - pad)),
+                    max: std::array::from_fn(|i| transformed.max[i].max(pivot[i] + pad)),
+                };
+                let box_corners = (0..8)
+                    .map(|n| {
+                        let c: Vec3 = std::array::from_fn(|i| {
+                            if n & (1 << i) == 0 {
+                                local.min[i]
+                            } else {
+                                local.max[i]
+                            }
+                        });
+                        pm_scene3d::geometry::transform(Bounds { min: c, max: c }, *world)
+                            .ok()
+                            .map(|b| b.min)
+                    })
+                    .collect::<Option<Vec<Vec3>>>()
+                    .and_then(|v| v.try_into().ok());
+                items.push(Item {
+                    position,
+                    rotation,
+                    scale,
+                    pixels: None,
+                    id: id.into(),
+                    role: Role::Object,
+                    is_null: true,
+                    is_plane: false,
+                    name: name(),
+                    locked: own_lock,
+                    world: *world,
+                    parent_world,
+                    bounds,
+                    box_corners,
+                    pivot,
+                    target: None,
+                    aim: None,
+                    light: None,
+                    shape: [0.; 3],
+                });
+            } else {
+                // Regular 3D null in composition pixel space: bridge into scene space
+                // so it appears, picks, and drags cleanly in 3D Free View too.
+                if !q.active_plane(evaluated_layer) {
+                    continue;
+                }
+                let Some((pixel_world, position_world)) = q.plane_worlds(evaluated_layer) else {
+                    continue;
+                };
+                let world = multiply(&bridge, &pixel_world);
+                let parent = multiply(
+                    &position_world,
+                    &pm_eval::space3d::translation(0., 0., -position[2]),
+                );
+                let parent_world = multiply(&bridge, &parent);
+                let pivot = transform_aim(&parent_world, &position);
+                let (x0, y0, x1, y1) = q
+                    .bounds(source_index, evaluated_layer)
+                    .map_or((0., 0., 100., 100.), |b| (b.x0, b.y0, b.x1, b.y1));
+                let local = Bounds {
+                    min: [x0, y0, 0.],
+                    max: [x1, y1, 0.],
+                };
+                let transformed =
+                    pm_scene3d::geometry::transform(local, world).unwrap_or(Bounds {
+                        min: [pivot[0] - pad, pivot[1] - pad, pivot[2] - pad],
+                        max: [pivot[0] + pad, pivot[1] + pad, pivot[2] + pad],
+                    });
+                let bounds = Bounds {
+                    min: std::array::from_fn(|i| transformed.min[i].min(pivot[i] - pad)),
+                    max: std::array::from_fn(|i| transformed.max[i].max(pivot[i] + pad)),
+                };
+                let corners = std::array::from_fn(|n| {
+                    let p = std::array::from_fn(|i| {
                         if n & (1 << i) == 0 {
                             local.min[i]
                         } else {
                             local.max[i]
                         }
                     });
-                    pm_scene3d::geometry::transform(Bounds { min: c, max: c }, *world)
-                        .ok()
-                        .map(|b| b.min)
-                })
-                .collect::<Option<Vec<Vec3>>>()
-                .and_then(|v| v.try_into().ok());
-            items.push(Item {
-                position: q.channels(
-                    evaluated_layer,
-                    ["position.x", "position.y", "position.z"],
-                    0.,
-                ),
-                rotation: q.channels(
-                    evaluated_layer,
-                    ["rotation.x", "rotation.y", "rotation"],
-                    0.,
-                ),
-                scale: q.channels(evaluated_layer, ["scale.x", "scale.y", "scale.z"], 100.),
-                pixels: None,
-                id,
-                role: Role::Object,
-                is_null: true,
-                is_plane: false,
-                name: name(),
-                locked: own_lock,
-                world: *world,
-                parent_world,
-                bounds,
-                box_corners,
-                pivot,
-                target: None,
-                aim: None,
-                light: None,
-                shape: [0.; 3],
-            });
+                    transform_aim(&world, &p)
+                });
+                items.push(Item {
+                    position,
+                    rotation,
+                    scale,
+                    pixels: Some(scene_units_per_pixel(height)),
+                    id: id.into(),
+                    role: Role::Object,
+                    is_null: true,
+                    is_plane: true,
+                    name: name(),
+                    locked: q.locked(id),
+                    world,
+                    parent_world,
+                    bounds,
+                    box_corners: Some(corners),
+                    pivot,
+                    target: None,
+                    aim: None,
+                    light: None,
+                    shape: [0.; 3],
+                });
+            }
             continue;
         }
         let Some(role) = pm_scene3d::layer_role(layer) else {

@@ -472,9 +472,6 @@ struct StudioSceneCache {
 struct StudioFrame {
     scene: Option<Arc<Scene>>,
     layers: Vec<pm_kernel::LayerInfo>,
-    // A group's geometry includes its descendants. In a Studio composition,
-    // evaluate it with the frame so a click doesn't walk them again.
-    groups: Option<Vec<Pose>>,
 }
 
 pub struct GizmoSurface {
@@ -512,6 +509,10 @@ pub struct GizmoSurface {
     /// The oldest pointer event behind the queued drag steps (`Host::input`).
     step_input: Option<f64>,
     latest: u64,
+    /// Single-flight guard for background `reread` tasks so rapid ticks/clicks
+    /// never pile up concurrent reads on the GCD thread pool.
+    reread_out: bool,
+    reread_again: bool,
     #[cfg(test)]
     completed_read: u64,
     /// Press waiting on a pick; the drag starts on its answer if still held.
@@ -644,6 +645,11 @@ fn comp_focal_length(
 
 /// Active non-group descendants of `group_id` in `list`.
 fn group_descendants(list: &[pm_kernel::model::LayerInfo], group_id: &str) -> Vec<String> {
+    let parent_group: std::collections::HashMap<&str, Option<&str>> = list
+        .iter()
+        .filter(|l| l.kind == "group")
+        .map(|l| (l.id.as_str(), l.group.as_deref()))
+        .collect();
     let mut out = Vec::new();
     for info in list {
         if info.kind == "group" {
@@ -660,10 +666,7 @@ fn group_descendants(list: &[pm_kernel::model::LayerInfo], group_id: &str) -> Ve
                 out.push(info.id.clone());
                 break;
             }
-            cur = list
-                .iter()
-                .find(|l| l.id == g)
-                .and_then(|l| l.group.as_deref());
+            cur = parent_group.get(g).copied().flatten();
         }
     }
     out
@@ -805,7 +808,7 @@ impl Pose {
 fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let root = p.snapshot.root()?;
     let list = pm_kernel::model::list_layers(root, None);
-    Some(read_poses(p, time, root, &list, p.selection.layers(), None))
+    Some(read_poses(p, time, root, &list, p.selection.layers()))
 }
 fn read_poses(
     p: &pm_kernel::Published,
@@ -813,7 +816,6 @@ fn read_poses(
     root: &pm_model::Node,
     list: &[pm_kernel::LayerInfo],
     selected: &[String],
-    groups: Option<&[Pose]>,
 ) -> Vec<Pose> {
     let roots = crate::layer_commands::transform_roots(list, selected);
     let layers: std::collections::HashMap<&str, (bool, &str)> = list
@@ -824,26 +826,23 @@ fn read_poses(
     let mut poses = vec![];
     for id in selected {
         let (locked, kind) = layers.get(id.as_str()).copied().unwrap_or((true, ""));
-        if kind == "group"
-            && let Some(groups) = groups
-        {
-            if let Some(mut pose) = groups.iter().find(|pose| &pose.id == id).cloned() {
-                pose.root = roots.contains(id.as_str());
-                poses.push(pose);
-            }
-            continue;
-        }
         let q = mirror.queries();
         // A selected layer the playhead is outside of has nothing on screen to
         // box (viewer.ts visibleSelectionLayers).
         if !q.active(None, id, time).unwrap_or(false) {
             continue;
         }
+        // Only text, captions, and groups (which may enclose text) need the
+        // shared font-registry mirror; other layer kinds resolve lock-free.
+        let bounds = if matches!(kind, "text" | "captions" | "group") {
+            crate::text_host::query(p, |q| q.bounds(None, id, time))
+        } else {
+            q.bounds(None, id, time)
+        };
         let (Ok(world), Ok(local), Ok(Some(bounds))) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
-            // Text measures with the registry's fonts.
-            crate::text_host::query(p, |q| q.bounds(None, id, time)),
+            bounds,
         ) else {
             continue;
         };
@@ -1006,9 +1005,13 @@ fn read_poses(
                             child_has_depth = true;
                         }
                     }
-                    let Ok(Some(cb)) =
+                    let child_kind = layers.get(child_id.as_str()).map(|(_, k)| *k).unwrap_or("");
+                    let cb_res = if matches!(child_kind, "text" | "captions") {
                         crate::text_host::query(p, |q| q.bounds(None, child_id, time))
-                    else {
+                    } else {
+                        mirror.queries().bounds(None, child_id, time)
+                    };
+                    let Ok(Some(cb)) = cb_res else {
                         continue;
                     };
                     if let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false) {
@@ -1087,9 +1090,13 @@ fn read_poses(
                     if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
                         continue;
                     }
-                    let Ok(Some(cb)) =
+                    let child_kind = layers.get(child_id.as_str()).map(|(_, k)| *k).unwrap_or("");
+                    let cb_res = if matches!(child_kind, "text" | "captions") {
                         crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
-                    else {
+                    } else {
+                        mirror.queries().bounds(None, &child_id, time)
+                    };
+                    let Ok(Some(cb)) = cb_res else {
                         continue;
                     };
                     if let Some((cc, child_plane)) =
@@ -1185,6 +1192,8 @@ impl GizmoSurface {
             busy: false,
             step_input: None,
             latest: 0,
+            reread_out: false,
+            reread_again: false,
             #[cfg(test)]
             completed_read: 0,
             picking: None,
@@ -1260,14 +1269,23 @@ impl GizmoSurface {
     }
 
     /// Reread the pose off the main thread. While playing the engine owns the
-    /// frame and gizmos stay down.
+    /// frame and gizmos stay down. Single-flight: at most one read runs on the
+    /// background pool at a time; newer triggers coalesce into one follow-up.
     fn reread(&mut self, cx: &mut Context<Self>) {
         if self.host.playing(cx) {
+            self.latest += 1;
+            self.reread_again = false;
             self.poses = Default::default();
             self.host.overlay(vec![], None, cx);
             return;
         }
         self.latest += 1;
+        if self.reread_out {
+            self.reread_again = true;
+            return;
+        }
+        self.reread_out = true;
+        self.reread_again = false;
         let ticket = self.latest;
         // Use the same publication for the scene, poses, and part selection.
         let published = self.kernel.published(&self.project);
@@ -1307,39 +1325,30 @@ impl GizmoSurface {
             let (p, frame_read) = published.zip(scene_read)?;
             let root = p.snapshot.root()?;
             let frame = frame_read.get_or_init(|| {
+                let layers = pm_kernel::model::list_layers(root, None);
+                let text_ids: std::collections::HashSet<&str> = layers
+                    .iter()
+                    .filter(|l| matches!(l.kind.as_str(), "text" | "captions"))
+                    .map(|l| l.id.as_str())
+                    .collect();
+                let mut local_mirror = QueryMirror::new(&p);
                 // The viewport probe returns immediately for a flat
                 // comp, before resolving or converting its layers.
                 let scene = pm_panel_studio3d::viewport::scene_with_bounds(&p, time, |id| {
-                    crate::text_host::query(&p, |q| q.bounds(None, id, time))
-                        .ok()
-                        .flatten()
+                    if text_ids.contains(id) {
+                        crate::text_host::query(&p, |q| q.bounds(None, id, time))
+                            .ok()
+                            .flatten()
+                    } else {
+                        local_mirror.queries().bounds(None, id, time).ok().flatten()
+                    }
                 })
                 .ok()
                 .map(Arc::new);
-                let layers = pm_kernel::model::list_layers(root, None);
-                let groups = scene.as_ref().map(|_| {
-                    let ids: Vec<_> = layers
-                        .iter()
-                        .filter(|layer| layer.kind == "group")
-                        .map(|layer| layer.id.clone())
-                        .collect();
-                    read_poses(&p, time, root, &layers, &ids, None)
-                });
-                StudioFrame {
-                    scene,
-                    layers,
-                    groups,
-                }
+                StudioFrame { scene, layers }
             });
             let mut scene = frame.scene.clone();
-            let mut poses = read_poses(
-                &p,
-                time,
-                root,
-                &frame.layers,
-                p.selection.layers(),
-                frame.groups.as_deref(),
-            );
+            let mut poses = read_poses(&p, time, root, &frame.layers, p.selection.layers());
             poses.retain(|pose| {
                 // Depth boxes are selection-specific. Only copy the
                 // base scene when a selected layer adds one.
@@ -1419,6 +1428,7 @@ impl GizmoSurface {
         cx.spawn(async move |this, cx| {
             let read = read.await;
             let _ = this.update(cx, |s, cx| {
+                s.reread_out = false;
                 if s.latest == ticket && !s.draws_live_outline() {
                     let (
                         poses,
@@ -1522,6 +1532,10 @@ impl GizmoSurface {
                         s.completed_read = ticket;
                     }
                     s.effects_reread(cx);
+                }
+                if s.reread_again {
+                    s.reread_again = false;
+                    s.reread(cx);
                 }
             });
         })
@@ -4277,30 +4291,11 @@ pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
             == Some("null")
             && l.get("threeD").and_then(|v| v.to_value().as_bool()) == Some(true)
         {
-            if l.get("d")
+            return l
+                .get("d")
                 .and_then(|d| d.get("studio3d"))
                 .and_then(|v| v.to_value().as_bool())
-                == Some(true)
-            {
-                return true;
-            }
-            let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref());
-            return comp
-                .and_then(|c| c.get("layers"))
-                .is_some_and(|layers| match layers.kind() {
-                    pm_model::NodeKind::Array(arr) => arr.iter().any(|other| {
-                        other
-                            .get("d")
-                            .and_then(|d| d.get("definition"))
-                            .is_some_and(|def| match def.kind() {
-                                pm_model::NodeKind::String(s) => {
-                                    s.to_string_lossy().starts_with("powermove.3d.")
-                                }
-                                _ => false,
-                            })
-                    }),
-                    _ => false,
-                });
+                == Some(true);
         }
         false
     })
