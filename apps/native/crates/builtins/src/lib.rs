@@ -2349,11 +2349,23 @@ impl Builtins {
         semantic: Option<String>,
     ) -> Result<String> {
         // Match the semantic identity on the same locked surface used for
-        // planning, so republishing cannot drop a valid press (Agent Stop).
-        let semantic = semantic.filter(|id| {
-            entry.surface.node(target)
-                .and_then(|node| node.props.get("id"))
-                .and_then(Value::as_str) == Some(id.as_str())
+        // planning, so republishing cannot drop a valid press (Agent Stop) or
+        // break selection when a panel republishes with fresh node IDs under lag.
+        let mut target = target;
+        let semantic = semantic.and_then(|id| {
+            let matches = |node: &pm_surface::Node| {
+                node.props.get("id").and_then(Value::as_str) == Some(id.as_str())
+            };
+            if entry.surface.node(target).is_some_and(matches) {
+                Some(id)
+            } else if let Some((&found_id, _)) =
+                entry.surface.nodes().iter().find(|(_, node)| matches(node))
+            {
+                target = found_id;
+                Some(id)
+            } else {
+                None
+            }
         });
         let revision = if semantic.is_some() { entry.surface.revision() } else { revision };
         let mut event = entry

@@ -308,6 +308,7 @@ impl ViewerSource {
         fonts: Option<&pm_render::text::host::RenderFonts>,
         observer: Option<RefineObserver>,
         cache: StudioResourceCache,
+        prewarm: bool,
     ) -> Result<Option<std::sync::Arc<Self>>, String> {
         if pm_eval::node::is_str(pm_eval::node::member(doc.root(), "render3d"), "electron") {
             return Ok(None);
@@ -321,8 +322,10 @@ impl ViewerSource {
             .with_capture_definitions(renderer.definitions());
         let tier = preview_tier(&document, request, preview)?;
         // The background loader fills the same shared resource cache.
-        std::sync::Arc::new(DocumentSource::new(doc, media.clone()).with_resource_cache(cache))
-            .spawn_prewarm(&request.composition);
+        if prewarm {
+            std::sync::Arc::new(DocumentSource::new(doc, media.clone()).with_resource_cache(cache))
+                .spawn_prewarm(&request.composition);
+        }
         Ok(Some(std::sync::Arc::new(Self {
             revision: document.revision(),
             document: std::sync::RwLock::new(Some(document)),

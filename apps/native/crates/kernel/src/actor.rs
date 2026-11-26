@@ -362,6 +362,27 @@ fn transform_value_op(op: &pm_model::Op) -> bool {
                 && key(value) == Some("v")
                 && matches!(patch.value, Some(Value::Number(_)))
         }
+        (Some("p"), [channel, kf, PathPart::Index(_), value]) => {
+            key(channel).is_some_and(transform)
+                && key(kf) == Some("kf")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("d"), [data, camera, p, _channel, value]) => {
+            key(data) == Some("data")
+                && key(camera) == Some("camera")
+                && key(p) == Some("p")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("d"), [data, camera, p, _channel, kf, PathPart::Index(_), value]) => {
+            key(data) == Some("data")
+                && key(camera) == Some("camera")
+                && key(p) == Some("p")
+                && key(kf) == Some("kf")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
         (Some("locked_intent"), []) => patch.value.as_ref().is_none_or(|value| {
             value.as_object().is_some_and(|channels| {
                 channels.iter().all(|(channel, value)| {
@@ -399,6 +420,55 @@ fn transform_value_reuse_rejects_structure_and_keyframe_edits() {
     };
     assert!(transform_value_op(
         &Patch::set(transform("v"), Value::Number(1.)).into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "p".into(),
+                "position.x".into(),
+                "kf".into(),
+                0_usize.into(),
+                "v".into(),
+            ],
+            Value::Number(12.),
+        )
+        .into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "d".into(),
+                "data".into(),
+                "camera".into(),
+                "p".into(),
+                "fov".into(),
+                "v".into(),
+            ],
+            Value::Number(32.),
+        )
+        .into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "d".into(),
+                "data".into(),
+                "camera".into(),
+                "p".into(),
+                "targetX".into(),
+                "kf".into(),
+                1_usize.into(),
+                "v".into(),
+            ],
+            Value::Number(3.5),
+        )
+        .into()
     ));
     assert!(!transform_value_op(
         &Patch::set(transform("kf"), Value::Array(vec![])).into()

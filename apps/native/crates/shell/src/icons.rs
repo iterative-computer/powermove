@@ -154,6 +154,9 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "square.dashed" => g(drawn!("dashed")),
         "lightbulb" => g(pierre!("BulbFill")),
         "square.stack.3d.up" | "square.stack.3d.down.right" => g(pierre!("Layers")),
+        // Agent provider marks in the composer model picker.
+        "provider.openai" => g(drawn!("provider-openai")),
+        "provider.claude" => g(drawn!("provider-claude")),
         _ => None,
     }
 }
@@ -282,6 +285,8 @@ mod tests {
         "lightbulb",
         "square.stack.3d.up",
         "square.stack.3d.down.right",
+        "provider.openai",
+        "provider.claude",
     ];
 
     /// Every mapped glyph parses, draws inside its square (nothing clipped

@@ -321,8 +321,13 @@ pub struct Host {
     /// The 3D model part picker's open request and in-place filter state.
     pub part_pick: Option<PartMenuState>,
     /// The Agent panel's open menu: its runtime, the request it answers,
-    /// and the values of its rows.
-    agent_pick: Option<(Arc<Builtins>, u64, Vec<Value>, Option<pm_shell::transient::ComposerPicker>)>,
+    /// and each row's `(value, optional deleteValue)`.
+    agent_pick: Option<(
+        Arc<Builtins>,
+        u64,
+        Vec<(Value, Option<Value>)>,
+        Option<pm_shell::transient::ComposerPicker>,
+    )>,
     /// The Agent panel is in the workspace's docks (pinned), and whether its
     /// toolbar item has parked it (hidden, its place kept).
     pub agent_docked: bool,
@@ -1331,9 +1336,13 @@ impl Controller {
             Some("model") => Some(ComposerPicker::Model),
             Some("effort") => Some(ComposerPicker::Effort),
             Some("access") => Some(ComposerPicker::Access),
+            Some("threads") => Some(ComposerPicker::Threads),
             _ => None,
         };
-        let search = picker.map(|kind| kind == ComposerPicker::Model && request.input["search"] == true);
+        let search = picker.map(|kind| {
+            matches!(kind, ComposerPicker::Model | ComposerPicker::Threads)
+                && request.input["search"] == true
+        });
         let options = request.input["options"]
             .as_array()
             .cloned()
@@ -1371,13 +1380,31 @@ impl Controller {
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
                 }
+                if let Some(icon) = o["icon"].as_str() {
+                    c.menu_icon = match icon {
+                        "plus" => Some("plus"),
+                        _ => None,
+                    };
+                }
+                if o["separatorAfter"] == true {
+                    c = c.separator_after();
+                }
+                if o["deleteValue"].is_string() {
+                    c = c.with_delete(format!("agentPickDelete:{i}"));
+                }
                 c.informational = o["informational"] == true;
                 c.is_default = o["default"] == true;
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })
             .collect();
-        let values = options.iter().map(|o| o["value"].clone()).collect();
+        let values: Vec<(Value, Option<Value>)> = options
+            .iter()
+            .map(|o| {
+                let delete = o["deleteValue"].as_str().map(|s| Value::String(s.to_owned()));
+                (o["value"].clone(), delete)
+            })
+            .collect();
         if request.input["refresh"] == true {
             // An account update can arrive while the user is choosing. Keep
             // the existing reply id, and update its row indices along with the menu.
@@ -1459,7 +1486,18 @@ impl Controller {
             let value = index
                 .parse::<usize>()
                 .ok()
-                .and_then(|i| values.get(i).cloned())
+                .and_then(|i| values.get(i).map(|(v, _)| v.clone()))
+                .unwrap_or(Value::Null);
+            runtime.platform_reply(id, Ok(value));
+        }
+    }
+    /// The Agent menu's trailing delete button answer: the row's `deleteValue`.
+    pub fn agent_picked_delete(&mut self, index: &str) {
+        if let Some((runtime, id, values, _)) = self.builtins.agent_pick.take() {
+            let value = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| values.get(i).and_then(|(_, delete)| delete.clone()))
                 .unwrap_or(Value::Null);
             runtime.platform_reply(id, Ok(value));
         }
@@ -1551,6 +1589,8 @@ impl Controller {
                     }
                 })
                 .await;
+            let mut tickets = tickets;
+            tickets.sort_by_key(|(id, _)| if id == "inspector" { 0 } else { 1 });
             for (id, ticket) in tickets {
                 let result = match ticket {
                     Ok(ticket) => ticket.await.map(|_| ()),
@@ -1561,6 +1601,15 @@ impl Controller {
                 {
                     eprintln!("Panel {id} update: {error}");
                 }
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &check))
+                    {
+                        v.drain_builtins(cx);
+                    }
+                });
             }
             let _ = this.update(cx, |v, cx| {
                 if !v

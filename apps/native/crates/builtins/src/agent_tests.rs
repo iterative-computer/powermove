@@ -905,7 +905,12 @@ fn the_thread_picker_lists_switches_and_deletes_after_asking() {
     panel.wait(idle);
     let agent = panel.agent();
     let first = thread_id(&agent);
-    panel.click("agent-new");
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["picker"], "threads");
+    assert_eq!(menu.input["search"], true);
+    let (agent_new, first_id) = (agent.clone(), first.clone());
+    panel.pick(&menu, "new", move |_| thread_id(&agent_new) != first_id);
     let second = thread_id(&agent);
     assert_ne!(first, second);
     panel.click("agent-threads");
@@ -928,10 +933,18 @@ fn the_thread_picker_lists_switches_and_deletes_after_asking() {
     panel.pick(&menu, &format!("thread:{first}"), move |_| {
         thread_id(&agent2) == wanted
     });
-    // Delete asks first (the window's alert), then the history goes.
+    // Hover trashcan delete asks first (the window's alert), then the history goes.
     panel.click("agent-threads");
     let menu = panel.request("agentMenu");
-    assert!(Agent::labels(&menu).contains(&"Delete Thread…".to_owned()));
+    assert!(
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["deleteValue"] == json!(format!("delete:{first}"))),
+        "each thread row carries a hover delete value: {:?}",
+        menu.input["options"]
+    );
     panel
         .panels
         .platform_reply(menu.id, Ok(json!(format!("delete:{first}"))));

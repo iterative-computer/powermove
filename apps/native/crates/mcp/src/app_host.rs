@@ -12,9 +12,11 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicIsize, Ordering},
     },
 };
+
+const EXCLUSIVE_OPERATION: isize = -1;
 
 pub struct Host {
     pub kernel: KernelHandle,
@@ -23,7 +25,8 @@ pub struct Host {
     presence: Mutex<
         std::collections::HashMap<String, std::collections::VecDeque<crate::presence::Presence>>,
     >,
-    operations: Arc<AtomicBool>,
+    /// 0 = idle, > 0 = active shared read/panel operations, -1 = exclusive session transition.
+    operations: Arc<AtomicIsize>,
     /// The project whose open waits on a person's recovery choice.
     deciding: Mutex<Option<String>>,
     pending_opens: Mutex<crate::recovery::PendingOpens>,
@@ -126,11 +129,19 @@ impl Windows {
         })
     }
 }
-/// An owned, nonblocking fence for app session transitions. Never held by a UI gesture.
-pub struct Operation(Arc<AtomicBool>);
+/// An owned, nonblocking fence for app session transitions (exclusive) or
+/// concurrent non-transition tool calls (shared). Never held by a UI gesture.
+pub struct Operation {
+    counter: Arc<AtomicIsize>,
+    exclusive: bool,
+}
 impl Drop for Operation {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        if self.exclusive {
+            self.counter.store(0, Ordering::Release);
+        } else {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 impl Host {
@@ -142,7 +153,7 @@ impl Host {
             profile,
             windows: Mutex::new(windows),
             presence: Mutex::default(),
-            operations: Arc::new(AtomicBool::new(false)),
+            operations: Arc::new(AtomicIsize::new(0)),
             deciding: Mutex::new(None),
             pending_opens: Mutex::default(),
             closing: AtomicBool::new(false),
@@ -388,13 +399,46 @@ impl Host {
     }
     pub fn try_operation(&self) -> Option<Operation> {
         self.operations
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(0, EXCLUSIVE_OPERATION, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Operation(self.operations.clone()))
+            .map(|_| Operation {
+                counter: self.operations.clone(),
+                exclusive: true,
+            })
     }
-    /// Whether a session transition holds the fence now.
+    /// Shared fence for non-transition MCP tools (reads, panel inspection,
+    /// captures, extension publishes). Unlimited shared callers can run
+    /// concurrently, while exclusive session transitions (open/close/import)
+    /// still fence them out cleanly.
+    pub fn try_shared_operation(&self) -> Option<Operation> {
+        let mut current = self.operations.load(Ordering::Acquire);
+        loop {
+            if current < 0 {
+                return None;
+            }
+            match self.operations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Operation {
+                        counter: self.operations.clone(),
+                        exclusive: false,
+                    });
+                }
+                Err(next) => current = next,
+            }
+        }
+    }
+    /// Whether any session transition or active fenced operation holds the fence now.
     pub fn operation_in_progress(&self) -> bool {
-        self.operations.load(Ordering::Acquire)
+        self.operations.load(Ordering::Acquire) != 0
+    }
+    /// Whether an open is currently paused waiting on a human recovery choice.
+    pub fn is_awaiting_recovery(&self) -> bool {
+        self.deciding.lock().unwrap().is_some()
     }
     /// While `project`'s open waits on a recovery choice in the window, tools
     /// say so instead of reporting a bare operation in progress.

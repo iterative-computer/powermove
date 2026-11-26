@@ -393,22 +393,32 @@ fn auto_orient(p: &Published, time: f64, l: &Value, id: &str, off: bool) -> Resu
     Ok(commands)
 }
 /// The commands that store a flight (Fly navigation through the shot camera)
-/// on the active camera, as one Undo: the camera moves by the flight, and
-/// with Auto-Orient Off its rotation takes the flown heading and pitch (its
-/// roll stays); aiming at a point of interest, that point moves so the
-/// camera looks where the flight ended. `from` and `to` are world poses;
-/// the camera's channels change by the same amounts, as a gizmo drag does.
+/// on the active camera, as one Undo: the camera lands on `to` directly in
+/// its parent's space (never drifting from a stale `from` pose or non-zero
+/// `rotation.x`/`rotation.y` under two-node Auto-Orient), keeping its roll.
 pub fn fly_camera(
     p: &Published,
     time: f64,
-    from: pm_scene3d::navigation::Pose,
+    _from: pm_scene3d::navigation::Pose,
     to: pm_scene3d::navigation::Pose,
 ) -> Result<(String, Vec<Command>)> {
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
     let comp = composition(p)?;
-    let l = comp["layers"]
+    let resolved =
+        pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, p.snapshot.open_comp().as_deref(), time)
+            .ok();
+    let layers = comp["layers"]
         .as_array()
-        .and_then(|ls| {
-            ls.iter()
+        .ok_or_else(|| invalid("This composition has no camera"))?;
+    let l = resolved
+        .as_ref()
+        .and_then(|r| r.camera_id.as_deref())
+        .and_then(|active| layers.iter().find(|l| l["id"].as_str() == Some(active)))
+        .or_else(|| {
+            layers
+                .iter()
                 .find(|l| schema::role(l) == Some(Role::Camera) && l["on"] != false)
         })
         .cloned()
@@ -419,7 +429,32 @@ pub fn fly_camera(
     let id = l["id"]
         .as_str()
         .ok_or_else(|| invalid("Missing camera ID"))?;
-    let (position, rotation, target) = camera_channels(p, time, &l)?;
+    let (position, rotation, _target) = camera_channels(p, time, &l)?;
+    let parent = resolved
+        .as_ref()
+        .and_then(|r| r.parent_worlds.get(id).copied())
+        .unwrap_or(IDENTITY);
+    let inv_parent = pm_scene3d::geometry::inverse(parent).unwrap_or(IDENTITY);
+    let parent_vec = |w: Vec3| -> Vec3 {
+        let a = pm_scene3d::render::gltf::math::apply(&inv_parent, w);
+        let o = pm_scene3d::render::gltf::math::apply(&inv_parent, [0.; 3]);
+        sub(a, o)
+    };
+    let current_world_pos = resolved
+        .as_ref()
+        .filter(|r| r.camera_id.as_deref() == Some(id))
+        .and_then(|r| r.camera_position);
+    let new_pos = match current_world_pos {
+        Some(cur) => {
+            let delta = parent_vec(sub(to.position, cur));
+            [
+                position[0] + delta[0],
+                position[1] + delta[1],
+                position[2] + delta[2],
+            ]
+        }
+        None => pm_scene3d::render::gltf::math::apply(&inv_parent, to.position),
+    };
     let set = |path: &str, v: f64| -> Command {
         let mut set =
             pm_kernel::commands::properties::SetProperty::new(id, path, to_model(&json!(v)), time);
@@ -427,23 +462,44 @@ pub fn fly_camera(
         set.mark_intent = true;
         pm_kernel::PropertyCommand::Set(set).into()
     };
-    let moved = sub(to.position, from.position);
     let mut commands = vec![];
     for (i, path) in ["position.x", "position.y", "position.z"]
         .iter()
         .enumerate()
     {
-        commands.push(set(path, position[i] + moved[i]));
+        commands.push(set(path, new_pos[i]));
     }
     if l["d"]["data"]["camera"]["autoOrient"] == "off" {
-        let r = camera_rotation(sub(to.target, to.position));
+        let forward = parent_vec(sub(to.target, to.position));
+        let r = camera_rotation(forward);
         commands.push(set("rotation.x", r[0]));
         commands.push(set("rotation.y", r[1]));
-        let _ = rotation;
     } else {
-        let aimed = sub(to.target, from.target);
+        let local_target = pm_scene3d::render::gltf::math::apply(&inv_parent, to.target);
         for (i, key) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
-            commands.push(set(&format!("camera.{key}"), target[i] + aimed[i]));
+            commands.push(set(&format!("camera.{key}"), local_target[i]));
+        }
+        // Clear any local pitch/yaw offset that would tilt the resolved aim
+        // away from the point of interest (`scene3d::service` look-at + local
+        // rotation), while preserving roll (`rotation`).
+        if rotation[0].abs() > 1e-6 {
+            commands.push(set("rotation.x", 0.));
+        }
+        if rotation[1].abs() > 1e-6 {
+            commands.push(set("rotation.y", 0.));
+        }
+        let mut mirror = QueryMirror::new(p);
+        for key in ["orientation.x", "orientation.y"] {
+            let v = mirror
+                .queries()
+                .evaluate(None, id, key, time)
+                .ok()
+                .and_then(|v| from_model(&v).ok())
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            if v.abs() > 1e-6 {
+                commands.push(set(key, 0.));
+            }
         }
     }
     Ok(("Fly Camera".into(), commands))
@@ -2048,6 +2104,97 @@ mod model_part_tests {
         assert_eq!(x(1.), 6.);
         call(pm_kernel::HistoryCall::Undo.into());
         assert_eq!(x(1.), 2.);
+    }
+
+    #[test]
+    fn fly_camera_lands_on_exact_pose_despite_stale_from_and_rotation_offset() {
+        use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Reply, Request, WriteBody};
+        use pm_scene3d::navigation::Pose;
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = "fly-camera-exact";
+        let root = json!({
+            "id": project,
+            "name": "Fly exact",
+            "compId": "c",
+            "w": 1920,
+            "h": 1080,
+            "fps": 30,
+            "dur": 5,
+            "assets": {},
+            "comps": {},
+            "layers": []
+        });
+        kernel
+            .open(project, OpenSource::Untitled(to_model(&root)))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let transact = |commands| {
+            let ack = kernel
+                .call(
+                    project,
+                    Request::new(
+                        Caller::native(),
+                        Call::Transact {
+                            label: None,
+                            expected_revision: None,
+                            body: WriteBody::Commands(commands),
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let read = || kernel.published(project).unwrap();
+        transact(vec![scene(
+            &read(),
+            0.,
+            json!({"operation":"add_camera","id":"cam"}),
+        )]);
+        // Introduce a non-zero rotation.y (like real user projects) on a two-node
+        // camera, plus pass a completely stale `from` pose to `fly_camera`.
+        let mut set_ry = pm_kernel::commands::properties::SetProperty::new(
+            "cam",
+            "rotation.y",
+            to_model(&json!(0.375)),
+            0.,
+        );
+        set_ry.preserve_hand_edits = false;
+        transact(vec![pm_kernel::PropertyCommand::Set(set_ry).into()]);
+
+        let stale_from = Pose {
+            position: [99., -42., 18.],
+            target: [-50., 20., 12.],
+            roll: 0.,
+            zoom: 1.,
+            ortho: false,
+        };
+        let to = Pose {
+            position: [-0.268, 1.15, 4.82],
+            target: [3.32, 0.45, -1.2],
+            roll: 0.,
+            zoom: 1.,
+            ortho: false,
+        };
+        let (_, cmds) = fly_camera(&read(), 0., stale_from, to).unwrap();
+        transact(cmds);
+
+        let p = read();
+        let resolved = pm_kernel::commands::scene3d::resolve_scene(
+            &p.snapshot,
+            p.snapshot.open_comp().as_deref(),
+            0.,
+        )
+        .unwrap();
+        let pos = resolved.camera_position.unwrap();
+        let target = resolved.targets["cam"];
+        for i in 0..3 {
+            assert!((pos[i] - to.position[i]).abs() < 1e-6, "pos[{i}]: {pos:?} vs {:?}", to.position);
+            assert!((target[i] - to.target[i]).abs() < 1e-6, "target[{i}]: {target:?} vs {:?}", to.target);
+        }
     }
 
 }

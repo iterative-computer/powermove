@@ -436,6 +436,7 @@ impl SurfaceView {
             self.scrub = Some(ScrubDrag {
                 local_commit: Some((json!(shown), json!(shown))),
                 id,
+                semantic: node.semantic.clone(),
                 start: event.position,
                 number: Default::default(),
                 motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -492,6 +493,7 @@ impl SurfaceView {
                 self.scrub = Some(ScrubDrag {
                     local_commit: None,
                     id,
+                    semantic: node.semantic.clone(),
                     start: event.position,
                     number: Default::default(),
                     motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -567,6 +569,7 @@ impl SurfaceView {
             self.scrub = Some(ScrubDrag {
                 local_commit: None,
                 id,
+                semantic: node.semantic.clone(),
                 start: event.position,
                 number: Default::default(),
                 motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -658,6 +661,7 @@ impl SurfaceView {
                     self.scrub = Some(ScrubDrag {
                         local_commit: None,
                         id,
+                        semantic: node.semantic.clone(),
                         start: event.position,
                         number: Default::default(),
                         motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -678,6 +682,7 @@ impl SurfaceView {
         self.scrub = Some(ScrubDrag {
             local_commit: None,
             id,
+            semantic: node.semantic.clone(),
             start: event.position,
             number: Default::default(),
             motion: pm_surface::kit::NumericMotion::new(0., 0.),

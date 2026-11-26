@@ -7,6 +7,7 @@ pub enum ComposerPicker {
     Model,
     Effort,
     Access,
+    Threads,
 }
 impl ComposerPicker {
     pub fn width(self) -> f32 {
@@ -14,6 +15,7 @@ impl ComposerPicker {
             Self::Model => 260.,
             Self::Effort => 156.,
             Self::Access => 360.,
+            Self::Threads => 288.,
         }
     }
 }
@@ -72,6 +74,29 @@ pub fn model_picker_frame(owner: Rect, anchor: Rect, size: (f32, f32)) -> Rect {
         w,
         h: size.1.min(top - y),
     }
+}
+
+/// The Threads popover opens below its header trigger, right-aligned to the
+/// trigger's trailing edge and clamped inside the owner's content rect.
+pub fn threads_picker_frame(owner: Rect, anchor: Rect, size: (f32, f32), gap: f32) -> Rect {
+    let owner = composer_picker_interior(owner);
+    let w = size.0.min(owner.w);
+    let room_below = (anchor.y - gap - owner.y).max(0.);
+    let room_above = (owner.y + owner.h - (anchor.y + anchor.h + gap)).max(0.);
+    let open_below = room_below >= size.1 || room_below >= room_above;
+    let max_h = if open_below {
+        room_below.max(owner.h.min(64.))
+    } else {
+        room_above.max(owner.h.min(64.))
+    };
+    let h = size.1.min(max_h).min(owner.h);
+    let y = if open_below {
+        (anchor.y - gap - h).clamp(owner.y, owner.y + owner.h - h)
+    } else {
+        (anchor.y + anchor.h + gap).clamp(owner.y, owner.y + owner.h - h)
+    };
+    let x = (anchor.x + anchor.w - w).clamp(owner.x, owner.x + owner.w - w);
+    Rect { x, y, w, h }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -149,6 +174,10 @@ pub struct Choice {
     pub hover_command: Option<String>,
     /// Symbol for this category or single choice in a grouped menu.
     pub menu_icon: Option<&'static str>,
+    /// Optional destructive trailing action command shown as a trashcan on hover.
+    pub delete_command: Option<String>,
+    /// Draw a subtle hairline separator directly after this row when more rows follow.
+    pub separator_after: bool,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -240,6 +269,18 @@ impl Choice {
     }
     pub fn with_aliases(mut self, aliases: Vec<String>) -> Self {
         self.aliases = aliases;
+        self
+    }
+    pub fn with_icon(mut self, name: &'static str) -> Self {
+        self.menu_icon = Some(name);
+        self
+    }
+    pub fn with_delete(mut self, command: impl Into<String>) -> Self {
+        self.delete_command = Some(command.into());
+        self
+    }
+    pub fn separator_after(mut self) -> Self {
+        self.separator_after = true;
         self
     }
 }
@@ -1584,5 +1625,26 @@ mod provider_tests {
         assert_eq!(short.y, 34.);
         assert_eq!(short.y, tall.y);
         assert_eq!(tall.y + tall.h, 492.);
+    }
+
+    #[test]
+    fn threads_picker_opens_below_and_right_aligned_to_its_header_trigger() {
+        let owner = Rect {
+            x: 0.,
+            y: 0.,
+            w: 400.,
+            h: 600.,
+        };
+        let anchor = Rect {
+            x: 310.,
+            y: 562.,
+            w: 80.,
+            h: 24.,
+        };
+        let frame = threads_picker_frame(owner, anchor, (288., 220.), 6.);
+        assert_eq!(frame.w, 288.);
+        assert_eq!(frame.h, 220.);
+        assert_eq!(frame.x + frame.w, 390., "right-aligned with the trigger");
+        assert_eq!(frame.y + frame.h, 556., "opens below the header trigger");
     }
 }

@@ -438,7 +438,7 @@ impl TimelineModel {
                     .reveal
                     .layers
                     .get(&layer)
-                    .is_some_and(|d| d.paths.is_some())
+                    .is_some_and(|d| !d.collapsed && d.paths.is_some())
                 {
                     let _ = self.include_paths(&layer, std::slice::from_ref(&path));
                 } else {

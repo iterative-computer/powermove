@@ -18,7 +18,7 @@ use crate::{
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
     transient::{
         Choice, ComposerPicker, Picker, PickerRow, composer_picker_frame, composer_picker_interior,
-        model_picker_frame, submenu_frame,
+        model_picker_frame, submenu_frame, threads_picker_frame,
     },
 };
 use foreign_types::ForeignType;
@@ -7589,6 +7589,24 @@ define_class!(
                 p.pick_choice(index, false);
             }
         }
+        #[unsafe(method(pickAction:))]
+        fn pick_action(&self, sender: &NSControl) {
+            if let Some(p) = self.ivars().upgrade() {
+                let mut p = p.borrow_mut();
+                let place = sender.tag() as usize;
+                let cmd = p.rows.get(place).and_then(|row| match row.kind {
+                    PickerRow::Choice(index) => {
+                        p.model.choices.get(index)?.delete_command.clone()
+                    }
+                    _ => None,
+                });
+                if let Some(cmd) = cmd {
+                    p.dispatch_choice(&cmd);
+                    p.picked = true;
+                    p.hide();
+                }
+            }
+        }
     }
 );
 define_class!(
@@ -8039,6 +8057,7 @@ struct PopupRow {
     kind: PickerRow,
     rect: NSRect,
     button: Retained<NSButton>,
+    delete_button: Option<Retained<NSButton>>,
 }
 /// The shape a palette or menu is built on. Rows stand `inset` inside the
 /// surface, so a row's corner is the surface's less that inset.
@@ -8703,6 +8722,19 @@ impl Popup {
     fn configure_field(&mut self, composer: Option<(ComposerPicker, bool)>) {
         self.composer = composer.map(|(kind, _)| kind);
         self.set_searchable(composer.is_none_or(|(_, on)| on));
+        let is_threads = self.composer == Some(ComposerPicker::Threads);
+        if self.surface != Surface::Palette {
+            self.search.setBezeled(!is_threads);
+            self.search.setBordered(false);
+            self.search.setDrawsBackground(!is_threads);
+            self.search.setFont(Some(&NSFont::systemFontOfSize(if is_threads {
+                self.tokens.typography.body as f64
+            } else {
+                self.tokens.typography.title as f64
+            })));
+            self.search
+                .setTextColor(Some(&native_color(self.tokens.colors.text)));
+        }
         let owner = self.parent.contentRectForFrameRect(self.parent.frame());
         let interior = composer_picker_interior(crate::layout::Rect {
             w: owner.size.width as f32,
@@ -8719,6 +8751,14 @@ impl Popup {
         }
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
             model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
+        } else if let Some(anchor) = self.anchor.filter(|_| is_threads) {
+            threads_picker_frame(
+                popup_rect(owner),
+                popup_rect(anchor),
+                (0., m.field_menu_height),
+                m.gap,
+            )
+            .h
         } else if self.composer.is_some() {
             m.field_menu_height.min(interior.h)
         } else {
@@ -8819,6 +8859,7 @@ impl Popup {
                 self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
+            (&c.delete_command, c.separator_after).hash(&mut h);
         }
         if self.surface == Surface::Palette {
             self.model.query.hash(&mut h);
@@ -9638,6 +9679,9 @@ impl PopupLayout<'_> {
             part.removeFromSuperview();
         }
         for row in self.rows.drain(..) {
+            if let Some(delete_button) = row.delete_button {
+                delete_button.removeFromSuperview();
+            }
             if !self
                 .cache
                 .buttons
@@ -9651,7 +9695,12 @@ impl PopupLayout<'_> {
         let t = self.tokens;
         let (m, shape) = (t.metrics, popup_shape(t, self.surface));
         let width = self.width;
-        let (inset, row_h) = (shape.inset as f64, shape.row as f64);
+        let is_threads = self.composer == Some(ComposerPicker::Threads);
+        let (inset, row_h) = if is_threads {
+            (6., 30.)
+        } else {
+            (shape.inset as f64, shape.row as f64)
+        };
         let model_rows = self.model.choices.iter().any(|c| c.provider.is_some());
         let browsing = self.model.grouped && self.model.query.is_empty();
         let is_palette = self.surface == Surface::Palette;
@@ -9666,7 +9715,10 @@ impl PopupLayout<'_> {
             }
         }
         let checks = chosen.iter().any(|row| match *row {
-            PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
+            PickerRow::Choice(i) => {
+                let c = &self.model.choices[i];
+                c.checked.is_some() || (!browsing && c.menu_icon.is_some())
+            }
             PickerRow::Provider(_) => true,
             PickerRow::Category(_) => false,
         });
@@ -9890,7 +9942,11 @@ impl PopupLayout<'_> {
                         unsafe { NSFontWeightSemibold },
                     ),
                 ));
-                mark.setContentTintColor(Some(&native_color(t.colors.text)));
+                mark.setContentTintColor(Some(&native_color(if is_threads {
+                    t.colors.accent
+                } else {
+                    t.colors.text
+                })));
                 mark.setAccessibilityElement(false);
                 centred(
                     &mark,
@@ -9903,6 +9959,35 @@ impl PopupLayout<'_> {
                 self.list.addSubview(&mark);
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
+            } else if !browsing
+                && !is_palette
+                && disclosure.is_none()
+                && let Some(name) = c.menu_icon
+            {
+                let glyph = NSImageView::imageViewWithImage(&symbol(name, ""), mtm);
+                glyph.setSymbolConfiguration(Some(
+                    &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        (m.symbol_inline - 2.) as f64,
+                        unsafe { NSFontWeightMedium },
+                    ),
+                ));
+                glyph.setContentTintColor(Some(&native_color(t.colors.secondary)));
+                glyph.setAccessibilityElement(false);
+                centred(
+                    &glyph,
+                    edge,
+                    y,
+                    row_h,
+                    m.symbol_inline as f64,
+                    glyph.fittingSize().height.ceil(),
+                );
+                self.list.addSubview(&glyph);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(glyph)));
+            }
+            const DELETE_BUTTON_SIZE: f64 = 24.;
+            if !is_palette && disclosure.is_none() && c.delete_command.is_some() {
+                trailing -= DELETE_BUTTON_SIZE + 2.;
             }
             let display_label = if disclosure.is_some() || flyout {
                 c.category.clone()
@@ -9940,37 +10025,47 @@ impl PopupLayout<'_> {
                 decoration.layout(rect, body_h);
                 decoration.set_hidden(false);
             } else {
-                let (title, title_h) = if disclosure.is_some() || c.font.is_some() {
-                    let title = popup_label(&display_label, title_size, title_color, mtm);
-                    let height = if disclosure.is_some() {
-                        title.setFont(Some(&NSFont::systemFontOfSize_weight(
-                            f64::from(title_size),
-                            unsafe { NSFontWeightSemibold },
-                        )));
-                        semibold_body_h
-                    } else if let Some(face) = c.font.as_ref().and_then(|family| {
-                        NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
-                            &NSString::from_str(family),
-                            NSFontTraitMask::empty(),
-                            5,
-                            t.typography.reading as f64,
-                        )
-                    }) {
-                        title.setFont(Some(&face));
-                        title.fittingSize().height.ceil()
+                let medium_weight = is_threads
+                    && disclosure.is_none()
+                    && (c.checked == Some(true) || c.menu_icon.is_some());
+                let (title, title_h) =
+                    if disclosure.is_some() || c.font.is_some() || medium_weight {
+                        let title = popup_label(&display_label, title_size, title_color, mtm);
+                        let height = if disclosure.is_some() {
+                            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                                f64::from(title_size),
+                                unsafe { NSFontWeightSemibold },
+                            )));
+                            semibold_body_h
+                        } else if medium_weight {
+                            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                                f64::from(title_size),
+                                unsafe { NSFontWeightMedium },
+                            )));
+                            body_h
+                        } else if let Some(face) = c.font.as_ref().and_then(|family| {
+                            NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
+                                &NSString::from_str(family),
+                                NSFontTraitMask::empty(),
+                                5,
+                                t.typography.reading as f64,
+                            )
+                        }) {
+                            title.setFont(Some(&face));
+                            title.fittingSize().height.ceil()
+                        } else {
+                            body_h
+                        };
+                        self.list.addSubview(&title);
+                        self.parts
+                            .push(Retained::into_super(Retained::into_super(title.clone())));
+                        (title, height)
                     } else {
-                        body_h
+                        (
+                            self.label(&display_label, title_size, title_color, None),
+                            body_h,
+                        )
                     };
-                    self.list.addSubview(&title);
-                    self.parts
-                        .push(Retained::into_super(Retained::into_super(title.clone())));
-                    (title, height)
-                } else {
-                    (
-                        self.label(&display_label, title_size, title_color, None),
-                        body_h,
-                    )
-                };
                 let mut title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
                 } else {
@@ -10053,13 +10148,73 @@ impl PopupLayout<'_> {
                 disclosure,
                 reuse_buttons,
             );
+            let delete_button = (!is_palette && disclosure.is_none() && c.delete_command.is_some())
+                .then(|| {
+                    let delete = unsafe {
+                        NSButton::buttonWithImage_target_action(
+                            &symbol("trash", "Delete Thread"),
+                            self.target.map(|t| t as &AnyObject),
+                            Some(sel!(pickAction:)),
+                            mtm,
+                        )
+                    };
+                    delete.setBordered(false);
+                    delete.setSymbolConfiguration(Some(
+                        &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                            12.,
+                            unsafe { NSFontWeightRegular },
+                        ),
+                    ));
+                    delete.setContentTintColor(Some(&native_color(t.colors.muted)));
+                    delete.setToolTip(Some(&NSString::from_str("Delete Thread")));
+                    delete.setAccessibilityLabel(Some(&NSString::from_str("Delete Thread")));
+                    delete.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
+                        "shell.palette.delete.{}",
+                        c.command
+                    ))));
+                    delete.setTag(place as isize);
+                    delete.setFrame(NSRect::new(
+                        NSPoint::new(
+                            rect.origin.x + rect.size.width - f64::from(t.space.xs) - DELETE_BUTTON_SIZE,
+                            y + ((row_h - DELETE_BUTTON_SIZE) / 2.).floor(),
+                        ),
+                        NSSize::new(DELETE_BUTTON_SIZE, DELETE_BUTTON_SIZE),
+                    ));
+                    delete.setHidden(true);
+                    self.list.addSubview(&delete);
+                    delete
+                });
             self.rows.push(PopupRow {
                 place,
                 kind: row,
                 rect,
                 button,
+                delete_button,
             });
             y += item_h;
+            if c.separator_after && place + 1 < chosen.len() {
+                let padding = f64::from(t.space.xs);
+                let thickness = self
+                    .list
+                    .window()
+                    .map_or(1., |window| window.backingScaleFactor().recip());
+                let line = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(edge, y + padding),
+                        NSSize::new((width - 2. * edge).max(0.), thickness),
+                    ),
+                );
+                line.setBoxType(NSBoxType::Custom);
+                line.setBorderWidth(0.);
+                line.setFillColor(
+                    &native_color(t.colors.separator).colorWithAlphaComponent(0.55),
+                );
+                line.setAccessibilityElement(false);
+                self.list.addSubview(&line);
+                self.parts.push(Retained::into_super(line));
+                y += 2. * padding + thickness;
+            }
         }
         if unlisted > 0 && !is_palette {
             let note = self.label(
@@ -10103,7 +10258,7 @@ impl PopupLayout<'_> {
         for decoration in self.cache.palette_rows.iter().skip(chosen.len()) {
             decoration.set_hidden(true);
         }
-        let field_h = if is_palette {
+        let field_h = if is_palette || (is_threads && self.searchable) {
             24.
         } else if self.searchable {
             self.search.fittingSize().height.ceil()
@@ -10113,6 +10268,8 @@ impl PopupLayout<'_> {
         let title_h = if model.grouped { body_h + inset } else { 0. };
         let (above, below) = if is_palette {
             (spotlight::HEADER, spotlight::FOOTER)
+        } else if is_threads && self.searchable {
+            (38., inset)
         } else {
             (
                 if self.searchable {
@@ -10127,6 +10284,8 @@ impl PopupLayout<'_> {
         let height = above + shown + below;
         let (left, right, top) = if is_palette {
             (44., 44., (spotlight::HEADER - field_h) / 2.)
+        } else if is_threads && self.searchable {
+            (edge - 2., edge - 2., (above - field_h) / 2.)
         } else {
             (inset, inset, inset + title_h)
         };
@@ -10136,6 +10295,28 @@ impl PopupLayout<'_> {
         );
         if self.search.frame() != search_frame {
             self.search.setFrame(search_frame);
+        }
+        if is_threads
+            && self.searchable
+            && let Some(body) = unsafe { self.search.superview() }
+        {
+            let thickness = self
+                .list
+                .window()
+                .map_or(1., |window| window.backingScaleFactor().recip());
+            let line = NSBox::initWithFrame(
+                NSBox::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0., height - above),
+                    NSSize::new(width, thickness),
+                ),
+            );
+            line.setBoxType(NSBoxType::Custom);
+            line.setBorderWidth(0.);
+            line.setFillColor(&native_color(t.colors.separator).colorWithAlphaComponent(0.55));
+            line.setAccessibilityElement(false);
+            body.addSubview(&line);
+            self.parts.push(Retained::into_super(line));
         }
         if model.grouped
             && let Some(body) = unsafe { self.search.superview() }
@@ -10248,6 +10429,7 @@ pub fn capture_agent_picker(
         Some("model") => Some(ComposerPicker::Model),
         Some("effort") => Some(ComposerPicker::Effort),
         Some("access") => Some(ComposerPicker::Access),
+        Some("threads") => Some(ComposerPicker::Threads),
         _ => None,
     };
     let searchable = kind.is_none() || input["search"] == true;
@@ -10284,6 +10466,15 @@ pub fn capture_agent_picker(
             c.checked = o["checked"].as_bool();
             c.is_default = o["default"] == true;
             c.informational = o["informational"] == true;
+            if o["icon"].as_str() == Some("plus") {
+                c.menu_icon = Some("plus");
+            }
+            if o["separatorAfter"] == true {
+                c.separator_after = true;
+            }
+            if o["deleteValue"].is_string() {
+                c.delete_command = Some(format!("delete:{i}"));
+            }
             c
         }).collect(),
         ..Default::default()
@@ -10501,12 +10692,19 @@ impl Popup {
                 row.button
                     .setAccessibilityValue(Some(&NSString::from_str("")))
             };
+            if let Some(delete) = &row.delete_button {
+                delete.setHidden(true);
+                delete.setContentTintColor(Some(&native_color(self.tokens.colors.muted)));
+            }
         }
         if let Some(row) = lit.and_then(|place| self.rows.get(place)) {
             unsafe {
                 row.button
                     .setAccessibilityValue(Some(&NSString::from_str("Selected")))
             };
+            if let Some(delete) = &row.delete_button {
+                delete.setHidden(false);
+            }
         }
         if let Some(theme) = &self.layout_cache.palette_theme {
             for place in [self.lit_row_place, lit].into_iter().flatten() {
@@ -10666,6 +10864,16 @@ impl Popup {
     fn point(&mut self, at: Option<NSPoint>) {
         if self.model.point(self.row_at(at)) {
             self.light(true);
+        }
+        if let Some(row) = self.lit_row_place.and_then(|place| self.rows.get(place))
+            && let Some(delete) = &row.delete_button
+        {
+            let over_delete = at.is_some_and(|pt| objc2_foundation::NSPointInRect(pt, delete.frame()));
+            delete.setContentTintColor(Some(&native_color(if over_delete {
+                self.tokens.colors.danger
+            } else {
+                self.tokens.colors.muted
+            })));
         }
         if self.model.submenu.is_some() || self.flyout_category.is_some() {
             self.sync_flyout();
@@ -10845,6 +11053,13 @@ impl Popup {
         let dimensions = (size.width as f32, size.height as f32);
         let frame = if self.composer == Some(ComposerPicker::Model) {
             model_picker_frame(parent, popup_rect(anchor), dimensions)
+        } else if self.composer == Some(ComposerPicker::Threads) {
+            threads_picker_frame(
+                parent,
+                popup_rect(anchor),
+                dimensions,
+                self.tokens.metrics.gap,
+            )
         } else {
             let shape = popup_shape(&self.tokens, self.surface);
             let checked = popup_checked_offset(&self.model, &self.rows, &self.scroll, size.height, shape.row);

@@ -240,6 +240,10 @@ pub struct State {
     /// Navigating in camera view: the move previews here and is stored on
     /// the shot camera, as one undo step, when the gesture ends.
     cam_nav: Option<CamNav>,
+    /// While a confirmed Fly/camera-nav transaction is committing to the
+    /// kernel, keep displaying the confirmed pose instead of flashing back to
+    /// the pre-flight camera; `(was_free, prev_free)` is restored once landed.
+    pub(super) camera_commit_return: Option<(bool, Option<View>)>,
     /// The handle under the pointer, drawn in text colour (§5).
     pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
@@ -576,6 +580,7 @@ impl GizmoSurface {
                 self.studio_fly_end(false, cx);
             }
             if key == "studioLook" && *v == "free" {
+                self.studio.camera_commit_return = None;
                 self.studio_go_free(cx);
                 self.studio_push_view(cx);
                 self.draw(cx);
@@ -583,6 +588,7 @@ impl GizmoSurface {
             }
             if key == "studioLook" && *v == "camera" && self.studio.free_look {
                 // View camera: back to the shot at once, not when the write lands.
+                self.studio.camera_commit_return = None;
                 self.studio.free_look = false;
                 self.studio.look_pending = Some(false);
                 self.studio_push_view(cx);
@@ -599,6 +605,7 @@ impl GizmoSurface {
             && self.studio.free_look
             && !self.studio.fly.as_ref().is_some_and(|run| run.camera)
             && self.studio.cam_nav.is_none()
+            && self.studio.camera_commit_return.is_none()
     }
     /// Where a light's marker and its ◆ target sit, in composition pixels,
     /// with the whole composition in view (tests drive them as a person would).
@@ -679,7 +686,11 @@ impl GizmoSurface {
             return;
         };
         let start = self.studio.view().unwrap_or(scene.shot);
-        let (was_free, prev_free) = (self.studio.free_look, self.studio.free);
+        let (was_free, prev_free) = self
+            .studio
+            .camera_commit_return
+            .take()
+            .unwrap_or((self.studio.free_look, self.studio.free));
         // Fly in the editor view; through the camera it is stored on confirm.
         let camera = !was_free && scene.has_camera;
         self.studio.free_look = true;
@@ -817,6 +828,7 @@ impl GizmoSurface {
             capture.set(false);
         }
         let end = run.fly.pose();
+        let mut hold_commit = false;
         if keep && run.camera {
             let time = self.host.time(cx);
             let stored = self
@@ -829,6 +841,13 @@ impl GizmoSurface {
                 });
             match stored {
                 Ok((_, commands)) => {
+                    if let Some(scene) = self.studio.scene.as_mut() {
+                        Arc::make_mut(scene).shot = end;
+                    }
+                    self.studio.free_look = true;
+                    self.studio.free = Some(end);
+                    self.studio.camera_commit_return = Some((run.was_free, run.prev_free));
+                    hold_commit = true;
                     self.queue.push_back(Job::Transact("Fly Camera", commands, None));
                     self.pump(cx);
                 }
@@ -836,15 +855,22 @@ impl GizmoSurface {
             }
         }
         // Kept in the editor view, the view simply stays where it flew to.
-        // Otherwise back to the look it began in: the shot (now carrying the
-        // flight, on confirm) or the editor view exactly as it was.
-        if !keep || run.camera {
+        // Confirmed through the shot camera, hold the confirmed pose until the
+        // camera transaction commits so the viewer never snaps back to the old
+        // shot in between. Otherwise return to where it began.
+        if (!keep || run.camera) && !hold_commit {
             self.studio.free_look = run.was_free;
             self.studio.look_pending = Some(run.was_free);
             self.studio.free = run.prev_free;
         }
         self.cursor = CursorStyle::Arrow;
-        let look = if self.studio.free_look { "free" } else { "camera" };
+        let look = if hold_commit {
+            if run.was_free { "free" } else { "camera" }
+        } else if self.studio.free_look {
+            "free"
+        } else {
+            "camera"
+        };
         self.studio_ui_fields([("studioLook", look), ("studioFly", "off")], cx);
         self.studio_push_view(cx);
         self.draw(cx);
@@ -938,6 +964,7 @@ impl GizmoSurface {
             return;
         };
         let end = self.studio.free.unwrap_or(run.start);
+        let mut hold_commit = false;
         if keep && end != run.start {
             let time = self.host.time(cx);
             let stored = self
@@ -950,6 +977,13 @@ impl GizmoSurface {
                 });
             match stored {
                 Ok((_, commands)) => {
+                    if let Some(scene) = self.studio.scene.as_mut() {
+                        Arc::make_mut(scene).shot = end;
+                    }
+                    self.studio.free_look = true;
+                    self.studio.free = Some(end);
+                    self.studio.camera_commit_return = Some((false, run.prev_free));
+                    hold_commit = true;
                     self.queue.push_back(Job::Transact("Move Camera", commands, None));
                     self.pump(cx);
                 }
@@ -962,9 +996,11 @@ impl GizmoSurface {
                 }
             }
         }
-        self.studio.free_look = false;
-        self.studio.look_pending = Some(false);
-        self.studio.free = run.prev_free;
+        if !hold_commit {
+            self.studio.free_look = false;
+            self.studio.look_pending = Some(false);
+            self.studio.free = run.prev_free;
+        }
         self.studio_push_view(cx);
         self.draw(cx);
     }

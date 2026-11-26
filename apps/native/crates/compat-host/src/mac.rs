@@ -665,7 +665,46 @@ define_class!(
         #[unsafe(method(webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:))]
         unsafe fn motion(&self,_web:&WKWebView,_origin:&WKSecurityOrigin,_frame:&WKFrameInfo,done:&DynBlock<dyn Fn(WKPermissionDecision)>){done.call((WKPermissionDecision::Deny,));}
         #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
-        unsafe fn files(&self,_web:&WKWebView,_params:&WKOpenPanelParameters,_frame:&WKFrameInfo,done:&DynBlock<dyn Fn(*mut NSArray<NSURL>)>){done.call((std::ptr::null_mut(),));}
+        unsafe fn files(
+            &self,
+            web: &WKWebView,
+            params: &WKOpenPanelParameters,
+            _frame: &WKFrameInfo,
+            done: &DynBlock<dyn Fn(*mut NSArray<NSURL>)>,
+        ) {
+            if self.ivars().trust.is_store() {
+                done.call((std::ptr::null_mut(),));
+                return;
+            }
+            let mtm = self.mtm();
+            let panel = NSOpenPanel::openPanel(mtm);
+            let allows_dirs = unsafe { params.allowsDirectories() };
+            panel.setCanChooseDirectories(allows_dirs);
+            panel.setCanChooseFiles(!allows_dirs);
+            panel.setAllowsMultipleSelection(unsafe { params.allowsMultipleSelection() });
+            let retained = panel.clone();
+            let callback = unsafe {
+                block2::RcBlock::copy(
+                    done as *const DynBlock<dyn Fn(*mut NSArray<NSURL>)>
+                        as *mut DynBlock<dyn Fn(*mut NSArray<NSURL>)>,
+                )
+            };
+            let finish = block2::RcBlock::new(move |result: NSModalResponse| {
+                if let Some(cb) = &callback {
+                    if result == NSModalResponseOK {
+                        let urls = retained.URLs();
+                        cb.call((Retained::as_ptr(&urls) as *mut NSArray<NSURL>,));
+                    } else {
+                        cb.call((std::ptr::null_mut(),));
+                    }
+                }
+            });
+            if let Some(window) = web.window() {
+                panel.beginSheetModalForWindow_completionHandler(&window, &finish);
+            } else {
+                panel.beginWithCompletionHandler(&finish);
+            }
+        }
         #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
         unsafe fn alert(&self,_web:&WKWebView,_message:&NSString,_frame:&WKFrameInfo,done:&DynBlock<dyn Fn()>){done.call(());}
         #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
@@ -1760,11 +1799,15 @@ impl MacDomHost {
         }
         let mtm = MainThreadMarker::new().ok_or(Error::InvalidRequest)?;
         let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
+        // In panel-attachment mode each extension panel has its own WKWebView
+        // whose bounds start at (0, 0), whereas `rect` is in window coordinates.
+        let origin = if self.panel_attachment.is_some() {
+            NSPoint::ZERO
+        } else {
+            NSPoint::new(rect.x, rect.y)
+        };
         unsafe {
-            configuration.setRect(NSRect::new(
-                NSPoint::new(rect.x, rect.y),
-                NSSize::new(rect.w, rect.h),
-            ));
+            configuration.setRect(NSRect::new(origin, NSSize::new(rect.w, rect.h)));
         }
         self.snapshot(self.generation(), Some(&configuration))
     }

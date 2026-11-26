@@ -4493,6 +4493,10 @@ impl Controller {
             self.agent_picked(index);
             return true;
         }
+        if let Some(index) = cmd.name.strip_prefix("agentPickDelete:") {
+            self.agent_picked_delete(index);
+            return true;
+        }
         if cmd.name == "palette.addEffect" {
             if let (Some(published), Some(runtime), Some(id)) = (
                 self.published.as_deref(),

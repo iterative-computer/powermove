@@ -146,7 +146,6 @@ test("focus order follows the thread bar, conversation and composer as the origi
     .filter(Boolean);
   expect(ids).toEqual([
     "agent-threads",
-    "agent-new",
     "agent-presentation",
     "agent-conversation",
     "quote-source-history:message-0",
@@ -181,8 +180,11 @@ test("only the model gives up space in the docked composer", async () => {
     expect(label?.props.style).toMatchObject({ flexShrink: 0 });
     expect(label?.props.metadata).toBeUndefined();
   }
-  expect(byId(root, "agent-threads")).toBeDefined();
-  expect(byId(root, "agent-new")).toBeDefined();
+  const header = byId(root, "agent-header");
+  const headerChildren = header.children.map((id) => nodes.find((n) => n.id === id));
+  expect(headerChildren[0]?.props.style).toMatchObject({ flexGrow: 1 });
+  expect(headerChildren[1]?.props.id).toBe("agent-threads");
+  expect(nodes.some((n) => n.props.id === "agent-new")).toBe(false);
   root.dispose();
 });
 
@@ -193,9 +195,16 @@ test("new thread, send and stop use the model's commands; Send hides while worki
   p.snapshot.draft.text = "A new request";
   p.snapshot.sendable = true;
   const render = () =>
-    root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+    root.render(
+      <AgentView
+        publication={p}
+        menu={async () => "new"}
+        send={(a) => actions.push(a)}
+      />,
+    );
   await render();
-  await root.drive(byId(root, "agent-new").id, "click");
+  await root.drive(byId(root, "agent-threads").id, "click");
+  await Promise.resolve();
   await root.drive(byId(root, "agent-send").id, "click");
   p.snapshot.runId = "run";
   p.snapshot.draft.text = "";
@@ -293,11 +302,27 @@ test("the thread picker lists threads with their state, switches, and offers New
   ).toContain("Ask which title to add");
   await root.drive(picker.id, "click");
   await Promise.resolve();
-  expect(asked[0]!.options.map((o) => o.label)).toEqual([
-    "New Thread",
-    "Ask which title to add",
-    "Make the headline · Working…",
-    "Delete Thread…",
+  expect(asked[0]!.picker).toBe("threads");
+  expect(asked[0]!.search).toBe(true);
+  expect(asked[0]!.options).toEqual([
+    {
+      label: "New Thread",
+      value: "new",
+      icon: "plus",
+      separatorAfter: true,
+    },
+    {
+      label: "Ask which title to add",
+      value: "thread:thread",
+      checked: true,
+      deleteValue: "delete:thread",
+    },
+    {
+      label: "Make the headline · Working…",
+      value: "thread:older",
+      checked: false,
+      deleteValue: "delete:older",
+    },
   ]);
   pick = "delete:thread";
   await root.drive(picker.id, "click");
@@ -1085,9 +1110,14 @@ test("mounted panel listens to model publications, forwards errors and unsubscri
     },
   };
   await root.render(
-    <AgentPanel model={model} onError={(e) => errors.push(e)} />,
+    <AgentPanel
+      model={model}
+      menu={async () => "new"}
+      onError={(e) => errors.push(e)}
+    />,
   );
-  await root.drive(byId(root, "agent-new").id, "click");
+  await root.drive(byId(root, "agent-threads").id, "click");
+  await Promise.resolve();
   await Promise.resolve();
   expect(errors.map(String)).toEqual(["Error: rejected"]);
   p = states.working();
@@ -1961,5 +1991,32 @@ test("steering directions do not render a Steering label on the user bubble", as
   expect(root.inspect().nodes.filter((node) => node.text === "Steering")).toHaveLength(0);
   expect(has(root, "You said: like just the odd sounds and stuff")).toBe(true);
   expect(has(root, "You said: also soften the kick")).toBe(true);
+  await root.dispose();
+});
+
+test("model picker shows the provider logo to the left of the model name", async () => {
+  const { root } = mount();
+  const iconOf = () => {
+    const picker = byId(root, "agent-model");
+    const firstChild = root.inspect().nodes.find((node) => node.id === picker.children[0]);
+    return (firstChild?.props.metadata as { symbol?: string } | undefined)?.symbol;
+  };
+  const p = fixture();
+  p.snapshot.settings.provider = "chatgpt";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(iconOf()).toBe("provider.openai");
+
+  p.snapshot.settings.provider = "claude";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(iconOf()).toBe("provider.claude");
+
+  p.snapshot.catalog.providers = [["compatible", "OpenAI API"]];
+  p.snapshot.settings.provider = "compatible";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(iconOf()).toBe("provider.openai");
+
+  p.snapshot.catalog.providers = [["compatible", "Ollama"]];
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(iconOf()).toBe("cpu");
   await root.dispose();
 });

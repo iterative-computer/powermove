@@ -404,6 +404,7 @@ const PICTURE_REST: std::time::Duration = std::time::Duration::from_millis(150);
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
     id: Id,
+    semantic: Option<SharedString>,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     motion: pm_surface::kit::NumericMotion,
@@ -3614,6 +3615,7 @@ impl SurfaceView {
         window.prevent_default();
         self.scrub = Some(ScrubDrag {
             id,
+            semantic: node.semantic.clone(),
             start: event.position,
             number,
             motion: pm_surface::kit::NumericMotion::new(
@@ -3679,16 +3681,33 @@ impl SurfaceView {
             drag.infinite.engage();
         }
         let id = drag.id;
+        let semantic = drag.semantic.clone();
         if !began && self.scrub_shown == Some((id, value)) {
             return;
         }
-        let binding = drag.binding.clone();
+        let cached_binding = drag.binding.clone();
         let deferred = if let Some((_, last)) = &mut drag.local_commit {
             *last = json!(value);
             true
         } else {
             false
         };
+        let live_id = semantic
+            .as_deref()
+            .and_then(|s| self.prepared.semantics.get(s).copied())
+            .unwrap_or(id);
+        let binding = self
+            .prepared
+            .node(live_id)
+            .and_then(|node| node.binding.clone().filter(|_| !node.local_change))
+            .or(cached_binding);
+        if let Some(drag) = &mut self.scrub
+            && binding.is_some()
+        {
+            drag.id = live_id;
+            drag.binding = binding.clone();
+        }
+        let id = live_id;
         let live_gain = (began && self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()))
             || self.gain_scrub.is_some();
         self.scrub_shown = Some((id, value));
@@ -3852,28 +3871,76 @@ impl SurfaceView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let pending = match (op, gesture) {
-                        (ScrubOp::Begin(label), _) => runtime.scrub_begin(&panel, label.as_deref()),
+                    match (op, gesture) {
+                        (ScrubOp::Begin(label), _) => {
+                            let pending = runtime
+                                .scrub_begin(&panel, label.as_deref())
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            let started = match ack.reply {
+                                pm_kernel::Reply::Gesture(id) => Some(id),
+                                _ => None,
+                            };
+                            Ok::<(Option<pm_kernel::Ack>, Option<u64>), String>((Some(ack), started))
+                        }
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
-                            runtime.scrub_step(&panel, &handle, gesture, value)
+                            let pending = runtime
+                                .scrub_step(&panel, &handle, gesture, value)
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(ack), Some(gesture)))
+                        }
+                        (ScrubOp::Value(handle, value), None) => {
+                            // Recover automatically if a prior Begin failed or was dropped
+                            // under lag, rather than silently discarding scrub values.
+                            let begin_ack = runtime
+                                .scrub_begin(&panel, None)
+                                .map_err(|e| e.to_string())?
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            let new_gesture = match begin_ack.reply {
+                                pm_kernel::Reply::Gesture(id) => id,
+                                pm_kernel::Reply::Throw(error) => {
+                                    return Err(error.to_string());
+                                }
+                                _ => return Err("Scrub gesture was refused".to_owned()),
+                            };
+                            let step_ack = runtime
+                                .scrub_step(&panel, &handle, new_gesture, value)
+                                .map_err(|e| e.to_string())?
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(step_ack), Some(new_gesture)))
                         }
                         (ScrubOp::Finish(commit), Some(gesture)) => {
-                            runtime.scrub_finish(&panel, gesture, commit)
+                            let pending = runtime
+                                .scrub_finish(&panel, gesture, commit)
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(ack), None))
                         }
-                        _ => return Err("Scrub gesture was refused".to_owned()),
+                        (ScrubOp::Finish(_), None) => Ok((None, None)),
                     }
-                    .map_err(|e| e.to_string())?;
-                    pending
-                        .await
-                        .ok_or("Kernel closed")?
-                        .map_err(|e| e.to_string())
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.scrub_busy = false;
-                let finished = finishing && result.as_ref().is_ok_and(|ack|
-                    !matches!(ack.reply, pm_kernel::Reply::Throw(_))
-                );
+                let finished = finishing
+                    && result.as_ref().is_ok_and(|(ack, _)| {
+                        ack.as_ref()
+                            .is_none_or(|a| !matches!(a.reply, pm_kernel::Reply::Throw(_)))
+                    });
                 if finishing {
                     v.scrub_gesture = None;
                 }
@@ -3887,18 +3954,32 @@ impl SurfaceView {
                     }
                 }
                 match result {
-                    Ok(ack) => match ack.reply {
-                        pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
-                        pm_kernel::Reply::Throw(error) => {
-                            v.error = Some(error.to_string());
+                    Ok((ack, opened)) => {
+                        if let Some(id) = opened {
+                            v.scrub_gesture = Some(id);
                         }
-                        _ => {}
-                    },
+                        if let Some(ack) = ack {
+                            match ack.reply {
+                                pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
+                                pm_kernel::Reply::Throw(error) => {
+                                    v.error = Some(error.to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() && v.colour.is_none() {
-                    v.scrub_gesture = None;
-                    if let Some((id, value)) = v.scrub_shown.take() {
+                if v.scrub_ops.is_empty()
+                    && v.scrub.is_none()
+                    && v.wheel_scrub.is_none()
+                    && v.colour.is_none()
+                {
+                    if v.scrub_gesture.is_some() {
+                        // Never drop a live kernel gesture without committing it,
+                        // or the leaked lease will stall subsequent edits.
+                        v.scrub_ops.push_back(ScrubOp::Finish(true));
+                    } else if let Some((id, value)) = v.scrub_shown.take() {
                         v.scrub_settled = finished.then_some((id, value, v.latest));
                     }
                 }

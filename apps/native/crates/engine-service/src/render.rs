@@ -612,6 +612,8 @@ pub struct Engine {
     /// were last registered for (`set_document_effects`): a drag frame of
     /// the same keeps them (`drag_frame`).
     effects_for: Option<(String, String, u64)>,
+    effects_edition: Option<u64>,
+    prewarm_key: Option<(u64, u64, String, u64)>,
     /// The frame being encoded is a drag's (scrubbed, not exact): a step of
     /// an edit changes values, not which effects exist, so it does not
     /// register the document's effects again (100 ms a step on a project
@@ -1334,6 +1336,8 @@ impl Engine {
             visual_media: Default::default(),
             font_warm: Default::default(),
             effects_for: None,
+            effects_edition: None,
+            prewarm_key: None,
             drag_frame: false,
             #[cfg(test)]
             effects_registered: 0,
@@ -1737,14 +1741,7 @@ impl Engine {
         self.camera_motion = moving;
     }
     fn frame_sampling(&self, _scene: &Scene, spec: &FrameSpec) -> pm_render::sampling::Sampling {
-        if self.camera_motion
-            && !spec.exact
-            && matches!(
-                self.studio_view,
-                crate::studio::ViewCamera::Custom { .. }
-                    | crate::studio::ViewCamera::Orthographic { .. }
-            )
-        {
+        if !spec.exact && (self.camera_motion || spec.moment == Moment::Scrub) {
             pm_render::sampling::Sampling::Playback
         } else {
             spec.sampling()
@@ -1825,9 +1822,11 @@ impl Engine {
             scene.comp.clone(),
             self.resources.generation,
         );
-        let keep_effects = self.drag_frame && self.effects_for.as_ref() == Some(&effects_for);
+        let keep_effects = self.effects_for.as_ref() == Some(&effects_for)
+            && (self.drag_frame || self.effects_edition == Some(edition));
         if self.studio_content.as_ref() != Some(&key) && !keep_effects {
             self.effects_for = None;
+            self.effects_edition = None;
             #[cfg(test)]
             {
                 self.effects_registered += 1;
@@ -1866,8 +1865,16 @@ impl Engine {
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.effects_for = Some(effects_for);
+            self.effects_edition = Some(edition);
         }
         if self.studio_content.as_ref() != Some(&key) {
+            let prewarm_key = (
+                edition,
+                scene.content,
+                scene.comp.clone(),
+                self.resources.generation,
+            );
+            let need_prewarm = self.prewarm_key.as_ref() != Some(&prewarm_key);
             #[cfg(feature = "kernel")]
             {
                 self.studio_source = if studio {
@@ -1887,6 +1894,7 @@ impl Engine {
                         self.fonts.as_ref(),
                         self.studio_progress.clone(),
                         self.studio_resources.clone(),
+                        need_prewarm,
                     )
                     .map_err(anyhow::Error::msg)?
                 } else {
@@ -1899,30 +1907,33 @@ impl Engine {
                 }
                 self.studio_source_view = self.studio_view.clone();
             }
-            // A document's first frame compiles the frame and text pipelines
-            // it draws with, so no frame met while playing does (built ones
-            // are kept: later documents pay nothing).
-            self.renderer.prewarm(&scene.doc);
-            // Effect programs (built-in and extension GLSL) build on the
-            // renderer's worker now, not inside the first frame that draws
-            // each one while playing.
-            self.renderer.prewarm_programs(&scene.doc);
-            // Precompile Studio Fast raster & material-capture pipelines on
-            // attach when the composition has Studio 3D layers so entering a
-            // 3D section does not compile shaders mid-scrub/playback.
-            if pm_eval::Comp::resolve(&scene.doc, &scene.comp).is_ok_and(|comp| {
-                comp.layers().iter().any(|layer| {
-                    pm_eval::parenting::Role3d::of(layer).is_some()
-                        || pm_eval::node::truthy(
-                            layer
-                                .get("d")
-                                .and_then(|d| d.get("extrusion"))
-                                .and_then(|e| e.get("enabled")),
-                        )
-                })
-            }) {
-                self.renderer
-                    .prewarm_studio(&scene.doc, &scene.comp, time.get());
+            if need_prewarm {
+                // A document's first frame compiles the frame and text pipelines
+                // it draws with, so no frame met while playing does (built ones
+                // are kept: later documents pay nothing).
+                self.renderer.prewarm(&scene.doc);
+                // Effect programs (built-in and extension GLSL) build on the
+                // renderer's worker now, not inside the first frame that draws
+                // each one while playing.
+                self.renderer.prewarm_programs(&scene.doc);
+                // Precompile Studio Fast raster & material-capture pipelines on
+                // attach when the composition has Studio 3D layers so entering a
+                // 3D section does not compile shaders mid-scrub/playback.
+                if pm_eval::Comp::resolve(&scene.doc, &scene.comp).is_ok_and(|comp| {
+                    comp.layers().iter().any(|layer| {
+                        pm_eval::parenting::Role3d::of(layer).is_some()
+                            || pm_eval::node::truthy(
+                                layer
+                                    .get("d")
+                                    .and_then(|d| d.get("extrusion"))
+                                    .and_then(|e| e.get("enabled")),
+                            )
+                    })
+                }) {
+                    self.renderer
+                        .prewarm_studio(&scene.doc, &scene.comp, time.get());
+                }
+                self.prewarm_key = Some(prewarm_key);
             }
             self.studio_content = Some(key);
         }
@@ -2338,14 +2349,7 @@ impl Engine {
                 } else {
                     spec.request(scene)?
                 };
-                if self.camera_motion
-                    && !spec.exact
-                    && matches!(
-                        self.studio_view,
-                        crate::studio::ViewCamera::Custom { .. }
-                            | crate::studio::ViewCamera::Orthographic { .. }
-                    )
-                {
+                if !spec.exact && (self.camera_motion || spec.moment == Moment::Scrub) {
                     request.output_kind = pm_render::OutputKind::Preview;
                 }
                 request.sampling = self.frame_sampling(scene, &spec);

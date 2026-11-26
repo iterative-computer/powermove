@@ -2831,10 +2831,10 @@ fn measure_tab_text(text: &str, size: f32, weight: FontWeight, window: &Window) 
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
-// The docked trigger has a label, a chevron and two insets; the new-thread
-// button keeps its whole hit target. Round up for the native text layout.
+// The docked trigger has a label, a chevron and two insets. Round up for the
+// native text layout.
 fn agent_header_width(label: f32, m: &pm_design::Metrics) -> f32 {
-    label.ceil() + m.symbol_inline + 4. * m.pill_inset + m.hit
+    label.ceil() + m.symbol_inline + 4. * m.pill_inset
 }
 
 fn tab_viewport_width(width: f32, tools: f32, restore: bool, t: &Tokens) -> f32 {
@@ -4035,7 +4035,9 @@ impl Editor {
                 let (visible, clip_width) = if scrolling {
                     whole_tabs(viewport, track.widths[first..].iter().copied())
                 } else {
-                    (tabs.len(), viewport)
+                    let total = track.widths.iter().sum::<f32>()
+                        + TAB_SPACING * tabs.len().saturating_sub(1) as f32;
+                    (tabs.len(), total.min(viewport))
                 };
                 let offset = track.widths[..first].iter().sum::<f32>() + first as f32 * TAB_SPACING;
                 let single_width = (p.rect.w - tools - m.inset - m.gap * 2.).max(0.);
@@ -4239,7 +4241,7 @@ impl Editor {
                     let strip = div()
                         .id(format!("tab-strip-{}-{}", p.dock, p.group))
                         .relative()
-                        .w(px(viewport))
+                        .w(px(clip_width))
                         .min_w(px(0.))
                         .flex_shrink(1.)
                         .overflow_hidden()

@@ -3986,7 +3986,7 @@ impl TimelineSurface {
                 && !matches!(self.gesture, Gesture::Idle | Gesture::Pan { .. })
                 && !pm_shell::left_button_held());
         if button_up {
-            if matches!(self.gesture, Gesture::Marquee { .. }) {
+            if matches!(self.gesture, Gesture::Marquee { .. } | Gesture::Scrub { .. }) {
                 self.on_up(cx);
                 return false;
             }

@@ -837,6 +837,12 @@ export interface MenuOption {
   stays?: boolean;
   /** Quiet status text, not a choice. */
   informational?: boolean;
+  /** Optional leading symbol name for special rows (e.g. "plus" for New Thread). */
+  icon?: string;
+  /** Draw a subtle hairline separator after this row when more rows follow. */
+  separatorAfter?: boolean;
+  /** Optional trailing hover delete action value returned when the trashcan is clicked. */
+  deleteValue?: string;
 }
 /** Opens the field menu at `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -844,8 +850,8 @@ export type Menu = (request: {
   anchor: number;
   placeholder: string;
   options: MenuOption[];
-  /** Composer pop-ups track their button rather than the legacy field menu. */
-  picker?: "model" | "effort" | "access";
+  /** Composer and header pop-ups track their button rather than the legacy field menu. */
+  picker?: "model" | "effort" | "access" | "threads";
   search?: boolean;
   /** Change the open model menu's rows without replacing its pending choice. */
   refresh?: boolean;
@@ -877,6 +883,7 @@ function Trigger({
       id={id}
       label={label}
       aria-haspopup="menu"
+      metadata={{ menuAnchor: true }}
       disabled={disabled}
       onClick={(event) => {
         if (!disabled) open(Number(event.currentTarget));
@@ -913,6 +920,14 @@ function Trigger({
     </UI.ToolbarItem>
   );
 }
+function providerIcon(provider: string, providers: [string, string][]): string {
+  if (provider === "chatgpt") return "provider.openai";
+  if (provider === "claude") return "provider.claude";
+  const label = providers.find(([id]) => id === provider)?.[1] ?? "";
+  if (/openai|chatgpt/i.test(label)) return "provider.openai";
+  if (/claude|anthropic/i.test(label)) return "provider.claude";
+  return "cpu";
+}
 function Picker({
   id,
   label,
@@ -920,6 +935,7 @@ function Picker({
   disabled,
   opened,
   icon,
+  prominent = false,
   title,
   open,
   flexible = false,
@@ -930,11 +946,13 @@ function Picker({
   disabled: boolean;
   opened: boolean;
   icon?: string;
+  prominent?: boolean;
   flexible?: boolean;
   title: string;
   open: (anchor: number) => void;
 }) {
-  const ink = t(disabled ? "colors.muted" : icon ? "colors.secondary" : "colors.text");
+  const pill = prominent || !icon;
+  const ink = t(disabled ? "colors.muted" : pill ? "colors.text" : "colors.secondary");
   return (
     <button
       id={id}
@@ -963,13 +981,15 @@ function Picker({
         height: t("metrics.control"),
         paddingLeft: t("metrics.pill_inset"),
         paddingRight: t("metrics.pill_inset"),
-        ...(opened || !icon ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
+        ...(opened || pill ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
         borderRadius: t("metrics.panel_radius"),
         color: ink,
       }}
     >
       {icon && <div metadata={{ symbol: icon }} style={{
-        flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
+        flexShrink: 0,
+        symbolSize: t("metrics.symbol_inline"),
+        color: t(disabled ? "colors.muted" : prominent ? "colors.text" : "colors.muted"),
       }} />}
       <text
         style={{
@@ -1004,7 +1024,7 @@ function Header({
   const blocked = s.composerDisabled;
   return (
     // The header slot: the popover draws it on its own ground; docked, it
-    // shares the dock's tab row.
+    // shares the dock's tab row, with the Threads trigger trailing on the right.
     <div
       id="agent-header"
       data-pm-slot="header"
@@ -1015,12 +1035,17 @@ function Header({
         flexShrink: 0,
         gap: t("metrics.pill_inset"),
         height: t("metrics.header"),
-        ...(popover ? {
-          paddingLeft: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
-        } : {}),
+        ...(popover
+          ? {
+              paddingLeft: t("metrics.gap"),
+              paddingRight: t("metrics.gap"),
+            }
+          : {
+              paddingRight: t("metrics.gap"),
+            }),
       }}
     >
+      <div style={{ flexGrow: 1 }} />
       <Trigger
         id="agent-threads"
         label={
@@ -1036,28 +1061,28 @@ function Header({
         disabled={!menu || blocked}
         open={(anchor) => {
           const threads = s.threads ?? [];
-          const current = threads.find((t) => t.id === s.threadId);
           void menu?.({
             anchor,
+            picker: "threads",
+            search: true,
             placeholder: "Search threads…",
             options: [
-              ...(blocked ? [] : [{ label: "New Thread", value: "new" }]),
+              ...(blocked
+                ? []
+                : [
+                    {
+                      label: "New Thread",
+                      value: "new",
+                      icon: "plus",
+                      separatorAfter: true,
+                    },
+                  ]),
               ...nestedThreads(threads).map(({ thread: t, depth }) => ({
                 label: `${"  ".repeat(depth)}${depth ? "↳ " : ""}${threadName(t.title)}${t.busy ? " · Working…" : ""}`,
                 value: `thread:${t.id}`,
                 checked: t.id === s.threadId,
-                category: "Threads",
+                deleteValue: `delete:${t.id}`,
               })),
-              // Apart from the list, last: the one destructive row.
-              ...(current
-                ? [
-                    {
-                      label: "Delete Thread…",
-                      value: `delete:${current.id}`,
-                      category: "This Thread",
-                    },
-                  ]
-                : []),
             ],
           }).then((choice) => {
             if (typeof choice !== "string") return;
@@ -1069,18 +1094,6 @@ function Header({
             } else if (choice.startsWith("delete:"))
               send({ type: "deleteThread", id: choice.slice(7) });
           });
-        }}
-      />
-      {popover && <div style={{ flexGrow: 1 }} />}
-      <UI.ToolbarItem
-        id="agent-new"
-        label="New Thread"
-        title="New Thread"
-        disabled={blocked}
-        metadata={{ symbol: "plus" }}
-        style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
-        onClick={() => {
-          if (!blocked) send({ type: "newThread" });
         }}
       />
       {popover && (
@@ -3093,9 +3106,11 @@ function Composer({
         <Picker
           id="agent-model"
           flexible
+          prominent
           title="Model"
           label={`Model, ${modelName}`}
           text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}
+          icon={providerIcon(s.settings.provider, s.catalog.providers)}
           disabled={!menu || choicesLocked}
           opened={openPicker === "model"}
           open={openModels}

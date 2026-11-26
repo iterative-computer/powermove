@@ -658,6 +658,13 @@ struct View {
     /// held still): it is drawn as a resting picture, which the next step
     /// interrupts like any paused one.
     edit_rested: bool,
+    /// Host timestamp (seconds) of the latest document revision arrival, used
+    /// to avoid settling mid-scrub and to detect rapid non-gesture edit bursts
+    /// (e.g. arrow-key nudging).
+    last_edit_at: Option<f64>,
+    /// True while rapid non-gesture edits (2+ revisions within the settle window)
+    /// are arriving, keeping interactive preview rendering until input rests.
+    recent_edit: bool,
     /// The skimmer (Final Cut's): while paused the viewer shows this time,
     /// and the playhead stays where it is.
     skim: Option<Ticks>,
@@ -732,7 +739,8 @@ fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool)
         && matches!(mode, Some(1 | 2))
         && v.stamp.generation == stamp.generation
         && v.stamp.doc_id == stamp.doc_id
-        && ((v.editing && stamp.revision <= v.stamp.revision)
+        && (((v.editing || v.recent_edit || v.last_edit_at.is_some())
+            && stamp.revision <= v.stamp.revision)
             || (v.stamp.revision == stamp.revision
                 && (mode == Some(2)
                     || v.stamp.sequence.wrapping_sub(stamp.sequence)
@@ -744,6 +752,9 @@ impl View {
         if self.editing != on {
             self.editing = on;
             self.edit_rested = false;
+            if on {
+                self.recent_edit = false;
+            }
             self.stamp.sequence += 1;
             self.dirty = true;
         }
@@ -1099,8 +1110,16 @@ impl Viewer {
                     v.input.get_or_insert(input);
                 }
                 let (actor_ms, publication_ms) = spans.unwrap_or_default();
+                let now = trace::now();
+                let rapid = !v.editing
+                    && v.last_edit_at
+                        .is_some_and(|at| now - at <= policy::SETTLE_IDLE_SECONDS);
+                v.last_edit_at = Some(now);
+                if rapid {
+                    v.recent_edit = true;
+                }
                 v.pipeline = trace::Pipeline {
-                    request: trace::now(),
+                    request: now,
                     actor_ms,
                     publication_ms,
                 };
@@ -1111,7 +1130,7 @@ impl Viewer {
                 v.config.snapshot = snapshot;
                 // A drag's frame in flight is finished and shown, not
                 // abandoned for the next step; a resting picture gives way.
-                if !v.editing || std::mem::take(&mut v.edit_rested) {
+                if (!v.editing && !v.recent_edit) || std::mem::take(&mut v.edit_rested) {
                     self.shared.supersede();
                 }
                 v.stamp.revision = v.config.snapshot.revision;
@@ -1360,13 +1379,19 @@ impl Viewer {
                 *e = (time.get(), 0);
             }
         }
+        let mut paused = false;
+        let mut audio = None;
         self.edit(|v| {
             v.input = Some(input);
             v.pipeline.request = trace::now();
+            if v.desired_rate.num != 0 || v.resume_on_show.is_some() {
+                paused = v.request_pause(&mut audio)?;
+                self.shared.supersede();
+            }
             // Replace an unconsumed scrub pair atomically, even under a burst
             // of HID input (including while an earlier request_pause() is still
             // pending on the worker thread).
-            if matches!(
+            let res = if matches!(
                 v.commands.back(),
                 Some(TransportCommand::Seek {
                     mode: pm_protocol::clock::SeekMode::Scrub,
@@ -1375,24 +1400,35 @@ impl Viewer {
             ) && v.commands.len() >= 2
                 && v.commands[v.commands.len() - 2] == TransportCommand::Pause
             {
-                return v.enqueue(TransportCommand::Seek {
+                v.enqueue(TransportCommand::Seek {
                     time,
                     mode: pm_protocol::clock::SeekMode::Scrub,
-                });
-            }
-            if v.commands.back() == Some(&TransportCommand::Pause) {
-                return v.enqueue(TransportCommand::Seek {
+                })
+            } else if v.commands.back() == Some(&TransportCommand::Pause) {
+                v.enqueue(TransportCommand::Seek {
                     time,
                     mode: pm_protocol::clock::SeekMode::Scrub,
-                });
+                })
+            } else {
+                ensure!(v.commands.len() <= 61, "transport queue full");
+                v.enqueue(TransportCommand::Pause)?;
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            };
+            res?;
+            if let Some(clock) = &mut v.status.clock {
+                clock.media_time = time;
+                clock.rate = pm_protocol::common::PlaybackRate::STOPPED;
+                clock.state = pm_protocol::clock::TransportState::Stopped;
             }
-            ensure!(v.commands.len() <= 61, "transport queue full");
-            v.enqueue(TransportCommand::Pause)?;
-            v.enqueue(TransportCommand::Seek {
-                time,
-                mode: pm_protocol::clock::SeekMode::Scrub,
-            })
-        })
+            Ok(())
+        })?;
+        if paused {
+            self.shared.state.lock().unwrap().notify();
+        }
+        Ok(())
     }
     /// Retarget a settled raster without exposing its drawable until complete.
     pub fn retarget(&self, layer: metal::MetalLayer, crop: Option<Crop>) -> Result<()> {
@@ -2063,6 +2099,8 @@ impl EngineService {
                 adapt_drags: false,
                 editing: false,
                 edit_rested: false,
+                last_edit_at: None,
+                recent_edit: false,
                 skim: None,
                 skim_input: None,
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
@@ -3599,12 +3637,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // The playhead stopped on a frame dragged at reduced resolution.
             // A new picture of the same time: its own `frame:rendered`.
             if !playing && r.refine_at.is_some_and(|at| now >= at) {
-                r.refine_at = None;
-                r.scrub = false;
-                v.edit_rested = v.editing;
-                v.stamp.sequence += 1;
-                bump_site(line!(), "");
-                v.dirty = true;
+                let edit_rest = if v.editing {
+                    policy::SETTLE_IDLE_SECONDS
+                } else {
+                    policy::SCRUB_SETTLE_SECONDS
+                };
+                if (v.editing || v.recent_edit)
+                    && let Some(at) = v.last_edit_at.filter(|at| now - *at < edit_rest)
+                {
+                    r.refine_at = Some(at + edit_rest);
+                } else {
+                    r.refine_at = None;
+                    r.scrub = false;
+                    v.edit_rested = v.editing;
+                    v.recent_edit = false;
+                    v.stamp.sequence += 1;
+                    bump_site(line!(), "");
+                    v.dirty = true;
+                }
             }
             if std::mem::take(&mut v.retry_now) {
                 r.not_before = r.not_before.min(now);
@@ -3741,7 +3791,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             v.dirty = false;
             let moment = if playing {
                 Moment::Playing
-            } else if r.scrub || (v.editing && !v.edit_rested) {
+            } else if r.scrub || (v.editing && !v.edit_rested) || v.recent_edit {
                 Moment::Scrub
             } else {
                 Moment::Paused
@@ -3777,7 +3827,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // playback sampling and preview reuse (`resting = false`).
                 v.quality.scale(
                     &r.auto,
-                    if moment == Moment::Scrub && (!v.adapt_drags || v.editing) {
+                    if moment == Moment::Scrub && (!v.adapt_drags || v.editing || v.recent_edit) {
                         Moment::Paused
                     } else {
                         moment
@@ -3793,7 +3843,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // mode and auto-settles via `camera_rest_at`.
             let resting =
                 !camera_motion && quality == 1. && moment == Moment::Paused && !r.transport.running();
-            let text_grid = (!camera_motion && quality == 1. && (moment != Moment::Scrub || v.editing))
+            let text_grid = (!camera_motion
+                && quality == 1.
+                && (moment != Moment::Scrub || v.editing || v.recent_edit))
                 .then(|| engine.text_grid_scale(&scene, &v.config.output))
                 .flatten();
             let (scale, settled) = if capture {
@@ -3843,7 +3895,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 },
                 studio_preview: if capture {
                     studio::Preview::Final
-                } else if playing && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final) {
+                } else if (playing || moment == Moment::Scrub || camera_motion)
+                    && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final)
+                {
                     studio::Preview::Live
                 } else {
                     v.studio_preview
@@ -7550,6 +7604,88 @@ mod worker_tests {
         v.scrub(Ticks::ZERO).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
+    }
+
+    #[test]
+    fn rapid_non_gesture_edit_burst_uses_interactive_scrub_and_settles() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("rapid-nudge-burst").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let base = service
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .get(&v.id)
+            .unwrap()
+            .config
+            .snapshot
+            .clone();
+        let next = |rev: u64| Snapshot {
+            doc_id: base.doc_id,
+            revision: rev,
+            document: base.document.clone(),
+        };
+        // First non-gesture edit: single edit, not yet a rapid burst.
+        v.snapshot(next(base.revision + 1)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(!view.recent_edit);
+            assert!(view.last_edit_at.is_some());
+        }
+        // Second non-gesture edit right after: enters interactive rapid-edit burst.
+        v.snapshot(next(base.revision + 2)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.recent_edit);
+            // A finished scrub frame from revision + 1 is accepted via only_moved
+            // rather than dropped in a stale_rejections freeze loop.
+            let earlier = Stamp {
+                revision: base.revision + 1,
+                ..view.stamp
+            };
+            assert!(only_moved(view, earlier, view.moves, Moment::Scrub, false));
+        }
+        v.retire();
+    }
+
+    #[test]
+    fn scrub_while_playing_pauses_immediately_and_keeps_sought_clock_time() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("scrub-while-playing").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Click the timeline ruler at 2.0s while playback is running and the worker is busy.
+        let target = Ticks::from_whole_seconds(2);
+        v.scrub(target).unwrap();
+        let status = v.status();
+        assert!(!status.wants_display);
+        let clock = status.clock.expect("clock present");
+        assert_eq!(clock.state, pm_protocol::clock::TransportState::Stopped);
+        assert_eq!(clock.media_time, target);
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let landed = drawn(&v);
+        assert_eq!(landed.frame.unwrap().time, target);
+        v.retire();
     }
 }
 

@@ -1488,6 +1488,12 @@ impl GizmoSurface {
                         }
                     }
                     let changed_look = free_look != s.studio.free_look;
+                    let mut scene = scene;
+                    if s.studio.camera_commit_return.is_some()
+                        && let (Some(sc), Some(end)) = (scene.as_mut(), s.studio.free)
+                    {
+                        Arc::make_mut(sc).shot = end;
+                    }
                     s.studio.scene = scene;
                     if let Some(want) = adopt {
                         if want && s.studio.free.is_none() {
@@ -1498,10 +1504,12 @@ impl GizmoSurface {
                     s.studio.selected = selected;
                     s.studio.part = part;
                     s.studio.tool = studio3d::Tool::parse(tool.as_deref());
-                    if !s.studio.busy() {
+                    if !s.studio.busy() && s.studio.camera_commit_return.is_none() {
                         s.studio.free_look = free_look;
                     }
-                    if changed_look || had != s.studio.scene.is_some() {
+                    if (changed_look && s.studio.camera_commit_return.is_none())
+                        || had != s.studio.scene.is_some()
+                    {
                         s.studio_push_view(cx);
                     }
                     s.draw(cx);
@@ -2725,6 +2733,7 @@ impl GizmoSurface {
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         let (started, kind) = (std::time::Instant::now(), job.kind());
+        let camera_transact = matches!(&job, Job::Transact("Fly Camera" | "Move Camera", ..));
         crate::interaction_work::submit!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2822,14 +2831,32 @@ impl GizmoSurface {
                     && s.effect_drag.is_none()
                     && s.pen_drag.is_none()
                     && !s.studio.busy()
+                    && s.gesture.is_some()
                 {
-                    s.gesture = None;
+                    s.queue.push_back(Job::Finish(true));
+                }
+                let mut released_camera_commit = false;
+                if camera_transact
+                    && !s
+                        .queue
+                        .iter()
+                        .any(|j| matches!(j, Job::Transact("Fly Camera" | "Move Camera", ..)))
+                    && let Some((was_free, prev_free)) = s.studio.camera_commit_return.take()
+                {
+                    s.studio.free_look = was_free;
+                    s.studio.look_pending = Some(was_free);
+                    s.studio.free = prev_free;
+                    s.studio_push_view(cx);
+                    s.draw(cx);
+                    released_camera_commit = true;
                 }
                 s.pump(cx);
                 // Reconcile any reads deferred during the drag, even when
                 // release did not change the document or the kernel refused it.
                 // The Pen also needs a read when its own work has landed.
-                if kind == "finish" || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty())
+                if kind == "finish"
+                    || released_camera_commit
+                    || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty())
                 {
                     s.refresh(cx);
                 }

@@ -7910,3 +7910,45 @@ fn parenting_studio_3d_layer_to_null_promotes_it_to_3d_null_at_origin() {
     assert_eq!(proj["target"]["first"]["typeLabel"], "3D Null");
     actor.shutdown();
 }
+
+#[test]
+fn semantic_activate_retargets_after_node_id_republish() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let entry_arc = panels.broker.entry("inspector").unwrap();
+    let mut entry = entry_arc.lock().unwrap();
+    // Pick any existing node that carries a semantic props["id"] and invoke
+    // `event_source` with a stale numeric target id + stale revision.
+    let (live_id, semantic_id) = entry
+        .surface
+        .nodes()
+        .iter()
+        .find_map(|(&id, node)| {
+            node.props
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|sid| (id, sid.to_owned()))
+        })
+        .expect("inspector surface has semantic nodes");
+    let stale_target = live_id + 10_000;
+    let stale_revision = publication.surface.revision().saturating_sub(1);
+    let source = Builtins::event_source(
+        &mut entry,
+        publication.generation,
+        stale_revision,
+        stale_target,
+        "click",
+        EventDetail::default(),
+        Some(semantic_id.clone()),
+    )
+    .expect("semantic id should retarget to the live node after republish");
+    assert!(
+        source.contains(&format!("\"target\":{live_id}")),
+        "expected retargeted node id {live_id} in {source}"
+    );
+    drop(entry);
+    actor.shutdown();
+}
