@@ -127,7 +127,7 @@ export interface Publication {
   speech: readonly SpeechModel[];
 }
 export type Action =
-  | { type: "row"; id: string; action: string }
+  | { type: "row"; id: string; action: string; plan?: string }
   | { type: "shortcut"; op: "record" | "reset" | "clear"; id: string }
   | { type: "write"; id: string; value: Json }
   | { type: "extension.enabled"; id: string; enabled: boolean }
@@ -236,6 +236,12 @@ export class SettingsModel {
   };
   private changed() {
     if (this.alive) for (const listener of this.listeners) listener();
+  }
+  /** The plan chosen in Settings › Account's picker, before Continue. */
+  chosenPlan: string | null = null;
+  choosePlan(id: string) {
+    this.chosenPlan = id;
+    this.changed();
   }
   get rows(): Row[] {
     const base = [

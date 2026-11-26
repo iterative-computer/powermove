@@ -442,7 +442,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             }
             Some(model) => {
                 let effort = request.effort.as_deref().unwrap_or("");
-                let model = crate::inference::live(environment, model, effort)?;
+                let model = crate::inference::live_in(environment, model, effort, Some(&id))?;
                 crate::aero::Options::live(crate::aero::Model::live(model))
             }
             None => return Err(crate::inference::CHOOSE.into()),

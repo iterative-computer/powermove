@@ -242,6 +242,17 @@ pub fn open_url(url: &str) -> bool {
     // browser (or another app): it says what it would have opened.
     if !opens_urls(cfg!(debug_assertions), pm_compat_runner::store_install::lane_launch()) {
         eprintln!("Powermove (development build) would open: {url}");
+        // The fake URL opener: reviews read what would have opened here.
+        if let Some(log) = std::env::var_os("PM_FAKE_URL_LOG") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+            {
+                let _ = writeln!(file, "{url}");
+            }
+        }
         return true;
     }
     objc2::rc::autoreleasepool(|_| {

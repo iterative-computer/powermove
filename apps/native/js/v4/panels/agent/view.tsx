@@ -911,10 +911,10 @@ export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
     (n.connection === "waiting" || (n.connection === "unavailable" && !!n.signedOut))
   );
 }
-/** Aero signed in without a plan, before the backend exists: honest and
- * quiet (no fault, no Try Again). */
-export function aeroComingSoon(s: Snapshot, n: NativeFacts): boolean {
-  return s.settings.provider === "aero" && n.connection === "unavailable" && !n.signedOut && !!n.aero?.comingSoon;
+/** Aero signed in on Free: it needs a plan. Honest and quiet (no fault, no
+ * Try Again); Subscribe… leads to Settings › Account. */
+export function aeroNeedsPlan(s: Snapshot, n: NativeFacts): boolean {
+  return s.settings.provider === "aero" && n.connection === "unavailable" && !n.signedOut && !!n.aero?.needsPlan;
 }
 /** The one quiet line under a signed-out composer: what the chosen harness
  * runs on, and where to sign in. One line at the narrowest dock. */
@@ -2971,11 +2971,11 @@ function Composer({
     // Nothing to choose: one compact pane with its one action (Try Again
     // for a harness that couldn't start), and no card. The composer's own
     // line says where to sign in.
-    // Aero signed in without a plan, before the backend exists: honest, one
-    // quiet line (and the plan the backend offers, when it offers one).
-    if (aeroComingSoon(s, n) && s.runId === null) {
-      options.push({ kind: "status", label: "Aero inference is coming soon.", value: "" });
-      if (n.aero?.offer) options.push({ kind: "action", label: `${n.aero.offer.label}…`, value: "providers:" });
+    // Aero on Free: one quiet line and Subscribe…, which opens Settings ›
+    // Account on its plans.
+    if (aeroNeedsPlan(s, n) && s.runId === null) {
+      options.push({ kind: "status", label: "Aero needs Aerolite or Aero.", value: "" });
+      options.push({ kind: "action", label: "Subscribe…", value: "providers:" });
       return { options };
     }
     const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
@@ -3014,6 +3014,16 @@ function Composer({
     const rank = (heading: string) => order.indexOf(heading) >>> 0;
     for (const heading of [...groups.keys()].sort((a, b) => rank(a) - rank(b)))
       options.push({ kind: "heading", label: heading, value: "", icon: headingIcon(heading) }, ...groups.get(heading)!);
+    // Out of credits: until when, and the bigger plan (Settings › Account).
+    const spent = harness === "aero" ? n.aero?.outOfCredits : null;
+    if (spent) {
+      options.push({
+        kind: "status",
+        label: spent.resets ? `Out of credits until ${spent.resets}.` : "Out of credits this month.",
+        value: "",
+      });
+      if (spent.upgrade) options.push({ kind: "action", label: `Upgrade to ${spent.upgrade}…`, value: "providers:" });
+    }
     options.push({ kind: "add", label: "Providers…", value: "providers:" });
     // Aero's usage monitor (credits, plan, reset day) once the backend has
     // answered; Claude Code and Codex report none.
@@ -3735,7 +3745,7 @@ export function AgentView({
   // fault is reported here.
   const harness = harnessMode(s);
   const fault =
-    gate && harness && n.connection === "unavailable" && !n.signedOut && !aeroComingSoon(s, n);
+    gate && harness && n.connection === "unavailable" && !n.signedOut && !aeroNeedsPlan(s, n);
   // Nothing to keep yet: the connection is the whole panel.
   const setup = gate && !harness && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";

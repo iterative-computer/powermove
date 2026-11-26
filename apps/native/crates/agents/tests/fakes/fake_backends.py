@@ -2,9 +2,9 @@
 """Local stand-ins for Settings › Providers, on 127.0.0.1 only (never the
 network): the ChatGPT OAuth issuer Codex signs in with (/auth), the Codex
 backend (/chatgpt/backend-api/codex/responses), OpenAI (/openai/v1), Anthropic
-(/anthropic/v1), an OpenAI-compatible custom endpoint (/custom/v1) and Aero's
-Powermove inference (/aero/v1/aero: usage, models, chat completions; the
-session must be AERO_SESSION).
+(/anthropic/v1), an OpenAI-compatible custom endpoint (/custom/v1) and the
+Powermove account's billing and Aero inference (/aero/v2/billing with checkout and
+portal, /aero/v2/aero: models, chat completions; the session must be AERO_SESSION).
 
 Usage: fake_backends.py PORT [ACCESS_TTL_SECONDS]. GET /stats answers what it
 saw. The model is a fake: asked with a Powermove project in its prompt, it
@@ -13,8 +13,9 @@ Refresh tokens rotate; a reused one answers `refresh_token_reused`.
 POST /control merges test knobs: refresh_barrier (hold refreshes until that many
 arrived, 3 s at most), refresh_delay (seconds before a refresh answers),
 hold_seconds (before a Codex reply), account (the account a sign-in gets),
-aero (Aero's usage answer: plan, none, offer, missing (404), error (500), rejected (401), out (402 on chat),
-echo (chat repeats the request's credential in its error)).
+aero (the account's billing: plan (Aerolite mid-period), aero, free, cancelling, past_due, out (no credits
+left; 402 on chat), missing (404), error (500), rejected (401), echo (chat repeats the request's credential
+in its error)).
 Every request's headers and body are kept in /stats "raw" for leak checks."""
 import base64, hashlib, json, os, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +44,31 @@ AERO_RICH = AERO_MODELS + [{"id": "anthropic/claude-sonnet-5.5", "name": "Claude
                            {"id": "openai/gpt-6-luna", "name": "GPT-6 Luna", "efforts": ["low", "medium", "high"]},
                            {"id": "google/gemini-3-flash", "name": "Gemini 3 Flash"},
                            {"id": "xai/grok-5", "name": "Grok 5"}]
+PLANS = [{"id": "aerolite", "name": "Aerolite", "priceCents": 999, "credits": 1000},
+         {"id": "aero", "name": "Aero", "priceCents": 1999, "credits": 2500}]
+# Credits spent each day of the period so far (Nov 25 to Dec 24; "today" is Dec 8).
+SPENT = [40, 12, 0, 66, 18, 0, 0, 24, 9, 5, 0, 14, 0, 0]
+RUNS_AERO = ("plan", "aero", "cancelling", "past_due", "out", "echo")
+
+
+def billing(state):
+    """GET /v2/billing as the contract shapes it, for a test state."""
+    if state == "free":
+        return {"plan": None, "status": None, "cancelAtPeriodEnd": False,
+                "credits": {"included": 0, "used": 0, "remaining": 0}, "period": None, "daily": [], "plans": PLANS}
+    offer = PLANS[1] if state == "aero" else PLANS[0]
+    included = offer["credits"]
+    spent = [c * 3 for c in SPENT] if state == "aero" else SPENT
+    used = included if state == "out" else sum(spent)
+    if state == "out":
+        spent = spent[:-1] + [included - sum(spent[:-1])]
+    days = [{"date": f"2026-{11 if i < 6 else 12}-{25 + i if i < 6 else i - 5:02d}", "credits": c} for i, c in enumerate(spent)]
+    return {"plan": {"id": offer["id"], "name": offer["name"], "priceCents": offer["priceCents"], "interval": "month"},
+            "status": "past_due" if state == "past_due" else "active", "cancelAtPeriodEnd": state == "cancelling",
+            "credits": {"included": included, "used": used, "remaining": included - used},
+            "period": {"start": "2026-11-25T00:00:00Z", "end": "2026-12-25T00:00:00Z"}, "daily": days, "plans": PLANS}
+
+
 lock = threading.Lock()
 codes, refresh, used, access = {}, {}, set(), {}
 stats = {"refreshes": 0, "reused": 0, "logins": 0, "requests": [], "raw": []}
@@ -225,24 +251,19 @@ class Handler(BaseHTTPRequestHandler):
             if RICH:
                 return self.reply(200, {"data": RICH_ANTHROPIC, "has_more": False})
             return self.reply(200, {"data": [{"id": "claude-fake-opus", "display_name": "Claude Fake Opus"}], "has_more": False})
-        if url.path.startswith("/aero/v1/aero/"):
+        if url.path.startswith("/aero/v2/"):
             if self.bearer() != AERO_SESSION:
                 return self.reply(401, {"error": "unauthorized"})
             state = control["aero"]
-            if url.path.endswith("/usage"):
+            if url.path == "/aero/v2/billing":
                 if state == "rejected":
                     return self.reply(401, {"error": "unauthorized"})
                 if state == "error":
                     return self.reply(500, {"error": "internal"})
                 if state == "missing":
                     return self.reply(404, {"error": "not found"})
-                if state == "none":
-                    return self.reply(200, {"plan": None})
-                if state == "offer":
-                    return self.reply(200, {"plan": None, "offer": {"label": "Get Aerolite", "url": "https://trypowermove.com/aero"}})
-                return self.reply(200, {"plan": {"id": "aerolite", "name": "Aerolite"},
-                                        "credits": {"remaining": 812, "included": 1000}, "resetsAt": "2026-12-25T00:00:00Z"})
-            if url.path.endswith("/models") and state in ("plan", "out", "echo"):
+                return self.reply(200, billing("plan" if state == "echo" else state))
+            if url.path == "/aero/v2/aero/models" and state in RUNS_AERO:
                 return self.reply(200, {"data": AERO_RICH if RICH else AERO_MODELS})
         if url.path == "/custom/v1/models":
             return self.reply(200, {"object": "list", "data": [{"id": "custom-fake-model"}]})
@@ -300,7 +321,18 @@ class Handler(BaseHTTPRequestHandler):
                     or not self.headers.get("anthropic-version")):
                 return self.reply(401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}})
             return self.reply(200, messages_sse(demo(body), body), "text/event-stream")
-        if path == "/aero/v1/aero/chat/completions":
+        if path in ("/aero/v2/billing/checkout", "/aero/v2/billing/portal"):
+            if self.bearer() != AERO_SESSION:
+                return self.reply(401, {"error": {"code": "unauthorized"}})
+            if path.endswith("/portal"):
+                return self.reply(200, {"url": "https://billing.stripe.com/p/session/test_fake"})
+            if control["aero"] != "free":
+                return self.reply(409, {"error": {"code": "has_plan"}})
+            plan = json.loads(body or b"{}").get("plan")
+            if plan not in ("aerolite", "aero"):
+                return self.reply(400, {"error": {"code": "bad_plan"}})
+            return self.reply(200, {"url": f"https://checkout.stripe.com/c/pay/cs_test_fake_{plan}"})
+        if path == "/aero/v2/aero/chat/completions":
             if control["aero"] == "echo":
                 # A careless backend that repeats the request's credential in its error.
                 return self.reply(400, {"error": {"message": f"bad request with {self.headers.get('Authorization')}",
@@ -309,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"error": {"code": "unauthorized"}})
             if control["aero"] == "out":
                 return self.reply(402, {"error": {"code": "credits_exhausted"}})
-            if control["aero"] not in ("plan", "out", "echo"):
+            if control["aero"] not in RUNS_AERO:
                 return self.reply(403, {"error": {"code": "no_plan"}})
             time.sleep(control["hold_seconds"])
             if AERO_EMULATE:

@@ -10,6 +10,7 @@
 use gpui::{App, AsyncApp, Global};
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
+use pm_agents::inference::{Billing, BillingAnswer};
 use pm_compat_runner::store_install;
 use pm_services::{
     ServiceError, ServiceErrorCode,
@@ -371,6 +372,7 @@ impl Http {
         }
         let code = value["error"]
             .as_str()
+            .or_else(|| value["error"]["code"].as_str())
             .filter(|c| c.len() <= 40 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
             .unwrap_or("unknown");
         let kind = match response.status {
@@ -439,6 +441,31 @@ impl Http {
     pub fn delete_account(&mut self) -> pm_services::Result<()> {
         self.call("DELETE", "/v1/me", None, true)?;
         self.forget()
+    }
+    /// `GET /v2/billing`: the plan, this period's credits and what can be
+    /// bought. A backend without the route says Missing.
+    fn billing(&mut self) -> pm_services::Result<BillingAnswer> {
+        match self.call("GET", pm_agents::inference::BILLING, None, true) {
+            Ok(value) => pm_agents::inference::parse_billing(200, value.to_string().as_bytes())
+                .map_err(|e| ServiceError::message(ServiceErrorCode::InvalidData, e)),
+            Err(error) if error.code == ServiceErrorCode::NotFound => Ok(BillingAnswer::Missing),
+            Err(error) if error.code == ServiceErrorCode::PermissionDenied => {
+                Ok(BillingAnswer::SignedOut)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    /// `POST /v2/billing/checkout` or `/portal`: the Stripe page to open,
+    /// when it is one of Stripe's (or, in a development build, the local
+    /// stack's own page).
+    fn billing_page(&mut self, page: &str, plan: Option<&str>) -> pm_services::Result<String> {
+        let body = plan.map(|plan| json!({ "plan": plan }));
+        let path = format!("{}/{page}", pm_agents::inference::BILLING);
+        let value = self.call("POST", &path, body.or(Some(json!({}))), true)?;
+        value["url"]
+            .as_str()
+            .and_then(billing_url)
+            .ok_or_else(|| ServiceError::message(ServiceErrorCode::InvalidData, "billing_url"))
     }
     /// Remember Installs: what the Store installed or removed on this Mac.
     pub fn record_install(&mut self, repo: &str, release: Option<&str>) -> pm_services::Result<()> {
@@ -579,8 +606,20 @@ struct Cloud {
     browser: BrowserAuth,
     google: Option<Google>,
     busy: bool,
+    billing: Billed,
 }
 impl Global for Cloud {}
+/// The account's billing, as Settings › Account shows it.
+#[derive(Default)]
+struct Billed {
+    state: Option<Result<Option<Billing>, ()>>,
+    /// Checkout or the Portal is open in the browser.
+    waiting: Option<&'static str>,
+    /// The last Subscribe or Manage Billing that failed, in words.
+    error: Option<String>,
+    read_at: Option<std::time::Instant>,
+    reading: bool,
+}
 
 /// Starts the account service for this profile and refreshes a stored session.
 pub fn init(profile: PathBuf, cx: &mut App) {
@@ -590,6 +629,15 @@ pub fn init(profile: PathBuf, cx: &mut App) {
     let origin = store_install::origin();
     let worker_profile = profile.clone();
     let Ok(worker) = ServiceWorker::start(move || {
+        // A local development stack's session, given at launch
+        // (`PM_CLOUD_SESSION`), lives in memory, never the Keychain.
+        if let Some(sealed) = local_session(origin) {
+            return Ok(Http::new(
+                origin,
+                Box::new(Memory(Some(sealed))),
+                worker_profile,
+            ));
+        }
         // A development review's account lives in memory, never the Keychain.
         #[cfg(debug_assertions)]
         if review_cloud() {
@@ -617,7 +665,9 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         browser: BrowserAuth::default(),
         google: None,
         busy: false,
+        billing: Billed::default(),
     });
+    follow_activation(cx);
     // Whether a session is stored, and who it is, off the main thread.
     if let Ok(pending) = cx.global::<Cloud>().worker.submit(|host| {
         let signed = host.signed_in();
@@ -645,10 +695,46 @@ pub fn init(profile: PathBuf, cx: &mut App) {
                     cloud.account = None;
                 }
                 changed(cx);
+                if signed {
+                    refresh_billing(cx);
+                }
             });
         })
         .detach();
     }
+}
+/// A session held in memory only (a local stack's, a review's).
+#[derive(Default)]
+pub(crate) struct Memory(Option<Vec<u8>>);
+impl Vault for Memory {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.clone())
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.0 = Some(bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self) -> Result<(), String> {
+        self.0 = None;
+        Ok(())
+    }
+}
+/// The session `PM_CLOUD_SESSION` gives a build on a local development
+/// stack (debug, or the Sandbox's `dev-cloud-origin`), sealed for `origin`:
+/// signed in as that stack's account from the start. Never on the real
+/// cloud, never in a shipped release.
+fn local_session(origin: &str) -> Option<Vec<u8>> {
+    if !store_install::LOCAL_CLOUD || !pm_agents::inference::local_origin(origin) {
+        return None;
+    }
+    let token = std::env::var("PM_CLOUD_SESSION")
+        .ok()
+        .filter(|t| !t.is_empty() && t.len() <= 4096 && !t.chars().any(char::is_control))?;
+    Some(
+        json!({"origin":origin,"token":token,"expiresAt":"2099-01-01T00:00:00.000Z"})
+            .to_string()
+            .into_bytes(),
+    )
 }
 async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) -> Option<T> {
     loop {
@@ -702,7 +788,37 @@ pub fn fact(cx: &App) -> Value {
     let account = cloud.account.as_ref().filter(|_| cloud.signed_in);
     json!({"revision":cloud.revision,"signedIn":account.is_some(),
         "identity":account.map(Account::identity),"email":account.map(|a| a.email.clone()),
-        "rememberInstalls":account.map(|a| a.remember_installs),"busy":cloud.busy})
+        "rememberInstalls":account.map(|a| a.remember_installs),"busy":cloud.busy,
+        "billing":account.map(|_| billing_fact(&cloud.billing))})
+}
+/// Settings › Account's plan card and credits (`pm_builtins` builds the rows).
+fn billing_fact(billed: &Billed) -> Value {
+    use pm_agents::inference::{Status, short_day};
+    let billing = match &billed.state {
+        None => return json!({"state":"loading"}),
+        Some(Err(())) => return json!({"state":"error"}),
+        Some(Ok(None)) => return json!({"state":"missing"}),
+        Some(Ok(Some(billing))) => billing,
+    };
+    json!({"state":"ready","subscribed":billing.subscribed(),
+        "plan":billing.plan.as_ref().map(|p| json!({"id":p.id,"name":p.name,"priceCents":p.price_cents})),
+        "status":billing.status.map(|s| match s {
+            Status::Active => "active",
+            Status::PastDue => "past_due",
+            Status::Canceled => "canceled",
+        }),
+        "cancelAtPeriodEnd":billing.cancel_at_period_end,
+        "credits":{"included":billing.included,"used":billing.used,"remaining":billing.remaining},
+        "resets":billing.resets().map(short_day),
+        // The period's length in days: the daily chart's slots.
+        "periodDays":billing.period.map(|(start, end)| {
+            let days = |d: pm_agents::inference::Day| pm_services::surfaces::store::civil_days(d);
+            (days(end) - days(start)).max(0)
+        }),
+        "daily":billing.daily.iter().map(|(day, credits)| json!([short_day(*day), credits])).collect::<Vec<_>>(),
+        "plans":billing.plans.iter().map(|p| json!({"id":p.id,"name":p.name,"priceCents":p.price_cents,"credits":p.credits})).collect::<Vec<_>>(),
+        "upgrade":billing.upgrade().map(|p| json!({"id":p.id,"name":p.name,"credits":p.credits})),
+        "waiting":billed.waiting,"error":billed.error})
 }
 /// Every editor republishes its built-ins, so Settings shows the change.
 fn changed(cx: &mut App) {
@@ -776,6 +892,7 @@ fn run_code(
                 cloud.signed_in = account.is_some();
                 cloud.account = account.clone();
                 changed(cx);
+                refresh_billing(cx);
             }
             done(result, cx);
         });
@@ -811,9 +928,58 @@ mod review {
     use super::*;
     use std::sync::Mutex;
     static EMAIL: Mutex<String> = Mutex::new(String::new());
+    /// The review account's billing: free, aerolite, aero, cancelling,
+    /// past_due or out (`PM_NATIVE_REVIEW_BILLING`, or a review link).
+    static BILLING: std::sync::LazyLock<Mutex<String>> = std::sync::LazyLock::new(|| {
+        Mutex::new(std::env::var("PM_NATIVE_REVIEW_BILLING").unwrap_or_else(|_| "free".into()))
+    });
+    pub fn set_billing(state: &str) {
+        *BILLING.lock().unwrap() = state.to_owned();
+    }
+    /// `GET /v2/billing` for a review state, shaped as the contract says.
+    fn billing(state: &str) -> Value {
+        let plans = json!([{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
+            {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}]);
+        if state == "free" {
+            return json!({"plan":null,"status":null,"cancelAtPeriodEnd":false,
+                "credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":plans});
+        }
+        let aero = state == "aero";
+        let (id, name, price, included) = if aero {
+            ("aero", "Aero", 1999, 2500)
+        } else {
+            ("aerolite", "Aerolite", 999, 1000)
+        };
+        let mut spent: Vec<u64> = [40, 12, 0, 66, 18, 0, 0, 24, 9, 5, 0, 14, 0, 0]
+            .iter()
+            .map(|c| if aero { c * 3 } else { *c })
+            .collect();
+        if state == "out" {
+            let before: u64 = spent[..spent.len() - 1].iter().sum();
+            *spent.last_mut().unwrap() = included - before;
+        }
+        let used: u64 = spent.iter().sum();
+        let daily: Vec<Value> = spent
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let date = if i < 6 {
+                    format!("2026-11-{}", 25 + i)
+                } else {
+                    format!("2026-12-{:02}", i - 5)
+                };
+                json!({"date": date, "credits": c})
+            })
+            .collect();
+        json!({"plan":{"id":id,"name":name,"priceCents":price,"interval":"month"},
+            "status":if state == "past_due" { "past_due" } else { "active" },
+            "cancelAtPeriodEnd":state == "cancelling",
+            "credits":{"included":included,"used":used,"remaining":included - used},
+            "period":{"start":"2026-11-25T00:00:00Z","end":"2026-12-25T00:00:00Z"},
+            "daily":daily,"plans":plans})
+    }
     static HANDLE: Mutex<String> = Mutex::new(String::new());
-    #[derive(Default)]
-    pub struct Memory(Option<Vec<u8>>);
+    pub(super) use super::Memory;
     impl Memory {
         /// Signed in from the start as `PM_NATIVE_REVIEW_SIGNED_IN` (an
         /// email), when the review launch names one; else signed out.
@@ -827,19 +993,6 @@ mod review {
                     .to_string()
                     .into_bytes(),
             ))
-        }
-    }
-    impl Vault for Memory {
-        fn read(&self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.0.clone())
-        }
-        fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-            self.0 = Some(bytes.to_vec());
-            Ok(())
-        }
-        fn delete(&mut self) -> Result<(), String> {
-            self.0 = None;
-            Ok(())
         }
     }
     pub fn answer(method: &str, path: &str, body: &[u8]) -> pm_services::Result<Value> {
@@ -863,6 +1016,23 @@ mod review {
                 Some("111111") => fail(ServiceErrorCode::NotFound, "api:gone"),
                 _ => fail(ServiceErrorCode::PermissionDenied, "api:unauthorized"),
             },
+            ("GET", "/v2/billing") => Ok(billing(&BILLING.lock().unwrap())),
+            // Checkout "paid" at once (as its webhook would land before the
+            // browser comes back); the Portal changes nothing.
+            ("POST", "/v2/billing/checkout") => {
+                let plan = body["plan"].as_str().unwrap_or_default().to_owned();
+                if !matches!(plan.as_str(), "aerolite" | "aero") {
+                    return fail(ServiceErrorCode::InvalidInput, "api:bad_plan");
+                }
+                if *BILLING.lock().unwrap() != "free" {
+                    return fail(ServiceErrorCode::InvalidInput, "api:has_plan");
+                }
+                *BILLING.lock().unwrap() = plan.clone();
+                Ok(json!({"url": format!("https://checkout.stripe.com/c/pay/cs_review_{plan}")}))
+            }
+            ("POST", "/v2/billing/portal") => {
+                Ok(json!({"url": "https://billing.stripe.com/p/session/review"}))
+            }
             ("GET", "/v1/me") => {
                 let handle = HANDLE.lock().unwrap().clone();
                 Ok(json!({"user":{"id":"review","email":EMAIL.lock().unwrap().clone()},
@@ -879,6 +1049,15 @@ mod review {
             },
             _ => Ok(json!({ "ok": true })),
         }
+    }
+}
+/// Development review link `powermove://review/billing/<state>`: the review
+/// account's billing changes (as its webhooks would) and is read again.
+#[cfg(debug_assertions)]
+pub fn review_billing(state: &str, cx: &mut App) {
+    if review_cloud() {
+        review::set_billing(state);
+        refresh_billing(cx);
     }
 }
 /// Who is signed in, if anyone: the account's email (its handle if it has
@@ -1055,6 +1234,7 @@ fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, cx: &mut A
         crate::alert::note(&explain_settings(&error.to_string()), "");
     }
     changed(cx);
+    refresh_billing(cx);
 }
 fn explain_settings(code: &str) -> String {
     if code == "network" {
@@ -1064,6 +1244,221 @@ fn explain_settings(code: &str) -> String {
     } else {
         "Your account couldn’t be updated. Try again.".into()
     }
+}
+
+// ---- Billing (Settings › Account) ----
+
+/// Reads the account's billing on the worker; Settings › Account and Aero
+/// follow the answer. Signed out: forgotten.
+pub fn refresh_billing(cx: &mut App) {
+    if !cx.has_global::<Cloud>() {
+        return;
+    }
+    let cloud = cx.global_mut::<Cloud>();
+    if !cloud.signed_in {
+        cloud.billing = Billed::default();
+        return;
+    }
+    if cloud.billing.reading {
+        return;
+    }
+    cloud.billing.reading = true;
+    let Ok(pending) = cloud.worker.submit(|host| Ok(host.billing())) else {
+        cloud.billing.reading = false;
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let answer = wait(pending, cx).await;
+        cx.update(|cx| {
+            let cloud = cx.global_mut::<Cloud>();
+            cloud.billing.reading = false;
+            cloud.billing.read_at = Some(std::time::Instant::now());
+            match answer {
+                Some(Ok(BillingAnswer::Billing(billing))) => {
+                    // A plan bought: the wait for Checkout is over.
+                    if billing.subscribed() && cloud.billing.waiting == Some("checkout") {
+                        cloud.billing.waiting = None;
+                    }
+                    cloud.billing.state = Some(Ok(Some(billing)));
+                }
+                Some(Ok(BillingAnswer::Missing)) => cloud.billing.state = Some(Ok(None)),
+                // The session ended: the account's own refresh signs out.
+                Some(Ok(BillingAnswer::SignedOut)) => cloud.billing = Billed::default(),
+                _ => {
+                    // Offline: what was read stays; nothing read yet is an error.
+                    if !matches!(cloud.billing.state, Some(Ok(Some(_)))) {
+                        cloud.billing.state = Some(Err(()));
+                    }
+                }
+            }
+            changed(cx);
+        });
+    })
+    .detach();
+}
+/// Subscribe: Stripe Checkout for `plan` opens in the browser, and the page
+/// waits for it (the return link, or the app coming back).
+pub fn subscribe(plan: String, cx: &mut App) {
+    open_billing_page("checkout", Some(plan), cx);
+}
+/// Manage Billing: the Stripe Customer Portal opens in the browser.
+pub fn manage_billing(cx: &mut App) {
+    open_billing_page("portal", None, cx);
+}
+fn open_billing_page(page: &'static str, plan: Option<String>, cx: &mut App) {
+    if !cx.has_global::<Cloud>() {
+        return;
+    }
+    let cloud = cx.global_mut::<Cloud>();
+    if cloud.busy || !cloud.signed_in {
+        return;
+    }
+    cloud.busy = true;
+    cloud.billing.error = None;
+    let Ok(pending) = cloud
+        .worker
+        .submit(move |host| Ok(host.billing_page(page, plan.as_deref())))
+    else {
+        cloud.busy = false;
+        return;
+    };
+    changed(cx);
+    cx.spawn(async move |cx| {
+        let answer = wait(pending, cx).await;
+        cx.update(|cx| {
+            let cloud = cx.global_mut::<Cloud>();
+            cloud.busy = false;
+            match answer {
+                Some(Ok(url)) if crate::platform::open_url(&url) => {
+                    cloud.billing.waiting = Some(page);
+                }
+                Some(Ok(_)) => {
+                    cloud.billing.error =
+                        Some("Powermove couldn’t open your browser. Try again.".into());
+                }
+                Some(Err(error)) => {
+                    let code = error.to_string();
+                    cloud.billing.error = Some(billing_error(&code).into());
+                    // Already on a plan (bought in another window): read it.
+                    if code == "api:has_plan" {
+                        changed(cx);
+                        return refresh_billing(cx);
+                    }
+                }
+                None => cloud.billing.error = Some(billing_error("network").into()),
+            }
+            changed(cx);
+        });
+    })
+    .detach();
+}
+fn billing_error(code: &str) -> &'static str {
+    match code {
+        "network" => "Can’t reach Powermove. Check your connection and try again.",
+        "api:has_plan" => "You already have a plan. Manage it with Manage Billing.",
+        "api:no_billing_account" => "There’s no billing to manage yet. Choose a plan first.",
+        "api:rate_limited" => "Too many tries. Wait a moment and try again.",
+        _ => "Billing couldn’t open. Try again.",
+    }
+}
+/// Waiting for Checkout: Cancel stops waiting (the browser's page stays).
+pub fn cancel_checkout(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        cx.global_mut::<Cloud>().billing.waiting = None;
+        changed(cx);
+    }
+}
+/// The Stripe page a billing call may open: Checkout or the Portal on
+/// Stripe's own hosts over https, or a local stack's page in a build that
+/// may use one. Kept canonical; nothing else is ever opened.
+fn billing_url(raw: &str) -> Option<String> {
+    let url = url::Url::parse(raw).ok()?;
+    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+    let stripe = url.scheme() == "https"
+        && url.port().is_none()
+        && matches!(
+            url.host_str(),
+            Some("checkout.stripe.com" | "billing.stripe.com")
+        );
+    let local = pm_agents::inference::LOCAL_ORIGINS
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+        && url.port().is_some();
+    (plain && (stripe || local)).then(|| url.to_string())
+}
+/// `powermove://billing/return?status=success|cancel|portal`: Checkout
+/// paid or cancelled, or the Portal closed, when the link is exactly that.
+pub fn billing_return(raw: &str) -> Option<&'static str> {
+    let url = url::Url::parse(raw).ok()?;
+    if url.scheme() != "powermove"
+        || url.host_str() != Some("billing")
+        || url.path() != "/return"
+        || !url.username().is_empty()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let mut pairs = url.query_pairs();
+    let (key, value) = pairs.next()?;
+    if key != "status" || pairs.next().is_some() {
+        return None;
+    }
+    match value.as_ref() {
+        "success" => Some("success"),
+        "cancel" => Some("cancel"),
+        "portal" => Some("portal"),
+        _ => None,
+    }
+}
+/// The browser came back from Checkout or the Portal: stop waiting, read
+/// the plan again, and Settings › Account comes forward.
+pub fn billing_returned(cx: &mut App) {
+    if cx.has_global::<Cloud>() {
+        cx.global_mut::<Cloud>().billing.waiting = None;
+        refresh_billing(cx);
+        changed(cx);
+    }
+    crate::settings_window::show_page("account", cx);
+}
+/// The app became active: while Checkout or the Portal is open, or when
+/// the plan was read a while ago, it is read again.
+fn follow_activation(cx: &mut App) {
+    use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
+    let (tx, rx) = async_channel::unbounded::<()>();
+    let block = block2::RcBlock::new(
+        move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+            let _ = tx.try_send(());
+        },
+    );
+    // SAFETY: a notification name constant; the observer lives for the process.
+    let token = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidBecomeActiveNotification),
+                None,
+                None,
+                &block,
+            )
+    };
+    std::mem::forget(token);
+    cx.spawn(async move |cx| {
+        while rx.recv().await.is_ok() {
+            cx.update(|cx| {
+                let Some(cloud) = cx.try_global::<Cloud>() else {
+                    return;
+                };
+                let stale = cloud
+                    .billing
+                    .read_at
+                    .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(300));
+                if cloud.billing.waiting.is_some() || stale {
+                    refresh_billing(cx);
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 /// Settings › Account › Sign Out.
@@ -1132,5 +1527,63 @@ pub fn remember_install(profile: &Path, repo: &str, release: Option<&str>) {
     let remember = cached(profile, store_install::origin()).is_some_and(|a| a.remember_installs);
     if remember && http.signed_in() {
         let _ = http.record_install(repo, release);
+    }
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::{billing_return, billing_url};
+
+    /// Only Stripe's Checkout and Portal over https open; a local stack's
+    /// page only in a build that may use one.
+    #[test]
+    fn only_stripes_pages_open_from_billing() {
+        for ok in [
+            "https://checkout.stripe.com/c/pay/cs_test_1",
+            "https://billing.stripe.com/p/session/test_1",
+        ] {
+            assert_eq!(billing_url(ok).as_deref(), Some(ok));
+        }
+        for refused in [
+            "http://checkout.stripe.com/c/pay/cs_test_1",
+            "https://checkout.stripe.com.evil.example/c",
+            "https://evil.example/?u=https://checkout.stripe.com",
+            "https://user@checkout.stripe.com/c",
+            "https://checkout.stripe.com:8443/c",
+            "https://stripe.com/c",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(billing_url(refused), None, "{refused}");
+        }
+        let local = billing_url("http://127.0.0.1:8787/v2/dev/checkout?s=1");
+        assert_eq!(local.is_some(), pm_agents::inference::LOCAL_ORIGINS);
+    }
+
+    /// A shipped release never opens a local page from billing.
+    #[cfg(all(not(debug_assertions), not(feature = "dev-cloud-origin")))]
+    #[test]
+    fn a_shipped_release_opens_only_stripe() {
+        assert_eq!(billing_url("http://127.0.0.1:8787/checkout"), None);
+        assert_eq!(billing_url("http://localhost:8787/checkout"), None);
+    }
+
+    #[test]
+    fn the_billing_return_link_is_exactly_success_or_cancel() {
+        for status in ["success", "cancel", "portal"] {
+            let link = format!("powermove://billing/return?status={status}");
+            assert_eq!(billing_return(&link), Some(status));
+        }
+        for other in [
+            "powermove://billing/return",
+            "powermove://billing/return?status=paid",
+            "powermove://billing/return?status=success&x=1",
+            "powermove://billing/return?status=success&status=portal",
+            "powermove://billing/elsewhere?status=success",
+            "powermove://auth?state=s&token=t",
+            "https://billing/return?status=success",
+        ] {
+            assert_eq!(billing_return(other), None, "{other}");
+        }
     }
 }

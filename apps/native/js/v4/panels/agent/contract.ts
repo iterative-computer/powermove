@@ -114,14 +114,15 @@ export interface NativeFacts {
    * models ("ChatGPT", "OpenAI API key", …). */
   accounts?: Record<string, string>;
   /** Aero on the Powermove account: its usage monitor's lines (credits,
-   * plan, reset day; none until the backend answers) and a plan the backend
-   * offers someone without one. */
+   * plan, reset day; none until the backend answers), whether the account
+   * is on Free, and when its credits are spent, the reset day and the
+   * bigger plan. */
   aero?: {
     usage: [label: string, value: string][];
-    /** The plan the backend offers (its label; the page opens natively). */
-    offer: { label: string } | null;
-    /** Signed in, no plan yet: a quiet state, never a fault. */
-    comingSoon?: boolean;
+    /** Signed in on Free: Aero needs Aerolite or Aero (quiet, never a fault). */
+    needsPlan?: boolean;
+    /** No credits left this period. */
+    outOfCredits?: { resets: string | null; upgrade: string | null } | null;
   };
   /** The configured compatible model's display name for its menu heading. */
   connectedModelName?: string | null;

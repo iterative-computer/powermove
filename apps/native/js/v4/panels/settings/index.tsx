@@ -134,7 +134,7 @@ const explained = (id: string) =>
   id.startsWith("storage.original.");
 /** Rows whose detail is their reading, shown under the title (a long one
  *  as a value would crush the title). */
-const READINGS = new Set(["media.used"]);
+const READINGS = new Set(["media.used", "account.choose"]);
 /** Visual choices the window shows as rendered previews (Settings' visual
  *  picker), named by what each option previews. */
 const PICKERS: Record<string, string> = {
@@ -168,6 +168,15 @@ function RowControl({
     onChange: change,
   };
   if (row.busy) return <UI.ProgressRow label="Checking…" />;
+  // Settings › Providers on Free: the plans are on Settings › Account.
+  if (row.control === "action" && row.action === "settings.show-account")
+    return (
+      <Button
+        label={row.actionLabel!}
+        disabled={disabled}
+        onClick={() => model.select("account")}
+      />
+    );
   if (row.control === "switch" && typeof row.value === "boolean")
     return <UI.Switch {...common} value={row.value} />;
   if (row.control === "secure")
@@ -191,6 +200,25 @@ function RowControl({
         />
       </div>
     );
+  // Free: Continue… opens Checkout for the plan chosen in the picker
+  // under the title (PlanPicker) in the browser.
+  if (row.control === "plans" && row.options?.length) {
+    const chosen = chosenPlan(row, model);
+    return (
+      <Button
+        label={row.actionLabel!}
+        disabled={disabled || !model.services}
+        onClick={() => {
+          void model.perform({
+            type: "row",
+            id: row.id,
+            action: row.action!,
+            plan: chosen,
+          });
+        }}
+      />
+    );
+  }
   if (row.control === "action") {
     const button = (
       <Button
@@ -271,6 +299,30 @@ function RowControl({
       />
     );
   return null;
+}
+/** The plan Settings › Account's picker has chosen: the person's choice,
+ *  else the first offered. */
+function chosenPlan(row: Row, model: SettingsModel): string {
+  const options = row.options ?? [];
+  return String(
+    options.find((o) => o.v === model.chosenPlan)?.v ?? options[0]?.v ?? "",
+  );
+}
+/** Aerolite or Aero, in Settings' visual picker, the card's width under
+ *  the title. */
+function PlanPicker({ row, model }: { row: Row; model: SettingsModel }) {
+  const options = row.options ?? [];
+  return (
+    <UI.SegmentedControl
+      label="Plan"
+      disabled={row.disabled || row.busy}
+      attr={{ "aria-description": row.detail ?? "" }}
+      metadata={{ picker: "plans" }}
+      value={chosenPlan(row, model)}
+      options={options.map((o) => ({ id: String(o.v), label: o.label }))}
+      onChange={(id) => model.choosePlan(id)}
+    />
+  );
 }
 function RowCopy({
   title,
@@ -393,6 +445,31 @@ function SettingRow({
         )}
         <RowControl row={row} model={model} nowrapStatus={Boolean(agentApp)} />
       </div>
+      {row.control === "plans" && row.options?.length ? (
+        <PlanPicker row={row} model={model} />
+      ) : null}
+      {/* This month's credits (Settings › Account): a meter of what is
+          used, and each day's use as thin bars; the window draws both. */}
+      {row.meter && (
+        <div
+          role="img"
+          label={`${row.meter.used} of ${row.meter.included} credits used`}
+          metadata={{ settingsLayout: "meter", ...row.meter }}
+        />
+      )}
+      {row.days && row.days.length > 0 && (
+        <div
+          role="img"
+          label={`${row.label}: ${row.days
+            .map(([day, credits]) => `${day} ${credits}`)
+            .join(", ")}`}
+          metadata={{
+            settingsLayout: "chart",
+            days: row.days,
+            slots: row.slots ?? row.days.length,
+          }}
+        />
+      )}
     </div>
   );
 }

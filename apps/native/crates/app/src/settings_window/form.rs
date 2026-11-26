@@ -1,6 +1,8 @@
 //! AppKit presentation of the Settings panel's semantic tree. The panel
 //! still owns its values, search results, actions and change listeners.
 mod agent_app_icons;
+mod credits;
+mod plans;
 mod previews;
 
 use crate::{session::Controller, v4_compile::number_facts};
@@ -1038,6 +1040,11 @@ enum Widget {
     /// in a popover.
     Help(Retained<NSButton>),
     Picker(Picker),
+    /// Settings › Account's plan cards (Free).
+    Plans(plans::Plans),
+    /// Settings › Account's credits: the meter and the daily chart.
+    Meter(Retained<credits::Meter>),
+    Chart(Retained<credits::Chart>),
 }
 
 impl Widget {
@@ -1056,6 +1063,9 @@ impl Widget {
             Self::Secure(value) => value,
             Self::Help(value) => value,
             Self::Picker(value) => &value.stack,
+            Self::Plans(value) => &value.stack,
+            Self::Meter(value) => value,
+            Self::Chart(value) => value,
         }
     }
 }
@@ -1131,7 +1141,7 @@ impl Render<'_, '_> {
                         // A visual picker runs the card's width under the title.
                         _ if has_picker(self.surface, child) => footers.extend(self.node(child.id)),
                         "nameButton" => leading = self.node(child.id),
-                        "error" => footers.extend(self.node(child.id)),
+                        "error" | "meter" | "chart" => footers.extend(self.node(child.id)),
                         _ => trailing.extend(self.node(child.id)),
                     }
                 }
@@ -1205,6 +1215,26 @@ impl Render<'_, '_> {
             Widget::Picker(picker) => {
                 let (_, value, _) = control_value(self.surface, node, component);
                 picker.update(value.as_u64().map(|v| v as usize), disabled(node));
+            }
+            Widget::Plans(plans) => {
+                let (_, value, _) = control_value(self.surface, node, component);
+                plans.update(value.as_u64().map(|v| v as usize), disabled(node));
+            }
+            Widget::Meter(meter) => {
+                let m = metadata(node);
+                let count = |k: &str| m[k].as_u64().unwrap_or(0);
+                meter.set(count("used"), count("included"), label(node));
+            }
+            Widget::Chart(chart) => {
+                let m = metadata(node);
+                let days = m["days"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| Some((d[0].as_str()?.to_owned(), d[1].as_u64()?)))
+                    .collect();
+                let slots = m["slots"].as_u64().unwrap_or(0) as usize;
+                chart.set(days, slots, label(node));
             }
             Widget::Image { view, resource } => {
                 let key = node.props.get("resource").and_then(Value::as_str);
@@ -1312,6 +1342,8 @@ impl Render<'_, '_> {
             return self.control(node, kind, &value, options);
         }
         match layout(node) {
+            "meter" => Widget::Meter(credits::Meter::new(mtm)),
+            "chart" => Widget::Chart(credits::Chart::new(mtm)),
             "row" => Widget::Row(Row::new(
                 mtm,
                 metadata(node)["agentApp"].as_str(),
@@ -2120,6 +2152,41 @@ impl Render<'_, '_> {
     fn picker(&mut self, node: &Node, kind: &str) -> Widget {
         let mtm = self.scroll.mtm();
         let (tx, rx) = async_channel::unbounded();
+        let (id, generation) = (node.id, self.generation);
+        let forward = |rx: async_channel::Receiver<Value>, cx: &mut Context<Controller>| {
+            cx.spawn(async move |owner, cx| {
+                while let Ok(value) = rx.recv().await {
+                    if owner
+                        .update(cx, |owner, cx| {
+                            owner.settings_control(generation, id, Kind::Segmented, value, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        };
+        // Plans are cards in the Settings card anatomy, not picture tiles.
+        if kind == "plans" {
+            let options = node
+                .children
+                .iter()
+                .filter_map(|id| self.surface.node(*id))
+                .map(|child| label(child).to_owned())
+                .collect();
+            // Nested inside the group card by the row's inset.
+            let radius = self.tokens.radius.nested(st().group_radius, st().row_inset) as f64;
+            let plans = plans::Plans::new(mtm, label(node), options, radius, tx);
+            if let Some(cx) = self.cx.as_deref_mut() {
+                forward(rx, cx);
+            }
+            let (_, value, _) =
+                control_value(self.surface, node, Some(Component::SegmentedControl));
+            plans.update(value.as_u64().map(|v| v as usize), disabled(node));
+            return Widget::Plans(plans);
+        }
         let target: Retained<PickerTarget> =
             unsafe { msg_send![super(PickerTarget::alloc(mtm).set_ivars(tx)), init] };
         let stack = NSStackView::new(mtm);
@@ -2177,21 +2244,8 @@ impl Render<'_, '_> {
             names.push(name);
         }
         stack.addArrangedSubview(&flexible_space(mtm));
-        let (id, generation) = (node.id, self.generation);
         if let Some(cx) = self.cx.as_deref_mut() {
-            cx.spawn(async move |owner, cx| {
-                while let Ok(value) = rx.recv().await {
-                    if owner
-                        .update(cx, |owner, cx| {
-                            owner.settings_control(generation, id, Kind::Segmented, value, cx);
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
+            forward(rx, cx);
         }
         let mut picker = Picker {
             stack,

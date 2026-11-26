@@ -43,6 +43,16 @@ impl Global for Entries {}
 /// URLs from LaunchServices. Files queue until the library is attached.
 pub fn receive(urls: Vec<String>, cx: &mut App) {
     for raw in urls {
+        #[cfg(debug_assertions)]
+        if let Some(state) = raw.strip_prefix("powermove://review/billing/") {
+            crate::cloud::review_billing(state, cx);
+            continue;
+        }
+        // Back from Stripe Checkout or the Portal (the billing return page).
+        if crate::cloud::billing_return(&raw).is_some() {
+            crate::cloud::billing_returned(cx);
+            continue;
+        }
         // Development builds: on-screen reviews reach a menu command without
         // pressing a menu item (which could bring the app forward);
         // `review/command/<name>/<arg>/…` passes string arguments.

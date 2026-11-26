@@ -856,13 +856,15 @@ impl Backend {
             .get(pm_agents::Provider::Compatible.name())
             .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
             .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
-        // Aero's usage monitor (credits, plan, reset day) and the plan the
-        // backend offers someone without one; nothing until it answers.
-        let (usage, offer) = self.native.agent_link.aero_usage();
+        // Aero's usage monitor (credits, plan, reset day); on Free, that Aero
+        // needs a plan; out of credits, the reset day and the bigger plan.
+        let (usage, billing) = self.native.agent_link.aero_usage();
+        let out = billing.as_ref().filter(|b| b.remaining == 0);
         let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
-            // The label only: the validated page opens natively, never from the panel.
-            "offer": offer.map(|o| json!({"label": o.label})),
-            "comingSoon": self.native.agent_link.aero_coming_soon()});
+            "needsPlan": self.native.agent_link.aero_needs_plan(),
+            "outOfCredits": out.map(|b| json!({
+                "resets": b.resets().map(pm_agents::inference::short_day),
+                "upgrade": b.upgrade().map(|p| p.name.clone())}))});
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.

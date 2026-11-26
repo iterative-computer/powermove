@@ -321,6 +321,13 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `settings.app_icon_gap` | Space after a Settings › Agents app mark | 10 | 10 | 10 | 10 |
 | `settings.avatar` | Settings account avatar side | 26 | 26 | 26 | 26 |
 | `settings.column` | Settings form column's greatest width | 560 | 560 | 560 | 560 |
+| `settings.credits_air` | Air above the credits meter and the daily chart | 8 | 8 | 8 | 8 |
+| `settings.credits_bar` | A day's bar width in the daily credits chart, at most | 6 | 6 | 6 | 6 |
+| `settings.credits_bar_gap` | Least space between the daily credits chart's bars | 2 | 2 | 2 | 2 |
+| `settings.credits_bar_radius` | The daily credits chart's bar caps' corner | 2 | 2 | 2 | 2 |
+| `settings.credits_chart` | Settings › Account daily credits chart height | 52 | 52 | 52 | 52 |
+| `settings.credits_meter` | Settings › Account credits meter thickness | 6 | 6 | 6 | 6 |
+| `settings.credits_today` | Today's marker under the daily credits chart | 3 | 3 | 3 | 3 |
 | `settings.dark_veil` | Dark Settings sidebar veil over the system material | 0.37 | 0.37 | 0.37 | 0.37 |
 | `settings.filter_width` | A Settings filter field's least width | 175 | 175 | 175 | 175 |
 | `settings.group_radius` | A Settings group card's corner | 10 | 10 | 10 | 10 |

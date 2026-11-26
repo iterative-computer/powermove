@@ -5213,6 +5213,11 @@ impl Controller {
                     });
                 }
             }
+            // Settings › Account (the billing return link, Aero's Subscribe).
+            "accountSettings" => {
+                self.builtins.settings_page = Some("account".into());
+                self.show_builtin("settings", window, cx);
+            }
             // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
             "keyboardShortcuts" => {
                 self.builtins.settings_page = Some("shortcuts".into());

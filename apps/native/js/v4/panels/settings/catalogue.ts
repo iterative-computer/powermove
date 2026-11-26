@@ -82,7 +82,9 @@ export type Control =
   | "secure"
   | "colour"
   | "action"
-  | "status";
+  | "status"
+  /** Settings › Account's plan picker (Free): the plans, then Continue…. */
+  | "plans";
 export interface Row {
   id: string;
   section: Section;
@@ -105,6 +107,12 @@ export interface Row {
   profileKey?: string;
   // Native Bindings leases are supplied by the host, never invented by a panel.
   binding?: string;
+  /** This month's credits as a meter (Settings › Account). */
+  meter?: { used: number; included: number };
+  /** Credits spent each day of the period so far: [day, credits]. */
+  days?: [string, number][];
+  /** The period's length in days (the chart's slots). */
+  slots?: number;
 }
 const choices = (values: (string | [Json, string])[]): Option[] =>
   values.map((v) =>
