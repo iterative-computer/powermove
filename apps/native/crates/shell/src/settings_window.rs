@@ -1298,7 +1298,8 @@ fn account_cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retaine
         .account_email
         .as_deref()
         .filter(|email| !email.is_empty() && Some(*email) != section.account_name.as_deref());
-    let subtitle = NSTextField::labelWithString(&NSString::from_str(email.unwrap_or("Account")), mtm);
+    let subtitle =
+        NSTextField::labelWithString(&NSString::from_str(email.unwrap_or("Account")), mtm);
     subtitle.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
     subtitle.setFont(Some(&NSFont::systemFontOfSize(
         NSFont::smallSystemFontSize(),
@@ -1512,8 +1513,20 @@ fn look(dark: bool) -> Look {
     }
 }
 
+/// An SVG's view box size (width, height).
+fn view_box(svg: &str) -> Option<(f64, f64)> {
+    let at = svg.find("viewBox=\"")? + "viewBox=\"".len();
+    let end = svg[at..].find('"')? + at;
+    let n: Vec<f64> = svg[at..end]
+        .split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    (n.len() == 4).then(|| (n[2], n[3]))
+}
+
 fn tile_svg(id: &str, dark: bool) -> Option<String> {
-    let glyph = glyph_body(glyph(id)?, "url(#g)");
+    let source = glyph(id)?;
+    let glyph = glyph_body(source, "url(#g)");
     let Look {
         body,
         edge,
@@ -1525,23 +1538,25 @@ fn tile_svg(id: &str, dark: bool) -> Option<String> {
     let s = TILE_UNITS;
     let m = MARGIN_UNITS;
     let full = s + 2. * m;
-    // The glyph: 14 of the tile's 22 units, centred.
-    let k = 14. / 16.;
-    let at = (s - 16. * k) / 2.;
+    // The glyph: 14 of the tile's 22 units across its longer side, centred
+    // (Pierre's are 16 units; the Powermove mark has its own box).
+    let (gw, gh) = view_box(source).unwrap_or((16., 16.));
+    let k = 14. / gw.max(gh);
+    let (ax, ay) = ((s - gw * k) / 2., (s - gh * k) / 2.);
     Some(format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{full}" height="{full}" viewBox="{nm} {nm} {full} {full}">
 <defs>
 <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{b0}"/><stop offset="1" stop-color="{b1}"/></linearGradient>
 <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{ec}" stop-opacity="{e0}"/><stop offset="1" stop-color="{ec}" stop-opacity="{e1}"/></linearGradient>
 <radialGradient id="light" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#ffffff" stop-opacity="{light}"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
-<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="16"><stop offset="0" stop-color="{g0}"/><stop offset="1" stop-color="{g1}"/></linearGradient>
+<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="{gh}"><stop offset="0" stop-color="{g0}"/><stop offset="1" stop-color="{g1}"/></linearGradient>
 <filter id="drop" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="#000000" flood-opacity="{so}"/></filter>
 <filter id="press" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0.55" stdDeviation="0.3" flood-color="{pc}" flood-opacity="{po}"/></filter>
 </defs>
 <path d="{outer}" fill="url(#body)" filter="url(#drop)"/>
 <path d="{outer}" fill="url(#light)"/>
 <path d="{inner}" fill="none" stroke="url(#edge)" stroke-width="0.5"/>
-<g filter="url(#press)"><g transform="translate({at} {at}) scale({k})">{glyph}</g></g>
+<g filter="url(#press)"><g transform="translate({ax} {ay}) scale({k})">{glyph}</g></g>
 </svg>"##,
         nm = -m,
         b0 = body.0,

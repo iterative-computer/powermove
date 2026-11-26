@@ -233,7 +233,7 @@ impl pm_mcp::store::StoreRead for StoreHttp {
             message: message.into(),
             backing: Some("native Store transport".into()),
         };
-        let origin = url::Url::parse(pm_compat_runner::store_install::ORIGIN)
+        let origin = url::Url::parse(pm_compat_runner::store_install::origin())
             .map_err(|_| Error::invalid("Invalid Store origin"))?;
         let mut url = origin
             .join(&request.path)
@@ -251,7 +251,7 @@ impl pm_mcp::store::StoreRead for StoreHttp {
         // Never leaves the Store's origin, even by redirect. Transport errors
         // can carry hosts and system detail: none crosses MCP.
         let response = pm_compat_runner::net::get_within(
-            pm_compat_runner::store_install::ORIGIN,
+            pm_compat_runner::store_install::origin(),
             url.as_str(),
             request.max_bytes,
             30,

@@ -754,7 +754,15 @@ pub fn snapshot_image_on_ground(
     let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &data)?;
     snapshot_bitmap_on_ground(&rep, Some(ground))
 }
+/// `rgb` (0xRRGGBB) as an sRGB colour.
+fn srgb(rgb: u32) -> Retained<NSColor> {
+    let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
+    NSColor::colorWithSRGBRed_green_blue_alpha(channel(16), channel(8), channel(0), 1.)
+}
+
 pub struct NativeControl {
+    /// A push button's accent, worn only while it is enabled.
+    tint: Option<u32>,
     build: Option<BuildSnapshot>,
     build_pixels: Rc<std::cell::RefCell<BuildPixels>>,
     control: Control,
@@ -1168,14 +1176,10 @@ fn make_control(
                     v.setImage(Some(&image));
                     v.setImagePosition(NSCellImagePosition::ImageLeading);
                 }
-                if let Some(rgb) = tint {
-                    let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
-                    v.setBezelColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                        channel(16),
-                        channel(8),
-                        channel(0),
-                        1.,
-                    )));
+                // A disabled tinted button is the system's plain grey one
+                // until it can be pressed (a dimmed accent reads as muddy).
+                if let Some(rgb) = tint.filter(|_| !disabled) {
+                    v.setBezelColor(Some(&srgb(rgb)));
                 }
                 if default {
                     v.setKeyEquivalent(&NSString::from_str("\r"));
@@ -1223,11 +1227,14 @@ fn make_control(
             });
             unsafe {
                 let _: () = msg_send![&*v, setDelegate: &*target];
-                v.setContentType(Some(if symbol == Some("code") {
-                    NSTextContentTypeOneTimeCode
-                } else {
-                    NSTextContentTypeEmailAddress
-                }));
+                // The code, and an address that AutoFill may offer; a field
+                // that says "plain" (the sign-in sheet's email, the handle)
+                // starts empty, nothing filled in or selected for the person.
+                match symbol {
+                    Some("code") => v.setContentType(Some(NSTextContentTypeOneTimeCode)),
+                    Some("plain") => {}
+                    _ => v.setContentType(Some(NSTextContentTypeEmailAddress)),
+                }
             }
             // An address is never corrected or completed as words.
             v.setAutomaticTextCompletionEnabled(false);
@@ -1291,6 +1298,7 @@ impl NativeControl {
             glass,
             inline,
             well,
+            tint,
             ..
         } = spec;
         let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
@@ -1345,6 +1353,7 @@ impl NativeControl {
         })
         .detach();
         Self {
+            tint,
             build: None,
             build_pixels: Default::default(),
             control,
@@ -1589,6 +1598,29 @@ impl NativeControl {
         self.height = fit.height as f32;
         self.width = fit.width as f32;
     }
+    /// A full-width push button of a sheet's column (the sign-in sheet's
+    /// Continue and Continue with Google): extra-large, `width` wide, a
+    /// rounded rectangle so its corners follow the sheet's.
+    pub fn wide(&mut self, width: f32) {
+        let Control::Button(v) = &self.control else {
+            return;
+        };
+        v.setControlSize(NSControlSize::ExtraLarge);
+        if v.respondsToSelector(objc2::sel!(setBorderShape:)) {
+            v.setBorderShape(NSControlBorderShape::RoundedRectangle);
+        }
+        self.height = v.fittingSize().height as f32;
+        self.width = width;
+    }
+    /// An image before the title (a sign-in provider's mark).
+    pub fn set_leading_image(&mut self, image: &objc2_app_kit::NSImage) {
+        let Control::Button(v) = &self.control else {
+            return;
+        };
+        v.setImage(Some(image));
+        v.setImagePosition(NSCellImagePosition::ImageLeading);
+        v.setImageScaling(objc2_app_kit::NSImageScaling::ScaleNone);
+    }
     /// A push button beside a `prominent` one: the same extra-large size,
     /// as wide as its title needs.
     pub fn extra_large(&mut self) {
@@ -1785,6 +1817,9 @@ impl NativeControl {
             self.control.value(value, &shown);
         }
         self.control.enabled(!disabled);
+        if let (Control::Button(v), Some(rgb)) = (&self.control, self.tint) {
+            v.setBezelColor((!disabled).then(|| srgb(rgb)).as_deref());
+        }
         if self.inline {
             // The title names the current value, so the width follows it.
             self.width = self.control.view().fittingSize().width as f32;

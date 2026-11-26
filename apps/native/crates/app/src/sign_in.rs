@@ -280,20 +280,20 @@ fn sheet_frame(flow: &SignInFlow) -> Frame {
     let (title, line) = match flow.stage {
         SignInStage::Email => (
             "Sign in to Powermove".to_owned(),
-            "Enter your email and we’ll send you a code. New here? This makes your account."
-                .to_owned(),
+            "Use your email or Google account.".to_owned(),
         ),
         SignInStage::Code => (
             "Check your email".to_owned(),
-            format!("We sent a 6-digit code to {}.", flow.email.trim()),
+            // The address stands under it, with Change.
+            "Enter the 6-digit code we emailed you.".to_owned(),
         ),
         SignInStage::Handle => (
             "Choose your handle".to_owned(),
-            "Your name on the Powermove Store. You can’t change it later.".to_owned(),
+            "Your name on the Powermove Store.".to_owned(),
         ),
         SignInStage::Browser => (
             "Continue in your browser".to_owned(),
-            "Sign in with Google there; Powermove picks it up when you’re done.".to_owned(),
+            "Finish with Google, then come back here.".to_owned(),
         ),
         SignInStage::Done => (
             "You’re in".to_owned(),
@@ -329,8 +329,15 @@ fn sheet_frame(flow: &SignInFlow) -> Frame {
             ],
             Some("choose"),
         ),
-        SignInStage::Browser => (vec![Button::new("back", "Use Email Instead")], None),
-        SignInStage::Done => (vec![Button::new("done", "Done")], Some("done")),
+        SignInStage::Browser => (
+            vec![
+                Button::new("back", "Use Email Instead"),
+                Button::new("cancel", "Cancel"),
+            ],
+            None,
+        ),
+        // The check, then the sheet closes by itself.
+        SignInStage::Done => (vec![], None),
     };
     Frame {
         surface: "sign-in".into(),
@@ -615,6 +622,7 @@ mod tests {
         assert_eq!(sheet_frame(&f).default.as_deref(), Some("choose"));
         f.stage = SignInStage::Done;
         assert_eq!(sheet_frame(&f).title, "You’re in");
+        assert!(sheet_frame(&f).buttons.is_empty(), "it closes by itself");
     }
 
     /// Email, code, a wrong code (shake, cleared), the right one: signed in.

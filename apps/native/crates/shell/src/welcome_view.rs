@@ -43,6 +43,10 @@ pub struct WelcomeView {
     pub sheet: bool,
     /// The sheet's Powermove tile, drawn once per appearance.
     sheet_tile: Option<(bool, std::sync::Arc<gpui::Image>)>,
+    /// The sheet's content height as last laid out, and the window height
+    /// last asked of AppKit for it (0 before the first).
+    sheet_content: std::rc::Rc<std::cell::Cell<f32>>,
+    sheet_height: f32,
     /// The stage card's AppKit buttons, by id and label.
     natives: std::collections::HashMap<(String, String), Entity<NativeControl>>,
     /// While a wave carries the card: the snapshot its buttons paint.
@@ -54,6 +58,11 @@ pub struct WelcomeView {
     handle_field: Option<Entity<NativeControl>>,
     /// The sign-in's stage as last drawn: a new one gives its field the keyboard.
     sign_in_stage: Option<SignInStage>,
+    /// Until when (the view's clock) the step's field asks for the keyboard
+    /// again on each frame it does not have it: a control leaving with the
+    /// step before (Use Email Instead) hands the keys back to the view after
+    /// the field took them.
+    field_focus_until: f64,
     /// The last wrong code's shake, and when it started.
     shake: (u64, f64),
     /// A long list of choices (the speech models) scrolls in its card.
@@ -81,6 +90,8 @@ impl WelcomeView {
             ground: false,
             sheet: false,
             sheet_tile: None,
+            sheet_content: Default::default(),
+            sheet_height: 0.,
             natives: Default::default(),
             snapshot: None,
             snapshots: 0,
@@ -88,6 +99,7 @@ impl WelcomeView {
             code_field: None,
             handle_field: None,
             sign_in_stage: None,
+            field_focus_until: 0.,
             shake: (0, 0.),
             list_scroll: ScrollHandle::new(),
         }
@@ -150,9 +162,9 @@ impl WelcomeView {
                     pull: false,
                     // On the stage the step's one action is filled with the
                     // accent, the column's width (Arc's Create Account).
-                    tint: (primary && self.stage).then_some(tokens.colors.accent),
+                    tint: (primary && (self.stage || self.sheet)).then_some(tokens.colors.accent),
                     symbol: None,
-                    glass: primary && !self.stage,
+                    glass: primary && !self.stage && !self.sheet,
                     well: false,
                 },
                 &tokens,
@@ -162,9 +174,15 @@ impl WelcomeView {
             control.set_build_snapshot(self.snapshot.map(crate::stage::snapshot_build));
             control.set_busy(busy);
             match size {
+                Size::Primary | Size::Wide if self.sheet => control.wide(SHEET_INNER),
                 Size::Primary if self.stage => control.prominent(PRIMARY_WIDTH),
                 Size::Pill => control.small(),
                 _ => {}
+            }
+            if button.id == "google"
+                && let Some(mark) = google_mark()
+            {
+                control.set_leading_image(&mark);
             }
             control
         });
@@ -1017,10 +1035,11 @@ impl WelcomeView {
             .child(right)
             .child(actions)
     }
-    /// The sign-in sheet: the Powermove tile, the title and line, the
-    /// stage's sign-in (the same block, fields and motion), one primary
-    /// action and the quiet links under it, in one column on the app's
-    /// ground in its appearance.
+    /// The sign-in sheet, one column 32 pt in from its edges: the Powermove
+    /// tile, the title and one line; Continue with Google first, "or",
+    /// the email (or the code, the handle, the check) and Continue, each the
+    /// column's width; Cancel, quiet, at the foot. The sign-in block is the
+    /// stage's (fields, cells, shake, resend), in the app's appearance.
     fn sheet_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         self.motion.frame(window);
         let t = self.tokens.clone();
@@ -1028,11 +1047,22 @@ impl WelcomeView {
         let frame = self.frame.clone();
         let dark = t.scheme == pm_design::Scheme::Dark;
         if self.sheet_tile.as_ref().is_none_or(|(d, _)| *d != dark) {
-            self.sheet_tile = crate::settings_window::tile_png("powermove", dark, SHEET_TILE as f64, 2.)
-                .map(|png| (dark, std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
+            self.sheet_tile = crate::settings_window::tile_png(
+                "powermove",
+                dark,
+                SHEET_TILE as f64,
+                2.,
+            )
+            .map(|png| {
+                (
+                    dark,
+                    std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)),
+                )
+            });
         }
-        let title_p = match &frame.sign_in {
-            Some(s) => {
+        let stage = frame.sign_in.as_ref().map(|s| s.stage);
+        let title_p = match stage {
+            Some(now) => {
                 let mut p = 1.;
                 for stage in [
                     SignInStage::Email,
@@ -1041,8 +1071,9 @@ impl WelcomeView {
                     SignInStage::Handle,
                     SignInStage::Browser,
                 ] {
-                    let shown = self.shown(TITLE_KEY + stage as u64, s.stage == stage, Preset::Show, window);
-                    if s.stage == stage {
+                    let shown =
+                        self.shown(TITLE_KEY + stage as u64, now == stage, Preset::Show, window);
+                    if now == stage {
                         p = shown;
                     }
                 }
@@ -1050,22 +1081,33 @@ impl WelcomeView {
             }
             None => 1.,
         };
-        let sign_in = frame.sign_in.clone().map(|s| self.sign_in_block(&s, window, cx));
+        let sign_in = frame
+            .sign_in
+            .clone()
+            .map(|s| self.sign_in_block(&s, window, cx));
         let spoken = frame.title.replace('\n', " ");
         let (tile_w, _) = crate::settings_window::tile_image_size(SHEET_TILE as f64);
+        let find = |id: &str| frame.buttons.iter().find(|b| b.id == id).cloned();
+        let google = find("google");
         let primary = frame
             .default
             .as_ref()
             .and_then(|id| frame.buttons.iter().find(|b| &b.id == id))
             .cloned();
+        // The browser step's way back stands where Continue does.
+        let secondary = primary.is_none().then(|| find("back")).flatten();
         let links: Vec<(String, String)> = frame
             .buttons
             .iter()
-            .filter(|b| Some(&b.id) != primary.as_ref().map(|p| &p.id))
+            .filter(|b| {
+                Some(&b.id) != primary.as_ref().map(|p| &p.id)
+                    && b.id != "google"
+                    && Some(&b.id) != secondary.as_ref().map(|p| &p.id)
+            })
             .map(|b| (b.id.clone(), b.label.clone()))
             .collect();
         let mut column = div()
-            .w(px(COLUMN))
+            .w(px(SHEET_INNER))
             .flex()
             .flex_col()
             .items_center()
@@ -1084,7 +1126,7 @@ impl WelcomeView {
                     .debug_selector(|| "welcome-title".into())
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
-                    .mt(px(12.))
+                    .mt(px(10.))
                     .text_size(px(SHEET_TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(relative(1.2))
@@ -1108,58 +1150,161 @@ impl WelcomeView {
                     .top(px((1. - title_p) * 10.))
                     .opacity(title_p.clamp(0., 1.))
                     .child(frame.line.clone()),
-            )
-            .children(sign_in.map(|block| div().w_full().mt(px(22.)).child(block)));
-        column = column.child(
+            );
+        // Google first, then "or" between hairlines, on the email step.
+        if let Some(button) = google {
+            let hairline = || div().flex_1().h(px(1.)).bg(rgba((c.text << 8) | 0x1f));
+            column = column
+                .child(
+                    div()
+                        .id("welcome-google")
+                        .mt(px(24.))
+                        .h(px(SHEET_CONTROL))
+                        .flex()
+                        .justify_center()
+                        .child(self.native_control(&button, Size::Wide, window, cx)),
+                )
+                .child(
+                    div()
+                        .id("sign-in-or")
+                        .role(Role::Label)
+                        .aria_label("or")
+                        .w_full()
+                        .mt(px(16.))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .text_size(px(12.))
+                        .text_color(rgb(c.secondary))
+                        .child(hairline())
+                        .child("or")
+                        .child(hairline()),
+                );
+        }
+        column = column.children(sign_in.map(|block| {
             div()
-                .id("welcome-primary")
-                .debug_selector(|| "welcome-primary".into())
-                .mt(px(22.))
-                .h(px(PRIMARY_HEIGHT))
-                .flex()
-                .justify_center()
-                .children(primary.map(|button| self.button(&button, window, cx))),
-        );
-        if !links.is_empty() {
+                .w_full()
+                .mt(px(if stage == Some(SignInStage::Email) {
+                    16.
+                } else {
+                    24.
+                }))
+                .child(block)
+        }));
+        if let Some(button) = primary.or(secondary.clone()) {
+            let size = if secondary.is_some() {
+                Size::Wide
+            } else {
+                Size::Primary
+            };
             column = column.child(
                 div()
-                    .id("welcome-links")
-                    .debug_selector(|| "welcome-links".into())
+                    .id("welcome-primary")
+                    .debug_selector(|| "welcome-primary".into())
                     .mt(px(12.))
+                    .h(px(SHEET_CONTROL))
                     .flex()
                     .justify_center()
-                    .gap(px(18.))
-                    .children(links.into_iter().map(|(id, label)| {
-                        let act = id.clone();
-                        div()
-                            .id(SharedString::from(format!("welcome-{id}")))
-                            .debug_selector(move || format!("welcome-{id}"))
-                            .role(Role::Link)
-                            .aria_label(label.clone())
-                            .tab_index(0)
-                            .text_size(px(13.))
-                            .text_color(rgb(c.secondary))
-                            .hover_style(|s| s.text_color(rgb(c.text)))
-                            .child(label)
-                            .on_click(cx.listener(move |v, _, _, cx| v.act(&act, cx)))
-                    })),
+                    .child(self.native_control(&button, size, window, cx)),
             );
         }
+        let foot = div()
+            .id("welcome-links")
+            .debug_selector(|| "welcome-links".into())
+            .mt(px(SHEET_FOOT_GAP))
+            .h(px(18.))
+            .flex()
+            .justify_center()
+            .gap(px(18.))
+            .children(links.into_iter().map(|(id, label)| {
+                let act = id.clone();
+                div()
+                    .id(SharedString::from(format!("welcome-{id}")))
+                    .debug_selector(move || format!("welcome-{id}"))
+                    .role(Role::Link)
+                    .aria_label(label.clone())
+                    .tab_index(0)
+                    .text_size(px(13.))
+                    .text_color(rgb(c.secondary))
+                    .hover_style(|s| s.text_color(rgb(c.text)))
+                    .child(label)
+                    .on_click(cx.listener(move |v, _, _, cx| v.act(&act, cx)))
+            }));
+        self.fit_sheet(window, cx);
+        let content = self.sheet_content.clone();
+        // The sheet is as tall as its step: the column and Cancel are
+        // measured as laid out, and the window follows on the next frame.
+        let measure = gpui::canvas(
+            move |bounds, window, _| {
+                let height = f32::from(bounds.size.height);
+                if (height - content.get()).abs() > 0.5 {
+                    content.set(height);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         div()
             .id("welcome")
             .role(Role::Dialog)
             .accessibility_id("shell.sign-in")
             .aria_label(spoken)
+            .relative()
             .size_full()
-            .bg(rgb(c.window))
+            // Settings' card colour: the sheet stands as one of its cards.
+            .bg(rgb(c.panel))
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(SHEET_TOP))
-            .child(column)
+            .pt(px(SHEET_PADDING))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(column)
+                    .child(foot)
+                    .child(measure),
+            )
+    }
+    /// Asks AppKit for the height the step's content needs, about the
+    /// sheet's centre: at once the first time, animated after (AppKit's own
+    /// sheets grow and shrink this way).
+    fn fit_sheet(&mut self, window: &mut Window, cx: &mut App) {
+        let content = self.sheet_content.get();
+        if content <= 0. {
+            return;
+        }
+        let height = (SHEET_PADDING + content + SHEET_FOOT).round();
+        if (height - self.sheet_height).abs() < 0.5 {
+            return;
+        }
+        let first = self.sheet_height == 0.;
+        self.sheet_height = height;
+        let Some(ns) = crate::settings_window::gpui_view(window).and_then(|v| v.window()) else {
+            return;
+        };
+        let animate = !first && !self.tokens.accessibility.reduce_motion;
+        // Not while GPUI draws: after this update's effects.
+        window.defer(cx, move |_, _| {
+            let frame = ns.frame();
+            let content = ns.contentRectForFrameRect(frame);
+            let grow = height as f64 - content.size.height;
+            if grow.abs() < 0.5 {
+                return;
+            }
+            // macOS centres a sheet on its window: it grows about its centre.
+            let mut next = frame;
+            next.size.height += grow;
+            next.origin.y -= (grow / 2.).round();
+            ns.setFrame_display_animate(next, true, animate);
+        });
     }
     /// How far `key` has sprung in (0–1, or past it on an overshoot): from
     /// 0 the first time it is shown, back towards 0 while it is not, so a
@@ -1221,7 +1366,9 @@ impl WelcomeView {
                     quiet: false,
                     pull: false,
                     tint: None,
-                    symbol: Some(which),
+                    // The sheet's email and the handle start empty: AutoFill
+                    // never fills or selects them.
+                    symbol: Some(if code || !self.sheet { which } else { "plain" }),
                     glass: false,
                     well: false,
                 },
@@ -1277,10 +1424,24 @@ impl WelcomeView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The sheet's fields run its column's width at its buttons' height.
+        let (well_w, well_h) = if self.sheet {
+            (SHEET_INNER, SHEET_CONTROL)
+        } else {
+            (PRIMARY_WIDTH, FIELD_HEIGHT)
+        };
         let t = self.tokens.clone();
         let c = &t.colors;
         let now = self.now();
         let arrived = self.sign_in_stage.replace(s.stage) != Some(s.stage);
+        if arrived {
+            self.field_focus_until = now + FIELD_FOCUS_SECONDS;
+        }
+        let claim = now < self.field_focus_until;
+        // A test's fixed clock never runs out: no frames for it.
+        if claim && self.clock.is_none() {
+            window.request_animation_frame();
+        }
         if s.shake != self.shake.0 {
             self.shake = (s.shake, now);
         }
@@ -1352,7 +1513,7 @@ impl WelcomeView {
                 let focused = field.update(cx, |f, cx| {
                     f.host_text(&s.email, s.revision);
                     f.alpha = email_p.clamp(0., 1.);
-                    if arrived {
+                    if arrived || (claim && !f.focused()) {
                         f.focus_on_paint();
                     }
                     cx.notify();
@@ -1364,8 +1525,8 @@ impl WelcomeView {
                     div()
                         .id("welcome-email-well")
                         .debug_selector(|| "welcome-email-well".into())
-                        .w(px(PRIMARY_WIDTH))
-                        .h(px(FIELD_HEIGHT))
+                        .w(px(well_w))
+                        .h(px(well_h))
                         .px(px(12.))
                         .flex()
                         .items_center()
@@ -1408,7 +1569,7 @@ impl WelcomeView {
                 let field = self.text_field("code", window, cx);
                 let focused = field.update(cx, |f, cx| {
                     f.host_text(&s.code, s.revision);
-                    if arrived {
+                    if arrived || (claim && !f.focused()) {
                         f.focus_on_paint();
                     }
                     cx.notify();
@@ -1460,7 +1621,7 @@ impl WelcomeView {
                 let focused = field.update(cx, |f, cx| {
                     f.host_text(&s.handle, s.revision);
                     f.alpha = handle_p.clamp(0., 1.);
-                    if arrived {
+                    if arrived || (claim && !f.focused()) {
                         f.focus_on_paint();
                     }
                     cx.notify();
@@ -1471,8 +1632,8 @@ impl WelcomeView {
                     div()
                         .id("welcome-handle-well")
                         .debug_selector(|| "welcome-handle-well".into())
-                        .w(px(PRIMARY_WIDTH))
-                        .h(px(FIELD_HEIGHT))
+                        .w(px(well_w))
+                        .h(px(well_h))
                         .px(px(12.))
                         .flex()
                         .items_center()
@@ -2170,6 +2331,8 @@ enum Size {
     Regular,
     /// A row's small button (Connect, Download): a capsule.
     Pill,
+    /// The sign-in sheet's other full-width button (Continue with Google).
+    Wide,
 }
 /// The stage's window: each half's width, the left half's ground, the
 /// field's two colours (orange to ember), the column's width and the title's
@@ -2207,11 +2370,20 @@ const LOGO_TOP: f32 = 104.;
 /// Where the content's room ends, and where the actions start: the primary
 /// at one height on every frame, its links 12 under it, 64 above the bottom.
 const ACTIONS_TOP: f32 = 510.;
-/// The sign-in sheet: its size, its tile, its title and the air above.
-pub const SHEET_SIZE: (f32, f32) = (400., 452.);
-const SHEET_TILE: f32 = 52.;
+/// The sign-in sheet: its size, the column 32 pt in from its edges, its
+/// controls' height (Google, the field, Continue), its tile and title.
+pub const SHEET_SIZE: (f32, f32) = (400., 428.);
+const SHEET_PADDING: f32 = 32.;
+/// Cancel's line sits this far above the sheet's bottom edge.
+const SHEET_FOOT: f32 = 22.;
+/// How long a step's field keeps asking for the keyboard after it arrives.
+const FIELD_FOCUS_SECONDS: f64 = 0.5;
+/// Cancel's line sits this far under the step's last control.
+const SHEET_FOOT_GAP: f32 = 20.;
+const SHEET_INNER: f32 = 400. - 2. * SHEET_PADDING;
+const SHEET_CONTROL: f32 = 36.;
+const SHEET_TILE: f32 = 48.;
 const SHEET_TITLE: f32 = 20.;
-const SHEET_TOP: f32 = 24.;
 /// The sign-in's six code cells, as wide together as the primary action.
 const CELLS: usize = 6;
 const CELL_WIDTH: f32 = 38.;
@@ -2440,6 +2612,17 @@ fn preview(id: &str, window: &Window) -> Option<AnyElement> {
 }
 
 /// The Powermove mark, `size` points high, filled with `color`.
+/// Google's multicolour G, as its sign-in branding has it on a sign-in
+/// button (16 pt, drawn once).
+fn google_mark() -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
+    thread_local! {
+        static MARK: Option<objc2::rc::Retained<objc2_app_kit::NSImage>> = crate::settings_window::svg_image(
+            include_str!("../icons/brands/google-g.svg"),
+            objc2_foundation::NSSize::new(16., 16.),
+        );
+    }
+    MARK.with(Clone::clone)
+}
 fn mark_glyph(size: f32, color: u32) -> impl IntoElement + use<> {
     canvas(
         |_, _, _| (),
