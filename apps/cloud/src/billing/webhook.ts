@@ -41,7 +41,7 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Pr
         if (userId && await userExists(tx, userId)) {
           await tx.insert(stripeCustomers).values({ userId, stripeCustomerId: customerId }).onConflictDoNothing();
         }
-        await upsertSubscription(tx, env, sub, new Date());
+        await upsertSubscription(tx, env, sub, at);
       };
     }
     case 'customer.subscription.created':
@@ -57,7 +57,7 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Pr
       if (!subscriptionId || !invoice.id || (reason !== 'subscription_create' && reason !== 'subscription_cycle' && reason !== 'subscription_update')) return null;
       const sub = await stripeClient(env).subscriptions.retrieve(subscriptionId);
       return async (tx) => {
-        const row = await upsertSubscription(tx, env, sub, new Date());
+        const row = await upsertSubscription(tx, env, sub, at);
         if (!row) return;
         const plan = planOf(env, sub);
         if (!plan) return;
