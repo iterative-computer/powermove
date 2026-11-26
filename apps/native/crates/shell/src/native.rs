@@ -657,54 +657,42 @@ pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
     let view = backdrop(mtm, &content);
     ground(&window, &view, t);
 }
-/// A sidebar's material, `width` wide and `height` tall at the content
-/// view's leading edge: liquid glass on macOS 26 and later (clear style, a
-/// heavy tint of the window colour), the sidebar visual effect before, the
-/// solid window colour under Reduce Transparency. Its frame is
-/// `sidebar_rect`: every edge of the glass, which draws a light rim, lies
-/// outside the window or under the content sheet.
+/// A sidebar's ground, `width` wide and `height` tall at the content view's
+/// leading edge: the chrome's one tone (`Tokens::ground`), the window tint
+/// over the same behind-window blur as the ground around the content sheet,
+/// solid `window` under Reduce Transparency. The sidebar is never a tone of
+/// its own (owner, 2026-11-26): a tinted clear glass here drew a cooler,
+/// darker grey than the ground beside it in light and a third chrome tone.
+/// Its frame is `sidebar_rect`, which runs past the window's edges and under
+/// the sheet's leading corners.
 fn sidebar_material(
     mtm: MainThreadMarker,
     t: &Tokens,
     width: f32,
     height: f64,
 ) -> Retained<NSView> {
-    let [x, y, w, h] = sidebar_rect(t, width, height);
-    let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-    let view = material(mtm, frame, t, Surface::Sidebar);
-    if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
-        glass.setCornerRadius(0.);
-        glass.setStyle(NSGlassEffectViewStyle::Clear);
-        glass.setTintColor(Some(
-            &native_color(t.colors.window)
-                .colorWithAlphaComponent(t.translucency.glass_tint as f64),
+    let [x, y, w, h] = sidebar_rect(width, height);
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
+    );
+    view.setWantsLayer(true);
+    let (ground, alpha) = t.ground();
+    if let Some(layer) = view.layer() {
+        layer.setBackgroundColor(Some(
+            &native_color(ground)
+                .colorWithAlphaComponent(alpha as f64)
+                .CGColor(),
         ));
-    } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
-        effect.setMaterial(NSVisualEffectMaterial::Sidebar);
-        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
-        solid.setCornerRadius(0.);
-        solid.setBorderWidth(0.);
-        solid.setFillColor(&native_color(t.colors.window));
     }
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
 }
-/// The sidebar material's frame in a content view `height` tall (AppKit's
-/// bottom-up points: x, y, width, height). Liquid glass draws a light rim
-/// along each of its edges; the owner saw the top one as a stray line along
-/// the window's top edge, as wide as the sidebar (2026-11-14). So the glass
-/// runs past the window's top, leading and bottom edges, where the window
-/// clips it, and on under the content sheet's leading corners, where the
-/// sheet covers it: no edge of it shows.
-pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
-    let beyond = f64::from(t.metrics.panel_radius);
-    [
-        -beyond,
-        -beyond,
-        f64::from(width + t.metrics.panel_radius + t.space.xs) + beyond,
-        height + beyond * 2.,
-    ]
+/// The sidebar ground's frame in a content view `height` tall (AppKit's
+/// bottom-up points: x, y, width, height): exactly the leading column the
+/// GPUI view leaves unpainted, so the chrome tint is laid once everywhere.
+fn sidebar_rect(width: f32, height: f64) -> [f64; 4] {
+    [0., 0., f64::from(width), height]
 }
 /// Gives a sheet a new content height. The first time, its top edge is put
 /// where a sheet `tallest` high stands centred in its parent (the most it
@@ -747,29 +735,6 @@ pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpu
         );
     })
     .detach();
-}
-/// A window laid out as Home is: a sidebar on the window's glass and a
-/// content sheet beside it (Settings). The GPUI window is transparent over
-/// the behind-window blur; the sidebar's material stands in the leading
-/// `width`, which the view leaves unpainted.
-pub fn sidebar_frame(w: &gpui::Window, t: &Tokens, width: f32) {
-    let mtm = MainThreadMarker::new().unwrap();
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
-    else {
-        return;
-    };
-    let gpui: Retained<NSView> =
-        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
-    let (Some(window), Some(content)) =
-        (gpui.window(), gpui.window().and_then(|w| w.contentView()))
-    else {
-        return;
-    };
-    appearance(&window, t);
-    let blur = backdrop(mtm, &content);
-    ground(&window, &blur, t);
-    let side = sidebar_material(mtm, t, width, content.bounds().size.height);
-    content.addSubview_positioned_relativeTo(&side, NSWindowOrderingMode::Below, Some(&gpui));
 }
 /// Frames a borderless GPUI window as a popover: `Surface::Popover` material
 /// (glass on macOS 26, a visual-effect popover before, solid `floating`
@@ -5847,12 +5812,9 @@ impl Host {
             self.tokens.metrics.sidebar
         }
     }
-    /// Home's sidebar is real system material in a column under the GPUI
-    /// view, which leaves that column unpainted: liquid glass on macOS 26 and
-    /// later, the sidebar visual effect before, the solid window colour under
-    /// Reduce Transparency. The glass carries a light tint of the window
-    /// colour (`translucency.glass_tint`), so labels drawn on it keep their
-    /// contrast whatever is behind the window.
+    /// Home's sidebar column, which the GPUI view leaves unpainted, gets the
+    /// chrome's ground (`sidebar_material`): one tone with the title bar and
+    /// the ground around the sheet.
     fn sync_sidebar(&self) {
         let mut slot = self.sidebar.borrow_mut();
         if !self.aside() {
@@ -11606,22 +11568,12 @@ fn stray_responder(responder: &NSResponder) -> bool {
 
 #[cfg(test)]
 mod sidebar_rect_tests {
-    use pm_design::{Accessibility, Scheme, Tokens};
-    /// No edge of the sidebar's glass (each drawn with a light rim) shows:
-    /// top, leading and bottom lie outside the window, the trailing one under
-    /// the content sheet, which starts at the sidebar's width.
+    /// The sidebar's ground covers exactly the column the GPUI view leaves
+    /// unpainted: no overlap with the painted ground (a darker double tint),
+    /// no gap (the bare blur).
     #[test]
-    fn the_sidebar_glass_has_no_edge_inside_the_window() {
-        let t = Tokens::new(Scheme::Dark, Accessibility::default());
-        let (width, height) = (t.metrics.sidebar, 900.);
-        let [x, y, w, h] = super::sidebar_rect(&t, width, height);
-        assert!(x < 0., "leading edge outside: {x}");
-        assert!(y < 0., "bottom edge outside: {y}");
-        assert!(y + h > height, "top edge outside: {}", y + h);
-        assert!(
-            x + w > f64::from(width + t.metrics.panel_radius),
-            "trailing edge under the sheet's corner"
-        );
+    fn the_sidebar_ground_is_exactly_the_unpainted_column() {
+        assert_eq!(super::sidebar_rect(224., 900.), [0., 0., 224., 900.]);
     }
 }
 

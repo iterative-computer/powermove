@@ -826,13 +826,15 @@ fn sticky_header_light_and_dark_crops() {
     }
 }
 
+/// Nothing of a scrolling dock shows under the toolbar, and the toolbar is
+/// the chrome's one tone: the same ground as the status bar (the title bar
+/// paints no band of its own, so a light window has two surface tones).
 #[test]
-fn toolbar_stays_opaque_above_scrolling_dock() {
+fn toolbar_stays_ground_above_scrolling_dock() {
     let mut mismatches = Vec::new();
     for (name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
         objc2::rc::autoreleasepool(|_| {
             let tokens = Tokens::new(scheme, Accessibility::default());
-            let fill = tokens.colors.window;
             let mut cx = context();
             let window = cx
                 .open_window(size(px(1000.), px(600.)), |_, cx| {
@@ -844,6 +846,7 @@ fn toolbar_stays_opaque_above_scrolling_dock() {
                 })
                 .unwrap();
             cx.run_until_parked();
+            let mut first = None;
             for (position, by) in [("top", 0.), ("middle", 350.), ("bottom", 10000.)] {
                 window
                     .update(&mut cx, |v, _, cx| {
@@ -863,17 +866,24 @@ fn toolbar_stays_opaque_above_scrolling_dock() {
                         )
                         .unwrap();
                 }
-                let pixel = image.get_pixel(950 * scale, 8 * scale).0;
-                let expected = [(fill >> 16) as u8, (fill >> 8) as u8, fill as u8, 255];
-                if pixel != expected {
-                    mismatches.push(format!("{name}:{position}: {pixel:?} != {expected:?}"));
+                let toolbar = image.get_pixel(950 * scale, 8 * scale).0;
+                let ground = image.get_pixel(500 * scale, 592 * scale).0;
+                if toolbar != ground {
+                    mismatches.push(format!(
+                        "{name}:{position}: toolbar {toolbar:?} != ground {ground:?}"
+                    ));
+                }
+                if *first.get_or_insert(toolbar) != toolbar {
+                    mismatches.push(format!(
+                        "{name}:{position}: the dock shows through {toolbar:?}"
+                    ));
                 }
             }
         });
     }
     assert!(
         mismatches.is_empty(),
-        "toolbar must paint opaque window colour: {mismatches:?}"
+        "toolbar must be the ground: {mismatches:?}"
     );
 }
 

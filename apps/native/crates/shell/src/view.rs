@@ -3086,14 +3086,16 @@ impl Editor {
     /// own double-click never runs; a double-click here does what the person
     /// chose in System Settings (Fill, Zoom or Minimize). Single presses fall
     /// through untouched: AppKit still moves the window from here.
-    fn titlebar_band(top: f32, fill: u32) -> Div {
+    /// It paints nothing: the window's ground (and on Home the sidebar's
+    /// glass) runs on under the toolbar, so the title bar is the chrome's one
+    /// tone, never a third band of its own.
+    fn titlebar_band(top: f32) -> Div {
         div()
             .absolute()
             .top_0()
             .left_0()
             .w_full()
             .h(px(top))
-            .bg(rgb(fill))
             .on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| {
                 if e.click_count == 2 {
                     window.titlebar_double_click();
@@ -3115,8 +3117,8 @@ impl Editor {
         }
         let t = &self.tokens;
         let (ground, ground_alpha) = t.ground();
-        // The sidebar column is the system's material (`Host::sync_sidebar`):
-        // the ground is painted everywhere else.
+        // The sidebar column's ground is the host's (`Host::sync_sidebar`):
+        // the same tint is painted everywhere else, the title bar included.
         let clear = self
             .host
             .as_ref()
@@ -3129,7 +3131,7 @@ impl Editor {
             .aria_label("Powermove editor")
             .size_full()
             .relative()
-            .child(Self::titlebar_band(top, self.tokens.colors.window))
+            .child(Self::titlebar_band(top))
             .child(
                 canvas(
                     |_, _, _| (),
@@ -4989,7 +4991,7 @@ impl Editor {
         } else {
             left
         };
-        root = root.child(Self::titlebar_band(top, self.tokens.colors.window));
+        root = root.child(Self::titlebar_band(top));
         if let Some(toast) = self.integration.as_ref().and_then(|i| i.action_toast(cx)) {
             root = root.child(toast);
         }
